@@ -1342,13 +1342,16 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    | a box writes skein's declared state | **the cover** |
    | a box signals or kills skein | **the uid split** |
    | a box that defeats its mount namespace is skein's peer | **the uid split** |
-   | a box reaches a GitHub repository it was not granted | **neither, and nothing else here** — SKEIN-548, open; §9.6 |
+   | a box reaches a GitHub repository it was not granted | **the direct route + the token** (SKEIN-548, closed for the git/gh path); §9.6 |
 
    The last row is in the table because leaving it out is what made the earlier drafts read as a
-   claim. Neither requirement touches it, and no requirement below does: the sandbox routes HTTP
-   through a credential-injecting proxy, so a request carrying no credential is answered as the
-   account and `git` inherits it. Scoping narrows what a box's own token can **do**; it does not
-   narrow what a box can **reach**. `docs/parity.md` records that as a known non-property.
+   claim, and it is now a real one for the tools a box uses. The sandbox routes HTTP through a
+   credential-injecting proxy, so a request left on the proxy is answered as the account and `git`
+   inherits it — so the launcher puts the GitHub hosts in `NO_PROXY` for a scoped box (§9.6), moving
+   git and gh onto a direct path where they present the box's own token and GitHub enforces it. What
+   the cover and the split still do not contain is a process that deliberately routes back through
+   the proxy or out to the host ssh-agent gateway; that is the substrate's egress policy (SKEIN-926),
+   not this table. `docs/parity.md` reproduces both the proxy hole and the direct boundary.
 
    So the cover carries most of the value and is cheap; the split is defence in depth and costs a
    `sudo` hop per crossing plus a sudoers policy. **Do the cover first.** If the split slips, what
@@ -1804,24 +1807,49 @@ the credit: `SKEIN_GIT_SCOPE=fleet` is an opt-out restoring the account-wide tok
 the forwarded ssh-agent. And the guard is the token, never the shim: *"The shim is the message, not
 the boundary."*
 
-**And the credit is narrower than it reads — SKEIN-548, open.** Measured from inside a live box on
-2026-09-06, again on 2026-09-07, and re-measured unchanged on 2026-09-11: the sandbox routes HTTP
+**The credit read narrower than it was, and SKEIN-548 is how it was made real.** Measured from
+inside a live box on 2026-09-06, 2026-09-07, 2026-09-11 and again 2026-09-15: the sandbox routes HTTP
 through a credential-injecting proxy, so a request carrying no Authorization header — or a
 deliberately invalid one — comes back authenticated as the account, while the same request sent
-direct is refused. **`git` inherits it, and that is not an inference** — re-checked 2026-09-11
-against the git wire protocol itself rather than only the REST API: a request to
+direct is refused. **`git` inherits it, and that is not an inference** — checked against the git wire
+protocol itself rather than only the REST API: a request to
 `/<owner>/<repo>/info/refs?service=git-upload-pack` for a **private** repository that is not this
 box's own, carrying no credential at all, comes back `200` with a real ref advertisement, and the
-identical request with the proxy bypassed comes back `401`. So a box with `GH_TOKEN` unset and its
+identical request with the proxy bypassed comes back `401`. Left on the proxy, a box with `GH_TOKEN`
+unset and its
 credential helper answering nothing still reads a private repository it was never granted.
 
+**So the launcher takes scoped boxes off the proxy for GitHub (SKEIN-548, closed for the git/gh
+path).** `src/box-session.sh` puts the GitHub hosts the proxy MITMs — `api.github.com`, `github.com`,
+`raw.githubusercontent.com`, `gist.github.com`, `copilot.github.com`, confirmed by issuer
+(`O=Docker Sandboxes` through the proxy, a real CA direct; measured 2026-09-15) — into `NO_PROXY`,
+which git (libcurl) and gh (Go) both honour. The request then never meets the proxy: git and gh
+present the token this box actually holds, and GitHub enforces it server-side, so the `401` above is
+what a box now gets for a private repo it was not granted. The server's own GitHub calls go the same
+way — `src/github.rs::call` passes `--noproxy` for the GitHub hosts, so the review queue reads as the
+person whose token was resolved rather than as the proxy's account. A `fleet`-scoped box is left on
+the proxy on purpose: that is the account-wide third mode, honest about being account-wide. **What is
+still not closed by this** is a process that deliberately re-routes through the proxy (re-exporting
+`$HTTPS_PROXY`, clearing `$NO_PROXY`) or wires `$SSH_AUTH_SOCK` to the host agent gateway above — the
+same "a variable anything can set again is not a containment" shape as the ssh-agent socket. Turning
+that intent away is the substrate's job (deny-by-default egress, SKEIN-926), not the shim's.
+
 **Which transport git picks decides whether it is injected, and that is a trap for anyone checking
-this.** The injection rides on HTTP(S) through the proxy; the same fetch attempted over SSH is
-refused outright, because SSH does not go through the proxy at all. So a `git ls-remote` that an
-`insteadOf` rule quietly rewrites to `git@github.com:` prints a clean "Repository not found" and
-reads as evidence that the boundary holds. It is not — it is evidence that the request never met
-the proxy. Check the HTTPS endpoint explicitly, and check which transport git actually chose. The `GH_TOKEN` the launcher is so careful about returns 401 when
-sent directly, which makes it a placeholder rather than the credential anything authenticates with.
+this.** The injection rides on HTTP(S) through the proxy. SSH is a different story than an earlier
+draft of this section told, and the correction is SKEIN-929: **SSH is not "refused outright."**
+`github.com:22` is reachable DIRECT from inside a box — measured 2026-09-15, the TCP connect
+succeeds and GitHub sends its `SSH-2.0-…` banner — and SSH does not traverse the proxy, so nothing
+injects a credential over it. What actually makes an `insteadOf`-rewritten `git@github.com:`
+`ls-remote` fail is narrower: the launcher binds a regular file over the box's `$SSH_AUTH_SOCK`
+(the `no-ssh-agent` cover), so the box's own agent socket answers nothing. That cover is **not the
+whole of SSH**, which is the part the old wording hid: a box's environment also carries
+`SSH_AUTH_SOCK_GATEWAY=gateway.docker.internal:3129` (TCP 3129 is open, measured 2026-09-15), a
+route to the HOST's ssh-agent that the file cover does not touch. Any key loaded in the host agent
+is therefore usable by **every** box, for **every** repository that key can reach, if a box wires
+`$SSH_AUTH_SOCK` to that gateway. skein does not block it (owner decision, SKEIN-929: leave the
+gateway reachable and document it, rather than add a mechanism beside the substrate) — so it is
+named here as a real, un-scoped reach, not a closed door. Check the HTTPS endpoint explicitly, check
+which transport git actually chose, and do not read a dead local agent socket as "SSH is contained."
 
 **How it is in a position to do that**, stated because it is the part that can be checked rather
 than inferred from a status code: the proxy **terminates TLS**. Inside a box the certificate for
@@ -1836,20 +1864,23 @@ regardless of what the box sent.
 repositories, 462 in total, and of the private ones 223 answer `permissions.push` true and 211
 answer `permissions.admin` true. `docs/parity.md` carries the reproduction.
 
-So the scoping machinery narrows what a box's own token can **do** — that half is real and GitHub
-enforces it server-side — and it does not narrow what a box can **reach**. Nothing in §9.5 closes
-that, and nothing in this document should be read as a claim about a box's network reach; `docs/parity.md`
-records it as a known non-property rather than a capability. Closing it needs the substrate: this is
-sbx behaviour, unsetting the proxy variable is not a boundary (the address is well known, and
-anything in the box can export it again — the same reasoning the launcher applies to the ssh-agent
-socket, which it binds a real file over rather than merely unsetting), and direct egress bypasses
-the proxy anyway, so the proxy is not a chokepoint either — verified 2026-09-11: with `--noproxy
-'*'` the request reaches GitHub's own front end (a certificate issued by GitHub's real CA) and is
-refused there with GitHub's own `401` body, rather than being blocked on the way out.
+That reach is exactly what the direct routing above closes for the tools a box uses. It counts, so
+it is worth stating precisely: **going direct is only a boundary because direct egress reaches
+GitHub's own front end and is refused there** — verified 2026-09-11 and 2026-09-15: with `--noproxy
+'*'` the request reaches GitHub (a certificate issued by GitHub's real CA) and comes back with
+GitHub's own `401`, rather than being blocked on the way out. So `NO_PROXY` does not merely hide the
+proxy address (which, the old wording rightly said, a box could re-export); it moves git and gh onto
+a path where GitHub itself is the authority on the credential. What that does **not** do is contain a
+process that chooses to route back through the proxy or out to the ssh-agent gateway — the same "a
+variable anything can set again is not a containment" caveat — which is why the isolation-grade
+boundary is still the substrate's (a deny-by-default egress policy, SKEIN-926), not the shim's.
 
-**What is retracted and what is still open**, because they are different halves. Retracted: every
-claim in this tree that git scoping bounds what a box can **reach**. Still open: whether the
-injection can be turned off for a sandbox.
+**What is closed and what is still open**, because they are different halves. Closed (SKEIN-548):
+git scoping now bounds what a box's normal tools **reach**, because they present the box's own token
+directly and GitHub enforces it — the retraction that this tree once carried is itself retracted, and
+`docs/parity.md` reproduces both the proxy hole and the direct boundary. Still open: whether the
+injection can be turned off for a sandbox at the substrate, which would make the boundary hold even
+for a process that means to escape it.
 
 That second half **cannot be settled from inside a box, and this document should not guess at it.**
 What a box can establish is only the shape of the thing: `sbx` is not on a box's `PATH`; no sandbox

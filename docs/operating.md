@@ -53,13 +53,16 @@ lists a matching `$SKEIN_*` variable, the environment still overrides the saved 
 use; the base branch has none and is the saved value alone, which `fleet::base_branch` then checks
 against what the remote actually has (`git ls-remote --symref`) before using it.
 
-**Git auth inside boxes.** HTTPS remotes push with no setup — the sbx proxy injects GitHub
-credentials and skein also seeds the `gh` token. That injection is also why scoping a box narrows
-the credential it holds and not the network it can use — see [One repo to write, the rest to
-read](#one-repo-to-write-the-rest-to-read), and SKEIN-548. For SSH remotes (`git@…`/`ssh://…`), sbx
-forwards your **host SSH agent** into the box (the private key stays on the host); set an SSH key path in
-Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns up-front if a repo's
-`origin` is SSH so you can switch it to HTTPS or load the key.
+**Git auth inside boxes.** HTTPS remotes push with no setup. A scoped box reaches GitHub **direct**
+(the GitHub hosts are in `NO_PROXY`), so git presents the per-repo token skein placed and GitHub
+enforces it; a `fleet`-mode box instead keeps the sbx proxy, which injects the account credential —
+see [One repo to write, the rest to read](#one-repo-to-write-the-rest-to-read), and SKEIN-548. For SSH
+remotes (`git@…`/`ssh://…`), sbx forwards your **host SSH agent** into the box (the private key stays
+on the host); set an SSH key path in Settings and skein `ssh-add`s it so it's available to forward.
+`skein add` warns up-front if a repo's `origin` is SSH so you can switch it to HTTPS or load the key.
+Note that scoping does **not** cover SSH: `github.com:22` is reachable direct and the host agent is
+also reachable at `SSH_AUTH_SOCK_GATEWAY=gateway.docker.internal:3129`, so any key in the host agent is usable by every box for
+every repo it reaches (SKEIN-929) — the launcher's socket cover blanks only the box's local agent.
 
 ## Transcript — the conversation that survives
 
@@ -275,17 +278,21 @@ token another box holds — each box's mount namespace hides every other box's d
 box can see of another](../README.md#what-one-box-can-see-of-another)); the exception is the workshop box, which
 opts out of that on purpose.
 
-**But the token is not the only route out of a box, and today it is not the one that carries the
-traffic.** Measured inside a live box on 2026-09-06: `sbx` routes the sandbox's HTTP through a
-credential-injecting proxy. A request that carries *no* Authorization header is answered as the
-account — and one carrying a deliberately invalid token is too, because the proxy replaces it. The
-box's own `GH_TOKEN` returns `401` when sent directly, so it is a placeholder rather than the
-credential anything actually authenticates with.
+**The token is not the only route out of a box, so the boundary is made real by taking the box off
+the proxy for GitHub.** Measured inside a live box (2026-09-06, re-measured 2026-09-15): `sbx` routes
+the sandbox's HTTP through a credential-injecting proxy. Left on it, a request that carries *no*
+Authorization header is answered as the account — and one carrying a deliberately invalid token, or
+the box's own per-repo token, is too, because the proxy terminates TLS and replaces the credential.
+So skein routes a scoped box's GitHub traffic **direct**: startup adds the GitHub hosts to `NO_PROXY`,
+and git and gh then present the token this box actually holds, which GitHub enforces server-side — a
+private repo the box was not granted comes back `401` rather than the account's `200`. A box in the
+account mode (`Scope … off`, `SKEIN_GIT_SCOPE=fleet`) stays on the proxy on purpose: that is the
+account-wide credential, honest about being account-wide.
 
-So scoping narrows **what a box's own token can do**. It does not narrow **what a box can reach**:
-anything in a box that opens a socket to GitHub is the account, whatever this setting says. Read this
-section as describing the credential a box *holds*, not a boundary on the network it can use — and
-see SKEIN-548, which is open.
+So scoping now narrows **what a box's normal tools reach**, not only what its token can do. What it
+still does not contain is a process that deliberately routes back through the proxy or reaches the
+host ssh-agent gateway — a firewall-grade boundary is the sandbox's egress policy to set, not this
+setting's (SKEIN-548, closed for the git/gh path; the residual is SKEIN-926/SKEIN-929).
 
 **Which repository "its own" means.** The URL the repo was added by, or — for an entry written back
 when a local path could still be registered — the `origin` on that repo's mirror. Such an entry is
@@ -326,8 +333,12 @@ one. Turning it off changes nothing for a fleet already running on it: the secre
 store, so it stays seeded and boxes keep pushing.
 
 `skein doctor` names which path you are on, and says so plainly when you are on none — boxes then
-hold no GitHub credential of their own. Read that as what a box *holds*: the retraction above applies
-here too, and a box with nothing placed in it still reaches GitHub through the proxy.
+hold no GitHub credential of their own. For a scoped box that means what it says: with nothing placed
+and the GitHub hosts in `NO_PROXY`, the box reaches GitHub direct and unauthenticated, so it clones
+public repos and is refused everything else. (A `fleet`-mode box on none is the exception — it stays
+on the proxy, so it still reaches GitHub as the account.) `skein doctor` also carries a reachability
+line: if the sandbox's egress policy blocks GitHub, the direct path cannot connect, and it prints the
+one `sbx policy allow network` command that clears it rather than silently falling back to the proxy.
 
 Prefer not to run an App? Store a fine-grained PAT per repository under **Settings → GitHub & keys →
 Without a GitHub App** (or on a repo's own card under **Repositories**). It is folded away because it
@@ -354,9 +365,11 @@ That comes from a `git` shim, and it is **the message, not the boundary**: it ne
 the ask and then runs the real git, so the push gets whatever answer it would have got without the
 shim, and an agent calling the real binary directly gets the same one. Everything that is not a push
 execs the real git on the shim's first line, and any surprise on the push path execs it too — the
-token is what isolates, so the shim can afford to be timid. **What the shim does not do is tell you
-the push will fail**, because that is not skein's to promise: the credential the sandbox proxy
-supplies is not one skein placed or can take away (SKEIN-548, open). It can also be asked directly:
+token is what isolates, so the shim can afford to be timid. **What the shim does not do is promise a
+particular outcome** — it states only that no *write* grant for that repo exists in this box, not
+what the push returns. For a scoped box the push now goes direct and is bounded by the token, so a
+repo the box holds nothing for is refused by GitHub itself (SKEIN-548, closed for the git path); the
+shim also adds the `sbx policy allow network` hint if the direct connection is blocked outright.
 
 ```
 $ /boxes/.skein/box-session.sh --request-write "$SKEIN_BOX" acme/thing "fix the shared type"
