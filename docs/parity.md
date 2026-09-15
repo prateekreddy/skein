@@ -751,15 +751,18 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
   explained, not outstanding: repo and connection settings are not `Config` at all.
 - **Two rounds of this document invented capabilities.** Treat any entry with no file reference
   beside it as unverified until someone greps for it.
-- **The git-scope boundary is a property of the token, not of the box — recorded here as a known
-  non-property rather than a capability.** It is not on the list the rewrite must preserve, and it
-  is not a bug held open for later: it was never true, so there is nothing to carry across. Measured
-  from inside a live box on 2026-09-06 and re-measured unchanged on 2026-09-11: the sandbox routes
-  HTTP through a credential-injecting proxy, so a request carrying no Authorization header, or a
-  deliberately invalid one, is answered as the account. A box's own `GH_TOKEN` returns `401` when
-  sent directly, which makes it a placeholder rather than the credential anything authenticates
-  with. `SKEIN_GIT_SCOPE`, the per-repo tokens, `git-credential-skein` and the ssh-agent bind
-  therefore govern a credential a box does not need in order to reach GitHub.
+- **The git-scope boundary was a property of the token, not of the box — and SKEIN-548 makes it a
+  property of the box for the git/gh path.** It IS on the list the rewrite must preserve now, because
+  it is now true: a scoped box reaches GitHub direct, presents the token skein placed, and GitHub
+  enforces it. Measured from inside a live box on 2026-09-06/07/11 and again 2026-09-15: the sandbox
+  routes HTTP through a credential-injecting proxy, so a request LEFT ON THE PROXY carrying no
+  Authorization header, or a deliberately invalid one, is answered as the account, while the same
+  request sent DIRECT is refused. So a box left on the proxy does not need its own credential to
+  reach GitHub — which is exactly why `src/box-session.sh` puts the GitHub hosts in `NO_PROXY` for a
+  scoped box, and `src/github.rs::call` passes `--noproxy` for the host's own calls. With that,
+  `SKEIN_GIT_SCOPE`, the per-repo tokens, `git-credential-skein` and the ssh-agent bind govern a
+  credential the box's normal tools DO use to reach GitHub. The reproduction is unchanged and is the
+  reason the routing exists:
 
   Re-derive it rather than trusting this paragraph. **The invalid token is the load-bearing half**,
   because a `200` from a credential that cannot possibly be valid is what proves the answer came
@@ -788,8 +791,15 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
   which was one sampled repository and is the minority case — read, write and administrative reach
   over most of an account is the honest statement.
 
-  The README's claim that the boundary "is real" was corrected rather than deleted, because the
-  token half of it is true and the network half never was. **This is substrate behaviour, not a
-  skein defect — but skein asserted the boundary, so it is skein's to enforce or to retract.**
-  SKEIN-548, open. The audit above did not test egress; nothing in this document should be read as
-  a claim about what a box can reach over the network.
+  The README's claim that the boundary "is real" is now true for the git/gh path, because skein
+  stopped depending on the proxy for it: a scoped box takes the direct route the third command
+  exercises (`--noproxy`), so its tools present the box's own token and GitHub is the authority. The
+  boundary reproduces from inside a box: a scoped box's `git ls-remote` (or the `curl --noproxy '*'`
+  above) against a private repo it holds no token for comes back `401`, where the same request on the
+  proxy returns refs. **What is still substrate behaviour, not skein's to close**, is a process that
+  deliberately routes back through the proxy or out to the host ssh-agent gateway (`github.com:22`
+  and `SSH_AUTH_SOCK_GATEWAY=gateway.docker.internal:3129` are both reachable direct — SKEIN-929); a firewall-grade boundary is
+  the sandbox's egress policy (SKEIN-926), which `src/health.rs` reports as a reachability line and
+  the git shim as a `sbx policy allow network` hint when GitHub is blocked outright. SKEIN-548,
+  closed for the git/gh path. `tests/github_reach_live.rs` reproduces the boundary against a real
+  fleet; it is `#[ignore]` because the sbx proxy is not reproducible under bwrap.

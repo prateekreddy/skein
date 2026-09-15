@@ -4970,7 +4970,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
          SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
-         SKEIN_BOX_PEERS={peers_q} \
+         SKEIN_BOX_PEERS={peers_q} SKEIN_FLEET_NAME={fleetname_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // Where the agent in this box keeps its model scratch, as a path relative to the box's own
@@ -5021,6 +5021,22 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         limits_q = sh_quote(&box_limits()),
         fleet_q = sh_quote(&fleet_limits()),
         guard_q = sh_quote(&fleet_guarantees()),
+        // The sandbox's own name, so a box can finish a sentence about the sandbox it lives in.
+        //
+        // A box cannot work this out for itself: `sbx` is not on its PATH and no sandbox
+        // configuration is mounted into it (architecture §9.6 measured exactly that). The one place
+        // the answer exists is out here, so it travels — in the environment, for the same reason as
+        // every variable above it: a launcher already installed in a running sandbox would read a
+        // new positional as part of the agent's command and every box restart would fail, where an
+        // old launcher simply ignores a variable it does not know.
+        //
+        // What reads it is the git shim's blocked-egress hint (`src/box-session.sh`), which prints
+        // `sbx policy allow network --sandbox <name>` for someone to paste unedited — the same
+        // string `health::github_reach_line` builds on the host, from this same
+        // `place::fleet_sandbox`, so the two surfaces cannot drift into naming different sandboxes.
+        // Unset (an older launcher), the shim says it was not told the name rather than emitting an
+        // empty `--sandbox `, which would look complete and not be.
+        fleetname_q = sh_quote(&crate::place::fleet_sandbox()),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -20259,6 +20275,17 @@ for a in sys.argv[2:]:
             script.contains(&format!("SKEIN_MODEL_SCRATCH={}", sh_quote(MODEL_SCRATCH))),
             "a box start does not carry the scratch path, so its agent derives one from the \
              sandbox's shared /tmp: {script}"
+        );
+        // And the sandbox's own NAME, for the same reason and over the same channel: a box cannot
+        // work it out (no `sbx` on its PATH, no sandbox config mounted in), so the blocked-egress
+        // hint in the git shim can only print a pasteable `sbx policy allow network --sandbox <name>`
+        // if the name travels. Pinned as the literal default rather than as
+        // `sh_quote(place::fleet_sandbox())`, which would compare the script with the function that
+        // built it and pass however wrong both were.
+        assert!(
+            script.contains("SKEIN_FLEET_NAME='skein-fleet'"),
+            "a box start does not carry the sandbox's name, so the git shim cannot finish the \
+             `sbx policy allow network --sandbox …` command it tells a person to run: {script}"
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");

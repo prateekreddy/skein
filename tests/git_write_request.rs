@@ -5,13 +5,15 @@
 //! replaces it is a per-repository write token, a read-only one for the repos the App is installed
 //! on, and nothing at all for anything else — chosen between by `git-credential-skein`.
 //!
-//! **Every assertion here is about the credential the helper hands over, and none of them is about
-//! what a box can reach.** The comments used to slide from one to the other ("git falls through to
-//! unauthenticated access: public works, private and not-yours does not"), and that consequence is
-//! false: the sandbox routes HTTP through a credential-injecting proxy, so a request carrying no
-//! credential is answered as the account (SKEIN-548, open; `src/gitgate.rs`'s module note has the
-//! measurement). The assertions are unaffected — silence is still the right answer, and the wrong
-//! token is still a 403 where silence is not.
+//! **Most assertions here are about the credential the helper hands over; one is about what a box
+//! reaches.** The comments used to slide from the first to the second and then disown the slide:
+//! "git falls through to unauthenticated access" was true of the DIRECT path but false through the
+//! sandbox's credential-injecting proxy, which answers a request carrying no credential as the
+//! account (SKEIN-548). That is now closed for the git path — the launcher puts the GitHub hosts in
+//! `NO_PROXY` for a scoped box, so silence really does fall through to an unauthenticated DIRECT
+//! request, and `a_scoped_box_routes_github_direct_and_a_fleet_box_does_not` asserts the routing.
+//! The credential assertions are unaffected either way — silence is still the right answer, and the
+//! wrong token is still a 403 where silence is not.
 //!
 //! Two shell scripts carry that, and both sit on paths every box takes constantly, so both are
 //! driven here as the real thing drives them rather than as a Rust re-implementation of what they
@@ -326,6 +328,24 @@ fn a_repository_name_that_could_address_something_else_never_reaches_the_queue()
 /// does it: a shim generated into a box's private namespace has nowhere else to be tested from, and
 /// this one sits on the path every git command in every box takes.
 fn build_git_shim(fleet: &std::path::Path, box_root: &std::path::Path, real_git: &str) -> PathBuf {
+    build_git_shim_named(fleet, box_root, real_git, Some(FLEET_FIXTURE))
+}
+
+/// The sandbox name a shim built here is told it lives in.
+///
+/// Deliberately NOT `skein-fleet`, which is `config::default_fleet_sandbox`: a fixture that equalled
+/// the default would still pass if the name stopped being carried and something fell back to it, so
+/// the assertion would be blind to exactly the regression it exists to catch.
+const FLEET_FIXTURE: &str = "skein-fleet-probe";
+
+/// The same, with the sandbox name the launcher was given — `None` for a box started by an OLDER
+/// launcher, which carries no `SKEIN_FLEET_NAME` at all.
+fn build_git_shim_named(
+    fleet: &std::path::Path,
+    box_root: &std::path::Path,
+    real_git: &str,
+    fleet_name: Option<&str>,
+) -> PathBuf {
     let launcher = script("box-session.sh");
     let src = fs::read_to_string(&launcher).unwrap();
     let lines: Vec<&str> = src.lines().collect();
@@ -350,16 +370,23 @@ fn build_git_shim(fleet: &std::path::Path, box_root: &std::path::Path, real_git:
     fs::copy(&launcher, &installed).unwrap();
     fs::create_dir_all(box_root).unwrap();
 
-    let out = Command::new("bash")
+    let mut builder = Command::new("bash");
+    builder
         .arg("-c")
         .arg(format!(
             "set -uo pipefail; binds=(); root={}; box=web-main; skein_launcher={}; {block}",
             box_root.display(),
             installed.display(),
         ))
-        .env("SKEIN_FLEET_ROOT", fleet)
-        .output()
-        .expect("bash to run the git shim block");
+        .env("SKEIN_FLEET_ROOT", fleet);
+    // The environment is how `fleet::session_script` carries the sandbox name to the launcher, so
+    // it is how a test has to hand one over too. Removed rather than left alone for the `None`
+    // case: this test process runs inside a box and would otherwise leak the real fleet's name in.
+    match fleet_name {
+        Some(name) => builder.env("SKEIN_FLEET_NAME", name),
+        None => builder.env_remove("SKEIN_FLEET_NAME"),
+    };
+    let out = builder.output().expect("bash to run the git shim block");
     assert!(
         out.status.success(),
         "the shim block failed: {}",
@@ -397,6 +424,111 @@ fn real_git() -> Option<String> {
         .ok()?;
     let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!p.is_empty()).then_some(p)
+}
+
+/// The whole `SKEIN_GIT_SCOPE` block, lifted from the launcher rather than copied — the same rule
+/// [`build_git_shim`] follows, so a change to the launcher is a change to what this runs.
+///
+/// It runs from the opening `if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]` to the `fi` that closes
+/// it, which is the blank line before the docker shim's comment. Balanced on its own.
+fn scope_block() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let from = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then"#))
+        .expect("the git-scope block moved");
+    let to = lines
+        .iter()
+        .position(|l| *l == "# The docker shim: whose container is this?")
+        .expect("the docker shim marker moved");
+    lines[from..to].join("\n")
+}
+
+/// **Making the per-repo boundary real is a routing choice, and this is where it is decided
+/// (SKEIN-548).** A scoped box reaches GitHub DIRECT — the launcher adds the injected GitHub hosts
+/// to `NO_PROXY`, so git and gh present the box's own token instead of the proxy answering as the
+/// account — while a `fleet`-mode box keeps the proxy and the account-wide token on purpose.
+///
+/// Counterfactual that makes this fail: if the `NO_PROXY` export moved outside the `if`, the fleet
+/// case would carry `github.com`; if the host list dropped `github.com`/`api.github.com`, the scoped
+/// case would not. Both were watched to fail before this was trusted (see the test's own proof run).
+#[test]
+fn a_scoped_box_routes_github_direct_and_a_fleet_box_does_not() {
+    let block = scope_block();
+    let dir = Scratch::temp("ghdirect");
+    let root = dir.path().join("root");
+    let home = dir.path().join("home");
+    let state = dir.path().join("state");
+    for d in [&root, &home, &state] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let run = |scope: Option<&str>| -> String {
+        let prelude = format!(
+            "set -uo pipefail; binds=(); root={root}; home={home}; state={state}; box=web-main; \
+             export SKEIN_FLEET_ROOT={fleet}; unset SKEIN_BOX_REPO SSH_AUTH_SOCK; \
+             no_proxy='localhost,127.0.0.1'; NO_PROXY='localhost,127.0.0.1';",
+            root = root.display(),
+            home = home.display(),
+            state = state.display(),
+            fleet = dir.path().display(),
+        );
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(format!(
+            "{prelude}\n{block}\necho \"RESULT=$NO_PROXY|$no_proxy\""
+        ));
+        match scope {
+            Some(v) => {
+                cmd.env("SKEIN_GIT_SCOPE", v);
+            }
+            None => {
+                cmd.env_remove("SKEIN_GIT_SCOPE");
+            }
+        }
+        let out = cmd.output().expect("the scope block to run");
+        assert!(
+            out.status.success(),
+            "the scope block failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("RESULT=").map(str::to_string))
+            .expect("the block to print its NO_PROXY")
+    };
+
+    // Scoped (the default, and any value that is not `fleet`): the GitHub hosts are added, direct.
+    for scope in [None, Some("repo")] {
+        let scoped = run(scope);
+        for host in [
+            "github.com",
+            "api.github.com",
+            "raw.githubusercontent.com",
+            "gist.github.com",
+            "copilot.github.com",
+        ] {
+            assert!(
+                scoped.contains(host),
+                "a scoped box ({scope:?}) must route {host} direct, but NO_PROXY was: {scoped}"
+            );
+        }
+        // The pre-existing loopback entries survive, and both cases are exported.
+        assert!(
+            scoped.contains("localhost") && scoped.contains('|'),
+            "the existing no_proxy and both spellings must be kept: {scoped}"
+        );
+    }
+
+    // Fleet mode: the block is skipped entirely, so nothing GitHub is added — it keeps the proxy.
+    let fleet = run(Some("fleet"));
+    assert!(
+        !fleet.contains("github.com"),
+        "a fleet-mode box keeps the proxy, so NO_PROXY must NOT name github hosts: {fleet}"
+    );
+    assert_eq!(
+        fleet, "localhost,127.0.0.1|localhost,127.0.0.1",
+        "a fleet-mode box's NO_PROXY is exactly what it started with: {fleet}"
+    );
 }
 
 /// The environment every `git` in this file runs under — the shim's own `git.real` included, since
@@ -554,6 +686,132 @@ fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
             args.join(" ")
         );
     }
+}
+
+/// **A scoped box that reaches GitHub direct gets the `sbx policy allow network` hint when the
+/// connection is BLOCKED, and only then (SKEIN-548/926).** The shim runs the real git, and on a
+/// failed GitHub-reaching verb it probes reachability: a probe that cannot connect is a block and
+/// prints the hint; a probe that gets any HTTP status (a 401/403 auth answer) does not. The probe
+/// target is `$SKEIN_GITHUB_REACH_URL`, so this drives the real shell without a network.
+///
+/// Counterfactual: point the probe at a live listener (a 401) and the hint must be absent; point it
+/// at a dead port and it must be present. Proven by sabotage — forcing `skein_reach_hint` to always
+/// or never print made one half fail.
+#[test]
+fn a_blocked_scoped_box_gets_the_policy_hint_and_an_auth_answer_does_not() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
+    if !have("curl") {
+        return skip("curl is not installed, and the reachability probe is a wrapper around it");
+    }
+    let b = Box_::new("shim-blocked");
+    let shim = build_git_shim(&b.fleet, &b.fleet.join("boxroot"), &git);
+
+    // A GitHub-reaching verb that fails to connect, so the shim reaches its reachability probe. The
+    // remote is a dead loopback port; git's own transport error is what makes it fail.
+    let run = |reach_url: &str| -> String {
+        let mut cmd = Command::new(&shim);
+        cmd.args(["ls-remote", "https://127.0.0.1:1/nope.git"])
+            .env("SKEIN_GIT_TOKENS", &b.tokens)
+            .env("SKEIN_FLEET_ROOT", &b.fleet)
+            .env("SKEIN_GITHUB_REACH_URL", reach_url)
+            .env_remove("SKEIN_BOX");
+        let out = git_env(&mut cmd).output().expect("the shim to run");
+        assert!(
+            !out.status.success(),
+            "the ls-remote to a dead port should have failed, so the probe path is reached"
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    // Blocked: the probe target is a dead port, so the connection cannot be made — hint printed,
+    // naming THIS box's sandbox so the command can be pasted unedited.
+    let blocked = run("http://127.0.0.1:1/");
+    assert!(
+        blocked.contains("GitHub is blocked by the sandbox's network policy")
+            && blocked.contains(&format!(
+                "sbx policy allow network --sandbox {FLEET_FIXTURE} github.com,api.github.com"
+            )),
+        "a blocked box must get the exact policy hint, with the real sandbox name substituted, \
+         got: {blocked}"
+    );
+    // And never a half-written command: no placeholder left in, and no empty `--sandbox `.
+    assert!(
+        !blocked.contains("--sandbox <fleet>") && !blocked.contains("--sandbox  "),
+        "the hint must not offer an unusable command: {blocked}"
+    );
+
+    // Reachable: a listener that answers 401 — GitHub answering, not a block — so no hint.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        // One 401 per probe; the probe may retry connect within its timeout, so answer a few.
+        let _ = listener.set_nonblocking(false);
+        for _ in 0..4 {
+            match listener.accept() {
+                Ok((mut sock, _)) => {
+                    let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf);
+                    let _ =
+                        sock.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+                    let _ = sock.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let answered = run(&format!("http://127.0.0.1:{port}/"));
+    drop(handle); // the thread ends with the listener when the test scope drops it
+    assert!(
+        !answered.contains("blocked by the sandbox's network policy"),
+        "a 401 is GitHub answering, so no policy hint should be printed, got: {answered}"
+    );
+}
+
+/// **A box started by an OLDER launcher carries no sandbox name, and must SAY so rather than print
+/// half a command.** `SKEIN_FLEET_NAME` is new, so a launcher already installed in a running sandbox
+/// does not set it — the case that actually happens in the field, on every box that has not been
+/// restarted since this shipped.
+///
+/// The failure being prevented is specific: `--sandbox ` with nothing after it reads as a finished
+/// command, gets pasted, and fails on the host for a reason that has nothing to do with the boundary
+/// it was trying to fix. So the empty name takes a different sentence, not an empty substitution.
+#[test]
+fn a_box_never_told_its_sandbox_name_says_so_instead_of_writing_half_a_command() {
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
+    if !have("curl") {
+        return skip("curl is not installed, and the reachability probe is a wrapper around it");
+    }
+    let b = Box_::new("shim-noname");
+    // `None`: exactly what an older launcher hands over — no SKEIN_FLEET_NAME at all.
+    let shim = build_git_shim_named(&b.fleet, &b.fleet.join("boxroot"), &git, None);
+
+    let mut cmd = Command::new(&shim);
+    cmd.args(["ls-remote", "https://127.0.0.1:1/nope.git"])
+        .env("SKEIN_GIT_TOKENS", &b.tokens)
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .env("SKEIN_GITHUB_REACH_URL", "http://127.0.0.1:1/")
+        .env_remove("SKEIN_BOX");
+    let out = git_env(&mut cmd).output().expect("the shim to run");
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        said.contains("never told its sandbox's name"),
+        "a box with no sandbox name must say that plainly, got: {said}"
+    );
+    // The whole point: no unusable command. Not an empty `--sandbox `, and not a stale placeholder.
+    assert!(
+        !said.contains("--sandbox  ")
+            && !said.contains("--sandbox <fleet>")
+            && !said.contains("--sandbox g"),
+        "a half-written or wrongly-filled command reached the person: {said}"
+    );
 }
 
 #[test]

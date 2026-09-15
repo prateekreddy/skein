@@ -205,11 +205,13 @@ claude (the same bug). So attach/shell change lands together with the kit, not b
 - In the box: `sbx secret set <box> github -t "$(gh auth token)"` on launch so the agent can
   fetch/push and open PRs. (`sbx secret` is the documented per-sandbox secret path.)
 
-**That injection is not only the host's, and it is why nothing here is a boundary — SKEIN-548,
-open.** Measured from inside a live box on 2026-09-06 and again on 2026-09-07: inside the sandbox
-the proxy answers a request carrying *no* credential as the account, and overrides a wrong one. So
-`sbx secret set` decides what a box **holds**, not what it can **reach**, and no arrangement of
-these two bullets narrows the second. See `docs/architecture.md` §9.6.
+**That injection is not only the host's, and left on the proxy it is why the credential alone is not
+a boundary — SKEIN-548.** Measured from inside a live box on 2026-09-06/07 and again 2026-09-15:
+inside the sandbox the proxy answers a request carrying *no* credential as the account, and overrides
+a wrong one. So on the proxy, `sbx secret set` decides what a box **holds**, not what it can
+**reach** — which is why a scoped box is routed **direct** for GitHub (`NO_PROXY`), so its tools
+present the token skein placed and GitHub enforces it. The account-token bullets above are the
+`fleet` mode, which keeps the proxy on purpose. See `docs/architecture.md` §9.6.
 
 ### Recommended sequencing (each a host checkpoint — all sbx-dependent, untestable in this sandbox)
 

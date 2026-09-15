@@ -62,7 +62,15 @@ reaches = {}
 # App tokens, and it now asks `github` instead. Two units spelling the same reach were two sets of
 # answers about the same boundary — one of them could not read an HTTP status and put its request
 # body on argv — so the row leaving is a duplicate client leaving, not a reach being hidden.
-reaches = { doorway = 1, fleet = 1, github = 2, repos = 1, "warden/serve" = 2, warden_client = 3 }
+#
+# `health` is here for SKEIN-548: making the per-repo GitHub boundary real routes a scoped box's
+# git/gh DIRECT (`NO_PROXY`), so a host egress policy that blocks GitHub now shows up as a failed
+# connection rather than a silent proxy fallback. `github_reach_health` spawns `curl --noproxy` to
+# `github.com` and turns the result into the `gh` doctor line — a bounded HEAD (`-m 5
+# --connect-timeout 3`) that carries no credential and reads only the http_code, so it is a
+# reachability probe, not a data reach. It is the web host, not the rate-limited REST API, and a
+# test pins `$SKEIN_GITHUB_REACH_URL` at a listener rather than reaching out.
+reaches = { doorway = 1, fleet = 1, github = 2, health = 1, repos = 1, "warden/serve" = 2, warden_client = 3 }
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and

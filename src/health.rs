@@ -865,6 +865,98 @@ pub fn health_report_gitgate() -> HealthCheck {
     git_scope_health()
 }
 
+/// Whether a DIRECT GitHub connection lands, told apart from what GitHub answers once it does.
+///
+/// The distinction is the whole point (SKEIN-548, SKEIN-926): a 401/403 is GitHub answering, and a
+/// blocked egress policy is GitHub never being reached. Only the second is skein's to explain with a
+/// policy command; the first is an ordinary auth answer nobody should be told to change a firewall
+/// over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubReach {
+    /// The connection landed and GitHub returned some HTTP status — reachable, whatever the status.
+    Reachable,
+    /// The connection could not be made at all — refused, timed out, or DNS failed.
+    Blocked,
+}
+
+/// Turn a direct-reachability outcome into the health line. Pure, so the blocked-vs-answer wording
+/// — the user-visible half — is proven without a network.
+pub(crate) fn github_reach_line(reach: GithubReach, fleet: &str) -> HealthCheck {
+    match reach {
+        // Not a fault: GitHub is reachable, so the scoped path presents this box's/host's own token
+        // and GitHub is the one enforcing it.
+        GithubReach::Reachable => HealthCheck::satisfied(
+            "available — GitHub is reachable directly, so the token skein holds is the one GitHub \
+             sees",
+        ),
+        // The approved wording (SKEIN-548), split across the diagnosis and its recipe. `{fleet}` is
+        // the real sandbox name, derived from config on the host where this runs.
+        GithubReach::Blocked => HealthCheck::unsatisfied(
+            "GitHub is blocked by the sandbox's network policy",
+            format!(
+                "on your host run:  sbx policy allow network --sandbox {fleet} \
+                 github.com,api.github.com"
+            ),
+        ),
+    }
+}
+
+/// Probe `target` DIRECT (never through the proxy) and classify the outcome. A real HTTP status —
+/// including 401/403 — is [`GithubReach::Reachable`]; only a failure to connect is
+/// [`GithubReach::Blocked`]. `curl` without `-f` exits 0 for any response and writes `000` with a
+/// non-zero exit when it could not connect, so the http_code alone decides it.
+pub(crate) fn probe_github_reach_at(target: &str) -> GithubReach {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "--noproxy",
+            "*",
+            "-I",
+            "-o",
+            "/dev/null",
+            "-m",
+            "5",
+            "--connect-timeout",
+            "3",
+            "-w",
+            "%{http_code}",
+            target,
+        ])
+        .output();
+    match out {
+        Ok(out) => {
+            let code = String::from_utf8_lossy(&out.stdout);
+            let code = code.trim();
+            if code.len() == 3 && code != "000" && code.bytes().all(|b| b.is_ascii_digit()) {
+                GithubReach::Reachable
+            } else {
+                GithubReach::Blocked
+            }
+        }
+        // curl failed to even spawn. Presence is the caller's concern; here that reads as no
+        // connection.
+        Err(_) => GithubReach::Blocked,
+    }
+}
+
+/// The `gh` health line: curl is present (the caller has checked), so this answers reachability.
+///
+/// **It must not spend the box's shared api.github.com budget from a test** (SKEIN-693), and it must
+/// not probe the network on a polled endpoint gratuitously — so a test that wants to exercise this
+/// pins `$SKEIN_GITHUB_REACH_URL` at its own listener, and without that pin an in-test call reports
+/// reachable rather than reaching out. In production it probes `github.com` — the web host, not the
+/// rate-limited REST API — because all that matters is whether a connection to GitHub can be made.
+fn github_reach_health(fleet: &str) -> HealthCheck {
+    let pinned = std::env::var("SKEIN_GITHUB_REACH_URL")
+        .ok()
+        .filter(|v| !v.is_empty());
+    match pinned {
+        Some(target) => github_reach_line(probe_github_reach_at(&target), fleet),
+        None if crate::util::in_test() => HealthCheck::satisfied("available"),
+        None => github_reach_line(probe_github_reach_at("https://github.com/"), fleet),
+    }
+}
+
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
 pub fn health_report() -> HealthReport {
@@ -1005,13 +1097,20 @@ pub fn health_report() -> HealthReport {
     // requirement of a default-on feature and dragged its keyring in with it; the queue now talks to
     // the API with a token skein already has. curl is what carries that, and gitgate has always
     // needed it to mint App tokens.
+    //
+    // And — since the scoped path reaches GitHub DIRECT (SKEIN-548) — whether GitHub is reachable at
+    // all. A deny-by-default egress policy (SKEIN-926) that blocks GitHub does not answer a request;
+    // it refuses the connection, and `crate::github::call` then fails as a transport error rather
+    // than falling back to the proxy. So this line reports the block and the one command that clears
+    // it, and clears ITSELF the next time the probe connects — a 401/403 is an answer, so only a
+    // failure to connect at all counts as blocked.
     let gh = match crate::github::have_curl() {
-        true => HealthCheck::satisfied("available"),
         false => HealthCheck::unsatisfied(
             "curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \
              and minting App tokens",
             "install curl",
         ),
+        true => github_reach_health(&crate::place::fleet_sandbox()),
     };
 
     let repos = load_repos();
@@ -1284,6 +1383,89 @@ pub fn health_report() -> HealthReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The blocked-egress message, and the rule that a 401/403 is not a block (SKEIN-548).** The
+    /// user-visible half: only a genuine failure to reach GitHub prints the `sbx policy allow
+    /// network` hint, and it carries the real fleet name. An auth answer clears the line.
+    ///
+    /// Counterfactual: if [`github_reach_line`] emitted the hint for `Reachable`, or dropped the
+    /// fleet name, or left the fix empty for a block, an assertion here fails. Proven by sabotage —
+    /// swapping the two arms made `the fleet name` / `is not a fault` fire.
+    #[test]
+    fn the_policy_hint_is_only_for_a_real_block() {
+        let blocked = github_reach_line(GithubReach::Blocked, "skein-fleet-xyz");
+        assert!(blocked.is_fault(), "a blocked GitHub must read as a fault");
+        assert!(
+            blocked
+                .detail
+                .contains("blocked by the sandbox's network policy"),
+            "the diagnosis lost its wording: {}",
+            blocked.detail
+        );
+        assert!(
+            blocked.fix.contains(
+                "sbx policy allow network --sandbox skein-fleet-xyz github.com,api.github.com"
+            ),
+            "the fix must be the exact copyable command with the real fleet name: {}",
+            blocked.fix
+        );
+
+        let reachable = github_reach_line(GithubReach::Reachable, "skein-fleet-xyz");
+        assert!(
+            !reachable.is_fault(),
+            "a reachable GitHub is not a fault, so nothing here should mention a firewall: {} / {}",
+            reachable.detail,
+            reachable.fix
+        );
+        assert!(
+            !reachable.detail.contains("blocked") && !reachable.fix.contains("sbx policy"),
+            "a 401/403 answer must NOT print the policy hint: {} / {}",
+            reachable.detail,
+            reachable.fix
+        );
+    }
+
+    /// **The probe tells a connect failure apart from an HTTP answer, by sabotage of the surface it
+    /// runs against.** A listener that answers 401 is [`GithubReach::Reachable`]; a dead port is
+    /// [`GithubReach::Blocked`]. The counterfactual is real: if `probe_github_reach_at` treated any
+    /// non-200 as blocked, the 401 case would flip; if it treated a refused connection as reachable,
+    /// the dead-port case would. Both were watched to fail before this was trusted.
+    #[test]
+    fn a_401_is_reachable_and_a_dead_port_is_blocked() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        // Skip rather than fail where the harness has no curl — the same rule the rest of the file
+        // holds; the probe is a wrapper around it.
+        if !crate::github::have_curl() {
+            return;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+                let _ = sock.flush();
+            }
+        });
+        let reachable = probe_github_reach_at(&format!("http://127.0.0.1:{port}/"));
+        let _ = handle.join();
+        assert_eq!(
+            reachable,
+            GithubReach::Reachable,
+            "an HTTP 401 is GitHub answering — reachable, not blocked"
+        );
+
+        // Port 1 on loopback refuses immediately: a connection that cannot be made at all.
+        let blocked = probe_github_reach_at("http://127.0.0.1:1/");
+        assert_eq!(
+            blocked,
+            GithubReach::Blocked,
+            "a refused connection is a block, not an answer"
+        );
+    }
 
     /// A running skein must say which build it is — with a revision, not a version number.
     ///

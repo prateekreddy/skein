@@ -6,13 +6,22 @@
 # host, every GitHub URL looks identical here, and the whole point (a different answer per
 # repository) is impossible.
 #
-# Two credentials exist, and the difference between them is the boundary:
+# Every credential this helper can hand over is a FILE the host placed under $SKEIN_GIT_TOKENS; none
+# is read from the environment (there is no $SKEIN_GH_READ, and there never was one anything read).
+# The difference between the files is the boundary:
 #
-#   * $SKEIN_GH_READ — a fine-grained PAT, read-only, every repository. The default answer.
-#   * $SKEIN_GIT_TOKENS/<repo> — a GitHub App installation token scoped to that ONE repository,
-#     with write. Placed by the host for the box's own repo, and for any repo its owner has granted
-#     in the cockpit. Refreshed before it expires; never minted here, because that would need the
-#     App's private key, which no box will ever hold.
+#   * $SKEIN_GIT_TOKENS/<owner>%2F<name> — a GitHub App installation token (or a per-repo PAT)
+#     scoped to that ONE repository, with write. Placed by the host for the box's own repo, and for
+#     any repo its owner has granted in the cockpit. Refreshed before it expires; never minted here,
+#     because that would need the App's private key, which no box will ever hold.
+#   * $SKEIN_GIT_TOKENS/read/<owner> — a read-only installation token, everything the App is
+#     installed on for that owner. One file per owner, because an installation token belongs to one
+#     installation. The default answer for a repo with no write file.
+#   * $SKEIN_GIT_TOKENS/read/_any — the optional cross-repo read-only PAT, for someone who wanted
+#     reads without an App. Absent in the ordinary setup.
+#
+# The lookup itself is below (`for candidate in …`), narrowest first; this list is only what the
+# files mean.
 #
 # So this helper hands over a write credential exactly where a token file exists, and nothing
 # anywhere else. GitHub enforces that server-side, which makes it a real bound on the token — and
@@ -86,13 +95,17 @@ done
 # whatever the network answers a request carrying no credential, which is still exactly right: the
 # wrong token is a 403 where silence is not.
 #
-# **What silence is NOT is a boundary, and this comment used to say it was — SKEIN-548, open.**
-# It read: "unauthenticated access, which is exactly right: public works, private-and-not-yours
-# does not." Measured from inside a live box on 2026-09-07: the sandbox routes HTTP through a
-# credential-injecting proxy, so `git ls-remote` against a private repository that is not this
-# box's — `GH_TOKEN` unset, this helper answering nothing — lists refs. Staying silent narrows what
-# this box's own credential can DO; it does not narrow what the box can REACH. Closing that needs
-# the substrate, not this script.
+# **And for a scoped box, silence now IS a boundary again — SKEIN-548 closed for the git path.**
+# This comment used to record the hole: the sandbox proxy terminates TLS for the GitHub hosts and
+# answered a request carrying no credential as the ACCOUNT, so `git ls-remote` against a private repo
+# that was not this box's — helper answering nothing — listed refs anyway. `src/box-session.sh` now
+# puts the GitHub hosts in `NO_PROXY` for a scoped box, so git reaches GitHub DIRECT: the proxy never
+# sees the request, and a private repo this box holds no token for is refused by GitHub itself (401/
+# 404). Silence therefore falls through to a genuinely unauthenticated DIRECT request — public still
+# clones, private-and-not-yours does not. What remains outside this helper's reach is a process that
+# deliberately routes back through the proxy; the substrate's egress policy (SKEIN-926), not this
+# script, is what answers that. A `fleet`-scoped box keeps the proxy on purpose and this note does
+# not apply to it.
 [ -n "$token" ] || exit 0
 
 printf 'username=x-access-token\n'
