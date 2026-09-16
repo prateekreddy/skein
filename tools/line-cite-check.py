@@ -1112,6 +1112,23 @@ SELF_GENERIC_RUN = "could not read the queue"
 # enforced by accident.
 SELF_GENERIC_SAID = SELF_GENERIC_RUN + " … and gave up waiting"
 
+# AND THE CELL THAT IS ONE RUN AND STILL NOT A QUOTATION IN FULL, which is the other half of
+# `quoted_whole`'s condition and the half nothing reached. `SELF_GENERIC_SAID` above yields TWO
+# runs, so a `len(found) == 1` that has stopped meaning anything already rejects it and case 15
+# goes on passing — its guard never consults the equality at all. This cell does: the
+# interpolation leaves exactly ONE findable run, and the cell is that run PLUS the `{queue}` the
+# document did not copy. `==` says paraphrase and stays silent; `in` — the cell merely
+# CONTAINING a run — calls it a quotation in full and judges the citation against every line
+# holding it.
+#
+# That weakening is neither hypothetical nor small, which is why it gets a case of its own rather
+# than a clause in 21. Measured at `3c77a20`: 96 site-cell rows are one run that is a SUBSTRING
+# of their cell rather than the whole of it — `{name} is not on PATH, and skein needs it`, `the
+# boxes' disk is N% full …` — and 14 of those hold their run at more than one line, so
+# containment invents a family verdict against each of them. It is the 83-line error the rule's
+# first draft made, rebuilt out of the other half of the condition.
+SELF_GENERIC_PARA = "{queue} " + SELF_GENERIC_RUN
+
 # A message WRAPPED ACROSS LINES as an argument to the call a citation names — `src/health.rs`
 # and `src/volume.rs` are full of these, and the citation names the call.
 # The judging phrase is THREE lines below the citation, so the radius alone cannot reach it and
@@ -1447,6 +1464,41 @@ def self_check():
         bad.append(
             "a citation sitting AT one of its message's several lines was convicted anyway, so"
             " the full-quote rule fires on every family row rather than on the wrong ones"
+        )
+
+    # 22. THE CELL HAS TO *BE* THE RUN, NOT CONTAIN IT — the equality in `quoted_whole`, which
+    #     until this case nothing could fail. Weakening `found[0] == plain(cell)` to `in` left
+    #     `--self-check` green and every gate green, and moved 53 rows of `docs/` into the
+    #     full-quote class in silence (22 became 75, and the rows judged at several lines 6
+    #     became 20). Case 15's guard calls `quoted_whole` but cannot catch it: that fixture has
+    #     two runs, so `len(found) == 1` rejects it before the equality is consulted, and 15 then
+    #     proves the rule is off for that row FOR THE WRONG REASON.
+    #
+    #     This fixture reaches the equality: ONE run, and a cell that is that run plus the
+    #     `{queue}` the document did not copy. It is the commonest paraphrase shape in the
+    #     survey — 96 site-cell rows at `3c77a20` are a single run that is a substring of their
+    #     cell, 14 of them holding that run at more than one line.
+    #
+    #     BOTH the reading and the verdict, because the reading alone would not show the cost:
+    #     under containment this row is convicted at lines its citation never claimed.
+    para_row = row_for("src/fake.rs:3", SELF_GENERIC_PARA)
+    if len(runs(SELF_GENERIC_PARA)) != 1 or SELF_GENERIC_RUN not in runs(SELF_GENERIC_PARA):
+        bad.append(
+            "the paraphrase-of-one-run fixture no longer yields exactly one findable run, so 22"
+            f" never reaches the equality it exists for — got {runs(SELF_GENERIC_PARA)}"
+        )
+    if len(copies) < 2:
+        bad.append("22 needs its run at more than one line to show what containment would cost")
+    if quoted_whole(para_row, "src/fake.rs:3") is not None:
+        bad.append(
+            "a message cell that CONTAINS one verbatim run was read as a quotation in full — the"
+            " cell has to be the run, or every paraphrase that elides once becomes a family"
+        )
+    para = Cite("docs/fake.md", 1, "src/fake.rs:3", "src/fake.rs", 3, row=para_row)
+    if check([para], {"src/fake.rs:3": {"line": "fn c() {}"}}, FakeTree(SELF_GENERIC)):
+        bad.append(
+            "a row that PARAPHRASES around one run was convicted at every line holding that run,"
+            " which is the 83-line error the misanchor rule's first draft made"
         )
 
     # 16. A message WRAPPED across the call the citation names is inside it. Drop the bracket
