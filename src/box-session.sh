@@ -440,11 +440,33 @@ request_package() {
   # "the whole fleet needs `libnss3`" is one decision however many agents trip over it. The flat
   # glob is for a request filed before the queue was split per box; the host shows one of those and
   # refuses to act on it, because nothing can say now which box wrote it.
+  #
+  # **A neighbour's file gets to say `pending` and nothing else** (SKEIN-931). Every field in it is
+  # that box's own words — it owns the directory and picks the ids — so `"state": "approved"` there
+  # is a box's assertion about itself, not an answer. Only the host answers a request, and it
+  # answers it on the HOST, at `$SKEIN_HOME/substrate/<box>/<id>.json`, which is not reachable from
+  # in here; so there is nothing inside a box that can tell a real approval from a made-up one.
+  #
+  # Believed, one forged file was a silent veto over the whole fleet: every other box asking for
+  # that package was told it "is approved", filed nothing, and the person who could have said yes
+  # was never asked. A neighbour's *pending* cannot do that, and that is the whole difference — it
+  # is a row on the owner's screen with two buttons on it, and whichever gets pressed the state
+  # stops being `pending`, so the next ask files.
+  #
+  # `approved` is still believed in **this box's own** directory, where it is normally the host's
+  # write-back and is what stops an agent retrying in a loop filing the same answered ask a hundred
+  # times. Forged there it suppresses only this box's own ask, which is not a hole to attack anyone
+  # through. `${f%/*}` is the directory the file was globbed out of; the flat glob leaves `$queue`,
+  # which is never `$dir`, so a loose pre-split file is pending-only too.
   local f state existing
   for f in "$queue"/*/*.json "$queue"/*.json; do
     [ -f "$f" ] || continue
     state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
-    case "$state" in pending | approved) ;; *) continue ;; esac
+    case "$state" in
+      pending) ;;
+      approved) [ "${f%/*}" = "$dir" ] || continue ;;
+      *) continue ;;
+    esac
     existing="$(jq -r '(.kind // "") + " " + ((.packages // []) | sort | unique | join(" ")) + " "' "$f" 2>/dev/null)" || continue
     if [ "$existing" = "$want" ]; then
       printf 'skein: already asked for (%s) — request %s is %s.\n' \

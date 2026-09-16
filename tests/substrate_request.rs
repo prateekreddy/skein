@@ -86,6 +86,23 @@ impl Fleet {
         Fleet::json_in(&self.queue().join(box_name))
     }
 
+    /// Write a request straight into a box's drop-box, saying whatever we like about it.
+    ///
+    /// This is not a shortcut around [`Fleet::ask`] — it is the thing being tested. A box owns its
+    /// own directory and chooses its own ids and contents, so *every* field here is a value a real
+    /// box can write, `state` included. Filing through `ask` could only ever produce `pending`,
+    /// which is exactly the claim that is safe to believe.
+    fn plant(&self, box_name: &str, id: &str, state: &str, kind: &str, packages: &[&str]) {
+        let dir = self.queue().join(box_name);
+        fs::create_dir_all(&dir).expect("a box's own drop-box");
+        let body = serde_json::json!({
+            "id": id, "box": box_name, "kind": kind, "packages": packages,
+            "asked": "2026-09-16T09:00:00Z", "state": state, "decided": "",
+            "remember": true, "log": "",
+        });
+        fs::write(dir.join(format!("{id}.json")), body.to_string()).expect("planted");
+    }
+
     /// Every request in every box's drop-box. Deliberately **not** the queue root: a file written
     /// directly there belongs to no box, so counting one would be counting a request nobody can be
     /// asked about.
@@ -294,6 +311,91 @@ fn asking_twice_for_the_same_thing_is_one_decision() {
     assert_eq!(code, 0);
     assert_eq!(f.queued().len(), 1, "the second ask joined the first");
     assert!(said.contains("already asked for"), "{said}");
+}
+
+/// **A neighbour's file may say it is pending. It may not say it is approved** (SKEIN-931).
+///
+/// Reading every box's queue is deliberate — "the whole fleet needs `libnss3`" is one decision
+/// however many agents trip over it, and the test above is that property. What made it a hole is
+/// *which* claims it believed. A box owns its drop-box and picks its own ids and contents, so
+/// `"state": "approved"` in `api`'s file is `api`'s assertion about itself and nothing else; only
+/// the host answers a request, and it answers it on the host, at `$SKEIN_HOME/substrate/<box>/`.
+///
+/// Believed, it was a silent veto that never expired: `api` writes one file and every other box in
+/// the fleet is told its ask "is approved" and files nothing, so the ask never reaches the person
+/// who could answer it. A *pending* neighbour cannot do that — it is a row on the owner's screen
+/// with two buttons on it, and whichever one is pressed the state stops being `pending` and the
+/// next ask files.
+///
+/// **What would make this fail**: `case "$state" in pending | approved)` back in the scan, which is
+/// what it used to be — `web-main` files nothing and is told `api` already asked.
+#[test]
+fn a_neighbours_claim_of_approval_does_not_swallow_this_boxs_ask() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let f = Fleet::new("selfapproved");
+    f.plant("api", "20260916-090000-1", "approved", "apt", &["libnss3"]);
+
+    let (code, said) = f.ask("web-main", &["apt-get", "install", "libnss3"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        f.filed_under("web-main").len(),
+        1,
+        "api approved its own request and web-main's ask was never filed, so nobody who could \
+         answer it will ever see it: {said}"
+    );
+    assert!(
+        !said.contains("already asked for"),
+        "web-main was told its ask had joined a decision that nobody has made: {said}"
+    );
+    // A denial is a box's claim too, and the same one: `denied` never collapsed an ask and must
+    // not start to. Checked here rather than in a test of its own because it is the same line.
+    f.plant("api", "20260916-090000-2", "denied", "apt", &["ripgrep"]);
+    let (code, said) = f.ask("web-main", &["apt-get", "install", "ripgrep"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        f.filed_under("web-main").len(),
+        2,
+        "api denied a request on the fleet owner's behalf: {said}"
+    );
+}
+
+/// The other half of the same line: a box's own drop-box is still allowed to collapse a repeat.
+///
+/// `approved` in a box's OWN file is normally the host's courtesy write-back (`decision_script`),
+/// and collapsing against it is what stops an agent that retries in a loop filing the same
+/// answered ask a hundred times. A box that forges it there forges it against itself alone, which
+/// is not a hole anyone can be attacked through — so the narrowing stops at the box's own
+/// directory rather than dropping `approved` altogether.
+///
+/// **What would make this fail**: dropping `approved` from the scan entirely, instead of trusting
+/// it only from `$dir`. This ask files a second copy of a request that was already answered.
+#[test]
+fn a_box_still_joins_the_answer_its_own_queue_already_holds() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let f = Fleet::new("ownapproved");
+    f.plant(
+        "web-main",
+        "20260916-090000-3",
+        "approved",
+        "apt",
+        &["libnss3"],
+    );
+
+    let (code, said) = f.ask("web-main", &["apt-get", "install", "libnss3"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        f.filed_under("web-main").len(),
+        1,
+        "a repeat of an ask this box's queue already holds the answer to was filed again: {said}"
+    );
+    assert!(
+        said.contains("already asked for") && said.contains("approved"),
+        "{said}"
+    );
 }
 
 #[test]
