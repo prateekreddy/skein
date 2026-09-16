@@ -456,13 +456,21 @@ def is_text(path):
 
 
 def tracked():
-    """Every file git has, or `None` when git cannot say.
+    """Every file git has, or `None` when git COULD NOT ANSWER — two different answers.
 
     **What is committed is what goes public**, and that is not the same set as what is on disk. A
     walk reads a developer's scratch file and an ignored lock file and fails the build over them,
     which is how a gate earns its reputation for crying wolf; it also reads NOTHING about a file
     that was deleted from the tree but is still in history, which this gate never claimed to cover.
     So the list comes from git when git is there, and the walk is only the fallback.
+
+    The failure and the empty answer have to be told apart, and this is where they stopped being
+    (SKEIN-893). `None` used to mean only "git raised"; git RUNNING and printing nothing came back
+    as `[]`, `[]` is not `None`, so it was taken for the list to scan — the caller iterated it,
+    read no file, found nothing in the files it had not read, and the run exited 0 green with the
+    half of this gate that enforces what is IN the tree having enforced nothing. So: `None` is
+    "git could not say", `[]` is "git says this tree has no files", and a caller that scans zero
+    files refuses rather than passing, because the two look identical in a green.
     """
     import subprocess
 
@@ -478,8 +486,21 @@ def tracked():
     return [p for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
 
 
-def files():
+def listing():
+    """`(paths, source)` — the files to scan and where the list came from, for the run to print.
+
+    Which of the two produced the list is part of what a run has to say about itself: a walk means
+    git could not answer, and a walk over a tree scans a different set from the one that goes
+    public. `paths` is `None` exactly when the walk is the source.
+    """
     listed = tracked()
+    if listed is None:
+        return None, "os.walk — git could not answer"
+    return listed, "git ls-files"
+
+
+def files(listed):
+    """Every text file to scan, as `(label, path)`. `listed` is `listing()`'s first half."""
     if listed is not None:
         for rel in sorted(listed):
             if rel.split("/", 1)[0] in SKIP_DIRS:
@@ -552,7 +573,14 @@ def scan_name(label, banned):
 
 
 def survey(banned):
-    """{rule: {what: ["file:line", …]}} across the tree.
+    """`(found, scanned, listed_n, source)` across the tree — the findings AND how much was read.
+
+    `scanned` is the count this gate had no way to state (SKEIN-893). The message half of the run
+    has said how many commit messages it covered since the day it was written, for exactly the
+    reason the tree half needed it too: a scan that covered nothing and a scan that found nothing
+    print the same green unless one of them says which.
+
+    `found` is `{rule: {what: ["file:line", …]}}`.
 
     `docs/residue.toml` is the one file not read, and it has to be. It names every allowed host,
     home and address, so scanning it would make every allow-list entry cite itself as its own use
@@ -564,7 +592,10 @@ def survey(banned):
     outside the repository altogether.
     """
     found = {r: {} for r in RULES}
-    for label, path in files():
+    listed, source = listing()
+    scanned = 0
+    for label, path in files(listed):
+        scanned += 1
         # A PATH carries names too, and this is the half a content scan cannot see. The pane
         # fixtures are named `<agent>-<state>.<box>.<what>.<date>.txt`, so the `<box>` segment is
         # a real box name sitting in a filename — the case SKEIN-540 opened with, and the reason
@@ -583,7 +614,7 @@ def survey(banned):
         for rule, hits in scan_text(text, banned).items():
             for what, lines in hits.items():
                 found[rule].setdefault(what, []).extend(f"{label}:{n}" for n in lines)
-    return found
+    return found, scanned, (len(listed) if listed is not None else None), source
 
 
 # ---- the commits a push would add -------------------------------------------------------------
@@ -1484,7 +1515,38 @@ def self_check():
 self_check()
 
 
+# Every argument this tool understands. `--history` takes refs after it, so what follows it is not
+# checked against this.
+FLAGS = ("--show", "--update", "--history")
+
+
+def argument_problem(argv):
+    """The complaint about an argument this tool does not understand, or `None`.
+
+    An unknown argument used to be IGNORED: `--updat` selected no mode, fell through to the
+    ordinary check, scanned the tree and exited 0, and the only difference from the run the typist
+    meant is that nothing was written — which is the harmless direction of a pair whose other
+    direction, `--update`, REWRITES a tracked file from whatever the survey found. A flag one
+    character wide should not be the difference between a check and a rewrite, and silence about a
+    word this tool did not understand is a claim that it did (SKEIN-893).
+    """
+    if "--history" in argv:
+        argv = argv[: argv.index("--history")]
+    unknown = [a for a in argv if a not in FLAGS]
+    if not unknown:
+        return None
+    return (
+        f"residue-check: this does not know the argument(s): {' '.join(unknown)}\n"
+        f"               rule: an argument this tool cannot read is not a request it can carry "
+        f"out. What there is: {', '.join(FLAGS)} (`--history` takes refs after it)"
+    )
+
+
 def main():
+    said_about_args = argument_problem(sys.argv[1:])
+    if said_about_args:
+        print(said_about_args)
+        return 2
     spec = load_spec()
     # Before anything reads the spec, and before `--update` can rewrite it: an entry filed where no
     # rule looks is worse than a missing one, because the file still reads as though it were made.
@@ -1502,7 +1564,50 @@ def main():
     # tree as it stands, and this mode asks a question about history that no allow-list answers.
     if "--history" in sys.argv:
         return history(banned, sys.argv[sys.argv.index("--history") + 1 :])
-    found = survey(banned)
+    found, scanned, listed_n, source = survey(banned)
+    # Said on every run that surveys, before anything is reported or rewritten, and for the reason
+    # the commit-message line below it was written: a scan reports what it FOUND, and what it found
+    # is worth nothing to a reader who does not know what it READ. On a clean master this gate's
+    # entire output was the commit-message line, so the tree scan — the half that enforces "nothing
+    # identifying gets back into this tree" — said nothing whatever about itself (SKEIN-893).
+    shape = [r for r in RULES if r not in ("banned", "filename")]
+    print(
+        f"residue-check: files scanned: {scanned}"
+        + (f" of {listed_n} listed" if listed_n is not None else "")
+        + f", from {source}\n"
+        f"               needles carried: {len(banned)} banned string(s) at width(s) "
+        f"{','.join(str(w) for w in banned.widths) or 'none'}, "
+        f"and {len(shape)} shape rules ({', '.join(shape)})"
+    )
+    # THE FOURTH ARM. Three ways this gate could be toothless are refused below — no spec, no hash
+    # file, no usable hashes — and this was the fourth, left open: a tree scan that read NO FILE
+    # exits green, because nothing is found in files nobody opened. It is refused here rather than
+    # beside the other three because `--show` and `--update` cannot repair it — they would report
+    # and WRITE from the same empty survey, and `--update` rewrites docs/residue.toml from it.
+    if scanned == 0:
+        if listed_n == 0:
+            why = (
+                "git answered and listed no file at all, so there was nothing to open. An empty\n"
+                "               answer is not a failure and was not treated as one"
+            )
+        elif listed_n is None:
+            why = (
+                "git could not answer, and the walk that stands in for it reached no readable\n"
+                "               file either"
+            )
+        else:
+            why = (
+                f"git listed {listed_n} file(s) and not one of them was read — every one was a\n"
+                f"               symlink, binary, or under a skipped directory"
+            )
+        print(
+            f"residue-check: the tree scan read no files, so the rules were applied to nothing\n"
+            f"               and a green here would mean only that nothing was looked at\n"
+            f"               why: {why}\n"
+            f"               rule: run this inside the worktree it is meant to scan, with a git "
+            f"that answers. A scan of zero files is refused, never passed"
+        )
+        return 1
     coverage, in_messages = survey_messages(banned)
 
     if "--show" in sys.argv:
