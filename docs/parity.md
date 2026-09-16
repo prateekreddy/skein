@@ -18,7 +18,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 84)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 158 unique, 161 occurrences
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 156 unique, 159 occurrences
 grep -c 'function ' src/web/index.html                          # 428
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -672,6 +672,36 @@ every repo's store and the host's own checkouts.
 the architecture keeps `declared = deleted` as a first-class cell — a half-completed destroy is still
 a thing skein must recognise and clean up. Only the board rows go.
 
+**Pointing a repo at a store you already have is CLI-only; the cockpit field is gone** (SKEIN-535).
+Both boards offered one — `/`'s "Advanced — shared data folder" disclosure and `/v2`'s bare
+"Shared-data folder" input — and both sent it as `store` on `POST /api/repos`. `add_repo` takes that
+string as a host path and uses it as one: `kit::ensure_store` scaffolds a whole `.claude` tree
+(`README.md`, `mailbox/`, `skein/bin/`, `telemetry/`, a dozen more) wherever it points, and its only
+guard is that the path is absolute. So the field wrote that tree anywhere on the host — reproduced
+against a running server, not reasoned. It is authenticated, but the fleet API token is printed into
+every cockpit URL, which makes it a privilege question rather than an open door.
+
+The route refuses `store` outright rather than bounding it, and `$SKEIN_HOME` is the wrong bound:
+`fleet::exposes_the_volume` already declines to *mount* a store under `$SKEIN_HOME` unless it is
+under `repos/` or `boxes/`, so a bounded route would have registered repos whose boxes silently come
+up with no store (SKEIN-943). Refused rather than ignored, too — serde drops an unknown field, so
+deleting it from `AddRepoReq` would have let a request naming a store succeed while quietly getting
+skein's own.
+
+What is lost, in the user's terms: **adopting an existing store is no longer something you can do
+from a browser.** It is not lost outright — `skein add <git-url> --store <path>` still does it, and
+runs as the person on their own host rather than as a request carrying a token that is on screen.
+Both dialogs now print that command where the field used to be, because the field was the only place
+anybody could learn the capability exists, and a capability withdrawn in silence reads as one that
+is gone.
+
+**Two smaller things go with it, listed so neither is read as an oversight.** `/v2` no longer probes
+a typed path at all: `GET /api/path` answered the shared-data folder field and only that one there —
+the source field is a remote and was deliberately never wired (SKEIN-806) — so `resolves` and
+`checkLater` went with the field that was their only caller. `/` still probes, on the SSH key path,
+which is a host path skein really does read. And the two element ids the field owned, `ar-store` and
+`ar-store-note`, are why the id count at the top of this document moved from 158 to 156.
+
 **The "no review — read again" control is gone, and a stack can no longer name a step that was
 read without one** (SKEIN-660, and it was SKEIN-371's). The row control, its "skein read this commit
 and no review came back" tooltip, and the stack's "N read but with no review" shortfall all rested on
@@ -702,9 +732,10 @@ Three verdicts, and the middle one is the load-bearing one:
 
 | §7 entry | at `/v2` | how it is known |
 |---|---|---|
-| Adopt-in-place is removed, and nothing replaced it | **holds** | it was a surface question after all, and this row said it was not: both boards invited a path and both have stopped. `/v2`'s setup hint asserted "a local path is a valid git remote, so it works" and its source field was wired to the path resolver, which answered a typed directory with a green `found: folder` while the server refused that same source on submit. The hint now reads "The repo's git URL"; the probe is gone from the source field and kept on the store field, because `--store` still takes a path (SKEIN-588, SKEIN-806) |
+| Adopt-in-place is removed, and nothing replaced it | **holds** | it was a surface question after all, and this row said it was not: both boards invited a path and both have stopped. `/v2`'s setup hint asserted "a local path is a valid git remote, so it works" and its source field was wired to the path resolver, which answered a typed directory with a green `found: folder` while the server refused that same source on submit. The hint now reads "The repo's git URL"; the probe is gone from the source field (SKEIN-588, SKEIN-806) — and gone from `/v2` altogether, since the store field it was kept for went with SKEIN-535 |
+| Pointing a repo at a store you already have is CLI-only | **holds** | the field is gone from both boards and neither sends `store`; `src/cockpit.rs`'s setup test asserts `/v2` does not, and `tests/ui/onboarding.mjs` asserts `/` has no `#ar-store` and still names `skein add --store` so the capability is discoverable. The route refuses the field for either of them |
 | Foreign sandbox display | **holds** | `/v2` reads `/api/queue`, whose rows are boxes, pull requests and setup faults (`queue::Source`). There is no sandbox row and no `foreign:` term in the page |
-| `/api/pick-path` and Browse | **holds, and gone from `/` too** | `/v2` adds a repository and makes a box, and a path is **typed**: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip. A link is reported as a link. `pick-path` is not referenced by either page now, and one test asserts it of both. SKEIN-106 moved `/`'s three Browse buttons to the same typed path and deleted the route, the handler and `health::pick_path` — it popped the *host's* native dialog, which needs a display the in-fleet skein does not have, and it was already unusable over Tailscale where the advice was "keep typing" |
+| `/api/pick-path` and Browse | **holds, and gone from `/` too** | a path is **typed**, never picked: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip, and a link is reported as a link. That probe now runs on `/` only, at the SSH key path; `/v2` has no path field left to probe since SKEIN-535 removed the shared-data folder, so it asks nothing. `pick-path` is not referenced by either page, and one test asserts that of both. SKEIN-106 moved `/`'s three Browse buttons to the same typed path and deleted the route, the handler and `health::pick_path` — it popped the *host's* native dialog, which needs a display the in-fleet skein does not have, and it was already unusable over Tailscale where the advice was "keep typing" |
 | The host ssh-agent path | not a surface question | a credential path, not a screen |
 | Transport reporting | **holds** | nothing in `/v2` reads a transport field; there is no readout to port |
 | Every copy rule has a test | not a surface question | `tests/resize_rules.rs`, unchanged by either board |

@@ -3060,27 +3060,51 @@ struct AddRepoReq {
     id: String,
     #[serde(default)]
     agent: String,
-    /// Shared-data folder for the repo (its `.claude` store). Empty ⇒ skein manages one under its home.
+    /// **Read only so that it can be refused** (SKEIN-535). Kept on the struct rather than deleted
+    /// because serde ignores a field it does not know: dropping it would make a request that names
+    /// a store succeed while quietly getting skein's own, which is the one outcome worse than the
+    /// bug being fixed here.
     #[serde(default)]
     store: String,
 }
 
 /// Register a repo: clone its remote, provision its store + kit, record it. A path is a 400, from
 /// `add_repo`. `git clone` can take a while, so run the blocking work off the async runtime.
+///
+/// **`store` is a CLI affordance and this route does not have it** (SKEIN-535). `add_repo` takes an
+/// arbitrary host path and uses it as one — `ensure_store` (`src/kit.rs`) scaffolds a whole `.claude`
+/// tree wherever it points, and its only guard is that the path is absolute. Over HTTP that made
+/// `{"store":"/tmp/outside/evilstore"}` write that tree anywhere on the host, reproduced against a
+/// running server on 2026-09-05. The request is authenticated, but the fleet API token is printed
+/// into every cockpit URL, so this was a privilege question rather than an open door.
+///
+/// **Refused rather than ignored.** Silently substituting skein's managed store for the one the
+/// caller named would be the server telling a caller its instruction was obeyed when it was not.
+///
+/// The CLI keeps it: `skein add --store ~/thing-shared/.claude` is a real, wanted use of an
+/// absolute path, and it runs as the person on their own host rather than as a request carrying a
+/// token that is on screen. `add_repo` cannot tell the two apart, so the caller is distinguished
+/// here, at the route, which is the only place that knows.
 async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     if r.source.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "missing source").into_response();
     }
+    if !r.store.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "`store` is not accepted over HTTP: it is an arbitrary path on the host, and \
+             registering a repo would scaffold a `.claude` store wherever it pointed.\n  \
+             Adopt an existing store from the CLI instead — `skein add <git-url> --store <path>` \
+             — which runs as you, on the host.\n  Leave `store` out and skein manages one under \
+             its own home.",
+        )
+            .into_response();
+    }
     let res = tokio::task::spawn_blocking(move || {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
         let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
-        let store = (!r.store.trim().is_empty()).then(|| r.store.trim().to_string());
-        skein::repos::add_repo(
-            r.source.trim(),
-            id.as_deref(),
-            agent.as_deref(),
-            store.as_deref(),
-        )
+        // `None`, always: the only way past the refusal above is not to have named a store.
+        skein::repos::add_repo(r.source.trim(), id.as_deref(), agent.as_deref(), None)
     })
     .await;
     match res {

@@ -75,6 +75,10 @@ main { flex: 1; overflow: auto; padding: 14px 22px 40px; }
 .said.done { color: var(--done); }
 .hint { color: var(--faint); font-size: 12px; margin-top: 4px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* The one command this page names, for the capability it no longer offers as a field (SKEIN-535).
+   Quieter than an input: it is something to go and do elsewhere, not something to fill in here. */
+.cmd { font-size: 12px; color: var(--dim); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 6px 8px; margin: 6px 0 0; overflow-x: auto; white-space: pre; }
 
 /* The terminal is the whole of "converse" (§11): commenting back to an agent is an Act against a
    box, and the box's terminal already is one. */
@@ -130,9 +134,17 @@ main { flex: 1; overflow: auto; padding: 14px 22px 40px; }
     <label for="src">Source</label>
     <input id="src" class="mono" placeholder="https://github.com/owner/name.git  ·  git@github.com:owner/name.git" autocomplete="off">
     <div class="said" id="srcsaid"></div>
-    <label for="store">Shared-data folder <span class="hint">— optional; skein keeps one under its own home if you leave this empty</span></label>
-    <input id="store" class="mono" placeholder="/home/you/data/thing" autocomplete="off">
-    <div class="said" id="storesaid"></div>
+    <!-- **No shared-data folder field** (SKEIN-535). It sent an absolute host path as `store`, and
+         the server scaffolded a whole `.claude` tree wherever it pointed. `POST /api/repos` refuses
+         `store` outright now; adopting a store you already have is CLI-only — `skein add <git-url>
+         --store <path>`, which runs as the person, on the host.
+
+         **Named here rather than only in index.html**, because the two pages answer the same
+         question and a person reads whichever one they are on. Withdrawing the field in silence on
+         this one would leave its reader believing the capability is gone. -->
+    <div class="hint">The repo's <code>.claude</code> store — memory and mailbox, shared across its
+      boxes — is scaffolded under skein's own home. To adopt a store you already have, from the host:</div>
+    <pre class="cmd mono">skein add &lt;git-url&gt; --store &lt;path&gt;</pre>
     <button class="go" id="addrepo">Add it</button>
     <div class="said" id="addsaid"></div>
   </section>
@@ -418,36 +430,14 @@ document.getElementById("closesetup").addEventListener("click", e => {
   setup.classList.remove("open");
 });
 
-// **What replaces Browse.** The native picker needed a host with display access, which in-fleet
-// skein cannot have — so a path is typed, and the surface says what it found rather than accepting
-// it silently. A link is reported as a link, because the whole job of this line is to say what is
-// actually there.
-async function resolves(path, into) {
-  if (!path.trim()) return said(into, "");
-  try {
-    const answer = await fetch(`/api/path?p=${encodeURIComponent(path.trim())}`);
-    const found = await answer.json();
-    if (found.resolved) {
-      said(into, `found: ${found.kind}`, "done");
-    } else {
-      // Not an error. Most of the time it is a URL in the source field, or a folder that does not
-      // exist yet — both fine, and both worth showing rather than hiding.
-      said(into, found.kind === "missing" ? "nothing there yet" : "", "");
-    }
-  } catch {
-    said(into, "");
-  }
-}
-
-let checking = 0;
-const checkLater = (input, into) => {
-  input.addEventListener("input", () => {
-    clearTimeout(checking);
-    checking = setTimeout(() => resolves(input.value, into), 250);
-  });
-};
-// NOT the source field: a repo is a remote, so "found: folder" affirmed what the server refuses.
-checkLater(document.getElementById("store"), "storesaid");
+// **This page probes no path, and there is nothing left for it to probe** (SKEIN-535). There used
+// to be a `resolves`/`checkLater` pair here — a debounced `/api/path` lookup that answered "found:
+// folder" under a field — and the shared-data folder field was its only caller. That field is gone,
+// because the server refuses `store` outright, so the probe went with it rather than sitting here
+// with no call site.
+//
+// Both fields that remain are deliberately unprobed: `src` is a git remote, not a path — affirming
+// a typed folder there is what SKEIN-806 was — and `branch` is not a path at all.
 
 document.getElementById("addrepo").addEventListener("click", async e => {
   const button = e.target;
@@ -459,7 +449,8 @@ document.getElementById("addrepo").addEventListener("click", async e => {
     const answer = await fetch("/api/repos", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ source, store: document.getElementById("store").value.trim() }),
+      // No `store`: the route refuses one (SKEIN-535).
+      body: JSON.stringify({ source }),
     });
     const body = await answer.json().catch(() => ({}));
     if (!answer.ok) {
@@ -471,9 +462,7 @@ document.getElementById("addrepo").addEventListener("click", async e => {
       said("addsaid", body.warning ? `Added ${name}.\n${body.warning}` : `Added ${name}.`,
         body.warning ? "warm" : "done");
       document.getElementById("src").value = "";
-      document.getElementById("store").value = "";
       said("srcsaid", "");
-      said("storesaid", "");
       loadRepos();
     }
   } catch (e) {

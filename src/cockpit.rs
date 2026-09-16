@@ -725,16 +725,64 @@ mod tests {
     /// dropping what it did not spell right — `AddRepoReq` takes `#[serde(default)]` on three of its
     /// four fields, so `stor` instead of `store` is a repo whose shared-data folder is quietly
     /// skein's own.
+    ///
+    /// **`store` is now the field this surface must NOT send** (SKEIN-535). The route refuses it
+    /// outright, because `add_repo` scaffolds a `.claude` tree wherever an absolute path points and
+    /// the API token that reaches this route is printed into every cockpit URL. So the pairing this
+    /// test exists for is unchanged and its subject is inverted: the page and the server have to
+    /// agree about the field's ABSENCE, and a form that sent it again would get a 400 that the
+    /// person reads as "adding a repo is broken".
+    ///
+    /// Asserted rather than deleted. Dropping the `store` row would have left the surface free to
+    /// grow the field back with nothing to notice.
     #[test]
     fn the_setup_surface_writes_the_fields_the_server_reads() {
-        // Add a repo: the two fields this surface sends, and the two it reads back.
-        assert!(V2.contains(r#"fetch("/api/repos", {"#));
-        for field in ["source", "store"] {
-            assert!(
-                V2.contains(&format!("{field},")) || V2.contains(&format!("{field}:")),
-                "the add-a-repo form does not send `{field}`"
-            );
-        }
+        // Add a repo: the one field this surface sends, and the two it reads back.
+        //
+        // **Scoped to the request literal, because the file-wide version could not fail.** This was
+        // `V2.contains("source,") || V2.contains("source:")`, and a queue row a hundred and eighty
+        // lines away reads `{ source: row.dataset.source, … }` — so the assertion was satisfied by
+        // code that has nothing to do with this form, and would have passed if the form sent no
+        // `source` at all. Measured, not reasoned: renaming the form's field to `src:` left it
+        // green. It had been that way since before SKEIN-535 and survived the round that lifted
+        // `store` out of the loop beside it.
+        //
+        // So both halves now read the body the form actually sends: the bytes between
+        // `JSON.stringify({` and the `})` that closes it, inside the `/api/repos` request. Not the
+        // whole request — a first attempt sliced that, and swept up the `// No \`store\`` comment
+        // sitting in it, so the store assertion fired on a comment saying the field was gone.
+        let body = {
+            let request = V2
+                .split_once(r#"fetch("/api/repos", {"#)
+                .expect("the add-a-repo form no longer posts to /api/repos")
+                .1;
+            let arg = request
+                .split_once("JSON.stringify({")
+                .expect("the add-a-repo form sends no JSON body")
+                .1;
+            &arg[..arg.find("})").expect("the request body is never closed")]
+        };
+        // The field the route refuses (SKEIN-535), named on its own so it fails in its own words.
+        assert!(
+            !body.contains("store"),
+            "the add-a-repo form sends `store` again, and POST /api/repos refuses it (SKEIN-535) — \
+             adopting an existing store is `skein add --store <path>` from the CLI now: {{{body}}}"
+        );
+        // **The exact shape, because a key is not a value.** `body.contains("source")` cannot tell
+        // `{ source }` from `{ src: source }` — the second sends the field under a name the server
+        // does not read, and `AddRepoReq` would take the default for it. That is precisely the
+        // silent-drop this test was written about, so the one field it sends is pinned whole.
+        // Adding a field here is meant to fail: it is the reviewable event.
+        assert_eq!(
+            body.trim(),
+            "source",
+            "the add-a-repo request body is no longer exactly `{{ source }}` — if a field was added \
+             deliberately, check the server reads it under that name before updating this"
+        );
+        assert!(
+            !V2.contains(r#"getElementById("store")"#) && !V2.contains(r#"id="store""#),
+            "the shared-data folder field is back on /v2, and the route refuses `store` (SKEIN-535)"
+        );
         assert!(
             V2.contains("body.repo?.id") && V2.contains("body.warning"),
             "the answer's repo and warning are not read — a push path that will not work is \
@@ -762,15 +810,30 @@ mod tests {
         // have, on a filesystem it is not standing on. It was already unusable over Tailscale, where
         // the advice was "keep typing", so typing became the path and this check is what makes
         // typing bearable.
+        //
+        // **`/v2` no longer has one, and that is a consequence rather than a second decision**
+        // (SKEIN-535). The probe answers a field, and on `/v2` the shared-data folder was the only
+        // field it ever answered — the source field is a remote and was deliberately never wired
+        // (SKEIN-806). Deleting the field left `resolves`/`checkLater` with no caller, so they went
+        // with it. `/` still probes, because the SSH key path is a host path skein really does read.
+        //
+        // The `pick-path` half is asserted of BOTH boards, because that one is about Browse rather
+        // than about any particular field, and it must not come back on either.
+        assert!(
+            INDEX.contains("/api/path?p="),
+            "/ does not ask what a typed path resolves to"
+        );
+        assert!(
+            INDEX.contains("found.resolved") && INDEX.contains("found.kind"),
+            "/ does not read the path check's answer"
+        );
+        assert!(
+            !V2.contains("/api/path?p="),
+            "/v2 probes a typed path again, but it has no path field to probe — the shared-data \
+             folder went with SKEIN-535 and the source field is a remote (SKEIN-806). If a path \
+             field came back, this assertion is the wrong thing to fix: see parity §7"
+        );
         for (board, page) in [("/", INDEX), ("/v2", V2)] {
-            assert!(
-                page.contains("/api/path?p="),
-                "{board} does not ask what a typed path resolves to"
-            );
-            assert!(
-                page.contains("found.resolved") && page.contains("found.kind"),
-                "{board} does not read the path check's answer"
-            );
             assert!(
                 !page.contains("pick-path"),
                 "Browse came back on {board} — it needs a host display the in-fleet skein cannot \

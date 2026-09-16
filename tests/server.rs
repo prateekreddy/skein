@@ -2991,3 +2991,119 @@ fn the_first_usage_load_on_a_host_that_has_never_counted_takes_the_reading() {
          whole walk again — which is the cost the cache exists to stop"
     );
 }
+
+/// **`store` is refused over HTTP and still accepted from the CLI** (SKEIN-535).
+///
+/// `add_repo` takes `store` as an arbitrary host path and uses it as one: `ensure_store`
+/// (`src/kit.rs`) scaffolds a whole `.claude` tree — `README.md`, `mailbox/`, `skein/bin/`,
+/// `telemetry/`, a dozen more — wherever it points, and its only guard is that the path is
+/// absolute. Over HTTP that wrote that tree anywhere on the host for anyone holding the API token,
+/// which is printed into every cockpit URL.
+///
+/// **Both halves in one test, because each one alone is satisfiable by a wrong fix.** Refusing the
+/// store inside `add_repo` would close the route and break `skein add --store`, which is a real and
+/// wanted use of an absolute path; leaving the route alone keeps the hole. Only the pair pins the
+/// refusal to the route, which is the one place that knows which caller it is talking to.
+///
+/// Each half goes through its own real front door — the wire for the route, the actual `skein`
+/// binary for the CLI — so neither is a call to a library function standing in for the thing.
+///
+/// **Asserted on the scaffold rather than on a message.** The bug is a directory tree appearing on
+/// disk, so that is what is measured on both sides: the same path, refused into non-existence over
+/// HTTP and created by the CLI.
+#[test]
+fn a_store_outside_skein_home_is_refused_over_http_and_still_accepted_from_the_cli() {
+    let home = token_home("storeguard");
+    // Beside `$SKEIN_HOME`, not under it — the shape the reproduction on 2026-09-05 used
+    // (`/tmp/outside/evilstore`), and the shape `--store ~/thing-shared/.claude` has.
+    let outside = home
+        .to_path_buf()
+        .parent()
+        .unwrap()
+        .join(format!("skein-it-storeguard-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+
+    // Registrable (so `registrable_source` lets it past) and unconnectable (so the mirror clone
+    // fails on a refused connection instead of a DNS lookup or a real network round trip). Both
+    // halves use the same one, so what differs between them is the store and nothing else.
+    //
+    // The clone failing is expected and is not what either half measures: `add_repo` runs
+    // `ensure_store` BEFORE `ensure_mirror` (`src/repos.rs`), so the store is on disk — or refused
+    // — well before the remote is ever reached.
+    const SOURCE: &str = "https://127.0.0.1:1/storeguard.git";
+
+    let (child, addr) = serving(
+        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let _kid = Kid(child);
+    let json = "Content-Type: application/json\r\n";
+
+    // ── over HTTP: refused, and nothing written ──────────────────────────────────────────────
+    let (code, why) = http_post(
+        &addr,
+        "/api/repos",
+        json,
+        format!(
+            r#"{{"source":"{SOURCE}","id":"storeguard","store":"{}"}}"#,
+            outside.display()
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        code, 400,
+        "POST /api/repos did not refuse a `store` outside $SKEIN_HOME: {why}"
+    );
+    // The assertion the whole item is about. It is checked before the wording below because a
+    // refusal that still scaffolds the tree is the bug, whatever it says.
+    assert!(
+        !outside.exists(),
+        "the HTTP route scaffolded a store outside $SKEIN_HOME at {} — this is SKEIN-535 itself, \
+         and the status code above says nothing about it",
+        outside.display()
+    );
+    // Refused loudly, and pointing at the way through. A 400 that only says "no" leaves the person
+    // who really does want to adopt a store with nowhere to go.
+    assert!(
+        why.contains("skein add") && why.contains("--store"),
+        "the refusal does not name the CLI as the way to adopt a store, so it is a dead end: {why}"
+    );
+
+    // ── from the CLI: the same path, accepted ────────────────────────────────────────────────
+    // `skein add <url> --store <path>` — the exact line `cmd_add` serves (`src/bin/skein.rs`).
+    let out = Command::new(env!("CARGO_BIN_EXE_skein"))
+        .args([
+            "add",
+            SOURCE,
+            "--id",
+            "storeguard",
+            "--store",
+            outside.to_str().unwrap(),
+        ])
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        .env("SKEIN_REGISTRY", home.to_path_buf().join("registry.json"))
+        .env_remove("SKEIN_SHARED")
+        .output()
+        .unwrap();
+    // Two entries `ensure_store` itself writes, so this reads the scaffold rather than the exit
+    // status — the command as a whole fails at the unreachable remote, by construction, and that
+    // failure is downstream of everything being measured here.
+    assert!(
+        outside.join("README.md").is_file() && outside.join("mailbox").is_dir(),
+        "`skein add --store {}` no longer provisions a store outside $SKEIN_HOME — the CLI half of \
+         SKEIN-535 has been broken by fixing the HTTP half in `add_repo` instead of at the route.\n\
+         stdout: {}\n  stderr: {}",
+        outside.display(),
+        String::from_utf8_lossy(&out.stdout).trim(),
+        String::from_utf8_lossy(&out.stderr).trim(),
+    );
+
+    let _ = std::fs::remove_dir_all(&outside);
+}
