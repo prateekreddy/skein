@@ -34,9 +34,8 @@
 import { chromium } from "playwright";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { openDoor } from "./lift.mjs";
+import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
@@ -58,7 +57,7 @@ const API_TOKEN = "c".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
 async function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-connections-ui-"));
+  const root = freshFixture(fixtureRoot(), "skein-connections-ui");
   const bin = path.join(root, "bin");
   const home = path.join(root, "home");
   fs.mkdirSync(bin, { recursive: true });

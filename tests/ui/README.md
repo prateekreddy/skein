@@ -112,6 +112,28 @@ a live one's.
 A directory whose name carries no pid — anything from before this — is left alone deliberately, on
 the same "do not delete what you cannot reason about" rule. Remove those by hand once.
 
+**Keeping it that way.** `smoke.mjs`, `attach.mjs`, `connections.mjs`, `actfail.mjs`,
+`updatepane.mjs` and `usage.mjs` once built their fixture with `fs.mkdtempSync(path.join(os.tmpdir(),
+"<prefix>-"))` instead — under `/tmp`, which a box cannot read, and with no pid in the name, so
+`freshFixture`'s sweep never reasoned about it either (SKEIN-653; 29 such directories were
+measured, the oldest 36 hours). `usage.mjs` was not on that list when this was written: the
+check below derived it, which is the whole argument for deriving the suite set rather than
+naming it.
+
+```sh
+node tests/ui/harness/leaks.mjs --fixture-root
+```
+
+checks for a regression back to that: it derives every suite that imports `startServer` from
+`./harness/server.mjs` — the import that turns a fixture into something a box has to read — and
+fails if any of them still names `os.tmpdir()`. Like every derived check in this file, it refuses
+to run rather than pass silently if it derives no suites at all, because a pattern that has never
+matched anything looks exactly like one that matches nothing (SKEIN-647). It is deliberately a
+separate exit code from a plain `node tests/ui/harness/leaks.mjs`: that one is the "did this run
+leave a process behind" contract `CONTRIBUTING.md` asks for after every browser run, and a
+source-hygiene regression in a suite this run never touched should not be reported through the same
+number.
+
 ## `leakcheck.mjs` — can the leak check see the server it is about
 
 ```sh

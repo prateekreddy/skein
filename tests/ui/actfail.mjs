@@ -45,9 +45,8 @@
 import { chromium } from "playwright";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { openDoor } from "./lift.mjs";
+import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
@@ -61,7 +60,7 @@ const API_TOKEN = "d".repeat(64);
 const REFUSAL = "GitHub said 405: Pull Request has merge conflicts";
 
 async function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-actfail-ui-"));
+  const root = freshFixture(fixtureRoot(), "skein-actfail-ui");
   const bin = path.join(root, "bin");
   const home = path.join(root, "home");
   fs.mkdirSync(bin, { recursive: true });
