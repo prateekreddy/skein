@@ -423,6 +423,14 @@ avoidable risk in the plan.
 **What runs in parallel from the start:** the component library, the GitHub module (already
 self-contained since `gh` was dropped), and the warden's two removable capability modules.
 
+**Where parallel branches meet, expect `line-cite-check` to be red at the merge and green on every
+branch that went into it** (SKEIN-937). Line shifts compose; citations are addresses; so the red
+exists only on the tree the integrator builds, it is nobody's regression, and it is repaired once
+on the complete tree after the last merge. **["`line-cite-check` goes red at a merge, and that is
+not a lane's regression"](../CONTRIBUTING.md#line-cite-check-goes-red-at-a-merge-and-that-is-not-a-lanes-regression)**
+in `CONTRIBUTING.md` is the whole of it, with what it cost; this is a pointer rather than a second
+copy, because two copies is how a retired premise ends up in ten places here.
+
 **The cost of incremental**: two placement shapes and the `sbx exec` fallback survive one more cycle
 — the very things the architecture wants deleted. That is real. It is smaller than a six-month branch
 against a codebase taking ~200 commits a month.
