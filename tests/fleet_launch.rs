@@ -1126,9 +1126,23 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // ask, and skein reads silence from Docker as a reason to stop — correctly, but that would make
     // this test pass for the wrong reason and stop covering the ordering it exists for.
     let err = resize_fleet("8g", "4", "", true).expect_err("resize must refuse");
-    assert!(
-        err.contains("no registered repo") && err.contains("untouched"),
-        "the refusal must say the sandbox was left alone: {err}"
+    // **Which refusal answered, and the other one this recognises** (SKEIN-433). `resize_fleet`
+    // refuses in phase 1 for more than one real reason and the FIRST of them is space:
+    // `room_to_copy_out` runs before the per-box census, because discovering the host is full
+    // after the sandbox is gone would be the worst possible moment for it. So on a machine with
+    // too little room the answer here is a correct refusal about the disk and not the ordering
+    // this covers — and `err.contains("no registered repo")` reported that correct refusal as a
+    // malformed one, sending the reader to the wording when the truth was 352 MiB free.
+    // `common::pinned_refusal` carries the argument; this call only has to name the other answer.
+    common::pinned_refusal(
+        &err,
+        &["no registered repo", "untouched"],
+        &[(
+            "copying the boxes out needs about",
+            "this machine has too little free space to copy the boxes out, so the resize refused \
+             on space before it reached the per-box census this covers",
+        )],
+        "the resize ordering assertions",
     );
     assert!(
         !rm_marker.exists(),

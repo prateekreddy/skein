@@ -135,6 +135,70 @@ pub fn skip(why: &str) {
     eprintln!("SKIPPED at {where_}: {why}");
 }
 
+/// Assert that a refusal is the one this test pins — or SKIP, naming the OTHER real refusal that
+/// answered instead.
+///
+/// **The defect this exists for is a class, not one test** (SKEIN-433, and the same shape as
+/// SKEIN-396 and SKEIN-413). An assertion written as
+///
+/// ```ignore
+/// assert!(err.contains("no registered repo"), "the refusal must say ...: {err}");
+/// ```
+///
+/// says exactly one thing about every answer it did not expect: *this refusal is malformed*. When
+/// the action it drives has more than one real refusal and a different one fires — correctly,
+/// about something the test was not asking — the report sends the reader to the refusal's wording.
+/// Observed in this file: the launch suite failed with "the refusal must say the sandbox was left
+/// alone: copying the boxes out needs about 706 MiB and the host has 352 MiB free — resize aborted
+/// with the sandbox untouched." Skein was right and the test was right; only the report was wrong,
+/// and it was wrong in the expensive direction, because a reader goes looking at refusal wording
+/// when the truth is the disk.
+///
+/// So a test that pins one refusal says which others it RECOGNISES, and an unrecognised one is
+/// still a failure — that is the case the assertion was written for and it keeps it.
+///
+/// * `wanted` — the refusal this test is about, as substrings that must ALL be present.
+/// * `others` — `(marker, what it means)` for each other legitimate refusal of the same action.
+///   The marker is matched against the refusal; the meaning is what the skip says out loud.
+/// * `covering` — what is not being covered when this skips, in the reader's terms.
+///
+/// Returns `true` when the pinned refusal fired and the caller should go on, `false` after
+/// skipping. Skipping goes through [`skip`], so `$SKEIN_TESTS_NO_SKIP` refuses it like any other
+/// skip and a machine that is supposed to have room says so rather than passing quietly.
+///
+/// **An empty `wanted` is a panic rather than a match.** `iter().all()` over nothing is `true`, so
+/// a caller that derived its markers and derived none would pin every answer including the wrong
+/// ones, and this helper would report a covered ordering that was never reached — the SKEIN-647
+/// shape, one layer in. There is nothing to check against, so it says so instead.
+#[track_caller]
+pub fn pinned_refusal(err: &str, wanted: &[&str], others: &[(&str, &str)], covering: &str) -> bool {
+    assert!(
+        !wanted.is_empty(),
+        "{covering}: pinned_refusal was given NO marker for the refusal it pins, and a pin that \
+         matches everything would report this as covered whatever skein said. What skein said: \
+         {err}"
+    );
+    if wanted.iter().all(|w| err.contains(w)) {
+        return true;
+    }
+    if let Some((marker, meaning)) = others.iter().find(|(m, _)| err.contains(m)) {
+        // One line, because `skip` writes one and `tools/noskip-check.py` reads them back per line.
+        // The refusal's first line is the part that carries the numbers.
+        let said = err.lines().next().unwrap_or(err);
+        skip(&format!(
+            "{covering}: skein refused for a different real reason — {meaning}. It said: {said} \
+             (matched {marker:?}; this test pins {wanted:?})"
+        ));
+        return false;
+    }
+    panic!(
+        "{covering}: the refusal is neither the one this test pins nor any this test recognises, \
+         so it is the malformation this assertion exists for.\n  pinned: {wanted:?}\n  \
+         recognised as other legitimate refusals: {:?}\n  what skein said: {err}",
+        others.iter().map(|(m, _)| *m).collect::<Vec<_>>()
+    );
+}
+
 /// The library's own `#[cfg(test)]` tests — the `cargo test --lib` binary — as named in
 /// [`REQUIREMENTS`].
 ///
