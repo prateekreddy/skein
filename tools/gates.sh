@@ -32,6 +32,9 @@
 #      something other than what the footer would name. Not a green, and not a red. See below.
 #   4  RUN REFUSED — the logs cannot be written, so there is nothing to report. Also not a red:
 #      "I cannot record what I am about to do" is not a gate failure. See SKEIN-793 below.
+#   5  RUN REFUSED — a binary a declared gate's command begins with is not on `$PATH`, so those
+#      gates could not have run. Also not a red, for the same reason and after the same incident
+#      in a second doorway: a gate that never executed did not fail. See SKEIN-938 below.
 #
 # **The refusal is the point (SKEIN-784).** The runner this replaces stamped its footer with
 # `$(git rev-parse --short HEAD)` evaluated when the footer PRINTED — at the end. A run was started
@@ -591,6 +594,154 @@ resolve_root "${1:-}"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/.target}"
 
+# ---------------------------------------------------------------------------------------------
+# Can these gates be carried out at all? (SKEIN-938)
+# ---------------------------------------------------------------------------------------------
+#
+# A gate whose command begins with a binary that is not on `$PATH` does not fail. It does not RUN.
+# bash answers 127, one line goes to that gate's log, `step` reads the non-zero status, and the run
+# prints a red. From a shell with no toolchain on its `$PATH`:
+#
+#     fmt                                      FAILED
+#     clippy                                   FAILED
+#     test                                     FAILED
+#     alone-check                              FAILED
+#     noskip-check                             FAILED
+#     === SOMETHING FAILED at <sha> ===
+#
+# Nothing was compiled and nothing was tested. A lane read those five as five breakages and acted
+# on them. That is SKEIN-793's incident through a different door — "fifteen gates FAILED having
+# executed not one command" — and it gets the same answer: a run that cannot be carried out is
+# REFUSED whole, with an exit code of its own, rather than reported as a result. Five FAILED lines
+# about commands that never ran are not a weaker kind of red; they are a report about a run that
+# did not happen, and a reader cannot tell them apart from the real thing.
+#
+# **What to check is derived from the list**: the leading word of every declared gate command. A
+# written-down list of interpreters beside the list of gates would be right on the day it was
+# written and silently partial afterwards, which is the shape SKEIN-647 named and this repository
+# has paid for three times. A gate added tomorrow whose command begins with `deno` is preflighted
+# for `deno` by this same code, with nobody remembering to say so. And the other half of that
+# lesson: a derivation that comes back with NOTHING refuses too, because "no interpreter is
+# missing" and "I read no interpreters" otherwise print the same green.
+#
+# What it does not look at is what a gate reaches for AFTER its first word, and two of the five
+# reds above were exactly that: `alone-check` and `noskip-check` begin with `python3`, which was
+# present, and run cargo themselves further in. They are covered here only because a missing
+# `cargo` refuses the WHOLE run — which is the right granularity anyway. A run that cannot execute
+# one declared gate has nothing to say about any of them, and half a run reported as a whole one is
+# the thing this file exists to stop.
+#
+# **`$PATH` is not repaired here, and that is deliberate rather than a limitation.** The header
+# above says the environment is inherited untouched. A runner that quietly prepended a toolchain to
+# its own `$PATH` would turn a misconfigured shell into a passing run, leaving the lane, the next
+# command that lane types, and CI misconfigured and unwarned. So this names the binary, names a
+# copy of it if the machine has one, prints the line that would supply it, and stops.
+
+# The leading word of each declared gate command, deduplicated. The leading word is what bash has
+# to find before any of the rest of the command means anything.
+gate_binaries() {
+  local line
+  while IFS= read -r line; do
+    gate_cmd "$line" | awk '{print $1}'
+  done < <(gates) | sort -u
+}
+
+# Which gates need it, for a refusal that says what would not have run.
+gates_needing() { # gates_needing <binary>
+  local line out=""
+  while IFS= read -r line; do
+    [ "$(gate_cmd "$line" | awk '{print $1}')" = "$1" ] || continue
+    out="$out${out:+, }$(field "$line" 1)"
+  done < <(gates)
+  printf '%s' "$out"
+}
+
+# Is it there? A leading word with a `/` in it is a path relative to the worktree root, which is
+# where the gates run, rather than a `$PATH` lookup — `tools/gates.sh --check` is one.
+have() { # have <leading word>
+  case "$1" in
+    */*) [ -x "$1" ] ;;
+    *)   command -v "$1" >/dev/null 2>&1 ;;
+  esac
+}
+
+# Where a missing binary actually IS on this machine, discovered at refusal time rather than listed.
+# No path belonging to any particular box is written in this file (see the header), and this needs
+# none: the environment already names directories — `$CARGO_HOME`, `$RUSTUP_HOME`, anything else
+# whose value is an absolute path — and a toolchain is that directory, its `bin`, or a sibling's.
+# A shell that exports `RUSTUP_HOME=<somewhere>/toolchain/rustup` is telling this function where
+# `<somewhere>/toolchain/cargo/bin/cargo` is without either of them being written down here. On a
+# machine where it finds nothing it says nothing was found, which is the true answer and a
+# different instruction to the reader.
+found_beside_env() { # found_beside_env <name> — directories holding an executable <name>
+  local v c d hits=""
+  while IFS= read -r v; do
+    [ -d "$v" ] || continue
+    for c in "$v" "$v/bin" "$v"/../*/bin "$v"/../*; do
+      [ -x "$c/$1" ] || continue
+      d=$(cd "$c" 2>/dev/null && pwd -P) || continue
+      case " $hits " in *" $d "*) continue ;; esac
+      hits="$hits $d"
+    done
+  done < <(printenv | sed -n 's/^[A-Za-z_][A-Za-z0-9_]*=\(\/.*\)$/\1/p')
+  [ -n "$hits" ] && printf '%s\n' $hits
+  return 0
+}
+
+needed=$(gate_binaries)
+needed_n=$(printf '%s\n' "$needed" | grep -c .)
+# An empty word among several is a different fault from no words at all, and the report says which.
+blank=no
+[ "$needed_n" -gt 0 ] && printf '%s\n' "$needed" | grep -q '^$' && blank=yes
+if [ "$needed_n" = 0 ] || [ "$blank" = yes ]; then
+  echo "=== RUN REFUSED: the preflight cannot read the interpreters out of the gate list ==="
+  echo "    $(gates | wc -l | tr -d ' ') gate(s) are declared; $needed_n leading command word(s) came back."
+  if [ "$blank" = yes ]; then
+    echo "    At least one of them is EMPTY: a declared gate whose command has no leading word,"
+    echo "    so what that gate would execute is unknown and cannot be preflighted."
+  fi
+  echo
+  echo "    No gate has run. This is the SKEIN-647 arm of this check: a preflight that derives"
+  echo "    nothing cannot find anything missing, and would report a clean environment on every"
+  echo "    machine including a bare one. It refuses instead. Either the list above has a gate"
+  echo "    with no command, or gate_binaries no longer reads the shape the list is written in."
+  exit 5
+fi
+
+missing=""
+for want in $needed; do
+  have "$want" || missing="$missing $want"
+done
+if [ -n "$missing" ]; then
+  echo "=== RUN REFUSED: a gate's interpreter is missing, so the gates have not been run ==="
+  echo "    worktree: $root"
+  echo "    \$PATH as inherited: $PATH"
+  for want in $missing; do
+    echo
+    echo "    $want is not there, and these gates begin with it: $(gates_needing "$want")"
+    beside=$(found_beside_env "$want")
+    if [ -n "$beside" ]; then
+      for dir in $beside; do
+        echo "        there is a $want off \$PATH at $dir/$want"
+      done
+      echo "        the prelude that supplies it, in the shell you run the gates from:"
+      echo "            export PATH=\"$(printf '%s\n' $beside | head -1):\$PATH\""
+    else
+      echo "        and no $want is in any directory this environment points at, so this is not a"
+      echo "        \$PATH that lost it — install it, or run the gates where it is installed."
+    fi
+  done
+  echo
+  echo "    NO GATE HAS RUN and none is reported above: not one passed, not one failed. Without"
+  echo "    this refusal each of those gates would have printed FAILED having executed nothing,"
+  echo "    which is a red a reader acts on and a run that did not happen (SKEIN-938, and the same"
+  echo "    report SKEIN-793's unwritable log directory produced)."
+  echo "    \$PATH is left exactly as it was handed in. A runner that repaired its own environment"
+  echo "    would pass here and leave this shell, the next command typed in it, and CI still"
+  echo "    misconfigured — with nothing on the terminal to say so."
+  exit 5
+fi
+
 # Recorded BEFORE anything runs. Everything printed at the end is about THIS.
 head_before=$(git rev-parse HEAD)
 short_before=$(git rev-parse --short HEAD)
@@ -695,6 +846,9 @@ step() {
 }
 
 echo "=== gates for $root at $tested === run $run_id"
+# What the preflight above looked for, printed like `tests/ui/harness/leaks.mjs` prints the fixture
+# names it derived: a check whose subject is invisible is a check nobody can tell has gone narrow.
+echo "$run_id preflight: $needed_n interpreter(s) derived from $declared_n declared gate command(s), each one found: $(printf '%s\n' $needed | tr '\n' ' ' | sed 's/ *$//')"
 while IFS= read -r line; do
   step "$(field "$line" 1)" "$(gate_cmd "$line")"
 done < <(gates)
