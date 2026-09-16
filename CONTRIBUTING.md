@@ -234,8 +234,8 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 23
-tools/gates.sh --list | wc -l                        # → 18
+grep -c '^      - run:' .github/workflows/ci.yml     # → 24
+tools/gates.sh --list | wc -l                        # → 19
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -255,6 +255,7 @@ tools/gates.sh --list | wc -l                        # → 18
 | `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `cockpit-tests` | the cockpit's pure functions | — |
 | `cockpit-bundle` | the committed bundle is not stale | — |
+| `fixture-root-check` | every browser suite that drives a real server builds its fixture under the fixture root, not `os.tmpdir()` | — |
 | `noskip-check` | the suite again under `$SKEIN_TESTS_NO_SKIP`, failing on a skip inside a test binary whose every declared requirement this machine has — and reporting, only, about the rest | `ENVIRONMENTAL` in `tools/noskip-check.py` |
 | `gate-list-check` | this table, `ci.yml` and `tools/` itself still name the set `tools/gates.sh` defines | the `ci` column, and `not_a_gate`, in `tools/gates.sh` |
 | `citation-check` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |

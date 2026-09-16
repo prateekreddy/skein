@@ -196,6 +196,7 @@ gates() {
     "residue-check|yes|python3 tools/residue-check.py" \
     "cockpit-tests|yes|node --test \"cockpit/test/*.test.mjs\"" \
     "cockpit-bundle|yes|node cockpit/build.mjs --check" \
+    "fixture-root-check|yes|node tests/ui/harness/leaks.mjs --fixture-root" \
     "noskip-check|yes|python3 tools/noskip-check.py" \
     "gate-list-check|yes|tools/gates.sh --check" \
     "citation-check|yes|python3 tools/citation-check.py"

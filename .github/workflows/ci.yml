@@ -193,6 +193,11 @@ jobs:
       # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
       # gone stale is a cockpit quietly running last week's code.
       - run: tools/gates.sh run cockpit-bundle
+      # A browser fixture belongs under one root, swept by the pid rule. Six suites built theirs
+      # from `os.tmpdir()` instead — unreadable from inside the box they are for, and carrying no
+      # pid, so nothing ever swept them. This derives the suites rather than listing them, and
+      # refuses when it derives none (SKEIN-653, SKEIN-700, SKEIN-717).
+      - run: tools/gates.sh run fixture-root-check
       # **What that run skipped — reported, and now able to fail the build (SKEIN-558, SKEIN-881).**
       #
       # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
