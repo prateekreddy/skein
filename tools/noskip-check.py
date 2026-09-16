@@ -61,9 +61,13 @@ REFUSES TO RUN RATHER THAN PASS QUIETLY, in every derivation it makes:
   * the environmental declaration is checked against the source, as above — exit 2.
   * and the RUN has to have happened. `^test result:` is the positive evidence, one line per test
     binary, and with none of them this reports **Unknown** and fails rather than reading an
-    all-clear into a silence (SKEIN-826). The two `tools/gates.sh` exit codes that are documented as
-    neither-a-pass-nor-a-failure — 3, the tree moved under the run, and 4, the logs could not be
-    written — are reported as Unknown and do NOT fail, because that is that script's own contract.
+    all-clear into a silence (SKEIN-826). A `tools/gates.sh` exit code documented there as
+    neither-a-pass-nor-a-failure is reported as a REFUSAL and does NOT fail, because that is that
+    script's own contract — and WHICH codes those are is asked of that script rather than
+    remembered here (`tools/gates.sh --exit-codes`, SKEIN-945). This used to be the literal tuple
+    `(3, 4)`, which never learned about exit 5 or exit 6 and would have failed the build on either.
+    Deriving nothing, or a set with no refusals in it, would make every refusal a red again — so
+    that refuses too, like every other derivation above.
 
   python3 tools/noskip-check.py            derive, run, judge — what CI calls
   python3 tools/noskip-check.py --scope    print the derivation and stop, running nothing
@@ -572,6 +576,58 @@ def attribute(root, path, lib):
     return m.group(1) if m else None
 
 
+def non_verdict_codes(root):
+    """`{code: what it means}` — the `tools/gates.sh` exit codes that are refusals, read from it.
+
+    **This was a copy, and a copy of a set like this goes stale in one direction only: silently.**
+    It read `status in (3, 4)`, written when 3 and 4 were all there was. `tools/gates.sh` grew exit
+    5 (a gate's interpreter is missing, SKEIN-938) and exit 6 (a gate's artefacts are not on disk,
+    SKEIN-941), and this file learned about neither — so a run REFUSED at either fell through to
+    "the run reported on no test binary at all" and failed the build. That is the refusal rendered
+    as exactly the red it exists to prevent, one layer up from the defect, which is the shape those
+    codes were added to stop.
+
+    Adding `5, 6` here would have fixed today and been wrong again at 7. The tuple was the defect,
+    not its contents (SKEIN-945), so the set is asked of the script that owns it, whose header list
+    is where a person adding a refusal already writes one down.
+
+    Refuses rather than returning an empty set, like every other derivation in this file: a set
+    with no refusals in it turns every refusal back into a red, and "gates.sh never refuses" and
+    "I could not read what gates.sh refuses at" print the same nothing unless one of them says so.
+    """
+    path = os.path.join(root, "tools/gates.sh")
+    try:
+        proc = subprocess.run(
+            [path, "--exit-codes"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise Refusal(f"cannot run `{path} --exit-codes`: {exc}") from exc
+    if proc.returncode != 0:
+        raise Refusal(
+            f"`tools/gates.sh --exit-codes` exited {proc.returncode} and said: "
+            f"{proc.stderr.strip() or '(nothing)'}"
+        )
+    codes = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) != 3 or not parts[0].isdigit():
+            raise Refusal(
+                f"`tools/gates.sh --exit-codes` printed a line this cannot read: {line!r}"
+            )
+        if parts[1] == "refused":
+            codes[int(parts[0])] = parts[2]
+    if not codes:
+        raise Refusal(
+            "`tools/gates.sh --exit-codes` named no refusal at all. Believing that would make "
+            "every refusal it can produce a build failure here, which is the whole of SKEIN-945."
+        )
+    return codes
+
+
 def run_suite(root):
     """`SKEIN_TESTS_NO_SKIP=1 tools/gates.sh run test` — the `test` gate's own command, not a copy.
 
@@ -618,6 +674,10 @@ def main(argv):
     present = {t: probe(t, caps) for t in tools}
     spans = environmental_spans(root)
 
+    # Derived BEFORE the suite runs: a set this cannot read is worth knowing about in a second
+    # rather than after a full no-skip run (SKEIN-945).
+    refused = non_verdict_codes(root)
+
     missing = {b: [t for t in ts if not present[t]] for b, ts in declared.items()}
     hostable = sorted(b for b, m in missing.items() if not m)
     unhostable = sorted(b for b, m in missing.items() if m)
@@ -653,6 +713,11 @@ def main(argv):
         for b in unhostable:
             print(f"  {b} — missing {missing[b]}")
         print()
+        print(
+            f"`tools/gates.sh` exit codes that are refusals rather than verdicts, read from its "
+            f"own header ({len(refused)}): {', '.join(str(c) for c in sorted(refused))}"
+        )
+        print()
         print(f"guards declared environmental ({len(spans)}):")
         for (path, first, last), why in sorted(spans.items()):
             print(f"  {path}:{first}-{last}  {why}")
@@ -673,29 +738,39 @@ def main(argv):
     # that must not happen here is reading an all-clear into that silence, which is what this step
     # did until SKEIN-826. It is a FAILURE: the switch asked for a run and did not get one.
     #
-    # The exception is `tools/gates.sh`'s own two non-verdicts, 3 (the tree moved under the run) and
-    # 4 (the logs could not be written), which that script documents as neither a pass nor a
-    # failure. `run` mode execs the gate's command and so normally carries cargo's status rather
-    # than either of those; they are honoured here anyway, because the alternative is this gate
-    # deciding that a refusal is a red, one layer up from the defect it exists for.
-    if status in (3, 4) or binaries == 0:
-        out.append(f"**Unknown — the run reported on no test binary at all** (exit {status}).")
-        out.append(
-            "This is NOT an all-clear. The switch asked for a run with no skips and got no run."
-        )
+    # The exception is a code `tools/gates.sh` documents as neither a pass nor a failure. WHICH
+    # codes those are is read from that script (`non_verdict_codes`) and not remembered here, which
+    # is SKEIN-945: the literal `(3, 4)` that used to be on this line never learned about exit 5 or
+    # exit 6 and would have failed the build on either.
+    #
+    # `run` mode execs the gate's command and so normally carries cargo's status rather than any of
+    # them; they are honoured anyway, because the alternative is this gate deciding that a refusal
+    # is a red, one layer up from the defect it exists for.
+    if status in refused or binaries == 0:
+        if status in refused:
+            # **Said differently from the silence below it, and the difference is the point.** "the
+            # run reported on no test binary at all" tells a reader the switch asked for a run and
+            # did not get one, which sends them to the SUITE. A refusal is not that: gates.sh
+            # declined on purpose and named the missing interpreter, or the full disk. Wearing the
+            # Unknown wording, a deliberate refusal misdirects in the expensive direction.
+            out.append(f"**Refused, not run — `tools/gates.sh` exited {status} on purpose.**")
+            out.append(f"That script documents {status} as: {refused[status]}")
+            out.append(
+                "Neither a pass nor a failure, so this gate declines to make it one. Nothing here "
+                "is a statement about the suite — the refusal below says what stopped the run, "
+                "and that is what to act on."
+            )
+        else:
+            out.append(f"**Unknown — the run reported on no test binary at all** (exit {status}).")
+            out.append(
+                "This is NOT an all-clear. The switch asked for a run with no skips and got no run."
+            )
         out.append("```")
         out += log.splitlines()[-20:]
         out.append("```")
         out.append(f"Full log: `{logpath}`")
-        if status in (3, 4):
-            out.append(
-                f"`tools/gates.sh` exited {status}, which it documents as neither a pass nor a "
-                "failure, so this gate declines to make it one."
-            )
-            emit(out)
-            return 0
         emit(out)
-        return 1
+        return 0 if status in refused else 1
 
     refusals = sorted({(f, int(n), why) for f, n, why in REFUSED.findall(log)})
     findings, expected, reported = [], [], []

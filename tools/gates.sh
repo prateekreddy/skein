@@ -22,6 +22,8 @@
 #   tools/gates.sh --list         print the list as `name|ci|command`
 #   tools/gates.sh --check        the consistency gate: ci.yml and CONTRIBUTING.md name this set
 #   tools/gates.sh --verify <f>   is that file ONE run of this, whole? — see SKEIN-903 below
+#   tools/gates.sh --exit-codes  the codes below as `code|kind|summary`, for anything that has
+#                                 to tell a refusal from a red — see SKEIN-945 below
 #
 # Exit codes. There are more than two on purpose, and the list below is where a new refusal
 # gets written down — a run that did not happen must never read as one that failed:
@@ -540,6 +542,97 @@ do_check() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# The exit codes, for anything downstream that has to tell a refusal from a red (SKEIN-945)
+# ---------------------------------------------------------------------------------------------
+#
+# Every refusal above is worth nothing if what reads this script turns it back into a red, and that
+# is what was happening. `tools/noskip-check.py` carried its own copy of the set — `status in (3, 4)`
+# — written when 3 and 4 were all there was. Exit 5 landed (SKEIN-938) and that copy did not learn
+# about it; exit 6 landed (SKEIN-941) and it did not learn about that either. A run refused at
+# either would have fallen through to "the run reported on no test binary at all" and FAILED THE
+# BUILD: the refusal rendered as the very red it exists to prevent, one layer up.
+#
+# **The tuple was the defect, not its contents.** Writing `3, 4, 5, 6` there fixes today and is
+# wrong again at 7 — a second list that is right on the day it is written and silently partial
+# afterwards, which is the SKEIN-647 shape this repository has now paid for four times. So the set
+# is DERIVED, from the one place a person adding a refusal already writes it down: the exit-code
+# list in this file's own header. A code added there is honoured downstream with nobody editing
+# anything else, which is the property, and it is the one worth testing for.
+#
+# **Two things are checked before a single code is printed**, because a derivation that comes back
+# with the wrong answer is worse than no derivation:
+#
+#   * it must parse SOME codes, and some of them must be REFUSALS. An empty set silently turns
+#     every refusal back into a red — this bug again, wearing a derivation's clothes — and the two
+#     cases print the same nothing unless one of them says so.
+#   * the documented set must match the codes this script actually EXITS WITH. A literal `exit <n>`
+#     the header does not mention is a refusal nobody downstream can honour; a documented code the
+#     body never exits with is a promise this script does not keep. Either way the header has
+#     stopped describing the file, and a list read out of a stale comment is a stale list.
+#
+# `kind` is `refused` for a code whose entry carries the word REFUSED — the same word the banners
+# themselves print — and `verdict` otherwise. One word rather than a list of phrases, so a fifth
+# refusal spelled a new way is still caught.
+do_exit_codes() {
+  local doc documented literal only_doc only_code refused_n
+  # `#   <n>  <text>`, continued by `#      <more>`, from the header block above.
+  doc=$(awk '
+    /^# Exit codes\./ { inlist = 1; next }
+    inlist && /^#   [0-9]+  / {
+      if (code != "") print code "|" text
+      code = $2
+      line = $0; sub(/^#   [0-9]+  /, "", line); text = line
+      next
+    }
+    inlist && /^#      / { line = $0; sub(/^#     /, "", line); text = text line; next }
+    inlist && /^#$/ { next }
+    inlist && code != "" { print code "|" text; code = ""; inlist = 0 }
+    END { if (code != "") print code "|" text }
+  ' "${BASH_SOURCE[0]}")
+
+  refused_n=$(printf '%s\n' "$doc" | grep -c 'REFUSED' || true)
+  if [ -z "$doc" ] || [ "$refused_n" = 0 ]; then
+    echo "gates.sh --exit-codes: REFUSED — the exit-code list in this file's own header parsed as" >&2
+    echo "    $(printf '%s\n' "$doc" | grep -c . || true) code(s), $refused_n of them refusals." >&2
+    echo "    Printing that would tell every reader downstream that this script never refuses," >&2
+    echo "    which is how a refusal becomes a red (SKEIN-945). Either the header's list is gone" >&2
+    echo "    or this parser no longer reads the shape it is written in." >&2
+    return 2
+  fi
+
+  documented=$(printf '%s\n' "$doc" | cut -d'|' -f1 | sort -un)
+  # What the body can actually hand back. `exit $?` and `exit "$fail"` are not literals and are not
+  # enumerable; every code this file chooses on purpose is written as one.
+  #
+  # **Comment lines go first, and both halves of that were learned the hard way.** Reading only
+  # line-initial `exit <n>` missed `cd "$root" || exit 2` and would have called a refusal reached
+  # that way undocumented; widening it to accept `;`, `&&` and `||` then matched the word `exit`
+  # inside the PROSE above, where this very defect is described — a checker reading its own
+  # explanation of itself as if it were code. Dropping whole comment lines first is what makes the
+  # wider pattern safe, and a comment line here is one that starts with `#`.
+  literal=$(grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" \
+    | grep -oE '(^[[:space:]]*|[;&|][[:space:]]*)exit [0-9]+' | awk '{print $NF}' | sort -un)
+  only_doc=$(comm -23 <(printf '%s\n' "$documented") <(printf '%s\n' "$literal"))
+  only_code=$(comm -13 <(printf '%s\n' "$documented") <(printf '%s\n' "$literal"))
+  if [ -n "$only_doc" ] || [ -n "$only_code" ]; then
+    echo "gates.sh --exit-codes: REFUSED — the header's exit codes and this file's own \`exit\`" >&2
+    echo "    statements do not describe the same script." >&2
+    [ -n "$only_doc" ] && echo "    documented but never exited with: $(printf '%s' "$only_doc" | tr '\n' ' ')" >&2
+    [ -n "$only_code" ] && echo "    exited with but not documented: $(printf '%s' "$only_code" | tr '\n' ' ')" >&2
+    echo "    A set read out of a comment is only as good as the comment. Fix whichever is wrong;" >&2
+    echo "    until then nothing downstream can be told which codes are refusals (SKEIN-945)." >&2
+    return 2
+  fi
+
+  printf '%s\n' "$doc" | while IFS='|' read -r code text; do
+    case "$text" in
+      *REFUSED*) printf '%s|refused|%s\n' "$code" "$text" ;;
+      *)         printf '%s|verdict|%s\n' "$code" "$text" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------------------------
 
@@ -551,6 +644,11 @@ case "${1:-}" in
   --check)
     resolve_root ""
     do_check
+    exit $?
+    ;;
+  --exit-codes)
+    # No worktree needed: the subject is this file's own header, not any tree.
+    do_exit_codes
     exit $?
     ;;
   --verify)
