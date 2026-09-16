@@ -175,39 +175,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3127"]
+["src/bin/skein-server.rs:3151"]
 line = "///"
 window = "/// Update skein's app settings — MERGED onto what is stored, never replacing it.\u000b///\u000b/// Every field of `Config` has a serde default, so deserializing a partial body into one silently"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3164"]
+["src/bin/skein-server.rs:3188"]
 line = "eprintln!(\"skein: ssh key not loaded ({e})\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3544"]
-line = "Ok(Err(why)) => ("
-window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:3549"]
+["src/bin/skein-server.rs:3573"]
 line = "Err(e) => ("
 window = ".into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3592"]
+["src/bin/skein-server.rs:3568"]
+line = "Ok(Err(why)) => ("
+window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:3616"]
 line = "Err(e) => ("
 window = "Ok(p) => Json(p).into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3693"]
+["src/bin/skein-server.rs:3717"]
 line = "if sandbox.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3731"]
+["src/bin/skein-server.rs:3755"]
 line = "if let Some(why) = skein::fleet::fleet_lifecycle_refusal(\"rebuild\", true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3734"]
+["src/bin/skein-server.rs:3758"]
 line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -215,58 +215,54 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the sentence this cited is the one SKEIN-702 replaced, and `src/bin/skein-server.rs:4464` keeps the record of the swap: “The old sentence — ‘too many terminals open — close one and retry’ — named”. `docs/recovery-survey.md` cites it twice as what the survey read on 2026-09-09, which is the only record of what was wrong; re-pointing it at the new wording would make the survey claim to have found a defect that was not there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4318"]
+["src/bin/skein-server.rs:4342"]
 line = "\"too many live boards open — close one and retry\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4372"]
+["src/bin/skein-server.rs:4396"]
 line = "skein::stream::Tick::PtyFreed => \"pty-freed\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4431"]
+["src/bin/skein-server.rs:4455"]
 line = "if !origin_ok(&headers) {"
 window = ") -> Response {\u000bif !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4432"]
+["src/bin/skein-server.rs:4456"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4461"]
-line = "mut socket: WebSocket,"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:4469"]
 historical = "`CLOSE_CHILD_ENDED`, which is now `CLOSE_NOTHING_TO_RECONNECT` at the same 4001. `docs/recovery-survey.md` says so in as many words — “Every mention of the old name in this document is historical” — so the citation names the constant as it stood, deliberately."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4476"]
+["src/bin/skein-server.rs:4485"]
+line = "mut socket: WebSocket,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:4500"]
 line = "refuse(&mut socket, pty_limit_reached(), AFTER_WAIT_PTY).await;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4494"]
+["src/bin/skein-server.rs:4518"]
 line = "\"skein: handoff brief failed: {e}\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4501"]
+["src/bin/skein-server.rs:4525"]
 line = "\"skein: handoff task failed: {e}\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4533"]
+["src/bin/skein-server.rs:4557"]
 line = "format!(\"skein: {why}{}\", watching_for_box(&name)),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4543"]
+["src/bin/skein-server.rs:4567"]
 line = "let _ = socket.send(Message::Text(format!(\"skein: {e}\\r\\n\"))).await;"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:4622"]
 historical = "SKEIN-702 replaced the four bare pty sentences with one form — `skeins_own_fault` at `src/bin/skein-server.rs:4628`, which says whose fault it is, that nothing in the box is wrong, and that there is no condition to wait on — and its four call sites carry the `what` this row quoted: `could not open a terminal device` at `:4780`. So the wording this row records is gone from the tree, and the row is the 2026-09-09 measurement of it, like `src/bin/skein-server.rs:4253`. Re-pointing it at the new sentence would make the survey claim a verdict (`n`, names no next step) that is false of what is there now. The address is the measurement and is meant to stay put; SKEIN-858 is why nothing here reads as drift."
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4624"]
-line = ".send(Message::Text(format!(\"\\r\\nskein: {why}\\r\\n\")))"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:4632"]
@@ -277,23 +273,27 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "SKEIN-702 replaced the four bare pty sentences with one form — `skeins_own_fault` at `src/bin/skein-server.rs:4628`, which says whose fault it is, that nothing in the box is wrong, and that there is no condition to wait on — and its four call sites carry the `what` this row quoted: `opened this terminal and then could not read from it` at `:4815`. So the wording this row records is gone from the tree, and the row is the 2026-09-09 measurement of it, like `src/bin/skein-server.rs:4253`. Re-pointing it at the new sentence would make the survey claim a verdict (`n`, names no next step) that is false of what is there now. The address is the measurement and is meant to stay put; SKEIN-858 is why nothing here reads as drift."
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server.rs:4648"]
+line = ".send(Message::Text(format!(\"\\r\\nskein: {why}\\r\\n\")))"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server.rs:4652"]
 historical = "SKEIN-702 replaced the four bare pty sentences with one form — `skeins_own_fault` at `src/bin/skein-server.rs:4628`, which says whose fault it is, that nothing in the box is wrong, and that there is no condition to wait on — and its four call sites carry the `what` this row quoted: `opened this terminal and then could not write to it` at `:4831`. So the wording this row records is gone from the tree, and the row is the 2026-09-09 measurement of it, like `src/bin/skein-server.rs:4253`. Re-pointing it at the new sentence would make the survey claim a verdict (`n`, names no next step) that is false of what is there now. The address is the measurement and is meant to stay put; SKEIN-858 is why nothing here reads as drift."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4654"]
+["src/bin/skein-server.rs:4678"]
 line = "\"skein: too many terminals open — {PTY_MAX} at once is the limit. Close another terminal \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4660"]
+["src/bin/skein-server.rs:4684"]
 line = "fn watching_for_box(name: &str) -> String {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4682"]
+["src/bin/skein-server.rs:4706"]
 line = "this terminal by itself: use Try again below. If it keeps failing, {likely}.\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4778"]
+["src/bin/skein-server.rs:4802"]
 line = "const AFTER_NO_WATCH: &str = \"no-watch\";"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -310,36 +310,36 @@ line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5081"]
-line = "async fn login_terminal("
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:5087"]
+["src/bin/skein-server.rs:5111"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5090"]
+["src/bin/skein-server.rs:5105"]
+line = "async fn login_terminal("
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:5114"]
 line = "return (StatusCode::BAD_REQUEST, \"unsupported runtime\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5110"]
+["src/bin/skein-server.rs:5134"]
 line = "// the login surface is a modal that closes with its socket, and one that reopened itself over"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5120"]
+["src/bin/skein-server.rs:5144"]
 line = "terminal and press log in again.\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5159"]
+["src/bin/skein-server.rs:5183"]
 line = "vec![format!(\"logged in, but the post-login share failed: {e}\")]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5170"]
+["src/bin/skein-server.rs:5194"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5467"]
+["src/bin/skein-server.rs:5491"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1498,223 +1498,227 @@ cited_by = ["docs/prose-symbols.toml"]
 line = ".wrap { padding:12px 9px 30px; }"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/index.html:2104"]
+["src/web/index.html:2111"]
 line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2208"]
+["src/web/index.html:2215"]
 line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2219"]
+["src/web/index.html:2222"]
+line = "method:\"POST\", headers:{\"Content-Type\":\"application/json\"}, body:JSON.stringify({ runtime })"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/index.html:2226"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2222"]
+["src/web/index.html:2229"]
 line = "}).catch(error => toast(`restart failed: ${error.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2665"]
+["src/web/index.html:2672"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2669"]
+["src/web/index.html:2676"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2679"]
+["src/web/index.html:2686"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2767"]
+["src/web/index.html:2774"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3368"]
+["src/web/index.html:3375"]
 line = "function openReview(repoId) {"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/index.html:3450"]
+["src/web/index.html:3457"]
 line = "let landed = false;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3578"]
+["src/web/index.html:3585"]
 line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3584"]
+["src/web/index.html:3591"]
 line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/index.html:3667"]
+["src/web/index.html:3674"]
 line = "const n = { draft: 0, conflicted: 0 };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3775"]
+["src/web/index.html:3782"]
 line = "<span>${esc(f.repo_id)} — skein could not read this queue: ${esc(f.error)}</span>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3782"]
+["src/web/index.html:3789"]
 line = "<span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || \"its review queue is switched off\")}</span>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:4037"]
+["src/web/index.html:4044"]
 line = "body = `<div class=\"revempty\">asking GitHub…</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:4045"]
+["src/web/index.html:4052"]
 line = "<div>GitHub said: ${esc(revQueue.error)}</div>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:4069"]
+["src/web/index.html:4076"]
 line = "}</b>${failed.map(f => `<div>${esc(f.repo_id)} — ${esc(f.error)}</div>`).join(\"\")}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:5216"]
+["src/web/index.html:5223"]
 line = "// authority on what is being read (`/api/review/reading`) and the poll will confirm this within"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:5367"]
+["src/web/index.html:5374"]
 line = "unread_because: \"skein could not reach its own summary for this PR: \" + error,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:6055"]
+["src/web/index.html:6062"]
 line = "? `The brief could not be fetched — ${esc(s.prose_failed)} Close the row and open it again to retry.`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:6167"]
+["src/web/index.html:6174"]
 line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7413"]
+["src/web/index.html:7420"]
 line = "}).catch(() => toast(\"stop failed\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7423"]
+["src/web/index.html:7430"]
 line = "}).catch(() => toast(\"destroy failed\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7462"]
+["src/web/index.html:7469"]
 line = "toast(`something went wrong in the page: ${line}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7632"]
+["src/web/index.html:7639"]
 line = "sesspane.innerHTML = `<div class=\"sess\"><div class=\"note\">loading…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7878"]
+["src/web/index.html:7885"]
 line = ".catch(e => { fv.innerHTML = `<div class=\"note\">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7884"]
+["src/web/index.html:7891"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">asking the box…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:7893"]
+["src/web/index.html:7900"]
 line = "}).catch(() => { diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load diff</div></div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:8196"]
+["src/web/index.html:8203"]
 line = ".catch(() => toast(\"send failed\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:8906"]
+["src/web/index.html:8913"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9183"]
+["src/web/index.html:9190"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9690"]
+["src/web/index.html:9697"]
 line = ".catch(e => toast(e.message));"
 window = "})\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9696"]
+["src/web/index.html:9703"]
 line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9704"]
+["src/web/index.html:9711"]
 line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9954"]
+["src/web/index.html:9961"]
 line = ".catch(e => toast(`pull failed: ${e.message}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10007"]
+["src/web/index.html:10014"]
 line = ".catch(e => toast(`couldn't save: ${e.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10052"]
+["src/web/index.html:10059"]
 line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10066"]
+["src/web/index.html:10073"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11295"]
+["src/web/index.html:11307"]
 line = "? `board is ${age}s stale — the server stopped answering`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11331"]
+["src/web/index.html:11343"]
 line = "for (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);"
 window = "render(tick.boxes || []);\u000bfor (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);\u000breturn;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11355"]
+["src/web/index.html:11367"]
 line = "es.addEventListener(\"pty-freed\", () => retryWaiting(\"wait-pty\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11376"]
+["src/web/index.html:11388"]
 line = "es.onerror = () => { document.getElementById(\"live\").classList.remove(\"on\"); document.getElementById(\"livetext\").textContent = \"reconnecting…\"; };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11437"]
+["src/web/index.html:11449"]
 line = "const extra = failed.length > 1 ? ` (+${failed.length - 1} more)` : \"\";"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11473"]
+["src/web/index.html:11485"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11600"]
+["src/web/index.html:11612"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11639"]
+["src/web/index.html:11651"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11867"]
+["src/web/index.html:11879"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:245"]
+["src/web/v2.html:257"]
 line = "events.onerror = () => { events.close(); setTimeout(follow, 4000); };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:313"]
+["src/web/v2.html:325"]
 line = "changeEl.innerHTML = `<div class=\"csum\">${esc(body.error || \"the change could not be read\")}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:318"]
+["src/web/v2.html:330"]
 line = "changeEl.innerHTML = `<div class=\"csum\">the change could not be read</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:370"]
+["src/web/v2.html:382"]
 line = "ws.onclose = () => term.write(\"\\r\\n\\x1b[2m— disconnected —\\x1b[0m\\r\\n\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:466"]
+["src/web/v2.html:457"]
 line = "said(\"addsaid\", body.error || (await answer.text?.()) || \"it could not be added\", \"warm\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:526"]
+["src/web/v2.html:515"]
 line = "said(\"makesaid\", body.error || `it was not accepted (${answer.status})`, \"warm\");"
 cited_by = ["docs/recovery-survey.md"]
 
