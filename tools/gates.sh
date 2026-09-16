@@ -22,8 +22,11 @@
 #   tools/gates.sh --list         print the list as `name|ci|command`
 #   tools/gates.sh --check        the consistency gate: ci.yml and CONTRIBUTING.md name this set
 #   tools/gates.sh --verify <f>   is that file ONE run of this, whole? — see SKEIN-903 below
+#   tools/gates.sh --exit-codes  the codes below as `code|kind|summary`, for anything that has
+#                                 to tell a refusal from a red — see SKEIN-945 below
 #
-# Exit codes, and they are deliberately four rather than two:
+# Exit codes. There are more than two on purpose, and the list below is where a new refusal
+# gets written down — a run that did not happen must never read as one that failed:
 #
 #   0  every gate passed, against the tree named in the footer
 #   1  a gate failed — or, under `--verify`, the file is not one whole run of this
@@ -35,6 +38,10 @@
 #   5  RUN REFUSED — a binary a declared gate's command begins with is not on `$PATH`, so those
 #      gates could not have run. Also not a red, for the same reason and after the same incident
 #      in a second doorway: a gate that never executed did not fail. See SKEIN-938 below.
+#   6  RUN REFUSED — a gate failed having named artefacts it had just built that are not on disk,
+#      so what failed is the machine's capacity rather than the suite. Also not a red, for the
+#      third time and through a third door: a build that could not be written did not fail a test.
+#      See SKEIN-941 below.
 #
 # **The refusal is the point (SKEIN-784).** The runner this replaces stamped its footer with
 # `$(git rev-parse --short HEAD)` evaluated when the footer PRINTED — at the end. A run was started
@@ -535,6 +542,97 @@ do_check() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# The exit codes, for anything downstream that has to tell a refusal from a red (SKEIN-945)
+# ---------------------------------------------------------------------------------------------
+#
+# Every refusal above is worth nothing if what reads this script turns it back into a red, and that
+# is what was happening. `tools/noskip-check.py` carried its own copy of the set — `status in (3, 4)`
+# — written when 3 and 4 were all there was. Exit 5 landed (SKEIN-938) and that copy did not learn
+# about it; exit 6 landed (SKEIN-941) and it did not learn about that either. A run refused at
+# either would have fallen through to "the run reported on no test binary at all" and FAILED THE
+# BUILD: the refusal rendered as the very red it exists to prevent, one layer up.
+#
+# **The tuple was the defect, not its contents.** Writing `3, 4, 5, 6` there fixes today and is
+# wrong again at 7 — a second list that is right on the day it is written and silently partial
+# afterwards, which is the SKEIN-647 shape this repository has now paid for four times. So the set
+# is DERIVED, from the one place a person adding a refusal already writes it down: the exit-code
+# list in this file's own header. A code added there is honoured downstream with nobody editing
+# anything else, which is the property, and it is the one worth testing for.
+#
+# **Two things are checked before a single code is printed**, because a derivation that comes back
+# with the wrong answer is worse than no derivation:
+#
+#   * it must parse SOME codes, and some of them must be REFUSALS. An empty set silently turns
+#     every refusal back into a red — this bug again, wearing a derivation's clothes — and the two
+#     cases print the same nothing unless one of them says so.
+#   * the documented set must match the codes this script actually EXITS WITH. A literal `exit <n>`
+#     the header does not mention is a refusal nobody downstream can honour; a documented code the
+#     body never exits with is a promise this script does not keep. Either way the header has
+#     stopped describing the file, and a list read out of a stale comment is a stale list.
+#
+# `kind` is `refused` for a code whose entry carries the word REFUSED — the same word the banners
+# themselves print — and `verdict` otherwise. One word rather than a list of phrases, so a fifth
+# refusal spelled a new way is still caught.
+do_exit_codes() {
+  local doc documented literal only_doc only_code refused_n
+  # `#   <n>  <text>`, continued by `#      <more>`, from the header block above.
+  doc=$(awk '
+    /^# Exit codes\./ { inlist = 1; next }
+    inlist && /^#   [0-9]+  / {
+      if (code != "") print code "|" text
+      code = $2
+      line = $0; sub(/^#   [0-9]+  /, "", line); text = line
+      next
+    }
+    inlist && /^#      / { line = $0; sub(/^#     /, "", line); text = text line; next }
+    inlist && /^#$/ { next }
+    inlist && code != "" { print code "|" text; code = ""; inlist = 0 }
+    END { if (code != "") print code "|" text }
+  ' "${BASH_SOURCE[0]}")
+
+  refused_n=$(printf '%s\n' "$doc" | grep -c 'REFUSED' || true)
+  if [ -z "$doc" ] || [ "$refused_n" = 0 ]; then
+    echo "gates.sh --exit-codes: REFUSED — the exit-code list in this file's own header parsed as" >&2
+    echo "    $(printf '%s\n' "$doc" | grep -c . || true) code(s), $refused_n of them refusals." >&2
+    echo "    Printing that would tell every reader downstream that this script never refuses," >&2
+    echo "    which is how a refusal becomes a red (SKEIN-945). Either the header's list is gone" >&2
+    echo "    or this parser no longer reads the shape it is written in." >&2
+    return 2
+  fi
+
+  documented=$(printf '%s\n' "$doc" | cut -d'|' -f1 | sort -un)
+  # What the body can actually hand back. `exit $?` and `exit "$fail"` are not literals and are not
+  # enumerable; every code this file chooses on purpose is written as one.
+  #
+  # **Comment lines go first, and both halves of that were learned the hard way.** Reading only
+  # line-initial `exit <n>` missed `cd "$root" || exit 2` and would have called a refusal reached
+  # that way undocumented; widening it to accept `;`, `&&` and `||` then matched the word `exit`
+  # inside the PROSE above, where this very defect is described — a checker reading its own
+  # explanation of itself as if it were code. Dropping whole comment lines first is what makes the
+  # wider pattern safe, and a comment line here is one that starts with `#`.
+  literal=$(grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" \
+    | grep -oE '(^[[:space:]]*|[;&|][[:space:]]*)exit [0-9]+' | awk '{print $NF}' | sort -un)
+  only_doc=$(comm -23 <(printf '%s\n' "$documented") <(printf '%s\n' "$literal"))
+  only_code=$(comm -13 <(printf '%s\n' "$documented") <(printf '%s\n' "$literal"))
+  if [ -n "$only_doc" ] || [ -n "$only_code" ]; then
+    echo "gates.sh --exit-codes: REFUSED — the header's exit codes and this file's own \`exit\`" >&2
+    echo "    statements do not describe the same script." >&2
+    [ -n "$only_doc" ] && echo "    documented but never exited with: $(printf '%s' "$only_doc" | tr '\n' ' ')" >&2
+    [ -n "$only_code" ] && echo "    exited with but not documented: $(printf '%s' "$only_code" | tr '\n' ' ')" >&2
+    echo "    A set read out of a comment is only as good as the comment. Fix whichever is wrong;" >&2
+    echo "    until then nothing downstream can be told which codes are refusals (SKEIN-945)." >&2
+    return 2
+  fi
+
+  printf '%s\n' "$doc" | while IFS='|' read -r code text; do
+    case "$text" in
+      *REFUSED*) printf '%s|refused|%s\n' "$code" "$text" ;;
+      *)         printf '%s|verdict|%s\n' "$code" "$text" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------------------------
 
@@ -546,6 +644,11 @@ case "${1:-}" in
   --check)
     resolve_root ""
     do_check
+    exit $?
+    ;;
+  --exit-codes)
+    # No worktree needed: the subject is this file's own header, not any tree.
+    do_exit_codes
     exit $?
     ;;
   --verify)
@@ -743,6 +846,161 @@ if [ -n "$missing" ]; then
   exit 5
 fi
 
+# ---------------------------------------------------------------------------------------------
+# Could this machine CARRY them? (SKEIN-941)
+# ---------------------------------------------------------------------------------------------
+#
+# The block above asks whether a gate's command could START. This one asks whether the machine had
+# room to finish it, and it exists because that answer arrived wearing a red's clothes.
+#
+# Gate run `718272db` reported `test FAILED` across 33 targets on a tree that was green twenty
+# minutes earlier and green ten minutes later at the same commit. What it printed:
+#
+#     run the real skein: Os { code: 2, kind: NotFound }
+#     ... every other target failing with "No such file or directory" on its OWN test binary
+#         under $CARGO_TARGET_DIR/debug/deps/
+#     error: extern location for serde does not exist: .../libserde-<hash>.rlib
+#
+# and **not one "No space left on device" line anywhere in it**. The single overlay behind
+# `/var/tmp`, `/tmp` and `/` had reached 98% with 2.6G free, four lanes' `.target` directories
+# holding ~19G of it. That is the whole mechanism, and the reason the word "disk" never appears: a
+# build that cannot write an artefact leaves a MISSING FILE, and by the time anything reports, the
+# failing syscall is the EXEC of that file, which answers ENOENT. The disk is upstream of the error
+# and absent from it. Decisive, inside that same run: `noskip-check` re-ran that very suite minutes
+# later and it PASSED.
+#
+# So thirty-three FAILED lines named thirty-three innocent targets and a reader had no way to tell
+# them from the real thing. That is the same family as everything above — a report about a run that
+# did not happen — and it gets the same answer: REFUSED, with an exit code of its own.
+#
+# **What is checked is decisive, and it is deliberately not a number.** A free-space floor was the
+# obvious shape and is the wrong one: "under 2G" is right on the day it is written and rots as the
+# build grows, and a floor tuned to this box would be a box's path by another name. The question
+# with an exact answer is the one the failure itself poses — *the run named a file it had just
+# built and could not open it; is that file there?* So the paths under `$CARGO_TARGET_DIR` are read
+# out of the failing gate's OWN log and tested for existence. Nothing is remembered, nothing is
+# compared against a constant, and a failure whose artefacts are all present is reported as the red
+# it is.
+#
+# **The filesystem is derived from `$CARGO_TARGET_DIR`** and never written down, because no path
+# belonging to any particular box may enter this file (see the header) and none is needed: the
+# variable names the directory and `df` names the filesystem under it.
+#
+# **The SKEIN-647 arm, which is the half that is easy to leave out.** The free-space figure is
+# printed beside every red, so the quantity this check is about is visible rather than implied. A
+# run that could not obtain it and printed the red anyway would be saying "the machine was fine" by
+# omission, in exactly the run where it was not — so a red whose capacity question could not be
+# asked is refused too, instead of being shown with the answer silently missing.
+#
+# **What this does NOT cover, said out loud so nobody reads more into a green.** `tools/gates.sh
+# run <name>` — the form CI calls, and the form `tools/noskip-check.py` calls — `exec`s the gate's
+# command and carries its status, so it reaches none of this. Extending it there means teaching
+# `tools/noskip-check.py` about this exit code first: it lists `tools/gates.sh`'s non-verdicts as
+# `(3, 4)`, which is already one short of the exit 5 added this morning, and a refusal it does not
+# recognise becomes a red one layer up — the very defect this exists for. That file belongs to
+# nobody in this change; the gap is named here rather than half-closed.
+
+# The nearest existing ancestor of $CARGO_TARGET_DIR. A path's filesystem is that directory's, and
+# in a fresh worktree the target directory itself does not exist until the first build.
+target_fs_dir() {
+  local d="$CARGO_TARGET_DIR"
+  while [ ! -d "$d" ]; do
+    case "$d" in /|.|"") return 1 ;; esac
+    d=$(dirname "$d")
+  done
+  printf '%s' "$d"
+}
+
+# `<free KiB> <mount point>`, or nothing at all when `df` will not answer for it.
+target_fs() {
+  local d
+  d=$(target_fs_dir) || return 1
+  df -Pk "$d" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4, $6; f = 1 } END { exit !f }'
+}
+
+human_kib() { # human_kib <KiB>
+  [ -n "${1:-}" ] || { printf 'unmeasured'; return 0; }
+  awk -v k="$1" 'BEGIN { if (k >= 1048576) printf "%.1fG", k / 1048576; else printf "%.0fM", k / 1024 }'
+}
+
+# The paths under $CARGO_TARGET_DIR that a failed gate's log NAMES and that are not on disk.
+#
+# Matched by prefix with awk's `index()` rather than by a regex, because $CARGO_TARGET_DIR is a
+# VALUE and a value dropped into a pattern is a pattern: one `.` or `+` in somebody's path and the
+# match quietly becomes a wider one than the reader of this line would expect.
+unbuilt_named_in() { # unbuilt_named_in <log>
+  awk -v pre="$CARGO_TARGET_DIR/" '
+    {
+      line = $0
+      while ((i = index(line, pre)) > 0) {
+        line = substr(line, i)
+        n = 0
+        while (n < length(line)) {
+          c = substr(line, n + 1, 1)
+          if (c == " " || c == "\t" || c == "\"" || c == "\047" || c == "`" || c == ")") break
+          n++
+        }
+        p = substr(line, 1, n)
+        sub(/[.,:;]+$/, "", p)
+        print p
+        line = substr(line, n + 1)
+      }
+    }' "$1" 2>/dev/null | sort -u | while IFS= read -r p; do
+      [ -e "$p" ] || printf '%s\n' "$p"
+    done
+}
+
+# Set by `carried` for `step` to print beside the red it allowed through.
+carried_note=""
+
+# Called the moment a gate fails and BEFORE its red is printed. It either refuses the whole run or
+# returns, having written the line that puts the free space next to the failure.
+carried() { # carried <gate name> <log> <free KiB before that gate, may be empty>
+  local name="$1" log="$2" before="$3" now free mount unbuilt n
+  now=$(target_fs) || now=""
+  if [ -z "$now" ]; then
+    echo
+    echo "=== RUN REFUSED: '$name' failed and this run cannot say whether the machine carried it === run $run_id"
+    echo "    \$CARGO_TARGET_DIR: $CARGO_TARGET_DIR"
+    echo "    df would not answer for that path, so there is no free-space figure to put beside"
+    echo "    this failure and no way to tell a suite that failed from a machine that could not"
+    echo "    hold one."
+    echo
+    echo "    Not reported as a red, for the reason every refusal in this file gives. A red shown"
+    echo "    with the capacity question silently unanswered asserts 'the machine was fine' by"
+    echo "    omission — the SKEIN-647 shape, and exactly what SKEIN-941 cost when 33 innocent"
+    echo "    targets were reported as broken."
+    exit 6
+  fi
+  free=${now%% *}
+  mount=${now##* }
+  unbuilt=$(unbuilt_named_in "$log")
+  if [ -n "$unbuilt" ]; then
+    n=$(printf '%s\n' "$unbuilt" | grep -c .)
+    echo
+    echo "=== RUN REFUSED: this machine did not carry '$name' === run $run_id"
+    echo "    That gate's failure NAMES $n path(s) under \$CARGO_TARGET_DIR that are not on disk:"
+    printf '%s\n' "$unbuilt" | head -10 | sed 's/^/        /'
+    [ "$n" -gt 10 ] && echo "        (…and $((n - 10)) more — the full log is named below)"
+    echo
+    echo "    \$CARGO_TARGET_DIR is on $mount, which has $(human_kib "$free") free now${before:+ and had $(human_kib "$before") before this gate}."
+    echo "    full log: $log"
+    echo
+    echo "    The run named a file it had just built and then could not open it. That is not a"
+    echo "    suite that failed; it is a build whose artefacts are not there — and the failing"
+    echo "    syscall by this point is the exec, which reports NotFound rather than ENOSPC, so the"
+    echo "    log can say 'No such file or directory' on every target and never once say 'disk'."
+    echo
+    echo "    NO GATE IS REPORTED AS FAILING and none of the lines that gate printed are shown:"
+    echo "    in the run this was written for, all 33 of them named targets that were fine."
+    echo "    Make room — several lanes' \$CARGO_TARGET_DIR on one filesystem is how this happens,"
+    echo "    and \`cargo clean\` in the worktrees not in use is the cheapest metre — then run it"
+    echo "    again."
+    exit 6
+  fi
+  carried_note="$mount: $(human_kib "$free") free${before:+, $(human_kib "$before") before this gate} — every artefact this gate names is on disk, so this red is a red"
+}
+
 # Recorded BEFORE anything runs. Everything printed at the end is about THIS.
 head_before=$(git rev-parse HEAD)
 short_before=$(git rev-parse --short HEAD)
@@ -818,8 +1076,11 @@ receipt="$LOGS/receipt"
 
 fail=0
 step() {
-  local name="$1" cmd="$2" slug matched
+  local name="$1" cmd="$2" slug matched free_before
   slug=$(printf '%s' "$name" | tr -c 'a-zA-Z0-9' '-')
+  # Read BEFORE the gate, so a refusal can say which way the figure moved while it ran (SKEIN-941).
+  free_before=$(target_fs) || free_before=""
+  free_before=${free_before%% *}
   # The same argument as the check above, for the case where the directory goes away mid-run: a
   # redirect that cannot be opened means the command did not run, and "did not run" is never "failed".
   if ! : >"$LOGS/$slug.log" 2>/dev/null; then
@@ -833,9 +1094,13 @@ step() {
     printf '%s %-40s ok\n' "$run_id" "$name"
     echo "gate $name ok" >>"$receipt"
   else
+    # Before the red is printed at all: a gate that failed because the machine could not hold its
+    # artefacts did not fail, and the lines below would name targets that are fine (SKEIN-941).
+    carried "$name" "$LOGS/$slug.log" "$free_before"
     printf '%s %-40s FAILED\n' "$run_id" "$name"
     echo "gate $name FAILED" >>"$receipt"
     fail=1
+    echo "    $carried_note"
     # The lines that NAME the failure, wherever they are in the log — not its last N lines.
     matched=$(grep -cE "^error|FAILED|^failures:|panicked at|✗|^ *FAIL " "$LOGS/$slug.log")
     grep -nE "^error|FAILED|^failures:|panicked at|✗|^ *FAIL " "$LOGS/$slug.log" | head -60
@@ -850,6 +1115,14 @@ echo "=== gates for $root at $tested === run $run_id"
 # What the preflight above looked for, printed like `tests/ui/harness/leaks.mjs` prints the fixture
 # names it derived: a check whose subject is invisible is a check nobody can tell has gone narrow.
 echo "$run_id preflight: $needed_n interpreter(s) derived from $declared_n declared gate command(s), each one found: $(printf '%s\n' $needed | tr '\n' ' ' | sed 's/ *$//')"
+# And the quantity the capacity check is measured in, printed for the same reason: a check whose
+# subject never appears is one nobody can tell has gone narrow (SKEIN-941).
+capacity_now=$(target_fs) || capacity_now=""
+if [ -n "$capacity_now" ]; then
+  echo "$run_id capacity: \$CARGO_TARGET_DIR is on ${capacity_now##* }, $(human_kib "${capacity_now%% *}") free"
+else
+  echo "$run_id capacity: df will not answer for \$CARGO_TARGET_DIR ($CARGO_TARGET_DIR) — any gate that fails will be REFUSED rather than reported"
+fi
 while IFS= read -r line; do
   step "$(field "$line" 1)" "$(gate_cmd "$line")"
 done < <(gates)
