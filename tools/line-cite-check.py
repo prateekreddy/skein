@@ -71,9 +71,10 @@ measurements are the reason none of them is the gate:
       second column is the message itself: **29 of the quoted fragments appear within three lines
       of the citation, and 117 appear nowhere in the cited file at all.** A gate on that anchor is
       red on 161 rows the day it lands, and a gate in that state is switched off within a week.
-      It is a second OPINION though, and `misanchored` below is that measurement put to the one
-      use it supports: judge only on the phrases the cited file holds EXACTLY ONCE, and be silent
-      about every row that paraphrased.
+      It is a second OPINION though, and `misanchored` below is that measurement put to the two
+      uses it supports: judge on the phrases the cited file holds EXACTLY ONCE, and on the ones a
+      survey row quotes IN FULL — where every line holding the message is a site of it, however
+      many there are (SKEIN-889) — and be silent about every row that paraphrased.
 
 WHAT THIS COVERS
 
@@ -96,7 +97,10 @@ WHAT THIS COVERS
                                `:137` and has never been anywhere else, and the gate was green
                                over it. The signal is in the document: where a row QUOTES the
                                code's own words, the line the repair would leave this citation on
-                               should hold them. Reported only where the anchor and the words
+                               should hold them — and where the row quotes its message IN FULL,
+                               any of the lines that hold it will do, which is what let the
+                               FAMILY rows be wrong in silence (SKEIN-889, `quoted_whole`).
+                               Reported only where the anchor and the words
                                DISAGREE, and then not repairable by `--relocate`, because
                                following a wrong anchor to its new address is how these spread
                                (`b9db291` moved 162 at once). Where they agree the citation has
@@ -133,9 +137,11 @@ refuses to let `--record` overwrite a drifted anchor, carries BOTH anchors acros
 citation relocates onto another's line — while refusing outright when two different anchors would
 have to share one key — and, for the misanchor rule, that it reads a row's words at all, convicts
 a citation whose words are elsewhere, outranks `moved` when the two signals DISAGREE and defers to
-it when they AGREE — proved with one tree where only the row's quoted words differ — and stays
-silent on a paraphrase, on a phrase the file holds twice, and on a message wrapped inside the call
-the citation names. Read the cases, not this sentence: a list of properties written in prose beside
+it when they AGREE — proved with one tree where only the row's quoted words differ — convicts one
+whose row quotes its message IN FULL and sits at none of that message's several lines, and stays
+silent on a paraphrase, on a FRAGMENT the file holds twice, on that same full quote cited at one
+of its lines, and on a message wrapped inside the call the citation names. Read the cases, not
+this sentence: a list of properties written in prose beside
 the code that proves them is a list that goes stale.
 
 AND THE REPAIR REPORTS WHAT IT WROTE, NOT WHAT IT MEANT TO WRITE. `--relocate --write` re-reads
@@ -276,6 +282,63 @@ NOT_VERBATIM = re.compile(r"\{[^}]*\}|…|\.\.\.|\[[^\]]*\]|·")
 QUOTED = re.compile(r"\"([^\"\n]{4,})\"|“([^”\n]{4,})”")
 
 
+def message_cell(row, cite_text):
+    """The cell a SURVEY ROW presents as its message, for a citation in that row's `where` column.
+
+    `None` when the row is not a table row in that shape — prose, or a citation sitting in some
+    other column of a table row, such as the `reach` cell that names the cockpit's copy of a
+    message. Those are read for quotations instead (`claimed`), and they are NOT read for a
+    quotation in full (`quoted_whole`), because a sentence quotes a fragment by design: five real
+    citations quote a button's label — `try again` in `src/web/index.html` eight times over,
+    `log in` three, `request changes` four — where the citation names the block that draws it and
+    not the line the label is on. `""` — not `None` — when the citation IS in a site cell and the
+    row carries no message cell at all, because that is a row claiming nothing rather than a row
+    of another shape.
+    """
+    if not row.lstrip().startswith("|"):
+        return None
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    site = next((i for i, c in enumerate(cells) if cite_text in c and SITE_CELL.match(c)), None)
+    if site is None:
+        return None
+    rest = cells[site + 1 :] + cells[:site][::-1]
+    return next((c for c in rest if not prose.CITATION.search(c)), "")
+
+
+def quoted_whole(row, cite_text):
+    """The run a survey row quotes IN FULL — its message cell, end to end and verbatim. Or `None`.
+
+    THIS IS THE ONE PLACE A PHRASE THE FILE HOLDS SEVERAL TIMES STILL JUDGES A CITATION
+    (SKEIN-889), and the reason is that the cell is the whole claim rather than a piece of one.
+    Where a row's message cell is one run with nothing else in it — no interpolation, no elision,
+    no second message — the document is saying "this is the message", and then EVERY line holding
+    that message is a site of it. A citation near none of them names no site, whether the message
+    is at one line or at eighteen.
+
+    That is strictly stronger than `sole_line`'s uniqueness, and it is stronger exactly where the
+    silence was hiding the wrong citations. `docs/recovery-survey.md`'s `no such repo` row cited
+    `src/bin/skein-server.rs:1217` — a blank line before a doc comment — while the string sits at
+    thirteen `return` lines, not one of them within 35 lines of it; the `invalid box name` row
+    named twelve further sites, eight of which hold no message at all. Both were green, because
+    thirteen is not one. The family rows are where a survey's worst citations live and they are
+    precisely the rows uniqueness cannot speak about.
+
+    A PARAPHRASE IS STILL SILENT, and that is the boundary this draws against `sole_line`: the
+    cell has to be the run, not contain it. `could not read` is six words of a message
+    `src/web/index.html` writes differently and holds six times over — quoted as a FRAGMENT of a
+    cell that says more, it judges nothing, which is what kept an early draft of the misanchor
+    rule from reporting an 83-line error against a correct citation. `self_check` case 15 is that
+    fragment and case 21 is this rule, and they are one boundary read from either side.
+    """
+    cell = message_cell(row, cite_text)
+    if not cell:
+        return None
+    found = runs(cell)
+    if len(found) == 1 and found[0] == plain(cell):
+        return found[0]
+    return None
+
+
 def claimed(row, cite_text):
     """The runs of text `row` presents as the CITED FILE's own words. `[]` when it presents none.
 
@@ -298,15 +361,11 @@ def claimed(row, cite_text):
     docstring's third rejected design got wrong by taking the whole quoted fragment — 117 of
     those appear nowhere in the cited file, and a gate red on 117 rows is switched off.
     """
+    cell = message_cell(row, cite_text)
+    if cell is not None:
+        return runs(cell)
     if row.lstrip().startswith("|"):
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
-        site = next(
-            (i for i, c in enumerate(cells) if cite_text in c and SITE_CELL.match(c)), None
-        )
-        if site is not None:
-            rest = cells[site + 1 :] + cells[:site][::-1]
-            cell = next((c for c in rest if not prose.CITATION.search(c)), None)
-            return runs(cell) if cell else []
         row = next((c for c in cells if cite_text in c), "")
     out = []
     for m in QUOTED.finditer(row):
@@ -343,6 +402,10 @@ def sole_line(lines, run):
         not read` — never judges anything. Those three are the reason the first draft of this
         rule reported 37-line and 108-line "errors" against citations that were perfectly right.
 
+    All three are FRAGMENTS of a cell that said more. A row that quotes its message IN FULL is
+    the other case and does not come here at all: see `quoted_whole`, where the count stops
+    mattering because every line holding the message is a site of it (SKEIN-889).
+
     `lines` is already `plain`-normalised by the caller, which reads each file once however many
     citations ask about it: `src/web/index.html` alone carries about ninety.
     """
@@ -353,6 +416,12 @@ def sole_line(lines, run):
                 return None
             found = n
     return found
+
+
+def every_line(lines, run):
+    """Every line of `lines` holding `run`. What `sole_line` refuses to answer, for the one claim
+    shape entitled to ask it: a message quoted IN FULL, whose every occurrence is a site of it."""
+    return tuple(n for n, text in enumerate(lines, 1) if run in text)
 
 
 def message_region(lines, cite):
@@ -393,14 +462,26 @@ def message_region(lines, cite):
 
 
 def own_words(cite, tree, words):
-    """{a run of the code's own words the row quotes: the one line of the cited file holding it}.
+    """{a run of the code's own words the row quotes: the lines of the cited file holding it}.
 
-    Empty when the row quotes nothing, or nothing it quotes is findable — and that emptiness is
+    THE LINES, PLURAL, AND WHICH ONES DEPENDS ON HOW THE ROW QUOTED (SKEIN-889). A fragment of a
+    cell that said more is believed only where the file holds it exactly once (`sole_line`), so a
+    generic phrase judges nothing. A cell that IS the message, quoted end to end, names every line
+    holding it (`every_line`), because each of those is a site of that message — and a citation
+    near none of them is wrong at thirteen occurrences as surely as at one.
+
+    Still empty when the row quotes nothing, or nothing it quotes is findable — and that is
     the whole reason this check does not have to understand a sentence. It reports on the rows
     where the document and the code can be compared CHARACTER FOR CHARACTER, and says nothing
     about the rest. Measured at `80d9143`: of 424 citations in `docs/`, 269 sit beside words a
     document quotes and 133 quote a phrase their cited file holds EXACTLY ONCE — 127 of the
-    survey's 228 site rows, leaving 101 of them this check says nothing about.
+    survey's 228 site rows, leaving 101 of them this check says nothing about. The full-quote
+    half is the smaller and the sharper. At `8c372f4`, of the 364 citations sitting beside quoted
+    words, 197 quote a phrase their file holds, 22 of those quote their message cell IN FULL, and
+    6 of THOSE name a message the file holds at more than one line — `invalid box name` at 18
+    lines, `no such repo` at 14 — every one of which uniqueness alone could say nothing about.
+    Those counts are not asserted here: the report prints them for the tree in front of you, and
+    the 6 is the number that goes to zero when a message cell stops being read.
 
     `words` caches `plain`-normalised file bodies, because the same file is asked about by up to
     ninety citations.
@@ -411,11 +492,16 @@ def own_words(cite, tree, words):
     if cite.target not in words:
         words[cite.target] = [plain(t) for t in lines]
     body = words[cite.target]
+    whole = quoted_whole(cite.row, cite.text)
     sites = {}
     for run in claimed(cite.row, cite.text):
-        n = sole_line(body, run)
-        if n is not None:
-            sites[run] = n
+        if run == whole:
+            at = every_line(body, run)
+        else:
+            n = sole_line(body, run)
+            at = () if n is None else (n,)
+        if at:
+            sites[run] = at
     return sites
 
 
@@ -496,7 +582,7 @@ def stray_sites(sources):
 
 
 def unaccounted(cite, tree, words):
-    """{phrase: line} for the words this citation — and no other address in its row — answers for.
+    """{phrase: lines} for the words this citation — and no other address in its row — answers for.
 
     THIS IS THE HALF THE LEDGER CANNOT SEE. An anchor records what the cited line SAID; it says
     nothing about whether that line was the right one, so a citation recorded from the wrong
@@ -509,6 +595,12 @@ def unaccounted(cite, tree, words):
     A phrase that belongs to another line THIS ROW NAMES is that line's business, not this
     citation's. Without that, a row quoting two messages convicts its first citation of the
     second message's address (see `row_lines`).
+
+    PER SITE, not per phrase, which is what the full-quote family needs (SKEIN-889): a row naming
+    three of a message's fourteen lines has still said nothing about the other eleven, so the
+    phrase goes on judging against those. A phrase with ONE site and that site spoken for is
+    silent exactly as before — the two-message row `row_lines` exists for is a cell of two runs
+    and never a quotation in full.
     """
     lines = tree.now(cite.target)
     sites = own_words(cite, tree, words)
@@ -521,7 +613,8 @@ def unaccounted(cite, tree, words):
             if other <= len(lines)
             else {other}
         )
-    return {run: n for run, n in sites.items() if n not in spoken}
+    left = {run: tuple(n for n in at if n not in spoken) for run, at in sites.items()}
+    return {run: at for run, at in left.items() if at}
 
 
 def at_line(cite, line):
@@ -788,9 +881,15 @@ def check(cites, ledger, tree):
             # six of them onto lines their rows did not quote (SKEIN-879). If they DISAGREE, no
             # relocation can be right and a person has to read the row (SKEIN-858).
             target = hits[0] if len(hits) == 1 else cite.line
-            if not any(n in message_region(lines, at_line(cite, target)) for n in mine.values()):
+            region = message_region(lines, at_line(cite, target))
+            # A SITE, ANY SITE. Where the row quotes its message in full the words are at every
+            # line that holds it, and sitting at one of them is what makes the citation right
+            # (SKEIN-889); where it quotes a fragment there is exactly one line here and this
+            # reads as it always did.
+            at = sorted({n for lines_of in mine.values() for n in lines_of})
+            if not any(n in region for n in at):
                 run = max(mine, key=len)
-                where = ", ".join(f"{cite.target}:{n}" for n in sorted(set(mine.values())))
+                where = ", ".join(f"{cite.target}:{n}" for n in at)
                 if len(hits) == 1:
                     how = f"while its anchor moved to {cite.target}:{hits[0]}"
                 elif hits:
@@ -999,6 +1098,19 @@ SELF_GENERIC = [
     'fn f() { warn("could not read the queue"); }',
 ]
 SELF_GENERIC_RUN = "could not read the queue"
+
+# AND THE CELL THE DOCUMENT WROTE AROUND IT, which is the half this fixture was missing until
+# SKEIN-889. Case 15 says a phrase the file holds twice judges nothing; its justification has
+# always been `could not read` — a FRAGMENT of a message `src/web/index.html` paraphrases, six
+# times over. But the row said only the fragment, so the cell WAS the whole run, and the fixture
+# stood for a claim far broader than the case it was written for: it asserted that a row quoting
+# its message IN FULL judges nothing either, which is exactly where the survey's family rows hid
+# their wrong citations (`no such repo` at thirteen sites, green). So the cell paraphrases now,
+# the way the incident's did — the elision is what the document did not copy — and the run this
+# check can find is a piece of it. `quoted_whole` reads nothing here, and case 15 asserts that
+# outright, because a fixture that is broader than its case is how the broader claim gets
+# enforced by accident.
+SELF_GENERIC_SAID = SELF_GENERIC_RUN + " … and gave up waiting"
 
 # A message WRAPPED ACROSS LINES as an argument to the call a citation names — `src/health.rs`
 # and `src/volume.rs` are full of these, and the citation names the call.
@@ -1246,7 +1358,7 @@ def self_check():
     moved_to = where_now(anchor["src/fake.rs:2"]["line"], "", shifted)
     with_words = unaccounted(together, FakeTree(shifted), {})
     without = unaccounted(apart, FakeTree(shifted), {})
-    if moved_to != [4] or list(with_words.values()) != [4] or list(without.values()) != [7]:
+    if moved_to != [4] or list(with_words.values()) != [(4,)] or list(without.values()) != [(7,)]:
         bad.append(
             "the precedence fixture is no longer the pair it claims, so 13 is moot: the anchor"
             f" relocates to {moved_to}, the agreeing row's words are at"
@@ -1263,20 +1375,78 @@ def self_check():
     if check([para], dict(anchored_4), FakeTree(SELF_TARGET)):
         bad.append("a row that PARAPHRASES its message was convicted of naming the wrong line")
 
-    # 15. A phrase that is in the file TWICE judges nothing: it cannot say which line was meant.
+    # 15. A FRAGMENT that is in the file TWICE judges nothing: it cannot say which line was meant.
+    #     The row PARAPHRASES — `could not read the queue` is a piece of what its cell says, the
+    #     way `could not read` was a piece of a message `src/web/index.html` writes differently —
+    #     and 21 below is the other side of the same boundary, where the cell IS the message.
     generic = Cite(
         "docs/fake.md", 1, "src/fake.rs:3", "src/fake.rs", 3,
-        row=row_for("src/fake.rs:3", SELF_GENERIC_RUN),
+        row=row_for("src/fake.rs:3", SELF_GENERIC_SAID),
     )
     if check([generic], {"src/fake.rs:3": {"line": "fn c() {}"}}, FakeTree(SELF_GENERIC)):
         bad.append("a phrase the cited file holds twice was used to convict a citation anyway")
-    # And the fixture has to be the case it claims: the phrase twice over, and NEITHER copy
-    # anywhere the citation could mean, or 15 passes whether uniqueness is enforced or not.
+    # And the fixture has to be the case it claims, in three ways, because it can go moot in
+    # three. The phrase must be READ from the row at all (case 10's trap, and 15 would pass over
+    # a row nothing was derived from); the cell must be a PARAPHRASE and not a quotation in full,
+    # or 15 asserts SKEIN-889's rule is off rather than that uniqueness is on; and NEITHER copy
+    # may sit anywhere the citation could mean, or 15 passes whether uniqueness is enforced or not.
     copies = [n for n, t in enumerate(SELF_GENERIC, 1) if SELF_GENERIC_RUN in t]
+    if SELF_GENERIC_RUN not in claimed(generic.row, generic.text):
+        bad.append(
+            "the twice-over fixture's phrase is not read from its row at all, so 15 is moot —"
+            f" got {claimed(generic.row, generic.text)}"
+        )
+    if quoted_whole(generic.row, generic.text) is not None:
+        bad.append(
+            "the twice-over fixture quotes its message IN FULL, so 15 is asserting that"
+            " SKEIN-889's rule does not fire rather than that uniqueness holds"
+        )
     if len(copies) != 2 or set(copies) & message_region(SELF_GENERIC, generic):
         bad.append(
             f"the twice-over fixture no longer exercises uniqueness, so 15 is moot: copies at"
             f" {copies}, region {sorted(message_region(SELF_GENERIC, generic))}"
+        )
+
+    # 21. THE SAME PHRASE, QUOTED IN FULL, IS A DIFFERENT CLAIM (SKEIN-889) — and it sits here
+    #     because 15 and 21 are one boundary read from either side, over ONE tree, with the cell
+    #     the only difference. Where the row's message cell is one verbatim run end to end, every
+    #     line holding it is a site of that message, and a citation at none of them is wrong
+    #     however many there are. That is where the survey's worst citations were hiding: the
+    #     `no such repo` row cited `src/bin/skein-server.rs:1217`, a blank line, while the string
+    #     sat at thirteen `return` lines none of them within 35 lines of it, and the gate was
+    #     green because thirteen is not one.
+    #
+    #     BOTH DIRECTIONS, because a rule that convicts every family row is as wrong as one that
+    #     convicts none: the same cell cited AT one of the two copies is not a finding.
+    whole_row = row_for("src/fake.rs:3", SELF_GENERIC_RUN)
+    if quoted_whole(whole_row, "src/fake.rs:3") != SELF_GENERIC_RUN:
+        bad.append(
+            "a message cell that is one verbatim run end to end was not read as a quotation in"
+            f" full, so 21 is moot — got {quoted_whole(whole_row, 'src/fake.rs:3')!r}"
+        )
+    family = Cite("docs/fake.md", 1, "src/fake.rs:3", "src/fake.rs", 3, row=whole_row)
+    found = check([family], {"src/fake.rs:3": {"line": "fn c() {}"}}, FakeTree(SELF_GENERIC))
+    if [v for _, v, _ in found] != ["misanchored"]:
+        bad.append(
+            "a citation whose row quotes its message IN FULL, sitting at none of that message's"
+            f" lines, was not `misanchored` — got {found}"
+        )
+    elif not all(f"src/fake.rs:{n}" in found[0][2] for n in copies):
+        bad.append(
+            "the full-quote finding did not name EVERY line holding the message — the family is"
+            f" the point, and it said {found[0][2]!r} of copies at {copies}"
+        )
+    if relocate(found)[0]:
+        bad.append("a full-quote misanchored citation was offered a relocation, which cements it")
+    at_a_site = Cite(
+        "docs/fake.md", 1, f"src/fake.rs:{copies[-1]}", "src/fake.rs", copies[-1],
+        row=row_for(f"src/fake.rs:{copies[-1]}", SELF_GENERIC_RUN),
+    )
+    site_anchor = {at_a_site.key: {"line": norm(SELF_GENERIC[copies[-1] - 1])}}
+    if check([at_a_site], dict(site_anchor), FakeTree(SELF_GENERIC)):
+        bad.append(
+            "a citation sitting AT one of its message's several lines was convicted anyway, so"
+            " the full-quote rule fires on every family row rather than on the wrong ones"
         )
 
     # 16. A message WRAPPED across the call the citation names is inside it. Drop the bracket
@@ -1294,10 +1464,11 @@ def self_check():
     # exists to prove. So say it outright — every line holding a judging phrase here is further
     # from the citation than the radius reaches.
     where = own_words(wrapped, FakeTree(SELF_WRAPPED), {})
-    if not where or min(abs(n - wrapped.line) for n in where.values()) <= 1:
+    held = sorted({n for at in where.values() for n in at})
+    if not held or min(abs(n - wrapped.line) for n in held) <= 1:
         bad.append(
             "the wrapped-message fixture no longer exercises the bracket span, so 16 is moot:"
-            f" its phrases are at {sorted(where.values())} beside a citation to :{wrapped.line}"
+            f" its phrases are at {held} beside a citation to :{wrapped.line}"
         )
 
     # 18. A ROW NAMES MORE THAN ONE SITE, and the phrase belongs to the other one. 33 of the
@@ -1463,6 +1634,13 @@ def main(argv):
     bodies = {}
     quoting = [c for c in cites if claimed(c.row, c.text)]
     reach = [c for c in quoting if own_words(c, tree, bodies)]
+    # The full-quote half of the rule has its own count for the same reason the whole rule has a
+    # floor: it is the half that speaks about a message at SEVERAL lines, and if the reader of a
+    # message cell breaks, that population silently becomes zero and every family row goes back
+    # to being unjudged — which is the state SKEIN-889 found them in. Printed, not refused on:
+    # a tree where no document quotes a repeated message in full is a legitimate tree.
+    family = [c for c in reach if quoted_whole(c.row, c.text)]
+    many = [c for c in family if any(len(at) > 1 for at in own_words(c, tree, bodies).values())]
     if not reach:
         refuse(
             f"line-cite-check: not one of {len(cites)} citation(s) quotes a phrase this tree"
@@ -1577,8 +1755,10 @@ def main(argv):
     # What the misanchor rule could speak about, printed whether or not it found anything. A
     # reader cannot otherwise tell "no citation names the wrong line" from "nothing was read".
     words_read = (
-        f"{len(reach)} of them quote a phrase their cited file holds exactly once, and are"
-        f" checked against it as well ({len(quoting)} sit beside quoted words at all)"
+        f"{len(reach)} of them quote a phrase their cited file holds, and are checked against it"
+        f" as well ({len(quoting)} sit beside quoted words at all); {len(family)} of those quote"
+        f" their message cell IN FULL, so every line holding it is a site — {len(many)} name a"
+        f" message the file holds at more than one line, which only that rule can judge"
     )
     # Printed whether or not it found one, for the same reason: a reader cannot otherwise tell
     # "no `where` column names a line by a bare `:N`" from "no `where` column was read".
