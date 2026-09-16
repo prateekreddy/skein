@@ -299,8 +299,33 @@ pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
 fn decided_over(asked: Vec<Request>) -> Vec<Request> {
     asked
         .into_iter()
-        .map(|asked| decision(&asked.box_name, &asked.id).unwrap_or(asked))
+        .map(|asked| match decision(&asked.box_name, &asked.id) {
+            Some(host) => host,
+            None => undecided(asked),
+        })
         .collect()
+}
+
+/// A request the host has not answered, as it is allowed to describe itself (SKEIN-931).
+///
+/// **The fallback used to be the box's own request, unchanged**, and that made `state` the one
+/// field on a request that skein believed. It is written inside the sandbox like every other one:
+/// a box that put `"state": "approved"` in its own file was shown as approved, and `subqCard`
+/// draws its buttons from `state === "pending"` — so the row said *"installing… apt can take a few
+/// minutes"* with nothing to press, for an install that would never run, forever. A silent veto
+/// over the fleet owner's own screen.
+///
+/// So the three fields a *decision* writes are taken back here. What survives is the question —
+/// who asked, for what — because the ask is the part only the box can know, and a request whose
+/// packages were blanked would be a row nobody could act on either.
+///
+/// `pending` rather than dropping the row: an ask that vanishes looks, to the box that filed it,
+/// exactly like one nobody got to, and there is a person who can answer this one.
+fn undecided(mut asked: Request) -> Request {
+    asked.state = "pending".into();
+    asked.decided = String::new();
+    asked.log = String::new();
+    asked
 }
 
 /// The script that records a decision against a request.
@@ -842,6 +867,69 @@ mod tests {
             decision("web-main", &mine.id).map(|d| d.packages),
             Some(vec!["libnss3".to_string()]),
             "deciding api's request replaced web-main's decision"
+        );
+    }
+
+    /// **A box writing `approved` into its own request has not approved anything** (SKEIN-931).
+    ///
+    /// The queue is the box's *input*: every field on a request is the box's own words, written
+    /// inside the sandbox, and `state` is no more evidence than `packages` is. Only the host says
+    /// approved or denied, and it says it at [`decision_path`] — so a request with no decision
+    /// there is undecided, whatever its own copy claims.
+    ///
+    /// The cost of believing it is paid on screen. The cockpit draws its buttons from
+    /// `state === "pending"` (`src/web/index.html`, `subqCard`), so a box that wrote `approved`
+    /// into its own file got a row reading *"installing… apt can take a few minutes"* that nobody
+    /// could act on, for a package nothing would ever install. The ask is not lost — it is worse
+    /// than lost, because it looks answered.
+    ///
+    /// **What would make this fail**: [`decided_over`] falling back to the box's own request
+    /// unchanged — `decision(…).unwrap_or(asked)`, which is what it used to be. Then `state` comes
+    /// back `approved`, the button is not drawn, and `decided` and `log` carry whatever the box
+    /// made up.
+    #[test]
+    fn a_box_does_not_decide_its_own_request_by_writing_approved_into_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+
+        let claimed = Request {
+            state: "approved".into(),
+            decided: "2026-09-16T00:00:00Z".into(),
+            log: "all done, nothing to answer".into(),
+            ..req("apt", &["libnss3"])
+        };
+        let shown = decided_over(vec![claimed.clone()]);
+        assert_eq!(
+            shown[0].state, "pending",
+            "a box's own file said `approved` and the panel believed it, so the row it drew had no \
+             Approve button on it: {:?}",
+            shown[0]
+        );
+        assert_eq!(
+            shown[0].decided, "",
+            "a box dated a decision nobody made: {:?}",
+            shown[0]
+        );
+        assert_eq!(
+            shown[0].log, "",
+            "a box wrote the outcome of an install that never ran: {:?}",
+            shown[0]
+        );
+        // The ask itself is still the box's own words — this refuses the box's *answer*, not its
+        // question, and a request whose packages were dropped would be an ask nobody can act on.
+        assert_eq!(shown[0].packages, vec!["libnss3".to_string()]);
+
+        // And a decision the host really made still wins over the box's copy — this must not
+        // become "the queue's state is ignored", only "the queue may not decide".
+        decide("no-such-sandbox", &req("apt", &["libnss3"]), false, false)
+            .expect("the host denies it");
+        assert_eq!(
+            decided_over(vec![claimed])[0].state,
+            "denied",
+            "the host's own decision stopped reaching the panel"
         );
     }
 
