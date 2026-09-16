@@ -274,6 +274,38 @@ live in `tools/gates.sh` and these two places hold only a membership claim that 
 Those four numbers describe a state that no longer exists, which is the only kind of count that is
 safe to write in prose here — it cannot go stale, because nothing will change it.
 
+### `line-cite-check` goes red at a merge, and that is not a lane's regression
+
+**Two branches that are each green alone can merge to a red `line-cite-check`, and neither branch
+is at fault** (SKEIN-937). A citation is an address, so it is the one kind of claim that line
+shifts break without anybody editing it. Lane A repairs its citations against its own line
+numbers; lane B repairs its own against *its* line numbers; the merge carries both sets of shifts,
+and now neither repair names the merged tree. The gate can only be red on a tree that exists after
+the merge — **and the integrator is the only person who ever builds that tree.**
+
+Measured twice in one afternoon on the same integration branch: **14 of 523 citations** at the
+first merge point, and **81 of 523** at the next — 73 `moved`, 4 `unrecorded`, 3 `misanchored`,
+1 `ambiguous`.
+
+So:
+
+* **Do not send it back to a lane.** The lane's tree really is green, and it will re-run its gates,
+  find nothing, and say so. That round trip has been paid for once already.
+* **The repair belongs on the integration branch, as its own commit** — separate from the merges,
+  so a reader can see that the addresses moved and nothing else did.
+* **Repair ONCE, on the complete tree, after the LAST merge.** Repairing after each merge is work
+  the next merge invalidates: those 14 were repaired, and then 81 needed repairing anyway.
+* **Measure on the tree you are about to repair, never on the previous one.** The second wasted
+  trip was a repair briefed with the tally from the earlier merge point, which sent an agent
+  hunting two findings that did not exist on the tree in front of it. The run is one command and
+  it prints the verdicts; a count taken anywhere else is a guess about a tree that no longer
+  exists.
+
+Most of it is mechanical — `python3 tools/line-cite-check.py --relocate --write` moves the line
+numbers the ledger can still resolve, and `--record` anchors citations the merge brought in new.
+`misanchored` is the one that is not: it means no relocation names the row's words, so a person
+reads the row (see the verdict guide the tool prints).
+
 Where a gate is python, it is python because Rust cannot express what it checks. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
