@@ -654,6 +654,114 @@ export function fixtureRegex(prefixes) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// the check: no suite builds its fixture from os.tmpdir()
+// ---------------------------------------------------------------------------------------------
+//
+// **This is the check the SKEIN-653 bug wanted and did not have.** `smoke.mjs`, `attach.mjs`,
+// `connections.mjs`, `actfail.mjs` and `updatepane.mjs` built their fixture with
+// `fs.mkdtempSync(path.join(os.tmpdir(), "<prefix>-"))` instead of `freshFixture(fixtureRoot(),
+// "<prefix>")`, and both halves of `fixtureRoot`'s own reasoning applied to every one of them: a box
+// a suite launches binds its own directories over `/tmp` (`src/box-session.sh` refuses a fleet root
+// beneath it), and a `mkdtemp` name carries no pid, so nothing the pid-sweep in `freshFixture` does
+// ever reasons about it — 29 such directories were measured under `/tmp`, the oldest 36 hours.
+//
+// [`serverSuites`] derives WHICH files this applies to, the same way [`fixturePrefixes`] derives
+// prefixes rather than naming them: a suite is anything under `tests/ui/` that imports `startServer`
+// from `./harness/server.mjs`, because that import is what turns a fixture directory into something
+// a box has to read, and it throws when it derives none, for the reason every derive-and-refuse
+// function in this file throws on that — a check that scans zero suites reports "clean" forever,
+// indistinguishably from a run that actually looked (SKEIN-647, SKEIN-687, SKEIN-913).
+//
+// **Not every file that calls `os.tmpdir()` under `tests/ui/` is this bug**, which is why the check
+// is scoped to [`serverSuites`] rather than to the whole directory. `leakcheck.mjs` calls it twice —
+// once for a planted orphan's `cwd`, once for a skeleton directory its OWN tests build to exercise
+// [`testMarker`] — and neither is a fixture a box ever reads: that file imports no `startServer` and
+// deliberately keeps its skeleton off `fixtureRoot()`, in its own words, "so that the disagreement is
+// a real one this suite made and not a state the tree has to be put into." Widening the scope to
+// match text anywhere in the directory would turn that deliberate choice into a false positive, which
+// is its own version of the SKEIN-647 shape: a check that fires on the wrong thing teaches a reader to
+// read past it.
+export function serverSuites(repo = REPO) {
+  let names;
+  try {
+    names = readdirSync(join(repo, "tests", "ui"));
+  } catch {
+    throw new Error(`the fixture-root check cannot read tests/ui/ — it is looking in ${repo}`);
+  }
+  const suites = [];
+  for (const name of names) {
+    if (!name.endsWith(".mjs")) continue;
+    const full = join(repo, "tests", "ui", name);
+    let text;
+    try {
+      text = readFileSync(full, "utf8");
+    } catch {
+      continue;
+    }
+    if (/import\s*\{[^}]*\bstartServer\b[^}]*\}\s*from\s*["']\.\/harness\/server\.mjs["']/
+      .test(codeOnly(text, "js"))) {
+      suites.push(name);
+    }
+  }
+  if (!suites.length) {
+    throw new Error('the fixture-root check derived no suite from `import { startServer } from ' +
+      '"./harness/server.mjs"` in tests/ui/ — either every suite moved off that import, or this ' +
+      "reader broke; fix the reader, do not widen it by hand.");
+  }
+  return suites.sort();
+}
+
+/** Which of [`serverSuites`] still build their fixture with `os.tmpdir()` instead of
+ * `freshFixture(fixtureRoot(), …)`, as `{file, line, text}`.
+ *
+ * One pattern — `os.tmpdir(` anywhere in a suite's code, comments and quoted examples already cut by
+ * [`codeOnly`] — rather than requiring it to sit inside a `mkdtempSync(...)` call on the same line.
+ * Every violation measured so far is `fs.mkdtempSync(path.join(os.tmpdir(), "prefix-"))` on one line,
+ * but a narrower pattern tied to that exact shape would miss a future one reformatted across two
+ * lines or built some other way — silently, which is the failure this check exists not to have. A
+ * suite has no legitimate reason to name `os.tmpdir()` at all once its fixture comes from
+ * `freshFixture`/`fixtureRoot`, so the bare mention is the whole signal. */
+export function tmpdirViolations(repo = REPO) {
+  const out = [];
+  for (const name of serverSuites(repo)) {
+    const text = codeOnly(readFileSync(join(repo, "tests", "ui", name), "utf8"), "js");
+    text.split("\n").forEach((line, i) => {
+      if (/\bos\.tmpdir\(/.test(line)) out.push({ file: name, line: i + 1, text: line.trim() });
+    });
+  }
+  return out;
+}
+
+/** The fixture-root gate: prints the suites it derived, then any violation, one per line. Exits 1 on
+ * a violation, 2 when it could not derive a suite list at all.
+ *
+ * A separate entry point from [`main`] rather than folded into its exit code — this is a question
+ * about SOURCE, asked once, not about processes on the box right now, and the two do not share a
+ * failure mode: [`main`]'s "exit 0" is the contract `CONTRIBUTING.md` asks for after every browser
+ * run, and a source-hygiene regression in a suite this run never touched should not be reported
+ * through that same number. */
+function fixtureRootMain(repo = REPO) {
+  let suites;
+  let violations;
+  try {
+    suites = serverSuites(repo);
+    violations = tmpdirViolations(repo);
+  } catch (e) {
+    console.error(`fixture-root check: ${e.message}`);
+    return 2;
+  }
+  console.log(`fixture-root check: ${suites.length} suites under tests/ui/ drive a real skein-server`);
+  console.log(`  ${suites.join(" ")}`);
+  if (!violations.length) {
+    console.log("  none of them build a fixture from os.tmpdir()");
+    return 0;
+  }
+  console.log(`\n${violations.length} of them still do:`);
+  for (const v of violations) console.log(`  ${v.file}:${v.line}  ${v.text}`);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------------------------
 // the check: the marker every test process carries, whatever it is called
 // ---------------------------------------------------------------------------------------------
 //
@@ -1227,5 +1335,6 @@ export function reportLines(shown, headline = "processes are still running from 
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exit(main(process.argv.slice(2)));
+  const argv = process.argv.slice(2);
+  process.exit(argv.includes("--fixture-root") ? fixtureRootMain() : main(argv));
 }

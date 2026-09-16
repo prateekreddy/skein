@@ -17,9 +17,8 @@
 //   node tests/ui/usage.mjs
 import { chromium } from "playwright";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { openDoor } from "./lift.mjs";
+import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 const API_TOKEN = "t".repeat(64);
@@ -35,7 +34,7 @@ const FIXTURE_BOX = "spend-fixture-box";
 // reads is entirely inside the fixture — `$SKEIN_FLEET_ROOT` is its sibling and stays empty, which
 // is also the shape `startServer` requires of the pair.
 function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ui-usage-"));
+  const root = freshFixture(fixtureRoot(), "ui-usage");
   const home = path.join(root, "home");
   const projects = path.join(home, "boxes", FIXTURE_BOX, "claude-projects", "a-project");
   fs.mkdirSync(projects, { recursive: true });

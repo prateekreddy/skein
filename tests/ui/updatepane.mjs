@@ -8,9 +8,8 @@
 //   node tests/ui/updatepane.mjs
 import { chromium } from "playwright";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { openDoor } from "./lift.mjs";
+import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
@@ -19,7 +18,7 @@ const API_TOKEN = "t".repeat(64);
 // The smallest fixture that serves a settings dialog: a store, a home, and a token. No box, no
 // tmux, no transcript — the Update pane asks about skein, not about the fleet's contents.
 function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ui-updatepane-"));
+  const root = freshFixture(fixtureRoot(), "ui-updatepane");
   fs.mkdirSync(path.join(root, "home"), { recursive: true });
   fs.writeFileSync(path.join(root, "home", "api-token"), API_TOKEN, { mode: 0o600 });
   fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({}));

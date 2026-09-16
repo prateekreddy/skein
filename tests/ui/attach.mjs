@@ -26,9 +26,8 @@
 // Needs node and nothing else — no chromium — so it runs in a box, where the attach path is used.
 import { createServer } from "node:net";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { boxlikeNamespace, grab, harness, openDoor } from "./lift.mjs";
+import { boxlikeNamespace, fixtureRoot, freshFixture, grab, harness, openDoor } from "./lift.mjs";
 import { startServer } from "./harness/server.mjs";
 
 const BOX = "attach-box";
@@ -85,7 +84,7 @@ function fleetPathDirs() {
 //
 // The stub survives for one job it can still do: `SKEIN_LS_CMD` is its own seam and still runs it.
 async function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-attach-"));
+  const root = freshFixture(fixtureRoot(), "skein-attach");
   const ws = path.join(root, "workspace");
   const home = path.join(root, "home");
   fs.mkdirSync(ws, { recursive: true });

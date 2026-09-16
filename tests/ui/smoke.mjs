@@ -13,9 +13,8 @@
 import { chromium } from "playwright";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { boxlikeNamespace, openDoor } from "./lift.mjs";
+import { boxlikeNamespace, fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler, texter } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -23,7 +22,7 @@ const BOX = "smoke-box";
 
 // ---------- fixture: a tiny workspace with the shapes that have actually broken ----------
 async function makeFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-ui-"));
+  const root = freshFixture(fixtureRoot(), "skein-ui");
   const ws = path.join(root, "workspace");
   fs.mkdirSync(path.join(ws, "docs", "nested"), { recursive: true });
   fs.writeFileSync(path.join(ws, "README.md"), "# smoke\n\nRead [the guide](docs/guide.md).\n");
