@@ -407,30 +407,73 @@ await check("the add-repo dialog offers a remote and only a remote", async () =>
 // label while keeping the affirmation would have moved SKEIN-588's dead end one step later rather
 // than closing it, so the source field is no longer wired to the path probe at all.
 //
-// **The store field is the control, and it is what makes this able to fail for the right reason.**
-// A probe removed on purpose and a probe broken by a renamed id leave the source field equally
-// silent, and nothing in an empty string says which. So the SAME path is put through the store
-// field first — which still takes a path, correctly — and this refuses to judge the source field
-// until it has seen the machinery answer for that exact directory.
+// **The control used to be the store field, and SKEIN-535 deleted it.** That field was the other
+// half of this dialog wired to the probe, so the SAME path went through it first and this refused
+// to judge the source field until it had seen the machinery answer for that exact directory. The
+// route refuses `store` outright now and the field is gone, which takes the control with it — and
+// the reason the control existed has not gone anywhere: a probe removed on purpose and a probe
+// broken by a renamed id leave the source field equally silent, and nothing in an empty string
+// says which.
+//
+// So the control is rebuilt out of the two things it was actually standing in for, which is
+// stronger than the field was because neither half depends on a second field continuing to exist:
+//
+//   * `/api/path` is asked directly for the same directory. That is the endpoint the probe calls,
+//     so if it stopped resolving this folder, an empty source note would mean nothing and this says
+//     so instead of passing.
+//   * `#ar-src-note` is required to EXIST before its emptiness is read. Renaming that id is the
+//     exact way this check would go quietly vacuous, and `textContent` of a missing element is the
+//     same empty string as a silent field.
 await check("the add-repo source field does not probe a typed path", async () => {
   const folder = path.join(fx.root, "home");
+  // The control: the probe's own endpoint, asked for the very directory typed below.
+  const probe = await (await fetch(
+    `http://127.0.0.1:${port}/api/path?p=${encodeURIComponent(folder)}`,
+    { headers: authHeader() })).json();
+  if (!probe.resolved)
+    throw new Error(`/api/path no longer resolves ${folder} (kind: ${probe.kind}), so an empty \
+source note cannot tell a removed probe from a broken one`);
   await page.evaluate(() => openAddRepo());
   await settle(400);
-  // The store field lives behind the Advanced disclosure, so open it the way a person does.
-  await page.click("#addrepo details.ar-adv > summary");
-  await mustSee("#ar-store", "the shared-data folder field");
-  // 250ms of debounce in `checkPathLater`, then a round trip to `/api/path`.
-  await page.fill("#ar-store", folder);
-  await settle(900);
-  const store = (await page.textContent("#ar-store-note")) || "";
-  if (!/found/.test(store))
-    throw new Error(`the store field stopped answering for ${folder}, so this check cannot tell a \
-removed probe from a broken one: "${store.trim()}"`);
+  // The note element must be there to be empty. Without this, a renamed id passes forever.
+  if (!(await page.$("#ar-src-note")))
+    throw new Error("#ar-src-note is gone, so this check was reading the empty string off nothing");
+  // 250ms of debounce in `checkPathLater`, then a round trip to `/api/path` — if it were wired.
   await page.fill("#ar-src", folder);
   await settle(900);
   const src = (await page.textContent("#ar-src-note")) || "";
   if (src.trim())
     throw new Error(`the repo-source field still answers for a path: "${src.trim()}"`);
+});
+
+// **The dialog no longer offers a shared-data folder at all** (SKEIN-535). It took an absolute host
+// path and sent it as `store`, and the server scaffolded a `.claude` tree wherever it pointed. The
+// route refuses `store` now, so the field would be the SKEIN-588/806 shape one field along: the
+// dialog offering what the server refuses. Asserted on the id AND on the disclosure's own heading,
+// because deleting the input and leaving the label is how half a removal reads as a whole one.
+//
+// **And it must still say where the capability went.** Adopting an existing store is CLI-only now,
+// which is a decision rather than a loss — but the field was the only place a person could learn
+// that it is possible at all, and a capability withdrawn in silence reads as one that is gone. The
+// 400 names `skein add --store` too, and reaches only somebody who already found a way to send
+// `store`; this is what the person who came looking for the field reads instead.
+//
+// So the forbidden thing here is the FIELD, not the words: the copy is now expected to talk about
+// adopting a store, and an earlier draft of this check banned that phrase outright — which would
+// have failed the moment the dialog started doing the right thing.
+await check("the add-repo dialog offers no shared-data folder, and says where it went", async () => {
+  await page.evaluate(() => openAddRepo());
+  await settle(400);
+  if (await page.$("#ar-store"))
+    throw new Error("the shared-data folder field is back; POST /api/repos refuses `store` (SKEIN-535)");
+  const dialog = (await page.textContent("#addrepo")) || "";
+  if (!dialog.trim())
+    throw new Error("the add-repo dialog read as empty — this check read nothing");
+  if (/Advanced — shared data folder/i.test(dialog))
+    throw new Error("the Advanced shared-data-folder disclosure is back, and the route refuses `store`");
+  if (!/--store/.test(dialog))
+    throw new Error(`the dialog withdrew the shared-data folder without saying where it went, so a \
+person who used that field has no way to find \`skein add --store\`: "${dialog.trim().slice(0, 240)}"`);
 });
 
 // **This check used to paste a local path, and it was measuring nothing.**

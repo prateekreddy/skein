@@ -1088,6 +1088,13 @@
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
   .bs-actions { display:flex; gap:8px; flex-wrap:wrap; }
   .ar-derived b { color:var(--accent); font-weight:600; }
+  /* The one command this dialog names, for the capability it no longer offers as a field
+     (SKEIN-535). Built from `.noauth-c`, the page's existing "run this instead" block, and pitched
+     a step quieter: 11px and `--text-2` rather than 12px and `--text`, so it reads as a command
+     without outranking the field labels it sits under. */
+  .ar-cmd { font-family:var(--mono); font-size:11px; color:var(--text-2); background:var(--bg);
+            border:1px solid var(--line); border-radius:4px; padding:6px 8px; margin:5px 0 0;
+            overflow-x:auto; white-space:pre; }
   /* The dialog grew past "paste a URL", so it needs a seam: everything above is how the repo is
      fetched, everything below is what it carries once it exists. */
   .ar-sec { margin-top:8px; padding-top:11px; border-top:1px solid var(--line); font-size:11px;
@@ -1410,10 +1417,6 @@
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
   .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
-  .ar-adv { margin-top:4px; }
-  .ar-adv summary { cursor:pointer; font-size:12px; color:var(--dim); width:fit-content; }
-  .ar-adv summary:hover { color:var(--text-2); }
-  .ar-advbody { padding-top:8px; display:flex; flex-direction:column; gap:8px; }
   .set-note { margin:6px 0 0; font-size:11.5px; line-height:1.55; color:var(--faint); }
   .set-note.ready { color:var(--done); }
   .set-note.gap { color:var(--waiting); }
@@ -1726,17 +1729,21 @@
       <div class="ar-derived" id="ar-derived"></div>
       <label class="nb-lbl">default agent</label>
       <select id="ar-agent"></select>
-      <details class="ar-adv">
-        <summary>Advanced — shared data folder</summary>
-        <div class="ar-advbody">
-          <div class="ar-derived">the folder this repo's boxes share: their memory, mailbox and status. skein makes one under <code>~/.skein/repos</code> and you never have to think about it. Point this somewhere else only to adopt a store you already have.</div>
-          <div class="path-row">
-            <input id="ar-store" placeholder="(skein manages one under ~/.skein/repos)" autocomplete="off" spellcheck="false" />
-            <span class="pathnote" id="ar-store-note"></span>
-          </div>
-        </div>
-      </details>
-      <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds it; leave blank to auto-manage.</div>
+      <!-- **No shared-data folder field here** (SKEIN-535). It took an absolute host path and sent
+           it as `store`, and the server scaffolded a whole `.claude` tree wherever it pointed —
+           anywhere on the host, for anyone holding the API token that is printed into every cockpit
+           URL. `POST /api/repos` refuses `store` outright now, so a field offering one would be the
+           SKEIN-588/806 shape again: the dialog offering what the server refuses. Adopting a store
+           you already have is CLI-only and deliberate — `skein add <git-url> --store <path>` runs as
+           the person, on the host, rather than as a request carrying a token that is on screen.
+
+           **The command is printed rather than merely not offered.** Deleting the field removed the
+           only place a person could learn that adopting a store is still possible at all, and a
+           capability that is withdrawn in silence reads as a capability that is gone. The 400 says
+           the same sentence, but only to somebody who has already found a way to send `store`;
+           this says it to the person who was about to look for the field. -->
+      <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds one under <code>~/.skein/repos</code>. To adopt a store you already have, from the host:</div>
+      <pre class="ar-cmd">skein add &lt;git-url&gt; --store &lt;path&gt;</pre>
 
       <!-- Everything else a repo carries, set here rather than found later on its card. Each of
            these is applied *after* the clone lands, because they all key on the repo's id and there
@@ -10512,7 +10519,7 @@ function arSetMsg(text, kind) {        // kind: "" | "err" | "warn" | "ok"
 }
 function openAddRepo() {
   const src = document.getElementById("ar-src");
-  src.value = ""; document.getElementById("ar-store").value = ""; arSetMsg("");
+  src.value = ""; arSetMsg("");
   document.getElementById("ar-token").value = "";
   document.getElementById("ar-plane").value = "";
   // Off, matching `repos::add`. A new repo is a repo nobody has said they review yet, and the
@@ -10562,7 +10569,6 @@ function submitAddRepo() {
   const src = document.getElementById("ar-src").value.trim();
   if (!src) { arSetMsg("Paste the repo's git URL.", "err"); return; }
   if (DEMO) { arSetMsg("Adding repos is disabled in demo.", "warn"); return; }
-  const store = document.getElementById("ar-store").value.trim();
   const agent = document.getElementById("ar-agent").value;
   const go = document.getElementById("ar-go");
   // `add_repo` clones inline with a 300s bound, so this can sit here for minutes on a large repo.
@@ -10579,7 +10585,9 @@ function submitAddRepo() {
     if (secs === 240) arSetMsg("still cloning — this gives up at 5 minutes.", "warn");
   }, 1000);
   const settle = () => { clearInterval(tick); go.disabled = false; };
-  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src, store, agent }) })
+  // No `store`: the route refuses one outright (SKEIN-535), and adopting an existing store is a
+  // CLI-only affordance now — `skein add <git-url> --store <path>`.
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src, agent }) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       settle();
@@ -10809,8 +10817,12 @@ function checkPathLater(inputId, noteId) {
     pathChecking[inputId] = setTimeout(() => resolvesPath(input.value, noteId), 250);
   });
 }
-// NOT ar-src: a repo is a remote, so a green "found: folder" affirmed what add_repo refuses (SKEIN-806).
-checkPathLater("ar-store", "ar-store-note");
+// **Nothing in the add-repo dialog is wired to this probe, and both absences are deliberate.**
+// NOT ar-src: a repo is a remote, so a green "found: folder" affirmed what add_repo refuses
+// (SKEIN-806). And there is no longer an ar-store to wire — the route refuses `store` outright
+// (SKEIN-535), so a field answering "found: folder" for a path the server would reject is the same
+// defect in the same dialog, one field along. The SSH key path is a host path skein really does
+// read, which is why it keeps the probe.
 checkPathLater("set-sshkey", "set-sshkey-note");
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
