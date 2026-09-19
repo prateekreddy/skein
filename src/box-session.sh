@@ -1059,6 +1059,94 @@ PY
   unset onboarding_flag
 fi
 
+# THE TREE SKEIN CLONED FOR A BOX IS TRUSTED IN THAT BOX — that tree, and nothing else.
+#
+# With the login screen gone (above), a new box stopped next on Claude Code's workspace-trust dialog
+# for its own tree. Measured across the owner's 14 boxes on 2026-09-19: every box the owner had
+# clicked through recorded `projects["/boxes/<box>/tree"].hasTrustDialogAccepted = true` in its own
+# private `~/.claude.json` — the key is the absolute path, no trailing slash, which is `$tree` exactly
+# (the `cd "$tree"` the session starts with, further down) — and nothing in skein wrote it. The
+# question that dialog asks is "do you trust this folder's own `.claude/settings.json` hooks and MCP
+# servers to run". For this one folder the person has already answered it: it is the repository they
+# registered, cloned by skein into this box. Asking again tells them nothing.
+#
+# That is the whole of the claim, so it is the whole of the write. Exactly `$tree`: never `/`, never
+# a parent, never any other key under `projects` — trust in Claude Code is inherited by every folder
+# beneath the one trusted, so a broader key would vouch for things skein did not clone. A new entry is
+# `{"hasTrustDialogAccepted": true}` and nothing more: Claude Code fills the rest of an entry from its
+# own defaults, and its own runner writes this same one-key shape. An entry already there gains that
+# one key and loses nothing.
+#
+# NOT behind the login guard above, deliberately. The two are different facts: whether this box holds
+# a credential, and whether this tree is the one skein cloned. Sharing the guard would mean a box with
+# no login shows the login screen and then, once the person has logged in, the trust dialog as well —
+# a second prompt for a question whose answer never depended on the first. Standing alone, a box with
+# no login shows the login screen and nothing after it.
+#
+# Same discipline as the onboarding flag: read, modify, write through a temp file and a rename; absent
+# or empty is written; present and unreadable — or a `projects`, or an entry for this tree, that is
+# not an object — is LEFT ALONE and said out loud, so the person meets one trust dialog rather than
+# losing the record.
+if command -v python3 >/dev/null 2>&1 && [ -d "$tree" ]; then
+  workspace_trust=0
+  python3 - "$home/.claude.json" "$tree" <<'PY' || workspace_trust=$?
+import json, os, sys, tempfile
+
+p, tree = sys.argv[1], sys.argv[2]
+try:
+    with open(p) as f:
+        raw = f.read()
+except FileNotFoundError:
+    raw = ""
+except OSError:
+    sys.exit(1)
+if raw.strip():
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        sys.exit(1)
+    if not isinstance(data, dict):
+        sys.exit(1)
+else:
+    data = {}
+projects = data.get("projects")
+if projects is None:
+    projects = {}
+elif not isinstance(projects, dict):
+    sys.exit(1)
+entry = projects.get(tree)
+if entry is None:
+    entry = {}
+elif not isinstance(entry, dict):
+    sys.exit(1)
+if entry.get("hasTrustDialogAccepted") is True:
+    sys.exit(0)
+entry["hasTrustDialogAccepted"] = True
+projects[tree] = entry
+data["projects"] = projects
+try:
+    mode = os.stat(p).st_mode & 0o777
+except OSError:
+    mode = 0o600
+where = os.path.dirname(p) or "."
+os.makedirs(where, exist_ok=True)
+handle, temp = tempfile.mkstemp(dir=where)
+try:
+    with os.fdopen(handle, "w") as out:
+        json.dump(data, out)
+    os.chmod(temp, mode)
+    os.replace(temp, p)
+except Exception:
+    try:
+        os.unlink(temp)
+    except OSError:
+        pass
+    sys.exit(1)
+PY
+  [ "$workspace_trust" -eq 0 ] || echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude.json could not be read or is not JSON this can extend — it is left exactly as it is, so the agent may ask you once to trust $tree" >&2
+  unset workspace_trust
+fi
+
 # Deliver box-to-box messages instead of holding them for approval — and do it in the BOX's own
 # settings, which is user scope.
 #

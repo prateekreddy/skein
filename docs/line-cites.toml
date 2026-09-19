@@ -613,15 +613,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/box-session.sh:1575"]
+["src/box-session.sh:1663"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1600"]
+["src/box-session.sh:1688"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1608"]
+["src/box-session.sh:1696"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
