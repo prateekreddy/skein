@@ -310,7 +310,10 @@ pub const TMUX: Tool = Tool {
 pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     (LIB, &[BWRAP, DU, GIT, JQ, NODE, PYTHON3, TMUX]),
     ("browser_suites", &[NODE, CHROMIUM]),
-    ("fleet_launch", &[BWRAP, TMUX, GIT]),
+    // `python3` because the launcher's credential leg IS python — `login_life`, `merge_login`, and
+    // the onboarding flag that goes with a seeded login (SKEIN-957). It was always needed and was
+    // written down nowhere, which is the same gap SKEIN-765 closed for `tmux` in `server`.
+    ("fleet_launch", &[BWRAP, TMUX, GIT, PYTHON3]),
     ("fleet_move", &[TMUX, PYTHON3]),
     // `curl` because the git shim's reachability probe IS a curl call: the two tests that drive the
     // blocked-egress hint guard on it, and without it here a machine with no curl skips them while

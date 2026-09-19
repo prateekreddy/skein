@@ -1215,9 +1215,14 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // re-entry. What keeps all of that inside the fixture is the `$SKEIN_FLEET_ROOT` these tests
     // pin at their own scratch tree.
     let _real = skein::place::seam::real_crossings();
-    if !bwrap_works() || !have("tmux") || !have("git") {
+    // **`python3` is new in this guard and was always needed here** (SKEIN-957). The launcher's
+    // whole credential leg is python — `login_life`, `merge_login`, and now the onboarding flag
+    // asserted below — so on a machine without it a box is seeded with a copy and none of the
+    // judgement, which is a different thing from what this test says it starts.
+    if !bwrap_works() || !have("tmux") || !have("git") || !have("python3") {
         return skip(
-            "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
+            "this machine cannot make a bwrap namespace, or lacks tmux/git/python3, so it cannot \
+             host a box",
         );
     }
     let root = scratch_named("start");
@@ -1408,6 +1413,29 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         seeded.contains("SEEDED"),
         "a new box inherits the sandbox's login rather than asking for its own: {seeded}"
     );
+    // ---- and it is not then asked to log in anyway (SKEIN-957) ----
+    // The invariant, over a box that was really started rather than over a fixture: a box skein has
+    // handed a credential to must not meet Claude Code's onboarding screen, which is gated on
+    // `hasCompletedOnboarding` in `~/.claude.json` and not on the credential. Derived over every
+    // home under the fleet root that the launcher's own `login_life` calls a login, so a seed path
+    // that acquires a credential some other way and forgets the flag fails here too. The sandbox's
+    // copy in this fixture has no `.claude.json` at all, which is the state that produced the bug:
+    // the flag cannot have arrived by being copied down.
+    let carrying = homes_carrying_a_login(&root.join("boxes"));
+    assert!(
+        !carrying.is_empty(),
+        "no box under the fleet root carries a login, so this assertion is about nothing — the \
+         launch above did not seed the credential it was given"
+    );
+    for home in &carrying {
+        assert_eq!(
+            onboarding_flag(home),
+            Some(serde_json::Value::Bool(true)),
+            "{} holds a working credential and would still be asked to onboard — which is the \
+             login screen on every new box",
+            home.display()
+        );
+    }
     std::thread::sleep(Duration::from_millis(1100)); // mtime granularity, not a race
                                                      // A re-login, and a grant of this box's own alongside it. Both are written here because the two
                                                      // must travel differently: the login belongs to the person and goes everywhere, the grant
@@ -2467,4 +2495,268 @@ fn an_uncovered_box_is_refused_until_it_is_allowed_and_then_says_so_where_someon
         }
         destroy_box(name).expect("destroy the box");
     }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Seeding a login and seeding "you have logged in before" are one act (SKEIN-957)
+// -------------------------------------------------------------------------------------------------
+//
+// Every new box in the owner's fleet opened on Claude Code's login screen while holding a working
+// credential, because the screen is gated on `hasCompletedOnboarding` in `~/.claude.json` and skein
+// wrote that key nowhere. The launcher writes it now, next to the credential merge, and what is
+// asserted below is the INVARIANT rather than one file's contents: whatever the launcher decides a
+// box's login is, a box that HAS one must not be asked to onboard. A test pinned to an example pair
+// of JSON blobs would stay green under a seed path that learned to forget the flag somewhere else.
+
+/// A block of the launcher, lifted from the first line beginning `from` up to and including the
+/// first line after it that is exactly `to`.
+///
+/// Read out of `box-session.sh` rather than copied, so a change to the launcher is a change to what
+/// these tests run — a copy would keep passing against the version it was written from. It panics
+/// rather than returning an empty block: a landmark that has moved must fail loudly here, not
+/// quietly hand the shell nothing to run and report that nothing went wrong.
+fn launcher_block(from: &str, to: &str) -> String {
+    let lines: Vec<&str> = LAUNCHER.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with(from))
+        .unwrap_or_else(|| {
+            panic!("box-session.sh has no line beginning `{from}` any more, so this harness is not lifting what it names")
+        });
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| *l == to)
+        .map(|i| start + 1 + i)
+        .unwrap_or_else(|| {
+            panic!("the block beginning `{from}` in box-session.sh does not end at a line `{to}`")
+        });
+    lines[start..=end].join("\n")
+}
+
+/// The launcher's own `login_life` — the judgement that decides whether a file is a login at all.
+///
+/// Asked by RUNNING the launcher's copy rather than by reading the JSON here: a second opinion
+/// written in Rust would be a second spelling of the rule, which is how the credential merge and the
+/// host's heal once elected opposite winners on the same five files.
+fn launcher_says_there_is_a_login(credential: &Path) -> bool {
+    let block = launcher_block("login_life() {", "}");
+    assert!(
+        block.contains("refreshTokenExpiresAt"),
+        "the lifted `login_life` no longer asks about an expired refresh token, so this harness is \
+         running something other than the launcher's judgement of what a login is"
+    );
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail\n{block}\nlogin_life '{}'",
+            credential.display()
+        ))
+        .output()
+        .expect("bash runs the launcher's login test")
+        .status
+        .success()
+}
+
+/// Run the launcher's onboarding block against one fixture home, exactly as a box start runs it.
+fn run_onboarding_block(home: &Path) -> std::process::Output {
+    let block = launcher_block("if command -v python3 >/dev/null 2>&1 && login_life", "fi");
+    assert!(
+        block.contains("hasCompletedOnboarding"),
+        "the lifted block no longer writes the key the onboarding screen is gated on, so this \
+         harness is running something that cannot answer the question it was written for"
+    );
+    let life = launcher_block("login_life() {", "}");
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail\nhome='{}'\n{life}\n{block}",
+            home.display()
+        ))
+        .output()
+        .expect("bash runs the launcher's onboarding block")
+}
+
+/// Every box home under `fleet_root` the launcher itself would say carries a login.
+fn homes_carrying_a_login(fleet_root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(fleet_root) else {
+        return found;
+    };
+    let mut boxes: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    boxes.sort();
+    for at in boxes {
+        let home = at.join("home");
+        if launcher_says_there_is_a_login(&home.join(".claude/.credentials.json")) {
+            found.push(home);
+        }
+    }
+    found
+}
+
+/// What `~/.claude.json` says about onboarding, for a home that has one.
+fn onboarding_flag(home: &Path) -> Option<serde_json::Value> {
+    let text = fs::read_to_string(home.join(".claude.json")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+    parsed.get("hasCompletedOnboarding").cloned()
+}
+
+/// A box that ends up with a login is never asked to onboard — whatever its `~/.claude.json` was.
+///
+/// The antecedent is the launcher's own `login_life`, so the case table below says what is on disk
+/// and never what the answer should be: swap a credential for a husk, or for a file whose refresh
+/// token expired in 2001, and the expectation follows the launcher instead of contradicting it.
+///
+/// **What makes each assertion fail**, planted and watched before this was believed:
+///
+///   * deleting `data["hasCompletedOnboarding"] = True` from the launcher — the invariant fails for
+///     every case that carries a login;
+///   * replacing the read-modify-write with `data = {}` before it, i.e. writing the file from a
+///     template — `a key that was there is gone` fails, naming the key;
+///   * making the unparseable case write anyway (`except ValueError: data = {}`) — `left exactly as
+///     it was` fails on the byte comparison;
+///   * dropping `&& login_life …` from the condition, so the flag is written with no credential —
+///     `a box with no login must still be asked` fails.
+#[test]
+fn a_box_that_has_a_login_is_never_asked_to_onboard() {
+    if !have("python3") {
+        return skip("the launcher writes this key with python3, and there is none here");
+    }
+    // A live login, a husk a logout leaves behind, and a credential whose refresh token died in
+    // 2001 — the last two are files, and neither is a login.
+    const LOGIN: &str = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}"#;
+    const HUSK: &str = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#;
+    const SPENT: &str = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":1000000000000}}"#;
+    // `(case, what is in .claude/.credentials.json, what is in .claude.json)`. `None` is a file
+    // that is not there at all, which is what a brand-new box's home looks like.
+    let cases: [(&str, Option<&str>, Option<&str>); 10] = [
+        ("no .claude.json at all", Some(LOGIN), None),
+        ("an empty .claude.json", Some(LOGIN), Some("")),
+        (
+            "a used one, with a record in it",
+            Some(LOGIN),
+            Some(r#"{"projects":{"/w":{"history":["a turn"]}},"userID":"u","numStartups":46}"#),
+        ),
+        (
+            "one that already says so",
+            Some(LOGIN),
+            Some(r#"{"hasCompletedOnboarding":true,"userID":"u"}"#),
+        ),
+        (
+            "one that says the opposite",
+            Some(LOGIN),
+            Some(r#"{"hasCompletedOnboarding":false,"userID":"u"}"#),
+        ),
+        ("one that is not JSON", Some(LOGIN), Some("not json at all")),
+        (
+            "one that is JSON but not an object",
+            Some(LOGIN),
+            Some("[1, 2, 3]"),
+        ),
+        ("a husk, not a login", Some(HUSK), Some(r#"{"userID":"u"}"#)),
+        (
+            "a login whose refresh token is spent",
+            Some(SPENT),
+            Some(r#"{"userID":"u"}"#),
+        ),
+        ("no credential at all", None, Some(r#"{"userID":"u"}"#)),
+    ];
+
+    // The same fixture family as every other test in this file, so the leak scan keeps deriving
+    // one set of names from this binary. Nothing here starts a process; the block under test is
+    // bash and a python that exits.
+    let dir = scratch_named("onboard");
+    let mut seen_with_a_login = 0;
+    let mut seen_without = 0;
+    for (n, (case, credential, before)) in cases.iter().enumerate() {
+        let home = dir.join(format!("home-{n}"));
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        if let Some(body) = credential {
+            fs::write(home.join(".claude/.credentials.json"), body).unwrap();
+        }
+        if let Some(body) = before {
+            fs::write(home.join(".claude.json"), body).unwrap();
+        }
+
+        let out = run_onboarding_block(&home);
+        assert!(
+            out.status.success(),
+            "the launcher's onboarding block failed for `{case}`: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        let after = fs::read_to_string(home.join(".claude.json")).ok();
+        let has_login = launcher_says_there_is_a_login(&home.join(".claude/.credentials.json"));
+        let was: Option<serde_json::Value> = before
+            .filter(|b| !b.trim().is_empty())
+            .map(|b| serde_json::from_str(b).unwrap_or(serde_json::Value::Null));
+        let could_extend = was.as_ref().map(|v| v.is_object()).unwrap_or(true);
+
+        if !has_login {
+            seen_without += 1;
+            // Skein does not fabricate "you have logged in before" for a box it handed nothing to:
+            // that box genuinely has to log in, and hiding the screen it does that on would leave
+            // it stranded in front of an agent that cannot answer.
+            assert_eq!(
+                after.as_deref(),
+                *before,
+                "a box with no login must still be asked to log in, and `{case}` had its \
+                 ~/.claude.json written anyway"
+            );
+            continue;
+        }
+        seen_with_a_login += 1;
+
+        if !could_extend {
+            // `~/.claude.json` is Claude Code's file and holds the box's whole project record. A
+            // shape skein cannot read is left alone and said out loud — the person meets one
+            // onboarding prompt, which is where they are today, instead of losing the record.
+            assert_eq!(
+                after.as_deref(),
+                *before,
+                "`{case}` was rewritten from a template; a file skein cannot parse must be left \
+                 exactly as it was"
+            );
+            assert!(
+                said.contains(".claude.json"),
+                "`{case}` was left alone in silence, so nobody can tell why the box still asks to \
+                 onboard: {said:?}"
+            );
+            continue;
+        }
+
+        // THE INVARIANT.
+        let text = after.expect("a home with a login must end up with a ~/.claude.json");
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("`{case}` left ~/.claude.json unreadable ({e}): {text}"));
+        assert_eq!(
+            parsed.get("hasCompletedOnboarding"),
+            Some(&serde_json::Value::Bool(true)),
+            "the launcher handed `{case}` a credential and left it needing to onboard, which is \
+             the login screen on every new box: {text}"
+        );
+        // And it added a key rather than replacing a file: everything that was there is still
+        // there, with the value it had.
+        if let Some(serde_json::Value::Object(before)) = &was {
+            for (key, value) in before {
+                if key == "hasCompletedOnboarding" {
+                    continue;
+                }
+                assert_eq!(
+                    parsed.get(key),
+                    Some(value),
+                    "`{case}`: the key `{key}` was in ~/.claude.json and is not in what skein \
+                     wrote back — this file carries the box's project history, and it is not \
+                     skein's to replace: {text}"
+                );
+            }
+        }
+    }
+    // Neither half of the table may quietly empty out: a run that saw no login proves nothing about
+    // the invariant, and one that saw no husk proves nothing about the restraint beside it.
+    assert!(
+        seen_with_a_login >= 7 && seen_without == 3,
+        "the launcher's own `login_life` read this table as {seen_with_a_login} logins and \
+         {seen_without} non-logins, which is not the split these cases were written to have — \
+         either a fixture has stopped being what it says it is, or the judgement moved"
+    );
 }

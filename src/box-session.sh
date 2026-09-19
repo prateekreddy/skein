@@ -980,6 +980,85 @@ for rel in ".claude/.credentials.json" ".codex/auth.json"; do
   fi
 done
 
+# A BOX SKEIN HAS HANDED A CREDENTIAL TO IS NEVER ASKED TO LOG IN.
+#
+# Seeding a login and seeding "you have logged in before" are one act, and they came apart. Claude
+# Code gates its onboarding screen on `hasCompletedOnboarding` in `~/.claude.json`, not on whether a
+# credential exists — so a box that inherited a perfectly good `.credentials.json` a few lines above
+# still opened on the login screen, on every box the owner has ever created. Measured across his
+# 13-box fleet on 2026-09-19: one refresh-token hash everywhere, `oauthAccount` everywhere, and the
+# only key that differed between a box that asks and a box that does not was this one. Nothing in
+# skein had ever written it (`grep -rn hasCompletedOnboarding src/ tools/` answered nothing at all),
+# so it appeared only where a person had completed onboarding BY HAND — into that box's own private
+# `.claude.json`, which never flows back — and every box created afterwards seeded from the same
+# un-onboarded copy. That is why it was every new box and only its first launch.
+#
+# Written HERE, beside the credential, rather than into the copy a box is seeded from. This is the
+# only place that knows whether the box ACTUALLY ended up with a login: it may have arrived in the
+# seed above, or in the merge above from a login made elsewhere, and either way the answer is the
+# file this reads and not what the seed happened to contain. It therefore also holds for every fleet
+# whose seed carries no flag at all, which is every fleet that exists today.
+#
+# `lastOnboardingVersion` is deliberately NOT written. It gates re-onboarding after a Claude Code
+# upgrade, which is plausibly wanted, and no onboarded box in this fleet carries it at all — the
+# installed Claude Code writes `hasCompletedOnboarding` and no such key — so writing it would be
+# suppressing a prompt nothing here has been seen to produce.
+#
+# READ, MODIFY, WRITE, and never a file from a template. `~/.claude.json` belongs to Claude Code,
+# not to skein: it holds that box's project history, its MCP servers and its tips state — 60K of it
+# on a box that has been used for a week. So one key is added to whatever is already there, through
+# a temporary file and a rename so a crash cannot leave a half-written one. A file that is present
+# and unparseable is LEFT ALONE and said out loud: the person is then exactly where they are today,
+# one onboarding prompt, rather than one conversation record worse off. An absent or empty file has
+# no record to lose and is written.
+if command -v python3 >/dev/null 2>&1 && login_life "$home/.claude/.credentials.json" >/dev/null 2>&1; then
+  onboarding_flag=0
+  python3 - "$home/.claude.json" <<'PY' || onboarding_flag=$?
+import json, os, sys, tempfile
+
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        raw = f.read()
+except FileNotFoundError:
+    raw = ""
+except OSError:
+    sys.exit(1)
+if raw.strip():
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        sys.exit(1)
+    if not isinstance(data, dict):
+        sys.exit(1)
+else:
+    data = {}
+if data.get("hasCompletedOnboarding") is True:
+    sys.exit(0)
+data["hasCompletedOnboarding"] = True
+try:
+    mode = os.stat(p).st_mode & 0o777
+except OSError:
+    mode = 0o600
+where = os.path.dirname(p) or "."
+os.makedirs(where, exist_ok=True)
+handle, temp = tempfile.mkstemp(dir=where)
+try:
+    with os.fdopen(handle, "w") as out:
+        json.dump(data, out)
+    os.chmod(temp, mode)
+    os.replace(temp, p)
+except Exception:
+    try:
+        os.unlink(temp)
+    except OSError:
+        pass
+    sys.exit(1)
+PY
+  [ "$onboarding_flag" -eq 0 ] || echo "skein: ${SKEIN_BOX:-this box} has a login, but its ~/.claude.json could not be read or is not JSON this can extend — it is left exactly as it is, so the agent may ask you to onboard once" >&2
+  unset onboarding_flag
+fi
+
 # Deliver box-to-box messages instead of holding them for approval — and do it in the BOX's own
 # settings, which is user scope.
 #
