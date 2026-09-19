@@ -346,6 +346,18 @@ fn build_git_shim_named(
     real_git: &str,
     fleet_name: Option<&str>,
 ) -> PathBuf {
+    build_git_shim_for(fleet, box_root, real_git, fleet_name, "web-main")
+}
+
+/// The same, for a box of the caller's naming — so two shims stacked one over the other can be
+/// told apart by the name each files its ask under.
+fn build_git_shim_for(
+    fleet: &std::path::Path,
+    box_root: &std::path::Path,
+    real_git: &str,
+    fleet_name: Option<&str>,
+    box_name: &str,
+) -> PathBuf {
     let launcher = script("box-session.sh");
     let src = fs::read_to_string(&launcher).unwrap();
     let lines: Vec<&str> = src.lines().collect();
@@ -374,7 +386,7 @@ fn build_git_shim_named(
     builder
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail; binds=(); root={}; box=web-main; skein_launcher={}; {block}",
+            "set -uo pipefail; binds=(); root={}; box={box_name}; skein_launcher={}; {block}",
             box_root.display(),
             installed.display(),
         ))
@@ -421,14 +433,44 @@ fn build_git_shim_named(
     box_root.join("bin/git")
 }
 
+/// The machine's real git — **never a skein shim**, which is what `command -v git` finds when these
+/// tests run inside a skein box (SKEIN-956).
+///
+/// A box binds its own shim over the git on its PATH, so `command -v git` there answers with a
+/// script whose `skein_git=` line names the real binary. Taken at face value, every shim built
+/// here wrapped the running box's shim: a push filed a second ask under the running box's name,
+/// and this file's verdict depended on which box ran it and what launcher started that box — green
+/// at the batch-10 gate, red on the same tree days later, with no commit between. The nesting is
+/// still tested, deliberately and on every machine, by
+/// `a_shim_wrapping_another_shim_files_one_request_for_one_push`.
 fn real_git() -> Option<String> {
     let out = Command::new("sh")
         .arg("-c")
         .arg("command -v git")
         .output()
         .ok()?;
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Followed rather than refused, and bounded, because a box started inside a box stacks them.
+    for _ in 0..8 {
+        let Some(inner) = shim_target(std::path::Path::new(&p)) else {
+            break;
+        };
+        p = inner;
+    }
     (!p.is_empty()).then_some(p)
+}
+
+/// The binary a skein git shim execs, read from the `skein_git=` line the launcher bakes into it;
+/// `None` when `path` is not one. A real git is a binary and has no such line.
+fn shim_target(path: &std::path::Path) -> Option<String> {
+    let text = fs::read(path).ok()?;
+    let text = String::from_utf8(text).ok()?;
+    if !text.starts_with("#!/bin/sh") {
+        return None;
+    }
+    text.lines()
+        .find_map(|l| l.strip_prefix("skein_git="))
+        .map(|v| v.trim_matches('\'').to_string())
 }
 
 /// The whole `SKEIN_GIT_SCOPE` block, lifted from the launcher rather than copied — the same rule
@@ -842,7 +884,12 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
     let said = String::from_utf8_lossy(&out.stderr);
 
     let queued = b.queued();
-    assert_eq!(queued.len(), 1, "the push filed no request: {said}");
+    assert_eq!(
+        queued.len(),
+        1,
+        "one push must file exactly one request, and it filed {} — {queued:?}: {said}",
+        queued.len()
+    );
     assert_eq!(queued[0]["repo"], "someone-else/private");
     assert_eq!(queued[0]["box"], "web-main");
     assert!(
@@ -863,6 +910,62 @@ fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
     assert!(
         repo.got_the_push(&git),
         "the shim swallowed the push instead of running it — the remote holds {:?}, not {}: {said}",
+        repo.received(&git),
+        repo.head
+    );
+}
+
+/// **One push files one request when a shim wraps another shim** (SKEIN-956). A box finds its
+/// "real" git with `command -v git`, and inside a box that is the box's own shim — so a box started
+/// from a box, or skein's own tests run in one, put a shim in front of a shim. Each used to file an
+/// ask under its own box name, and the person approving saw two cockpit rows for one push.
+///
+/// Built here on purpose, with two names, so it is caught on any machine: before this test the
+/// nesting existed only by accident, when `cargo test` happened to run inside a scoped box.
+#[test]
+fn a_shim_wrapping_another_shim_files_one_request_for_one_push() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let Some(git) = real_git() else {
+        return skip("git is not installed, and the shim under test is a wrapper around it");
+    };
+    let b = Box_::new("shim-nested");
+    // The inner shim is what the outer box's `git.real` turns out to be: the enclosing box's git.
+    let inner = build_git_shim_for(
+        &b.fleet,
+        &b.fleet.join("enclosing"),
+        &git,
+        Some(FLEET_FIXTURE),
+        "web-enclosing",
+    );
+    let outer = build_git_shim(
+        &b.fleet,
+        &b.fleet.join("boxroot"),
+        &inner.display().to_string(),
+    );
+
+    let repo = Repo::new(&b, &git, "git@github.com:someone-else/private.git");
+    let out = shim_push(&outer, &b, &repo, true);
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    let queued = b.queued();
+    assert_eq!(
+        queued.len(),
+        1,
+        "one push through two shims must file exactly one request, and it filed {} — {queued:?}: {said}",
+        queued.len()
+    );
+    // The ask belongs to the box the agent is in — the outermost shim — not the one around it.
+    assert_eq!(queued[0]["box"], "web-main", "{queued:?}");
+    assert_eq!(
+        said.matches("nothing here grants you").count(),
+        1,
+        "the agent was told twice: {said}"
+    );
+    assert!(
+        repo.got_the_push(&git),
+        "the stacked shims swallowed the push — the remote holds {:?}, not {}: {said}",
         repo.received(&git),
         repo.head
     );
