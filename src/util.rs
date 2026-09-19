@@ -1450,6 +1450,26 @@ pub(crate) mod probe {
         &stat[open + 1..close] == comm && state != "Z"
     }
 
+    /// Wait for a pid to BECOME a live `comm`, and say whether it did (SKEIN-967).
+    ///
+    /// The readiness half of the handshake with a script that does `sleep 30 & echo $! > pidfile`.
+    /// `$!` names the forked shell, and the shell writes it without waiting for that fork to exec
+    /// — so the pid can be read while its command name is still `sh`, and a single read of
+    /// [`alive_named`] then calls a process that is moments from being the `sleep` "not a running
+    /// sleep". Under load that was one alone run in two. The exec is the event the caller is
+    /// waiting on, so this waits for the exec: the budget only bounds how long a process that never
+    /// becomes `comm` is given before the caller says so.
+    pub(crate) fn became_within(pid: i32, comm: &str, budget: std::time::Duration) -> bool {
+        let since = std::time::Instant::now();
+        while !alive_named(pid, comm) {
+            if since.elapsed() >= budget {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        true
+    }
+
     /// Wait for a pid to stop being a live `comm`, and say whether it did.
     ///
     /// Polled rather than read once, because a kill is a signal and the reaping is init's job. The
@@ -1536,8 +1556,14 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         };
+        // Waited for rather than read once: the pid is written before the fork has exec'd `sleep`
+        // (SKEIN-967), and the wait is inside the same two seconds as the pidfile's.
         assert!(
-            probe::alive_named(grandchild, "sleep"),
+            probe::became_within(
+                grandchild,
+                "sleep",
+                Duration::from_secs(2).saturating_sub(began.elapsed())
+            ),
             "pid {grandchild} was not a running `sleep` before the deadline, so this run proves \
              nothing about what the deadline ends"
         );
@@ -1634,9 +1660,11 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             })
             .collect();
+        // Waited for rather than read once: `$!` is written before the fork has exec'd `sleep`, so
+        // a single read can find it still named `sh` (SKEIN-967).
         for pid in &grandchildren {
             assert!(
-                probe::alive_named(*pid, "sleep"),
+                probe::became_within(*pid, "sleep", Duration::from_secs(5)),
                 "pid {pid} was not a running `sleep` before the signal, so this run proves nothing \
                  about what a forwarded interrupt ends"
             );
