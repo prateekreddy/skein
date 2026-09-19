@@ -999,6 +999,196 @@ pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
     crate::util::with_lock(&guard, || clone_mirror(repo, &mirror))
 }
 
+/// The environment variable [`FLEET_CREDENTIAL_HELPER`] reads the token out of.
+///
+/// A name of skein's own, so it cannot collide with anything git or the fleet already sets. The
+/// helper below has to spell it a second time — `concat!` takes literals — and renaming one without
+/// the other leaves git asking for a variable nothing sets, which is a helper that answers with an
+/// EMPTY password rather than one that fails. That is why
+/// [`tests::the_token_sent_is_the_one_filed_under_that_repository`] asserts on the stored token's
+/// own characters coming back out of real git, and not merely on a `password=` line being there.
+const FLEET_TOKEN_VAR: &str = "SKEIN_FLEET_GIT_TOKEN";
+
+/// A `credential.helper` that answers from [`FLEET_TOKEN_VAR`] and from nothing else.
+///
+/// **The token reaches git through the environment and never through argv or a URL**, which is
+/// §9.5's rule about secrets and the reason this is a helper rather than the one-liner that rewrites
+/// `https://github.com/…` into `https://<token>@github.com/…`. A rewritten URL is in
+/// `/proc/<pid>/cmdline`, in git's own error messages, and in the `origin` of anything cloned from
+/// it; an environment variable is readable only by the same uid.
+///
+/// `git` runs a `!`-prefixed helper through `sh` with the operation appended, so `$1` here is
+/// `get`, `store` or `erase`. Only `get` is answered: `store` and `erase` are git offering to
+/// remember or forget a credential skein already keeps on disk, and a helper that acted on them
+/// would be a second, unmanaged copy of the token.
+const FLEET_CREDENTIAL_HELPER: &str = concat!(
+    "!f() { test \"$1\" = get && ",
+    "printf 'username=x-access-token\\npassword=%s\\n' \"$SKEIN_FLEET_GIT_TOKEN\"; }; f"
+);
+
+/// The file one stored credential's token lives in — `~/.skein/github-pats/<id>`.
+///
+/// The same path `gitgate::credential_token_path` writes and reads, spelled again here because that
+/// one is private to its module. The duplication is deliberate and is covered rather than assumed:
+/// this path is quoted at a person in [`git_refusal`], so naming the wrong directory would send
+/// them to look somewhere skein never reads, and
+/// [`tests::the_token_sent_is_the_one_filed_under_that_repository`] writes through this function
+/// and reads back through [`crate::gitgate::credential_for`], so the two cannot drift apart in
+/// silence.
+fn stored_credential_path(id: &str) -> PathBuf {
+    skein_home().join("github-pats").join(id)
+}
+
+/// The list that says which repository each stored credential covers — `~/.skein/github-pats.json`.
+fn stored_credentials_path() -> PathBuf {
+    skein_home().join("github-pats.json")
+}
+
+/// The fleet's optional read-only PAT — `~/.skein/github-read-token`, as [`crate::gitgate::read_pat`]
+/// reads it.
+fn read_credential_path() -> PathBuf {
+    skein_home().join("github-read-token")
+}
+
+/// What skein found to authenticate one **fleet-side** git run with, and where it looked.
+///
+/// Fleet-side means outside every box. `src/box-session.sh` wires a box's git up completely — a
+/// `SKEIN_GIT_TOKENS` directory, `credential.useHttpPath`, a `credential.helper` — and neither
+/// [`clone_mirror`] nor [`fetch_mirror`] is inside a box, so none of that reached them. Carried
+/// from [`fleet_git`] to [`git_refusal`] so a failure can name the credential that was tried, or
+/// the files that were read looking for one, instead of passing git's own words through.
+struct FleetGit {
+    /// `owner/name`, when the remote is a GitHub repository a stored credential can be keyed to.
+    /// `None` for anything else — a directory, a remote on some other host — which no stored PAT
+    /// covers and which it would therefore be wrong to blame a missing PAT for.
+    slug: Option<String>,
+    /// The credential file whose token was handed to git, if one was.
+    sent: Option<PathBuf>,
+}
+
+/// Wire up a git command skein runs fleet-side: never a terminal, and the credential the fleet
+/// already holds.
+///
+/// **`GIT_TERMINAL_PROMPT=0` is the half that matters, and it matters most when no credential is
+/// found at all** (SKEIN-951). Both of these call sites were a bare `Command::new("git")` — no
+/// credential environment, no helper, and nothing stopping git from reaching its last resort, which
+/// is to ask the terminal. On 2026-09-19 that stopped a `skein start` dead for twenty minutes at
+/// `Username for 'https://github.com':`, the git process asleep inside `git remote-https` waiting on
+/// a tty nobody was watching, with no way for the owner to tell what was being asked for.
+///
+/// Failing here is survivable and hanging is not, which is why the prompt is the bug rather than the
+/// missing token: `start_box_inner` prints a warning and brings the box up from the mirror it
+/// already has when [`fetch_mirror`] returns `Err`. Refusing turns a dead fleet into a line of text.
+///
+/// **The credential is chosen by the repository it covers, not by being first in the file.**
+/// `github-pats.json` records the `owner/name` each stored token is good for, so
+/// [`crate::gitgate::credential_for`] can pick the one that can actually reach this remote. A
+/// read-only PAT is the fallback and not the preference: it is broad by design, so it may well not
+/// have been granted the private repository in question, while a per-repo token covers exactly the
+/// repository being fetched or it would not be filed under it.
+///
+/// Nothing is sent to a remote skein cannot key a credential to — see [`FleetGit::slug`]. A token
+/// belonging to a person is not something to offer a host on the strength of a URL skein did not
+/// recognise.
+fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
+    // First, and unconditionally. Every path below can decide there is no credential to send; none
+    // of them may decide that git is allowed to ask a terminal instead.
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    let Some(slug) = crate::gitgate::repo_slug(repo) else {
+        return FleetGit {
+            slug: None,
+            sent: None,
+        };
+    };
+    let found = crate::gitgate::credential_for(&slug)
+        .map(|(c, token)| (stored_credential_path(&c.id), token))
+        .or_else(|| crate::gitgate::read_pat().map(|token| (read_credential_path(), token)));
+    let Some((path, token)) = found else {
+        return FleetGit {
+            slug: Some(slug),
+            sent: None,
+        };
+    };
+    command.env(FLEET_TOKEN_VAR, token.expose());
+    // `credential.helper` is a LIST, and the empty value is how git is told to forget the entries it
+    // has accumulated from the fleet's own config files. Without the reset a helper configured there
+    // — `store` pointing at a file with a stale token, say — is asked first and answers first, and
+    // skein's token is never reached. With it, the only helper is the one on the line below.
+    command.env("GIT_CONFIG_COUNT", "2");
+    command.env("GIT_CONFIG_KEY_0", "credential.helper");
+    command.env("GIT_CONFIG_VALUE_0", "");
+    command.env("GIT_CONFIG_KEY_1", "credential.helper");
+    command.env("GIT_CONFIG_VALUE_1", FLEET_CREDENTIAL_HELPER);
+    FleetGit {
+        slug: Some(slug),
+        sent: Some(path),
+    }
+}
+
+/// Does this git failure look like one a credential would have prevented?
+///
+/// Deliberately a list of what git and GitHub actually say, and deliberately not "anything that
+/// failed": a fetch that could not resolve `github.com` is not a missing token, and telling somebody
+/// to go and store one would send them to fix the wrong thing. `repository not found` is in the list
+/// because that is what GitHub answers for a private repository the caller cannot see — the same
+/// words it uses for one that does not exist, which is why [`git_refusal`] offers the credential as
+/// an explanation rather than asserting it.
+fn refused_for_want_of_a_credential(stderr: &str) -> bool {
+    let said = stderr.to_ascii_lowercase();
+    [
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+        "authentication failed",
+        "invalid username or token",
+        "repository not found",
+        "403 forbidden",
+    ]
+    .iter()
+    .any(|marker| said.contains(marker))
+}
+
+/// A failed fleet-side git run, said in skein's terms rather than only in git's.
+///
+/// git's last word for a missing credential is `fatal: could not read Username for
+/// 'https://github.com': terminal prompts disabled`. True, and useless: it names neither the
+/// repository nor anywhere a person could put a token, and the warning `start_box_inner` prints
+/// around it ("is cloning from a mirror that could not be refreshed") names the box rather than the
+/// credential. So this says which repository was being reached, which files skein read looking for
+/// something to reach it with, and what to do — and then quotes git, because git's words are what a
+/// search engine and the next person both recognise.
+///
+/// Only for failures that look like a credential problem. Everything else passes through unchanged,
+/// so a network outage is still reported as a network outage.
+fn git_refusal(doing: &str, stderr: &str, auth: &FleetGit) -> String {
+    let stderr = stderr.trim();
+    if !refused_for_want_of_a_credential(stderr) {
+        return format!("{doing}: {stderr}");
+    }
+    let account = match (&auth.slug, &auth.sent) {
+        (_, Some(path)) => format!(
+            "skein sent the token stored at {}, and it was refused — so it has expired, or it does \
+             not cover this repository",
+            path.display()
+        ),
+        (Some(slug), None) => format!(
+            "skein had no GitHub credential to send for {slug}, which is exactly how a private \
+             repository answers. It looks in {} for a stored token naming {slug} (the token itself \
+             is then at {}), and for a read-only token at {}; neither had one. Store one under \
+             GitHub in the cockpit's settings",
+            stored_credentials_path().display(),
+            stored_credential_path("<id>").display(),
+            read_credential_path().display(),
+        ),
+        (None, None) => format!(
+            "skein keys its GitHub credentials by `owner/name` and could not read one out of this \
+             remote, so nothing in {} can be matched to it and no token was sent",
+            stored_credentials_path().display(),
+        ),
+    };
+    format!("{doing}: {account}. git said: {stderr}")
+}
+
 /// The clone itself, with the lock in [`ensure_mirror`] already held.
 fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     // Asked again under the lock. The caller that held it may have been making exactly this mirror,
@@ -1021,6 +1211,8 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(mirror.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
     let mut command = Command::new("git");
+    // Never a terminal, and the fleet's own credential if it has one (SKEIN-951).
+    let auth = fleet_git(&mut command, repo);
     // `--` before the two positionals, so a `source` beginning with `-` is a repository name git
     // cannot find rather than an option git obeys. Belt to `registrable_source`'s braces, and worth
     // saying what it is NOT: with the argv this builds, an injected option was *not* exploitable —
@@ -1032,9 +1224,10 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     let out = bounded_output(&mut command, "git clone --mirror", Duration::from_secs(300))?;
     if !out.status.success() {
         let _ = fs::remove_dir_all(mirror);
-        return Err(format!(
-            "mirroring {from}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(git_refusal(
+            &format!("mirroring {from}"),
+            &String::from_utf8_lossy(&out.stderr),
+            &auth,
         ));
     }
     // Point it at where the code really comes from. A URL repo's mirror fetches from the URL; an
@@ -1102,6 +1295,8 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
 pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
     let mirror = ensure_mirror(repo)?;
     let mut command = Command::new("git");
+    // Never a terminal, and the fleet's own credential if it has one (SKEIN-951).
+    let auth = fleet_git(&mut command, repo);
     command.arg("-C").arg(&mirror).args([
         "fetch",
         "--prune",
@@ -1111,10 +1306,10 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
     ]);
     let out = bounded_output(&mut command, "git fetch --prune", Duration::from_secs(300))?;
     if !out.status.success() {
-        return Err(format!(
-            "fetching {}: {}",
-            repo.id,
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(git_refusal(
+            &format!("fetching {}", repo.id),
+            &String::from_utf8_lossy(&out.stderr),
+            &auth,
         ));
     }
     // Keep it packed as it grows (SKEIN-406). `--auto` rather than a plain `gc`: it is a no-op
@@ -1816,6 +2011,269 @@ mod tests {
             Ok(repo.clone())
         })
         .unwrap()
+    }
+
+    /// A repo record pointing at a GitHub URL, with no mirror and nothing on disk but its store.
+    ///
+    /// Deliberately not [`registered`]: these three tests are about what skein hands the git it
+    /// spawns, and `registered` makes a mirror, which means running the real git before the
+    /// interesting one.
+    fn at_github(home: &Path, slug: &str) -> Repo {
+        let id = slug.replace('/', "-");
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "source": format!("https://github.com/{slug}.git"),
+            "store": home.join("store/.claude").to_string_lossy(),
+            "agent": "claude",
+        }))
+        .unwrap()
+    }
+
+    /// A `git` on `$PATH` that records the environment it was spawned with and then answers exactly
+    /// what git answers when it has no credential and no terminal to ask at. Returns the log.
+    fn recording_git(home: &Path, env: &mut crate::testutil::EnvPins) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("git-spawns.log");
+        fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\n{{ echo \"ARGV: $*\"; env; echo '--- end ---'; }} >> '{}'\n\
+                 echo \"fatal: could not read Username for 'https://github.com': terminal prompts \
+                 disabled\" >&2\nexit 128\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        env.set(
+            "PATH",
+            format!("{}:{}", bin.display(), env::var("PATH").unwrap_or_default()),
+        );
+        log
+    }
+
+    /// **Fleet-side git never waits on a terminal, and says which credential was missing**
+    /// (SKEIN-951).
+    ///
+    /// `clone_mirror` and `fetch_mirror` run git *outside* every box, so none of the credential
+    /// wiring `src/box-session.sh` does reached them and nothing set `GIT_TERMINAL_PROMPT`. A
+    /// private remote with no usable token therefore reached git's last resort — asking the tty —
+    /// and on 2026-09-19 a `skein start` sat on `Username for 'https://github.com':` for twenty
+    /// minutes with nobody watching the terminal it was asking.
+    ///
+    /// Two assertions, and they fail for two different reasons on purpose. The first reads the
+    /// environment of the process that was actually spawned, not a string in the source: deleting
+    /// `command.env("GIT_TERMINAL_PROMPT", "0")` from [`fleet_git`] is the change that makes it
+    /// fail, and it is the change that brings the hang back. The second is the refusal's own text —
+    /// having [`git_refusal`] pass git's stderr through unchanged is the change that makes it fail,
+    /// and that is the state where a person is told "could not read Username" and nothing about
+    /// where skein looked.
+    #[test]
+    fn fleet_side_git_refuses_rather_than_asking_a_terminal_for_a_username() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        let log = recording_git(&home, &mut env);
+
+        let repo = at_github(&home, "acme/thing");
+        let why = ensure_mirror(&repo).expect_err("this git cannot make a mirror");
+
+        let spawned = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            spawned.contains("ARGV: clone --mirror"),
+            "the clone is not what got recorded, so the environment below is some other git's:\n\
+             {spawned}"
+        );
+        assert!(
+            spawned.lines().any(|line| line == "GIT_TERMINAL_PROMPT=0"),
+            "the git skein spawned may still ask a terminal, which is the hang itself. Its \
+             environment was:\n{spawned}"
+        );
+
+        for wanted in [
+            "acme/thing",
+            &home.join("github-pats.json").display().to_string(),
+            &home.join("github-read-token").display().to_string(),
+        ] {
+            assert!(
+                why.contains(wanted),
+                "the refusal never names {wanted}, so it cannot be acted on: {why}"
+            );
+        }
+
+        // And the other direction, which is the part a decoration that fires on every failure would
+        // get wrong: a fetch that could not resolve the host is not a missing token, and sending
+        // somebody to store one would send them to fix the wrong thing. Making
+        // `refused_for_want_of_a_credential` answer `true` unconditionally is the change that makes
+        // this fail.
+        let offline = git_refusal(
+            "fetching thing",
+            "fatal: unable to access 'https://github.com/acme/thing.git/': \
+             Could not resolve host: github.com",
+            &FleetGit {
+                slug: Some("acme/thing".into()),
+                sent: None,
+            },
+        );
+        assert!(
+            !offline.contains("github-pats.json"),
+            "a host that could not be resolved was reported as a credential to go and store: \
+             {offline}"
+        );
+    }
+
+    /// **The token sent is the one filed under this repository, and real git reads it back.**
+    ///
+    /// Two halves that a single-credential fixture would conflate. The first is selection: the file
+    /// holds a credential for another repo *first*, so picking by position rather than by the
+    /// `repos` field — which is what `gitgate::any_user_pat` does, and is SKEIN-953 — sends a token
+    /// that cannot reach this remote. The second is that the wiring works at all: `git credential
+    /// fill` is the real git binary, asked the same question the real fetch asks it, so a helper
+    /// that is misspelled or reads the wrong variable answers nothing and the assertion fails.
+    ///
+    /// It also pins the path drift that [`stored_credential_path`] warns about: the token is
+    /// written through that function and read back through `gitgate::credential_for`, so changing
+    /// one directory name without the other fails here rather than in a refusal that points a
+    /// person at a directory skein never reads.
+    #[test]
+    fn the_token_sent_is_the_one_filed_under_that_repository() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+
+        fs::create_dir_all(home.join("github-pats")).unwrap();
+        fs::write(
+            home.join("github-pats.json"),
+            serde_json::json!([
+                {"id": "first", "label": "some other repo", "repos": ["acme/other"]},
+                {"id": "second", "label": "this repo", "repos": ["acme/thing"]},
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let wrong = "token-filed-under-the-other-repo";
+        let right = "token-filed-under-this-repo";
+        crate::secret::write(
+            &stored_credential_path("first"),
+            &crate::secret::Secret::new(wrong),
+        )
+        .unwrap();
+        crate::secret::write(
+            &stored_credential_path("second"),
+            &crate::secret::Secret::new(right),
+        )
+        .unwrap();
+
+        let (read_back, _) = crate::gitgate::credential_for("acme/thing")
+            .expect("gitgate reads tokens back from somewhere other than stored_credential_path");
+        assert_eq!(
+            read_back.id, "second",
+            "the credential filed under acme/thing is not the one that came back"
+        );
+
+        let repo = at_github(&home, "acme/thing");
+        let mut command = Command::new("git");
+        command
+            .args(["credential", "fill"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let auth = fleet_git(&mut command, &repo);
+        assert_eq!(
+            auth.sent,
+            Some(stored_credential_path("second")),
+            "skein did not choose the credential filed under the repo it is fetching"
+        );
+
+        let mut child = command.spawn().unwrap();
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"protocol=https\nhost=github.com\npath=acme/thing.git\n\n")
+                .unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        let filled = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            filled.contains(&format!("password={right}")),
+            "git was given no usable credential by skein's wiring; it filled:\n{filled}\nand said:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !filled.contains(wrong),
+            "git was handed the token filed under a different repository:\n{filled}"
+        );
+    }
+
+    /// **A remote skein cannot key a credential to is sent no credential at all.**
+    ///
+    /// `github-pats` tokens belong to a person and are filed by `owner/name`. Offering one to a host
+    /// skein did not recognise would be skein deciding, on the strength of an unparsed URL, to hand
+    /// somebody's PAT to whoever is on the other end. Making [`fleet_git`] fall back to
+    /// `gitgate::read_pat` before it has a slug is the change that makes this fail.
+    ///
+    /// `GIT_TERMINAL_PROMPT` is asserted here as well, and for its own reason: the credential search
+    /// returns early on this path, so a fix that set the variable *after* finding a token would
+    /// leave exactly this case — a remote skein knows least about — still able to hang.
+    #[test]
+    fn a_remote_skein_cannot_name_is_sent_no_credential() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        crate::secret::write(
+            &read_credential_path(),
+            &crate::secret::Secret::new("the-fleet-wide-read-token"),
+        )
+        .unwrap();
+
+        let elsewhere: Repo = serde_json::from_value(serde_json::json!({
+            "id": "elsewhere",
+            "source": "https://git.example.invalid/acme/thing.git",
+            "store": home.join("store/.claude").to_string_lossy(),
+            "agent": "claude",
+        }))
+        .unwrap();
+        let mut command = Command::new("git");
+        let auth = fleet_git(&mut command, &elsewhere);
+        assert_eq!(
+            auth.slug, None,
+            "a non-GitHub remote parsed as a repository"
+        );
+        assert_eq!(
+            auth.sent, None,
+            "skein offered a stored PAT to a host it could not name"
+        );
+
+        let sent: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            sent.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0"),
+            "a remote with no credential is the one that hangs, and this one may still prompt: \
+             {sent:?}"
+        );
+        assert!(
+            !sent.contains_key(FLEET_TOKEN_VAR),
+            "a token reached a remote skein could not key it to: {sent:?}"
+        );
     }
 
     /// A repo registered now does not start polling GitHub, and an older file that never wrote the

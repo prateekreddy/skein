@@ -184,14 +184,14 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: ssh key not loaded ({e})\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3573"]
-line = "Err(e) => ("
-window = ".into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein-server.rs:3568"]
 line = "Ok(Err(why)) => ("
 window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server.rs:3573"]
+line = "Err(e) => ("
+window = ".into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:3616"]
@@ -310,13 +310,13 @@ line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server.rs:5105"]
+line = "async fn login_terminal("
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server.rs:5111"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:5105"]
-line = "async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:5114"]
@@ -1250,53 +1250,51 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub(crate) fn registrable_source(source: &str) -> bool {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos.rs:1014"]
-line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/repos.rs:1035"]
-line = "return Err(format!("
-window = "let _ = fs::remove_dir_all(mirror);\u000breturn Err(format!(\u000b\"mirroring {from}: {}\","
+historical = "SKEIN-951 replaced this site: `clone_mirror`'s refusal is `git_refusal` at `src/repos.rs:1227` now. The verdict this row records for it — `n`, raw git stderr — IS the defect that item fixed, so the message here today names the repository, the `github-pats.json` and `github-read-token` skein read looking for a credential, and where to store one, with git's own words quoted after them. The row is the 2026-09-09 measurement of what was there, like `src/bin/skein-server.rs:4253`, and re-pointing it at the new sentence would make the survey claim it found a defect that is not there. Its third site, `src/repos.rs:1367` (`fetch_pull_head`), still reads exactly as the row says and is cited live in the same row — which is why this is declared per site and not for the row."
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/repos.rs:1114"]
-line = "return Err(format!("
-window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"fetching {}: {}\","
+historical = "The other half of the same 2026-09-09 measurement as `src/repos.rs:1035`, and gone the same way: `fetch_mirror`'s refusal is `git_refusal` at `src/repos.rs:1309` now, so the words this row recorded — `fetching {id}: {stderr}` and nothing else — are not in the tree any more."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1172"]
+["src/repos.rs:1204"]
+line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/repos.rs:1367"]
 line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"fetching {} of {}: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1191"]
+["src/repos.rs:1386"]
 line = "/// A repo's files, read out of its **mirror** rather than off somebody's disk."
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos.rs:1241"]
+["src/repos.rs:1436"]
 line = "return Err(format!("
 window = "if tree.git(&[\"rev-parse\", \"--verify\", \"HEAD\"]).is_none() {\u000breturn Err(format!(\u000b\"the mirror at {} has no readable HEAD — an empty repository, or a mirror that \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1465"]
+["src/repos.rs:1660"]
 line = "return Err(format!("
 window = "if !valid_runtime(runtime) {\u000breturn Err(format!(\u000b\"unsupported runtime {runtime:?}; available: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1498"]
+["src/repos.rs:1693"]
 line = "let store = match store.map(str::trim).filter(|s| !s.is_empty()) {"
 cited_by = ["docs/architecture.md"]
 
-["src/repos.rs:1512"]
+["src/repos.rs:1707"]
 line = "if !registrable_source(source) {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos.rs:1513"]
+["src/repos.rs:1708"]
 line = "return Err(format!("
 window = "if !registrable_source(source) {\u000breturn Err(format!(\u000b\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1603"]
+["src/repos.rs:1798"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 

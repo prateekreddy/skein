@@ -496,7 +496,28 @@ depends_on = ["mailbox", "repos", "sbx", "util"]
 # shared one token. `deployment` was the edge that refused it in-fleet and `gitgate` the one that
 # skipped it for a fleet that can scope; with nothing to refuse or skip, both edges go. What is left
 # is `gh_secret_seeded`, a read of a marker on the volume, which reaches neither.
-depends_on = ["config", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
+#
+# `gitgate` came BACK on this list with SKEIN-951, for the opposite reason to the one that took it
+# off. What left was skein WRITING a fleet-wide secret; what returns is skein READING the credential
+# a person already stored, for the two git runs this module makes outside every box — `clone_mirror`
+# and `fetch_mirror`. Those had no credential wiring at all and nothing set `GIT_TERMINAL_PROMPT`,
+# so a private remote with no usable token stopped a box start dead on
+# `Username for 'https://github.com':`. `repos` asks `gitgate` three questions and mints nothing:
+# `repo_slug` for the `owner/name` a stored token is filed under, `credential_for` to pick the token
+# filed under THAT repository rather than the first in the file, and `read_pat` for the fleet-wide
+# read-only fallback. No module joins a cycle over it — `repos` and `gitgate` are both already
+# inside the eighteen-module component recorded at the top of this file.
+depends_on = [
+  "config",
+  "gitgate",
+  "kit",
+  "place",
+  "registry",
+  "runtime",
+  "sbx",
+  "tracking",
+  "util",
+]
 
 [current.review]
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's
