@@ -225,8 +225,10 @@ gets used for.
 
 `.github/workflows/ci.yml` invokes those same gates, one step per gate, as `tools/gates.sh run
 <name>` — so that a red X in the UI still names the gate that failed while the command it runs is
-written down only once. Six of its `- run:` steps are not gates: four prepare the machine, one
-proves bwrap actually works, and one deepens the clone for the step after it. The step that reports
+written down only once. Eight of its `- run:` steps are not gates. Six are in the `check` job: four
+prepare the machine, one proves bwrap actually works, and one deepens the clone for the step after
+it. The other two are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds
+every target at it — see "Releases, and what CI covers" below. The step that reports
 what the run skipped used to be a seventh — advisory, and therefore never acted on, which is what
 made `noskip-check` a gate instead (SKEIN-558, SKEIN-881). **The rest are gates that can fail your
 change**, and `tools/gates.sh`
@@ -234,7 +236,7 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 24
+grep -c '^      - run:' .github/workflows/ci.yml     # → 26
 tools/gates.sh --list | wc -l                        # → 19
 ```
 
@@ -601,6 +603,33 @@ worth having before the code, not after.
 
 Found a security issue? Do not open a pull request for it. [`SECURITY.md`](SECURITY.md) says where
 to send it.
+
+## Releases, and what CI covers
+
+**Linux only, on purpose.** skein runs inside an sbx sandbox, and a sandbox is a Linux machine
+whatever the host is — so Linux is what executes it, and Linux is what CI builds and tests. There is
+no macOS job and no macOS binary, and nothing is published to crates.io. The suite does run on a Mac
+with the exceptions in `GATED` (see the README's Build section), but no CI run stands behind that.
+
+**What CI runs.** `.github/workflows/ci.yml`, on every branch push and pull request, on
+`ubuntu-latest`:
+
+- the `check` job: every gate `tools/gates.sh` marks for CI, one step each. That is 18 of the 19;
+  `alone-check` is the one it does not run, for the reason under "The gate that is not in CI"
+  above, and `gate-list-check` fails if that ever stops being the only one.
+- the `msrv` job: `cargo build --locked --all --all-targets` on the toolchain `rust-version` in
+  `Cargo.toml` names. That version was measured, not picked, and the comment beside it says how;
+  the job reads it from `Cargo.toml`, so the number exists once. It is a build, not a second run of
+  the gates — though `clippy` in the `check` job also reads it, and fails on an API newer than it.
+
+**Cutting a release** is pushing a `v*` tag whose version matches `version` in `Cargo.toml`.
+`.github/workflows/release.yml` then runs the whole of `ci.yml` on the tagged commit — the tag push
+does not also run it separately — and only if that is green does it build `skein` and
+`skein-server` for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, run each one's
+`--version`, and attach one archive per target, with its SHA-256, to a GitHub release. It refuses a
+tag that disagrees with `Cargo.toml`, and a binary that reports a dirty tree. The binaries link
+glibc from `ubuntu-24.04`, so they need 2.39 or newer. `skein-warden` is not in the archive: it runs
+on the host, not in a box, and building it stays `cargo build --release --workspace`.
 
 ## Licence
 

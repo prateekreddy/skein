@@ -2176,6 +2176,13 @@ case "$name" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
 # blocked-egress hint if the direct push cannot reach GitHub at all).
 [ -r "$SKEIN_GIT_TOKENS/${owner}%2F${name}" ] && skein_git_run "$@"
 
+# **One push files one ask, however many shims it passes through** (SKEIN-956). `git_real` is
+# whatever `command -v git` found when this box started, and inside a box that is the box's OWN
+# shim — so a box started from a box, or skein's tests run in one, wrap this shim around another,
+# and each filed an ask under its own box name: two cockpit rows for one push. The shim further out
+# has already asked for this repo and named it below, so the one further in is only git.
+[ "${SKEIN_GIT_ASKED-}" = "$owner/$name" ] && exec "$skein_git" "$@"
+
 # No token. File the ask — `--request-write` collapses repeats, so a retrying agent does not grow
 # the queue — then run the push anyway so GitHub gives its own answer alongside this one. A scoped
 # box now reaches GitHub DIRECT (SKEIN-548 closed for the token's own path), so this push is bounded
@@ -2203,6 +2210,8 @@ if [ "$filed" = 0 ]; then
 else
   echo "skein could not file the request from here, so there is nothing in the cockpit to approve — ask whoever runs this fleet for write access to $owner/$name." >&2
 fi
+SKEIN_GIT_ASKED="$owner/$name"
+export SKEIN_GIT_ASKED
 skein_git_run "$@"
 GITSHIM
     } > "$root/bin/git" || exit 1
