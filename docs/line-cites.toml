@@ -24,6 +24,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "`restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting."
 cited_by = ["docs/prose-symbols.toml"]
 
+["docs/architecture.md:1722"]
+line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
+cited_by = ["docs/threat-model.md"]
+
 ["docs/delivery.md:152"]
 line = "`fleet` no longer contains a call that changes anything on the host."
 cited_by = ["docs/prose-symbols.toml"]
@@ -56,6 +60,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/announce.rs:793"]
 line = "let first = announce_disk(&unknown, &policy, demand).expect(\"a quiet tick cannot fail\");"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/apiauth.rs:56"]
+line = "std::env::var(\"SKEIN_NO_API_AUTH\").ok().as_deref(),"
+cited_by = ["docs/threat-model.md"]
 
 ["src/bin/skein-server.rs:39"]
 line = "/// Named rather than spelled inside [`PTY_LIMIT`] because the refusal quotes it. A person told"
@@ -613,17 +621,82 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/box-session.sh:113"]
+line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH\""
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:735"]
+line = "share_paths=(\".local\" \".cargo\" \".rustup\" \".npm\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:979"]
+line = "merge_login \"$mine\" \"$canon\""
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1179"]
+line = "data[\"crossSessionInbound\"] = \"accept\""
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1202"]
+line = "[ -e \"$HOME/$rel\" ] && binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1485"]
+line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
+window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1532"]
+line = "binds+=(--tmpfs \"$fleet_root_dir\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1575"]
+line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1640"]
+line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
+cited_by = ["docs/threat-model.md"]
+
 ["src/box-session.sh:1663"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
 ["src/box-session.sh:1688"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
-cited_by = ["docs/architecture.md"]
+cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 
 ["src/box-session.sh:1696"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
+
+["src/box-session.sh:1752"]
+line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1753"]
+line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1816"]
+line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1941"]
+line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2002"]
+line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2356"]
+line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2404"]
+line = "exec bwrap \\"
+cited_by = ["docs/threat-model.md"]
 
 ["src/config.rs:459"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"

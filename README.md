@@ -449,6 +449,8 @@ invariant the embedded terminal's responsiveness rests on.
 * [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately, and what counts as one in
   a tool whose whole job is to sandbox agents. Please read the scope section: the line between a
   vulnerability and the product working as designed is not in the usual place here.
+* [`docs/threat-model.md`](docs/threat-model.md) — what a box can and cannot reach, in one table,
+  with the test behind each row.
 * [`CHANGELOG.md`](CHANGELOG.md) — what skein does today and how it got there, every entry traced
   to a commit.
 

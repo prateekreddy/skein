@@ -61,6 +61,10 @@ Please give the fix a chance to ship before publishing. There is no bug bounty.
 
 ## What counts as a vulnerability
 
+What a box can and cannot reach today is one table in
+[`docs/threat-model.md`](docs/threat-model.md), each row with the test or line of code behind it
+and the known gaps listed under their tracker items. Read it first.
+
 The design is argued in [`docs/architecture.md`](docs/architecture.md) — §9 is the trust model,
 §7 is the privilege split, and §8 is the host warden. The short version is that **a box is
 untrusted by construction.** It runs somebody's coding agent, that agent runs arbitrary code, and
