@@ -8,6 +8,13 @@ members = ["warden"]
 name = "skein"
 version = "0.1.0"
 edition = "2021"
+# Measured, not guessed. The tree COMPILES from 1.87.0 (1.86.0 fails: `is_multiple_of` is unstable
+# there), but 1.87 and 1.88 compile it to a different program: `lock.unlock()` in src/mailbox.rs and
+# src/sandbox.rs is fs2's `unlock` below 1.89 and std's `File::unlock` from 1.89, where std's
+# inherent method wins (SKEIN-966). So the floor is the first release on which the code means what
+# it means on stable, and clippy's `incompatible_msrv` holds the tree to it. CI builds at this
+# version in the `msrv` job, reading it from this line.
+rust-version = "1.89"
 description = "See and steer your fleet of agent sandboxes"
 license = "MIT OR Apache-2.0"
 # Two binaries, so a bare `cargo run -- doctor` would otherwise refuse to pick one. The CLI is the
