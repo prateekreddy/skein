@@ -1,0 +1,105 @@
+name: release
+
+# A `v*` tag becomes a GitHub release carrying the `skein` and `skein-server` Linux binaries — and
+# only after every job in `ci.yml` has passed on the tagged commit. Linux only, deliberately: skein
+# runs inside an sbx sandbox, which is a Linux machine whatever the host is, so that is the platform
+# its binaries execute on. There is no macOS build and nothing is published to crates.io; see
+# "Releases" in CONTRIBUTING.md.
+#
+# Nothing here pushes a tag. Cutting one is the owner's decision; this workflow is what happens
+# after it.
+
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default. Only `publish` below writes, and only to this repository's releases.
+permissions:
+  contents: read
+
+jobs:
+  # The whole of `ci.yml` — every gate, and the MSRV build — on the tagged commit. `ci.yml` does not
+  # also run on the tag push by itself (its `push:` trigger is branches only), so this is the one run
+  # of them a tag gets, and `build` cannot start until it is green.
+  gates:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: gates
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Pinned images rather than `-latest`: the image fixes the glibc these binaries link
+          # against (2.39 on 24.04), which is the oldest a box can run them on. A `-latest` that
+          # moved would raise that floor without a line in any diff.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          # Native arm64 rather than cross-compiling: an sbx sandbox on Apple silicon is an
+          # aarch64 Linux machine, so this is the binary most boxes actually run.
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # The tag names the version the release claims, and `Cargo.toml` names the version the
+      # binaries report. Refuse to publish a `v0.2.0` whose `skein --version` says 0.1.0.
+      - run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$want" != "$have" ]; then
+            echo "tag $GITHUB_REF_NAME says $want; Cargo.toml [package] version is $have" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked --bin skein --bin skein-server
+      # One archive per target, holding both binaries, named for the tag and the target so two
+      # downloads never collide; and a checksum beside it. Each binary is RUN before it is packed:
+      # it must start on the machine that built it, report the tag's version, and not carry the
+      # `-dirty` marker that says it was built from something other than the tagged commit.
+      - run: |
+          name="skein-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/release/skein target/release/skein-server README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          for bin in skein skein-server; do
+            out=$("dist/$name/$bin" --version)
+            echo "$out"
+            case "$out" in
+              "$bin ${GITHUB_REF_NAME#v} ("*) ;;
+              *) echo "$bin --version does not report ${GITHUB_REF_NAME#v}" >&2; exit 1 ;;
+            esac
+            case "$out" in
+              *-dirty*) echo "$bin was built from a dirty tree" >&2; exit 1 ;;
+            esac
+          done
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # `gh` is preinstalled on hosted runners and authenticates with this job's own token, so no
+      # secret is added. `--verify-tag` refuses to create a tag if the pushed one is somehow absent.
+      - run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "skein $GITHUB_REF_NAME" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

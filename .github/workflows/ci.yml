@@ -1,8 +1,13 @@
 name: ci
 
 on:
+  # Branches only. A `v*` tag is gated by `release.yml`, which calls this whole workflow through
+  # `workflow_call` below and publishes nothing unless every job here passes on the tagged commit —
+  # so a tag push runs these gates once, as the release's precondition, rather than twice.
   push:
+    branches: ["**"]
   pull_request:
+  workflow_call:
 
 jobs:
   check:
@@ -266,3 +271,41 @@ jobs:
             git fetch --unshallow --filter=tree:0 origin
           fi
       - run: tools/gates.sh run citation-check
+
+  # **The declared MSRV, built at.** `rust-version` in `Cargo.toml` is a claim to every reader, and a
+  # claim nothing re-checks goes stale the first time somebody uses an API newer than it: the job
+  # above builds on `stable` only, where that is invisible. The version is READ from `Cargo.toml`
+  # rather than written here too, so there is one copy of it and this job cannot test a different
+  # number from the one the manifest declares.
+  #
+  # A build, not the gates: the gates' verdicts are about the code, and running them twice on two
+  # compilers doubles the bill to learn one fact. What this job adds is whether the tree compiles —
+  # every target, tests included, against the lockfile — on the oldest compiler it says it supports.
+  #
+  # Its command lives here and not in `tools/gates.sh`, which is the one exception to that file's
+  # rule and is deliberate for now: a local run would need a second toolchain installed to answer
+  # it, and `gates.sh` has no way yet to say "not answerable on this machine" for a Rust version.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Exactly one `rust-version = "x.y"` line, or the job fails naming what it found — an empty
+      # read would otherwise hand `rust-toolchain` an empty toolchain and build on whatever that
+      # defaults to, which is the silent-success shape this repository keeps paying for.
+      - run: |
+          found=$(grep -cE '^rust-version = "[0-9]+\.[0-9]+(\.[0-9]+)?"$' Cargo.toml || true)
+          if [ "$found" != 1 ]; then
+            echo "expected exactly one rust-version line in Cargo.toml, found $found" >&2
+            exit 1
+          fi
+          v=$(sed -n 's/^rust-version = "\([0-9.]*\)"$/\1/p' Cargo.toml)
+          echo "MSRV from Cargo.toml: $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+        id: msrv
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: rustc --version && cargo build --locked --all --all-targets
