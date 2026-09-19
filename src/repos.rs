@@ -1053,10 +1053,11 @@ fn read_credential_path() -> PathBuf {
 /// What skein found to authenticate one **fleet-side** git run with, and where it looked.
 ///
 /// Fleet-side means outside every box. `src/box-session.sh` wires a box's git up completely — a
-/// `SKEIN_GIT_TOKENS` directory, `credential.useHttpPath`, a `credential.helper` — and neither
-/// [`clone_mirror`] nor [`fetch_mirror`] is inside a box, so none of that reached them. Carried
-/// from [`fleet_git`] to [`git_refusal`] so a failure can name the credential that was tried, or
-/// the files that were read looking for one, instead of passing git's own words through.
+/// `SKEIN_GIT_TOKENS` directory, `credential.useHttpPath`, a `credential.helper` — and none of
+/// [`clone_mirror`], [`fetch_mirror`] or [`fetch_pull_head`] is inside a box, so none of that
+/// reached them. Carried from [`fleet_git`] to [`git_refusal`] so a failure can name the
+/// credential that was tried, or the files that were read looking for one, instead of passing
+/// git's own words through.
 struct FleetGit {
     /// `owner/name`, when the remote is a GitHub repository a stored credential can be keyed to.
     /// `None` for anything else — a directory, a remote on some other host — which no stored PAT
@@ -1064,15 +1065,20 @@ struct FleetGit {
     slug: Option<String>,
     /// The credential file whose token was handed to git, if one was.
     sent: Option<PathBuf>,
+    /// The remote git was pointed at, as the repo records it. Named in an ssh refusal, where the
+    /// remote is the thing a person has to go and fix and the repo id is not.
+    remote: String,
+    /// The `GIT_SSH_COMMAND` git was given — see [`ssh_that_cannot_ask`].
+    ssh: String,
 }
 
 /// Wire up a git command skein runs fleet-side: never a terminal, and the credential the fleet
 /// already holds.
 ///
 /// **`GIT_TERMINAL_PROMPT=0` is the half that matters, and it matters most when no credential is
-/// found at all** (SKEIN-951). Both of these call sites were a bare `Command::new("git")` — no
-/// credential environment, no helper, and nothing stopping git from reaching its last resort, which
-/// is to ask the terminal. On 2026-09-19 that stopped a `skein start` dead for twenty minutes at
+/// found at all** (SKEIN-951, SKEIN-954). All three call sites were a bare `Command::new("git")` —
+/// no credential environment, no helper, and nothing stopping git from reaching its last resort,
+/// which is to ask the terminal. On 2026-09-19 that stopped a `skein start` dead for twenty minutes at
 /// `Username for 'https://github.com':`, the git process asleep inside `git remote-https` waiting on
 /// a tty nobody was watching, with no way for the owner to tell what was being asked for.
 ///
@@ -1094,10 +1100,16 @@ fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
     // First, and unconditionally. Every path below can decide there is no credential to send; none
     // of them may decide that git is allowed to ask a terminal instead.
     command.env("GIT_TERMINAL_PROMPT", "0");
+    // The same for ssh, which `GIT_TERMINAL_PROMPT` does not reach (SKEIN-955).
+    let ssh = ssh_that_cannot_ask(repo);
+    command.env("GIT_SSH_COMMAND", &ssh);
+    let remote = repo.source.trim().to_string();
     let Some(slug) = crate::gitgate::repo_slug(repo) else {
         return FleetGit {
             slug: None,
             sent: None,
+            remote,
+            ssh,
         };
     };
     let found = crate::gitgate::credential_for(&slug)
@@ -1107,6 +1119,8 @@ fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
         return FleetGit {
             slug: Some(slug),
             sent: None,
+            remote,
+            ssh,
         };
     };
     command.env(FLEET_TOKEN_VAR, token.expose());
@@ -1122,7 +1136,97 @@ fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
     FleetGit {
         slug: Some(slug),
         sent: Some(path),
+        remote,
+        ssh,
     }
+}
+
+/// The ssh command a fleet-side git runs: whatever it would have run anyway, with
+/// `-oBatchMode=yes` added so ssh can never ask a terminal anything (SKEIN-955).
+///
+/// **`GIT_TERMINAL_PROMPT=0` does not reach ssh.** [`registrable_source`] accepts `ssh://` and
+/// `git@host:`, and on that transport the asking is done by ssh itself, on `/dev/tty`: `Enter
+/// passphrase for key …` for an encrypted key with no agent, `Are you sure you want to continue
+/// connecting` for an unknown host key. Either blocks for ever, which is the SKEIN-951 hang by
+/// another door. With `BatchMode=yes` ssh fails instead, and [`git_refusal`] says why.
+///
+/// **An inherited command is kept and the option ADDED to it, never replaced** — the owner's
+/// decision (2026-09-19). The fleet may set an ssh command for reasons of its own (a key with
+/// `-i`, a port, a proxy), and overwriting it would trade a hang for a fetch that silently uses the
+/// wrong key. Which command is "inherited" follows git's own order of precedence (in git's
+/// `connect.c`), because `GIT_SSH_COMMAND` outranks all of them and setting
+/// it is therefore the same as discarding whichever one git would have used:
+///
+/// 1. `$GIT_SSH_COMMAND`, as a shell string, with the option appended;
+/// 2. `core.sshCommand`, read the way this git would read it — the mirror's config when there is
+///    a mirror, else the global and system files — likewise appended;
+/// 3. `$GIT_SSH`, a program path rather than a shell string, so it is quoted before the option is
+///    appended;
+/// 4. otherwise plain `ssh`.
+///
+/// Appended, not inserted after the program name: the inherited value is a shell string and may
+/// not begin with the program (`env FOO=1 ssh …`, a wrapper script), so the end is the only place
+/// the option can go without parsing it. ssh takes the FIRST value it sees for an option, so an
+/// inherited command that already says `-oBatchMode=no` keeps saying it — that is somebody's
+/// explicit choice, not a default this is here to override. `src/store/sync-install.sh` has done
+/// the same append, `${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes`, for its own git since before this.
+///
+/// `StrictHostKeyChecking` is left alone on purpose: under `BatchMode` an unknown host key is a
+/// refusal rather than a question, and accepting one silently is a decision nobody has made.
+fn ssh_that_cannot_ask(repo: &Repo) -> String {
+    let set = |name: &str| env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let inherited = set("GIT_SSH_COMMAND")
+        .or_else(|| configured_ssh_command(repo))
+        .or_else(|| set("GIT_SSH").map(|program| sh_quote(&program)))
+        .unwrap_or_else(|| "ssh".to_string());
+    format!("{} -oBatchMode=yes", inherited.trim_end())
+}
+
+/// `core.sshCommand` as the git about to run would see it, or `None`.
+///
+/// Asked of git rather than parsed out of files, because config has includes, conditional includes
+/// and three scopes, and a second reader of it is a second thing to get wrong. Any failure reads
+/// as "not set": the cost is `ssh` in place of a configured command, which is what git itself
+/// would do with a config it could not read.
+fn configured_ssh_command(repo: &Repo) -> Option<String> {
+    let mut ask = Command::new("git");
+    let mirror = mirror_path(&repo.id);
+    if mirror_is_made(&mirror) {
+        ask.arg("-C").arg(&mirror);
+    }
+    ask.args(["config", "--get", "core.sshCommand"]);
+    let out = bounded_output(
+        &mut ask,
+        "git config core.sshCommand",
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!command.is_empty()).then_some(command)
+}
+
+/// Did ssh refuse, rather than git or the host? The two answers `BatchMode=yes` turns a prompt
+/// into: no key it could use without asking, and a host key it was not allowed to accept.
+fn refused_by_ssh(stderr: &str) -> bool {
+    let said = stderr.to_ascii_lowercase();
+    said.contains("permission denied (publickey") || said.contains("host key verification failed")
+}
+
+/// The key an ssh command names with `-i`, if it names one.
+fn ssh_identity(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "-i" {
+            return words.next();
+        }
+        if let Some(key) = word.strip_prefix("-i").filter(|k| !k.is_empty()) {
+            return Some(key);
+        }
+    }
+    None
 }
 
 /// Does this git failure look like one a credential would have prevented?
@@ -1162,6 +1266,22 @@ fn refused_for_want_of_a_credential(stderr: &str) -> bool {
 /// so a network outage is still reported as a network outage.
 fn git_refusal(doing: &str, stderr: &str, auth: &FleetGit) -> String {
     let stderr = stderr.trim();
+    if refused_by_ssh(stderr) {
+        let key = match ssh_identity(&auth.ssh) {
+            Some(key) => format!("the key it names, {key},"),
+            None => "the key ssh picks for itself (an `IdentityFile` in its config, else its \
+                     default `~/.ssh/id_*`)"
+                .to_string(),
+        };
+        return format!(
+            "{doing}: ssh refused {} and was not allowed to ask anything, because skein runs it as \
+             `{}`. So {key} was only usable if it needs no passphrase or is loaded in an ssh-agent \
+             this process can reach through $SSH_AUTH_SOCK, and the host's key had to be in \
+             known_hosts already. Fix whichever of those it is, or register the repo by its https \
+             URL, which uses a stored token instead. git said: {stderr}",
+            auth.remote, auth.ssh
+        );
+    }
     if !refused_for_want_of_a_credential(stderr) {
         return format!("{doing}: {stderr}");
     }
@@ -1353,6 +1473,11 @@ pub fn fetch_pull_head(repo: &Repo, number: u64) -> Result<String, String> {
     let mirror = ensure_mirror(repo)?;
     let refspec = pull_head_ref(number);
     let mut command = Command::new("git");
+    // Never a terminal, and the fleet's own credential if it has one (SKEIN-954). The third
+    // fleet-side network git, and the one SKEIN-951 left out: a fork's pull-request head comes from
+    // nowhere else, so a private base repo with a missing or expired token hung the REVIEWER here
+    // on `Username for 'https://github.com':` exactly as `skein start` hung in `fetch_mirror`.
+    let auth = fleet_git(&mut command, repo);
     command
         .arg("-C")
         .arg(&mirror)
@@ -1364,11 +1489,10 @@ pub fn fetch_pull_head(repo: &Repo, number: u64) -> Result<String, String> {
         Duration::from_secs(300),
     )?;
     if !out.status.success() {
-        return Err(format!(
-            "fetching {} of {}: {}",
-            refspec,
-            repo.id,
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(git_refusal(
+            &format!("fetching {refspec} of {}", repo.id),
+            &String::from_utf8_lossy(&out.stderr),
+            &auth,
         ));
     }
     Ok(refspec)
@@ -2054,6 +2178,20 @@ mod tests {
         log
     }
 
+    /// The one record in a [`recording_git`]-style log whose argv contains `argv`, from its
+    /// `ARGV:` line to the next one.
+    ///
+    /// Picked out rather than searched as a whole, because fleet-side git is no longer one spawn:
+    /// [`configured_ssh_command`] asks `git config` first, and an assertion that any line of the
+    /// whole log reads `GIT_TERMINAL_PROMPT=0` would be satisfied by a spawn that is not the one
+    /// that talks to the remote.
+    fn spawn_of(log: &str, argv: &str) -> String {
+        log.split("ARGV: ")
+            .find(|record| record.lines().next().is_some_and(|l| l.contains(argv)))
+            .map(|record| format!("ARGV: {record}"))
+            .unwrap_or_default()
+    }
+
     /// **Fleet-side git never waits on a terminal, and says which credential was missing**
     /// (SKEIN-951).
     ///
@@ -2082,7 +2220,10 @@ mod tests {
         let repo = at_github(&home, "acme/thing");
         let why = ensure_mirror(&repo).expect_err("this git cannot make a mirror");
 
-        let spawned = fs::read_to_string(&log).unwrap_or_default();
+        let spawned = spawn_of(
+            &fs::read_to_string(&log).unwrap_or_default(),
+            "clone --mirror",
+        );
         assert!(
             spawned.contains("ARGV: clone --mirror"),
             "the clone is not what got recorded, so the environment below is some other git's:\n\
@@ -2117,6 +2258,8 @@ mod tests {
             &FleetGit {
                 slug: Some("acme/thing".into()),
                 sent: None,
+                remote: "https://github.com/acme/thing.git".into(),
+                ssh: "ssh -oBatchMode=yes".into(),
             },
         );
         assert!(
@@ -2273,6 +2416,328 @@ mod tests {
         assert!(
             !sent.contains_key(FLEET_TOKEN_VAR),
             "a token reached a remote skein could not key it to: {sent:?}"
+        );
+    }
+
+    /// **A fork's pull-request head is fetched the same way as the mirror: never a terminal, the
+    /// token filed under this repository, and a refusal that names where skein looked** (SKEIN-954).
+    ///
+    /// [`fetch_pull_head`] is the third fleet-side network git and SKEIN-951 wired only the other
+    /// two, so `review::stand_the_change_up` — the only path that serves a fork's commits — could
+    /// still hang a reviewer on `Username for 'https://github.com':`. Nothing here reaches the
+    /// network: the mirror is made by hand (all [`mirror_is_made`] asks for is `HEAD` and
+    /// `objects/`), and the `git` on `$PATH` is a shim.
+    ///
+    /// The shim does two things with the environment it was SPAWNED with, so none of this reads a
+    /// string in the source. It records it, and it hands it, unchanged, to the REAL git's
+    /// `credential fill` — the same question the real fetch would ask — and records the answer.
+    ///
+    /// What makes each assertion fail:
+    /// - dropping `fleet_git` from [`fetch_pull_head`], or deleting its `GIT_TERMINAL_PROMPT` line:
+    ///   the recorded environment has no `GIT_TERMINAL_PROMPT=0`;
+    /// - going back to `format!("fetching {} of {}: {}", …)` for the refusal: it no longer names
+    ///   `github-pats.json` / `github-read-token`, nor the token file that was sent;
+    /// - choosing a credential by position instead of by the repository it covers, or breaking the
+    ///   helper wiring: real git fills the other repository's token, or none.
+    #[test]
+    fn a_forks_pull_head_is_fetched_without_a_terminal_and_with_this_repos_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+
+        // The real git, found BEFORE the shim goes on `$PATH`, for the credential half.
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+        assert!(
+            real.starts_with('/'),
+            "no real git to check the credential with: {real:?}"
+        );
+
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("git-spawns.log");
+        let ask = home.join("credential-question");
+        fs::write(
+            &ask,
+            "protocol=https\nhost=github.com\npath=acme/thing.git\n\n",
+        )
+        .unwrap();
+        fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\n{{ echo \"ARGV: $*\"; env; echo '--- end ---'; \
+                 echo '--- filled ---'; '{real}' credential fill < '{ask}' 2>&1; \
+                 echo '--- end filled ---'; }} >> '{log}'\n\
+                 echo \"fatal: could not read Username for 'https://github.com': terminal prompts \
+                 disabled\" >&2\nexit 128\n",
+                ask = ask.display(),
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        env.set(
+            "PATH",
+            format!("{}:{}", bin.display(), env::var("PATH").unwrap_or_default()),
+        );
+
+        let repo = at_github(&home, "acme/thing");
+        let mirror = mirror_path(&repo.id);
+        fs::create_dir_all(mirror.join("objects")).unwrap();
+        fs::write(mirror.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        // No credential anywhere: the case that hung, and the one the refusal has to explain.
+        let why = fetch_pull_head(&repo, 7).expect_err("this git fetches nothing");
+        let spawned = spawn_of(
+            &fs::read_to_string(&log).unwrap_or_default(),
+            "refs/pull/7/head",
+        );
+        assert!(
+            spawned.contains("ARGV: -C") && spawned.contains("refs/pull/7/head"),
+            "the pull-head fetch is not what got recorded, so the environment below is some \
+             other git's:\n{spawned}"
+        );
+        assert!(
+            spawned.lines().any(|line| line == "GIT_TERMINAL_PROMPT=0"),
+            "the git fetching a fork's pull-request head may still ask a terminal, which is the \
+             hang itself. Its environment was:\n{spawned}"
+        );
+        for wanted in [
+            "refs/pull/7/head",
+            "acme/thing",
+            &home.join("github-pats.json").display().to_string(),
+            &home.join("github-read-token").display().to_string(),
+        ] {
+            assert!(
+                why.contains(wanted),
+                "the pull-head refusal never names {wanted}, so it cannot be acted on: {why}"
+            );
+        }
+
+        // Now a token filed under ANOTHER repository first, and this repository's second.
+        fs::create_dir_all(home.join("github-pats")).unwrap();
+        fs::write(
+            home.join("github-pats.json"),
+            serde_json::json!([
+                {"id": "first", "label": "some other repo", "repos": ["acme/other"]},
+                {"id": "second", "label": "this repo", "repos": ["acme/thing"]},
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let wrong = "token-filed-under-the-other-repo";
+        let right = "token-filed-under-this-repo";
+        crate::secret::write(
+            &stored_credential_path("first"),
+            &crate::secret::Secret::new(wrong),
+        )
+        .unwrap();
+        crate::secret::write(
+            &stored_credential_path("second"),
+            &crate::secret::Secret::new(right),
+        )
+        .unwrap();
+        fs::write(&log, "").unwrap();
+
+        let why = fetch_pull_head(&repo, 7).expect_err("this git fetches nothing");
+        let whole = fs::read_to_string(&log).unwrap_or_default();
+        let spawned = spawn_of(&whole, "refs/pull/7/head");
+        assert!(
+            spawned.lines().any(|line| line == "GIT_TERMINAL_PROMPT=0"),
+            "with a token to send, the pull-head fetch may still ask a terminal:\n{spawned}"
+        );
+        let filled = spawned
+            .split("--- filled ---")
+            .nth(1)
+            .and_then(|rest| rest.split("--- end filled ---").next())
+            .unwrap_or_default();
+        assert!(
+            filled.contains(&format!("password={right}")),
+            "real git, given the environment the pull-head fetch was spawned with, filled no \
+             usable credential:\n{filled}"
+        );
+        assert!(
+            !whole.contains(wrong),
+            "the pull-head fetch was handed the token filed under a different repository:\n\
+             {whole}"
+        );
+        assert!(
+            !whole
+                .lines()
+                .filter(|l| l.starts_with("ARGV: "))
+                .any(|l| l.contains(right)),
+            "the token reached git's argv, where /proc/<pid>/cmdline shows it to anyone:\n{whole}"
+        );
+        assert!(
+            why.contains(&stored_credential_path("second").display().to_string()),
+            "the refusal does not say which stored token was sent and refused: {why}"
+        );
+    }
+
+    /// **An ssh remote cannot make fleet-side git wait on a terminal either, and whatever ssh
+    /// command was inherited is the one that runs** (SKEIN-955).
+    ///
+    /// Real git, a real bare mirror whose `origin` is an `ssh://` URL, and no network: the "ssh"
+    /// git runs is a script that records its argv and answers the way ssh does under `BatchMode`
+    /// when a key would have needed a passphrase. So every assertion below is about the argv of the
+    /// process git actually spawned for the transport — not a string in the source, and not the
+    /// environment skein meant to hand over. Four inheritances, in git's own order of precedence:
+    ///
+    /// 1. nothing — `ssh` on `$PATH` must run WITH `-oBatchMode=yes`. Deleting the
+    ///    `command.env("GIT_SSH_COMMAND", …)` line from [`fleet_git`] makes it fail;
+    /// 2. `$GIT_SSH_COMMAND` — THAT command must run, with its own `-i` and the option added.
+    ///    Making [`ssh_that_cannot_ask`] return a plain `ssh -oBatchMode=yes` (overwriting what was
+    ///    inherited) makes it fail, because the inherited script never runs;
+    /// 3. `core.sshCommand` — the same, read through git. Dropping [`configured_ssh_command`] from
+    ///    the chain makes it fail;
+    /// 4. `$GIT_SSH` — a program path, which must still be what runs.
+    ///
+    /// And the refusal has to name the remote and the key rather than pass `Permission denied
+    /// (publickey)` through: removing the ssh branch of [`git_refusal`] makes that fail.
+    #[test]
+    fn an_ssh_remote_is_fetched_with_batch_mode_added_to_the_inherited_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.unset("GIT_SSH_COMMAND");
+        env.unset("GIT_SSH");
+        let gitconfig = home.join("gitconfig");
+        fs::write(&gitconfig, "").unwrap();
+        env.set("GIT_CONFIG_GLOBAL", &gitconfig);
+        env.set("GIT_CONFIG_NOSYSTEM", "1");
+
+        let log = home.join("ssh-spawns.log");
+        let fake_ssh = |dir: &Path, tag: &str| {
+            fs::create_dir_all(dir).unwrap();
+            let path = dir.join("ssh");
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho \"{tag}: $*\" >> '{}'\n\
+                     echo 'git@example.invalid: Permission denied (publickey).' >&2\nexit 255\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        fake_ssh(&home.join("bin"), "path");
+        let inherited = fake_ssh(&home.join("inherited"), "inherited");
+        env.set(
+            "PATH",
+            format!(
+                "{}:{}",
+                home.join("bin").display(),
+                env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let remote = "ssh://git@example.invalid/acme/thing.git";
+        let repo: Repo = serde_json::from_value(serde_json::json!({
+            "id": "thing",
+            "source": remote,
+            "store": home.join("store/.claude").to_string_lossy(),
+            "agent": "claude",
+        }))
+        .unwrap();
+        let mirror = mirror_path(&repo.id);
+        fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        for args in [
+            vec!["init", "--bare", "-q"],
+            vec!["remote", "add", "origin", remote],
+        ] {
+            let mut git = Command::new("git");
+            if args[0] == "init" {
+                git.args(&args).arg(&mirror);
+            } else {
+                git.arg("-C").arg(&mirror).args(&args);
+            }
+            assert!(git.status().unwrap().success(), "git {args:?} failed");
+        }
+
+        // Each case returns the ssh lines it caused, and the refusal.
+        let fetch = || {
+            fs::write(&log, "").unwrap();
+            let why = fetch_mirror(&repo).expect_err("no ssh here lets anything through");
+            (fs::read_to_string(&log).unwrap_or_default(), why)
+        };
+
+        // 1. Nothing inherited.
+        let (ran, why) = fetch();
+        assert!(
+            ran.lines()
+                .any(|l| l.starts_with("path: ") && l.contains("-oBatchMode=yes")),
+            "with nothing inherited, ssh ran without -oBatchMode=yes, so a key with a passphrase \
+             asks the terminal:\n{ran}"
+        );
+        for wanted in [remote, "BatchMode=yes", "ssh-agent", "IdentityFile"] {
+            assert!(
+                why.contains(wanted),
+                "the ssh refusal never names {wanted}, so it cannot be acted on: {why}"
+            );
+        }
+
+        // 2. `$GIT_SSH_COMMAND`, with a key of its own.
+        let key = home.join("keys/deploy");
+        env.set(
+            "GIT_SSH_COMMAND",
+            format!("'{}' -i {}", inherited.display(), key.display()),
+        );
+        let (ran, why) = fetch();
+        assert!(
+            ran.lines().any(|l| l.starts_with("inherited: ")
+                && l.contains(&format!("-i {}", key.display()))
+                && l.contains("-oBatchMode=yes")),
+            "the inherited GIT_SSH_COMMAND did not run with its own -i AND -oBatchMode=yes — it \
+             was overwritten, or the option was not added:\n{ran}"
+        );
+        assert!(
+            !ran.lines().any(|l| l.starts_with("path: ")),
+            "a plain ssh ran in place of the inherited GIT_SSH_COMMAND:\n{ran}"
+        );
+        assert!(
+            why.contains(&key.display().to_string()),
+            "the refusal does not name the key the inherited command offered: {why}"
+        );
+        env.unset("GIT_SSH_COMMAND");
+
+        // 3. `core.sshCommand`.
+        let configured = home.join("keys/configured");
+        fs::write(
+            &gitconfig,
+            format!(
+                "[core]\n\tsshCommand = '{}' -i {}\n",
+                inherited.display(),
+                configured.display()
+            ),
+        )
+        .unwrap();
+        let (ran, _) = fetch();
+        assert!(
+            ran.lines().any(|l| l.starts_with("inherited: ")
+                && l.contains(&format!("-i {}", configured.display()))
+                && l.contains("-oBatchMode=yes")),
+            "core.sshCommand was not the command that ran with -oBatchMode=yes added:\n{ran}"
+        );
+        fs::write(&gitconfig, "").unwrap();
+
+        // 4. `$GIT_SSH`, a program path rather than a shell string.
+        env.set("GIT_SSH", &inherited);
+        let (ran, _) = fetch();
+        assert!(
+            ran.lines()
+                .any(|l| l.starts_with("inherited: ") && l.contains("-oBatchMode=yes")),
+            "the inherited GIT_SSH program was not what ran with -oBatchMode=yes added:\n{ran}"
         );
     }
 

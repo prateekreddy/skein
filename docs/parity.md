@@ -342,7 +342,7 @@ describe a replacement — "a local filesystem path is a valid git remote, so a 
 still works: skein clones it into the mirror and fetches from your path" — and that replacement was
 never built. It is true of git and false of skein. `registrable_source` (`src/repos.rs:855`) requires
 a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
-everything else before it clones anything (`src/repos.rs:1707`), in the words *"is a path, and skein
+everything else before it clones anything (`src/repos.rs:1831`), in the words *"is a path, and skein
 registers repos by remote"*.
 
 So the cost is larger than the old entry admitted, and it is stated here rather than in the future
@@ -353,7 +353,7 @@ nothing to fetch from, and would differ from a URL repo in nothing a box could o
 repo has no server needs a server — a bare repo reachable over `ssh://` is enough.
 
 One consequence the old entry listed as "must be built, not assumed" was in fact built: `diff`,
-`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos.rs:1386`)
+`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos.rs:1510`)
 rather than a working checkout.
 
 **The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein

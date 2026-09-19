@@ -1251,50 +1251,49 @@ line = "pub(crate) fn registrable_source(source: &str) -> bool {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
 ["src/repos.rs:1035"]
-historical = "SKEIN-951 replaced this site: `clone_mirror`'s refusal is `git_refusal` at `src/repos.rs:1227` now. The verdict this row records for it — `n`, raw git stderr — IS the defect that item fixed, so the message here today names the repository, the `github-pats.json` and `github-read-token` skein read looking for a credential, and where to store one, with git's own words quoted after them. The row is the 2026-09-09 measurement of what was there, like `src/bin/skein-server.rs:4253`, and re-pointing it at the new sentence would make the survey claim it found a defect that is not there. Its third site, `src/repos.rs:1367` (`fetch_pull_head`), still reads exactly as the row says and is cited live in the same row — which is why this is declared per site and not for the row."
+historical = "SKEIN-951 replaced this site: `clone_mirror`'s refusal is `git_refusal` at `src/repos.rs:1347` now. The verdict this row records for it — `n`, raw git stderr — IS the defect that item fixed, so the message here today names the repository, the `github-pats.json` and `github-read-token` skein read looking for a credential, and where to store one, with git's own words quoted after them. The row is the 2026-09-09 measurement of what was there, like `src/bin/skein-server.rs:4253`, and re-pointing it at the new sentence would make the survey claim it found a defect that is not there. Its third site, `src/repos.rs:1367` (`fetch_pull_head`), outlived it by a day and went the same way under SKEIN-954 — declared on its own entry, because the three were settled one at a time."
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/repos.rs:1114"]
-historical = "The other half of the same 2026-09-09 measurement as `src/repos.rs:1035`, and gone the same way: `fetch_mirror`'s refusal is `git_refusal` at `src/repos.rs:1309` now, so the words this row recorded — `fetching {id}: {stderr}` and nothing else — are not in the tree any more."
+historical = "The other half of the same 2026-09-09 measurement as `src/repos.rs:1035`, and gone the same way: `fetch_mirror`'s refusal is `git_refusal` at `src/repos.rs:1429` now, so the words this row recorded — `fetching {id}: {stderr}` and nothing else — are not in the tree any more."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1204"]
+["src/repos.rs:1324"]
 line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/repos.rs:1367"]
-line = "return Err(format!("
-window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"fetching {} of {}: {}\","
+historical = "The third site of the same 2026-09-09 measurement as `src/repos.rs:1035` and `src/repos.rs:1114`, and the last to go: SKEIN-954 routed `fetch_pull_head` through `fleet_git` and its refusal through `git_refusal` (`src/repos.rs:1492` now), so the words this row recorded — `fetching {refspec} of {id}: {stderr}` and nothing else — are not in the tree any more. What it says today names the repository and the credential files skein read, as its two neighbours do. Declared rather than re-pointed for the same reason as they were: the row is the record of the defect, and moving it onto the fixed sentence would make the survey claim it found one that is not there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1386"]
+["src/repos.rs:1510"]
 line = "/// A repo's files, read out of its **mirror** rather than off somebody's disk."
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos.rs:1436"]
+["src/repos.rs:1560"]
 line = "return Err(format!("
 window = "if tree.git(&[\"rev-parse\", \"--verify\", \"HEAD\"]).is_none() {\u000breturn Err(format!(\u000b\"the mirror at {} has no readable HEAD — an empty repository, or a mirror that \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1660"]
+["src/repos.rs:1784"]
 line = "return Err(format!("
 window = "if !valid_runtime(runtime) {\u000breturn Err(format!(\u000b\"unsupported runtime {runtime:?}; available: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1693"]
+["src/repos.rs:1817"]
 line = "let store = match store.map(str::trim).filter(|s| !s.is_empty()) {"
 cited_by = ["docs/architecture.md"]
 
-["src/repos.rs:1707"]
+["src/repos.rs:1831"]
 line = "if !registrable_source(source) {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos.rs:1708"]
+["src/repos.rs:1832"]
 line = "return Err(format!("
 window = "if !registrable_source(source) {\u000breturn Err(format!(\u000b\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1798"]
+["src/repos.rs:1922"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
