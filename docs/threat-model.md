@@ -19,11 +19,11 @@ column says which kind of backing a row has, strongest first:
 
 ## Where a box stands
 
-A box is the sandbox's filesystem (`--dev-bind / /`, `src/box-session.sh:2404`) with a set of
+A box is the sandbox's filesystem (`--dev-bind / /`, `src/box-session.sh:2413`) with a set of
 covers applied, run by `bwrap` as the same uid as every other box. It gets its own
 mount namespace and its own user namespace, and it shares the network, PID and IPC namespaces with
 the whole sandbox: `exec bwrap` asks for no `--unshare-*` flag
-(`sed -n '/^exec bwrap/,/^  --$/p' src/box-session.sh`), and `src/box-session.sh:2356` says why
+(`sed -n '/^exec bwrap/,/^  --$/p' src/box-session.sh`), and `src/box-session.sh:2365` says why
 the PID namespace stays shared. **So the boundary is files, not control**, as architecture §9.2
 says, and the rows below are mostly about files for that reason.
 

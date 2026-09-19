@@ -690,11 +690,11 @@ cited_by = ["docs/threat-model.md"]
 line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2356"]
+["src/box-session.sh:2365"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2404"]
+["src/box-session.sh:2413"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
@@ -853,14 +853,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \\"
 window = "eprintln!(\u000b\"skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \\\u000bstay outside the ceiling\""
 cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet.rs:3510"]
-line = "fn known_hosts_script(hosts: &[String]) -> String {"
-cited_by = ["docs/prose-symbols.toml"]
-
-["src/fleet.rs:3529"]
-line = "/// `known_hosts` first. A legacy box got that from its kit; the fleet sandbox never had it, so the"
-cited_by = ["docs/prose-symbols.toml"]
 
 ["src/fleet.rs:3551"]
 line = "eprintln!(\"skein: could not pin SSH host keys in {sandbox} ({e}); a box cloning over SSH will fail host key verification\");"
