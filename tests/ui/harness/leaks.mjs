@@ -73,12 +73,36 @@
 // fixtures go is not a fixture process, a process that names something INSIDE that root is, and the
 // root is subtracted only where it stands alone so that the second one is never touched.
 //
+// **And a sixth time, over a process that was doing nothing wrong at all** (SKEIN-990). Both halves
+// went red, seconds apart, over `tmux -S /tmp/<fixture>/fleet/.skein/private/server.tmux
+// new-session -d -s skein-server …` — one second old, started by a suite in ANOTHER worktree that
+// was running at that moment, in a tree where no suite was running at all. Two rules were wrong at
+// once, and each one alone would have produced the red:
+//
+//   * **`ppid == 1` is not "its run has gone" for a process that was daemonised on purpose.**
+//     `tmux new-session -d` forks a server and the launching process returns, so a fixture's tmux
+//     is parentless in its FIRST second and for the whole of its healthy life. An age threshold
+//     cannot separate that from a leak either, because a leak is one second old in its first
+//     second. What separates them is whether anything else of that fixture is still running under
+//     a live parent — [`fixturesRunning`], measured on the cohort rather than on the row;
+//   * **the environment held this worktree's path, and it was a breadcrumb.** The only mention of
+//     it in that tmux was `OLDPWD=/boxes/…/tree`, left by the `cd` the other lane's agent made on
+//     its way INTO its own worktree; the lane that owned the process was named by `PWD` and by
+//     nothing stronger (that environment carries no `$CARGO_MANIFEST_DIR` at all — measured, see
+//     `tests/ui/leakcheck.mjs`). `fromWorktree` asked "is this path anywhere in the environment",
+//     and to a breadcrumb the answer is yes. [`whose`] asks a question with an answer instead: a
+//     process that names another checkout of this repository as well as this one belongs to the
+//     one it is STANDING in, and to neither when it stands in neither. The other checkouts come
+//     from `git worktree list` — git's own record of every lane on this box, derived like
+//     everything else here, never a list of paths in this file.
+//
 // The other half is [`quiesceOnExit`], and it is `tests/common/mod.rs`'s `Scratch` argument
 // transplanted: *whatever has to stop, stops on every path; only the removal is conditional*. The
 // node tier had no equivalent — `srv.kill()` sat at the top level of each suite, after the last
 // check, so a throw or a Ctrl-C skipped it, and it never covered the tmux server anyway, because
 // that server is not `skein-server`'s child to take with it.
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -925,10 +949,125 @@ export function ownWorktree() {
  * `/var/tmp/skein-wt-leak` claim every process of a run in `/var/tmp/skein-wt-leakblind`, since the
  * first path is a prefix of the second — sibling worktrees on this box are named exactly that way,
  * and the mistake would hand one lane another lane's leaks to answer for. Same reasoning, and the
- * same three terminators, as [`fixtureRegex`]. */
-export function fromWorktree(p, repo = REPO) {
-  if (p.envState !== "read") return false;
-  return worktreeRegex(repo).test(p.env);
+ * same three terminators, as [`fixtureRegex`].
+ *
+ * **What it is NOT is a claim that a process naming this path is this run's** (SKEIN-990) — an
+ * environment carries where a process has BEEN as well as what it is using, and `OLDPWD` is
+ * exactly that. [`whose`] is the rule now, and this is the boolean face of it, kept because it is
+ * the shape the callers and `leakcheck.mjs` already ask in. */
+export function fromWorktree(p, repo = REPO, others = otherWorktrees(repo)) {
+  return whose(p, repo, others) === "mine";
+}
+
+/** Every OTHER checkout of this repository on this box, from `git worktree list` — the answer to
+ * "which lanes are there", asked of the thing that knows.
+ *
+ * **Derived, for the reason every other name in this file is** (SKEIN-647). The lanes here are
+ * `/var/tmp/skein-wt-<name>` today because `lane-common.md` says so today; a list of paths in this
+ * file would be current until the morning somebody puts one somewhere else, and a check comparing
+ * against paths nothing uses cannot fail. Git is the register: a worktree exists exactly when it is
+ * in there, whatever it is called and wherever it lives.
+ *
+ * **What it cannot see is a lane that is a separate CLONE rather than a worktree of this one**,
+ * because git holds no record tying the two together — so a process of such a lane carrying this
+ * worktree in a breadcrumb reads as this worktree's, which is SKEIN-990 returning for that one
+ * shape. It is written down here rather than guarded against, because the guard would have to be a
+ * rule about what a checkout's path looks like, and a rule about paths is the thing this file keeps
+ * proving it cannot have.
+ *
+ * **It refuses when the answer does not contain `repo` itself.** `git worktree list` names the
+ * worktree it is run in, always, plus the main checkout — so a reply without this one is not "no
+ * other lanes", it is a reader that has broken or a directory that is not a checkout, and those
+ * must not both read as clean. Same guard as [`fixturePrefixes`]'s empty tier.
+ *
+ * Memoised per repository, because [`whose`] is asked of every process on the box and the answer
+ * cannot change usefully inside one run of the check — a lane added halfway through a scan would be
+ * read for some processes and not others, which is worse than being read for none. */
+const worktreeCache = new Map();
+export function otherWorktrees(repo = REPO) {
+  if (worktreeCache.has(repo)) return worktreeCache.get(repo);
+  let out;
+  try {
+    out = execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch (e) {
+    throw new Error(`the leak check cannot ask git which other checkouts of this repository are on \
+this box (\`git worktree list\` in ${repo} failed: ${e.message.split("\n")[0]}), so it cannot tell \
+this worktree's processes from another lane's. Fix this reader; do not write the lanes in here.`);
+  }
+  const paths = [...out.matchAll(/^worktree (.+)$/gm)].map(m => m[1].replace(/\/+$/, ""));
+  if (!paths.includes(repo)) {
+    throw new Error(`the leak check asked git for the checkouts of this repository and got \
+${paths.length ? paths.join(", ") : "nothing"} — none of which is ${repo}, the worktree it is \
+running in. git names the worktree it was run in, so this is a broken reader and not an empty \
+answer.`);
+  }
+  const others = paths.filter(p => p !== repo);
+  worktreeCache.set(repo, others);
+  return others;
+}
+
+/** Which checkout `p` belongs to: `"mine"` for `repo`, `"elsewhere"` for one of `others`, and
+ * `"unclear"` when it names this one and another and there is nothing left to tell them apart.
+ *
+ * **A path in an environment says the process passed that way, not that the process is that run's**
+ * (SKEIN-990). The tmux this was measured on carried `OLDPWD=<this worktree>` — the breadcrumb of
+ * the `cd` another lane's agent made on its way out of it — and `PWD=<that lane>`, and nothing else
+ * that named either; [`fromWorktree`] read the first, and a suite that was running perfectly well
+ * two directories away became this run's leak. Every rule that tries to grade the MENTION fails
+ * here: the breadcrumb is an exact path, so "names something inside it" would have thrown away the
+ * owning lane's evidence too (`PWD` is exact as well — measured, and the reason that rule is not
+ * the one below).
+ *
+ * So the tie is broken by asking the kernel where the process is standing, which is not a variable
+ * and cannot be stale: `/proc/<pid>/cwd`. A test binary stands in its manifest directory, and
+ * everything a suite starts inherits that — the tmux measured for SKEIN-990 stood in the lane that
+ * started it, `tmux new-session` having no `-c` (`src/registry.rs:39` says so and why).
+ *
+ * **When it stands in neither, the answer is `"unclear"` and not a guess.** Guessing "mine" is the
+ * red this item is about; guessing "theirs" is the silence SKEIN-645 was, one lane over. [`main`]
+ * prints those rows under a headline that says exactly what is not known about them, which is the
+ * only honest thing a check can do with a process it cannot attribute — and a bucket that is never
+ * empty is then a visible reason to find more evidence, rather than a wrong verdict nobody sees.
+ *
+ * **The rival is looked for in the arguments as well as the environment**, though the claim on THIS
+ * worktree is still read out of the environment alone. The asymmetry is deliberate and only ever
+ * subtracts: a `skein-server` exec'd from `<lane>/.target/debug/skein-server` names its lane in
+ * argv and nowhere else, and there is no direction in which reading that can turn somebody else's
+ * process into this run's leak. */
+export function whose(p, repo = REPO, others = otherWorktrees(repo)) {
+  if (p.envState !== "read") return "elsewhere";
+  if (!worktreeRegex(repo).test(p.env)) return "elsewhere";
+  const rivals = others.filter(w => worktreeRegex(w).test(p.env) || worktreeRegex(w).test(p.args));
+  if (!rivals.length) return "mine";
+  const standing = standsIn(p.pid, [repo, ...rivals]);
+  if (standing === repo) return "mine";
+  return standing ? "elsewhere" : "unclear";
+}
+
+/** Which of `checkouts` this pid's working directory is inside, or `null` — the kernel's answer,
+ * read from `/proc/<pid>/cwd`.
+ *
+ * `null` covers three facts that are all the same fact here: the process is standing outside every
+ * checkout, it exited between the scan and this read, or this user may not look (another user's
+ * daemon). None of them is evidence, and [`whose`] treats the absence of evidence as the absence of
+ * evidence rather than as a verdict.
+ *
+ * The longest match wins, so a checkout nested inside another is answered with the inner one. The
+ * boundary is [`worktreeRegex`]'s, for its reason: `/var/tmp/skein-wt-leak` must not claim a
+ * process standing in `/var/tmp/skein-wt-leakblind`. */
+function standsIn(pid, checkouts) {
+  let cwd;
+  try {
+    cwd = readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
+  let best = null;
+  for (const c of checkouts) {
+    if ((cwd === c || cwd.startsWith(`${c}/`)) && (!best || c.length > best.length)) best = c;
+  }
+  return best;
 }
 
 /** A path, escaped for a regexp.
@@ -1106,6 +1245,113 @@ export function withoutSharedRoots(p, roots) {
   return { ...p, args, env };
 }
 
+/** The derived prefixes as one regexp that captures the whole fixture DIRECTORY NAME it found —
+ * `skein-it-apiauth-switch-132862` out of `/tmp/skein-it-apiauth-switch-132862/fleet/…`.
+ *
+ * **[`fixtureRegex`] answers "is this a fixture process" and this one answers "WHICH fixture", and
+ * the second question is the one [`fixturesRunning`] needs.** A prefix on its own cannot group a
+ * cohort: every test in `tests/server.rs` is `skein-it-` and they are different runs. What makes
+ * the name an identity is the tail the call sites do not write — `Scratch::temp` and `mkdtemp`
+ * both put a pid or a random suffix on it — so the captured directory name names one run of one
+ * test and nothing else.
+ *
+ * The leading `/` is [`fixtureRegex`]'s, and for its reason: without it a prefix matches a bare
+ * word in somebody's command line. The trailing boundary is wider than [`fixtureRegex`]'s three
+ * terminators, and deliberately: this is an identity being read rather than a match being made, so
+ * a path that ends at a quote (`while [ -f '/tmp/<fixture>/…' ]`, which is what
+ * `fleet::supervised` really writes) must give the same name as one that ends at a space. A wider
+ * boundary here can only find MORE of the cohort, and more cohort is the direction that turns a
+ * red into an in-flight, never the other way. */
+export function fixtureNameRegex(prefixes) {
+  const alt = prefixes.map(p => p.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("|");
+  return new RegExp(`/((?:${alt})[A-Za-z0-9._-]*)(?![A-Za-z0-9._-])`, "g");
+}
+
+/** Which fixtures each process names, as `Map<pid, string[]>` — the fixture directory names of
+ * [`fixtureNameRegex`], read off the same surfaces [`fixtureNamed`] matches on and cleaned the same
+ * way, so that the containers cannot enter an identity either (SKEIN-918, SKEIN-979). */
+export function fixtureCensus(all, prefixes, repo = REPO, shared = sharedFixtureRoot()) {
+  const re = fixtureNameRegex(prefixes);
+  const census = new Map();
+  for (const p of all) {
+    const s = withoutWorktree(withoutSharedRoots(p, rootsCarriedBy(p, shared)), repo);
+    const names = new Set();
+    for (const m of s.args.matchAll(re)) names.add(m[1]);
+    if (s.envState === "read") for (const m of s.env.matchAll(re)) names.add(m[1]);
+    if (names.size) census.set(p.pid, [...names]);
+  }
+  return census;
+}
+
+/** Is this process's fixture still being used by a run that is going? A function of a process, over
+ * the whole census — and **the answer `ppid == 1` cannot give** (SKEIN-990).
+ *
+ * `tmux new-session -d` forks a server and the launching process returns, so a fixture's tmux is
+ * reparented to pid 1 in its first second and stays there for the whole of a healthy life. Neither
+ * parentage nor age can tell that from a leak: a leak is one second old in its first second too,
+ * and both were measured at one second old. What tells them apart is not on the row at all — it is
+ * whether anything ELSE of that fixture is still running with a live parent. Measured on a live
+ * cohort (`tests/ui/leakcheck.mjs` plants the same shape):
+ *
+ *     tmux  ppid=1     tmux -S /tmp/<fixture>/fleet/.skein/private/server.tmux new-session -d …
+ *     srv   ppid=<test binary, alive>   <lane>/.target/debug/skein-server
+ *     bash  ppid=<the tmux>   while [ -f '/tmp/<fixture>/fleet/.skein/server-doorway.py' ]; do …
+ *     py    ppid=<the bash>   python3 /tmp/<fixture>/fleet/.skein/server-doorway.py …
+ *
+ * **The descendants are the whole difficulty, and skipping them is the rule.** The `bash` and the
+ * `python` name the fixture and have live parents, but they are what is LEFT when the suite dies —
+ * `fleet::supervised` restarts that python every two seconds for as long as the fixture directory
+ * survives, which is four tmux servers between two and nine hours old (SKEIN-645). Counting them as
+ * evidence would make every stranded tmux permanently "in flight", which is that item exactly, and
+ * quietly. So evidence must be a process with a live parent that is NOT descended from any
+ * parentless process of the same fixture: the `skein-server` above qualifies, its parent being the
+ * test binary that is still running; the `bash` and the `python` cannot, whatever their parents.
+ *
+ * **What this gives up, said out loud.** A run that strands a process in a fixture it then goes on
+ * using is called in flight until that run ends — which is why `CONTRIBUTING.md` asks for this
+ * check AFTER a run and not during one, and why the lost case is bounded by the length of a suite
+ * rather than by nine hours. The alternative is the red this item was filed over, which is
+ * SKEIN-913's lesson: a check that goes red for a reason the reader can see is not theirs teaches
+ * people to read past it, and the next red is read past too.
+ *
+ * Returns a predicate over a process rather than the set, because the callers hold processes and
+ * the set is keyed by a name they would have to re-derive to use. */
+export function fixturesRunning(all, repo = REPO, shared = sharedFixtureRoot(repo),
+  prefixes = fixturePrefixes(repo).prefixes) {
+  const census = fixtureCensus(all, prefixes, repo, shared);
+  const parents = new Map();
+  const parent = pid => {
+    if (!parents.has(pid)) parents.set(pid, parentOf(pid));
+    return parents.get(pid);
+  };
+  const descends = (pid, ancestor) => {
+    let cur = pid;
+    for (let i = 0; i < 64; i++) {
+      cur = parent(cur);
+      if (cur === ancestor) return true;
+      if (!Number.isInteger(cur) || cur <= 1) return false;
+    }
+    return false;
+  };
+  const byName = new Map();
+  for (const [pid, names] of census) {
+    for (const name of names) {
+      if (!byName.has(name)) byName.set(name, []);
+      byName.get(name).push(pid);
+    }
+  }
+  const running = new Set();
+  for (const [name, pids] of byName) {
+    const stranded = pids.filter(pid => parent(pid) === 1);
+    // A live parent is `> 1` and not merely "not 1": `parentOf` answers `null` for a pid that has
+    // gone between the scan and this read, and a sibling that has just exited is not a run still
+    // going. Reading it as evidence would spare a real leak, which is the silent direction.
+    const live = pid => Number.isInteger(parent(pid)) && parent(pid) > 1;
+    if (pids.some(pid => live(pid) && !stranded.some(s => descends(pid, s)))) running.add(name);
+  }
+  return p => (census.get(p.pid) || []).some(name => running.has(name));
+}
+
 /** Every process carrying `marker`, split three ways: `{carrying, orphans, attached, theirs,
  * theirOrphans}`.
  *
@@ -1127,16 +1373,28 @@ export function withoutSharedRoots(p, roots) {
  * **Every orphan actually measured was `ppid=1`**, which is why this costs nothing real: the six
  * under one worktree in SKEIN-873, the seven from seven `attach.mjs` runs in SKEIN-861, and the one
  * found on a final gate run. What it does give up is named in [`main`]: a supervisor that leaks a
- * child while itself staying alive is counted rather than failed on, and a process daemonised on
- * purpose — a fixture's tmux server is `ppid=1` by design — reads as an orphan if you run this
- * DURING a suite instead of after it, which is the one thing CONTRIBUTING.md asks.
+ * child while itself staying alive is counted rather than failed on.
+ *
+ * **The parenthesis this paragraph used to end on was a defect and not a caveat** (SKEIN-990). It
+ * read "a process daemonised on purpose — a fixture's tmux server is `ppid=1` by design — reads as
+ * an orphan if you run this DURING a suite instead of after it", and that is not a cost of asking
+ * after a run: a `tmux new-session -d` of a suite in ANOTHER worktree took this check red twice,
+ * one second old each time, in a tree where nothing was running at all. [`fixturesRunning`] is what
+ * answers for the daemonised shape now, and it is the second argument to [`attribute`].
  *
  * `theirOrphans` is the same question asked of the other lanes, and is reported for a person to
  * read rather than for the exit code: somebody's leak, plainly, and not this run's to be red about.
- * It is how the six in SKEIN-873 were found by hand in the first place. */
-export function testMarked(all, marker, repo = REPO) {
+ * It is how the six in SKEIN-873 were found by hand in the first place.
+ *
+ * **The cohort test defaults to being derived here rather than to being off.** A caller that does
+ * not pass one gets the rule, at the cost of one more pass over the box; `main` passes the one it
+ * built so the two halves share the work and, more to the point, agree. An `inFlight` defaulting to
+ * "nothing is in flight" would make the SKEIN-990 behaviour the one you get by forgetting, which is
+ * how a fix stops being a fix. */
+export function testMarked(all, marker, repo = REPO, inFlight = fixturesRunning(all, repo),
+  others = otherWorktrees(repo)) {
   const carrying = all.filter(p => marked(p, marker));
-  return { carrying, ...attribute(carrying.map(p => [p, p]), repo) };
+  return { carrying, ...attribute(carrying.map(p => [p, p]), repo, inFlight, others) };
 }
 
 /** The rule, and the only copy of it: split `hits` into `{orphans, attached, theirs,
@@ -1167,24 +1425,44 @@ export function testMarked(all, marker, repo = REPO) {
  * given since SKEIN-884 and the only one an attributed check can give: the lane that owns that path
  * is the one that can tell a leak from a fixture it is still using, and a verdict handed to a lane
  * that cannot act on it is a red nobody can clear. [`attributionLine`] is where that is said in
- * words, and it says whose. */
-function attribute(hits, repo) {
+ * words, and it says whose.
+ *
+ * **`unclear` is the fourth bucket and it is deliberately not a verdict** (SKEIN-990). [`whose`]
+ * answers it for a process that names this worktree AND another checkout of it and is standing in
+ * neither — the shape an environment carrying a `cd` breadcrumb has once the evidence that would
+ * settle it is gone. Both available guesses are a defect this file already has a name for: "mine"
+ * is the red this item was filed over, and "theirs" is SKEIN-645's silence with somebody else's
+ * name on it. So it is counted, printed with its rows, and reaches no exit code — and a bucket
+ * that stops being empty is a visible reason to go and find better evidence, which a wrong verdict
+ * would never have been.
+ *
+ * `inFlight` is [`fixturesRunning`], and it is applied to the other lanes' rows as well as to this
+ * one's: another lane's in-flight tmux is no more "somebody's leak" than this one's is. */
+function attribute(hits, repo, inFlight = () => false, others = otherWorktrees(repo)) {
   const orphans = [];
   const attached = [];
   const theirs = [];
+  const unclear = [];
   let theirOrphans = 0;
   for (const [p, record] of hits) {
     const parent = parentOf(p.pid);
-    if (!fromWorktree(p, repo)) {
+    // "Nothing is left of the run that made it": its parent is gone AND no other process of its
+    // fixture is still running under a live parent. The second half is what a daemon needs — see
+    // [`fixturesRunning`], and SKEIN-990 for the red that was printed without it.
+    const stranded = parent === 1 && !inFlight(p);
+    const verdict = whose(p, repo, others);
+    if (verdict === "unclear") {
+      unclear.push(record);
+    } else if (verdict === "elsewhere") {
       theirs.push(record);
-      if (parent === 1) theirOrphans++;
-    } else if (parent === 1) {
+      if (stranded) theirOrphans++;
+    } else if (stranded) {
       orphans.push(record);
     } else {
       attached.push(record);
     }
   }
-  return { orphans, attached, theirs, theirOrphans };
+  return { orphans, attached, theirs, theirOrphans, unclear };
 }
 
 /** Every process whose argv or environment names one of `patterns` — `[prefix, RegExp]` pairs —
@@ -1203,7 +1481,9 @@ function attribute(hits, repo) {
  * the half of this a suite can own: which bucket reaches the exit code is a single integer that
  * any lane's leak could also produce, so the two are asserted apart — the same division as
  * SKEIN-780. */
-export function fixtureNamed(all, patterns, repo = REPO, shared = sharedFixtureRoot()) {
+export function fixtureNamed(all, patterns, repo = REPO, shared = sharedFixtureRoot(),
+  inFlight = fixturesRunning(all, repo, shared, patterns.map(([prefix]) => prefix)),
+  others = otherWorktrees(repo)) {
   const hits = [];
   for (const p of all) {
     // The containers come out before any prefix goes in — the shared fixture root (SKEIN-979) and
@@ -1220,7 +1500,7 @@ export function fixtureNamed(all, patterns, repo = REPO, shared = sharedFixtureR
       break;
     }
   }
-  return { carrying: hits.map(([, record]) => record), ...attribute(hits, repo) };
+  return { carrying: hits.map(([, record]) => record), ...attribute(hits, repo, inFlight, others) };
 }
 
 /** This pid's parent, or `null` when it cannot be read. Field 4 of `/proc/<pid>/stat`, taken after
@@ -1280,10 +1560,12 @@ function main(argv) {
   let derived;
   let marker;
   let shared;
+  let lanes;
   try {
     derived = fixturePrefixes();
     marker = testMarker();
     shared = sharedFixtureRoot();
+    lanes = otherWorktrees();
   } catch (e) {
     console.error(`leak check: ${e.message}`);
     return 2;
@@ -1304,6 +1586,15 @@ function main(argv) {
   // actually cleaned of is whatever IT carries in that variable.
   console.log(`  a process naming $${shared.variable} (${shared.fallback} by default) and nothing ` +
     "under it is not a fixture process, so that path is taken out before the prefixes go in");
+  // The other two rules that make the check see less, said out loud for the same reason and in the
+  // same place (SKEIN-990). The lane count is git's answer and not a list in here, so a reader can
+  // see at once whether the check knows about the worktree whose processes it is looking at.
+  console.log(`  git names ${lanes.length} other checkout${lanes.length === 1 ? "" : "s"} of this ` +
+    "repository on this box; a process that names one of them as well as this worktree belongs to " +
+    "whichever of the two it is standing in, and to neither when it stands in neither");
+  console.log("  a process whose parent is gone is a leak only if nothing else of its fixture is " +
+    "still running under a live parent — a tmux a suite daemonises has no parent from its first " +
+    "second, and nor has one left behind for nine hours");
   const patterns = prefixes.map(prefix => [prefix, fixtureRegex([prefix])]);
   const mine = new Set(ancestry());
   const all = processes().filter(p => !mine.has(p.pid));
@@ -1313,7 +1604,11 @@ function main(argv) {
       `  ${denied} of ${all.length} processes would not let this user read their environment, so ` +
         `only their command line was checked and $${marker} could not be asked of them at all`);
   }
-  const named = fixtureNamed(all, patterns, REPO, shared);
+  // Derived once and handed to both halves: the same cohort answering the same question twice is
+  // the way the two halves stopped being able to contradict each other (SKEIN-913), and a second
+  // derivation would be a second moment as well as a second pass.
+  const running = fixturesRunning(all, REPO, shared, prefixes);
+  const named = fixtureNamed(all, patterns, REPO, shared, running, lanes);
   for (const said of prefixLines(named, all.length)) console.log(said);
   // Oldest first and older than `--min-age`, per bucket. The filter is applied to each list rather
   // than to the scan, so the counts above are about the box and the rows below are about what was
@@ -1324,30 +1619,36 @@ function main(argv) {
   const mineOrphans = listed(named.orphans);
   const inFlight = listed(named.attached);
   const elsewhere = listed(named.theirs);
-  if (!mineOrphans.length && !inFlight.length && !elsewhere.length) {
+  const unclear = listed(named.unclear);
+  if (!mineOrphans.length && !inFlight.length && !elsewhere.length && !unclear.length) {
     console.log(`  nothing is running from any of them${minAge ? ` and older than ${minAge}s` : ""}`);
   }
   if (elsewhere.length) {
     for (const said of reportLines(elsewhere, named.theirOrphans
       ? "processes name a test fixture and are not this worktree's — " +
-        `${named.theirOrphans} of them have no parent left, which is a leak belonging to ` +
-        "whichever lane owns that path, to be reported there and not answered for here"
+        `${named.theirOrphans} of them have nothing left of the run that made them, which is a ` +
+        "leak belonging to whichever lane owns that path, to be reported there and not answered " +
+        "for here"
       : "processes name a test fixture and are not this worktree's, so not this run's to be red " +
         "about")) {
       console.log(said);
     }
   }
+  if (unclear.length) {
+    for (const said of reportLines(unclear, unclearHeadline())) console.log(said);
+  }
   if (inFlight.length) {
     for (const said of reportLines(
-      inFlight, "processes name a test fixture of this worktree and their parent is alive, so a " +
+      inFlight, "processes name a test fixture of this worktree and the run that made them is " +
+        "still going — a live parent, or another process of the same fixture that has one — so a " +
         "run is in flight rather than a leak")) {
       console.log(said);
     }
   }
   if (mineOrphans.length) {
     for (const said of reportLines(
-      mineOrphans, "processes are still running from a test fixture of this worktree and have " +
-        "lost their parent, which is this run's leak")) {
+      mineOrphans, "processes are still running from a test fixture of this worktree with nothing " +
+        "left of the run that made them, which is this run's leak")) {
       console.log(said);
     }
   }
@@ -1356,8 +1657,13 @@ function main(argv) {
   // was this check's answer for as long as it was wrong, and a reader could not tell it from
   // "nothing could ever match"; a count against the population examined can be read either way
   // round, which is the whole of SKEIN-647 and the reason the prefixes are printed above.
-  const split = testMarked(all, marker);
+  const split = testMarked(all, marker, REPO, running, lanes);
   for (const said of markerLines(split, marker, all.length)) console.log(said);
+  const markUnclear = listed(split.unclear.map(p =>
+    ({ pid: p.pid, age: p.age, args: p.args, prefix: marker, where: "environment" })));
+  if (markUnclear.length) {
+    for (const said of reportLines(markUnclear, unclearHeadline())) console.log(said);
+  }
   const { orphans } = split;
   const marks = orphans
     .filter(p => p.age === null || p.age >= minAge)
@@ -1368,14 +1674,29 @@ function main(argv) {
       // The two red headlines end in the same six words on purpose: they are the same verdict
       // reached by two scans, and a reader skimming the output should not have to work out which
       // of several reports is the one being exited 1 over (SKEIN-913).
-      marks, `processes carry $${marker} from this worktree and have lost their parent, which is ` +
-        "this run's leak")) {
+      marks, `processes carry $${marker} from this worktree with nothing left of the run that ` +
+        "made them, which is this run's leak")) {
       console.log(said);
     }
   }
-  // One bucket of each half, and it is the same bucket: this worktree's, parent gone. Everything
-  // else printed above is printed and nothing more (SKEIN-913).
+  // One bucket of each half, and it is the same bucket: this worktree's, with nothing left of the
+  // run that made it. Everything else printed above is printed and nothing more (SKEIN-913,
+  // SKEIN-990).
   return mineOrphans.length || marks.length ? 1 : 0;
+}
+
+/** The headline the `unclear` rows are printed under, and **the only place either half says it**,
+ * so that the two cannot describe the same bucket differently (SKEIN-913's argument, applied to the
+ * bucket SKEIN-990 added).
+ *
+ * It says what is not known rather than guessing: these processes name this worktree and another
+ * checkout of it, and are standing in neither, so there is nothing left to decide between them. A
+ * reader who wants to know can read `/proc/<pid>/environ` — which is how the first of them was
+ * chased — and the row carries the pid and the age to start from. */
+function unclearHeadline() {
+  return "processes name this worktree AND another checkout of it and are standing in neither, so " +
+    "whose run they belong to cannot be told from here — not counted as this run's leak, and not " +
+    "cleared either";
 }
 
 /** The marker verdict's summary, as the lines [`main`] prints: how many of `population` carry
@@ -1399,21 +1720,23 @@ export function markerLines(split, marker, population, repo = REPO) {
   ];
 }
 
-/** The three-way split in one sentence, and **the same sentence for both halves** — [`main`] prints
+/** The four-way split in one sentence, and **the same sentence for both halves** — [`main`] prints
  * it under the prefix count and again under the marker count, so a reader comparing the two is
  * comparing like with like and cannot be handed the contradiction SKEIN-913 was.
  *
- * Only the first number reaches the exit code. The other three are for a person: this worktree's
- * with a live parent is a run in flight, and another lane's is another lane's — including the
- * reparented ones, which are a genuine leak that this run still must not be red about, and the
- * clause says so rather than leaving a reader to work out whose they are. [`fromWorktree`] argues
- * why another lane's cannot be failed on, [`attribute`] why a live parent is the line rather than
- * an age. */
-export function attributionLine({ orphans, attached, theirs, theirOrphans }) {
-  return `  ${orphans.length} of them are this worktree's and their parent is gone, which is a ` +
-    `leak; ${attached.length} are this worktree's with a live parent, so a run is in flight; ` +
-    `${theirs.length} are from elsewhere on this box (${theirOrphans} of those reparented to ` +
-    "pid 1, so somebody's leak and not this run's to be red about)";
+ * Only the first number reaches the exit code. The other four are for a person: this worktree's
+ * with its run still going is a run in flight, and another lane's is another lane's — including the
+ * stranded ones, which are a genuine leak that this run still must not be red about, and the
+ * clause says so rather than leaving a reader to work out whose they are. [`whose`] argues why
+ * another lane's cannot be failed on and what the fourth number is, [`attribute`] and
+ * [`fixturesRunning`] why the end of a run is the line rather than an age or a parent. */
+export function attributionLine({ orphans, attached, theirs, theirOrphans, unclear = [] }) {
+  return `  ${orphans.length} of them are this worktree's with nothing left of the run that made ` +
+    `them, which is a leak; ${attached.length} are this worktree's with that run still going, so ` +
+    `a run is in flight; ${theirs.length} are from elsewhere on this box (${theirOrphans} of ` +
+    "those with nothing left of their run, so somebody's leak and not this run's to be red " +
+    `about); ${unclear.length} name this worktree and another checkout of it and stand in ` +
+    "neither, so whose they are cannot be told from here";
 }
 
 /** The prefix verdict's summary, as the lines [`main`] prints: how many of `population` carry a

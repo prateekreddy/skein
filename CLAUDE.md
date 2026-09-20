@@ -100,11 +100,27 @@ to read past it, and the next red is read past too. It reports in two halves and
 attributed what it found: the marker half said, in those words, that nothing there was this run's to
 be red about, while the fixture-name half exited 1 over five rows of another lane's `rustc`, every
 one nought seconds old with a live parent. **Both halves now answer one question the same way — a
-process is this run's leak only if it is attributable to THIS worktree and its parent is gone.**
-Everything else is still reported, with its age and where it came from, under a headline that says
-whose it is; another lane's orphan is a real leak and is named as theirs, to be answered for where
-it belongs. So `exit 0` means *this* worktree is clean, and the rows printed beneath the counts are
-context rather than an accusation.
+process is this run's leak only if it is attributable to THIS worktree and nothing is left of the
+run that made it.** Everything else is still reported, with its age and where it came from, under a
+headline that says whose it is; another lane's orphan is a real leak and is named as theirs, to be
+answered for where it belongs. So `exit 0` means *this* worktree is clean, and the rows printed
+beneath the counts are context rather than an accusation.
+
+**And both halves then went red over a process that was doing nothing wrong** (SKEIN-990) — another
+worktree's `tmux … new-session -d -s skein-server`, one second old, twice, in a tree where no suite
+was running at all. Each half of the sentence above was wrong, and either alone produces that red.
+**`ppid == 1` is not "its run has gone" for something daemonised on purpose**: tmux forks a server
+and the launcher returns, so a healthy fixture's tmux is parentless from its first second, and an
+age threshold separates nothing, because a leak is one second old in its first second too. **And a
+path in an environment says where a process has BEEN as well as what it is using** — the only
+mention of this tree in that process was `OLDPWD`, the breadcrumb of the `cd` another lane's agent
+made on its way into its own worktree. So a parentless process is this run's leak only when nothing
+else of its own fixture is still running under a live parent, and its own children do not count
+(they are exactly what a stranded tmux keeps); and only when it does not also name another checkout
+of this repository, which the check asks `git worktree list` rather than keeping a list of lanes,
+breaking the tie on where the process is standing. One it can attribute to neither is printed under
+a headline saying so and reaches no exit code, because both available guesses are a failure this
+file already has a name for.
 
 The suites also stop what they started now, on every way out including a throw and a Ctrl-C
 (`quiesceOnExit`, same file). A fixture *directory* is still kept when a suite fails, because it is
