@@ -4357,6 +4357,257 @@ pub fn stray_advice(strays: &[Stray]) -> Option<String> {
     ))
 }
 
+// ──────── build output inside a live box, for a source tree that is no longer there ───────────
+//
+// [`substrate_strays`] above answers "what under `.skein` belongs to nobody", and on the fleet this
+// was measured against it correctly answers **nothing**: the 19.2 GB it was written for was cleared
+// by hand on 2026-09-09 and no box has put anything there since. The bytes moved rather than went
+// away. 30.5 GiB of cargo build output now sits *inside* live boxes, under `<fleet root>/<box>/`,
+// where `substrate_strays` never looks and where every existing figure counts it as the box's own
+// and therefore as wanted.
+//
+// Most of it is wanted. The part that is not is build output for a **worktree that has been
+// removed** — an agent lane makes `<box>/wt-1140`, points a build at `<box>/target-wt1140`, the
+// lane ends and the worktree goes, and the build directory stays because nothing ever connected
+// the two. One such directory was 5.88 GiB, twelve days old, on a filesystem that hit 100% three
+// times in a day.
+//
+// **The connection nothing had is written down in the build output itself.** Cargo emits a `.d`
+// file beside every artefact — ordinary `make` syntax, the outputs before the colon and every
+// source file after it — and the sources are spelled as the absolute paths of the tree the build
+// ran against. So a build directory *states* which tree it is for, and whether that tree is on
+// disk is a question with an answer.
+//
+// That is the whole of the evidence, and it is deliberately not any of these:
+//
+// * **not the name.** `target-wt1140` and `target-private` sit side by side in one box, the same
+//   twelve days old, one 5.88 GiB and dead and one 3.99 GiB and live. Nothing about either name
+//   says which. A lane's cleanup deleted live fixtures by matching names on the day this was
+//   written; matching `target-` here would be the same mistake with `rm -rf` behind it.
+// * **not the age.** Both of those were last written on the same day.
+// * **not cargo's `.fingerprint` directory**, which looks like a register of what the next build
+//   will reuse and is not: cargo writes one per generation and removes none, so slate-One's 2,657
+//   fingerprints cover 6,762 artefacts including every superseded one. Measured before it was
+//   believed, which is why it is written down here rather than tried again.
+//
+// A build directory is found the same way — by asking cargo rather than by matching a name.
+// `.rustc_info.json` is written by cargo into the root of a target directory and nowhere else, so
+// a directory carrying one is a target directory whatever it is called, and a directory called
+// `target-anything` without one is not examined at all.
+//
+// **Nothing here deletes**, the same as everything above it: the `rm -rf` is spelled out for a
+// reader who can see the evidence beside it, and skein does not run it.
+
+/// Cargo's own marker file, written into the root of a target directory and nowhere else.
+///
+/// Named once because it is the definition of "this is a build directory" that this file uses in
+/// place of a name match.
+const CARGO_TARGET_MARKER: &str = ".rustc_info.json";
+
+/// A build directory inside a live box, and the source tree its own dependency files name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedBuild {
+    /// The build directory itself, absolute.
+    pub path: String,
+    /// What [`tree_bytes`] makes of it — the same walk every other figure here comes from.
+    pub bytes: u64,
+    /// The source tree its `.d` files name, which is **not on disk**. This is the evidence, and it
+    /// is carried rather than recomputed so that whatever prints the report prints the reason.
+    pub built_from: String,
+    /// How many of its dependency-file references name [`built_from`]…
+    pub naming: usize,
+    /// …out of this many that name anything inside the box at all. The pair is reported because a
+    /// build directory can have been pointed at a second tree after the first went, and a reader
+    /// deciding whether to delete 5.88 GiB should see that rather than be told a verdict.
+    pub of: usize,
+}
+
+/// Every directory under `dir` that carries [`CARGO_TARGET_MARKER`], not descending into one once
+/// found — a target directory's own subdirectories are its contents, not more target directories.
+///
+/// Bounded at `depth` because a box holds whole checkouts of other people's repositories and this
+/// walk is on the path of a disk check, not of a build.
+fn cargo_build_dirs(dir: &std::path::Path, depth: usize, found: &mut Vec<std::path::PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for kid in entries.flatten() {
+        let path = kid.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match path.join(CARGO_TARGET_MARKER).exists() {
+            true => found.push(path),
+            false => cargo_build_dirs(&path, depth - 1, found),
+        }
+    }
+}
+
+/// The source trees a build directory's `.d` files name, and how many references each one has.
+///
+/// A `.d` file is `make` syntax — `<output>: <source> <source> …` — and the sources cargo writes
+/// for a path-dependency are absolute. Only paths under `inside` are counted, because a reference
+/// to the shared toolchain says nothing about which tree this build was for; and each is reduced to
+/// its first component under `inside`, which is the worktree, not the file.
+///
+/// **A reference to the build directory's own ancestry is dropped.** `<box>/tree/target` names
+/// `<box>/tree`, and a build directory cannot be orphaned by the tree it lives in — that tree is
+/// there, or the build directory would not be either.
+fn build_sources(
+    build: &std::path::Path,
+    inside: &std::path::Path,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut stack = vec![build.to_path_buf()];
+    let prefix = format!("{}/", inside.display());
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for kid in entries.flatten() {
+            let path = kid.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("d") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for word in text.split([' ', '\t', '\n', '\r']) {
+                let word = word.trim_end_matches(':');
+                let Some(rest) = word.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Some(first) = rest.split('/').next().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let root = format!("{prefix}{first}");
+                if build.starts_with(&root) {
+                    continue; // the tree this build directory lives in
+                }
+                *counts.entry(root).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Build directories inside live boxes whose dependency files name a source tree that is gone.
+///
+/// **`Err` rather than an empty answer whenever a derivation came up empty**, which is
+/// [`substrate_strays`]'s discipline and is here for the same reason: a sweep that reports nothing
+/// because it recognised nothing reads exactly like a sweep that reports nothing because there is
+/// nothing (SKEIN-647). There is one way to come up empty here — no box at all — and it says so.
+///
+/// Note what is *not* a refusal: a box with no build directory, and a build directory whose `.d`
+/// files name no tree, are both simply silent. Neither is a failed derivation — there is genuinely
+/// nothing to say — and a build directory skein cannot explain is one it must not offer to delete.
+///
+/// Biggest first, because the only reason anybody runs this is that a disk is full.
+pub fn orphaned_builds() -> Result<Vec<OrphanedBuild>, String> {
+    let root = fleet_root();
+    let live = live_box_names();
+    if live.is_empty() {
+        return Err(format!(
+            "skein can see no boxes at all — neither a directory in {root} nor a placement record \
+             in {places} — so it cannot say whose build output anything is. Refusing rather than \
+             reporting that nothing is stranded",
+            places = skein_home().join("places").display(),
+        ));
+    }
+    use std::os::unix::fs::MetadataExt;
+    let mut stranded = Vec::new();
+    for name in &live {
+        let box_dir = std::path::Path::new(&root).join(name);
+        if !box_dir.is_dir() {
+            continue; // a placement record for a box whose tree is not here
+        }
+        let on_disk = std::fs::metadata(&box_dir).map(|m| m.dev()).ok();
+        let mut builds = Vec::new();
+        cargo_build_dirs(&box_dir, 4, &mut builds);
+        for build in builds {
+            let sources = build_sources(&build, &box_dir);
+            let of: usize = sources.values().sum();
+            let mut gone: Vec<(&String, &usize)> = sources
+                .iter()
+                .filter(|(tree, _)| !std::path::Path::new(tree).exists())
+                .collect();
+            gone.sort_by(|a, b| b.1.cmp(a.1));
+            let Some((tree, naming)) = gone.first() else {
+                continue;
+            };
+            stranded.push(OrphanedBuild {
+                bytes: tree_bytes(&build, on_disk),
+                path: build.display().to_string(),
+                built_from: (*tree).clone(),
+                naming: **naming,
+                of,
+            });
+        }
+    }
+    stranded.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
+    Ok(stranded)
+}
+
+/// [`orphaned_builds`] as a line to put in front of a person, or `None` when there is nothing to
+/// say.
+///
+/// The evidence is in the sentence and not only in the struct: a reader is told which tree the
+/// build was for, that it is not on disk, and how much of the directory says so — because
+/// `naming` short of `of` means the directory was pointed at something else afterwards, and that
+/// is the reader's call rather than this function's.
+///
+/// The command is spelled out and **not run**, and every path in it is shell-quoted: the fleet
+/// root comes from `$SKEIN_FLEET_ROOT`, an operator sets it, and this string is meant to be
+/// pasted into a shell.
+pub fn orphaned_build_advice(builds: &[OrphanedBuild]) -> Option<String> {
+    if builds.is_empty() {
+        return None;
+    }
+    let gib = |bytes: u64| format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    let total: u64 = builds.iter().map(|b| b.bytes).sum();
+    let lines = builds
+        .iter()
+        .map(|b| {
+            format!(
+                "\x20   {} ({}) was built from {}, which is not on disk — {} of its {} source \
+                 references name it",
+                b.path,
+                gib(b.bytes),
+                b.built_from,
+                b.naming,
+                b.of,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let paths = builds
+        .iter()
+        .map(|b| sh_quote(&b.path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let subject = match builds.len() {
+        1 => "1 build directory".to_string(),
+        n => format!("{n} build directories"),
+    };
+    let verb = match builds.len() {
+        1 => "names a source tree",
+        _ => "name source trees",
+    };
+    Some(format!(
+        "{subject} in the fleet {verb} that is no longer there, {total} in all:\n{lines}\n\
+         skein did not create them and does not remove them; if they are yours to delete:\n\
+         \x20   rm -rf {paths}",
+        total = gib(total),
+    ))
+}
+
 /// `du` over every box, and the `|| true` is the entire point of this being its own function.
 ///
 /// `du` exits nonzero if it could not read so much as one directory anywhere in the tree, while
@@ -13272,6 +13523,229 @@ for a in sys.argv[2:]:
             path.is_dir(),
             "{} was removed by a report — the one thing this must never do",
             path.display()
+        );
+    }
+
+    // ───── build output for a tree that is gone: `orphaned_builds`, `orphaned_build_advice` ─────
+
+    /// A cargo build directory inside a live box, built from `tree` under that box.
+    ///
+    /// The marker file is what makes it a build directory as far as [`cargo_build_dirs`] is
+    /// concerned, and the `.d` file is written the way cargo writes one — `make` syntax, outputs
+    /// before the colon, absolute source paths after it. Both halves are the fixture because both
+    /// halves are the derivation.
+    fn plant_build(box_dir: &std::path::Path, build: &str, built_from: &str, refs: usize) {
+        let dir = box_dir.join(build);
+        let deps = dir.join("debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(dir.join(CARGO_TARGET_MARKER), "{}").unwrap();
+        std::fs::write(deps.join("libthing.rlib"), vec![7u8; 40_000]).unwrap();
+        let src = box_dir.join(built_from);
+        let sources = (0..refs)
+            .map(|i| format!("{}/src/f{i}.rs", src.display()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(
+            deps.join("thing-0123456789abcdef.d"),
+            format!("/target/debug/deps/libthing.rlib: {sources}\n"),
+        )
+        .unwrap();
+    }
+
+    /// A build directory whose sources are not on disk is named, with the tree that is missing.
+    ///
+    /// **What would make this fail**: dropping the `!Path::exists(tree)` filter in
+    /// `orphaned_builds`, so that no tree is ever "gone" and the sweep has nothing to report.
+    /// Watched — see the report; the assertion below failed with `[]`.
+    #[test]
+    fn a_build_directory_whose_source_tree_is_gone_is_named_with_that_tree() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        // `wt-1140` is never created, which is the whole of what makes this build output dead.
+        plant_build(&root.join("web-main"), "target-wt1140", "wt-1140", 9);
+
+        let found = orphaned_builds().expect("a fleet with a box is answerable");
+
+        assert_eq!(
+            found
+                .iter()
+                .map(|b| b.built_from.as_str())
+                .collect::<Vec<_>>(),
+            vec![root.join("web-main/wt-1140").display().to_string()],
+            "the sweep did not name the build output of a worktree that is gone, so nothing would \
+             ever reclaim it: {found:?}"
+        );
+        assert!(
+            found[0].bytes >= 40_000,
+            "the build directory is reported at {} bytes, which cannot include the 40,000-byte \
+             artefact planted in it — a size nobody can act on is not a report",
+            found[0].bytes
+        );
+        assert_eq!(
+            (found[0].naming, found[0].of),
+            (9, 9),
+            "the count of references that name the missing tree is wrong, and that count is what a \
+             reader weighs a `rm -rf` against: {found:?}"
+        );
+    }
+
+    /// A build directory whose tree is still there is left alone — **and the same directory is
+    /// named the moment that tree goes**, which is what makes the first half an assertion rather
+    /// than a coincidence.
+    ///
+    /// This is the direction that deletes somebody's work. On the fleet this was measured against,
+    /// one box held `target-wt1140` (5.9 GiB, dead) and `target-private` (4.0 GiB, live) side by
+    /// side, written on the same day, and neither the name nor the age tells them apart.
+    ///
+    /// **What would make this fail**: inverting that existence filter to report trees that *are*
+    /// on disk. Watched — see the report; the first assertion named the live directory.
+    #[test]
+    fn a_build_directory_whose_source_tree_is_still_there_is_left_alone_until_it_goes() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        // `plant_fleet` made `web-main/tree`, so this build directory's sources are all present.
+        std::fs::create_dir_all(box_dir.join("tree/src")).unwrap();
+        plant_build(&box_dir, "target-private", "tree", 9);
+
+        let while_live = orphaned_builds().expect("a fleet with a box is answerable");
+        assert!(
+            while_live.is_empty(),
+            "a build directory was called orphaned while the tree it names is on disk — this is \
+             the report that puts a live box's work in a `rm -rf` a person is invited to paste: \
+             {while_live:?}"
+        );
+
+        std::fs::remove_dir_all(box_dir.join("tree")).unwrap();
+
+        let once_gone = orphaned_builds().expect("a fleet with a box is answerable");
+        assert_eq!(
+            once_gone
+                .iter()
+                .map(|b| b.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![box_dir.join("target-private").display().to_string()],
+            "the same directory is still unnamed after the tree it was built from was removed, so \
+             the silence above proved nothing: {once_gone:?}"
+        );
+    }
+
+    /// A directory that merely *looks* like build output is never examined, and never offered.
+    ///
+    /// The point of the test is the thing it refuses to do. `target-keepme` here is named exactly
+    /// like the real strays, is exactly as old, and names a tree that does not exist — everything a
+    /// name match or an age check would fire on. It carries no [`CARGO_TARGET_MARKER`], so cargo
+    /// never made it, so skein says nothing about it.
+    ///
+    /// **What would make this fail**: finding build directories by a `target` name prefix instead
+    /// of by cargo's marker. Watched — see the report; `target-keepme` was named for deletion.
+    #[test]
+    fn a_directory_that_only_looks_like_build_output_is_never_offered() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        // Real build output, so a sweep that found nothing at all cannot pass this test.
+        plant_build(&box_dir, "target-wt1140", "wt-1140", 9);
+        // Somebody's notes, under a name that matches every stray on the fleet.
+        let decoy = box_dir.join("target-keepme");
+        std::fs::create_dir_all(decoy.join("debug/deps")).unwrap();
+        std::fs::write(
+            decoy.join("debug/deps/thing-0123456789abcdef.d"),
+            format!("out: {}/wt-gone/src/f.rs\n", box_dir.display()),
+        )
+        .unwrap();
+
+        let found = orphaned_builds().expect("a fleet with a box is answerable");
+
+        assert_eq!(
+            found.iter().map(|b| b.path.as_str()).collect::<Vec<_>>(),
+            vec![box_dir.join("target-wt1140").display().to_string()],
+            "a directory cargo never made was offered for deletion because its name looked like \
+             one that cargo did — which is the failure that cost another lane its fixtures: \
+             {found:?}"
+        );
+        assert!(
+            decoy.is_dir(),
+            "{} was removed by a report — the one thing this must never do",
+            decoy.display()
+        );
+    }
+
+    /// No boxes at all is a refusal, not an empty sweep.
+    ///
+    /// Same discipline as `the_sweep_refuses_rather_than_saying_nothing_is_stranded` above and for
+    /// the same reason: with no box names derived, "nothing is stranded" would be indistinguishable
+    /// from "I could not tell", and the second is the truth (SKEIN-647).
+    ///
+    /// **What would make this fail**: returning `Ok(vec![])` when `live_box_names` is empty.
+    /// Watched — see the report; `expect_err` panicked on an `Ok([])`.
+    #[test]
+    fn a_fleet_with_no_boxes_refuses_rather_than_reporting_nothing_stranded() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        // A build directory whose tree is gone, and no box anywhere. The bytes are real and the
+        // sweep still must not answer, because it cannot say whose they are.
+        std::fs::create_dir_all(root.join(".skein")).unwrap();
+        let why = orphaned_builds()
+            .expect_err("no box means the sweep cannot say whose build output anything is");
+        assert!(
+            why.contains("no boxes at all") && why.contains("Refusing"),
+            "the refusal does not say what could not be derived, so a reader cannot tell it from \
+             a clean fleet: {why}"
+        );
+    }
+
+    /// The offer hands over a command, carries the evidence, and deletes nothing itself.
+    ///
+    /// **What would make this fail**: dropping `built_from` from the sentence
+    /// `orphaned_build_advice` builds, leaving a reader a `rm -rf` over 5.9 GiB and no reason.
+    /// Watched — see the report; the "names the tree" assertion failed.
+    #[test]
+    fn the_build_offer_carries_its_evidence_and_deletes_nothing() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        plant_build(&box_dir, "target-wt1140", "wt-1140", 9);
+
+        assert_eq!(
+            orphaned_build_advice(&[]),
+            None,
+            "there is nothing to say about nothing"
+        );
+
+        let found = orphaned_builds().expect("a fleet with a box is answerable");
+        let offer =
+            orphaned_build_advice(&found).expect("one was found, so there is something to say");
+        let gone = box_dir.join("wt-1140");
+        assert!(
+            offer.contains(&gone.display().to_string()),
+            "the offer does not name the tree that is missing, so it asserts a directory is dead \
+             without saying why: {offer}"
+        );
+        assert!(
+            offer.contains("which is not on disk") && offer.contains("9 of its 9"),
+            "the offer states no evidence a reader can check before pasting a `rm -rf`: {offer}"
+        );
+        assert!(
+            offer.contains("rm -rf"),
+            "the offer names a problem and no way out of it: {offer}"
+        );
+        assert!(
+            offer.starts_with("1 build directory ") && offer.contains(" names a source tree"),
+            "the offer does not agree with itself about how many it found: {offer}"
+        );
+        assert!(
+            box_dir.join("target-wt1140").is_dir(),
+            "the build directory was removed by a report — the one thing this must never do"
         );
     }
 
