@@ -543,10 +543,21 @@ const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbi
 /// ```
 ///
 /// which is `$HOME/.local/bin`, then this, then `FLEET_PATH` exactly. `~/.local/bin` is the one
-/// that matters: it is where Claude Code installs itself, it is the first entry of
-/// `box-session.sh`'s `share_paths` (`src/box-session.sh:668`), and that file says in as many words
-/// that a box handed a home without it "has no agent and no way to authenticate one"
+/// that matters: it is where Claude Code installs itself, and `box-session.sh` says in as many
+/// words that a box handed a home without it "has no agent and no way to authenticate one"
 /// (`src/box-session.sh:13-18`).
+///
+/// **Neither of the two is writable from inside a box any more** (SKEIN-963, SKEIN-968), and the
+/// name of this constant is why that had to be done twice. `~/.local` was the first entry of
+/// `box-session.sh`'s `share_paths` and is a per-box copy-on-write overlay now; this second entry
+/// was never under `$HOME` at all, so making `~/.local` private did not touch it — and it is the
+/// one `which -a claude` answers with inside a real box. `box-session.sh` binds it `--ro-bind`.
+/// This constant is unchanged: a crossing lands in the box's own mount namespace, so it inherits
+/// both of those without having to know about either.
+///
+/// The PATH stays as it is because the ORDER is what callers depend on — `crate::agentpath` asks
+/// whether the first `claude` on it is the agent — and the answer to "can a box change what that
+/// resolves to" is now a mount rather than a path edit.
 const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 
 /// The PATH a box runs on, built from the `home` in its placement — [`Place::wrap`] exports exactly

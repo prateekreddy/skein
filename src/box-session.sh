@@ -49,11 +49,17 @@ set -uo pipefail
 #
 # What it replaces: the PATH inherited from the fleet agent, which is a login shell's. On this
 # substrate that begins `~/.local/bin:/usr/local/share/npm-global/bin:…`, and both of those are
-# uid 1000 — the same uid every box runs as, with `.local` bound read-WRITE into every one of them
-# so that eleven boxes share one 547 MB toolchain instead of paying for it each. So a box that
-# dropped a `sudo`, a `jq`, a `python3` or a `bwrap` into `~/.local/bin` had it run here, at fleet
-# scope, with the real one still sitting behind it on the path. Nothing about that needed an
-# exploit: it is a file copy into a directory the box already writes.
+# uid 1000 — the same uid every box runs as. `.local` was bound read-WRITE into every one of them
+# when this was written, so that eleven boxes shared one toolchain instead of paying for it each,
+# and a box that dropped a `sudo`, a `jq`, a `python3` or a `bwrap` into `~/.local/bin` had it run
+# here, at fleet scope, with the real one still sitting behind it on the path. Nothing about that
+# needed an exploit: it was a file copy into a directory the box already wrote.
+#
+# `.local` is a copy-on-write overlay per box now and `/usr/local/share/npm-global` is read-only in
+# a box (`overlay_paths` below, SKEIN-963/968), so neither half of that sentence is still live —
+# and this export stays exactly as it is, because the reason it exists is that a fleet-scope script
+# must not resolve its commands through anything a box can reach, and "cannot today" is a weaker
+# claim than "does not, by construction".
 #
 # The narrow fix — resolving one binary against a fixed PATH — was already here, for `tmux`, and
 # the twelve `sudo` calls, the two `python3` calls and the `bwrap` below went on resolving through
@@ -107,8 +113,11 @@ set -uo pipefail
 #     spellings would. Exporting it here would be worse than useless: it would put a box-writable
 #     directory in front of `bwrap` itself, which is the whole of ISO-1.
 #
-# Sharing `.local` between boxes stays what §9.2 already says it is: boxes are one trust domain.
-# What changes is that SKEIN's own scripts stop being one of the things that domain executes.
+# That export stopped SKEIN's own scripts being one of the things a box can decide. `overlay_paths`
+# and the `--ro-bind` beside it finish the other half: neither entry of `box_path` is writable from
+# inside a box any more, so the agent one box runs is no longer a file another box can replace.
+# Boxes remain one trust domain for their STATE — §9.2 says so and it is still true — but the
+# domain's membership is no longer writable from inside it (SKEIN-963, SKEIN-968).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
@@ -712,17 +721,38 @@ printf '%s\n' "$start_id" >"$tmp/skein-start-id" || exit 1
 # round, something unanticipated is merely private: it costs a re-download, not an identity two
 # boxes both claim work under.
 #
-# (A copy-on-write overlay would be the honest version of this, and it is unavailable here: the
-# sandbox root is ITSELF overlayfs, and overlayfs refuses an overlayfs upperdir. Measured, not
-# assumed — bwrap 0.11.1 and this kernel both support it fine.)
+# (A copy-on-write overlay is the honest version of this, and half of it is available here. The
+# paragraph that used to sit on this line said it was unavailable outright — "the sandbox root is
+# ITSELF overlayfs, and overlayfs refuses an overlayfs upperdir" — which is true of the UPPER layer
+# and was read as true of the mechanism. Re-measured on this substrate, bwrap 0.11.1:
+#
+#     $ bwrap --dev-bind / / --overlay-src LOWER --tmp-overlay DEST -- \
+#         sh -c 'echo x > DEST/bin/probe && echo wrote'
+#     wrote                                        # and LOWER/bin/probe does not exist outside
+#     $ bwrap --dev-bind / / --overlay-src LOWER --overlay /boxes/u/upper /boxes/u/work DEST -- true
+#     bwrap: Can't make overlay mount on ... upperdir=/oldroot/boxes/u/upper ...: Invalid argument
+#
+# The lower layer may live anywhere; the upper layer may not live on overlayfs, and every writable
+# filesystem here except tmpfs IS overlayfs — `stat -f -c %T` answers `overlayfs` for /, /boxes,
+# /var/tmp and /tmp alike. The one virtiofs mount accepts the upperdir, mounts, and then refuses
+# every write with EROFS, which is worse than refusing to mount. So `--tmp-overlay` is what is
+# left: bwrap makes the upper layer as a tmpfs INSIDE the namespace, which makes it private to the
+# box by construction and gives it exactly the box's lifetime.)
 #
 # Seeded into the box on first start and diverging from there: credentials, per-box conversation
-# history, and the MCP registration that points each box at its own repo's work-tracking gateway.
-seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
-# Bound back through, genuinely shared. ~/.local carries the agent CLIs themselves — software, not
-# state, and 547M of it, so copying it per box would cost gigabytes to isolate binaries every box
-# wants identical. Conversation state lives in ~/.claude, which IS seeded. The rest are package
-# caches no box needs its own copy of.
+# history, the MCP registration that points each box at its own repo's work-tracking gateway, and
+# the work-tracker install stamps under `.local/state` — which are the one thing under `.local`
+# that must outlive a restart, and the reason is below `overlay_paths`.
+seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile" ".local/state")
+# Bound back through, genuinely shared. These are package caches no box needs its own copy of.
+#
+# **`.local` is no longer one of them, and that is SKEIN-963.** It carries the agent CLIs and about
+# 1.1 GB of `pip --user` libraries — software every box wants identical, which is why it was shared
+# — and `box_path` above puts `$HOME/.local/bin` FIRST on every box's PATH. Shared read-write plus
+# first on PATH is architecture §9.2 path 1 word for word: `~/.local/bin/claude` written by one box
+# is what every other box executes on its next start, persistent cross-box code execution with no
+# live target needed. It is in `overlay_paths` below instead, which keeps the reading and drops the
+# writing.
 #
 # NOT ~/shared, though it is the most obviously shared thing here. It is scoped to a REPO, not to a
 # sandbox — the two were the same object when a box was a sandbox, and this is where they come apart:
@@ -732,7 +762,33 @@ seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
 # it stays live across boxes of the SAME repo, which is what `shared` has always meant. Binding it
 # also broke provisioning outright: shared-home.sh refuses to replace a real path, and it gates
 # startup, so every fleet box would have failed to come up.
-share_paths=(".local" ".cargo" ".rustup" ".npm")
+share_paths=(".cargo" ".rustup" ".npm")
+
+# Shared to READ, private to WRITE. Every box sees the sandbox's copy whole; every box's own writes
+# land in a tmpfs upper layer that no other box has a name for.
+#
+# **What this buys, and it is the only thing it buys**: a box can no longer decide what another box
+# executes. It does not make a box's writes safe FROM itself, and it is not a sandbox — a box still
+# runs whatever the sandbox's `.local/bin` holds, which is what "boxes are one trust domain" has
+# always meant and still does. What changes is that the domain's membership stops being writable
+# from inside it.
+#
+# **The cost, stated rather than discovered**: a box's own `pip install --user` lives in RAM and is
+# gone at the next `skein restart`. That is the right way round — installs that every box should
+# have are made in the SANDBOX, outside any box, where they land in the lower layer and reach every
+# box at once. It is also unbounded: `--size` applies only to `--tmpfs`, so nothing here caps what
+# a box can push into its own upper layer. A box that installs torch inside itself spends 1 GB of
+# the sandbox's memory until it restarts.
+#
+# **`.local/state` is the exception, and it is in `seed_paths` for a reason worth writing down.**
+# `sync-install.sh` gates itself on `$HOME/.local/state/skein/sync-<slug>.done`, and that stamp
+# means "this box owns its CLAUDE.md, its memory and its skill now" — the whole point of the gate
+# is that a later start must not re-assert over them. An ephemeral upper layer loses the stamp at
+# every restart, so the gate would open every time and rewrite a box's own memory on every start.
+# Seeded and then bound back private below: the stamps a box has today come with it, and the ones
+# it writes from now on are its own. That also closes a smaller defect nobody had filed — the
+# stamp directory was SHARED, so one box's stamp answered for a box that had never run the install.
+overlay_paths=(".local")
 
 # `.claude/sessions` was a fifth entry here, and the reason it is not is the whole of SKEIN-572.
 #
@@ -1201,6 +1257,84 @@ binds=(--bind "$home" "$HOME")
 for rel in "${share_paths[@]}"; do
   [ -e "$HOME/$rel" ] && binds+=(--bind "$HOME/$rel" "$HOME/$rel")
 done
+# ...and the copy-on-write ones on top of those, lower layer first.
+#
+# `--overlay-src` names the layer to READ and applies to the `--tmp-overlay` that follows it, which
+# is why the two are emitted as one pair per entry and never separated: a stray `--overlay-src`
+# with no overlay after it attaches itself to the next one, and the box would then see a directory
+# it was never meant to.
+#
+# The destination is the same path as the source, exactly as the share loop above does it, and for
+# the same reason — `$HOME` is already the box's private home by the time this is read inside the
+# namespace, while the SOURCE resolves against the original filesystem. So this reads the sandbox's
+# real `~/.local` and shows it at the box's own `~/.local`.
+#
+# **Asked by running it, because a box that cannot start is worse than a box that cannot write.**
+# `--tmp-overlay` arrived in bubblewrap 0.9; this substrate has 0.11.1. An unconditional overlay on
+# a sandbox whose image ships an older bwrap is `bwrap: Unknown option`, which is every box on that
+# fleet refusing to start with no way in to fix it — the one failure this file must never have. So
+# the capability is probed rather than assumed, and a bwrap without it gets the SAFE half: a
+# read-only bind, which keeps the property that matters (no box decides what another box executes)
+# and loses only a box's ability to write its own `~/.local`. Said out loud, because losing
+# `pip install --user` inside a box with no explanation is the kind of thing people debug for an
+# hour.
+#
+# **The probe is the mount itself, not a stand-in for it**, and the first spelling here was a
+# stand-in: it asked bwrap to overlay `/usr`, which fails on this very substrate — `/usr/bin/docker`,
+# `/usr/bin/git` and `/usr/bin/sudo.ws` are separate mounts, and overlayfs refuses a lowerdir with
+# submounts under it. So the capability probe answered "no overlay here" on a machine whose
+# `~/.local` overlays perfectly, and every box would have quietly taken the read-only fallback. A
+# proxy for the real question is a third thing that can be wrong. This runs the exact source and
+# destination the bind below will use, so whatever it answers is about the mount that will be made.
+#
+# One extra `bwrap` per overlay entry per box start, ~8ms, against a launch that already spends
+# seconds in provisioning.
+for rel in "${overlay_paths[@]}"; do
+  [ -e "$HOME/$rel" ] || continue
+  if bwrap --dev-bind / / --overlay-src "$HOME/$rel" --tmp-overlay "$HOME/$rel" -- /bin/true >/dev/null 2>&1; then
+    binds+=(--overlay-src "$HOME/$rel" --tmp-overlay "$HOME/$rel")
+  else
+    binds+=(--ro-bind "$HOME/$rel" "$HOME/$rel")
+    echo "skein: bwrap here cannot overlay ~/$rel, so it is READ-ONLY in $box rather than \
+copy-on-write — every tool is still there, but nothing inside the box can install into it. \
+bubblewrap 0.9 or newer, and a ~/$rel with no mount points under it, is what gets the writable \
+upper layer back." >&2
+  fi
+done
+# ...and the box's own state back through the overlay it just went under (see `overlay_paths`).
+#
+# AFTER the loop, because it has to win: the overlay covers all of `.local`, and this is the one
+# subtree under it that a restart must find again. Created here rather than assumed, because the
+# seed only copies when the sandbox has something to copy — a fleet whose sandbox has never run
+# `sync-install.sh` has no `~/.local/state` at all, and `--bind` of a missing source is a hard
+# bwrap failure, which would mean no box on that fleet could start.
+mkdir -p "$home/.local/state" || exit 1
+binds+=(--bind "$home/.local/state" "$HOME/.local/state")
+
+# The npm prefix the agent CLIs actually live in — READ-ONLY, and this is the other half of
+# SKEIN-963 (filed separately as SKEIN-968 because a private `~/.local` does not touch it).
+#
+# `box_path` above is `$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH`. The first entry is
+# handled by the overlay; the second is the one `which -a claude` answers with inside a real box,
+# and it is not under `$HOME`, so nothing above reaches it. Measured on this fleet, from inside a
+# box, 2026-09-19: `/usr/local/share/npm-global` is owned by uid 1000 — the uid every box runs as —
+# `test -w` on its `bin` says writable, and the `claude` symlinked there was 2.1.278 while the
+# root-owned `/usr/local/bin/claude` that skein's own updater installs was 2.1.272. That gap is the
+# proof rather than the theory: Claude Code's background auto-updater had already written, from
+# inside whichever box ran it, the binary every other box then executed.
+#
+# **A read-only bind rather than an overlay, and the difference is what happens to a box that
+# updates itself.** Under an overlay the in-box updater SUCCEEDS — into a tmpfs, ~440 MB of it, lost
+# at the next restart, and until then that box runs an agent build skein neither installed nor can
+# see. Two boxes could run two different agents while the cockpit reports one version. Read-only
+# makes the attempt fail instead, which costs nothing and leaves exactly one answer to "which agent
+# is this fleet running". The attempt is then stood down explicitly rather than left to fail — see
+# the `DISABLE_` exports in the session block at the end of this file.
+#
+# Conditional because it is an absolute path on a substrate that need not have it: a `--ro-bind` of
+# a missing source fails the whole launch.
+[ -d /usr/local/share/npm-global ] \
+  && binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)
 # The conversation lives on the HOST, not in this VM.
 #
 # Everything else here is about isolating boxes from each other; this is about surviving the sandbox
@@ -2367,9 +2501,11 @@ unset SKEIN_MODEL_SCRATCH
 # The binary that reports the anchor, resolved here and by absolute path.
 #
 # The line that reports it runs in the shell inside the box, whose PATH begins with the box's own
-# `~/.local/bin` — which is shared read-write with every box in the fleet (see the share list
-# above). So an unqualified `tmux` there is a binary any box can replace, and the pid skein
-# addresses this box by would be whatever that binary chose to print. Resolved out here instead,
+# `~/.local/bin`. That was shared read-write with every box in the fleet when this was written and
+# is a per-box overlay now (see `overlay_paths` above), so an unqualified `tmux` there is no longer
+# a binary ANY box can replace — but it is still one THIS box can, into its own upper layer, and
+# the pid skein addresses this box by would be whatever that binary chose to print. The overlay
+# narrows the blast radius and does not remove the reason. Resolved out here instead,
 # before any box's namespace exists, against this script's own PATH — which is fixed and
 # root-owned at the top of the file, so the one-line override that used to sit on this command is
 # now what every command here gets.
@@ -2429,6 +2565,29 @@ exec bwrap \
     # server. That chain is the box agent session, and before this line it ran on the fixed six
     # with no ~/.local/bin in it (SKEIN-851).
     export PATH="$box_path"
+    # The agent CLI does not update ITSELF in a box; skein updates it for every box at once.
+    #
+    # This is the half of SKEIN-968 that faces the person rather than the attacker. The `--ro-bind`
+    # of /usr/local/share/npm-global up in the bind list is what makes a box unable to replace the
+    # agent every other box runs; on its own it turns a silent background write into a silent
+    # background FAILURE, and Claude Code surfaces those — so every box would carry a red update
+    # line about a directory it is never again allowed to write. A guard that makes the tool
+    # complain is a guard people learn to read past.
+    #
+    # Both names, and both are read out of the binary rather than remembered. `strings` on
+    # `/usr/local/share/npm-global/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`
+    # (2.1.278) describes them in its own words: DISABLE_AUTOUPDATER "turns off BACKGROUND
+    # auto-updates only", and under DISABLE_UPDATES it will "report the stale version but propose
+    # nothing -- that is an admin decision (`claude update` refuses under DISABLE_UPDATES)". The
+    # first stops the unasked-for write; the second turns a hand-typed `claude update` into one
+    # clear refusal instead of an npm permission error nobody can act on. Neither hides the
+    # version: a box is still told when it is behind, which is what must stay true while the
+    # installing moves to skein.
+    #
+    # Exported HERE for the reason the paragraph above gives about PATH -- a login shell sources
+    # the profile before it runs this command string, so an export in this block is the one
+    # spelling a profile cannot undo -- and it reaches the agent down the same tmux chain.
+    export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
     # path names the OUTER /tmp, which does not exist in this box private one, so the server fails
