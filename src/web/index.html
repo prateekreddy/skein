@@ -1912,6 +1912,7 @@
           <section class="set-pane" data-pane="boxes">
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">The share of the fleet's one filesystem a box may take. Blank means unlimited. <details><summary>how it is measured and enforced</summary>how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</details></span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Offer old build output after</span><span class="desc">Days a compiler artefact may go untouched before a full disk offers it back. <b>0 turns the offer off.</b> <details><summary>why this one is a judgement and not a measurement</summary>Everything else skein offers to delete it can <b>prove</b> dead — a directory under <code>.skein</code> that belongs to neither skein nor any live box, or a build directory whose own dependency files name a source tree that is no longer on disk. Cargo's superseded generations cannot be proved dead at all: rebuild a crate under a changed feature set and the old <code>.rlib</code> stays beside the new one for ever, and nothing in either file says which is which — cargo's own fingerprint register does not either, because it keeps one per generation and removes none. The only handle left is how long since something read or wrote the file, and skein admits it <b>here and nowhere else</b> because of what being wrong costs: the artefact is regenerated from source nobody touched, so the price is a <b>slower rebuild and never lost work</b>. It is yours to set because its correctness is local — a fleet whose lanes run for a week is wrong to call five days dead. skein never deletes any of it; it names what it would remove, with the age and the size, and prints the command.</details></span><input id="set-staledays" type="number" min="0" step="1" placeholder="5" autocomplete="off" /></label>
             <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as. Blank reads it from the repo's host clone, which is usually already right — a box has a private HOME, so it inherits no gitconfig of its own.</span><input id="set-gitname" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
@@ -9568,6 +9569,9 @@ function openSettings(pane = "repos") {
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
+    // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
+    // off — and `||` would show them a blank box that reads back as the default.
+    document.getElementById("set-staledays").value = settings.stale_build_days ?? "";
     document.getElementById("set-gitname").value = settings.git_name || "";
     document.getElementById("set-gitemail").value = settings.git_email || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
@@ -9992,6 +9996,9 @@ function settingsPayload() {
     scope_git_to_repo: document.getElementById("set-gitscope").checked,
     github_app_id: document.getElementById("set-ghappid").value.trim(),
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
+    // Blank means the same as 0, which the field says: skein says nothing about age at all. The
+    // two provable sweeps beside it are unaffected either way.
+    stale_build_days: Math.max(0, parseInt(document.getElementById("set-staledays").value, 10) || 0),
     git_name: document.getElementById("set-gitname").value.trim(),
     git_email: document.getElementById("set-gitemail").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),
