@@ -16,8 +16,15 @@ stale once, which is the failure this whole section is about — **`tests/parity
 them on every `cargo test` and fails when a count moves.** A number here is a claim about the code,
 so it is checked like one. Updating it is one line, and the failure says which.
 
+**Every number in the block below is checked, including the one inside a parenthetical**, and that
+clause is there because the parenthetical was the exception. It read "that gives 84" while the
+command it names answered 86, and it had no reader: the count was pulled off the line as its first
+whitespace-separated word, so `86)` was never a number to anything (SKEIN-986). A stale count
+inside a reproduction block is worse than one in prose, because the block is what a reader checks
+the prose against.
+
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 84)
+grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 157 unique, 160 occurrences
 grep -c 'function ' src/web/index.html                          # 428
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags

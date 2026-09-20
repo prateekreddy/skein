@@ -29,11 +29,18 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(repo().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
-/// The number in the `# NN` comment on the line of the parity block that starts with `starts_with`.
+/// Every number in the `# …` comment on the line of the parity block that starts with
+/// `starts_with`, in the order it is written.
 ///
 /// Deliberately anchored on the command rather than on a line number: this file would otherwise
 /// have the same problem it exists to fix.
-fn stated(parity: &str, starts_with: &str) -> u64 {
+///
+/// **Runs of digits, not words that parse as numbers** (SKEIN-986). This read the first
+/// whitespace-separated word and stopped, so a count written inside a parenthetical was invisible
+/// to it: the route line's `that gives 84)` had no reader at all, and by the time anyone ran the
+/// command it named the answer was 86. A number in this block that nothing reproduces is the one
+/// thing the block exists to rule out, and it was sitting on the first line of it.
+fn counts_on(parity: &str, starts_with: &str) -> Vec<u64> {
     let line = parity
         .lines()
         .find(|l| l.trim_start().starts_with(starts_with))
@@ -47,11 +54,28 @@ fn stated(parity: &str, starts_with: &str) -> u64 {
         .split_once('#')
         .unwrap_or_else(|| panic!("no `# <count>` on: {line}"))
         .1;
-    after
-        .split_whitespace()
-        .next()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("the count after `#` is not a number: {line}"))
+    let counts: Vec<u64> = after
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .filter_map(|run| run.parse().ok())
+        .collect();
+    assert!(!counts.is_empty(), "no count in the `#` comment on: {line}");
+    counts
+}
+
+/// The one count on a line that states one.
+fn stated(parity: &str, starts_with: &str) -> u64 {
+    let counts = counts_on(parity, starts_with);
+    assert_eq!(
+        counts.len(),
+        1,
+        "`{starts_with}…` states {} numbers, and this reads it as stating one. Every number in \
+         that block is a claim about the code and has to be checked as one — add the check rather \
+         than letting the extra number ride unread, which is how `that gives 84` outlived the \
+         answer 86 (SKEIN-986).",
+        counts.len()
+    );
+    counts[0]
 }
 
 fn check(what: &str, stated: u64, measured: u64, command: &str) {
@@ -73,13 +97,30 @@ fn the_parity_gate_still_reproduces_its_own_counts() {
     let server = read("src/bin/skein-server.rs");
     let index = read("src/web/index.html");
 
-    // `.route(` and not `.route("`, which the document also records — the second misses the routes
-    // whose path is a constant, and the difference between the two numbers is itself the note.
+    // `.route(` and not `.route("`, which the document also records — the second misses every
+    // entry the router writes across several lines, whose path is on the line BELOW the call, and
+    // the difference between the two numbers is itself the note. Both are checked: the
+    // parenthetical is a claim about the code exactly like the count beside it, and it was the one
+    // number in this block that nothing ran (SKEIN-986). The measurement matches what `grep -c`
+    // does — LINES containing the string, not occurrences of it.
+    let routes = counts_on(&parity, "grep -c '\\.route('");
+    assert_eq!(
+        routes.len(),
+        2,
+        "the route line should state the count and the under-count the quoted form gives: it says \
+         {routes:?}"
+    );
     check(
         "routes",
-        stated(&parity, "grep -c '\\.route('"),
+        routes[0],
         server.matches(".route(").count() as u64,
         "grep -c '\\.route('  src/bin/skein-server.rs",
+    );
+    check(
+        "routes the quoted form finds",
+        routes[1],
+        server.lines().filter(|l| l.contains(".route(\"")).count() as u64,
+        "grep -c '\\.route(\"'  src/bin/skein-server.rs",
     );
 
     // Unique element ids, and the occurrences beside them: two ids written twice is a bug the page
@@ -100,21 +141,11 @@ fn the_parity_gate_still_reproduces_its_own_counts() {
     let mut unique: Vec<&str> = ids.clone();
     unique.sort_unstable();
     unique.dedup();
-    let line = parity
-        .lines()
-        .find(|l| l.trim_start().starts_with("grep -oE 'id="))
-        .expect("docs/parity.md no longer counts the page's element ids");
-    let numbers: Vec<u64> = line
-        .split_once('#')
-        .expect("no counts on the id line")
-        .1
-        .split_whitespace()
-        .filter_map(|w| w.parse().ok())
-        .collect();
+    let numbers = counts_on(&parity, "grep -oE 'id=");
     assert_eq!(
         numbers.len(),
         2,
-        "the id line should state both the unique count and the occurrences: {line}"
+        "the id line should state both the unique count and the occurrences: it says {numbers:?}"
     );
     check(
         "unique element ids",
