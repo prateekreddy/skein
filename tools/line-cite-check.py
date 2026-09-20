@@ -88,6 +88,19 @@ WHAT THIS COVERS
   a recorded anchor            the same commit as the citation and the reviewer sees both.
   a whole file renamed away    `prose-check.py` already fails on this; this gate would see it as
                                an unresolvable path and leaves it there rather than double-report.
+  a citation that inherited     `inherited`, and it is the failure the ledger's KEY makes
+  an anchor another citation    possible: an entry is keyed by ADDRESS ALONE, so a row that comes
+  wrote                         to cite an address another row already recorded is judged against
+                                the other row's anchor — and `--relocate` then moves it to
+                                wherever THAT anchor sits now. It happened: `docs/recovery-
+                                survey.md`'s cross-origin row was hand-corrected onto a line the
+                                ledger held for the unsupported-runtime row, one `--relocate
+                                --write` moved it onto the unsupported-runtime line, and every
+                                gate was green over the result (SKEIN-936). The signal is the same
+                                one `--record` reads: what the cited line said in the commit that
+                                wrote THIS citation's document line. Where that is not the anchor
+                                the ledger holds, the anchor is not this citation's record, and
+                                no relocation of it can be right.
   a citation whose anchor was   `misanchored`, and it is a DIFFERENT THING from every row above:
   never the right line          those drifted, this one was wrong when it was written. The ledger
                                cannot see it — an anchor records what the cited line SAID, not
@@ -158,6 +171,46 @@ MODES
     python3 tools/line-cite-check.py --relocate  # where each drifted citation's anchor sits now
     python3 tools/line-cite-check.py --relocate --write
                                                  # and rewrite the documents and the ledger to match
+    python3 tools/line-cite-check.py --relocate --write --only src/fleet.rs
+                                                 # ... only the citations that name that file
+    python3 tools/line-cite-check.py --relocate --write --in docs/architecture.md
+                                                 # ... only the ones written in that document
+
+WHY THE REPAIR TAKES A FILTER, AND WHY ONLY THE REPAIR DOES. Parallel lanes here are given
+disjoint FILES, and an insertion into one source file moves citations in every document that names
+it: a 474-line insertion into `src/fleet.rs` produced 60 findings across five documents on
+2026-09-20, and `--relocate --write` rewrote all five or none (SKEIN-976). Two lanes editing two
+different source files therefore both rewrote `docs/recovery-survey.md` and `docs/prose-
+symbols.toml`, each correct about its own file and wrong about the other's, and the merge had to be
+resolved row by row by asking which file each citation named. `--only src/fleet.rs` is that
+question asked once: a lane repairs the citations ITS change moved and reports the rest, so it
+never rewrites a citation into a file it did not touch, and its ledger edits stay inside that
+file's own block of keys — the ledger is sorted by cited path. `--in` is the same filter on the
+other side, for a lane that owns a document rather than a source file.
+
+**IT DOES NOT MAKE THE TWO LANES DISJOINT, and the measurement is what says so** rather than the
+hope. Built as a fixture on 2026-09-20 — 474 lines into `src/fleet.rs` on one branch, 120 into
+`src/health.rs` on the other, each repairing only its own — the merge conflicted in
+`docs/recovery-survey.md` in three hunks, exactly as many as without the filter, because the rows
+that conflict name BOTH files on ONE line and a line is git's unit. The filter is worth having for
+what it does do; what makes the merge mechanical is the recipe below.
+
+**Neither filter narrows the GATE**, and asking for one without `--relocate` is refused rather
+than honoured: a gate that reads part of the tree and reports "0 problems" is the shape this file
+exists to refuse (SKEIN-647). What is withheld is printed, every time, with the flag that withheld
+it — a partial repair that cannot be told from a whole one is how a half-repaired tree gets
+committed (SKEIN-821).
+
+MERGING TWO BRANCHES THAT BOTH REPAIRED CITATIONS. Do not resolve those hunks row by row. **Take
+either side of each conflicted document whole, then run `--record`, then `--relocate --write`**:
+the first gives an anchor to every citation the resolution left the ledger without — read out of
+the commit that wrote its document line, not out of today's tree — and the second re-derives every
+line number from the anchors, which is the one thing in the conflict that did not move. It is
+sound because each side was green when it was committed, so the commit that wrote any line of it
+is one where that side's citations were right; and it is checked rather than trusted, because a
+citation the anchors cannot resolve is reported instead of guessed. On the fixture above that
+recipe left seven findings, every one an `ambiguous` anchor the insertion alone had already made
+unrepairable (SKEIN-823), and not one line derived by hand.
 """
 
 import importlib.util
@@ -581,7 +634,7 @@ def stray_sites(sources):
     return found, read
 
 
-def unaccounted(cite, tree, words):
+def unaccounted(cite, tree, words, landing=None):
     """{phrase: lines} for the words this citation — and no other address in its row — answers for.
 
     THIS IS THE HALF THE LEDGER CANNOT SEE. An anchor records what the cited line SAID; it says
@@ -596,6 +649,17 @@ def unaccounted(cite, tree, words):
     citation's. Without that, a row quoting two messages convicts its first citation of the
     second message's address (see `row_lines`).
 
+    AND IT NAMES THEM WHERE THEY HAVE MOVED TO, not where the document still says they are
+    (`landing`, built in `check`). The other addresses in a row are stale in exactly the state
+    this whole gate exists for: an edit above them. Subtracting them at their old numbers
+    subtracts the wrong lines, so their messages fall through onto whichever sibling is being
+    judged and it is convicted of quoting them — three of the four citations in
+    `docs/recovery-survey.md:835` reported that way after one insertion into `src/fleet.rs`, all
+    three of them ordinary `moved` citations that a person then had to repair by hand (SKEIN-976).
+    It cuts the other way too, and that is the half to keep in mind before widening it: a
+    sibling's OLD line stops excusing anything, so a phrase sitting there is now this citation's
+    to answer for.
+
     PER SITE, not per phrase, which is what the full-quote family needs (SKEIN-889): a row naming
     three of a message's fourteen lines has still said nothing about the other eleven, so the
     phrase goes on judging against those. A phrase with ONE site and that site spoken for is
@@ -606,8 +670,10 @@ def unaccounted(cite, tree, words):
     sites = own_words(cite, tree, words)
     if not sites or lines is None:
         return {}
+    landing = {} if landing is None else landing
     spoken = set()
-    for other in row_lines(cite) - {cite.line}:
+    for named in row_lines(cite) - {cite.line}:
+        other = landing.get(f"{cite.target}:{named}", named)
         spoken |= (
             message_region(lines, Cite(cite.doc, cite.doc_line, "", cite.target, other))
             if other <= len(lines)
@@ -782,6 +848,69 @@ def anchor_for(cite, tree, blames):
     return (text, window(lines, cite.line)), ""
 
 
+def history_is_readable():
+    """Whether `git blame` on this checkout can name the commit that wrote a line.
+
+    A SHALLOW CLONE ANSWERS EVERY BLAME WITH ONE SHA — its own HEAD — and answers it confidently.
+    Measured on a `--depth 1` clone of this repository on 2026-09-20: all 2,498 lines of
+    `docs/architecture.md` came back under one commit, so "the tree as it stood in the commit that
+    wrote this line" is the working tree for every line in every document. `inherited` below would
+    then convict every drifted citation in the repository, in CI, for a reason that has nothing to
+    do with the change under test — the SKEIN-913 shape, a check going red for somebody else's
+    reason, which teaches people to read past it. `.github/workflows/ci.yml` says in as many words
+    that this gate "needs no history and is unaffected by the shallow clone", and it stays true:
+    the rule is switched off here, and the summary says so rather than printing a silent zero.
+    """
+    out = git("rev-parse", "--is-shallow-repository")
+    return out is not None and out.strip() != "true"
+
+
+def inherited(cite, entry, tree, blames, history=True):
+    """Why this ledger entry is NOT the record `cite` wrote — or `""` when it is, or cannot be told.
+
+    THE LEDGER IS KEYED BY ADDRESS ALONE, so two citations that come to name one address share one
+    entry, and the one that did not write it is judged against text it never claimed. `--relocate`
+    then moves it to wherever that other row's anchor has got to. That is SKEIN-936, and it is not
+    a hypothetical: `docs/recovery-survey.md`'s cross-origin row was hand-corrected onto
+    `src/bin/skein-server.rs:5087` — correctly, by a person reading the file — while the ledger
+    held that key for the unsupported-runtime row; the next `--relocate --write` moved the
+    cross-origin row onto the unsupported-runtime line, printed "0 left for a person", and
+    `line-cite-check` exited 0 over the result. The only thing that noticed was a human spotting
+    that the ledger's entry count had fallen by one, which is a side effect and not a signal.
+
+    THE TEST IS THE ONE `--record` ALREADY MAKES, asked of an entry that exists rather than of one
+    that does not: what did the cited line say in the commit that wrote THIS citation's document
+    line? For a citation left behind by an edit to the code, the document line has not been touched
+    since it was recorded, so `git blame` names the same commit and the answer is the anchor
+    itself — 523 of the 523 recorded citations in `docs/` answered exactly that on 2026-09-20, with
+    none underivable, which is what makes this a rule and not a heuristic. For a citation a person
+    has re-derived and rewritten, the document line is newer than the entry, and the answer is what
+    the person was looking at — which is not the anchor, and says so.
+
+    `""` WHERE NOTHING CAN BE PROVED, which is three states and not one: the history is not there
+    (`history_is_readable`), `git blame` knows nothing about the document at all — an uncommitted
+    or untracked document, and every fixture `self_check` builds — or the line cannot be read out
+    of the commit that wrote it (`anchor_for` says why). Silence here is the honest answer and the
+    conservative one; the repair path treats it as a reason to refuse to move rather than as
+    permission, and `main` counts what it could not check rather than reporting zero.
+    """
+    if not history or "historical" in entry:
+        return ""
+    if cite.doc not in blames:
+        blames[cite.doc] = blame_map(cite.doc)
+    if not blames[cite.doc]:
+        return ""
+    anchored, _ = anchor_for(cite, tree, blames)
+    if anchored is None or anchored[0] == entry["line"]:
+        return ""
+    sha = blames[cite.doc].get(cite.doc_line)
+    where = "the working tree" if sha is None else sha[:8]
+    return (
+        f"the anchor recorded here is another citation's: at {where} {cite.key} said"
+        f" {anchored[0][:60]!r}, while the ledger holds {entry['line'][:60]!r}"
+    )
+
+
 def read_ledger(path=None):
     """{key: {"line": str} or {"historical": str}} — `{}` when the ledger is not there yet."""
     import tomllib
@@ -825,7 +954,7 @@ def where_now(anchor_line, anchor_window, lines):
     return [n for n, text in enumerate(lines, 1) if norm(text) == anchor_line]
 
 
-def check(cites, ledger, tree):
+def check(cites, ledger, tree, blames=None, history=True):
     """[(cite, verdict, detail)] for every citation that is not in agreement with the ledger.
 
     Verdicts, and they are deliberately different things to a reader:
@@ -833,6 +962,10 @@ def check(cites, ledger, tree):
                       this citation on is not where they are. `detail` is where they are AND what
                       the anchor did, because those two facts together are the finding. No
                       mechanical repair can be right, so none is offered.
+      `inherited`   — the anchor at this citation's address was recorded for a DIFFERENT citation,
+                      so following it would drag this one onto another row's line (`inherited`,
+                      SKEIN-936). Also a person's, and for the same reason as `misanchored`: the
+                      ledger is not describing this claim, so no move of it can be right.
       `unrecorded`  — no anchor. Nothing is being claimed about it, so nothing can be checked.
       `moved`       — the anchor is elsewhere in the file. `detail` is where.
       `gone`        — the anchor is nowhere in the file. `detail` is what it said.
@@ -857,7 +990,29 @@ def check(cites, ledger, tree):
                       SKEIN-858 started from had been carried along by exactly that, and the
                       `detail` says which way the two disagree so a person can read the row.
     """
-    findings, words = [], {}
+    findings, words, blames = [], {}, {} if blames is None else blames
+    # WHERE EVERY DRIFTED CITATION IN THIS SET WOULD LAND, worked out before any of them is
+    # judged, because a row's OTHER sites are evidence about this one and they have moved too.
+    # `unaccounted` subtracts the lines a row's other addresses answer for; those addresses are
+    # the numbers written in the document, and during a drift those numbers are exactly the ones
+    # that are stale. A 474-line insertion into `src/fleet.rs` on 2026-09-20 made
+    # `docs/recovery-survey.md:835` — four sites, four messages, one cell — report THREE of its
+    # four citations as `misanchored` "its words are at src/fleet.rs:8953", the last of the four
+    # messages, because the other three sites were being subtracted at their pre-insertion
+    # addresses and so subtracted nothing at all. Every one of those three was an ordinary
+    # `moved`, and each cost a person a hand-derived line number (SKEIN-976). A site that has
+    # moved answers for where it has moved TO, and this map is that answer.
+    landing = {}
+    for cite in cites:
+        entry = ledger.get(cite.key)
+        lines = tree.now(cite.target)
+        if entry is None or "historical" in entry or cite.key in landing:
+            continue
+        if lines is None or cite.line > len(lines) or norm(lines[cite.line - 1]) == entry["line"]:
+            continue
+        hits = where_now(entry["line"], entry.get("window", ""), lines)
+        if len(hits) == 1:
+            landing[cite.key] = hits[0]
     for cite in cites:
         entry = ledger.get(cite.key)
         # A `historical` declaration is a person's written reason for a citation that points at
@@ -872,7 +1027,7 @@ def check(cites, ledger, tree):
         # either is reported. `drifted` and `hits` are what the ledger half of this gate knows.
         drifted = entry is not None and not past_end and norm(lines[cite.line - 1]) != entry["line"]
         hits = where_now(entry["line"], entry.get("window", ""), lines) if drifted else []
-        mine = {} if past_end else unaccounted(cite, tree, words)
+        mine = {} if past_end else unaccounted(cite, tree, words, landing)
         if mine:
             # WHERE WOULD THE MECHANICAL REPAIR LEAVE THIS CITATION? At the anchor's new line when
             # that resolves uniquely, and where it is otherwise. If the row's own words are in the
@@ -912,6 +1067,20 @@ def check(cites, ledger, tree):
         if not drifted:
             continue
         if len(hits) == 1:
+            # THE PROVENANCE QUESTION IS ASKED HERE AND NOWHERE ELSE, which is narrower than it
+            # first looks and deliberately so. `moved` is the ONLY verdict that moves a citation,
+            # so it is the only one a wrong anchor can drag — and it is also the only verdict
+            # whose document line, if a past `--relocate --write` wrote it, was CORRECT at that
+            # commit, because that is what the relocation did to it. Asked of the other verdicts
+            # it reads the tree at a commit where the citation was already stuck: measured on a
+            # two-lane merge fixture on 2026-09-20, asking it of `ambiguous` citations convicted
+            # two of them whose document line a sibling citation's relocation had rewritten,
+            # saying "another citation's anchor" about an entry that was their own. They are a
+            # person's either way; `ambiguous` is the true thing to tell them.
+            whose = inherited(cite, entry, tree, blames, history)
+            if whose:
+                findings.append((cite, "inherited", whose))
+                continue
             findings.append((cite, "moved", f"{cite.target}:{hits[0]}"))
         elif hits:
             findings.append((cite, "ambiguous", f"{len(hits)} line(s) hold it"))
@@ -946,9 +1115,27 @@ def rewrite_line(text, cite, new):
     )
 
 
-def relocate(findings, write=False, root=None):
-    """Rewrite each `moved` citation's line number in its document. Returns (moved, left)."""
-    moves = [(c, d) for c, verdict, d in findings if verdict == "moved"]
+def under(path, roots):
+    """Whether `path` is `roots` — one of them, or inside one of them.
+
+    At a `/` boundary, for the same reason `prose.resolve` matches its tail at one: `src/fleet.rs`
+    must not be selected by `--only src/fleet` and `docs/architecture.md` must not be selected by
+    `--in docs/arch`. `roots` empty means every path, because no filter was asked for.
+    """
+    return not roots or any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def relocate(findings, write=False, root=None, select=None):
+    """Rewrite each `moved` citation's line number in its document. Returns (moved, left).
+
+    `select` is the filter `--only` and `--in` build, and it is applied HERE rather than to the
+    findings, so that what is withheld can be printed beside what was written: a partial repair
+    that reads like a whole one is the SKEIN-821 shape, where "0 left for a person" was printed
+    over a dropped anchor.
+    """
+    moves = [
+        (c, d) for c, v, d in findings if v == "moved" and (select is None or select(c))
+    ]
     if not write:
         return moves, []
     edits = {}
@@ -1619,6 +1806,157 @@ def self_check():
     if stray_sites(outside) != ([], 0):
         bad.append("stray_sites read a file outside `docs/`, which is not its scope")
 
+    # ------------------------------------------------------------------------------------------
+    # 23-26. THE DRAG (SKEIN-936). The ledger is keyed by ADDRESS, so two citations that come to
+    # name one address share one entry — and the one that did not write it is judged against
+    # another row's claim and moved to wherever THAT claim has got to. Every case below is built
+    # on one tree with one ledger, and the ONLY difference between the citation that is moved and
+    # the citation that is not is which commit wrote its document line.
+    # ------------------------------------------------------------------------------------------
+
+    class TreeAt(FakeTree):
+        """A tree with a past: `at()` answers out of `past`, keyed by sha, `now()` as before."""
+
+        def __init__(self, lines, past):
+            super().__init__(lines)
+            self._past = past
+
+        def at(self, sha, rel):
+            return self._past.get(sha, self._now.get(rel))
+
+    old, new = "a" * 40, "b" * 40
+    # `shifted` is SELF_TARGET with two lines added above it: the disk-full line is at :4 and the
+    # reconnect line at :7. At `old` the file was four lines long and its LAST line was the
+    # reconnect message — so a citation written then, to :4, meant the reconnect message, and the
+    # anchor recorded under `src/fake.rs:4` is that. At `new` the file is what it is now.
+    was = ["let x = 1;", "let y = 2;", "let z = 3;", SELF_TARGET[4]]
+    drag_tree = TreeAt(shifted, {old: was, new: list(shifted)})
+    drag_ledger = {"src/fake.rs:4": {"line": norm(SELF_TARGET[4])}}
+    # The citation that recorded the entry: its document line has not been touched since, so the
+    # commit that wrote it is `old` and the anchor is its own. An edit above the code left it
+    # behind, and moving it is exactly right.
+    settled = Cite("docs/one.md", 3, "src/fake.rs:4", "src/fake.rs", 4)
+    # And the citation a PERSON re-derived, onto the same address, reading the file as it stands.
+    # `docs/recovery-survey.md`'s cross-origin row was in this state on 2026-09-15 and one
+    # `--relocate --write` moved it onto an unsupported-runtime refusal, green.
+    by_hand = Cite("docs/two.md", 9, "src/fake.rs:4", "src/fake.rs", 4)
+    seen = {"docs/one.md": {3: old}, "docs/two.md": {9: new}}
+    found = check([settled, by_hand], dict(drag_ledger), drag_tree, dict(seen))
+    said = {c.doc: v for c, v, _ in found}
+
+    # 23. The citation that wrote the anchor still moves, and the one that did not is `inherited`.
+    if said.get("docs/one.md") != "moved":
+        bad.append(
+            "the citation whose own document line recorded this anchor was not offered its"
+            f" relocation — got {said.get('docs/one.md')}, so the rule convicts the innocent too"
+        )
+    if said.get("docs/two.md") != "inherited":
+        bad.append(
+            "a citation judged by an anchor another citation recorded was not `inherited` — got"
+            f" {said.get('docs/two.md')}: this is the drag SKEIN-936 was found by"
+        )
+    elif "src/fake.rs:4" not in next(d for c, v, d in found if v == "inherited"):
+        bad.append("`inherited` did not name the address the two citations contend for")
+
+    # 24. AND IT IS NOT OFFERED A RELOCATION, which is the half that matters: the verdict is only
+    #     a message, the refusal to move is the protection.
+    moves, _ = relocate(found)
+    if [c.doc for c, _ in moves] != ["docs/one.md"]:
+        bad.append(
+            "the relocation was offered to the wrong set of citations — only the one whose own"
+            " document line recorded this anchor may move, and moving the other IS the drag."
+            f" It was offered to {[c.doc for c, _ in moves]}"
+        )
+
+    # 25. AND THE FIXTURE HAS TO DRAG WITHOUT THE RULE, or 23 is proving nothing but its own
+    #     arrangement. With the provenance switched off — which is what a shallow clone is, and
+    #     what this tool did before SKEIN-936 — the same tree, ledger and citations produce two
+    #     plain `moved` verdicts and the hand-corrected citation is rewritten onto the reconnect
+    #     line. The verdict the rule replaces is the one this asserts.
+    blind = check([settled, by_hand], dict(drag_ledger), drag_tree, dict(seen), history=False)
+    if [v for _, v, _ in blind] != ["moved", "moved"] or [
+        d for _, _, d in blind
+    ] != ["src/fake.rs:7", "src/fake.rs:7"]:
+        bad.append(
+            "the drag fixture does not drag with the provenance rule off, so 23 is moot: it"
+            f" reports {[(v, d) for _, v, d in blind]} where both should be moved to :7"
+        )
+
+    # 26. AND THE QUESTION IS ASKED ONLY OF A CITATION THE LEDGER WOULD MOVE. Asked of one that is
+    #     stuck for another reason it reads a tree where that citation was ALREADY stuck, and says
+    #     "another citation's anchor" about an entry that is its own: measured on a two-lane merge
+    #     fixture on 2026-09-20, two `ambiguous` citations whose document line a sibling's
+    #     relocation had rewritten were convicted that way. They are a person's either way, and
+    #     `ambiguous` is the true thing to tell them.
+    twice_ledger = {"src/fake.rs:4": {"line": norm(SELF_TWICE[1])}}
+    stuck_cite = Cite("docs/one.md", 3, "src/fake.rs:4", "src/fake.rs", 4)
+    stuck_tree = TreeAt(SELF_TWICE, {old: ["fn only() {}"] * 6})
+    verdicts = [
+        v for _, v, _ in check([stuck_cite], dict(twice_ledger), stuck_tree, {"docs/one.md": {3: old}})
+    ]
+    if verdicts != ["ambiguous"]:
+        bad.append(
+            "a citation whose anchor is in the file twice was told its anchor belongs to another"
+            f" citation — got {verdicts}, where nothing was going to move it in the first place"
+        )
+
+    # 27. A PATH FILTER REPAIRS ONE LANE'S CITATIONS AND WITHHOLDS THE REST (SKEIN-976), and it
+    #     matches at a `/` boundary for the same reason `prose.resolve` does — `--only src/fleet`
+    #     must not select `src/fleet.rs`, or a lane repairs a file it does not own by typo.
+    if not under("src/fleet.rs", []):
+        bad.append("`under` with no filter excluded a path, so an unfiltered repair repairs nothing")
+    if under("src/fleet.rs", ["src/fleet"]):
+        bad.append("`--only src/fleet` selected `src/fleet.rs`, matching inside a path component")
+    if not (under("src/fleet.rs", ["src"]) and under("src/fleet.rs", ["src/fleet.rs"])):
+        bad.append("`under` did not match a path against its own directory or itself")
+    mixed = [
+        (Cite("docs/one.md", 3, "src/fake.rs:4", "src/fake.rs", 4), "moved", "src/fake.rs:9"),
+        (Cite("docs/two.md", 3, "src/other.rs:4", "src/other.rs", 4), "moved", "src/other.rs:9"),
+    ]
+    picked, _ = relocate(mixed, select=lambda c: under(c.target, ["src/fake.rs"]))
+    if [c.target for c, _ in picked] != ["src/fake.rs"]:
+        bad.append(f"--only did not hold back the citation naming another file — got {picked}")
+    picked, _ = relocate(mixed, select=lambda c: under(c.doc, ["docs/two.md"]))
+    if [c.doc for c, _ in picked] != ["docs/two.md"]:
+        bad.append(f"--in did not hold back the citation in another document — got {picked}")
+
+    # 28. A ROW'S OTHER SITES ANSWER FOR WHERE THEY HAVE MOVED TO (SKEIN-976). `SELF_APART` holds
+    #     two messages nine lines apart; the row names both and quotes both, and the file has
+    #     shifted by six. Judging the first citation against the second message AT ITS OLD ADDRESS
+    #     convicts it of quoting a line it never named — which is what three of the four citations
+    #     in `docs/recovery-survey.md:835` reported after one insertion into `src/fleet.rs`, every
+    #     one of them an ordinary `moved` that then cost a person a hand-derived line number.
+    pair_row = (
+        "| `src/fake.rs:4`, `src/fake.rs:10` | the disk is full · nothing to reconnect"
+        " | **R** — a trigger | y | yes | C |"
+    )
+    two_sites = [
+        Cite("docs/fake.md", 1, "src/fake.rs:4", "src/fake.rs", 4, row=pair_row),
+        Cite("docs/fake.md", 1, "src/fake.rs:10", "src/fake.rs", 10, row=pair_row),
+    ]
+    sites_ledger = {
+        "src/fake.rs:4": {"line": norm(SELF_APART[3])},
+        "src/fake.rs:10": {"line": norm(SELF_APART[9])},
+    }
+    shifted_sites = ["// added"] * SELF_APART_GAP + SELF_APART
+    found = check(two_sites, dict(sites_ledger), FakeTree(shifted_sites), {"docs/fake.md": {}})
+    if [(v, d) for _, v, d in found] != [
+        ("moved", "src/fake.rs:10"),
+        ("moved", "src/fake.rs:16"),
+    ]:
+        bad.append(
+            "a row naming two sites in one file, both shifted, did not report two plain `moved`"
+            f" — got {[(v, d) for _, v, d in found]}"
+        )
+    #     And the fixture has to be the case it claims: WITHOUT the map, the second message falls
+    #     onto the first citation, which is the artefact this exists to remove.
+    stale = unaccounted(two_sites[0], FakeTree(shifted_sites), {})
+    if list(stale.values()) != [(16,)]:
+        bad.append(
+            "the two-site fixture no longer charges the second message to the first citation when"
+            f" the other site is subtracted at its OLD address, so 28 is moot — got {stale}"
+        )
+
     # 17. A `historical` declaration exempts the misanchor verdict too — a row that is the record
     #     of what WAS wrong is expected not to find its words in the tree.
     hist_row = {"src/fake.rs:4": {"historical": "the six copies SKEIN-756 deleted"}}
@@ -1643,6 +1981,34 @@ def main(argv):
         return 0
     everything, doing_record = "--all" in argv, "--record" in argv
     doing_relocate, writing = "--relocate" in argv, "--write" in argv
+    # A FLAG THAT IS ACCEPTED AND DOES NOTHING IS THE FAILURE THIS FILE IS ABOUT. `--only` with
+    # nothing after it, or with the next flag after it, would otherwise fall out of a
+    # comprehension silently and the run would repair EVERYTHING while its operator believed it
+    # had repaired one file — which is the SKEIN-647 shape pointed at a repair instead of a check.
+    only, inside, dangling = [], [], []
+    for i, flag in enumerate(argv):
+        if flag not in ("--only", "--in"):
+            continue
+        value = argv[i + 1] if i + 1 < len(argv) else ""
+        if not value or value.startswith("-"):
+            dangling.append(f"{flag} {value or '(nothing)'}")
+        else:
+            (only if flag == "--only" else inside).append(value)
+    if dangling:
+        refuse(
+            "line-cite-check: --only and --in each take a path, and one was given none:",
+            *(f"  * {d}" for d in dangling),
+            "  Refusing rather than dropping the filter, because a repair that quietly ignored",
+            "  it would rewrite every document while its operator believed it rewrote one",
+            "  (SKEIN-647).",
+        )
+    if (only or inside) and not doing_relocate:
+        refuse(
+            "line-cite-check: --only and --in narrow the REPAIR, never the gate.",
+            "  A gate that reads part of the tree and prints `0 problems` is the check this file",
+            "  refuses to be (SKEIN-647). Run the gate whole, and pass the filter to --relocate:",
+            "    python3 tools/line-cite-check.py --relocate --write --only src/fleet.rs",
+        )
 
     broken = self_check()
     if broken:
@@ -1733,19 +2099,76 @@ def main(argv):
             )
         return 0
 
-    findings = check(cites, ledger, tree)
+    # THE PROVENANCE RULE'S OWN FLOOR, and it has one for the third time for the third reason. It
+    # is the rule that keeps `--relocate` from dragging a citation a person placed (SKEIN-936),
+    # its failure mode is silence like the other two, and it has a switch — a shallow clone, where
+    # `git blame` names one commit for every line and nothing can be derived. So `blames` is built
+    # here, shared with `check`, and counted: a reader can tell "no citation is judged by another
+    # citation's anchor" from "the history to tell was not there".
+    history = history_is_readable()
+    blames = {}
+    findings = check(cites, ledger, tree, blames, history)
+    recorded = [c for c in cites if c.key in ledger and "historical" not in ledger[c.key]]
+    # WHAT THE PROVENANCE RULE WAS ASKED, AND WHAT IT COULD ANSWER. Its floor is not a population
+    # of documents like the other two rules': the rule is asked only about a citation the ledger
+    # would MOVE, so on a tree with nothing drifted the honest number is zero and says so. The
+    # state it exists to make visible is the other one — citations moving while the rule that
+    # stops a drag could not be consulted (SKEIN-936, SKEIN-647).
+    would_move = [c for c, v, _ in findings if v in ("moved", "inherited")]
+    vouched = [c for c in would_move if blames.get(c.doc)] if history else []
 
     if doing_relocate:
-        moves, _ = relocate(findings, write=False)
+        select = (lambda c: under(c.target, only) and under(c.doc, inside)) if (only or inside) else None
+        moves, _ = relocate(findings, write=False, select=select)
+        all_moves, _ = relocate(findings, write=False)
+        withheld = [m for m in all_moves if m not in moves]
         for cite, detail in moves:
             print(f"{cite.doc}:{cite.doc_line}  {cite.text}  ->  {detail}")
         stuck = [(c, v, d) for c, v, d in findings if v != "moved"]
+
+        # WHAT THE FILTER HELD BACK, PRINTED WHETHER OR NOT IT IS WRITING. A filter that is
+        # honoured silently turns "0 left for a person" into a statement about a subset, which is
+        # the sentence SKEIN-821 was printed over.
+        def say_withheld():
+            if not withheld:
+                return
+            flags = " ".join([*(f"--only {p}" for p in only), *(f"--in {p}" for p in inside)])
+            print(
+                f"\n{len(withheld)} relocatable citation(s) NOT written: {flags} excludes them."
+                " They are still findings, and this repository is not green until somebody"
+                " repairs them:"
+            )
+            for cite, detail in withheld:
+                print(f"  outside     {cite}  ->  {detail}")
 
         if not (writing and moves):
             print(f"\n{len(moves)} citation(s) relocatable; {len(stuck)} left for a person")
             for cite, verdict, detail in stuck:
                 print(f"  {verdict:10s} {cite}  {detail}")
+            say_withheld()
             return 0
+
+        # AND IT WILL NOT MOVE WHAT IT CANNOT VOUCH FOR. `inherited` is what stands between
+        # `--relocate --write` and a citation a person placed by hand, and it can only speak where
+        # the history is readable — so a repair run that cannot read it is refused outright rather
+        # than run with the guard off. This is the one place the answer differs from the gate's:
+        # the gate reports what it could not check and carries on, because a shallow CI checkout
+        # is a legitimate tree to check; a repair is not something CI does at all.
+        unvouched = [(c, d) for c, d in moves if not (history and blames.get(c.doc))]
+        if unvouched:
+            refuse(
+                "line-cite-check: --relocate --write cannot show that the anchors it would follow",
+                "belong to the citations it would move, so it has written NOTHING. A citation a",
+                "person re-derived by hand is told from one an edit left behind by the commit that",
+                "wrote the document line (SKEIN-936), and that needs history this checkout has not",
+                "got:" if not history else "got for these documents:",
+                *(
+                    ["  * this is a shallow clone — `git fetch --unshallow` and run it again"]
+                    if not history
+                    else [f"  * {d} is not in this repository's history" for d in sorted({c.doc for c, _ in unvouched})]
+                ),
+                f"  {len(unvouched)} of {len(moves)} citation(s) this run would have moved.",
+            )
 
         # THE REKEY IS PLANNED BEFORE A BYTE IS WRITTEN, so a refusal leaves the tree exactly as
         # it was. Half a repair is worse than none here: the documents would name lines the
@@ -1761,7 +2184,7 @@ def main(argv):
                 *(f"  * {a} and {b} both relocate to {new}" for a, b, new in collisions),
             )
 
-        relocate(findings, write=True)
+        relocate(findings, write=True, select=select)
         write_ledger(planned)
 
         # AND NOW READ IT ALL BACK OFF THE DISK. Everything below this line is derived from the
@@ -1772,7 +2195,7 @@ def main(argv):
         # its plan rather than its result is the defect family this repository keeps paying for
         # (SKEIN-647, 794, 804) — so the numbers here cost a second scan, on purpose.
         after_cites, _ = scan(prose.citation_sources(), index, everything)
-        after = check(after_cites, read_ledger(), Tree())
+        after = check(after_cites, read_ledger(), Tree(), {}, history)
         sites = {(c.doc, c.doc_line) for c, _ in moves}
         unrepaired = [(c, v, d) for c, v, d in after if (c.doc, c.doc_line) in sites]
 
@@ -1786,6 +2209,7 @@ def main(argv):
         )
         for cite, verdict, detail in after:
             print(f"  {verdict:10s} {cite}  {detail}")
+        say_withheld()
         if unrepaired:
             sys.stdout.flush()
             print(
@@ -1818,9 +2242,23 @@ def main(argv):
         f"{site_cells} `where` cell(s) name a citation; {len(strays)} of them name a further line"
         " by a bare `:N`, which nothing can resolve"
     )
+    # Printed whether or not it found one, for the third time and the third reason: a reader
+    # cannot otherwise tell "no citation is being judged by another citation's anchor" from "the
+    # history that tells them apart was not there" — and in a shallow clone it is not (SKEIN-936).
+    whose_read = (
+        f"{len(vouched)} of the {len(would_move)} citation(s) the ledger would MOVE were checked"
+        " against the commit that wrote them, so none of them can drag a citation a person placed"
+        f" ({len(recorded)} of the citations above are recorded at all)"
+        if history
+        else f"none of the {len(would_move)} citation(s) the ledger would MOVE could be checked"
+        " against the commit that wrote it: this is a shallow clone, where `git blame` names one"
+        " commit for every line. `--relocate --write` refuses here rather than repair with the"
+        " rule that stops a drag switched off"
+    )
     if not findings and not strays:
         print(f"{read} still name the line they were written against{extra}")
         print(words_read)
+        print(whose_read)
         print(sites_read)
         return 0
 
@@ -1831,11 +2269,12 @@ def main(argv):
     by_verdict = {}
     for cite, verdict, detail in findings:
         by_verdict.setdefault(verdict, []).append((cite, detail))
-    for verdict in ("misanchored", "unrecorded", "moved", "gone", "ambiguous"):
+    for verdict in ("misanchored", "inherited", "unrecorded", "moved", "gone", "ambiguous"):
         for cite, detail in by_verdict.get(verdict, []):
             print(f"{cite.doc}:{cite.doc_line}  {cite.text}  {verdict}" + (f"  {detail}" if detail else ""))
     print(f"\n{len(findings)} of {read} no longer name what they were written to name{extra}")
     print(words_read)
+    print(whose_read)
     print(sites_read)
     print(
         "\nWhat to do, by verdict:\n"
@@ -1849,6 +2288,13 @@ def main(argv):
         f"              tree no longer has, declare it in {LEDGER_REL} as `historical = \"<why>\"`.\n"
         "              (A citation whose anchor and words moved TOGETHER is not this: it reads\n"
         "              `moved`, and one command repairs it.)\n"
+        "  inherited   the anchor at this address was recorded for a DIFFERENT citation, and\n"
+        "              following it would move this one onto that citation's line — which is how\n"
+        "              a hand-corrected citation got dragged onto an unrelated refusal with every\n"
+        "              gate green (SKEIN-936). `--relocate` offers no repair. Two rows citing one\n"
+        "              address is the ordinary cause: relocate or re-cite the OTHER one first,\n"
+        "              then `--record`, which reads this citation's own anchor out of the commit\n"
+        "              that wrote its document line and puts it in the diff a reviewer reads.\n"
         f"  unrecorded  a citation with no anchor. `python3 tools/line-cite-check.py --record`\n"
         "              writes one from the commit that wrote the citation, and the reviewer reads\n"
         "              it in the same diff as the citation.\n"
