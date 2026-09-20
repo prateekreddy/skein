@@ -92,9 +92,12 @@ time an argument name changes, and nothing tells us.
 
 ## The submodule, and why the copy still exists
 
-`upstream/sync` is the real repo, pinned. It is **not** what ships: `include_str!` runs at build
-time and sync is private, so a build that read from it would fail for anyone without access, and
-skein does not get to stop compiling over a work-tracking document.
+`upstream/sync` is the real repo, pinned. It is **not** what ships: `include_str!` reads the
+committed copy in `src/store/sync/` at build time, not the submodule, and a clone without
+`--recursive` leaves `upstream/sync` empty (CONTRIBUTING.md's "Setting up"), so reading from it
+directly would fail for anyone who cloned plainly, and skein does not get to stop compiling over a
+work-tracking document. sync itself is public (SKEIN-880) — an anonymous clone gets HTTP 200 — that
+was never the reason to vendor.
 
 So the copy is what ships and the submodule is what it is checked against.
 `the_shipped_skill_is_upstreams_verbatim` fails the moment the two disagree — that is the whole
