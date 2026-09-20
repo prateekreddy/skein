@@ -92,10 +92,6 @@ tracker item is the record; this list only points at it.
 * **SKEIN-960**: on some live boxes the agent's own config trusts the filesystem root. For a
   working directory outside a git repository, that runs a folder's `.claude/settings.json` hooks
   without asking. skein did not write the entry.
-* **SKEIN-961**: `SECURITY.md` lists reaching the Docker socket as in scope, but the table above
-  shows every ordinary box reaches it by design. One of the two has to change.
-* **SKEIN-963**: the shared `~/.local` row above breaks architecture §9.2's rule that no shared
-  writable path holds anything another box executes.
 * **SKEIN-964**: architecture §9.4 says a box can signal skein and other boxes through the shared
   PID namespace. The premise is in the code, but no test sends a signal, so it is not a row.
 
