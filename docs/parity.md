@@ -606,11 +606,16 @@ it is where the fragility lives". Nothing here is removed; the requirement is th
 carrying every box's work, by whatever mechanism, with the symlink and ignored-file rules in
 `docs/delivery.md` §5 intact.
 
-**The shared toolchain stops being shared.** `share_paths` binds `~/.local`, `~/.cargo`, `~/.rustup`
-and `~/.npm` read-write from the sandbox into every box, so one box's `cargo install` or
-`npm i -g` reaches all of them and the build cache warms them all. Architecture §9.5.4 removes that —
-either read-only with a per-box overlay, or not shared. **The speed and the convenience are the cost**,
-and the `sudo` shim's own text currently tells users to rely on it.
+**The shared toolchain stops being shared.** `share_paths` binds `~/.cargo`, `~/.rustup` and
+`~/.npm` read-write from the sandbox into every box, so one box's `cargo install` reaches all of
+them and the build cache warms them all. Architecture §9.5.4 removes that — either read-only with a
+per-box overlay, or not shared. **The speed and the convenience are the cost**, and the `sudo`
+shim's own text currently tells users to rely on it.
+
+`~/.local` is already the per-box overlay half of that answer (SKEIN-963): shared lower layer,
+tmpfs upper, so a box's `pip install --user` no longer reaches any other box and no longer survives
+its own restart. Whatever the rewrite does here must keep both halves of what that bought — a box
+still seeing every tool installed outside it, and no box deciding what another box executes.
 
 **Everything that travels with the diff pane.** Not just a pane: the `d` shortcut, one of the six
 voice verbs ("show me the diff"), the palette's per-box `Diff:` entries, the refresh and "Send N"

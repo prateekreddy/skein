@@ -943,14 +943,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:1688`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:1696`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:1822`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:1830`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:1663`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:1797`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
@@ -971,14 +971,30 @@ directory back on purpose, which is a different thing from never having reached 
 
 Named because §9.1's cover makes the *file* axis safe and it is easy to stop there.
 
-**1 — Shared writable toolchains.** `share_paths=(".local" ".cargo" ".rustup" ".npm")`
-(`grep -n 'share_paths=' src/box-session.sh`) are bound read-write from the sandbox's real `$HOME`
-into every box, so
-boxes share one toolchain and one build cache. **`~/.local/bin/claude` is the agent binary every
-other box executes on next start.** Any box can overwrite it. This is stronger than any socket path:
-it is persistent, it survives restarts, and it needs no live target.
+**1 — Shared writable toolchains.** `share_paths` and `overlay_paths`
+(`grep -n 'share_paths=\|overlay_paths=' src/box-session.sh`) are bound from the sandbox's real
+`$HOME` into every box, so boxes share one toolchain and one build cache.
 
 > **No shared writable path may contain anything another box executes.**
+
+**Closed for the two paths a box executes from — SKEIN-963 and SKEIN-968.** `~/.local` was on the
+read-write list, and `~/.local/bin/claude` was therefore the agent binary every other box ran on
+next start: persistent, surviving restarts, needing no live target and no exploit, only a file
+copy. It is a copy-on-write overlay per box now — the sandbox's copy is the lower layer, a tmpfs
+bwrap makes inside the box is the upper — so a box reads everything and decides nothing for anyone
+else. The same rule then caught a second path a private `~/.local` could not: `box_path`'s second
+entry, `/usr/local/share/npm-global/bin`, is not under `$HOME` at all, is owned by the uid every
+box runs as, and is what `which -a claude` answers with first. Claude Code's own auto-updater had
+already written it from inside a box. It is `--ro-bind` now, the in-box updater is stood down by
+name, and updating the agent CLIs is skein's job for the whole fleet. All three properties are held
+by real-bwrap tests: `a_binary_one_box_plants_is_not_what_another_box_runs`,
+`a_box_still_sees_the_shared_toolchain_under_its_private_overlay` and
+`the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it`.
+
+`~/.cargo`, `~/.rustup` and `~/.npm` stay read-write and shared. No entry of `box_path` points into
+them, so they are not a path another box executes from — and `fleet::skein_toolchain_path` exists
+precisely because being merely unexecuted is not the same as being safe to build skein's own server
+with.
 
 **2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared,
 the inbox sockets in the sandbox-wide `/run/user/1000/cc-socks/` are deliberately bound back through
@@ -1366,7 +1382,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
    written over a root. **Built**: the launcher is *given* the mount set rather than learning it, as
-   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet.rs:5076`), and each box gets back only its
+   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet.rs:5100`), and each box gets back only its
    own repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that

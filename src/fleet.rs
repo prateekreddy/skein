@@ -3316,14 +3316,34 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
 /// Versions are read before and after and reported as a change, because "updated" is not a fact
 /// anybody can check and `1.2.3 -> 1.2.9` is. A runtime that was already current says so rather
 /// than claiming to have moved.
+///
+/// **It installs into the prefix a BOX executes from, which is not the one `sudo` writes**
+/// (SKEIN-968). This said `sudo npm install -g` and nothing else for as long as it existed, and
+/// `sudo npm` is npm running as root, whose global prefix is `/usr/local`. Every box's PATH begins
+/// `$HOME/.local/bin:/usr/local/share/npm-global/bin:…` (`box-session.sh`'s `box_path`, and
+/// `BOX_PATH_HEAD` in `src/place.rs` for the crossing), and that npm-global prefix belongs to uid
+/// 1000. Measured on the live fleet, 2026-09-19: `/usr/local/share/npm-global/bin/claude` was
+/// 2.1.278 and the root-owned `/usr/local/bin/claude` this script had been writing was 2.1.272. So
+/// the update installed, correctly reported that it had, and changed nothing any box ran — the
+/// shape of SKEIN-441, one prefix further down.
+///
+/// Unprivileged when the configured prefix is ours, `sudo` when it is not, because both substrates
+/// are real: a per-user npm prefix (this fleet) and a root-owned `/usr/local` (a plain image).
+///
+/// And it SAYS when the copy it installed is not the copy on the PATH, rather than leaving that to
+/// be inferred from a version that did not move. A shadowed install is the one failure here that
+/// looks exactly like success.
 const RUNTIME_UPDATE_SCRIPT: &str = r#"
          set -- $SKEIN_RUNTIME_PACKAGES;
          [ "$#" -gt 0 ] || { echo 'no agent runtimes are configured here, so there is nothing to update'; exit 0; };
          command -v npm >/dev/null 2>&1 || { echo 'this sandbox has no npm, so the agent CLIs cannot be updated in it' >&2; exit 1; };
          was_claude="$(claude --version 2>/dev/null | head -n 1)";
          was_codex="$(codex --version 2>/dev/null | head -n 1)";
+         prefix="$(npm config get prefix 2>/dev/null)";
+         case "$prefix" in undefined|null) prefix="";; esac;
+         if [ -n "$prefix" ] && [ -w "$prefix" ]; then as=""; else as="sudo"; fi;
          log=/tmp/skein-runtime-update.log;
-         timeout 600 sudo npm install -g "$@" >"$log" 2>&1 || {
+         timeout 600 $as npm install -g "$@" >"$log" 2>&1 || {
              echo 'npm could not install the agent runtimes. It said:' >&2;
              tail -n 15 "$log" | sed 's/^/  | /' >&2;
              exit 1;
@@ -3336,6 +3356,10 @@ const RUNTIME_UPDATE_SCRIPT: &str = r#"
            if [ -z "$was" ]; then echo "$r: installed, now $now"; moved=1;
            elif [ "$was" = "$now" ]; then echo "$r: $now (already current)";
            else echo "$r: $was -> $now"; moved=1; fi;
+           at="$(command -v "$r" 2>/dev/null)";
+           if [ -n "$prefix" ] && [ -n "$at" ] && [ "$at" != "$prefix/bin/$r" ] && [ -x "$prefix/bin/$r" ]; then
+             echo "$r: installed into $prefix but this sandbox runs $at, which every box runs too — the install is shadowed" >&2;
+           fi;
          done;
          [ "$moved" = 1 ] || echo 'nothing moved — every runtime here was already the newest npm has.'"#;
 
