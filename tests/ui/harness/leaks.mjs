@@ -60,6 +60,19 @@
 // fixture and carries no marker — the shape the marker half structurally cannot see — and narrowing
 // the scan to fix the verdict would have traded this defect for SKEIN-687's.
 //
+// **And the same red came back through that half a fifth time** (SKEIN-979). Attribution was not
+// the gap this time; the NEEDLE was. `smoke.mjs` names its fixture with a bare prefix, `skein-ui`,
+// and the shared root every lane on this box writes into is `/var/tmp/skein-uifix` — or
+// `/var/tmp/skein-uif-<lane>` under the preamble each agent exports — so the root itself matched
+// the prefix derived from what is created INSIDE it. Every process of every lane that exported that
+// variable read as "names a test fixture": `cargo`, `rustc`, a running `bash tools/gates.sh`. And a
+// backgrounded gate run whose parent shell has exited is attributable to this worktree with its
+// parent gone, which is exactly what this file calls a leak — so a LIVE gate run could take the
+// check red under a prefix it had nothing to do with. [`withoutSharedRoots`] is the answer, and it
+// is [`withoutWorktree`]'s argument applied to the other container: a process that names where
+// fixtures go is not a fixture process, a process that names something INSIDE that root is, and the
+// root is subtracted only where it stands alone so that the second one is never touched.
+//
 // The other half is [`quiesceOnExit`], and it is `tests/common/mod.rs`'s `Scratch` argument
 // transplanted: *whatever has to stop, stops on every path; only the removal is conditional*. The
 // node tier had no equivalent — `srv.kill()` sat at the top level of each suite, after the last
@@ -904,7 +917,9 @@ export function ownWorktree() {
  * **`$SKEIN_UI_FIXTURE_ROOT` is deliberately not used for this, though SKEIN-873 offered it.** It
  * defaults to `/var/tmp/skein-uifix`, which every worktree on the box writes into — so it is the
  * one skein-shaped path that says nothing about whose run this is. [`fixtureScopes`] has a rule of
- * its own to keep that same shared root out of a kill's scope.
+ * its own to keep that same shared root out of a kill's scope, and [`withoutSharedRoots`] is the
+ * third place that has to know it: until SKEIN-979 the prefix scan was the one reader of this path
+ * with no rule about it, and counted every process that merely carried it.
  *
  * The trailing boundary is not decoration. A bare `includes` would make a run in
  * `/var/tmp/skein-wt-leak` claim every process of a run in `/var/tmp/skein-wt-leakblind`, since the
@@ -916,19 +931,21 @@ export function fromWorktree(p, repo = REPO) {
   return worktreeRegex(repo).test(p.env);
 }
 
-/** `repo`, escaped for a regexp.
+/** A path, escaped for a regexp.
  *
- * **One spelling of "the worktree path", because there are now two readers of it** — SKEIN-918's
- * first named cost. [`worktreeRegex`] asks whether a process belongs to a worktree and
- * [`withoutWorktree`] takes that path back out of the text; two escapes would be two paths the day
- * one of them was edited, and the failure would be silent in both directions at once. */
-function worktreeLiteral(repo) {
-  return repo.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+ * **One spelling of "this path, literally", because there are now three readers of it** —
+ * SKEIN-918's first named cost, and SKEIN-979 added the third. [`worktreeRegex`] asks whether a
+ * process belongs to a worktree, [`withoutWorktree`] takes that path back out of the text, and
+ * [`withoutSharedRoots`] does the same for the shared fixture root; three escapes would be three
+ * paths the day one of them was edited, and the failure would be silent in every direction at once.
+ * It was named for the worktree while the worktree was the only path it escaped. */
+function pathLiteral(path) {
+  return path.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
 }
 
 /** `repo`, anchored so that it cannot match a longer sibling path — see [`fromWorktree`]. */
 export function worktreeRegex(repo) {
-  return new RegExp(`${worktreeLiteral(repo)}(?:/|:|\\s|$)`);
+  return new RegExp(`${pathLiteral(repo)}(?:/|:|\\s|$)`);
 }
 
 /** `p` with `repo` subtracted from both surfaces — the argv and environment a fixture name is then
@@ -978,8 +995,115 @@ export function worktreeRegex(repo) {
  * [`sighting`] refuses to read an environment that was never read, and a denied one must stay
  * denied rather than become an empty string that matches nothing. */
 export function withoutWorktree(p, repo = REPO) {
-  const gone = new RegExp(worktreeLiteral(repo), "g");
+  const gone = new RegExp(pathLiteral(repo), "g");
   return { ...p, args: p.args.replace(gone, ""), env: p.env.replace(gone, "") };
+}
+
+/** The shared fixture ROOT — the directory the browser tier creates its fixtures INSIDE — as
+ * `{variable, fallback}`: the environment variable that names it, and the path it falls back to.
+ * Read out of `tests/ui/lift.mjs`'s own `fixtureRoot`, and **written down nowhere in here**.
+ *
+ * **It is derived for the reason [`testMarker`] and [`fixturePrefixes`] are.** The path is
+ * `/var/tmp/skein-uifix` today and the variable is `$SKEIN_UI_FIXTURE_ROOT` today; a copy of either
+ * in this file is a string that is current until somebody edits the one place that decides it, and
+ * a scan matching a path nothing uses is this whole file's defect one variable over. So the shape
+ * is read back from the function that answers the question for real, over [`codeOnly`], so that a
+ * doc comment quoting it cannot satisfy the derivation — and a shape this reader stops recognising
+ * throws here rather than quietly leaving the subtraction below with nothing to subtract. */
+export function sharedFixtureRoot(repo = REPO) {
+  const lift = readOrRefuse(join(repo, "tests", "ui", "lift.mjs"), "the shared fixture root");
+  const named = codeOnly(lift, "js").match(
+    /function\s+fixtureRoot\s*\(\s*\)\s*\{[^}]*?process\.env\.([A-Za-z_][A-Za-z0-9_]*)\s*\|\|\s*"([^"]+)"/);
+  if (!named) {
+    throw new Error("the leak check cannot find `fixtureRoot()` returning \
+`process.env.<VARIABLE> || \"<path>\"` in tests/ui/lift.mjs, so it does not know which directory \
+every lane on this box creates its fixtures inside. Fix this reader; do not write the path in \
+here.");
+  }
+  return { variable: named[1], fallback: named[2].replace(/\/+$/, "") };
+}
+
+/** Every path that is a shared fixture ROOT as far as `p` is concerned: `shared.fallback`, and
+ * whatever `p` itself says [`sharedFixtureRoot`]'s variable is.
+ *
+ * **Per process, and not "the root this check is running under", because the roots differ per
+ * lane.** Each agent on this box exports its own — `/var/tmp/skein-uif-<lane>` — so a list built
+ * from this process's environment would clean this lane's processes and leave every other lane's
+ * reading as fixture-named, which is the noise half of SKEIN-979 left in place. Taking the value
+ * off the process being judged needs no list and no lane names.
+ *
+ * Both surfaces, because `env VARIABLE=<path> cmd` puts the assignment in ARGUMENTS and in no
+ * environment at all — measured while SKEIN-979 was reproduced, on the shell that planted the
+ * probe.
+ *
+ * A value is a root only if it is an absolute path with at least two segments of its own. `/` and
+ * `/var` are not directories anyone creates fixtures in, and the point of the rule below is that
+ * what is subtracted is small and specific. */
+export function rootsCarriedBy(p, shared) {
+  const roots = new Set([shared.fallback]);
+  const add = value => {
+    const path = String(value || "").replace(/\/+$/, "");
+    if (/^\/[^\s/]+(?:\/[^\s/]+)+$/.test(path)) roots.add(path);
+  };
+  for (const v of p.envVars) {
+    if (v.startsWith(`${shared.variable}=`)) add(v.slice(shared.variable.length + 1));
+  }
+  for (const m of p.args.matchAll(new RegExp(`(?:^|\\s)${shared.variable}=(\\S+)`, "g"))) add(m[1]);
+  return [...roots];
+}
+
+/** `p` with each of `roots` taken out of both surfaces **only where the root stands alone** — where
+ * it is not the head of a longer path.
+ *
+ * **A process that merely MENTIONS the shared root was reading as a fixture process** (SKEIN-979),
+ * and it is SKEIN-918 with a different path. `tests/ui/smoke.mjs`'s call site is a BARE prefix,
+ * `skein-ui`, so [`fixtureRegex`] builds `/(?:skein\-ui)[A-Za-z0-9._-]*(?:/|\s|$)` — and both
+ * `/var/tmp/skein-uifix` and the `/var/tmp/skein-uif-<lane>` of the preamble every agent here
+ * exports match it, on `fix` and on `f-<lane>`. That root is on `cargo`, on `rustc`, on
+ * `tools/gates.sh` and on every other process of every lane that exported it. [`fromWorktree`]
+ * already says in as many words that this root "is the one skein-shaped path that says nothing
+ * about whose run this is", and [`fixtureScopes`] has a rule of its own to keep it out of a kill's
+ * scope; the prefix scan had neither. **It could go red and not merely add noise**: a backgrounded
+ * `bash tools/gates.sh` carries this root and `$CARGO_TARGET_DIR` under this worktree, and its
+ * parent shell exits — attributable to this worktree, parent gone, which is the definition of this
+ * run's leak. A live gate run turned the check red for a prefix it had nothing to do with, which is
+ * SKEIN-913's lesson returning through the other half.
+ *
+ * **"Stands alone" is the whole rule, and it is what tells a fixture process from one that merely
+ * names where fixtures go.** A gate runner and a `cargo test` carry the root and nothing under it.
+ * A fixture process carries something INSIDE it — `SKEIN_HOME=<root>/<prefix>-4211-ab/home`, a
+ * box's tmux socket, a bwrap bind. So the subtraction is refused wherever the next character is a
+ * path character, and what a fixture process carries is never touched.
+ *
+ * **That is also why the next fixture naming convention cannot defeat it.** Nothing here knows or
+ * cares what a fixture is CALLED: the only string removed is a root, and it is removed only where
+ * it names the root itself. Point `$SKEIN_UI_FIXTURE_ROOT` at a per-run directory tomorrow — the
+ * one way a subtraction of this shape could blind a scan — and the bare assignment goes while
+ * `<that directory>/home` stays, so the process is still named by the prefix it really carries. The
+ * alternative shape, removing the root globally the way [`withoutWorktree`] removes the worktree,
+ * is exactly the one that would NOT survive that: it would leave `SKEIN_HOME=/home` and see
+ * nothing. The two differ because the containers differ — no test creates a fixture inside a
+ * worktree (SKEIN-918 measured that and said so), and every fixture in this tier is created inside
+ * this root.
+ *
+ * What it does not reach is a process that names some OTHER file under the shared root, because the
+ * root's own basename starts with `skein-ui` and matches on its own. That is a directory only this
+ * tier writes into, so naming something in it is close to the definition of a fixture process — and
+ * the direction of the residue is the safe one: such a process is still reported, not hidden.
+ *
+ * `args` and `env` only, and `envState` untouched, for [`withoutWorktree`]'s reason. */
+export function withoutSharedRoots(p, roots) {
+  let { args, env } = p;
+  for (const root of roots) {
+    // The negative lookahead is the sibling rule [`fromWorktree`] states for the worktree, mirrored:
+    // `/var/tmp/skein-uif-leak` must not be taken out of `/var/tmp/skein-uif-leakattr979`, or one
+    // lane's root would start editing another lane's paths. `/` is in the class for the same reason
+    // it is the point of this function.
+    const alone = new RegExp(`${pathLiteral(root)}(?![A-Za-z0-9._/-])`, "g");
+    args = args.replace(alone, "");
+    env = env.replace(alone, "");
+  }
+  return { ...p, args, env };
 }
 
 /** Every process carrying `marker`, split three ways: `{carrying, orphans, attached, theirs,
@@ -1079,13 +1203,16 @@ function attribute(hits, repo) {
  * the half of this a suite can own: which bucket reaches the exit code is a single integer that
  * any lane's leak could also produce, so the two are asserted apart — the same division as
  * SKEIN-780. */
-export function fixtureNamed(all, patterns, repo = REPO) {
+export function fixtureNamed(all, patterns, repo = REPO, shared = sharedFixtureRoot()) {
   const hits = [];
   for (const p of all) {
-    // The worktree path comes out before any prefix goes in (SKEIN-918), once per process rather
-    // than once per pattern: the answer does not depend on which prefix is being tried, and there
-    // are fifty-odd of those against every process on the box.
-    const surfaces = withoutWorktree(p, repo);
+    // The containers come out before any prefix goes in — the shared fixture root (SKEIN-979) and
+    // then the worktree (SKEIN-918) — once per process rather than once per pattern: the answer
+    // does not depend on which prefix is being tried, and there are fifty-odd of those against
+    // every process on the box. The root goes first because a lane may put its root inside its own
+    // worktree, and the worktree's removal would otherwise leave a root this file no longer
+    // recognises as one.
+    const surfaces = withoutWorktree(withoutSharedRoots(p, rootsCarriedBy(p, shared)), repo);
     for (const [prefix, re] of patterns) {
       const where = sighting(surfaces, re);
       if (!where) continue;
@@ -1152,9 +1279,11 @@ function main(argv) {
   const minAge = Number((argv.find(a => a.startsWith("--min-age=")) || "").split("=")[1] || 0);
   let derived;
   let marker;
+  let shared;
   try {
     derived = fixturePrefixes();
     marker = testMarker();
+    shared = sharedFixtureRoot();
   } catch (e) {
     console.error(`leak check: ${e.message}`);
     return 2;
@@ -1169,6 +1298,12 @@ function main(argv) {
     console.log(`  ${quoted.length} more appear only in comments and are not fixture names: ` +
       quoted.join(" "));
   }
+  // Said out loud for the reason the prefixes are (SKEIN-979): this line is a rule that makes the
+  // check see LESS, and a reader must be able to tell that it fired and what it took out. Every
+  // lane exports a root of its own, so the one named here is only the fallback — what a process is
+  // actually cleaned of is whatever IT carries in that variable.
+  console.log(`  a process naming $${shared.variable} (${shared.fallback} by default) and nothing ` +
+    "under it is not a fixture process, so that path is taken out before the prefixes go in");
   const patterns = prefixes.map(prefix => [prefix, fixtureRegex([prefix])]);
   const mine = new Set(ancestry());
   const all = processes().filter(p => !mine.has(p.pid));
@@ -1178,7 +1313,7 @@ function main(argv) {
       `  ${denied} of ${all.length} processes would not let this user read their environment, so ` +
         `only their command line was checked and $${marker} could not be asked of them at all`);
   }
-  const named = fixtureNamed(all, patterns);
+  const named = fixtureNamed(all, patterns, REPO, shared);
   for (const said of prefixLines(named, all.length)) console.log(said);
   // Oldest first and older than `--min-age`, per bucket. The filter is applied to each list rather
   // than to the scan, so the counts above are about the box and the rows below are about what was

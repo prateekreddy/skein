@@ -785,6 +785,104 @@ check("the worktree path is escaped before it is matched, for both readers",
     attribution: under.worktreeRegex ? under.worktreeRegex(DOTTED).test(SIBLING) : "no worktreeRegex" },
   { subtraction: SIBLING, attribution: false });
 
+// --- and neither is the shared root every lane on this box creates its fixtures inside ----------
+// **The same defect with the other container** (SKEIN-979). `smoke.mjs` names its fixture with a
+// BARE prefix — `skein-ui` — and the root that fixture is created inside is `/var/tmp/skein-uifix`,
+// or `/var/tmp/skein-uif-<lane>` under the preamble each agent on this box exports. Both start with
+// that prefix, so every process carrying `$SKEIN_UI_FIXTURE_ROOT` and nothing else skein-shaped —
+// `cargo`, `rustc`, a running `bash tools/gates.sh` — read as "names a test fixture". It was not
+// only noise: a backgrounded gate run is attributable to this worktree AND has lost its parent
+// shell, which is this file's definition of this run's leak, so a LIVE gate run could take the
+// check red. That is SKEIN-913's lesson arriving through the half SKEIN-913 did not touch.
+//
+// The rule is that a root is subtracted only where it STANDS ALONE, and the cases below are what
+// each half of that sentence costs:
+//
+//   - the root really does read as a fixture name, or every line after it is a check on a string
+//     that was never going to match;
+//   - a row that names it and nothing under it is not named by it — the defect;
+//   - the same path in a row that does NOT declare it a root still is. The control: without it, a
+//     scan that had simply stopped seeing anything would pass every line here;
+//   - a fixture INSIDE the root is still named. The false negative this could have been traded for,
+//     and the one that would be strictly worse;
+//   - a root that is itself a per-run fixture directory cannot blind the scan. This is the line
+//     that says the rule survives the next naming convention somebody invents: subtract the root
+//     globally, the way the worktree is subtracted, and `SKEIN_HOME=<that root>/home` becomes
+//     `/home` and the leak goes invisible. Standing alone is what keeps it visible.
+//
+// Rows rather than processes, for the reason the block above gives: which text the scan matches is
+// a property of the text and the rule, and a box several agents share cannot be held still to ask
+// it. The live pair was measured by hand while this was written — a planted orphan carrying only
+// the root went from `exit 1` to `exit 0`, and one carrying a fixture under the root stayed red.
+/** A tree whose `tests/ui/lift.mjs` is exactly `body`, for the two refusals below. */
+function repoWithLift(body) {
+  const at = path.join(skeleton, `lift-${++skeletons}`);
+  mkdirSync(path.join(at, "tests", "ui"), { recursive: true });
+  writeFileSync(path.join(at, "tests", "ui", "lift.mjs"), body);
+  return at;
+}
+/** `under.sharedFixtureRoot(repo)`'s answer, or the word `refused` — `markerOf`'s bargain, so that
+ * "it threw" and "it returned a root" are one comparison. */
+const rootOf = repo => {
+  try {
+    return under.sharedFixtureRoot(repo);
+  } catch {
+    return "refused";
+  }
+};
+const shared = rootOf(worktree || ".");
+check("the shared fixture root is read out of tests/ui/lift.mjs, not written into the check",
+  shared, { variable: "SKEIN_UI_FIXTURE_ROOT", fallback: "/var/tmp/skein-uifix" });
+check("a tree with no tests/ui/lift.mjs is refused rather than defaulted to a path nothing uses",
+  rootOf(emptyDir()), "refused");
+// Prose is not a call site here either (SKEIN-917): the reader runs over the cut text, so a comment
+// quoting the shape cannot satisfy a derivation that is supposed to have found the real one.
+check("and one whose only fixtureRoot is inside a comment is refused, because prose is not code",
+  rootOf(repoWithLift(
+    "// function fixtureRoot() { return process.env.SKEIN_QUOTED || \"/var/tmp/quoted\"; }\n")),
+  "refused");
+
+// Built out of a derived prefix rather than spelt out, so these rows keep meaning what they say if
+// `skein-ui` is ever renamed: `<prefix>fix` is `skein-uifix`'s shape, and `<prefix>-4211-ab` is the
+// shape of what a run creates inside a root.
+const rootVar = shared === "refused" ? "NO_SHARED_ROOT_WAS_DERIVED" : shared.variable;
+const SHARED_ROOT = `/var/tmp/${lanePrefix}fix`;
+const PER_RUN_ROOT = `/var/tmp/${lanePrefix}-4211-ab`;
+check("a shared root named after a bare prefix really does read as a fixture, or the rest is empty",
+  fixtureRegex(prefixes).test(`${rootVar}=${SHARED_ROOT}`), true);
+check("and a process naming it and nothing under it is not fixture-named",
+  namedBy(rowNaming(`${rootVar}=${SHARED_ROOT}`), ANOTHER_LANE), null);
+check("nor is one naming the DEFAULT root, which is what a lane that exported nothing is using",
+  namedBy(rowNaming(`A=${shared === "refused" ? "/nowhere" : shared.fallback}`), ANOTHER_LANE), null);
+check("while the same path in a row that does not declare it a root still is, which is the control",
+  namedBy(rowNaming(`ELSEWHERE=${SHARED_ROOT}`), ANOTHER_LANE), lanePrefix);
+// `env VAR=<path> cmd` puts the assignment in the ARGUMENTS and in no environment at all — the
+// shape the reproduction was planted with, and the one surface a root can arrive on alone.
+check("the root is read off the arguments as well as the environment",
+  namedBy(rowNaming("", `env ${rootVar}=${SHARED_ROOT} cargo test`), ANOTHER_LANE), null);
+check("and a fixture INSIDE the shared root is still named, because only a root alone is removed",
+  namedBy(rowNaming(`${rootVar}=${SHARED_ROOT} SKEIN_HOME=${SHARED_ROOT}/${lanePrefix}-4211/home`),
+    ANOTHER_LANE),
+  lanePrefix);
+check("a root that is ITSELF a fixture directory cannot blind the scan, whatever anyone renames",
+  namedBy(rowNaming(`${rootVar}=${PER_RUN_ROOT} SKEIN_HOME=${PER_RUN_ROOT}/home`), ANOTHER_LANE),
+  lanePrefix);
+// The live shape in one row: a lane's gate run carries its worktree and its root and nothing else.
+// Both subtractions have to fire, and either one alone leaves this named.
+check("a row carrying only its worktree and its shared root is named by neither",
+  namedBy(rowNaming(`CARGO_MANIFEST_DIR=${NAMED_LANE} ${rootVar}=${SHARED_ROOT}`), NAMED_LANE),
+  null);
+// Two string properties of the subtraction itself, asked of the text rather than of a verdict,
+// because a verdict can be right for the wrong reason: the removal is bounded at its right-hand
+// end, and the path is escaped before it becomes a pattern. An unbounded removal would edit one
+// lane's paths out of another lane's longer root; an unescaped `.` matches any character.
+const subtracted = (env, roots) => (under.withoutSharedRoots
+  ? under.withoutSharedRoots(rowNaming(env), roots).env : "not subtracted");
+check("one lane's root is not taken out of another lane's longer one",
+  subtracted(`A=${SHARED_ROOT}9/x`, [SHARED_ROOT]), `A=${SHARED_ROOT}9/x`);
+check("and the root is escaped before it is matched, as the worktree is",
+  subtracted("A=/var/tmp/axb", ["/var/tmp/a.b"]), "A=/var/tmp/axb");
+
 // --- and a shape a COMMENT quotes is not a call site --------------------------------------------
 // **The guard one variable over could be satisfied by prose** (SKEIN-917, SKEIN-882). `leaks.mjs`
 // read every file in the test tree line by line and could not tell a call site from a doc comment
