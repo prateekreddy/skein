@@ -6,6 +6,7 @@ mod common;
 
 use common::{fake_github, have, skip, Scratch};
 use skein::doorway::{FIRST, INHERITED_ONLY};
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, RawFd};
@@ -87,13 +88,15 @@ fn on_the_first_descriptor(fd: RawFd) -> std::io::Result<()> {
 /// a reason to bind one (`skein::doorway::inherited_only`, asserted by
 /// `told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind` below).
 ///
-/// It is also the shape the fleet actually starts a server in — `src/server-doorway.py:186` sets
+/// It is also the shape the fleet actually starts a server in — `src/server-doorway.py:213` sets
 /// the same `LISTEN_FDS=1` on the same descriptor — so the thirteen spawns in this file now
-/// exercise the production start, where one of them did.
+/// exercise the production start, where one of them did. That is the line in the doorway's `spawn`,
+/// which is the one that starts a *server*; the cite here used to be `:186`, which is the same
+/// assignment in `reexec`, where the doorway replaces its own image.
 ///
 /// `LISTEN_PID` is removed rather than set: it is the half of the convention that names the process
 /// the descriptors are for, and this side of the fork there is no pid to name. `descriptor` accepts
-/// its absence deliberately (`src/doorway.rs:199`, and
+/// its absence deliberately (`src/doorway.rs:202`, and
 /// `one_descriptor_is_the_one_the_convention_names` asserts it).
 fn handed(cmd: &mut Command) -> (Child, String) {
     handed_with(cmd, TheDoorwaysPin::Set)
@@ -112,12 +115,64 @@ enum TheDoorwaysPin {
     Unset,
 }
 
+impl TheDoorwaysPin {
+    /// Which of the two starts this is, in words, for a failure message.
+    ///
+    /// The two differ only by an environment variable, so a panic that named neither left the
+    /// reader to guess which spawn of a test that makes both had failed — which is what
+    /// `the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_it` did when
+    /// SKEIN-989 hit it.
+    fn said(self) -> &'static str {
+        match self {
+            TheDoorwaysPin::Set => "the way the fleet's doorway starts one",
+            TheDoorwaysPin::Unset => "the way a host starts one, outside the fleet's doorway",
+        }
+    }
+}
+
 /// [`handed`], with a say in whether the doorway's own declaration rides along.
 ///
 /// Both shapes still take the socket from this process, so neither races for a port: the descriptor
 /// is what makes SKEIN-526 impossible, and the pin is only what the child is *told* about where it
 /// came from.
 fn handed_with(cmd: &mut Command, pin: TheDoorwaysPin) -> (Child, String) {
+    // **One `Command`, one hand-over — and a refusal rather than a comment** (SKEIN-989).
+    //
+    // `CommandExt::pre_exec` *stacks*: registering a second closure does not replace the first, and
+    // the child runs every closure it carries, in order, before it execs. Measured rather than
+    // recalled — two closures on one `Command`, each writing its own name to descriptor 2, print
+    // both. So a `Command` spawned twice through here takes the FIRST call's closure into the
+    // SECOND call's child, still naming the listener this function dropped at the end of the first
+    // call: a descriptor this process no longer owns.
+    //
+    // What that does next depends on what took the number in the meantime, which is why it reads as
+    // load rather than as a bug:
+    //
+    //   * nothing took it — the stale `dup` fails with `EBADF`, and `spawn` hands that back with no
+    //     message anywhere saying which descriptor, or whose, or that there were two;
+    //   * something took it — the stale closure puts *that* on descriptor [`FIRST`], closing what
+    //     was already there. When what was already there is this call's own listener (it lands on
+    //     descriptor 3 whenever 3 is free) this call's closure then duplicates the stale object
+    //     instead, and the server refuses a descriptor that is not a listening socket and exits 1.
+    //
+    // Both were reproduced against the unfixed file: 6 failures in 40 executed whole-binary runs
+    // under 16 busy loops on 11 CPUs, split between `EBADF` out of `spawn` and "the server exited
+    // (exit status: 1) without serving the socket it was handed". And it passed 25 of 25 alone,
+    // because alone the freed number is taken straight back — both listeners landed on descriptor 3
+    // every time, so the stale closure duplicated the right socket by coincidence.
+    //
+    // `LISTEN_FDS` is the marker because it is already the fact: the line below is the only place
+    // in this file that sets it on a `Command`, so finding it on one that arrives here means this
+    // `Command` has been handed a socket before.
+    assert!(
+        !cmd.get_envs()
+            .any(|(key, _)| key == OsStr::new("LISTEN_FDS")),
+        "the `Command` for {:?} has already been handed a listening socket once, and spawning it \
+         again would carry the first hand-over's `pre_exec` closure — and the descriptor this \
+         process dropped after that spawn — into the second child. Build a fresh `Command` per \
+         spawn; `pre_exec` closures stack rather than replace (SKEIN-989)",
+        cmd.get_program()
+    );
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     let addr = listener
         .local_addr()
@@ -135,7 +190,19 @@ fn handed_with(cmd: &mut Command, pin: TheDoorwaysPin) -> (Child, String) {
         TheDoorwaysPin::Set => cmd.env(INHERITED_ONLY, "1"),
         TheDoorwaysPin::Unset => cmd.env_remove(INHERITED_ONLY),
     };
-    let child = cmd.spawn().expect("the server binary spawned");
+    // Not `.expect("the server binary spawned")`. The only thing this spawn does between fork and
+    // exec is move one descriptor, so a failure here is about that descriptor and nothing else —
+    // and the reader needs to be told which one, and which of the two starts was being made. Only
+    // the errno crosses the fork: `pre_exec` reports through a pipe that carries
+    // `raw_os_error()` and not a message, so this sentence can only be written on this side of it.
+    let child = cmd.spawn().unwrap_or_else(|e| {
+        panic!(
+            "the server was not started {}: {e}. All this spawn had to do between fork and exec \
+             was put the listener on {addr} — descriptor {fd} in this process — onto descriptor \
+             {FIRST} in the child, so a bad descriptor here is that one (SKEIN-989)",
+            pin.said()
+        )
+    });
     // The parent's copy goes and the child's stays, so from here the server is the *sole* holder of
     // the socket. That is deliberate and it is about failing fast: were this process to keep a copy,
     // a server that died would leave a listener nobody accepts on, `connect` would keep succeeding
@@ -1641,20 +1708,27 @@ fn the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_
     )
     .unwrap();
 
-    let mut cockpit = Command::new(env!("CARGO_BIN_EXE_skein-server"));
-    cockpit
-        .env("SKEIN_REGISTRY", &reg)
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // A warden at an address the kernel refuses, as every spawn in this file does.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_NO_API_AUTH", "1")
-        .env_remove("SKEIN_SHARED")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    // **A builder rather than one `Command` spawned twice, and that is SKEIN-989.** This test makes
+    // the only two-spawn measurement in the file, and it made both of them off one `Command` —
+    // which carried the first spawn's `pre_exec` closure, and the descriptor `handed_with` had
+    // dropped after it, into the second spawn's child. `handed_with` refuses that now, so this
+    // shape is the one that compiles *and* runs; the note there has the measurement.
+    let cockpit = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skein-server"));
+        cmd.env("SKEIN_REGISTRY", &reg)
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            // A warden at an address the kernel refuses, as every spawn in this file does.
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_NO_API_AUTH", "1")
+            .env_remove("SKEIN_SHARED")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd
+    };
 
     // ---- the fleet's cockpit: nothing is served, to anybody ----
-    let (child, addr) = serving_with(&mut cockpit, TheDoorwaysPin::Set);
+    let (child, addr) = serving_with(&mut cockpit(), TheDoorwaysPin::Set);
     let _kid = Kid(child);
     let (st, body) = http_get_unauthenticated(&addr, "/api/boxes");
     assert_eq!(
@@ -1682,7 +1756,7 @@ fn the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_
     assert_eq!(st, 503, "the cockpit page was served anyway: {body}");
 
     // ---- and it is the doorway's pin that decides, not the switch on its own ----
-    let (child, addr) = serving_with(&mut cockpit, TheDoorwaysPin::Unset);
+    let (child, addr) = serving_with(&mut cockpit(), TheDoorwaysPin::Unset);
     let _outside = Kid(child);
     let (st, body) = http_get_unauthenticated(&addr, "/api/boxes");
     assert_eq!(
@@ -1693,6 +1767,67 @@ fn the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_
     assert!(
         body.contains("thing-a"),
         "the off-switch answered without the fleet's boxes in it: {body}"
+    );
+}
+
+/// **A `Command` is handed a socket once, and the second time is refused where it is asked for.**
+///
+/// The guard in [`handed_with`] is what turns SKEIN-989 from a thing that happens on a busy box
+/// into a thing that cannot be written. `pre_exec` closures stack rather than replace, so a
+/// `Command` spawned twice through that helper carries the first spawn's closure — and the
+/// descriptor the helper dropped after it — into the second spawn's child. Under load that came
+/// back as `EBADF` out of `spawn`, or as a server that exited 1 holding something that was not a
+/// listening socket; alone it passed, because the freed descriptor number was taken straight back
+/// by the next listener.
+///
+/// **What makes it fail**: delete the `assert!` at the top of [`handed_with`] and the second
+/// hand-over is accepted, so the `Ok` arm below fires by name. That was run, and it did.
+///
+/// `/bin/sh` rather than the server binary, because nothing here is about the server: the subject
+/// is the helper, and a shell that exits at once costs no start-up sequence and leaves no
+/// supervisor behind.
+///
+/// `catch_unwind` rather than `#[should_panic]`, for the reason
+/// `an_answer_from_a_server_that_is_not_ours_is_caught_rather_than_believed` gives: the assertion
+/// is about *what the refusal says*, and a test that let the panic out could not read it. The
+/// panic printed on the way past is this assertion working.
+#[test]
+fn a_command_that_has_already_been_handed_a_socket_is_refused_a_second_one() {
+    let mut once = Command::new("/bin/sh");
+    once.arg("-c")
+        .arg("exit 0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let (mut first, _addr) = handed(&mut once);
+    first.wait().expect("the first child is waitable");
+
+    let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handed(&mut once)));
+    let why = match again {
+        Ok((mut extra, _)) => {
+            let _ = extra.wait();
+            panic!(
+                "a `Command` that had already been handed a listening socket was handed a second \
+                 one, so the first hand-over's stale descriptor can still reach a second child"
+            )
+        }
+        Err(why) => why,
+    };
+    let why = why
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| why.downcast_ref::<&str>().copied())
+        .unwrap_or("<the refusal's payload was not a string>");
+    assert!(
+        why.contains("already been handed a listening socket"),
+        "the refusal does not say what was refused: {why}"
+    );
+    assert!(
+        why.contains("pre_exec") && why.contains("stack"),
+        "the refusal does not say why one `Command` cannot be spawned twice: {why}"
+    );
+    assert!(
+        why.contains("/bin/sh"),
+        "the refusal does not name the `Command` it refused: {why}"
     );
 }
 
