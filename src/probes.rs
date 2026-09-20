@@ -1323,9 +1323,11 @@ mod tests {
         );
     }
 
-    // The skill is upstream's, vendored here because `include_str!` runs at build time and sync is a
-    // private repo — a build that needed it would fail for anyone without access, and skein does not
-    // get to stop compiling over a work-tracking document.
+    // The skill is upstream's, vendored here because `include_str!` runs at build time against this
+    // committed copy, not the submodule — a clone without `--recursive` leaves `upstream/sync` empty
+    // (CONTRIBUTING.md's "Setting up"), so reading from it directly would fail for anyone who cloned
+    // plainly, and skein does not get to stop compiling over a work-tracking document. sync itself is
+    // public (SKEIN-880); that was never the reason to vendor.
     //
     // So the copy is what ships and the submodule is what it is checked against. Drift is the whole
     // risk of vendoring: a copy that silently falls behind teaches an agent a contract the gateway
