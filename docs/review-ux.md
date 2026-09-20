@@ -91,7 +91,7 @@ after : { focused: "BODY",        caret: 0 }
 ```
 
 `renderReview()` fires on: each of up to six summaries landing, the 4-second stale re-poll
-(`index.html:3591`), each filter change, and the module fetch. So writing "request changes" on a
+(`index.html:3592`), each filter change, and the module fetch. So writing "request changes" on a
 queue that is still settling means losing the caret mid-sentence, repeatedly, with the text intact so
 you do not notice until you type the next character in the wrong place.
 
@@ -118,7 +118,7 @@ corner of a 1400px window, 900 px from where the eye is.
 
 **2.7 The badge and the pane never agree, and there is no path between them.** In the nine-repo rig
 the badge read **232** while the pane showed **29**, because `openReview()` with no argument resolves
-to `localStorage("skein.reviewRepo")` (`index.html:3375`). Pressing a number opens something that is
+to `localStorage("skein.reviewRepo")` (`index.html:3376`). Pressing a number opens something that is
 not that number and never says why.
 
 **2.8 Head chips are 21 px tall** (42×21 for `all`, 82×21 for `refresh`) — under any pointer-target

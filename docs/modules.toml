@@ -450,7 +450,14 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # credential — `health` turns `prq::Life` into the sentence and the recipe, exactly as it already
 # turns `gitgate`'s scope states into the `gitgate` line. The edge adds no cycle: nothing reachable
 # from `prq` depends on `health`.
-depends_on = ["ai", "board", "fleet", "gitgate", "github", "place", "prq", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+# `config` for one number: `Config::stale_build_days`, the age past which a full disk offers
+# compiler output back (SKEIN-974). It is the one figure in this module's disk work that is a
+# judgement rather than a derivation — every other thing `disk_verdict` offers to delete can be
+# proved dead — and its correctness is local to a fleet, so it had to be the owner's to set rather
+# than a constant somebody edits and rebuilds. The read is in `disk_health` and not in
+# `disk_verdict`, which keeps the verdict itself drivable on a machine with no settings file; what
+# crosses the boundary is a `u32`, and nothing reachable from `config` depends on `health`.
+depends_on = ["ai", "board", "config", "fleet", "gitgate", "github", "place", "prq", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 # `repos` and `util` went with local-path repos. `kit` reached for `Repo` to read a checkout

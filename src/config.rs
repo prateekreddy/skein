@@ -271,6 +271,33 @@ pub struct Config {
     /// other durable state, so raising one box's allowance is not a decision about all of them.
     #[serde(default = "default_box_disk_max")]
     pub box_disk_max: String,
+    /// How many whole days a compiler artefact may go untouched before a full disk offers it back,
+    /// and **0 turns the offer off**.
+    ///
+    /// This is the one figure in skein's disk work that is a judgement rather than a derivation,
+    /// which is exactly why it is a setting and not a constant. Everything else
+    /// [`crate::fleet`] offers to delete it can *prove* dead — a directory under `.skein` that is
+    /// neither skein's own nor any live box's ([`crate::fleet::substrate_strays`]), or a build
+    /// directory whose own dependency files name a source tree that is no longer on disk
+    /// ([`crate::fleet::orphaned_builds`]). Cargo's superseded generations cannot be proved dead at
+    /// all: rebuild a crate under a changed feature set and the old `.rlib` stays beside the new one
+    /// under a different metadata hash for ever, and nothing in either file says which is which —
+    /// cargo's own `.fingerprint` register does not either, because it keeps one per generation and
+    /// removes none. The only handle left is how long since something read or wrote the file.
+    ///
+    /// **Five days by default**, the owner's own number, and the reason it has to be yours to change
+    /// is that its correctness is local: a fleet whose lanes run for a week is wrong to call five
+    /// days dead, and one that rebuilds hourly could halve it. Being wrong in either direction costs
+    /// a **slower rebuild and never work** — the artefact is regenerated from source that was never
+    /// touched — which is what makes an age acceptable evidence here and nowhere else in this
+    /// module. `0` is a supported state and not a broken one: skein then says nothing about age at
+    /// all, and the two provable sweeps above are unaffected.
+    ///
+    /// Read by [`crate::health::disk_health`], and only when a filesystem is already past its line.
+    /// Whole days, counted the way `find -mtime +N` counts them, so the figure skein reports and the
+    /// command it prints name the same files.
+    #[serde(default = "default_stale_build_days")]
+    pub stale_build_days: u32,
     /// The `user.name` every box commits as. Empty ⇒ read from this host's **global** git config.
     ///
     /// A box's checkout is a fresh clone into a private HOME, so it inherits neither the host's
@@ -322,6 +349,11 @@ fn default_fleet_sandbox() -> String {
 
 fn default_box_disk_max() -> String {
     "10g".to_string()
+}
+
+/// Five whole days. See [`Config::stale_build_days`] for why this one is the owner's to change.
+fn default_stale_build_days() -> u32 {
+    5
 }
 
 /// Off by default, and it must stay that way for a fleet that already exists.
@@ -618,6 +650,7 @@ impl Default for Config {
             fleet_disk: String::new(),
             fleet_one_disk: default_fleet_one_disk(),
             box_disk_max: default_box_disk_max(),
+            stale_build_days: default_stale_build_days(),
             git_name: String::new(),
             git_email: String::new(),
             box_memory_max: String::new(),

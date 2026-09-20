@@ -4608,6 +4608,240 @@ pub fn orphaned_build_advice(builds: &[OrphanedBuild]) -> Option<String> {
     ))
 }
 
+// ─────────── compiler output cargo has superseded, where the only handle is its age ────────────
+//
+// The two sweeps above can each PROVE what they name is dead: a directory under `.skein` that is
+// neither skein's own nor any live box's, and a build directory whose own dependency files name a
+// tree that is not on disk. This one cannot, and saying so is half of what it is for.
+//
+// Cargo never garbage-collects. Rebuild a crate under a changed feature set or a new compiler and
+// the old `.rlib`, `.rmeta` and binary stay beside the new ones under a different `-<16 hex>`
+// metadata hash, for ever. Nothing in either file says which generation the next build will use.
+// **Cargo's own `.fingerprint` register does not answer it either**, which the comment above
+// records having measured rather than assumed: one fingerprint directory per generation and none
+// removed, so every superseded artefact resolves to a live fingerprint and a derivation built on
+// them reports nothing dead at all. A superseded generation is also genuinely reusable — check the
+// old branch back out and cargo links it rather than rebuilding.
+//
+// So the only handle left is **how long since anything read or wrote the file**, which is what
+// `cargo-sweep` uses and what every other rule in this module argues against — "a directory being
+// old is not on its own evidence of death". It is admitted here, and only here, because of what
+// being wrong costs: the artefact is regenerated from source nobody touched, so the price of
+// deleting a generation that was still wanted is a **slower rebuild and never lost work**. That is
+// the whole of the argument, and it does not transfer to anything else this module names.
+//
+// Two rules keep the admission narrow, and both are the lesson of the lanes that deleted live
+// fixtures by matching names:
+//
+// * **Age only ever qualifies output cargo has already claimed.** The walk starts at a directory
+//   carrying [`CARGO_TARGET_MARKER`] and never anywhere else, so a twelve-day-old directory called
+//   `target-notes` that cargo did not make is not examined, not counted and not offered. Age is
+//   never the thing that selects.
+// * **Whole days, counted as `find -mtime +N` counts them.** The figure skein reports and the
+//   command it prints have to name the same files, or a reader checks the second against the first
+//   and finds skein wrong about its own offer.
+//
+// **Nothing here deletes**, the same as everything above it.
+
+/// A build directory inside a live box, and how much of it nothing has touched lately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBuild {
+    /// The build directory itself, absolute.
+    pub path: String,
+    /// Bytes held by regular files older than the threshold — what the offer would reclaim, and
+    /// **not** the directory's size. The two differ by everything a build has touched since.
+    pub bytes: u64,
+    /// How many such files.
+    pub files: usize,
+    /// What [`tree_bytes`] makes of the whole directory, carried so the report can say what share
+    /// of a live build this is. A directory that is 99% stale and one that is 4% stale are
+    /// different decisions and a reader should not have to go and measure to tell them apart.
+    pub of: u64,
+    /// The age of the oldest qualifying file, in whole days. The evidence, such as it is: `6` on a
+    /// five-day threshold is a rounding, `12` is a fortnight nobody has been near.
+    pub oldest_days: u64,
+}
+
+/// Build directories inside live boxes holding compiler output nothing has touched in
+/// `older_than_days` whole days.
+///
+/// **`Err` rather than an empty answer whenever a derivation came up empty**, which is
+/// [`substrate_strays`]' and [`orphaned_builds`]' discipline and is here for the same reason
+/// (SKEIN-647). There are two ways to come up empty and each says so: no box at all, and a
+/// threshold of zero — which would qualify every file skein can see, including the one cargo wrote
+/// a second ago, and so is a refusal rather than an offer of everything.
+///
+/// Note what is *not* a refusal: a box with no build directory, and a build directory nothing is
+/// old enough in, are both simply silent. There is genuinely nothing to say.
+///
+/// Biggest first, because the only reason anybody runs this is that a disk is full.
+pub fn stale_builds(older_than_days: u32) -> Result<Vec<StaleBuild>, String> {
+    let root = fleet_root();
+    let live = live_box_names();
+    if live.is_empty() {
+        return Err(format!(
+            "skein can see no boxes at all — neither a directory in {root} nor a placement record \
+             in {places} — so it cannot say whose build output anything is. Refusing rather than \
+             reporting that nothing is stale",
+            places = skein_home().join("places").display(),
+        ));
+    }
+    if older_than_days == 0 {
+        return Err(
+            "a threshold of zero days would qualify every compiler artefact in the fleet, \
+             including the one cargo wrote a second ago. Refusing rather than offering the whole \
+             of every build directory — set `stale_build_days` to the number of days you want, or \
+             leave it at zero to have skein say nothing about age at all"
+                .to_string(),
+        );
+    }
+    use std::os::unix::fs::MetadataExt;
+    let mut stale = Vec::new();
+    for name in &live {
+        let box_dir = std::path::Path::new(&root).join(name);
+        if !box_dir.is_dir() {
+            continue; // a placement record for a box whose tree is not here
+        }
+        let on_disk = std::fs::metadata(&box_dir).map(|m| m.dev()).ok();
+        let mut builds = Vec::new();
+        cargo_build_dirs(&box_dir, 4, &mut builds);
+        for build in builds {
+            let (bytes, files, oldest_days) = untouched_for(&build, on_disk, older_than_days);
+            if files == 0 {
+                continue;
+            }
+            stale.push(StaleBuild {
+                of: tree_bytes(&build, on_disk),
+                path: build.display().to_string(),
+                bytes,
+                files,
+                oldest_days,
+            });
+        }
+    }
+    stale.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
+    Ok(stale)
+}
+
+/// Bytes, count and greatest age of the regular files under `build` that nothing has written in
+/// `days` whole days.
+///
+/// **Regular files only, because `find -type f -delete` is what the offer prints.** Counting a
+/// directory's own blocks here would put bytes in the figure that the command would not reclaim,
+/// and a reader who runs it and measures again would find skein had overstated the saving.
+///
+/// The walk is [`tree_bytes`]' — same device filter, same hardlink set, same silence on an
+/// unreadable directory — because a second walk written beside it is a second answer to "how big
+/// is that".
+///
+/// A file whose mtime is in the *future* is age zero rather than a negative one: a clock that went
+/// backwards must not make every artefact in the fleet eligible for deletion.
+fn untouched_for(build: &std::path::Path, on_disk: Option<u64>, days: u32) -> (u64, usize, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let now = std::time::SystemTime::now();
+    let mut bytes = 0u64;
+    let mut files = 0usize;
+    let mut oldest = 0u64;
+    let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    if let Ok(meta) = std::fs::metadata(build) {
+        seen.insert((meta.dev(), meta.ino()));
+    }
+    let mut stack = vec![build.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(kids) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for kid in kids.flatten() {
+            let Ok(meta) = kid.metadata() else {
+                continue;
+            };
+            if on_disk.is_some_and(|dev| meta.dev() != dev) {
+                continue; // `-x`
+            }
+            if !seen.insert((meta.dev(), meta.ino())) {
+                continue; // a hardlink already counted
+            }
+            if meta.is_dir() {
+                stack.push(kid.path());
+                continue;
+            }
+            if !meta.is_file() {
+                continue; // `-type f`
+            }
+            let Ok(age) = meta.modified().and_then(|m| {
+                now.duration_since(m)
+                    .or(Ok(std::time::Duration::from_secs(0)))
+            }) else {
+                continue;
+            };
+            // Whole days, truncated — `find -mtime +N` discards the fraction too, and the figure
+            // and the command have to name one set of files.
+            let whole = age.as_secs() / 86_400;
+            if whole <= u64::from(days) {
+                continue;
+            }
+            bytes += meta.blocks() * 512;
+            files += 1;
+            oldest = oldest.max(whole);
+        }
+    }
+    (bytes, files, oldest)
+}
+
+/// [`stale_builds`] as a line to put in front of a person, or `None` when there is nothing to say.
+///
+/// **The sentence says out loud that this evidence is the weak one**, and that is a requirement
+/// rather than a courtesy. [`orphaned_build_advice`] above can tell a reader *why* a directory is
+/// dead and invite them to check it; this one can only say that nothing has been near these files,
+/// which is a fact about attention and not about need. A reader who cannot tell the two offers
+/// apart will weigh them the same, and the whole reason an age is admissible here is that its
+/// failure mode is cheap — so the failure mode is in the sentence.
+///
+/// The command is spelled out and **not run**, every path in it is shell-quoted, and its `-mtime`
+/// carries the same number the figures were derived from.
+pub fn stale_build_advice(builds: &[StaleBuild], older_than_days: u32) -> Option<String> {
+    if builds.is_empty() || older_than_days == 0 {
+        return None;
+    }
+    let gib = |bytes: u64| format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    let total: u64 = builds.iter().map(|b| b.bytes).sum();
+    let lines = builds
+        .iter()
+        .map(|b| {
+            format!(
+                "\x20   {} — {} of its {} in {} files nothing has written in {} days, the oldest \
+                 {} days",
+                b.path,
+                gib(b.bytes),
+                gib(b.of),
+                b.files,
+                older_than_days,
+                b.oldest_days,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let paths = builds
+        .iter()
+        .map(|b| sh_quote(&b.path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let subject = match builds.len() {
+        1 => "1 build directory".to_string(),
+        n => format!("{n} build directories"),
+    };
+    Some(format!(
+        "{subject} in the fleet holds {total} of compiler output nothing has touched in \
+         {older_than_days} days, which cargo will never remove by itself:\n{lines}\n\
+         This is age-based evidence and it is the weaker kind — nothing in these files says a \
+         generation is dead, only that nothing has read or written one for {older_than_days} days, \
+         so being wrong here costs a slower rebuild and never work. The threshold is yours: \
+         `stale_build_days` in Settings, and 0 turns this off. skein does not run this:\n\
+         \x20   find {paths} -mindepth 1 -type f -mtime +{older_than_days} -delete",
+        total = gib(total),
+    ))
+}
+
 /// `du` over every box, and the `|| true` is the entire point of this being its own function.
 ///
 /// `du` exits nonzero if it could not read so much as one directory anywhere in the tree, while
@@ -13746,6 +13980,311 @@ for a in sys.argv[2:]:
         assert!(
             box_dir.join("target-wt1140").is_dir(),
             "the build directory was removed by a report — the one thing this must never do"
+        );
+    }
+
+    // ───── compiler output nothing has touched: `stale_builds`, `stale_build_advice` ─────
+
+    /// Push every regular file under `dir` back by `days` whole days and an hour.
+    ///
+    /// The extra hour is not slack, it is the arithmetic: [`untouched_for`] truncates to whole days
+    /// exactly as `find -mtime` does, so a file aged by precisely `days * 86_400` is `days` old and
+    /// a threshold of `days` does **not** match it. Aging by a little more makes the fixture's age
+    /// the number the test names, whatever the clock does between the two calls.
+    fn age_by(dir: &std::path::Path, days: u64) {
+        let when =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400 + 3_600);
+        let times = std::fs::FileTimes::new()
+            .set_modified(when)
+            .set_accessed(when);
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for kid in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = kid.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_times(times)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Compiler output nothing has written in a long time is named — and a build directory a lane
+    /// is still using is not, **by the same call that named the first**.
+    ///
+    /// The two halves are one test on purpose. A sweep that reports nothing is indistinguishable
+    /// from a sweep that cannot see anything (SKEIN-647), so the silence is only worth asserting
+    /// beside a fixture the same call *does* name.
+    ///
+    /// **What would make each fail**: dropping the `whole <= days` filter in `untouched_for`, so
+    /// every file in the fleet qualifies and the fresh directory is offered too; and inverting it,
+    /// so nothing old ever is. Watched — see the report.
+    #[test]
+    fn compiler_output_nothing_has_touched_is_named_and_a_live_build_directory_is_not() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        // `plant_fleet` made `web-main/tree`, so neither of these is an orphan: the question here
+        // is age and only age.
+        std::fs::create_dir_all(box_dir.join("tree/src")).unwrap();
+        plant_build(&box_dir, "target-fresh", "tree", 9);
+
+        let nothing_old = stale_builds(5).expect("a fleet with a box is answerable");
+        assert!(
+            nothing_old.is_empty(),
+            "a build directory a lane wrote a moment ago was offered for deletion on the strength \
+             of its age — which is the offer that costs somebody their afternoon: {nothing_old:?}"
+        );
+
+        plant_build(&box_dir, "target-private", "tree", 9);
+        age_by(&box_dir.join("target-private"), 12);
+
+        let found = stale_builds(5).expect("a fleet with a box is answerable");
+        assert_eq!(
+            found.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+            vec![box_dir.join("target-private").display().to_string()],
+            "the sweep named the wrong set: the silence above proves nothing unless this call, \
+             which differs only by a directory nobody has touched in twelve days, names it and \
+             nothing else: {found:?}"
+        );
+        assert!(
+            found[0].bytes >= 40_000 && found[0].files >= 2,
+            "the reclaimable figure is {} bytes in {} files, which cannot include the \
+             40,000-byte artefact planted in it — a size nobody can act on is not a report",
+            found[0].bytes,
+            found[0].files
+        );
+        assert_eq!(
+            found[0].oldest_days, 12,
+            "the age skein reports is not the age the fixture has, so the evidence in the offer is \
+             not about these files: {found:?}"
+        );
+        assert!(
+            found[0].of >= found[0].bytes,
+            "the directory is reported as smaller than the part of it being offered: {found:?}"
+        );
+    }
+
+    /// **The threshold is the owner's, and setting it two ways gives two answers.**
+    ///
+    /// This is the whole of SKEIN-974's "it must be configurable": not that a field exists, but
+    /// that what skein offers follows it. Driven through `config::load_config` and a real
+    /// `config.json` rather than by passing a literal, because a constant somebody edits and
+    /// rebuilds would pass an assertion written against the argument alone.
+    ///
+    /// **What would make this fail**: `stale_builds` ignoring its argument for a hardcoded 5 — the
+    /// thirty-day assertion then names the directory anyway. Watched — see the report.
+    #[test]
+    fn the_age_threshold_is_a_setting_and_changing_it_changes_what_is_offered() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        std::fs::create_dir_all(box_dir.join("tree/src")).unwrap();
+        plant_build(&box_dir, "target-private", "tree", 9);
+        age_by(&box_dir.join("target-private"), 12);
+
+        let offered = |days: u32| {
+            std::fs::write(
+                skein_home().join("config.json"),
+                format!(r#"{{"stale_build_days":{days}}}"#),
+            )
+            .unwrap();
+            let setting = crate::config::load_config().stale_build_days;
+            assert_eq!(
+                setting, days,
+                "the file said {days} and settings read {setting}"
+            );
+            stale_builds(setting)
+                .expect("a fleet with a box is answerable")
+                .len()
+        };
+
+        assert_eq!(
+            offered(1),
+            1,
+            "a threshold of one day does not reach output twelve days untouched, so the setting \
+             is not what decides"
+        );
+        assert_eq!(
+            offered(30),
+            0,
+            "a threshold of thirty days still offers output twelve days untouched — the same \
+             fleet, the same files, and the only thing that changed was the setting"
+        );
+        // And the default is the owner's number rather than whatever the last case wrote.
+        std::fs::remove_file(skein_home().join("config.json")).unwrap();
+        assert_eq!(
+            crate::config::load_config().stale_build_days,
+            5,
+            "a fleet with no config.json does not get the five days SKEIN-974 settled on"
+        );
+    }
+
+    /// A directory that merely *looks* like build output is never examined, **however old it is**.
+    ///
+    /// The companion to `a_directory_that_only_looks_like_build_output_is_never_offered`, and the
+    /// one that matters most for this sweep: age is the loosest evidence in this module, so the
+    /// thing it is allowed to qualify has to be pinned by something else. `notes` here is twelve
+    /// days old and full of files, which is everything an age check on its own would fire on. It
+    /// carries no [`CARGO_TARGET_MARKER`], so cargo never made it, so skein says nothing about it.
+    ///
+    /// **What would make this fail**: walking every directory in a box rather than starting from
+    /// cargo's marker. Watched — see the report; `notes` was named for deletion.
+    #[test]
+    fn age_never_selects_a_directory_cargo_did_not_make() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        std::fs::create_dir_all(box_dir.join("tree/src")).unwrap();
+        // Real, old build output, so a sweep that found nothing at all cannot pass this test.
+        plant_build(&box_dir, "target-private", "tree", 9);
+        // Somebody's twelve-day-old working notes, which no build would ever regenerate.
+        let keep = box_dir.join("notes");
+        std::fs::create_dir_all(keep.join("debug/deps")).unwrap();
+        std::fs::write(keep.join("debug/deps/draft.rlib"), vec![7u8; 40_000]).unwrap();
+        age_by(&box_dir, 12);
+
+        let found = stale_builds(5).expect("a fleet with a box is answerable");
+
+        assert_eq!(
+            found.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+            vec![box_dir.join("target-private").display().to_string()],
+            "an old directory cargo never made was offered for deletion, which is the failure \
+             every rule in this module exists to prevent — and here the only evidence was its \
+             age: {found:?}"
+        );
+        assert!(
+            keep.join("debug/deps/draft.rlib").is_file(),
+            "a report removed somebody's file — the one thing this must never do"
+        );
+    }
+
+    /// The two ways this sweep can come up empty are refusals, not answers.
+    ///
+    /// No box is [`orphaned_builds`]' refusal and the same one. A threshold of zero is this
+    /// sweep's own: it would qualify every artefact in the fleet, so offering "everything" is the
+    /// answer skein must not give, and `0` is instead how the owner turns the offer off.
+    ///
+    /// **What would make each fail**: returning `Ok(vec![])` for a fleet with no boxes, and
+    /// treating `0` as an ordinary threshold. Watched — see the report; with `0` accepted the
+    /// sweep returned the fresh build directory.
+    #[test]
+    fn no_boxes_and_a_zero_threshold_are_both_refusals() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        std::fs::create_dir_all(root.join(".skein")).unwrap();
+        let why = stale_builds(5)
+            .expect_err("no box means the sweep cannot say whose build output anything is");
+        assert!(
+            why.contains("no boxes at all") && why.contains("Refusing"),
+            "the refusal does not say what could not be derived, so a reader cannot tell it from a \
+             clean fleet: {why}"
+        );
+
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        std::fs::create_dir_all(box_dir.join("tree/src")).unwrap();
+        plant_build(&box_dir, "target-fresh", "tree", 9);
+        let zero = stale_builds(0)
+            .expect_err("zero days would qualify the artefact cargo wrote a second ago");
+        assert!(
+            zero.contains("zero days") && zero.contains("Refusing"),
+            "the refusal does not say why zero is not a threshold: {zero}"
+        );
+        assert_eq!(
+            stale_build_advice(
+                &[StaleBuild {
+                    path: box_dir.join("target-fresh").display().to_string(),
+                    bytes: 40_000,
+                    files: 1,
+                    of: 40_000,
+                    oldest_days: 12,
+                }],
+                0
+            ),
+            None,
+            "the offer spoke on a fleet whose owner set the threshold to zero to switch it off"
+        );
+    }
+
+    /// The offer says out loud that its evidence is the weak kind, hands over a command that names
+    /// the same days the figures came from, and deletes nothing.
+    ///
+    /// **Why the wording is an assertion.** [`orphaned_build_advice`] can tell a reader *why* a
+    /// directory is dead; this one cannot, and a reader who cannot tell the two offers apart will
+    /// weigh them the same. The only thing that makes an age admissible here at all is that being
+    /// wrong costs a rebuild rather than work, so that has to be in the sentence rather than in a
+    /// doc comment nobody staring at a full disk will read.
+    ///
+    /// **What would make each fail**: dropping the "weaker kind" clause; printing a `-mtime` that
+    /// is not the threshold the figures were derived from, so a reader checking the command finds
+    /// a different set of files. Watched — see the report.
+    #[test]
+    fn the_stale_offer_says_its_evidence_is_the_weak_kind_and_deletes_nothing() {
+        let _lock = env_lock();
+        let dir = crate::testutil::tempdir();
+        let (root, _pins) = pinned_fleet(&dir);
+        plant_fleet(&root, &["web-main"], &[]);
+        let box_dir = root.join("web-main");
+        std::fs::create_dir_all(box_dir.join("tree/src")).unwrap();
+        plant_build(&box_dir, "target-private", "tree", 9);
+        age_by(&box_dir.join("target-private"), 12);
+
+        assert_eq!(
+            stale_build_advice(&[], 5),
+            None,
+            "there is nothing to say about nothing"
+        );
+
+        let found = stale_builds(5).expect("a fleet with a box is answerable");
+        let offer =
+            stale_build_advice(&found, 5).expect("one was found, so there is something to say");
+
+        assert!(
+            offer.contains("weaker kind") && offer.contains("slower rebuild and never work"),
+            "the offer does not say that this evidence is the weak one, so a reader weighs it the \
+             same as a directory skein can prove is dead: {offer}"
+        );
+        assert!(
+            offer.contains("the oldest 12 days") && offer.contains("nothing has touched in 5 days"),
+            "the offer states no evidence a reader can check before deleting anything: {offer}"
+        );
+        assert!(
+            offer.contains("stale_build_days"),
+            "the offer never says the threshold is the reader's to change, so an offer they \
+             disagree with has no answer but to ignore it: {offer}"
+        );
+        let command = offer
+            .lines()
+            .find(|l| l.trim_start().starts_with("find "))
+            .unwrap_or_else(|| panic!("the offer names a problem and no way out of it: {offer}"));
+        assert!(
+            command.contains("-mtime +5") && command.contains("-type f"),
+            "the command does not select the files the figures above it were derived from, so a \
+             reader who runs it reclaims a different amount than skein said: {command}"
+        );
+        assert!(
+            command.contains(&box_dir.join("target-private").display().to_string()),
+            "the command does not name what the sentence above it named: {command}"
+        );
+        assert!(
+            box_dir
+                .join("target-private/debug/deps/libthing.rlib")
+                .is_file(),
+            "a report removed the artefact it was reporting — the one thing this must never do"
         );
     }
 
