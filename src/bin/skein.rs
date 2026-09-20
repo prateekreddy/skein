@@ -701,6 +701,27 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // How long that credential has left (SKEIN-928). Directly under the scope line, because the two
+    // are the same credential asked two questions — what it can reach, and whether it will still
+    // reach it next month — and because this is the one a person runs `skein doctor` to find out
+    // when a push has just started failing for no reason they can see.
+    //
+    // A command rather than the report, for the reason every line in this function is: it costs a
+    // request to GitHub per credential, and a person typing `doctor` is asking for it. The cockpit
+    // gets the same check through `health_report`, where a gate stops the poll paying for it.
+    {
+        let t = skein::health::token_expiry_health();
+        let mark = match t.level {
+            skein::health::Level::Satisfied => OK,
+            skein::health::Level::Unsatisfied => BAD,
+            skein::health::Level::Unknown => WARN,
+        };
+        println!("{mark} token life    {}", t.detail);
+        if !t.fix.is_empty() {
+            println!("{DIM}              → {}{RESET}", t.fix);
+        }
+    }
+
     // Which boxes nothing bounds. Beside the fleet cgroups above and not folded into them, because
     // they answer different questions: those say what the sandbox as a whole is held to, this says
     // whether a given box is inside it. A box that never joined a cgroup is outside every number

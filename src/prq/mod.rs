@@ -45,8 +45,8 @@ mod write;
 mod fixtures;
 
 pub use credentials::{
-    forget_host_token, forget_renames, forget_trunks, host_token, host_token_source, repo_slug,
-    slug_for_write, trunk_of, viewer, GhToken,
+    credential_lives, days_until, forget_host_token, forget_renames, forget_trunks, host_token,
+    host_token_source, repo_slug, slug_for_write, trunk_of, viewer, CredentialLife, GhToken, Life,
 };
 pub use refresh::{
     counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue, StoppedPr,

@@ -430,10 +430,177 @@ pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
     Ok((login, teams))
 }
 
+// ---------- how long each credential has left (SKEIN-928) ----------
+//
+// The fleet's GitHub credential has an expiry date and nothing in skein could see it. When it
+// passes, every API call and every `git push` from every box fails at once, and it does not look
+// like an expiry — it looks like an auth bug, which is a day spent before anybody thinks to check a
+// date. Only the owner can renew it: it is regenerated on github.com and re-set from the host. So
+// skein's whole job here is to see it coming early enough to be acted on, and to say what to do
+// rather than only what is wrong.
+//
+// **The resolution lives here because the credential does.** `host_credential` above already knows
+// which of four sources skein's GitHub calls are running on; asking that question a second time in
+// `health` would be two answers to one question, which is the shape SKEIN-547 is about.
+
+/// What GitHub says about how long one credential has left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Life {
+    /// GitHub answered and named a date: the date as GitHub spelled it, and whole days from now to
+    /// it — **negative once it is past**, which is a state a reader has to be able to say out loud.
+    Expires { when: String, days: i64 },
+    /// GitHub answered and named no expiry at all. A personal access token with no expiry date is
+    /// a real and supported thing, and it is the one answer here that needs nothing from anybody.
+    Endless,
+    /// GitHub did not answer the question, and this is why.
+    ///
+    /// **Never folded into [`Life::Endless`]**, and that distinction is what the whole check turns
+    /// on. Measured from a box on 2026-09-20 with `Authorization: token skein-test-garbage`:
+    /// `HTTP/2 401`, and **no** `github-authentication-token-expiration` header at all. So "the
+    /// header was not there" is what a dead credential looks like as well as what an endless one
+    /// looks like, and a reader that takes the absence for good news reports the worst state in the
+    /// fleet as the healthiest.
+    Unanswered(String),
+}
+
+/// One credential skein holds, where it came from, and what GitHub said about it.
+///
+/// The recipe for replacing it is deliberately NOT here: it differs by source, it names the fleet
+/// sandbox, and it is a sentence shown to a person — all of which belong to the reporting layer,
+/// the way [`crate::health`] already owns the wording for `gitgate`'s scope states rather than
+/// `gitgate` owning it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialLife {
+    pub source: GhToken,
+    /// What to call it in a sentence — `$GH_TOKEN`, or the label and repository its owner gave it.
+    pub label: String,
+    pub life: Life,
+}
+
+/// Whole days from `now` to the date GitHub put in `github-authentication-token-expiration`.
+///
+/// GitHub's spelling is `2026-10-15 13:19:49 UTC` (measured on this fleet 2026-09-15, SKEIN-928).
+/// `None` for anything this cannot read, which the caller turns into [`Life::Unanswered`] rather
+/// than into a pass — an expiry skein failed to parse is not an expiry skein has cleared.
+///
+/// **Floor division, not truncation.** A whole-day count that rounds toward zero answers `0` for
+/// a credential that died four hours ago and `0` for one that dies in four hours; `div_euclid`
+/// gives `-1` and `0`, and only one of those two sentences is true.
+pub fn days_until(when: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    let text = when.trim();
+    let text = text.strip_suffix("UTC").unwrap_or(text).trim();
+    let at = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok()?;
+    Some((at.and_utc() - now).num_seconds().div_euclid(86_400))
+}
+
+/// Ask GitHub about one credential. Separate from [`credential_lives`] so that the mapping from an
+/// answer to a [`Life`] is written once rather than once per source.
+fn life_of(token: &crate::secret::Secret, now: chrono::DateTime<chrono::Utc>) -> Life {
+    match crate::github::token_expiry(token) {
+        Err(why) => Life::Unanswered(why),
+        Ok(None) => Life::Endless,
+        Ok(Some(when)) => match days_until(&when, now) {
+            Some(days) => Life::Expires { when, days },
+            None => Life::Unanswered(format!(
+                "GitHub named an expiry skein could not read: {when:?}"
+            )),
+        },
+    }
+}
+
+/// Every GitHub credential skein holds, asked how long it has left.
+///
+/// **One network call per credential, so nothing polled may call this directly** — see
+/// [`crate::health::token_expiry_health`], which is where the gate is.
+///
+/// The host credential comes first because it is the one skein's own calls run on, and it is
+/// skipped when it resolved to a stored write PAT: that token is listed below under its own name,
+/// and one credential reported twice under two names reads as two problems.
+pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLife> {
+    let mut out = Vec::new();
+    let (source, held) = host_credential();
+    if let Some(token) = held {
+        if source != GhToken::WritePat {
+            out.push(CredentialLife {
+                source,
+                label: source.label().to_string(),
+                life: life_of(&token, now),
+            });
+        }
+    }
+    // The stored per-repo tokens — `~/.skein/github-pats/<id>`, described by `github-pats.json`.
+    // Reached through `credential_for` because that is the accessor `gitgate` publishes and the
+    // same one that decides which token a box is handed; deduplicated by the id it answers with, so
+    // one token filed against two repositories is one row rather than two.
+    let mut seen = std::collections::BTreeSet::new();
+    for stored in crate::gitgate::write_credentials() {
+        if stored.problem().is_some() {
+            continue;
+        }
+        let Some((found, token)) = crate::gitgate::credential_for(stored.repo()) else {
+            continue;
+        };
+        if !seen.insert(found.id.clone()) {
+            continue;
+        }
+        let repo = found.repo().to_string();
+        let label = match found.label.trim().is_empty() {
+            true => repo,
+            false => format!("{} ({repo})", found.label.trim()),
+        };
+        out.push(CredentialLife {
+            source: GhToken::WritePat,
+            label,
+            life: life_of(&token, now),
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::prq::fixtures::{batched_repo, recording_github, routing_github, wired};
+
+    /// **GitHub's expiry date, counted the way a person would count it** (SKEIN-928).
+    ///
+    /// The header's spelling is `2026-10-15 13:19:49 UTC`, measured on this fleet on 2026-09-15.
+    /// Two things have to hold for the line built on it to be true: the format parses at all, and a
+    /// date that is already past comes back negative.
+    ///
+    /// Counterfactuals, named before the assertions: swapping `div_euclid(86_400)` for a
+    /// whole-day count that rounds toward zero makes `four hours past its date must not read as
+    /// still alive` fail, because it answers `0` for both sides of the date. Dropping the
+    /// `strip_suffix("UTC")` makes `parses GitHub's own spelling` fail, since `%S` does not eat a
+    /// trailing zone name. Returning `Some(0)` instead of `None` for an unparseable value would
+    /// make `an expiry skein cannot read is not an expiry skein has cleared` fail — and that one is
+    /// the dangerous direction, since a `Some` is what the caller turns into a countdown.
+    #[test]
+    fn an_expiry_date_is_counted_forwards_and_backwards() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-20T13:19:49Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            days_until("2026-10-15 13:19:49 UTC", now),
+            Some(25),
+            "parses GitHub's own spelling, and counts whole days to it"
+        );
+        assert_eq!(
+            days_until("2026-09-20 09:19:49 UTC", now),
+            Some(-1),
+            "four hours past its date must not read as still alive"
+        );
+        assert_eq!(
+            days_until("2026-09-21 09:19:49 UTC", now),
+            Some(0),
+            "under a day left is zero days left, not one"
+        );
+        assert_eq!(
+            days_until("whenever", now),
+            None,
+            "an expiry skein cannot read is not an expiry skein has cleared"
+        );
+    }
 
     /// **The GitHub credential is a `Secret` from the cache outwards, and prints as one.**
     ///

@@ -9333,7 +9333,10 @@ function renderDiagnostics() {
     ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
     ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
     ["disk", "fleet disk"],
-    ["gitgate", "github scope"], ["warden", "host warden"], ["cover", "box isolation"],
+    // "token life" directly under "github scope": the same credential asked two questions — what it
+    // can reach, and whether it will still reach it next month (SKEIN-928).
+    ["gitgate", "github scope"], ["token_expiry", "token life"],
+    ["warden", "host warden"], ["cover", "box isolation"],
     ["ai", "ai enrichment"],
   ];
   // Three states, not two. `unknown` is "skein could not tell", which is neither a pass nor a
@@ -11436,7 +11439,11 @@ function loadHealth() {
     // failure lands in the middle of a build in whichever box happened to ask for the next block —
     // usually not the box that took the space. `health.ok` counts it, so leaving it out here would
     // put a red banner on screen with nothing in it to read.
-    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","disk","gitgate","warden","cover"];
+    // "token_expiry" among them for the reason "cover" is: a GitHub credential inside its renewal
+    // window has no symptom at all until the day it stops working, and on that day every box loses
+    // GitHub at once and it reads as an auth bug. `health.ok` counts it, so leaving it out here
+    // would put a red banner on screen with nothing in it to read (SKEIN-928).
+    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","disk","gitgate","token_expiry","warden","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");

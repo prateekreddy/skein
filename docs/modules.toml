@@ -441,7 +441,16 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # it tells somebody to run (`sbx exec <sandbox> docker system prune -af`). A recipe that cannot be
 # copied is half a recipe, and the alternative — health guessing the name, or printing a
 # placeholder — is worse than the edge.
-depends_on = ["ai", "board", "fleet", "gitgate", "github", "place", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+# `prq` for the credential deadline check (SKEIN-928). The question — when does each GitHub
+# credential skein holds stop working — has to be asked of the credential that is actually in use,
+# and `prq::credentials` is already the one place that resolves which of four sources that is
+# ($GH_TOKEN, the read token, a stored write PAT, the host's `gh` login). The alternative was for
+# `health` to resolve it a second time, which is the precise shape of SKEIN-547: two answers to one
+# question, agreeing until the day they do not. What crosses the boundary is a reading, never a
+# credential — `health` turns `prq::Life` into the sentence and the recipe, exactly as it already
+# turns `gitgate`'s scope states into the `gitgate` line. The edge adds no cycle: nothing reachable
+# from `prq` depends on `health`.
+depends_on = ["ai", "board", "fleet", "gitgate", "github", "place", "prq", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 # `repos` and `util` went with local-path repos. `kit` reached for `Repo` to read a checkout
