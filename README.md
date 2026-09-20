@@ -368,11 +368,19 @@ skein version · help
 Example:
 
 ```
-  BOX            STATE  BRANCH                    SEEN    DIR
-● my-feature     live   feat/my-feature           12s ago ~/work/.../gadget-demo
-● bugfix-login   idle   fix/login                 8m ago  ~/work/.../gadget-demo
-○ thing-export  stale  export                    9h ago  ~/work/.../gadget-demo
+  BOX           STATE  BRANCH           SEEN     DIR
+● my-feature    live   feat/my-feature  12s ago  ~/work/.../gadget-demo
+● bugfix-login  idle   fix/login        8m ago   ~/work/.../gadget-demo
+○ thing-export  stale  export           9h ago   ~/work/.../gadget-demo
+
+3 boxes
 ```
+
+Every column is as wide as its own widest value (`pad`, in `src/bin/skein.rs`), so a longer box name
+or branch moves everything to the right of it. The block above is those three rows put through that
+rule rather than a table drawn by hand — the one it replaces had been edited by hand until the
+`stale` row no longer lined up with the two above it, which is the one thing a sample of aligned
+output cannot afford to get wrong.
 
 State prefers the explicit status a box's hooks report (`needs-input` / `waiting` / `working` /
 `done`); with no report it falls back to `live` (<2m) / `idle` (<30m) / `stale` from `lastSeen`.
@@ -435,7 +443,7 @@ Go there to:
   request you approve once, for every box;
 * **read a conversation the terminal has lost**, hand a box from Claude to Codex, or carry durable
   working files from one box to the next;
-* **look a knob up** — the whole `SKEIN_*` table, the `.env` that saves you retyping it, how skein
+* **look a knob up** — the `SKEIN_*` knob table, the `.env` that saves you retyping it, how skein
   sizes a fleet, and how it reaches one at all.
 
 It closes with the two things worth reading before you change skein itself: what skein owns of the
