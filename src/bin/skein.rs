@@ -474,18 +474,32 @@ fn cmd_doctor() -> Result<(), String> {
     // does not work: the API needs the fleet's token, so a bare `http://127.0.0.1:7878` loads a page
     // whose every request is refused. A diagnostic that prints the address and stops is handing over
     // the broken half of the answer.
-    match skein::apiauth::disabled() {
-        true => println!(
-            "{DIM}·{RESET} cockpit       http://{addr}  {DIM}(auth off — \
-             $SKEIN_NO_API_AUTH){RESET}"
+    //
+    // **The URL carries the token even when `$SKEIN_NO_API_AUTH` is set** (SKEIN-962). Until then
+    // this branched on `apiauth::disabled` and printed a bare address under the switch — which is
+    // now the one URL that cannot work either way. The fleet's cockpit refuses the switch
+    // (`apiauth::off_switch_refused`, architecture §9.4): a server the doorway started with it set
+    // serves nothing but the refusal, and one started without it wants the token. Neither of them
+    // opens on an address alone, so the switch no longer changes what to print — it adds a line
+    // saying it will not do what its name says.
+    match skein::apiauth::stored() {
+        Some(t) => println!("{OK} cockpit       http://{addr}/?t={t}"),
+        None => println!(
+            "{DIM}·{RESET} cockpit       http://{addr}/?t=…  {DIM}(the token is minted at the \
+             server's first start){RESET}"
         ),
-        false => match skein::apiauth::stored() {
-            Some(t) => println!("{OK} cockpit       http://{addr}/?t={t}"),
-            None => println!(
-                "{DIM}·{RESET} cockpit       http://{addr}/?t=…  {DIM}(the token is minted at the \
-                 server's first start){RESET}"
-            ),
-        },
+    }
+    // Read rather than obeyed: this is `skein`, not the cockpit, so what it can report is that the
+    // switch is set in an environment the fleet's server is started from — not that any particular
+    // server took it. `apiauth::switch_set` is the reading and `apiauth::disabled` is the decision,
+    // and the two exist separately because of exactly this line. The sentence says what a server
+    // started under it will do.
+    if skein::apiauth::switch_set() {
+        println!(
+            "{WARN} api auth      $SKEIN_NO_API_AUTH is set, and the fleet's cockpit refuses it \
+             — a server started with it serves that refusal and nothing else. Unset it where the \
+             server is started, then restart the server."
+        );
     }
 
     // **No host tools on this list** (SKEIN-576). `sbx` used to be here whenever skein was on the

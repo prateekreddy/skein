@@ -46,6 +46,10 @@ const DEV_GH_TOKEN = "gho_the_developers_own_credential";
 const DEV_GITHUB_TOKEN = "ghp_the_developers_other_credential";
 process.env.GH_TOKEN = DEV_GH_TOKEN;
 process.env.GITHUB_TOKEN = DEV_GITHUB_TOKEN;
+// And the variable the cockpit leaves in every box's environment (SKEIN-962) — see check 4. Set
+// here for the credentials' reason: a GitHub runner has never been under a doorway, so a check that
+// trusted the ambient value would assert nothing there while looking green in a box.
+process.env.SKEIN_LISTEN_INHERITED_ONLY = "1";
 
 const t = harness();
 
@@ -133,9 +137,18 @@ async function serverWith(extra) {
  * this file passed to `startServer` would assert nothing: that object is an input to the mechanism
  * under test, and the failure this check exists for is the mechanism ignoring it. */
 function childHome(srv) {
+  return childVar(srv, "HOME");
+}
+
+/** One variable out of a started server's real environment, or `"unset"`.
+ *
+ * `childHome`'s reader, generalised for check 4. Same argument: the object this file handed
+ * `startServer` is an input to the mechanism under test, so reading it back proves nothing about
+ * what the child was execed with. */
+function childVar(srv, name) {
   const environ = fs.readFileSync(`/proc/${srv.pid}/environ`, "utf8").split("\0");
-  const found = environ.find(v => v.startsWith("HOME="));
-  return found === undefined ? null : found.slice("HOME=".length);
+  const found = environ.find(v => v.startsWith(`${name}=`));
+  return found === undefined ? "unset" : found.slice(name.length + 1);
 }
 
 /** What a `HOME` IS, rather than what it says — so a failure names the path and a pass cannot be
@@ -143,7 +156,7 @@ function childHome(srv) {
  * carries the sentinel `startServer` writes, which is the same evidence `onboarding.mjs` reads out
  * of the box the server went on to launch. */
 function whatHomeIsThis(home) {
-  if (!home) return "unset";
+  if (!home || home === "unset") return "unset";
   if (home === process.env.HOME) return "the home of whoever ran this suite";
   try {
     const inside = fs.realpathSync(home).startsWith(fs.realpathSync(fx.root) + path.sep);
@@ -226,6 +239,33 @@ try {
       { whenTheSuiteSaysNothing: whatHomeIsThis(childHome(saidNothing.srv)),
         whenTheSuiteAsksForTheRunners: whatHomeIsThis(childHome(askedForARealOne.srv)) },
       { whenTheSuiteSaysNothing: mine, whenTheSuiteAsksForTheRunners: mine },
+    );
+  }
+
+  // 4. **The auth-off switch pin, and it is the check the block below says to write when a name is
+  //    given a real meaning again** (SKEIN-962). `$SKEIN_LISTEN_INHERITED_ONLY` now has one:
+  //    `apiauth::off_switch_refused` reads it to decide where `$SKEIN_NO_API_AUTH` is refused, so a
+  //    server that carries both serves nothing but the refusal on every path.
+  //
+  //    It is ambient in a box — `src/server-doorway.py` sets it on the cockpit it execs and a box
+  //    session inherits the cockpit's environment — which is `$SKEIN_IN_FLEET`'s story exactly, and
+  //    it landed the same way: `attach.mjs` runs with `SKEIN_NO_API_AUTH` and died on `server never
+  //    came up` on a machine where nothing was wrong with the server. This suite sets the ambient
+  //    value itself, the way it sets the developer's credential above, so the question is the same
+  //    one on a runner as in a box rather than passing vacuously wherever the variable is absent.
+  //
+  //    **Both arms, and they differ.** The first is the pin: a suite that says nothing gets a server
+  //    that is not the fleet's cockpit. The second is the hatch: a suite that means to say it is one
+  //    still can, which is what `tests/server.rs` relies on to spawn both shapes.
+  {
+    const saidNothing = await serverWith({});
+    const saidItWasTheCockpit = await serverWith({ SKEIN_LISTEN_INHERITED_ONLY: "1" });
+    const pin = "SKEIN_LISTEN_INHERITED_ONLY";
+    t.check(
+      "a suite's server is not told it is the fleet's cockpit, and a suite that means to say so can",
+      { whenTheSuiteSaysNothing: childVar(saidNothing.srv, pin),
+        whenTheSuiteSaysItIs: childVar(saidItWasTheCockpit.srv, pin) },
+      { whenTheSuiteSaysNothing: "unset", whenTheSuiteSaysItIs: "1" },
     );
   }
 

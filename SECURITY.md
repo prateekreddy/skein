@@ -149,9 +149,13 @@ Not because they do not matter, but because they are the product rather than a d
   still a real report about that same socket.
 * **Anything that needs host root, physical access, or an already-compromised host.** skein trusts
   the machine it is installed on; the whole design is about not trusting what runs *inside* it.
-* **`SKEIN_NO_API_AUTH=1`.** It is a documented off-switch for an owner who has some other
-  boundary, and it is an environment variable rather than a setting precisely so that it cannot be
-  reached through the API it disarms.
+* **`SKEIN_NO_API_AUTH=1` *outside* the fleet.** It is a documented off-switch for an owner who has
+  some other boundary, and it is an environment variable rather than a setting precisely so that it
+  cannot be reached through the API it disarms. **Inside the fleet it is refused** (SKEIN-962): the
+  cockpit the doorway starts answers every request with the reason and serves nothing else, because
+  there the switch's own justification is false — every box shares one network namespace with that
+  port, so the token is the only boundary there is. A report that the switch disarms an in-fleet
+  cockpit *is* in scope; a report that it disarms one an owner ran somewhere else is this bullet.
 * **Resource use inside a box's declared allowance.** One sandbox is a shared pool of memory, CPU
   and disk, sized by its owner at creation, with a per-box ceiling on top. A box using what it was
   given is not an attack — a box exceeding a ceiling that was set for it *is*, and that is in

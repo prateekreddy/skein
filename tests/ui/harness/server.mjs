@@ -226,6 +226,21 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // Before the spread and therefore overridable, for `$GH_TOKEN`'s reason: a suite that stands up
   // its own fake warden says so in its own `env`, and what is being ruled out is the AMBIENT one.
   childEnv.SKEIN_WARDEN = "127.0.0.1:1";
+  // **`$SKEIN_LISTEN_INHERITED_ONLY` goes, and it is the pin the block above says to write when a
+  // name is given a real meaning again** (SKEIN-962). It now has one: `apiauth` reads it to decide
+  // where `$SKEIN_NO_API_AUTH` is refused, so a server carrying it and the switch serves nothing
+  // but the refusal.
+  //
+  // And it is ambient in a box, for the same reason `$SKEIN_IN_FLEET` was: `src/server-doorway.py`
+  // sets it on the cockpit it execs, a box session is started by that cockpit, and the environment
+  // comes down with it — `env | grep SKEIN_LISTEN` in a box in this fleet answers `=1`. So a suite
+  // run by hand in a box started a server that believed it was the fleet's own cockpit, which is
+  // SKEIN-643's story repeated with a live variable: `attach.mjs` runs with `SKEIN_NO_API_AUTH` and
+  // died on `server never came up`, on a machine where nothing was wrong with the server.
+  //
+  // Before the spread, like the warden: what is ruled out is the AMBIENT value, and a suite that
+  // means to say it is the fleet's cockpit still can. `hatches.mjs` checks both halves.
+  delete childEnv.SKEIN_LISTEN_INHERITED_ONLY;
   const spawnEnv = { ...childEnv, ...env };
   // **After the spread, and the credential above is before it on purpose** — the two pins want
   // opposite things from a suite. A suite has a real reason to want no GitHub credential, so that

@@ -96,6 +96,28 @@ fn on_the_first_descriptor(fd: RawFd) -> std::io::Result<()> {
 /// its absence deliberately (`src/doorway.rs:199`, and
 /// `one_descriptor_is_the_one_the_convention_names` asserts it).
 fn handed(cmd: &mut Command) -> (Child, String) {
+    handed_with(cmd, TheDoorwaysPin::Set)
+}
+
+/// Whether the spawn carries `SKEIN_LISTEN_INHERITED_ONLY=1` — which is what the fleet's doorway
+/// sets on its child and what nothing else in the tree sets (`src/server-doorway.py`'s `spawn`).
+///
+/// It is the difference between the two starts, and `src/doorway.rs`'s own note says so: in-fleet a
+/// missing descriptor means the start sequence did not do its job, host-driven there is nobody
+/// upstream to have opened a socket. SKEIN-962 makes the same variable decide whether
+/// `$SKEIN_NO_API_AUTH` is honoured, so a test of that needs to spawn both ways.
+#[derive(Clone, Copy, PartialEq)]
+enum TheDoorwaysPin {
+    Set,
+    Unset,
+}
+
+/// [`handed`], with a say in whether the doorway's own declaration rides along.
+///
+/// Both shapes still take the socket from this process, so neither races for a port: the descriptor
+/// is what makes SKEIN-526 impossible, and the pin is only what the child is *told* about where it
+/// came from.
+fn handed_with(cmd: &mut Command, pin: TheDoorwaysPin) -> (Child, String) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     let addr = listener
         .local_addr()
@@ -108,12 +130,12 @@ fn handed(cmd: &mut Command) -> (Child, String) {
     unsafe {
         cmd.pre_exec(move || on_the_first_descriptor(fd));
     }
-    let child = cmd
-        .env("LISTEN_FDS", "1")
-        .env(INHERITED_ONLY, "1")
-        .env_remove("LISTEN_PID")
-        .spawn()
-        .expect("the server binary spawned");
+    cmd.env("LISTEN_FDS", "1").env_remove("LISTEN_PID");
+    match pin {
+        TheDoorwaysPin::Set => cmd.env(INHERITED_ONLY, "1"),
+        TheDoorwaysPin::Unset => cmd.env_remove(INHERITED_ONLY),
+    };
+    let child = cmd.spawn().expect("the server binary spawned");
     // The parent's copy goes and the child's stays, so from here the server is the *sole* holder of
     // the socket. That is deliberate and it is about failing fast: were this process to keep a copy,
     // a server that died would leave a listener nobody accepts on, `connect` would keep succeeding
@@ -198,7 +220,12 @@ fn first_byte(addr: &str, patience: Duration) -> std::io::Result<()> {
 
 /// [`handed`], then [`until_it_answers`]: the two lines every spawn below used to write for itself.
 fn serving(cmd: &mut Command) -> (Child, String) {
-    let (mut child, addr) = handed(cmd);
+    serving_with(cmd, TheDoorwaysPin::Set)
+}
+
+/// [`serving`], for a test that needs to say which of the two starts it is making.
+fn serving_with(cmd: &mut Command, pin: TheDoorwaysPin) -> (Child, String) {
+    let (mut child, addr) = handed_with(cmd, pin);
     until_it_answers(&mut child, &addr);
     (child, addr)
 }
@@ -487,6 +514,15 @@ fn http_get(addr: &str, path: &str) -> (u16, String) {
          Connection: close\r\n\r\n"
     );
     send(addr, &format!("GET {path}"), raw.as_bytes())
+}
+
+/// One GET carrying **no credential at all** — what a box on the shared namespace can send.
+///
+/// [`http_get`] always sends the token, so it cannot tell "the switch turned auth off" from "the
+/// token worked". Only an unauthenticated request can, which is what SKEIN-962 is about.
+fn http_get_unauthenticated(addr: &str, path: &str) -> (u16, String) {
+    let raw = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    send(addr, &format!("GET {path} (no token)"), raw.as_bytes())
 }
 
 /// One GET that reads for at most `patience` — for a stream, which never closes.
@@ -1560,6 +1596,104 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
     // said neither is what makes this a refusal rather than a bind that lost.
     assert!(!why.contains("cannot bind"), "{why}");
     drop(held);
+}
+
+/// **`$SKEIN_NO_API_AUTH` is refused where the cockpit is the fleet's, and honoured where it is
+/// not** (SKEIN-962; architecture §9.4 said the first half from the day it was written, and until
+/// this test nothing made it true — `apiauth::disabled` returned a bool and the server printed a
+/// warning and served the whole API to every box in the namespace).
+///
+/// Two spawns, identical but for the one variable the fleet's doorway sets on its child
+/// ([`TheDoorwaysPin`]). Both are handed the same kind of socket by this process, so neither races
+/// for a port and the descriptor is not what differs.
+///
+/// **What would make each half fail**, named before it was written and then planted (see the commit
+/// message):
+///
+///   * the first half — make `apiauth::off_switch_refused` return `false`, which is what the code
+///     did before this item, and `/api/boxes` answers 200 with `thing-a` in it to a request
+///     carrying no credential at all. `an in-fleet cockpit served the API` is the assertion.
+///   * the second half — make `off_switch_refused` return `switch_set()` alone, refusing
+///     everywhere rather than in the fleet, and the documented off-switch stops working for the
+///     owner it exists for. `outside the fleet the documented off-switch` is that assertion.
+///
+/// The requests are deliberately **unauthenticated**: [`http_get`] carries the token, so under it a
+/// 200 cannot tell "the switch turned auth off" from "the token was accepted", which is the whole
+/// distinction being measured.
+#[test]
+fn the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_it() {
+    let dir = Scratch::temp("skein-it-apiauth-switch");
+    let reg = dir.join("sandboxes.json");
+    std::fs::write(
+        &reg,
+        r#"{"thing-a":{"branch":"a","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":"done"}}"#,
+    )
+    .unwrap();
+    // A placement, because that is what makes a box a box — the same fixture
+    // `server_serves_ui_vendor_and_guards_routes` builds, and for the same reason: without it
+    // `/api/boxes` is an empty list, and an empty list is what a refusal looks like too.
+    let home = token_home("apiauth-switch");
+    let places = home.to_path_buf().join("places");
+    std::fs::create_dir_all(&places).unwrap();
+    std::fs::write(
+        places.join("thing-a.json"),
+        r#"{"sandbox":"skein-fleet","ns_pid":1,"home":"/boxes/thing-a/home","tree":"/boxes/thing-a/tree","sock":"/boxes/thing-a/session.sock"}"#,
+    )
+    .unwrap();
+
+    let mut cockpit = Command::new(env!("CARGO_BIN_EXE_skein-server"));
+    cockpit
+        .env("SKEIN_REGISTRY", &reg)
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+        // A warden at an address the kernel refuses, as every spawn in this file does.
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
+        .env("SKEIN_NO_API_AUTH", "1")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // ---- the fleet's cockpit: nothing is served, to anybody ----
+    let (child, addr) = serving_with(&mut cockpit, TheDoorwaysPin::Set);
+    let _kid = Kid(child);
+    let (st, body) = http_get_unauthenticated(&addr, "/api/boxes");
+    assert_eq!(
+        st, 503,
+        "an in-fleet cockpit served the API to a request with no credential while \
+         $SKEIN_NO_API_AUTH was set: {body}"
+    );
+    assert!(
+        body.contains("SKEIN_NO_API_AUTH") && body.contains("9.4"),
+        "the refusal does not say what was refused or where that is written down: {body}"
+    );
+    assert!(
+        !body.contains("thing-a"),
+        "the refusal carried the fleet's boxes in it: {body}"
+    );
+    // A refusal and not a gate: the fleet's own token does not buy the API back either.
+    let (st, body) = http_get(&addr, "/api/boxes");
+    assert_eq!(
+        st, 503,
+        "the token reopened an API the cockpit had refused to serve: {body}"
+    );
+    // Including the page `open_to_all` would otherwise hand to anyone — a cockpit that loads and
+    // then fails every call it makes is a worse answer than one that says what is wrong.
+    let (st, body) = http_get_unauthenticated(&addr, "/");
+    assert_eq!(st, 503, "the cockpit page was served anyway: {body}");
+
+    // ---- and it is the doorway's pin that decides, not the switch on its own ----
+    let (child, addr) = serving_with(&mut cockpit, TheDoorwaysPin::Unset);
+    let _outside = Kid(child);
+    let (st, body) = http_get_unauthenticated(&addr, "/api/boxes");
+    assert_eq!(
+        st, 200,
+        "outside the fleet the documented off-switch stopped working, so this refuses an owner \
+         who has some other boundary rather than a box that has none: {body}"
+    );
+    assert!(
+        body.contains("thing-a"),
+        "the off-switch answered without the fleet's boxes in it: {body}"
+    );
 }
 
 /// The server says the warden is missing **at boot**, not at the first Launch.
