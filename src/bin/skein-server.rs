@@ -2953,6 +2953,7 @@ async fn api_health() -> Json<serde_json::Value> {
                 memory: skein::health::HealthCheck::unknown("the health check itself failed"),
                 disk: skein::health::HealthCheck::unknown("the health check itself failed"),
                 gitgate: skein::health::HealthCheck::unknown("the health check itself failed"),
+                token_expiry: skein::health::HealthCheck::unknown("the health check itself failed"),
                 warden: skein::health::HealthCheck::unknown("the health check itself failed"),
                 cover: skein::health::HealthCheck::unknown("the health check itself failed"),
                 logins: Vec::new(),

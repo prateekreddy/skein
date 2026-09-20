@@ -344,6 +344,30 @@ fn call(
     accept: &str,
     timeout: Duration,
 ) -> Result<(u16, String), String> {
+    call_reading_headers(method, url, token, body, accept, timeout, false)
+        .map(|(status, body, _)| (status, body))
+}
+
+/// [`call`], keeping the response headers when the caller asks for them.
+///
+/// **Opt-in rather than always collected.** One caller wants a header and twenty want a body, and
+/// `-D` costs a file write per request — so the twenty do not pay for what they throw away. The one
+/// caller is [`token_expiry`], whose answer GitHub puts in no response body at all, so there is no
+/// way to get it from the other twenty.
+///
+/// The dump goes to a FILE and never to stdout, for the same reason the request body does: stdout
+/// already carries the body with the status written after it, and a header block mixed into that
+/// would be split off as the status by the `rsplit_once('\n')` below. 0600, and removed on every
+/// path out including the deadline and the transport failure.
+fn call_reading_headers(
+    method: &str,
+    url: &str,
+    token: &crate::secret::Secret,
+    body: Option<&str>,
+    accept: &str,
+    timeout: Duration,
+    keep_headers: bool,
+) -> Result<(u16, String, String), String> {
     use std::io::Write;
     // The hold, checked before anything is spent. `/rate_limit` is exempt: it is free, and it is
     // the endpoint the hold itself is learned from, so gating it would leave no way back out.
@@ -384,6 +408,25 @@ fn call(
         Some(Ok(path)) => Some(path),
         Some(Err(e)) => return Err(e),
         None => None,
+    };
+    // Where curl is told to write the response headers, when anybody wants them. Named before the
+    // arguments are built and cleaned up beside `body_file` on every path out, so the two temporary
+    // files have one lifetime between them rather than two that can disagree.
+    let header_file = match keep_headers {
+        false => None,
+        true => Some(std::env::temp_dir().join(format!(
+            "skein-hdr-{}-{}",
+            std::process::id(),
+            REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))),
+    };
+    // Both temporary files, removed on every path out of this function — the spawn failure, the
+    // missing pipes, the deadline, and the ordinary return. Written once so that a return added
+    // later cannot leave a request body or a header dump behind in `/tmp`.
+    let scrub = || {
+        for path in [&body_file, &header_file].into_iter().flatten() {
+            let _ = std::fs::remove_file(path);
+        }
     };
     let mut args: Vec<String> = vec![
         "-sS".into(),
@@ -431,6 +474,10 @@ fn call(
         args.push("--data-binary".into());
         args.push(format!("@{}", path.display()));
     }
+    if let Some(path) = &header_file {
+        args.push("-D".into());
+        args.push(path.display().to_string());
+    }
     args.push("--config".into());
     args.push("-".into());
 
@@ -464,9 +511,7 @@ fn call(
     let mut child = match child {
         Ok(child) => child,
         Err(e) => {
-            if let Some(path) = &body_file {
-                let _ = std::fs::remove_file(path);
-            }
+            scrub();
             return Err(e);
         }
     };
@@ -491,9 +536,7 @@ fn call(
         _ => {
             // The GROUP, not the pid: see the spawn above. `end_group` reaps as well.
             crate::util::end_group(&mut child);
-            if let Some(path) = &body_file {
-                let _ = std::fs::remove_file(path);
-            }
+            scrub();
             return Err("curl started without pipes".into());
         }
     };
@@ -529,9 +572,7 @@ fn call(
                 Some(status) => break status,
                 None if std::time::Instant::now() >= deadline => {
                     crate::util::end_group(&mut child);
-                    if let Some(path) = &body_file {
-                        let _ = std::fs::remove_file(path);
-                    }
+                    scrub();
                     let got = arrived.load(std::sync::atomic::Ordering::Relaxed);
                     return Err(match got {
                         0 => format!("GitHub did not answer within {}s", timeout.as_secs()),
@@ -549,9 +590,13 @@ fn call(
     };
     let stdout = out_thread.join().unwrap_or_default();
     let stderr = err_thread.join().unwrap_or_default();
-    if let Some(path) = &body_file {
-        let _ = std::fs::remove_file(path);
-    }
+    // Read before the scrub, and empty when nobody asked for it or curl never got as far as a
+    // response — which is a real state the caller must tell apart from "no such header".
+    let headers = header_file
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    scrub();
     if !status.success() {
         return Err(transport_failure(
             status.code(),
@@ -570,7 +615,7 @@ fn call(
     if !exempt && rate_limited(status, &body).is_some() {
         engage_hold(token);
     }
-    Ok((status, body))
+    Ok((status, body, headers))
 }
 
 /// `GET`, as JSON. A non-2xx answers with GitHub's own `message` when it has one, because that is
@@ -580,6 +625,54 @@ pub(crate) fn get_json(
     token: &crate::secret::Secret,
 ) -> Result<serde_json::Value, String> {
     get_json_within(path, token, Duration::from_secs(30))
+}
+
+/// **When GitHub says this credential stops working** — the one question no response body answers.
+///
+/// GitHub returns `github-authentication-token-expiration` on an authenticated REST call made with
+/// a personal access token that carries an expiry, and returns no such header when the token has
+/// none. Measured on this fleet on 2026-09-15 (SKEIN-928): `2026-10-15 13:19:49 UTC`.
+///
+/// **A missing header is read as "no expiry" only when GitHub actually authenticated the call**,
+/// and that is the whole of why this answers with a `Result` rather than an `Option`. Measured from
+/// a box on 2026-09-20 with `Authorization: token skein-test-garbage`: `HTTP/2 401`, and no
+/// expiration header — so an absent header is also exactly what a dead credential looks like. Every
+/// non-2xx is an `Err` here, and the reporting layer renders an `Err` as architecture §2.2's
+/// `unknown` rather than as a pass.
+///
+/// `/user` rather than the quota-free `/rate_limit`: it is the endpoint the header was actually
+/// measured on. One request per gate interval is a cheaper price than a green check built on a
+/// guess about which endpoints carry the header. Ten seconds is a headers-only read of a tiny
+/// document, and it is also how long the cockpit's FIRST health poll waits on a cold gate.
+pub(crate) fn token_expiry(token: &crate::secret::Secret) -> Result<Option<String>, String> {
+    let url = format!("{}/user", api_base());
+    let (status, body, headers) = call_reading_headers(
+        "GET",
+        &url,
+        token,
+        None,
+        "application/vnd.github+json",
+        Duration::from_secs(10),
+        true,
+    )?;
+    match status {
+        200..=299 => Ok(expiry_in_headers(&headers).map(str::to_string)),
+        _ => Err(complaint(status, &body)),
+    }
+}
+
+/// The expiry header's value out of a raw header block, or `None` when it is not there.
+///
+/// Pure, so the parse is proven without a network — including the two things a hand-rolled header
+/// reader gets wrong: HTTP header names are case-insensitive, and every line ends `\r\n`, so a
+/// value that is not trimmed carries a carriage return into whatever prints it.
+pub(crate) fn expiry_in_headers(headers: &str) -> Option<&str> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("github-authentication-token-expiration")
+            .then(|| value.trim())
+    })
 }
 
 /// [`get_json`], with the caller's own budget. For the endpoints whose answers are measured in
@@ -1267,6 +1360,45 @@ pub fn have_curl() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The expiry header is found however GitHub spells it, and not found when it is absent**
+    /// (SKEIN-928).
+    ///
+    /// Two things a hand-rolled header reader gets wrong, and both of them are silent: HTTP header
+    /// names are case-insensitive, and every line ends `\r\n`, so an untrimmed value carries a
+    /// carriage return into whatever prints it. The third case is the one the whole check turns on
+    /// — a header block with no expiry in it, which is what GitHub returns for a token that never
+    /// expires AND for one it just refused.
+    ///
+    /// Counterfactuals: replacing `eq_ignore_ascii_case` with `==` makes `found however GitHub
+    /// capitalises it` fail; dropping the `trim` on the value makes `no carriage return` fail;
+    /// defaulting the `find_map` to the first header makes `absent means absent` fail. Proven by
+    /// sabotage — swapping in `==` fired the first of those.
+    #[test]
+    fn the_expiry_header_is_read_however_it_is_spelled() {
+        let block = "HTTP/2 200\r\n\
+                     Github-Authentication-Token-Expiration: 2026-10-15 13:19:49 UTC\r\n\
+                     x-ratelimit-limit: 5000\r\n\r\n";
+        assert_eq!(
+            expiry_in_headers(block),
+            Some("2026-10-15 13:19:49 UTC"),
+            "found however GitHub capitalises it, and with no carriage return left on the end"
+        );
+        assert_eq!(
+            expiry_in_headers("HTTP/2 200\r\nGITHUB-AUTHENTICATION-TOKEN-EXPIRATION: x\r\n"),
+            Some("x"),
+            "header names are case-insensitive in both directions"
+        );
+        // The measured shape of a refusal, from a box on 2026-09-20 with
+        // `Authorization: token skein-test-garbage`: a 401 and no expiration header at all. This
+        // must answer None rather than something, because the caller reads None beside a 2xx as
+        // "this token never expires" — and beside a 401 as nothing at all.
+        assert_eq!(
+            expiry_in_headers("HTTP/2 401\r\nx-github-request-id: DA06:6D792\r\n\r\n"),
+            None,
+            "absent means absent: there is no header here to mistake for one"
+        );
+    }
 
     /// The credential every stub GitHub below is called with.
     ///
