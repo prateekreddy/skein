@@ -200,7 +200,13 @@ depends_on = ["config", "fleet", "secret", "signals", "util"]
 # `secret` since the fleet's API token became a `Secret`: minting it, reading it and comparing a
 # presented one against it are all that module's, so this one no longer spells `/dev/urandom`, a
 # file mode or a constant-time loop of its own.
-depends_on = ["config", "secret"]
+#
+# `doorway` for SKEIN-962: `$SKEIN_NO_API_AUTH` is refused where the cockpit is the fleet's, and
+# `doorway` is the module that knows that — from an environment variable the doorway sets at the
+# exec and nothing else in the tree writes. The edge is deliberately to the module whose own note
+# says `depends_on = []` so that "is this socket mine" cannot be answered by writing a file: the
+# party this refusal is about can write files.
+depends_on = ["config", "doorway", "secret"]
 
 [current.act]
 # `util` for the name guard, and nothing else. §14 gives `act` `source`, `signal` and `state`, none

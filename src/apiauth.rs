@@ -47,15 +47,95 @@ fn token_path() -> std::path::PathBuf {
     crate::config::skein_home().join("api-token")
 }
 
-/// Is API auth switched off?
+/// Is the auth-off switch set in this process's environment?
 ///
-/// For a fleet whose owner has some other boundary and does not want this one. Deliberately an env
-/// var and not a setting: a setting for it would be reachable through the very API it disarms.
-pub fn disabled() -> bool {
+/// The reading on its own, which is not the same answer as [`disabled`] everywhere skein runs.
+/// `skein doctor` reports on the switch rather than acting on it, so it wants this one.
+pub fn switch_set() -> bool {
     matches!(
         std::env::var("SKEIN_NO_API_AUTH").ok().as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+/// Is this process running under the fleet's doorway — the cockpit, or something it started?
+///
+/// **Not `SKEIN_IN_FLEET`, which is the obvious answer and a dead one.** `deployment::in_fleet()`
+/// was removed at SKEIN-576 — skein stands inside the sandbox it manages now, so there is no second
+/// deployment to tell apart — and the variable went with it at SKEIN-643. Nothing in this tree sets
+/// it any longer: `grep -rn SKEIN_IN_FLEET . --exclude-dir=.git` is 11 lines and every one of them
+/// is a comment, with `fleet::start_server` passing the doorway `SKEIN_HOME` and nothing else. A
+/// fleet created before that commit still carries it, which is exactly the trap: gating on it would
+/// look right on such a machine and refuse nothing at all on a fleet created today.
+///
+/// [`crate::doorway::INHERITED_ONLY`] is the live one. `src/server-doorway.py`'s `spawn` sets it on
+/// the server's environment at the exec, beside the listening descriptor, and nothing else in the
+/// tree writes it.
+///
+/// **What it actually marks, measured rather than assumed.** Not the cockpit alone — the cockpit
+/// *and every process descended from it*, because a box session is started by the cockpit and
+/// inherits its environment. Read out of a box's own shell in this fleet, `env | grep SKEIN_LISTEN`
+/// answers `SKEIN_LISTEN_INHERITED_ONLY=1`, beside the `SKEIN_IN_FLEET=1` the live doorway's
+/// command line still carries. So a `skein-server` started *inside a box* with the switch set is
+/// refused too, and `tests/ui/harness/server.mjs` strips the variable for exactly that reason.
+///
+/// **That extent is right rather than a defect to be narrowed.** The switch's justification is "an
+/// owner who has some other boundary", and §9.4's answer to why there is none in-fleet is the
+/// shared network namespace — which a box is on. A server a box starts with auth off is reachable
+/// from every other box exactly as the cockpit is. What lies outside this is a machine that is not
+/// a skein fleet, and there the switch works exactly as it is documented to.
+///
+/// **A box cannot forge it in either direction, which is the property that matters.** A box setting
+/// this in its own shell changes its own processes and nothing about the cockpit: an environment is
+/// written only by whoever execs the process, the cockpit is exec'd by the doorway in the sandbox,
+/// and no box starts it. Nothing here is read from a file, a setting or a request, so there is
+/// nothing a box can create to make the cockpit refuse to start — which would hand it a way to stop
+/// the fleet — and nothing it can delete to make the cockpit accept the switch. A signal derived
+/// from the fleet root or from a marker file would fail on precisely that point, since
+/// `~/.skein/boxes` is bind-mounted into every box. This variable already decides whether skein may
+/// be the cockpit at all (§9.4), so it carries no trust it was not carrying already.
+fn under_the_fleets_doorway() -> bool {
+    crate::doorway::inherited_only()
+}
+
+/// Is API auth switched off?
+///
+/// For a fleet whose owner has some other boundary and does not want this one. Deliberately an env
+/// var and not a setting: a setting for it would be reachable through the very API it disarms.
+///
+/// **Under the fleet's doorway the answer is no, whatever the variable says** (SKEIN-962, and
+/// architecture §9.4, which has said "in-fleet there is no such boundary, so the switch is refused"
+/// since it was written). The switch is for an owner who has some other boundary; here there is none to
+/// have — every box shares one network namespace with the cockpit's port, and the token is the
+/// whole of what stands between a box and `/api/fleet/git-grants`. So there the variable stops
+/// meaning "off" and starts meaning "refuse to serve": [`off_switch_refused`] is what the cockpit
+/// branches on, and this staying `false` is the belt beside that brace — anything that reached a
+/// route despite the refusal is still asked for the token rather than waved through.
+pub fn disabled() -> bool {
+    switch_set() && !under_the_fleets_doorway()
+}
+
+/// Is the auth-off switch set where it is refused?
+///
+/// The cockpit serves [`off_switch_refusal`] and nothing else when this is true, and `skein doctor`
+/// reports the same thing. [`under_the_fleets_doorway`] is what "where" means, and why a box cannot
+/// choose the answer.
+pub fn off_switch_refused() -> bool {
+    switch_set() && under_the_fleets_doorway()
+}
+
+/// What the cockpit says, and then serves, instead of starting with the switch on.
+///
+/// What happened, why it is refused here rather than everywhere, and what to do — in that order,
+/// because the second sentence is the one that stops this reading as skein being broken.
+pub fn off_switch_refusal() -> &'static str {
+    "skein-server: $SKEIN_NO_API_AUTH is set and this server is running under the fleet's doorway \
+     ($SKEIN_LISTEN_INHERITED_ONLY=1), where the switch is refused (architecture §9.4).\n\
+     The switch exists for an owner who has some other boundary. Inside the sandbox there is no \
+     other boundary to have: every box shares one network namespace with this port, so the fleet's \
+     API token is the only thing standing between a box and /api/fleet/git-grants.\n\
+     Nothing but this message is served, on any path. Unset $SKEIN_NO_API_AUTH wherever this server \
+     is started and restart it; the cockpit URL skein prints carries the token.\n"
 }
 
 /// The token already on disk, or `None` — never minting one.

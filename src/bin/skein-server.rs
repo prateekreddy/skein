@@ -582,24 +582,47 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    match skein::apiauth::disabled() {
-        true => println!(
+    // **architecture §9.4's "the switch is refused" happens here** (SKEIN-962). The document had
+    // said it since it was written and no code did it: `apiauth::disabled` returned a bool, the
+    // `true` arm below printed a warning, and the server then served the whole API — git grants
+    // included — to every box in the namespace. `apiauth::off_switch_refused` says where the
+    // refusal applies and why a box cannot put the cockpit into it.
+    //
+    // **The refusal stays up and answers, rather than exiting.** The doorway restarts whatever it
+    // started, two seconds later, for ever (the `main` loop in `src/server-doorway.py`), so a
+    // refusal that exited would be a restart storm writing this sentence into a tmux pane nobody is
+    // reading — SKEIN-645's shape exactly. Exiting would not even free the port: the door belongs
+    // to the doorway and stays open, so every arrival would be accepted into its backlog and never
+    // answered, which is a browser that hangs instead of one that is told what is wrong.
+    let app = if skein::apiauth::off_switch_refused() {
+        println!(
             "skein-server → http://{addr}\n  \
-             API AUTH OFF ($SKEIN_NO_API_AUTH) — anything that can reach this port drives the \
-             fleet, boxes included"
-        ),
-        // The token is printed, not just stored: this URL is how a browser gets a session, and a
-        // secret nobody is shown is a secret nobody can use.
-        false => match skein::apiauth::token() {
-            // `expose()` — see the note on `apiauth::token`. The URL is the delivery channel.
-            Ok(t) => println!("skein-server → http://{addr}/?t={}", t.expose()),
-            Err(e) => println!(
+             REFUSING TO SERVE — $SKEIN_NO_API_AUTH is set and this server is under the fleet's \
+             doorway, where the switch is refused (§9.4). Every request is answered with the reason."
+        );
+        eprintln!("{}", skein::apiauth::off_switch_refusal());
+        refusal_only()
+    } else {
+        match skein::apiauth::disabled() {
+            true => println!(
                 "skein-server → http://{addr}\n  \
-                 no API token could be created ({e}) — every API call will be refused until \
-                 ~/.skein is writable"
+                 API AUTH OFF ($SKEIN_NO_API_AUTH) — anything that can reach this port drives the \
+                 fleet, boxes included"
             ),
-        },
-    }
+            // The token is printed, not just stored: this URL is how a browser gets a session, and
+            // a secret nobody is shown is a secret nobody can use.
+            false => match skein::apiauth::token() {
+                // `expose()` — see the note on `apiauth::token`. The URL is the delivery channel.
+                Ok(t) => println!("skein-server → http://{addr}/?t={}", t.expose()),
+                Err(e) => println!(
+                    "skein-server → http://{addr}\n  \
+                     no API token could be created ({e}) — every API call will be refused until \
+                     ~/.skein is writable"
+                ),
+            },
+        }
+        app
+    };
     // Flag an off-loopback bind so it's never a surprise that the port is reachable from the network.
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
     if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
@@ -753,6 +776,26 @@ fn open_to_all(path: &str) -> bool {
     // `/v2` for the same reason as `/`: it is the same bytes for every fleet, it reads no state, and
     // it is where `?t=` lands. An unauthenticated visitor gets a page that can explain itself.
     path == "/" || path == "/v2" || path.starts_with("/vendor/")
+}
+
+/// The whole cockpit, when the auth-off switch is set where it is refused (SKEIN-962).
+///
+/// A fallback and nothing else: every path, every method, the same 503 and the same sentence —
+/// including `/` and `/vendor/`, which [`open_to_all`] would otherwise serve. A page that loads and
+/// then fails every call it makes is a worse answer than one that says what is wrong, and this is
+/// read by a person in a browser at least as often as by `curl`. No [`gate`] layer, because there
+/// is nothing here to authenticate: the refusal is the same for the owner and for a box, and it
+/// names no secret. It names the variable that is set, which is a fact a box could as easily read
+/// off its own environment. The security headers stay on: this is still an origin a browser renders.
+fn refusal_only() -> Router {
+    Router::new()
+        .fallback(|| async {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                skein::apiauth::off_switch_refusal(),
+            )
+        })
+        .layer(axum::middleware::from_fn(security_headers))
 }
 
 /// What the cockpit sends on every answer. See the layer's own note for what the CSP does and does
