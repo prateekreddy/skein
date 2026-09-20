@@ -120,15 +120,46 @@ page.on("request", r => {
   else if (pathname.startsWith("/api/")) others.add(pathname);
 });
 
+// **Every `/api/…` this page asked for that the server had no route for** (SKEIN-857).
+//
+// The pane shipped in two halves and only one of them landed: `src/web/index.html` asked
+// `/api/usage` and no router entry registered it, so opening the pane was answered 404 and the
+// page reported that as its own generic failure.
+// `cockpit_routes::the_cockpit_never_asks_for_a_route_this_server_does_not_serve` in
+// `src/bin/skein-server.rs` is what found it, and it is a SOURCE comparison — it reads the
+// router's entries and the pages' URL literals out of the source and matches the strings. This
+// makes the same claim by asking a running server, which is the half a string match cannot make:
+// a path the page builds by concatenation rather than as one literal, or an entry registered onto
+// a router nothing mounts, reads as served in the source scan and 404s in a browser.
+//
+// Read from the RESPONSE rather than from the pane, because from inside the page a 404 and a slow
+// read are the same thing — `usageReading` stays `null` either way. Measured: with that route
+// deleted this suite stopped at "the first reading reaching the page never happened — waited
+// 20000ms", which is true and tells a reader nothing about where to look.
+const unserved = [];
+page.on("response", r => {
+  const { pathname } = new URL(r.url());
+  if (r.status() === 404 && pathname.startsWith("/api/")) unserved.push(pathname);
+});
+const unservedPaths = () => [...new Set(unserved)];
+
 // **Wait for an arrival, never for a beat** (SKEIN-833). Every negative assertion below sits behind
 // one of these, and each one fails saying what never came — a suite that waits a fixed 600 ms in
 // front of "the page did not ask" goes green having observed nothing at all, which is the one
 // failure mode worse than red.
+//
+// A 404 on an `/api/` path ends the wait at once rather than serving out its twenty seconds: what
+// is being waited for cannot arrive, and the useful sentence is the path, not the duration.
 const until = async (got, what, ms = 20000) => {
   const deadline = Date.now() + ms;
   for (;;) {
     const now = await Promise.resolve(got()).catch(() => false);
     if (now) return now;
+    if (unserved.length) {
+      throw new Error(
+        `${what} cannot happen — this server serves no route for ${unservedPaths().join(", ")}, ` +
+        "so the page's fetch was answered 404");
+    }
     if (Date.now() > deadline) throw new Error(`${what} never happened — waited ${ms}ms`);
     await page.waitForTimeout(50);
   }
@@ -336,6 +367,13 @@ try {
   // line in the run. It is recorded as a check so it reaches `report` with everything else.
   value("every phase of this suite ran to the end", `stopped at: ${stopped && stopped.message || stopped}`, "");
 }
+
+// **Outside the `try`, so a suite that stopped early still states this** (SKEIN-857). The phase
+// above reports where the run gave up; this reports what the server would not serve, and the two
+// are different sentences — a 404 on a path that does NOT block the reading never reaches the wait
+// at all, and would otherwise be observed by nothing. The deliberate outage above is a 500 and is
+// not counted here, which is deliberate too: 500 is a route that answered.
+value("every /api path this page asked for has a route to answer it", unservedPaths(), []);
 
 const shot = path.join(fx.root, "failure.png");
 if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: false }).catch(() => {});

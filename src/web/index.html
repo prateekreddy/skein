@@ -9390,10 +9390,10 @@ function renderDiagnostics() {
 //     age of what it is showing — `read_at` and `fresh`, and the sentence `usageRead` builds from
 //     the pair of them.
 //
-// `/api/usage` is served by `api_usage` (`src/bin/skein-server.rs:376`), and a route the cockpit
-// asks for without the server serving it is refused outright by
-// `cockpit_routes::the_cockpit_never_asks_for_a_route_this_server_does_not_serve` — which is what
-// caught the window when this pane was in the tree and its route was not.
+// `/api/usage` is served by `api_usage` in `src/bin/skein-server.rs` — grep the router for the
+// path; the line number this gave had drifted eight lines. A route the cockpit asks for and the
+// server does not serve is caught by `tests/ui/usage.mjs` against a running server, and by
+// `cockpit_routes::the_cockpit_never_asks_for_a_route_this_server_does_not_serve` in the source.
 //
 // A failed fetch is still a supported state rather than a broken one, because a route existing is
 // not a route answering: the pane says skein could not ask, and shows no figure at all — never a
