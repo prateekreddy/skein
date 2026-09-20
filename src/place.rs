@@ -1510,17 +1510,62 @@ impl Place {
             })
         });
         // Written on its own thread, and that is not symmetry with the stderr drain — it is the one
-        // way this call has a deadline at all. A pipe holds ~64KB; past that `write_all` blocks
+        // way this call has a deadline at all. A pipe holds ~64KB; past that the write blocks
         // until the guest reads, and the guest is `cat` in a sandbox that may be exactly the thing
         // that has stopped answering. The deadline below starts *after* this returns, so a blocking
         // write was an unbounded wait no timeout covered — with an `sbx exec` held open for its
         // whole duration. Every install skein does goes through here, so a sandbox that went quiet
         // took the caller with it.
         let mut pipe = child.stdin.take().ok_or("sbx exec: no stdin")?;
+        let wanted = body.len();
         let body = body.to_vec();
+        // How many bytes the pipe has ACCEPTED, published as they are accepted — and the reason
+        // there is a counter here at all rather than a `write_all` (SKEIN-944). The deadline arm
+        // below has to say which half stalled, and it used to ask `writing.is_finished()`. That
+        // question is asked *after* `end_group`, and `end_group` is what kills the guest — which
+        // closes the read end, which releases a writer blocked on a full pipe, which finishes the
+        // thread. So the kill created the answer the message then reported: on a loaded box the
+        // main thread could be descheduled between the two, the writer woke with `EPIPE` first,
+        // and a body that had never left the pipe buffer was reported as "sent, so the box has
+        // it". Measured at 11 failures in 40 runs with 16 busy loops on 11 CPUs, and a probe on
+        // either side of `end_group` read `false` before it in all 40 and `true` after it in 7.
+        //
+        // A byte count cannot race that way. Bytes are only added when the kernel has taken them,
+        // nothing can be accepted once the read end is gone, and — the second thing
+        // `is_finished()` got wrong — a write that FAILED also finishes its thread, so a body that
+        // died with `EPIPE` at byte zero read as fully sent too.
+        //
+        // **In chunks, and the chunk size is the whole reason the count is worth reading.** A
+        // blocking pipe write does not return when the buffer fills — the kernel holds the call
+        // until every requested byte has landed — so handing the write the whole body reports 0
+        // until it reports all of it, which is the same single bit `is_finished()` gave. Measured:
+        // against a guest that never reads, a one-call 1 MB write sat on `0 of 1048576 bytes
+        // accepted` with a quarter of a megabyte provably in the pipe. A chunk smaller than any
+        // pipe's buffer turns that into progress, so the refusal can tell a guest that stopped
+        // reading immediately from one that read most of the body and then stopped.
+        const CHUNK: usize = 8 * 1024;
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = std::sync::Arc::clone(&accepted);
         let writing = std::thread::spawn(move || {
-            pipe.write_all(&body)
-                .and_then(|()| pipe.flush())
+            let mut at = 0;
+            while at < body.len() {
+                match pipe.write(&body[at..body.len().min(at + CHUNK)]) {
+                    // What `write_all` calls `WriteZero`, spelled out: the pipe stopped taking
+                    // bytes without saying why, and looping on it would spin for ever.
+                    Ok(0) => {
+                        return Err("sbx exec: writing stdin: the pipe accepted nothing".into())
+                    }
+                    Ok(n) => {
+                        at += n;
+                        counting.store(at, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    // Exactly what `write_all` does with it: a signal interrupted the call before
+                    // any bytes moved, so retry rather than fail.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(format!("sbx exec: writing stdin: {e}")),
+                }
+            }
+            pipe.flush()
                 .map_err(|e| format!("sbx exec: writing stdin: {e}"))
             // `pipe` drops here, which is the EOF the guest command is waiting for.
         });
@@ -1557,10 +1602,15 @@ impl Place {
                     // and this is the path a struggling fleet takes over and over, so `end_group`
                     // does both.
                     crate::util::end_group(&mut child);
+                    // Read from the counter above rather than from `writing.is_finished()`, and
+                    // the byte figures are in the message because a reader who is told which half
+                    // stalled deserves the number that says so (SKEIN-944).
+                    let sent = accepted.load(std::sync::atomic::Ordering::SeqCst);
                     return Err(format!(
-                        "sbx exec did not finish within {}s — the body was {}",
+                        "sbx exec did not finish within {}s — the body was {} ({sent} of {wanted} \
+                         bytes accepted)",
                         timeout.as_secs(),
-                        match writing.is_finished() {
+                        match sent == wanted {
                             true => "sent, so the box has it and did not finish with it",
                             // The distinction worth having: a guest that never drained the pipe is
                             // a sandbox that has stopped, not a script that is slow.
@@ -1925,9 +1975,31 @@ mod tests {
 
     use crate::testutil::*;
 
+    /// The `(N of M bytes accepted)` a deadline refusal from [`Place::write`] carries, as numbers.
+    ///
+    /// Written as a parse rather than as a `contains("65536 of 1048576")`, because the claim the
+    /// test is making is a RELATION between the two figures and not either figure: a literal would
+    /// be asserting this machine's pipe capacity, which is a property of the kernel it happens to
+    /// be running on. It panics rather than returning an `Option` so that a refusal which stopped
+    /// carrying the numbers fails here, naming the message, instead of silently satisfying a
+    /// comparison of two zeroes.
+    fn accepted_of(why: &str) -> (usize, usize) {
+        let figures = why
+            .rsplit_once('(')
+            .and_then(|(_, tail)| tail.strip_suffix(" bytes accepted)"))
+            .and_then(|figures| figures.split_once(" of "))
+            .unwrap_or_else(|| panic!("the refusal carries no byte count: {why}"));
+        let read = |n: &str| {
+            n.parse()
+                .unwrap_or_else(|e| panic!("{n:?} is not a byte count ({e}): {why}"))
+        };
+        (read(figures.0), read(figures.1))
+    }
+
     /// A guest that never reads its stdin must time out, not hang for ever.
     ///
-    /// A pipe holds about 64KB. Past that `write_all` blocks until something on the other end reads,
+    /// A pipe holds a bounded buffer — 64 KiB on a stock kernel, 262144 bytes on the box this
+    /// sentence was measured on. Past that the write blocks until something on the other end reads,
     /// and the deadline in `Place::write` only started *after* the write returned — so a body larger
     /// than the pipe, sent to a sandbox that had stopped answering, was an unbounded wait that no
     /// timeout covered, holding an `sbx exec` open for its whole duration. Every install skein does
@@ -1939,6 +2011,16 @@ mod tests {
     /// that fake was bypassed and the write ran for real — against this machine (SKEIN-592). The
     /// seam is the sanctioned way for a test to say what a fleet-scope command runs, and nothing
     /// outside this process can select it.
+    ///
+    /// **It also reads the byte count out of the refusal, and that is the part that used to be a
+    /// race** (SKEIN-944, and SKEIN-984/SKEIN-985 are the same failure seen twice more). The
+    /// refusal named its half from `writing.is_finished()`, read after `end_group` — and
+    /// `end_group` kills the guest, which closes the read end, which finishes the writer. So the
+    /// kill manufactured the answer, and on a loaded box this test failed with `the body was sent`
+    /// against a guest that provably never read a byte. It reproduced at 11 failures in 40 runs
+    /// under 16 busy loops on 11 CPUs. Nothing about the test's own clock was wrong: its only
+    /// wall-clock assertion allows 20s for a 2s deadline, and the 2s belongs to the test, while
+    /// every production caller of `write` passes 30s or 60s (`src/fleet.rs`, `src/sandbox.rs`).
     #[test]
     fn a_write_to_a_box_that_never_reads_it_gives_up_instead_of_hanging() {
         let _g = crate::testutil::env_lock();
@@ -1951,7 +2033,14 @@ mod tests {
         }));
 
         let place = crate::place::own_sandbox("skein-fleet");
-        let body = vec![b'x'; 1 << 20]; // 1 MB — sixteen times the pipe
+        // Bigger than any pipe this test could be handed, and the size is chosen against a
+        // MEASURED ceiling rather than a remembered one. It read `1 << 20` with the comment
+        // "sixteen times the pipe", which assumed the 64 KiB a stock kernel gives: on this box
+        // `F_GETPIPE_SZ` answers 262144, so it was four times, and
+        // `/proc/sys/fs/pipe-max-size` is 1048576 — the body's exact size. A kernel that gave a
+        // pipe its own maximum would have swallowed the whole body, and the refusal would have
+        // been right to say it was sent while this test called that a bug.
+        let body = vec![b'x'; 4 << 20];
         let started = std::time::Instant::now();
         let why = place
             .write("cat > /tmp/x", &body, Duration::from_secs(2))
@@ -1967,6 +2056,22 @@ mod tests {
         // And it says which half stalled, because they are different faults: a body that was sent
         // means the box has it and is slow, one still being sent means nothing read it at all.
         assert!(why.contains("nothing in the box read it"), "{why}");
+
+        // And the half it names is DERIVED, which is what stops this being a coin toss on a busy
+        // box. The refusal carries the two numbers it decided from, and the only thing that can
+        // put a figure here strictly between nothing and the whole body is a pipe that took a
+        // bufferful and then stopped — which is the guest not reading. A classification taken
+        // from the writer thread's liveness could not produce this line at all.
+        let (sent, wanted) = accepted_of(&why);
+        assert_eq!(
+            wanted,
+            body.len(),
+            "the refusal misreports the body size: {why}"
+        );
+        assert!(
+            0 < sent && sent < wanted,
+            "the refusal claims {sent} of {wanted} bytes reached a guest that never read: {why}"
+        );
 
         std::env::remove_var("SKEIN_HOME");
     }
