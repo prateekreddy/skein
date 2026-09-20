@@ -313,7 +313,8 @@ works. The token lives at `~/.skein/api-token` (0600, generated on first run), s
 at `host.docker.internal:7878` — measured, not assumed — so before this, any agent could approve its
 own write-access request, or un-scope its own box, and collect a real GitHub token for a repo it was
 never meant to touch. Static assets and the page itself are still served to anyone; everything that
-reads or changes state is not. `SKEIN_NO_API_AUTH=1` turns it off if you have another boundary.
+reads or changes state is not. `SKEIN_NO_API_AUTH=1` turns it off if you have another boundary —
+outside the fleet. Inside one, it is refused: the cockpit serves nothing but the reason why.
 
 ### Remote access (Tailscale)
 

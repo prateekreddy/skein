@@ -24,7 +24,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "`restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting."
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/architecture.md:1738"]
+["docs/architecture.md:1750"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -729,6 +729,10 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "/// for. `SD_LISTEN_FDS_START` in systemd's headers; a number here, since importing a crate for one"
 cited_by = ["docs/prose-symbols.toml"]
 
+["src/doorway.rs:64"]
+line = "pub const INHERITED_ONLY: &str = \"SKEIN_LISTEN_INHERITED_ONLY\";"
+cited_by = ["docs/architecture.md"]
+
 ["src/doorway.rs:80"]
 line = "pub fn descriptor(fds: Option<&str>, pid: Option<&str>, me: u32) -> Result<Option<RawFd>, String> {"
 cited_by = ["docs/recovery-survey.md"]
@@ -1421,6 +1425,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/sandbox.rs:999"]
 line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/server-doorway.py:218"]
+line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
+cited_by = ["docs/architecture.md"]
 
 ["src/store/sync/UPSTREAM.md:7"]
 line = "Last synced from: **`e113f18`**, 2026-08-10."

@@ -1054,6 +1054,18 @@ which needs a requirement rather than an inference:
 - **the auth-off switch.** `SKEIN_NO_API_AUTH` voids all of this, and the server already prints that
   anything reaching the port drives the fleet, boxes included. It exists for a fleet whose owner has
   some other boundary; **in-fleet there is no such boundary, so the switch is refused.**
+
+  **Closed** (SKEIN-962). `apiauth::off_switch_refused` is what the cockpit branches on: set and
+  refused, it serves nothing but the reason, on every path, rather than starting normally. "In-fleet"
+  is read off one signal, `SKEIN_LISTEN_INHERITED_ONLY=1` (`src/doorway.rs:64`) — not
+  `SKEIN_IN_FLEET`, dead since SKEIN-643 and present in this tree only as comments. `spawn` in
+  `src/server-doorway.py:218` sets it on the server's environment at the `exec` that hands the
+  listening descriptor down, and nothing else in the tree writes it. A box cannot forge it either
+  way: an environment is written only by whoever execs the process, the cockpit is exec'd by the
+  doorway inside the sandbox, and no box execs the cockpit — so there is nothing a box can set to
+  make an honest cockpit refuse to start, and nothing it can unset to make a refusing one serve.
+  Test: `the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_it`
+  (`tests/server.rs`).
 - **the token has a second copy.** It is printed as `?t=…` on stdout at every start, and in-fleet
   stdout lands in a log, a tmux scrollback or a supervisor capture inside the sandbox. Covering the
   file does nothing for that.
