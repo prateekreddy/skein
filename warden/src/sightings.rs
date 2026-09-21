@@ -260,11 +260,14 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         };
-        assert!(
-            a_live_sleep(grandchild),
-            "pid {grandchild} was not a running `sleep` before the deadline, so this run proves \
-             nothing about what the deadline ends"
-        );
+        while !a_live_sleep(grandchild) {
+            assert!(
+                began.elapsed() < Duration::from_secs(2),
+                "pid {grandchild} was not a running `sleep` before the deadline, so this run \
+                 proves nothing about what the deadline ends"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             began.elapsed() < Duration::from_secs(2),
             "the grandchild was seen only after the deadline could already have fired"
