@@ -9337,6 +9337,11 @@ function renderDiagnostics() {
     // "token life" directly under "github scope": the same credential asked two questions — what it
     // can reach, and whether it will still reach it next month (SKEIN-928).
     ["gitgate", "github scope"], ["token_expiry", "token life"],
+    // "proxy credential" third in the same group, because it is the same credential asked the
+    // question the other two cannot: not what skein's token may reach and not how long it lasts,
+    // but whether the token skein holds is the one GitHub is actually answering (SKEIN-548). It is
+    // the substrate's answer rather than skein's, which is why skein can only report it.
+    ["proxy_injection", "proxy credential"],
     ["warden", "host warden"], ["cover", "box isolation"],
     ["ai", "ai enrichment"],
   ];
@@ -11450,7 +11455,16 @@ function loadHealth() {
     // window has no symptom at all until the day it stops working, and on that day every box loses
     // GitHub at once and it reads as an auth bug. `health.ok` counts it, so leaving it out here
     // would put a red banner on screen with nothing in it to read (SKEIN-928).
-    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","disk","gitgate","token_expiry","warden","cover"];
+    // "proxy_injection" among them for the reason "token_expiry" is, one step further on: an
+    // injected account credential has no symptom from inside a box at all — every request simply
+    // works, including the ones against repositories this fleet was never granted — so the first
+    // sign of it is somebody else's repository turning up in a diff. skein cannot close it (it is
+    // set on the HOST with `sbx secret set`), which is exactly why the banner is the whole of
+    // skein's answer: not a refusal to start, because a false positive would lock the owner out of
+    // their own fleet, and not a `skein doctor` line, because a boundary nobody looks at is a
+    // boundary nobody knows has gone (SKEIN-548). `health.ok` counts it, so leaving it out here
+    // would put a red banner on screen with nothing in it to read.
+    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","disk","gitgate","token_expiry","proxy_injection","warden","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");

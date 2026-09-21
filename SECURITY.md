@@ -160,6 +160,24 @@ Not because they do not matter, but because they are the product rather than a d
   and disk, sized by its owner at creation, with a per-box ceiling on top. A box using what it was
   given is not an attack — a box exceeding a ceiling that was set for it *is*, and that is in
   scope.
+* **The sandbox proxy answering GitHub as the account.** Every box's HTTP goes through a proxy
+  skein does not run and cannot configure from inside the sandbox — the lever is an `sbx secret`
+  command on the host, against the owner's own keychain — and while that proxy is injecting, a
+  request from a box carrying no credential, or carrying a deliberately invalid one, is answered as
+  the whole account. skein's answer is not a claim that this cannot happen. It is to **measure it
+  and put it on the cockpit's banner in red** (`proxy_injection` in `src/health.rs`, SKEIN-548,
+  SKEIN-927), because a boundary the substrate can reopen without touching a line of this code is
+  one somebody has to be told about. The row in [`docs/threat-model.md`](docs/threat-model.md)
+  carries the dates it has flipped and the command that answers it today. So a report that a box
+  reached GitHub as the account through the proxy is describing a condition this project already
+  states — **but a report that it did so while the check said otherwise is very much in scope**,
+  and so is anything that makes the check answer "nothing added" without having asked.
+* **A box reaching an arbitrary host on the internet.** skein sets no egress policy, and that is a
+  decision rather than an omission: boxes install from npm, PyPI, crates.io, GitHub and the model
+  APIs, and an allowlist that misses one fails in a way that reads as a broken build rather than as
+  a policy. A box reaches whatever the host's `sbx` policy allows, which the threat-model page
+  records as measured rather than assumed (SKEIN-926). Narrowing it is the host owner's to do,
+  with `sbx policy`.
 * **Vulnerabilities in `sbx`, Docker, `bwrap` or a vendored dependency.** Report those upstream.
   Do tell us as well if skein's use of them makes the impact worse or the fix different.
 * **Missing hardening with no demonstrated path to impact** — a header that could be stricter, an

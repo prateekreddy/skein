@@ -70,7 +70,23 @@ reaches = {}
 # --connect-timeout 3`) that carries no credential and reads only the http_code, so it is a
 # reachability probe, not a data reach. It is the web host, not the rate-limited REST API, and a
 # test pins `$SKEIN_GITHUB_REACH_URL` at a listener rather than reaching out.
-reaches = { doorway = 1, fleet = 1, github = 2, health = 1, repos = 1, "warden/serve" = 2, warden_client = 3 }
+#
+# **`health` is 2 from 1** for the other half of SKEIN-548, and the two are deliberately opposite
+# reaches rather than one reach reused. `github_reach_health` above asks whether GitHub can be
+# reached with the proxy taken OUT of the path (`--noproxy '*'`). `probe_proxy_injection_at`
+# (SKEIN-927) asks what the proxy does when it is put back IN: it spawns `curl -x "$HTTPS_PROXY"
+# --noproxy ''` to `api.github.com/rate_limit` carrying a credential that is marked as not being
+# one — `skein-test-not-a-credential`, a constant, never a stored token — and reads back a status
+# and `x-ratelimit-limit` with the body discarded to `/dev/null`. An acceptance on a ceiling above
+# the anonymous one means the proxy answered as the account, and that is the red banner.
+#
+# It is a probe rather than a read of configuration on purpose, and this row is where that is
+# written down: `sbx secret ls` describes what is stored, and three sbx issues on SKEIN-927 record
+# the store and the proxy's behaviour disagreeing. It is bounded (`-m 8 --connect-timeout 4`),
+# behind a one-hour `util::Gate` so an open cockpit does not turn it into a poll, it does not run
+# from a test unless `$SKEIN_PROXY_PROBE_URL` pins it at a listener, and `/rate_limit` is chosen
+# over `/user` because it spends nothing from the anonymous rate-limit pool every box shares.
+reaches = { doorway = 1, fleet = 1, github = 2, health = 2, repos = 1, "warden/serve" = 2, warden_client = 3 }
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and

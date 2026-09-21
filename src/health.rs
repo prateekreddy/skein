@@ -584,6 +584,21 @@ pub struct HealthReport {
     /// be asked — never `satisfied`, since a dead credential and a credential with no expiry are
     /// the same silence on the wire.
     pub token_expiry: HealthCheck,
+    /// **Whether the sandbox proxy is answering GitHub as the account** (SKEIN-548).
+    ///
+    /// skein cannot stop this — it is the substrate's, set on the host with `sbx secret set` — so
+    /// the whole of skein's answer is to notice and say so. It is a banner rather than a refusal to
+    /// start, because a false positive here would lock the owner out of their own fleet; and it is
+    /// a banner rather than a `skein doctor` line, because a boundary nobody is looking at is a
+    /// boundary nobody knows has gone.
+    ///
+    /// **Why it is a check rather than a sentence in a document.** It has flipped under this fleet
+    /// twice in a fortnight in opposite directions, silently: injecting on 2026-09-06, injecting on
+    /// 2026-09-15, and not injecting on 2026-09-21 (`docs/threat-model.md`). A document records the
+    /// day it was written; only a check records today.
+    ///
+    /// Never `ok: false` for having no proxy — that is most deployments, and it is a correct state.
+    pub proxy_injection: HealthCheck,
     /// Whether the host warden is answering, and what it says it can do.
     ///
     /// A fault when it is not: fleet create and destroy go only through it and there is no
@@ -1009,6 +1024,238 @@ fn github_reach_health(fleet: &str) -> HealthCheck {
         Some(target) => github_reach_line(probe_github_reach_at(&target), fleet),
         None if crate::util::in_test() => HealthCheck::satisfied("available"),
         None => github_reach_line(probe_github_reach_at("https://github.com/"), fleet),
+    }
+}
+
+// ---------- what the sandbox proxy does with a credential (SKEIN-548) ----------
+
+/// **The credential the probe sends, and the only one it ever sends.**
+///
+/// `skein-test-` by convention across this tree — `tests/github_reach_live.rs:47` sends the same
+/// shape for the same reason — so that a copy of it in a log, a terminal or a health report is not
+/// a disclosure. The probe reads a **status code and one rate-limit header** back, and discards
+/// the rest of the response unread: no body, and no credential of anybody's in either direction.
+/// That is not politeness, it is the property that makes this check safe to run unattended, on a
+/// polled endpoint, on somebody else's fleet.
+pub(crate) const PROBE_CREDENTIAL: &str = "skein-test-not-a-credential";
+
+/// Where the probe asks, and it is `/rate_limit` for two reasons rather than one.
+///
+/// It discriminates as sharply as `/user` — an invalid credential is `401` on both — and **it does
+/// not spend the rate limit**, so a check that runs every hour for the life of a fleet costs
+/// nothing from the 60-an-hour anonymous pool that every box behind one egress IP shares. Both
+/// halves of that were measured here on 2026-09-21 rather than read from documentation: the pool
+/// was exhausted at the time by ordinary traffic (`x-ratelimit-used: 60`), `/user` answered `403`
+/// rate-limit-exceeded in that state, and `/rate_limit` answered `200` in the same second. It also
+/// carries the ceiling the arm below needs, which `/user` does not.
+const PROBE_TARGET: &str = "https://api.github.com/rate_limit";
+
+/// GitHub's hourly ceiling for a request nobody authenticated — measured through the proxy and
+/// direct on 2026-09-21, `x-ratelimit-limit: 60` both ways. An authenticated one is orders above
+/// it (SKEIN-927 recorded 5000 on the day injection was live), so the two never collide and the
+/// exact authenticated figure does not need to be written down here.
+const ANONYMOUS_CEILING: u32 = 60;
+
+/// **What the sandbox proxy did with a credential it was handed** (SKEIN-548).
+///
+/// The question `NO_PROXY` cannot answer. `src/box-session.sh:2098` routes a scoped box's `git`
+/// and `gh` around the proxy, and the launcher says in its own comment that this narrows the
+/// normal path rather than containing anything — "a variable anything can set again is not a
+/// containment". So what matters is what the proxy does to a request that *is* on it, and the only
+/// way to find that out is to send something that cannot possibly be valid and see whether it
+/// works anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyCredential {
+    /// A credential that cannot be valid came back **authenticated** — accepted, and with an
+    /// hourly ceiling above [`ANONYMOUS_CEILING`]. Something other than the credential that was
+    /// sent answered for it, which is the injection SKEIN-548 measured on 2026-09-06.
+    Injected { ceiling: u32 },
+    /// **Nothing account-wide was added**, which is the claim this check actually makes and covers
+    /// both ways of not adding one: the invalid credential arrived and GitHub refused it, or the
+    /// request was answered anonymously.
+    ///
+    /// The second is not a hypothetical corner. sbx v0.43.0's note — quoted on SKEIN-548 — is that
+    /// the proxy "no longer forwards a client-supplied credential the proxy did not issue" to a
+    /// managed provider host, and a strip with nothing put back is exactly an anonymous `200`. A
+    /// probe that read the status alone would call that injection and paint the banner red over a
+    /// proxy that had added nothing at all.
+    Untouched,
+    /// No proxy is configured in this environment, so there is nothing in the path to inject.
+    Absent,
+    /// Neither an acceptance nor a refusal came back. `why` says what did.
+    Unanswered(String),
+}
+
+/// Turn the reading into the line. **Pure**, so every sentence the owner sees is proven without a
+/// network and without a credential of any kind.
+///
+/// Only [`ProxyCredential::Injected`] is a fault, and only an *authenticated* answer produces one
+/// — so an `Unanswered` can never hide an injection and can never manufacture one. That ordering is
+/// the same one [`token_expiry_line`] keeps, for the same reason: this is a check whose false
+/// positive would put a red banner across a working fleet.
+pub(crate) fn proxy_injection_line(seen: ProxyCredential, fleet: &str) -> HealthCheck {
+    match seen {
+        ProxyCredential::Injected { ceiling } => HealthCheck::unsatisfied(
+            format!(
+                "the sandbox proxy answers GitHub as the account: a deliberately invalid \
+                 credential came back authenticated through it, on an hourly ceiling of {ceiling} \
+                 where an unauthenticated request gets {ANONYMOUS_CEILING}. So anything in a box \
+                 that routes through $HTTPS_PROXY reaches every repository the account can, \
+                 whatever token that box holds"
+            ),
+            format!(
+                "on your HOST, set what this sandbox injects — `sbx secret set github --sandbox \
+                 {fleet}` — to a token bounded to the repositories the fleet should reach, or to a \
+                 dummy value, which turns injection off and leaves boxes on skein's own per-repo \
+                 tokens. Set it again after any fleet rebuild: `sbx rm` deletes a sandbox-scoped \
+                 secret along with the sandbox"
+            ),
+        ),
+        ProxyCredential::Untouched => HealthCheck::satisfied(
+            "the sandbox proxy adds no credential of its own to GitHub — a deliberately invalid \
+             one sent through it was not answered as anybody, so a box reaches GitHub as whatever \
+             token it actually holds",
+        ),
+        ProxyCredential::Absent => HealthCheck::satisfied(
+            "no proxy is configured here, so there is nothing in the path to put a credential on a \
+             request that carries none",
+        ),
+        ProxyCredential::Unanswered(why) => HealthCheck::unknown(format!(
+            "skein could not tell whether the sandbox proxy injects a credential — {why}"
+        )),
+    }
+}
+
+/// Send [`PROBE_CREDENTIAL`] to `target` **through `proxy`** and classify what comes back.
+///
+/// `--noproxy ''` empties curl's bypass list rather than inheriting it, and that is load-bearing:
+/// in a scoped box `$NO_PROXY` names exactly the GitHub hosts (`src/box-session.sh:2098`), so a
+/// probe that honoured it would go direct and answer a question nobody asked — "does GitHub refuse
+/// a garbage token", to which the answer is always yes.
+///
+/// `-D -` puts the response **headers** on stdout, because the status alone is not enough to tell
+/// an injected credential from a stripped one — see [`ProxyCredential::Untouched`]. The body still
+/// goes to `/dev/null`: nothing this reads is anybody's secret, and nothing it does not read can
+/// become one.
+pub(crate) fn probe_proxy_injection_at(proxy: &str, target: &str) -> ProxyCredential {
+    let header = format!("Authorization: Bearer {PROBE_CREDENTIAL}");
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "-x",
+            proxy,
+            "--noproxy",
+            "",
+            "-D",
+            "-",
+            "-o",
+            "/dev/null",
+            "-m",
+            "8",
+            "--connect-timeout",
+            "4",
+            "-H",
+            header.as_str(),
+            "-w",
+            "\nskein-http-code %{http_code}",
+            target,
+        ])
+        .output();
+    let out = match out {
+        Ok(out) => out,
+        // curl is not installed, or could not be started. Presence is the `gh` line's concern; here
+        // it reads as a question that was not asked rather than as an answer.
+        Err(why) => return ProxyCredential::Unanswered(format!("curl did not run: {why}")),
+    };
+    let answer = String::from_utf8_lossy(&out.stdout);
+    let code = answer
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("skein-http-code "))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // The one header this reads, and the reason it is read at all: it is the difference between a
+    // request somebody was authenticated for and one nobody was.
+    let ceiling = answer
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("x-ratelimit-limit")
+                .then(|| value.trim().parse::<u32>().ok())?
+        })
+        .next_back();
+    match (code.as_str(), ceiling) {
+        // Accepted, and accepted as somebody: a ceiling above the anonymous one is GitHub saying it
+        // authenticated this request, and it cannot have authenticated the string that was sent.
+        ("200", Some(ceiling)) if ceiling > ANONYMOUS_CEILING => {
+            ProxyCredential::Injected { ceiling }
+        }
+        // Accepted anonymously. The credential was dropped on the way rather than replaced, so
+        // nothing account-wide was added, which is what this check is about.
+        ("200", Some(_)) => ProxyCredential::Untouched,
+        // Accepted with no ceiling to read at all. Not an injection this can stand behind — and
+        // this check does not guess, because a red banner nobody can confirm is one people learn
+        // to scroll past (SKEIN-913).
+        ("200", None) => ProxyCredential::Unanswered(
+            "the probe was accepted but carried no x-ratelimit-limit, so whether anybody was \
+             authenticated for it cannot be told from here"
+                .to_string(),
+        ),
+        // GitHub refusing the probe's own credential is the whole point: it arrived as sent.
+        ("401", _) => ProxyCredential::Untouched,
+        // curl's own code for "no connection was made", and its empty output when it died first.
+        ("000" | "", _) => {
+            ProxyCredential::Unanswered("the probe could not reach the proxy at all".to_string())
+        }
+        // A rate limit is the common one, and it is genuinely not an answer to this question: an
+        // unauthenticated `403` and an injected-but-throttled `403` look identical from here.
+        (other, _) => ProxyCredential::Unanswered(format!(
+            "the probe was answered {other}, which is neither an acceptance nor a refusal"
+        )),
+    }
+}
+
+/// Ask the proxy the question, and say so on the board when the answer is yes.
+///
+/// **Behind a gate for [`token_expiry_health`]'s reason**: `/api/health` is polled every fifteen
+/// seconds by every open board, and this costs an HTTP request. **An hour**, and the interval is
+/// argued from measurement rather than from taste — this is a property of the substrate and not of
+/// anything skein installs, and it changed under this fleet inside six days (the dates are in
+/// `docs/threat-model.md`) with nothing in the tree to say so. A day would have been wrong.
+///
+/// **It does not reach out from a test.** The rule [`github_reach_health`] and
+/// [`token_expiry_health`] both keep: a unit test that depends on a network fails for somebody
+/// else's reason, and this one would spend the box's shared api.github.com budget as well. A test
+/// that wants the live path pins `$SKEIN_PROXY_PROBE_URL` at its own listener, exactly as
+/// `$SKEIN_GITHUB_REACH_URL` does for the neighbour above.
+fn proxy_injection_health(fleet: &str) -> HealthCheck {
+    static GATE: crate::util::Gate<HealthCheck> = crate::util::Gate::new();
+    let proxy = ["HTTPS_PROXY", "https_proxy"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    // No proxy is a complete answer, not a gap — and it is the answer on every deployment that is
+    // not inside an sbx sandbox, which is most of them.
+    let Some(proxy) = proxy else {
+        return proxy_injection_line(ProxyCredential::Absent, fleet);
+    };
+    let pinned = std::env::var("SKEIN_PROXY_PROBE_URL")
+        .ok()
+        .filter(|value| !value.is_empty());
+    match pinned {
+        Some(target) => proxy_injection_line(probe_proxy_injection_at(&proxy, &target), fleet),
+        None if crate::util::in_test() => HealthCheck::unknown("not asked from a test"),
+        None => {
+            let fleet = fleet.to_string();
+            GATE.get(std::time::Duration::from_secs(60 * 60), move || {
+                Some(proxy_injection_line(
+                    probe_proxy_injection_at(&proxy, PROBE_TARGET),
+                    &fleet,
+                ))
+            })
+            .unwrap_or_else(|| HealthCheck::unknown("skein has not been able to ask the proxy yet"))
+        }
     }
 }
 
@@ -1543,6 +1790,12 @@ pub fn health_report() -> HealthReport {
     // is every box at once. An `unknown` here — GitHub unreachable, no credential answered — is
     // not a fault and `is_fault` already says so.
     let token_expiry = token_expiry_health();
+    // `proxy_injection` is in the fault list for the reason `token_expiry` is, one step further on:
+    // an injected account credential has no symptom at all from inside a box — every request simply
+    // works — so the first sign of it is somebody else's repository in a diff. skein cannot close
+    // it, which is exactly why it has to be the thing that says it is open (SKEIN-548). An
+    // `unknown` here is a rate limit or an unreachable proxy and `is_fault` already declines it.
+    let proxy_injection = proxy_injection_health(&crate::place::fleet_sandbox());
     let ok = ![
         &registry,
         &sbx,
@@ -1551,6 +1804,7 @@ pub fn health_report() -> HealthReport {
         &mailbox,
         &gitgate,
         &token_expiry,
+        &proxy_injection,
         &warden,
         &cover,
         &disk,
@@ -1573,6 +1827,7 @@ pub fn health_report() -> HealthReport {
         disk,
         gitgate,
         token_expiry,
+        proxy_injection,
         warden,
         cover,
         logins: crate::fleet::signed_in_runtimes(),
@@ -1884,6 +2139,241 @@ mod tests {
             GithubReach::Blocked,
             "a refused connection is a block, not an answer"
         );
+    }
+
+    /// **A proxy that accepts what cannot be valid is the fault; everything else is not
+    /// (SKEIN-548).** The user-visible half of the detection the owner asked for: a red line only
+    /// when a credential was substituted, and the recipe that clears it names the real sandbox,
+    /// because `sbx secret set` without `--sandbox <name>` writes the GLOBAL secret and would widen
+    /// the very thing it was run to narrow.
+    ///
+    /// **The concrete change that makes this fail, named before it was written:** swapping the
+    /// `Injected` and `Untouched` arms of [`proxy_injection_line`]. Planted, and
+    /// `an accepted garbage credential is the fault` failed. Dropping `{fleet}` from the recipe
+    /// fails `the recipe must name the sandbox`; making `Absent` unsatisfied fails
+    /// `no proxy is not a fault`.
+    #[test]
+    fn only_an_accepted_garbage_credential_reads_as_injection() {
+        let injected =
+            proxy_injection_line(ProxyCredential::Injected { ceiling: 5000 }, "thing-fleet");
+        assert!(
+            injected.is_fault(),
+            "an accepted garbage credential is the fault this check exists for: {}",
+            injected.detail
+        );
+        assert!(
+            injected.detail.contains("5000") && injected.detail.contains("60"),
+            "the diagnosis shows both ceilings, because the gap between them IS the evidence: {}",
+            injected.detail
+        );
+        assert!(
+            injected.detail.contains("answers GitHub as the account"),
+            "the diagnosis lost its wording: {}",
+            injected.detail
+        );
+        assert!(
+            injected
+                .fix
+                .contains("sbx secret set github --sandbox thing-fleet"),
+            "the recipe must name the sandbox, or it writes the global secret: {}",
+            injected.fix
+        );
+
+        let untouched = proxy_injection_line(ProxyCredential::Untouched, "thing-fleet");
+        assert!(
+            !untouched.is_fault(),
+            "a refused garbage credential is the proxy behaving: {}",
+            untouched.detail
+        );
+        assert!(
+            untouched.fix.is_empty(),
+            "nothing to fix means no recipe: {}",
+            untouched.fix
+        );
+
+        let absent = proxy_injection_line(ProxyCredential::Absent, "thing-fleet");
+        assert!(
+            !absent.is_fault(),
+            "no proxy is not a fault — it is most deployments: {}",
+            absent.detail
+        );
+
+        let unsure = proxy_injection_line(
+            ProxyCredential::Unanswered("the probe was answered 403".to_string()),
+            "thing-fleet",
+        );
+        assert_eq!(
+            unsure.level,
+            Level::Unknown,
+            "a reading that is neither an acceptance nor a refusal must not be a fault, and must \
+             not be a pass: {}",
+            unsure.detail
+        );
+        assert!(
+            unsure.detail.contains("403"),
+            "an unknown says what it saw, or nobody can act on it: {}",
+            unsure.detail
+        );
+    }
+
+    /// **An acceptance is an injection only when somebody was authenticated for it**, against a
+    /// real proxy socket. A property of the mechanism rather than of a string: curl is given `-x`
+    /// and the listener answers as the proxy would, headers and all.
+    ///
+    /// The third case is the one worth having. An anonymous `200` — the shape sbx v0.43.0's
+    /// credential-stripping produces — must NOT read as an injection, and a status-only probe
+    /// cannot tell it from one. That is the false positive SKEIN-913 is about: a check that goes
+    /// red for a reason the reader can see is not theirs is a check they learn to read past.
+    ///
+    /// **The concrete changes that make this fail, named before it was written:** returning
+    /// `Untouched` from the authenticated arm of [`probe_proxy_injection_at`] — planted, and
+    /// `an authenticated 200 is a substituted credential` failed; and dropping the
+    /// `ceiling > ANONYMOUS_CEILING` guard so any `200` is an injection — planted, and
+    /// `an anonymous 200 added no credential` failed.
+    #[test]
+    fn only_an_authenticated_acceptance_through_the_proxy_is_injection() {
+        if !crate::github::have_curl() {
+            return crate::testutil::skip(
+                "no curl, and the injection probe under test is a wrapper around it",
+            );
+        }
+        // Authenticated: GitHub's ceiling for a credential it recognised, far above the anonymous
+        // one. SKEIN-927 recorded exactly this on the day injection was live.
+        let (port, served) =
+            fake_proxy("HTTP/1.1 200 OK\r\nx-ratelimit-limit: 5000\r\nContent-Length: 0\r\n\r\n");
+        let injected =
+            probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
+        let _ = served.join();
+        assert_eq!(
+            injected,
+            ProxyCredential::Injected { ceiling: 5000 },
+            "an authenticated 200 is a substituted credential: the one that was sent cannot be \
+             valid, so somebody else's was"
+        );
+
+        // Anonymous: accepted, and nobody was authenticated for it. A credential was dropped on the
+        // way, not added — the opposite of what this check reports.
+        let (port, served) = fake_proxy(format!(
+            "HTTP/1.1 200 OK\r\nx-ratelimit-limit: {ANONYMOUS_CEILING}\r\nContent-Length: 0\r\n\r\n"
+        ));
+        let stripped =
+            probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
+        let _ = served.join();
+        assert_eq!(
+            stripped,
+            ProxyCredential::Untouched,
+            "an anonymous 200 added no credential, and must not paint the banner red"
+        );
+
+        let (port, served) = fake_proxy("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        let untouched =
+            probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
+        let _ = served.join();
+        assert_eq!(
+            untouched,
+            ProxyCredential::Untouched,
+            "a 401 is the probe's own credential arriving as sent"
+        );
+
+        // Port 1 on loopback refuses immediately: no proxy answered at all.
+        let blind = probe_proxy_injection_at("http://127.0.0.1:1", PROBE_TARGET_FOR_TESTS);
+        assert!(
+            matches!(blind, ProxyCredential::Unanswered(_)),
+            "a proxy that cannot be reached answers nothing, which is not a pass and not a fault: \
+             {blind:?}"
+        );
+    }
+
+    /// **The probe sends a credential that cannot be anybody's, and sends it to the proxy.**
+    ///
+    /// This is the security assertion of the pair, and it is about what leaves the machine rather
+    /// than about what comes back. It reads the bytes the probe actually put on the socket and
+    /// requires that the only `Authorization` on them is [`PROBE_CREDENTIAL`], which is prefixed
+    /// `skein-test-` so that it cannot be mistaken for — or used as — a real one.
+    ///
+    /// **The concrete change that makes this fail, named before it was written:** dropping the
+    /// `skein-test-` prefix from [`PROBE_CREDENTIAL`]. Planted, and
+    /// `the probe's credential must be unmistakably not a credential` failed. Sending the request
+    /// direct instead of through the proxy fails `the probe must go THROUGH the proxy`.
+    #[test]
+    fn the_probe_puts_nothing_but_a_marked_non_credential_on_the_wire() {
+        if !crate::github::have_curl() {
+            return crate::testutil::skip("no curl, and this reads what curl put on the socket");
+        }
+        assert!(
+            PROBE_CREDENTIAL.starts_with("skein-test-"),
+            "the probe's credential must be unmistakably not a credential: {PROBE_CREDENTIAL}"
+        );
+        let (port, served) = fake_proxy("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        let _ =
+            probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
+        let request = served.join().expect("the fake proxy thread");
+        // First, because it is the one an empty request answers: a probe that reached the proxy at
+        // all is the precondition for anything the bytes say about what it sent.
+        assert!(
+            request.starts_with(&format!("GET {PROBE_TARGET_FOR_TESTS} ")),
+            "the probe must go THROUGH the proxy — an absolute-form request line is what a proxy \
+             is asked, and a direct one would answer a different question: {request:?}"
+        );
+        let authorizations: Vec<&str> = request
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .collect();
+        assert_eq!(
+            authorizations,
+            vec![format!("Authorization: Bearer {PROBE_CREDENTIAL}").as_str()],
+            "exactly one Authorization, and it is the marked non-credential: {request:?}"
+        );
+    }
+
+    /// A target the tests can reach a loopback listener with. `http`, because a proxy is asked for
+    /// an absolute-form `GET` rather than a `CONNECT` — which is exactly the request shape under
+    /// test — and a host that can never resolve, so a test that lost its `-x` fails instead of
+    /// reaching out.
+    const PROBE_TARGET_FOR_TESTS: &str = "http://api.github.invalid/rate_limit";
+
+    /// A listener that answers one request as a proxy would, and hands the request back.
+    ///
+    /// **`accept` has a deadline, and that is not tidiness.** Written with a plain blocking
+    /// `accept`, the sabotage this helper exists to catch — taking `-x` off the probe, so it never
+    /// reaches the proxy at all — made the test HANG rather than fail, which is the one outcome
+    /// `CONTRIBUTING.md`'s third rule says is worse than no test: a run that never finishes reports
+    /// nothing, and under `--no-fail-fast` it stops the thirty-six binaries behind it too. So the
+    /// wait ends, and the caller gets an empty request to assert about.
+    fn fake_proxy(answer: impl Into<String>) -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let answer = answer.into();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+        listener
+            .set_nonblocking(true)
+            .expect("a loopback listener can be polled");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut seen = String::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut sock, _)) => {
+                        let _ = sock.set_nonblocking(false);
+                        let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let mut buf = [0u8; 4096];
+                        if let Ok(read) = sock.read(&mut buf) {
+                            seen = String::from_utf8_lossy(&buf[..read]).to_string();
+                        }
+                        let _ = sock.write_all(answer.as_bytes());
+                        let _ = sock.flush();
+                        break;
+                    }
+                    Err(why) if why.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            seen
+        });
+        (port, handle)
     }
 
     /// A running skein must say which build it is — with a revision, not a version number.
@@ -2752,6 +3242,60 @@ mod tests {
         }
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The proxy check reaches the banner and the diagnostics pane, read out of the two arrays
+    /// the page actually filters on** (SKEIN-548).
+    ///
+    /// `health_report` counts `proxy_injection` towards `ok`, so a page that does not carry the key
+    /// produces the exact failure SKEIN-928's comment warns about: `ok: false` puts a red row above
+    /// the app and `CHECKED.filter` finds nothing to name in it. Nothing else in this tree ties a
+    /// report field to the page — `the_wire_names_are_the_names_the_page_switches_on` below covers
+    /// the three *level* strings and not the keys.
+    ///
+    /// **It reads the array literals, not the file.** A `page.contains("proxy_injection")` would
+    /// pass on the comment three lines above the array, which is SKEIN-987's lesson exactly: an
+    /// HTML comment that names a thing is not a use of it. `token_expiry` is asserted alongside so
+    /// that an extraction which silently matched nothing fails here rather than passing everything.
+    ///
+    /// **The concrete change that makes this fail, named before it was written:** deleting
+    /// `"proxy_injection"` from the page's `CHECKED`. Planted, and `the banner must count it`
+    /// failed; deleting the `CHECKS` row failed `the diagnostics pane must have a row for it`.
+    #[test]
+    fn the_proxy_check_is_on_the_banner_and_in_the_diagnostics_pane() {
+        let page = include_str!("web/index.html");
+        let literal = |start: &str| -> String {
+            let from = page
+                .find(start)
+                .unwrap_or_else(|| panic!("the page has no `{start}` — did it get renamed?"))
+                + start.len();
+            let rest = &page[from..];
+            // `];` and not `]`: `CHECKS` is an array OF arrays, and its first element closes with
+            // `],` four characters in. The statement's own terminator is the only unambiguous end.
+            let to = rest
+                .find("];")
+                .unwrap_or_else(|| panic!("`{start}` is not closed anywhere after it"));
+            rest[..to].to_string()
+        };
+        // The banner's list, which is what decides whether a red banner has anything to say.
+        let checked = literal("const CHECKED = [");
+        for key in ["token_expiry", "proxy_injection"] {
+            assert!(
+                checked.contains(&format!("\"{key}\"")),
+                "the banner must count it, or `ok: false` shows a red row with nothing in it — \
+                 `{key}` is not in CHECKED: {checked}"
+            );
+        }
+        // The diagnostics pane's rows. `CHECKS` is a list of pairs, so the first entry of the pair
+        // is what has to be there — a label alone would render a row nothing fills.
+        let checks = literal("const CHECKS = [");
+        for key in ["token_expiry", "proxy_injection"] {
+            assert!(
+                checks.contains(&format!("[\"{key}\",")),
+                "the diagnostics pane must have a row for it, since the banner sends a reader \
+                 straight there — `{key}` is not in CHECKS: {checks}"
+            );
+        }
     }
 
     /// The three states reach the cockpit under the names it renders.
