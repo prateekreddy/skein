@@ -52,8 +52,9 @@ says, and the rows below are mostly about files for that reason.
 | every TCP port in the sandbox, including the cockpit's API | **yes, it can connect**. The API needs the token, which is in the "no" rows above — and the switch that would remove that requirement is refused rather than honoured for a cockpit under the fleet's doorway (SKEIN-962) | code: no `--unshare-net`; `src/apiauth.rs:56` is the one off-switch; test `the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_it` (`tests/server.rs`) |
 | the host's `ssh-agent` through `$SSH_AUTH_SOCK` | **no**, a regular file is bound over the socket (scoped boxes) | code: `src/box-session.sh:2136`, under `src/box-session.sh:2075` |
 | the host's `ssh-agent` through the gateway on TCP 3129 | **yes**, left reachable by owner decision (SKEIN-929); usable if the host agent holds a key | architecture §9.6 |
-| GitHub, from a scoped box's `git` and `gh` | only with the box's own token: the GitHub hosts go into `NO_PROXY`, so the sandbox proxy cannot inject the account's credential | test `a_scoped_box_routes_github_direct_and_a_fleet_box_does_not` (`tests/git_write_request.rs`); live test `tests/github_reach_live.rs`, ignored unless `SKEIN_LIVE_FLEET=1` |
-| the rest of the internet | **not bounded by skein** (SKEIN-926) | `grep -rn 'sbx policy' src`: every hit is advice printed for a person, and none sets a policy |
+| GitHub, from a scoped box's `git` and `gh` | only with the box's own token: the GitHub hosts go into `NO_PROXY`, so those two tools never reach the proxy and are bounded by the token they present. **This routes the normal path around the proxy; it does not contain anything** — `NO_PROXY` is a variable anything in the box can set again, which the launcher says of itself — so what the proxy would do to a request that *is* on it is the row below | test `a_scoped_box_routes_github_direct_and_a_fleet_box_does_not` (`tests/git_write_request.rs`); live test `tests/github_reach_live.rs`, ignored unless `SKEIN_LIVE_FLEET=1` |
+| **GitHub through the sandbox proxy** instead of around it | **whatever the proxy decides, and skein cannot bound it — so skein measures it and says so.** Measured *not* injecting on 2026-09-21: an invalid credential sent through the proxy is refused, and an accepted request carries the anonymous hourly ceiling. It **was** injecting on 2026-09-06 and again on 2026-09-15, when the same probe came back authenticated as the account. Nothing in this tree changed between those dates; the substrate did, which is why this is a check and not a sentence | the `proxy_injection` health check — `proxy_injection_line` and `probe_proxy_injection_at` in `src/health.rs` — red on the cockpit's banner when the answer is yes (SKEIN-927); tests `only_an_authenticated_acceptance_through_the_proxy_is_injection` and `the_probe_puts_nothing_but_a_marked_non_credential_on_the_wire`. The command is under [Checking this page](#checking-this-page) |
+| the rest of the internet | **yes — every host tried, and not bounded by skein** (SKEIN-926). **Open by decision rather than by oversight**: a box installs from npm, PyPI, crates.io, GitHub and the model APIs, so an allowlist that misses one produces a failure that reads as a broken build rather than as a policy. skein therefore sets no egress policy at all, and a box reaches whatever the host's `sbx` policy allows | measured 2026-09-21 from inside a scoped box with the proxy out of the path — the command is under [Checking this page](#checking-this-page), and all six hosts answered `200`. `grep -rn 'sbx policy' src` finds 9 hits, every one of them advice printed for a person to run on their own host; none sets a policy |
 | the fleet's canonical agent login | cannot replace it; a box's login moves up only when the fleet holds none (`src/box-session.sh:1035`) | code |
 
 **Two kinds of box get less of this, and both say so when they start.**
@@ -73,12 +74,12 @@ says, and the rows below are mostly about files for that reason.
 Each of these either has no evidence strong enough for a row, or is a known gap in a row above. The
 tracker item is the record; this list only points at it.
 
-* **SKEIN-926**: the sandbox reaches arbitrary internet hosts directly. skein sets no egress
-  policy, so a box reaches whatever the host's `sbx` policy allows, and on the fleet where this
-  was measured that was everything tried.
-* **SKEIN-927**: the sandbox proxy can inject the account's GitHub credential for a request that
-  goes through it. Scoped `git` and `gh` go around it, but a process that points itself back at
-  the proxy, or clears `NO_PROXY`, is back on it. skein does not yet detect injection at start.
+* **SKEIN-548 / SKEIN-927** are no longer listed here, and the two rows above say why: open egress
+  is a decision that is now stated and measured rather than a gap, and injection is now a check
+  that runs. What is *not* closed is the underlying property — a process in a box that points
+  itself back at the proxy, or clears `NO_PROXY`, is on whatever the proxy does that day. skein
+  cannot change that from inside the sandbox; it can only be the thing that notices, which is the
+  whole of what the `proxy_injection` row claims.
 * **SKEIN-831**: a fleet that was serving before the socket move keeps the cockpit's tmux socket at
   the old path in the readable half of `.skein`, where a box can `connect()` to it. A tmux client
   can make the server run commands, so that is fleet-scope execution. It lasts until that fleet's
@@ -102,6 +103,29 @@ cargo test --test isolation_bwrap        # the bwrap rows; a skip names the chec
 python3 tools/line-cite-check.py         # every file:line above still says what it said when cited
 python3 tools/prose-check.py             # every test and function named above still exists
 ```
+
+**The two substrate rows are measured, not tested**, because what they are about is not in this
+repository. Run them from inside a box. Neither sends a credential: the first sends none at all,
+and the second sends a string that is marked as not being one.
+
+```sh
+# egress (SKEIN-926) — the proxy deliberately out of the path, so this is the direct reach
+for h in httpbin.org www.reddit.com pypi.org discord.com www.bbc.co.uk example.org; do
+  curl -s --noproxy '*' -o /dev/null -w "$h %{http_code}\n" "https://$h/"
+done
+
+# the proxy's credential (SKEIN-548) — 401 is the proxy adding nothing; a 200 whose
+# x-ratelimit-limit is far above 60 is the account answering for a string that cannot be a token
+curl -sS -x "$HTTPS_PROXY" --noproxy '' -o /dev/null -D - \
+  -H 'Authorization: Bearer skein-test-not-a-credential' \
+  https://api.github.com/rate_limit
+```
+
+Both were last run on **2026-09-21**, and every date in the two rows above is a date somebody ran
+one of them. That is the point of writing the commands here and not the results alone: the
+substrate under this page belongs to somebody else, the proxy row already records it answering one
+way on 2026-09-15 and the other way six days later with nothing in this tree changing between, and
+a reader who needs today's answer rather than that day's can have it in two commands.
 
 When a cover changes, change the row in the same commit. A row that is no longer true is worse
 than a missing one, because a reader trusts it.
