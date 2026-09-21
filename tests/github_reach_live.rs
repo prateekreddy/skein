@@ -3,22 +3,30 @@
 //! Every other test of scoping in this tree inspects what the launcher builds or what the credential
 //! helper hands over. None of them can prove the property that matters — *a box scoped to one repo
 //! cannot READ another private repo* — because that property is enforced by the interaction between
-//! skein's routing and **sbx's credential-injecting proxy**, and the proxy is not reproducible under
-//! bwrap. A box left on the proxy is answered as the fleet account for any repo the account can see,
-//! whatever credential it sent (measured: a garbage `Bearer` is `200` through the proxy, `401`
-//! direct). Making the boundary real is exactly stopping that: the launcher puts the GitHub hosts in
-//! `NO_PROXY` for a scoped box, so its git and gh reach GitHub DIRECT and are bounded by the token
-//! the box actually holds — and GitHub refuses a private repo it was not granted.
+//! skein's routing and sbx's GitHub proxy, and the proxy is not reproducible under bwrap. What the
+//! proxy does with a credential through it is not skein's to fix, and it has already gone both ways:
+//! measured from inside a box, a garbage `Bearer` came back `200` through the proxy — the fleet
+//! ACCOUNT, unbounded — on 2026-09-06 and again on 2026-09-15, and `401` on 2026-09-21.
+//! `docs/threat-model.md`'s "GitHub through the sandbox proxy" row and the hourly `proxy_injection`
+//! health check (`src/health.rs`, SKEIN-927) carry which of those is true today; this file does not.
+//! Making the boundary real does not depend on which answer that is: the launcher puts the GitHub
+//! hosts in `NO_PROXY` for a scoped box, so its git and gh reach GitHub DIRECT and are bounded by
+//! the token the box actually holds — and GitHub refuses a private repo it was not granted, on an
+//! injecting day and a non-injecting one alike.
 //!
 //! So this test needs a live fleet: a box that is genuinely scoped (its environment carries the
 //! `NO_PROXY` the launcher set), and a second private repo the account can see but this box was not
-//! granted. It is `#[ignore]` unless `SKEIN_LIVE_FLEET=1`, and it uses only garbage
-//! `skein-test-` credentials — it never sends a real token anywhere.
+//! granted. It is `#[ignore]` unless `SKEIN_LIVE_FLEET=1`, and it uses only garbage `skein-test-`
+//! credentials — it never sends a real token anywhere.
 //!
-//! **Run un-ignored on a box that is NOT scoped (e.g. `SKEIN_GIT_SCOPE=fleet`) it FAILS in the right
-//! place**: such a box reaches GitHub through the proxy, so the second private repo is readable and
-//! the "refused" assertion fails — which is precisely the hole scoping closes. On a scoped box the
-//! same request goes direct and is refused, and it passes.
+//! **Run un-ignored on a box that is NOT scoped (e.g. `SKEIN_GIT_SCOPE=fleet`), it fails in the
+//! right place only while the proxy is injecting**: such a box then reaches GitHub through the proxy
+//! and is answered as the account, so the second private repo is readable and the "refused"
+//! assertion fails — which is precisely the hole scoping closes. On a day the proxy is not
+//! injecting, an unscoped box gets the proxy's own `401` for a garbage credential and this sanity
+//! check passes for the wrong reason; the proxy-credential command under `docs/threat-model.md`'s
+//! "Checking this page" section says which day it is. On a scoped box the request goes direct
+//! regardless of the proxy, and it passes for the right reason either way.
 
 use std::process::Command;
 
