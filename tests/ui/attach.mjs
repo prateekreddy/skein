@@ -28,6 +28,7 @@ import { createServer } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { boxlikeNamespace, fixtureRoot, freshFixture, grab, harness, openDoor } from "./lift.mjs";
+import { processes, sighting } from "./harness/leaks.mjs";
 import { startServer } from "./harness/server.mjs";
 
 const BOX = "attach-box";
@@ -145,7 +146,21 @@ exit 0
   // a stub that has stopped being reachable is indistinguishable from a box that answered quickly —
   // which is precisely how SKEIN-859 stayed unreadable for three lanes.
   const stalls = path.join(root, "crossings.log");
+  // **And which fixture the stalling box belongs to, EXPORTED, because the `exec` below strips
+  // every other name off it** (SKEIN-994). After `exec sleep 60` the stand-in's argv is two words
+  // and the `$*` that held the crossing is gone, so the only thing that can still say whose it is
+  // is the environment. Today one reaches it by inheritance — the crossing carries `$SKEIN_HOME`
+  // and `$SKEIN_FLEET_ROOT` down from this suite's server, measured on the running stand-in — and
+  // inheritance through `nsenter` is the run's to lose, not this fixture's to rely on: the tmux
+  // measured for SKEIN-990 carried no `$CARGO_MANIFEST_DIR` at all, because what started it handed
+  // it a curated environment. The same argument as `SKEIN_TEST_WORKTREE` in `lift.mjs`, one
+  // variable over: state the tie rather than borrow it, so the leak check can put this process in
+  // its fixture's cohort whatever the crossing decides to carry.
+  //
+  // `export` and not an interpolation: the path is then in the environment `exec` keeps, rather
+  // than in an argument list it replaces (SKEIN-861).
   fs.writeFileSync(stub, `#!/bin/sh
+export SKEIN_TEST_FIXTURE='${root}'
 printf '%s\n' "$*" >> ${stalls}
 case "$*" in *skein-stall*) exec sleep 60 ;; esac
 exec /usr/bin/bash "$@"
@@ -162,7 +177,7 @@ exec /usr/bin/bash "$@"
     sock: path.join(root, "fleet", BOX, "session.sock"),
     generation: box.generation, ns_start: box.ns_start,
   }));
-  return { root, ws, home, sbx, stalls, boxlike: box.child };
+  return { root, ws, home, sbx, stalls, stub, boxlike: box.child };
 }
 
 // The page's world, cut down to exactly what `attachFiles` touches.
@@ -436,8 +451,42 @@ try {
   //     `sbx exec -i` when this was written; there has been no `sbx` hop since SKEIN-576.)
   const w5 = pageWorld(base, BOX, new Map());
   const began = Date.now();
+  // Watched WHILE the upload is outstanding, because that is the only window the stand-in exists
+  // in: skein kills the process it spawned the moment the stall budget runs out, so by the checks
+  // below there is nothing left to ask. Asked through `sighting`, which answers which SURFACE the
+  // name was on and never hands back any of the environment it read.
+  const standInSeen = (async () => {
+    // What the stub SAYS, read back out of the stub this fixture wrote rather than named here —
+    // the derivation `fleetPathDirs` makes of `FLEET_PATH`, for its reason: a name written in two
+    // places is a name that is right in one of them. It is asked for as a whole assignment, so the
+    // answer is about the variable the stub exported and not about the `$SKEIN_HOME` the crossing
+    // happens to carry down from the server today, which names the same directory.
+    const said = /^export ([A-Za-z_][A-Za-z0-9_]*)=/m.exec(fs.readFileSync(fx.stub, "utf8"));
+    const stated = said ? `${said[1]}=${fx.root}` : null;
+    const until = Date.now() + STALL_MS * 3;
+    let last = "<no `sleep 60` was ever seen>";
+    while (Date.now() < until) {
+      for (const p of processes()) {
+        if (p.args !== "sleep 60") continue;
+        const where = sighting(p, fx.root);
+        if (where) {
+          return { argv: p.args, where,
+            stated: stated ? sighting(p, stated) : "the stub exports no variable at all" };
+        }
+        last = "a `sleep 60` naming no fixture on either surface";
+      }
+      // No gap between sweeps, and the sweep itself is the pace. The window this looks into is the
+      // stall budget — five seconds — while one pass over every readable environment on the box is
+      // 100-300ms quiet and over a second under the load of a whole `cargo test` (measured, see
+      // `harness/leaks.mjs`), so a sleep here would spend a third of the attempts there are to
+      // have. The loop returns the moment it finds the process, which is what it costs in practice.
+      await new Promise(setImmediate);
+    }
+    return { argv: last, where: null, stated: null };
+  })();
   await w5.attachFiles(BOX, [{ rel: "skein-stall.png", file: new File([bytes], "skein-stall.png", { type: "image/png" }) }], 1);
   const stalledFor = Date.now() - began;
+  const standIn = await standInSeen;
   const refusal = w5.said.find(m => m.startsWith("attach failed:")) || "";
 
   // 10. The fixture's own integrity, asserted instead of assumed — and the check whose absence let
@@ -455,6 +504,24 @@ try {
     "the box that stalls is the program the crossing ran, not a stub the pin left unreachable",
     { ranTheStub: crossings.length > 0, sawTheStalledWrite: /skein-stall/.test(crossings) },
     { ranTheStub: true, sawTheStalledWrite: true },
+  );
+
+  // 10b. And the stand-in that box leaves says WHOSE it is (SKEIN-994). After `exec sleep 60` its
+  //     arguments are two words and the crossing that held the fixture name is gone, so a leak
+  //     check meeting it has only "a test process whose parent has died" to go on — which is what
+  //     a healthy stand-in of a suite that is still running looks like too (SKEIN-990), and what
+  //     `fixturesRunning` needs a fixture name to tell apart.
+  //
+  //     Three facts in one answer, and the third is the one this file owns. The argv really is
+  //     bare, so the environment is the only surface left; the fixture IS named on it; and it is
+  //     named by the assignment the stub itself exported, rather than only by the `$SKEIN_HOME`
+  //     the crossing carries down from this suite's server — which names the same directory today
+  //     and is the run's to lose, not this fixture's to rely on. Delete that `export` from the stub
+  //     above and this reads `stated: "the stub exports no variable at all"`.
+  t.check(
+    "the stalling box's stand-in says which fixture it belongs to, though exec took its argv",
+    standIn,
+    { argv: "sleep 60", where: "environment", stated: "environment" },
   );
 
   // 11. The refusal itself: a word, and inside the budget.

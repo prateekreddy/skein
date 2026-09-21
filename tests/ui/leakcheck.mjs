@@ -36,7 +36,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { REPORT_CAP, environOf, fixturePrefixes, fixtureRegex, quiesceOnExit }
   from "./harness/leaks.mjs";
-import { harness } from "./lift.mjs";
+import { boxlikeNamespace, harness } from "./lift.mjs";
 
 const { check, done } = harness();
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -213,6 +213,22 @@ function report() {
   const r = spawnSync(process.execPath, [LEAKS], { encoding: "utf8" });
   return { out: `${r.stdout}${r.stderr}`, status: r.status };
 }
+
+/** This pid's parent, read here rather than asked of the module: what the module's own answer is
+ * is the thing under test, and a probe that asked it would agree with it by construction. Field 4
+ * of `/proc/<pid>/stat`, after the last `)` because a `comm` can contain one.
+ *
+ * It sits up here beside the other plumbing rather than beside the tmux plants it was written for,
+ * because the exported-fixture plants below need the same fact and a second spelling of "which
+ * process is its parent" is a second thing to get wrong. */
+const ppidOf = pid => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return Number(stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[1]);
+  } catch {
+    return null;
+  }
+};
 
 // --- a fixture that is only in the environment -------------------------------------------------
 // **This check read the report, and that was SKEIN-780's premise a second time** (SKEIN-781). It
@@ -499,6 +515,261 @@ reapOrphan();
 if (orphan.pid) await new Promise(r => setTimeout(r, 300));
 check("and it is gone from the scan once the process is",
   orphan.pid ? under.processes().some(p => p.pid === orphan.pid) : "the probe was never made", false);
+
+// --- a stand-in that EXPORTS its fixture before it execs ---------------------------------------
+// **What the probe above cannot be told apart from, and the reason naming it at the spawn is the
+// fix** (SKEIN-980, SKEIN-994). The marker finds a process that has shed every name it ever had,
+// and that is all it finds: `ppid == 1` is the only other thing known about it, and SKEIN-990
+// proved that is not enough, because a stand-in a suite `exec`s is parentless from the moment the
+// crossing that started it returns and is not a leak. What settles it is the COHORT —
+// `fixturesRunning`, over the processes naming the same fixture directory — and a process that
+// names no fixture on either surface can be in no cohort at all.
+//
+// This repository `exec`s two such stand-ins, and they were measured rather than assumed to be one
+// case, because they are not. The bwrap anchor (`lift.mjs`) really did carry no fixture name at
+// all: with only its wrapper killed, the marker half called it `orphans` and the prefix half found
+// it in none of its four lists. The stalling box's stand-in (`attach.mjs`) was named after all —
+// the crossing carries `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` down from that suite's server — and
+// 24 runs of the gate five seconds apart during `node tests/ui/attach.mjs` went red 0 times. That
+// name arrives by INHERITANCE, which is the run's to lose and not the fixture's to rely on, so the
+// export at that spawn makes it the fixture's own statement instead.
+//
+// The fix is one line at each spawn and it is not a rule in the check: the script EXPORTS the
+// fixture root before `exec`ing, so the name is in the environment `exec` keeps rather than in the
+// arguments it replaces (SKEIN-861 is the same distinction, made the other way round). Teaching
+// the check to let a bare `sleep` off instead is SKEIN-645 — a check taught to ignore a shape goes
+// quiet about every real leak wearing it.
+//
+// Both plants are that shape exactly: argv the two words `sleep 30`, an environment written from
+// nothing, and one exported variable naming a fixture. They differ in one thing, which is the thing
+// the cohort rule reads:
+//
+//   * LEAK — nothing else on the box names its fixture, so nothing is left of the run that made it;
+//   * IN FLIGHT — one live process, whose parent is this suite, names the same fixture.
+//
+// A fixture directory each, for the reason the tmux plants have one each: a cohort is shared by
+// name, and two probes under one fixture would vouch for each other. Planted rather than taken from
+// a suite, because the rule has to hold on every box; the case below this one ties it to the real
+// `boxlikeNamespace` where `bwrap` allows one.
+const EXPORTED_TAG = `leakcheck-exported-${process.pid}`;
+/** The fixture each plant claims: a derived prefix, so the scan can name it, and a directory that
+ * is never created — the check reads `/proc` and never the filesystem a path names. */
+const exportedRoot = which => `/tmp/${prefix}leakcheck-stall-${which}-${process.pid}`;
+/** Kill whatever carries this run's tag, by the tag and never by a pid — [`reapOrphan`]'s argument,
+ * and its reason: a bare `sleep 30` is every sleep on this box, and these are nobody's child. */
+const reapExported = () => {
+  for (const p of under.processes()) {
+    if (p.envState !== "read" || !p.env.includes(`SKEIN_LEAKCHECK_EXPORTED=${EXPORTED_TAG}`)) continue;
+    try {
+      if (environOf(p.pid).env.includes(EXPORTED_TAG)) process.kill(p.pid, "SIGKILL");
+    } catch { /* gone between the scan and the signal, which is the outcome this is for */ }
+  }
+};
+quiesceOnExit([], reapExported);
+// Written from nothing, so that the only fixture name either plant carries is the one its own
+// script exports. `PATH` because the lookup of `setsid` happens with this environment, and
+// `CARGO_MANIFEST_DIR` because that is the variable cargo really ties a test process to its
+// worktree with.
+const EXPORTED_ENV = {
+  PATH: "/usr/bin:/bin",
+  [markerName || "SKEIN_MARKER_WAS_NOT_DERIVED"]: "1",
+  CARGO_MANIFEST_DIR: worktree || "/nonexistent-worktree",
+  SKEIN_LEAKCHECK_EXPORTED: EXPORTED_TAG,
+};
+// `--fork` for [`orphanProbe`]'s reason: without it `setsid` execs in place and the pid stays this
+// process's child, which is a run in flight and the wrong half of the rule.
+const plantExported = which =>
+  spawn("/usr/bin/setsid",
+    ["--fork", "sh", "-c", `export SKEIN_TEST_FIXTURE='${exportedRoot(which)}'; exec sleep 30`],
+    { env: EXPORTED_ENV, stdio: "ignore" });
+plantExported("leak");
+plantExported("inflight");
+// The run still using the in-flight fixture: a plain `spawn`, so its parent is this process and
+// alive, and it is not descended from the parentless one — the two things `fixturesRunning` counts
+// as evidence, and the two the stranded plant must not be given.
+const usingStall = spawn("/usr/bin/sleep", ["30"],
+  { env: { ...EXPORTED_ENV, SKEIN_TEST_FIXTURE: exportedRoot("inflight") }, stdio: "ignore" });
+quiesceOnExit([], () => { try { usingStall.kill("SIGKILL"); } catch { /* already gone */ } });
+/** A plant's pid once it has `exec`ed and the kernel has reparented it, or what was seen instead.
+ *
+ * Polled on BOTH facts, and the second is why this is a poll: `setsid --fork` returns before its
+ * child is reparented, so a classification taken at the wrong instant grades a process whose parent
+ * is still alive and calls a leak a run in flight. [`startTmux`] settles the same way for the same
+ * reason. Found by its environment, never by its argv: the argv is what the fix cannot restore and
+ * is the thing under test. */
+async function exportedProbe(which) {
+  let last = "<never seen>";
+  const until = Date.now() + PROBE_DEADLINE_MS;
+  while (Date.now() < until) {
+    const found = under.processes().find(p =>
+      p.envState === "read"
+      && p.env.includes(`SKEIN_LEAKCHECK_EXPORTED=${EXPORTED_TAG}`)
+      && p.env.includes(`SKEIN_TEST_FIXTURE=${exportedRoot(which)}`));
+    if (found) {
+      last = `${found.args} ppid=${ppidOf(found.pid)}`;
+      if (found.args === "sleep 30" && ppidOf(found.pid) === 1) return { pid: found.pid, which };
+    }
+    await new Promise(r => setTimeout(r, 25));
+  }
+  return { pid: null, which, lastSeen: last, waitedMs: PROBE_DEADLINE_MS, ...probeBasis };
+}
+const stallLeak = await exportedProbe("leak");
+const stallFlight = await exportedProbe("inflight");
+check("two stand-ins export their fixture, exec, and are reparented, which is the shape under test",
+  [stallLeak, stallFlight].map(s => (s.pid ? "planted" : s)), ["planted", "planted"]);
+/** Both plants graded over ONE scan, so the two answers are about one moment — and asked with a
+ * pattern list of the single prefix they were named with. The whole derived list would be answered
+ * by SKEIN-979's collision on a box exporting `$SKEIN_UI_FIXTURE_ROOT`, and the case would then
+ * pass with the export removed. */
+const classifyExported = () => {
+  if (!under.fixtureNamed) return { leak: NOT_SPLIT.bucket, inflight: NOT_SPLIT.bucket };
+  const all = under.processes();
+  const split = under.fixtureNamed(all, [[prefix, fixtureRegex([prefix])]]);
+  const verdict = probe => {
+    if (!probe.pid) return { bucket: "the probe was never made" };
+    if (!all.some(p => p.pid === probe.pid)) return { bucket: "the scan never saw this pid" };
+    for (const name of ["orphans", "attached", "theirs", "unclear"]) {
+      const row = split[name].find(r => r.pid === probe.pid);
+      if (row) return { bucket: name, where: row.where, named: row.prefix, argv: row.args };
+    }
+    return { bucket: "in none of the four lists", ...probeBasis };
+  };
+  return { leak: verdict(stallLeak), inflight: verdict(stallFlight) };
+};
+const stallSplit = classifyExported();
+// The paired facts are in the same answer rather than in a check of their own: `where` says the
+// name was found in the environment and nowhere else, and `argv` says what the process still looks
+// like — two words, naming no fixture, no suite and no run. Without them "orphans" would be true
+// for the uninteresting reason and the export would not be what produced it.
+check("a stand-in whose script exported its fixture is named by it, on the environment surface",
+  stallSplit.leak,
+  { bucket: "orphans", where: "environment", named: prefix, argv: "sleep 30" });
+check("and one whose fixture a live process is still using is a run in flight, parentless or not",
+  { ...stallSplit.inflight, parent: stallFlight.pid ? ppidOf(stallFlight.pid) : null },
+  { bucket: "attached", where: "environment", named: prefix, argv: "sleep 30", parent: 1 });
+// The gate over both at once: red about the one with nothing left of its run, and silent about the
+// one whose fixture is still in use. That pair is what stops this being "make the red go away" —
+// the same shape, the same argv, and the verdict turns on the cohort alone.
+const stallRun = report();
+check("the gate is red over the stranded stand-in and not over the one still in use",
+  { status: stallRun.status,
+    leak: leaking(stallRun.out).includes(stallLeak.pid),
+    inflight: leaking(stallRun.out).includes(stallFlight.pid) },
+  { status: 1, leak: true, inflight: false });
+reapExported();
+try { usingStall.kill("SIGKILL"); } catch { /* already gone */ }
+await new Promise(r => setTimeout(r, 300));
+check("and both are gone from the scan once the processes are",
+  under.processes().some(p => [stallLeak.pid, stallFlight.pid].includes(p.pid)), false);
+
+// --- and the real anchor a box-like namespace leaves -------------------------------------------
+// **The call site itself, because the rule above is only worth what the spawn actually carries**
+// (SKEIN-980). `boxlikeNamespace` is what every browser suite that reads a box from the inside
+// starts, and the one process it is GUARANTEED to leave is the `exec`'d anchor: `bwrap … -- bash -c
+// 'echo $$ > <root>/anchor; exec sleep 600'`, whose argv is two words and whose script is gone with
+// the image. Measured on this branch before the change, with only the wrapper killed: the marker
+// half answered `orphans`, the prefix half found it in none of its four lists, and the row a reader
+// was handed read `environment SKEIN_TEST  sleep 600` — no fixture, no suite, no run.
+//
+// So the real helper is run here rather than a copy of its spawn: a copy would assert this file's
+// idea of the call site and go on passing the morning the call site changed, which is the shape
+// `leaks.mjs` derives its every name to avoid.
+//
+// **Both verdicts, because the fix has to move one and leave the other.** With the wrapper alive
+// the anchor is a run in flight; with ONLY the wrapper killed — which is what
+// `fx.boxlike.kill()` did for as long as SKEIN-861 was open, and the ordering `stop` exists to get
+// right — it is this run's leak, and now says which fixture it was.
+//
+// It needs a namespace, so it skips where `tests/isolation_bwrap.rs` skips — and says so rather
+// than silently, because a skipped check passes and a reader's seeing that it did not run is the
+// only defence. Under `$SKEIN_TESTS_NO_SKIP` it is a failure instead; see [`noSkipAsked`].
+const bwrapWorks = () =>
+  spawnSync("bwrap", ["--dev-bind", "/", "/", "--", "/bin/true"], { stdio: "ignore" }).status === 0;
+/** Is this the run that has to PROVE nothing was skipped? The variable's name is read out of the
+ * constant that defines it — `testutil::NO_SKIP` — rather than written in here, for [`testMarker`]'s
+ * reason: a name spelled twice is a name that is right in one of the two places. `null` is a third
+ * answer, "the constant could not be read", and is said in the skip line rather than folded into
+ * "no".
+ *
+ * It is asked at all because `cargo test` shows a PASSING suite's output to nobody, so the line
+ * below is a skip a reader meets only when they run this suite by hand —
+ * `tests/browser_suites.rs` says in its own words that a skip nobody reads is the failure mode the
+ * whole file exists because of. Under `$SKEIN_TESTS_NO_SKIP` it stops being a skip and becomes a
+ * failure, which is exactly what that variable means and what the Rust tier's guards already do
+ * with it. */
+const noSkipAsked = () => {
+  try {
+    const named = /const NO_SKIP: &str = "([A-Za-z_][A-Za-z0-9_]*)"/
+      .exec(readFileSync(path.join(worktree || ".", "src", "testutil.rs"), "utf8"));
+    return named ? Boolean(process.env[named[1]]) : null;
+  } catch {
+    return null;
+  }
+};
+/** Which bucket the prefix scan puts the anchor in, and what its row says — one scan, the single
+ * derived prefix its root was named with, for [`classifyExported`]'s reasons. */
+const classifyAnchor = pid => {
+  if (!under.fixtureNamed) return NOT_SPLIT;
+  const all = under.processes();
+  if (!all.some(p => p.pid === pid)) return { bucket: "the scan never saw this pid" };
+  const split = under.fixtureNamed(all, [[prefix, fixtureRegex([prefix])]]);
+  for (const name of ["orphans", "attached", "theirs", "unclear"]) {
+    const row = split[name].find(r => r.pid === pid);
+    if (row) return { bucket: name, where: row.where, named: row.prefix, argv: row.args };
+  }
+  return { bucket: "in none of the four lists", ...probeBasis };
+};
+if (!bwrapWorks()) {
+  const asked = noSkipAsked();
+  const said = "bwrap cannot make a namespace here, so the anchor a box-like namespace leaves " +
+    "cannot be planted and the checks it carries did not run — the same skip as " +
+    "tests/isolation_bwrap.rs";
+  if (asked === true) {
+    // A run that was told to prove nothing was skipped, having skipped something, is a failure and
+    // not a note. The ledger is where that has to land: this suite exits on its count.
+    check(`${said}, and this run was told to prove nothing was skipped`, "skipped", "ran");
+  } else {
+    console.log(`⤼ ${said}${asked === null
+      ? ", and the constant naming the no-skip variable could not be read, so this run cannot say "
+        + "whether it was told to prove otherwise"
+      : ""}`);
+  }
+} else {
+  const anchorRoot = `/tmp/${prefix}leakcheck-anchor-${process.pid}`;
+  mkdirSync(anchorRoot, { recursive: true });
+  const box = await boxlikeNamespace(anchorRoot);
+  const held = classifyAnchor(box.ns_pid);
+  // Read at the same moment as the verdict above, and compared with the wrapper's own pid rather
+  // than with the word "alive": a paired fact whose two sides are both written here proves nothing,
+  // and what has to be true for `attached` to mean anything is that this anchor's parent is the
+  // bwrap that made it.
+  const heldParent = ppidOf(box.ns_pid);
+  // Only the wrapper, which is the whole point: `exec` means the anchor pid IS the sleep, so
+  // killing bwrap is what strands it. `box.stop()` below is the ordering that does not.
+  box.child.kill("SIGKILL");
+  const until = Date.now() + PROBE_DEADLINE_MS;
+  while (Date.now() < until && ppidOf(box.ns_pid) !== 1) await new Promise(r => setTimeout(r, 25));
+  const stranded = classifyAnchor(box.ns_pid);
+  check("the anchor a namespace fixture leaves is named by its own fixture while its run is going",
+    { ...held, parent: heldParent === box.child.pid ? "the bwrap that made it" : heldParent },
+    { bucket: "attached", where: "environment", named: prefix, argv: "sleep 600",
+      parent: "the bwrap that made it" });
+  check("and once nothing of that fixture is left it is this run's leak, and still names it",
+    { ...stranded, parent: ppidOf(box.ns_pid) },
+    { bucket: "orphans", where: "environment", named: prefix, argv: "sleep 600", parent: 1 });
+  // What a reader is handed, which is what the item was filed about: the row used to say
+  // `SKEIN_TEST` and two words. The marker still finds it — both halves reach it now — and the
+  // prefix half's report is printed first, so this is the row the reader meets.
+  const anchorRun = report();
+  check("and the row it is red about names the fixture rather than only the marker",
+    { red: leaking(anchorRun.out).includes(box.ns_pid), row: reportOf(anchorRun.out, box.ns_pid) },
+    { red: true, row: { where: "environment", prefix } });
+  box.stop();
+  await new Promise(r => setTimeout(r, 300));
+  check("and it is gone from the scan once the anchor is",
+    under.processes().some(p => p.pid === box.ns_pid), false);
+  rmSync(anchorRoot, { recursive: true, force: true });
+}
 
 // --- the prefix half's own red, and the two greens beside it -----------------------------------
 // **The rule the prefix scan did not have, planted from both sides** (SKEIN-913). Until this item
@@ -807,17 +1078,6 @@ const startTmux = async (which, env, cwd) => {
   }
   return { pid: null, which, exit: started.status, stderr: (started.stderr || "").trim(),
     naming: last.map(p => `${p.pid} ppid=${ppidOf(p.pid)} ${p.args.slice(0, 60)}`) };
-};
-/** This pid's parent, read here rather than asked of the module: what the module's own answer is
- * is the thing under test, and a probe that asked it would agree with it by construction. Field 4
- * of `/proc/<pid>/stat`, after the last `)` because a `comm` can contain one. */
-const ppidOf = pid => {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return Number(stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/)[1]);
-  } catch {
-    return null;
-  }
 };
 const TMUX_ENV = which => ({
   PATH: "/usr/bin:/bin",

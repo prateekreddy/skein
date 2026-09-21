@@ -361,11 +361,34 @@ export async function boxlikeNamespace(root, bindOver) {
     "bwrap",
     ["--dev-bind", "/", "/", ...binds, "--",
      "bash", "-c", `echo $$ > ${anchorAt}; exec sleep 600`],
-    // stdout nulled: a child that outlives this holds an inherited pipe open, and the suite then
-    // looks like a hang long after it finished. stderr to a FILE for the same reason inverted — it
-    // holds no pipe open, and it is the only place bwrap's own refusal (userns, apparmor) is
-    // recorded. Nulling it is how a denied namespace becomes a silent mystery.
-    { stdio: ["ignore", "ignore", fs.openSync(errAt, "w")] },
+    {
+      // stdout nulled: a child that outlives this holds an inherited pipe open, and the suite then
+      // looks like a hang long after it finished. stderr to a FILE for the same reason inverted — it
+      // holds no pipe open, and it is the only place bwrap's own refusal (userns, apparmor) is
+      // recorded. Nulling it is how a denied namespace becomes a silent mystery.
+      stdio: ["ignore", "ignore", fs.openSync(errAt, "w")],
+      // **Which fixture this namespace belongs to, said in the one place the `exec` below cannot
+      // take it from** (SKEIN-980). The anchor's argv becomes the two words `sleep 600` — the
+      // fixture root lived in the `bash -c` script and the script goes with the image — so until
+      // this line the only thing on it that said anything was `$SKEIN_TEST`, and the row a reader
+      // was handed named no fixture, no suite and no run. Measured on this branch before the
+      // change: the marker half called it `orphans`, the prefix half found it in none of its four
+      // lists, and the gate's row read `environment SKEIN_TEST  sleep 600`.
+      //
+      // The name of the variable is inert, exactly as `SKEIN_TEST_WORKTREE` above is: the scan
+      // searches the whole environment for a derived prefix and does not care which variable holds
+      // one. What it buys is not one more witness but a COHORT — `fixturesRunning` groups by the
+      // fixture directory a process names, and a process that names none can be in no cohort, so it
+      // is judged on parentage alone, which is what SKEIN-990 proved is not enough. With the root
+      // here, the anchor is a run in flight while its suite is going and this run's leak once
+      // nothing of that fixture is left, which is the verdict every other process of the fixture
+      // already gets.
+      //
+      // EXPORTED rather than interpolated into the script, and that distinction is SKEIN-861's:
+      // `${anchorAt}` is in the arguments of a `bash` that is about to replace itself, and an
+      // interpolated path is gone the moment it does. `exec` does not clear an environment.
+      env: { ...process.env, SKEIN_TEST_FIXTURE: root },
+    },
   );
   let anchor = null;
   for (let i = 0; i < 200 && anchor === null; i++) {
