@@ -6325,12 +6325,36 @@ mod cockpit_routes {
     /// string literal — a quote or a backtick immediately before it — and a line that starts a
     /// comment is skipped, because these files discuss routes in comments as often as they call
     /// them (`index.html` mentions `/api/repos/undefined/…` in a note about a bug that is fixed).
+    ///
+    /// **`<!--` is in that list, and leaving it out cost the gate both ways** (SKEIN-987). Two of
+    /// the three scanned files are HTML and their comments open `<!--`, which is none of the three
+    /// Rust/JS forms: `src/web/index.html:1905` says the usage pane is "Rendered from
+    /// `/api/usage`", in backticks, and that sentence read as a request to that route. The visible
+    /// direction is a false accusation — with the route deleted, the missing-path gate reported
+    /// three asks where the page makes two, and named a line nobody fetches from. The costly
+    /// direction is the other one: `every_method_this_router_registers_has_a_caller_or_a_declared_reason`
+    /// counts asks through here too, so **a prose mention was enough to make a route nothing calls
+    /// read as called** — the defect SKEIN-308 wrote that gate for, inverted.
+    ///
+    /// The honest limit, since it is the kind that reads as covered: this is per LINE, so it sees
+    /// the line a comment OPENS on and not the interior of one that runs on. There is a live
+    /// example three lines above the one this fixed — `src/web/index.html:1895` names
+    /// `/api/fleet/plan` in backticks, inside a comment that opened at 1880 — and it is still
+    /// counted as a request. That route is fetched for real at `index.html:10698` so it costs
+    /// nothing today, but the hole is the same shape as the one above (SKEIN-991). Tracking the
+    /// comment state across lines would close it and open a worse one: a `<!--` inside a string
+    /// would silently swallow every request after it, which is the direction that makes a gate
+    /// green over anything.
     fn asked_for(page: &str) -> Vec<(usize, String, &'static str)> {
         let lines: Vec<&str> = page.lines().collect();
         let mut out = Vec::new();
         for (n, line) in lines.iter().enumerate() {
             let t = line.trim_start();
-            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+            if t.starts_with("//")
+                || t.starts_with('*')
+                || t.starts_with("/*")
+                || t.starts_with("<!--")
+            {
                 continue;
             }
             let b = line.as_bytes();
@@ -6481,6 +6505,28 @@ mod cockpit_routes {
                 asked_for(page)
                     .into_iter()
                     .map(move |(line, path, method)| (name, line, path, method))
+            })
+            .collect()
+    }
+
+    /// Every `(path, method)` in `routes` that nothing in `asks` requests.
+    ///
+    /// Lifted out of `every_method_this_router_registers_has_a_caller_or_a_declared_reason` so a
+    /// test can drive the gate's own composition over fixtures instead of a second copy of it
+    /// (SKEIN-987). The thing that went wrong there was not in either scanner on its own — it was
+    /// what this function does with them, and a test asserting on `asked_for` alone would not have
+    /// seen a route go from unasked to asked.
+    fn unasked<'a>(
+        routes: &'a [(&'a str, Vec<&'a str>)],
+        asks: &[(&str, usize, String, &'static str)],
+    ) -> Vec<(&'a str, &'a str)> {
+        routes
+            .iter()
+            .flat_map(|(path, methods)| methods.iter().map(move |m| (*path, *m)))
+            .filter(|(path, method)| {
+                !asks.iter().any(|(_, _, ask, asked_method)| {
+                    asked_method.eq_ignore_ascii_case(method) && serves(path, ask)
+                })
             })
             .collect()
     }
@@ -6640,17 +6686,9 @@ mod cockpit_routes {
 
         let routes = entries(include_str!("skein-server.rs"));
         let asks = every_ask();
-        let unasked: Vec<(&str, &str)> = routes
-            .iter()
-            .flat_map(|(path, methods)| methods.iter().map(move |m| (*path, *m)))
-            .filter(|(path, method)| {
-                !asks.iter().any(|(_, _, ask, asked_method)| {
-                    asked_method.eq_ignore_ascii_case(method) && serves(path, ask)
-                })
-            })
-            .collect();
+        let uncalled = unasked(&routes, &asks);
 
-        let undeclared: Vec<String> = unasked
+        let undeclared: Vec<String> = uncalled
             .iter()
             .filter(|(path, method)| {
                 !declared
@@ -6671,7 +6709,7 @@ mod cockpit_routes {
         let outlived: Vec<String> = declared
             .iter()
             .filter(|(path, method, _)| {
-                !unasked
+                !uncalled
                     .iter()
                     .any(|(p, m)| p == path && method.eq_ignore_ascii_case(m))
             })
@@ -6775,6 +6813,59 @@ mod cockpit_routes {
         // Prose is not a request: these files name routes in comments more often than they call
         // them, and a scanner that read those would report the bugs they describe as live.
         assert!(asked_for("  // used to send the pump to `/api/repos/undefined/x`").is_empty());
+    }
+
+    /// **A route named only in an HTML comment has no caller, and the gate has to say so**
+    /// (SKEIN-987).
+    ///
+    /// Two of the three scanned files are HTML. `asked_for` skipped `//`, `*` and `/*` and not
+    /// `<!--`, so a sentence in `src/web/index.html` explaining where a pane's data comes from —
+    /// with the path in backticks, which is one of the three quotes this scanner looks for —
+    /// counted as a request to that route.
+    ///
+    /// The false accusation is the half you can see: the missing-path gate names a line nobody
+    /// fetches from. This asserts the half you cannot, and it is the worse one. A handler nothing
+    /// calls is what `every_method_this_router_registers_has_a_caller_or_a_declared_reason` exists
+    /// to name (SKEIN-308), and a comment mentioning its path was enough to make it read as called
+    /// — so that gate went green over exactly the thing it was written to catch. Measured on
+    /// master before the fix, with a route planted beside `/api/usage` and one comment line added
+    /// to `index.html`: all five tests in this module passed.
+    ///
+    /// Driven through `unasked`, the gate's own composition, rather than through `asked_for`
+    /// alone: neither scanner was wrong by itself, and an assertion on the scanner would not have
+    /// watched a route go from unasked to asked.
+    #[test]
+    fn a_route_named_only_in_an_html_comment_still_has_no_caller() {
+        // Assembled, like every other router fixture here: `docs/parity.md` counts this binary's
+        // routes by grepping its source for the router's own call.
+        let router = format!(" .{}(\"/api/only-in-a-comment\", {}(h)) ", "route", "get");
+        let routes = entries(&router);
+        assert_eq!(
+            routes,
+            vec![("/api/only-in-a-comment", vec!["get"])],
+            "the fixture router did not parse, so what follows proves nothing"
+        );
+
+        // The shape `src/web/index.html:1905` is in: prose, the path in backticks, no fetch.
+        let page = "          <!-- The pane is rendered from `/api/only-in-a-comment` rather than \
+                    written here. -->";
+        assert!(
+            asked_for(page).is_empty(),
+            "an HTML comment that only NAMES a route was read as a request to it: {:?}",
+            asked_for(page)
+        );
+
+        let asks: Vec<(&str, usize, String, &'static str)> = asked_for(page)
+            .into_iter()
+            .map(|(line, path, method)| ("fixture.html", line, path, method))
+            .collect();
+        assert_eq!(
+            unasked(&routes, &asks),
+            vec![("/api/only-in-a-comment", "get")],
+            "a route nothing calls read as called, because a comment names it — the defect \
+             SKEIN-308's gate exists to catch, inverted: the gate goes green over a handler \
+             reachable only by typing its URL"
+        );
     }
 }
 
