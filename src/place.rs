@@ -2915,6 +2915,35 @@ mod tests {
         );
         assert_ne!(said, mine, "the command ran here rather than in the box");
 
+        // **The anchor goes first and bwrap second, and killing bwrap first is precisely what
+        // orphans the anchor** (SKEIN-1005, which is SKEIN-861/892 in the Rust tier long after
+        // `tests/ui/lift.mjs` fixed the same two lines). There is no `--unshare-pid` above, so the
+        // anchor is in this process's pid namespace; `bash -c` execs the last command of its
+        // string, so the anchor pid IS the `sleep 60` and its argv is the two words `exec` left it
+        // with. `boxlike.kill()` reaches the bwrap and nothing else, and bwrap is what was WAITING
+        // on the anchor — so the anchor is reparented to pid 1 and runs out its full minute, on
+        // success as well as on failure, once per run of this test. Measured on this branch before
+        // this block: `cargo test --lib -- a_crossing_in_the_fleet_enters_the_box_without_sbx`
+        // ("1 passed") and then `node tests/ui/harness/leaks.mjs` three times 4s apart, 3 of 3 red
+        // over one pid ageing 0s, 5s, 9s at `ppid=1`.
+        //
+        // **`ns_start` is a pid-reuse guard rather than decoration.** This box is shared between
+        // several checkouts, the anchor may have died on its own, and by now its pid may be worn
+        // by a stranger — a `pkill` here once reaped 72 tmux servers whose owners could not
+        // afterwards be named, which `fixtureScopes` in `tests/ui/harness/leaks.mjs` records. The
+        // `starttime` this test already read to stamp the placement record is what tells the
+        // anchor from the stranger, and it is read back through the same [`parse_proc_starttime`]
+        // the crossing's own guard uses rather than through a second parse of field 22.
+        let still_the_anchor = std::fs::read_to_string(format!("/proc/{anchor}/stat"))
+            .ok()
+            .and_then(|stat| parse_proc_starttime(&stat))
+            .is_some_and(|started| started == ns_start);
+        if still_the_anchor {
+            // SAFETY: `kill` has no memory effects, and `anchor` is a pid this test's own bwrap
+            // wrote into a file in this test's own fixture directory, checked just above to be
+            // still the same process it was when that pid was read.
+            unsafe { libc::kill(anchor as libc::pid_t, libc::SIGKILL) };
+        }
         let _ = boxlike.kill();
         let _ = boxlike.wait();
         std::env::remove_var("SKEIN_HOME");
