@@ -2078,23 +2078,31 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
   chmod 700 "$SKEIN_GIT_TOKENS" 2>/dev/null || true
 
   # Route GitHub DIRECT for this scoped box — the line that makes the per-repo boundary REAL
-  # (SKEIN-548). The sandbox proxy at `$HTTPS_PROXY` TERMINATES TLS for the GitHub hosts and has the
-  # final say on the credential: a request through it carrying no token, a garbage token, or this
-  # box's own per-repo token is answered as the fleet ACCOUNT — so everything below (the helper, the
-  # own-repo token, the shim) narrows what a box's token can DO while the proxy quietly hands the
-  # box the whole account's reach. Measured 2026-09-15 from inside a box: `Bearer skein-test-garbage`
-  # to `api.github.com/user` is 200 through the proxy and 401 direct; the git wire protocol
-  # (`/<owner>/<repo>/info/refs?service=git-upload-pack`) for a private repo is 200 through the proxy
-  # with no credential and 401 direct. With sbx v0.43.0 a client credential the proxy did not issue
-  # is no longer forwarded either, so through the proxy this box's own token is dropped anyway —
-  # DIRECT is the only path on which this box's own token is ever seen.
+  # (SKEIN-548). Whether `$HTTPS_PROXY` terminates TLS for the GitHub hosts is the substrate's
+  # choice, not skein's, and it has already gone both ways: measured from inside a box on
+  # 2026-09-06 and again on 2026-09-15, it did, and had the final say on the credential — no token,
+  # a garbage token, and this box's own per-repo token were all answered as the fleet ACCOUNT.
+  # Measured again on 2026-09-21 it did not: every host tried presented its own real certificate
+  # (a plain CONNECT tunnel, MITMing nothing) and a garbage `Bearer` came back 401 where the same
+  # request came back 200 six days earlier. Nothing in this tree changed between those dates — the
+  # substrate did — and `/usr/local/share/ca-certificates/proxy-ca.crt`
+  # (`CN=Docker Sandboxes Proxy CA`) is still installed, so the 2026-09-06/15 behaviour is dormant
+  # machinery, not removed machinery, and can return without anything here changing. Do not read
+  # this comment for today's answer: `docs/threat-model.md`'s "GitHub through the sandbox proxy"
+  # row and the hourly `proxy_injection` health check (`src/health.rs`, SKEIN-927) carry it, because
+  # they are re-measured rather than remembered. Everything below (the helper, the own-repo token,
+  # the shim) narrows what a box's token can DO regardless of which answer that is. With sbx
+  # v0.43.0 a client credential the proxy did not issue is no longer forwarded either, so through
+  # the proxy this box's own token is dropped anyway — DIRECT is the only path on which this box's
+  # own token is ever seen.
   #
-  # So NO_PROXY names exactly the GitHub hosts the proxy MITMs — issuer `O=Docker Sandboxes` when
-  # reached through it, a real CA direct (measured 2026-09-15) — and git and gh honour NO_PROXY
-  # through libcurl and Go respectively. `localhost`/`127.0.0.1` stay direct too, so the
-  # `$SKEIN_GITHUB_API` stub the tests point at loopback keeps working. A `fleet`-scoped box does
-  # NOT reach this block: it keeps the proxy and the account-wide token, which is the honest third
-  # mode ("one PAT for the entire app, provided by the sbx secret") rather than a broken boundary.
+  # So NO_PROXY names exactly the GitHub hosts the proxy has MITMed before and may again — see
+  # `docs/threat-model.md` for which is true today rather than a certificate issuer asserted here —
+  # and git and gh honour NO_PROXY through libcurl and Go respectively. `localhost`/`127.0.0.1`
+  # stay direct too, so the `$SKEIN_GITHUB_API` stub the tests point at loopback keeps working. A
+  # `fleet`-scoped box does NOT reach this block: it keeps the proxy and the account-wide token,
+  # which is the honest third mode ("one PAT for the entire app, provided by the sbx secret")
+  # rather than a broken boundary.
   gh_direct="api.github.com,github.com,raw.githubusercontent.com,gist.github.com,copilot.github.com"
   case ",${no_proxy-}," in
     *",github.com,"*) ;;
