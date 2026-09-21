@@ -31,6 +31,16 @@ reason. Two consequences worth knowing: a field whose name is shared with anothe
 if *either* is read, and a field named something very common (`name`, `url`, `error`) is nearly
 impossible to catch here.
 
+**Loose about the object, strict about comments.** A line that opens a comment — `//`, `*`, `/*` or
+`<!--`, the four forms the scanned files use — is not a read, because the looseness above is only
+the right error while the miss stays the expensive direction. Until SKEIN-992 there was no comment
+filter at all, so one line of prose naming `.thatname` was enough to excuse a field nothing reads.
+Measured when the filter went in: 15 of the 118 serialised fields match on a comment line, and none
+is excused only that way, because each also has a real reader. The filter is per line, so the
+interior of a comment that runs on past its opening line is still scanned (SKEIN-996); the doc
+comment on `page_reads` in `tests/queue_field_readers.rs` carries both the measurement and the
+limit.
+
 ## The two ways a field gets on this list
 
 **Server-consumed.** The field is not for the page at all. It round-trips through the on-disk queue
