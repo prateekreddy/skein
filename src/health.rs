@@ -492,9 +492,27 @@ pub fn scratch_verdict(reported: Result<String, String>, whose: &str) -> HealthC
 }
 
 impl HealthReport {
+    /// How many checks [`HealthReport::checks`] returns — the length of its array, named rather
+    /// than written into the signature so that a test can read it without building a report
+    /// (`every_health_check_field_is_named_in_the_list`).
+    pub const CHECK_COUNT: usize = 14;
+
     /// Every check in the report, named. One list, so a check added to the struct and forgotten
     /// here shows up as a compile error rather than as a check nothing ever looks at.
-    pub fn checks(&self) -> [(&'static str, &HealthCheck); 12] {
+    ///
+    /// **That sentence was false for as long as this pattern ended in `..`** (SKEIN-1000). A `..`
+    /// makes the destructuring accept whatever it has not been told about, so two checks were added
+    /// to the struct and never listed here — `token_expiry` (SKEIN-928) and `proxy_injection`
+    /// (SKEIN-548) — and nothing failed. `health_report`'s `ok` counts both, so a fleet inside its
+    /// token's renewal window put a red row above the cockpit; and [`crate::queue::who_needs_you`]
+    /// builds its rows from THIS list, so the one surface whose job is "what needs a person" could
+    /// not produce a row for either. A red banner and a work queue that does not say why is the
+    /// exact shape the sentence above promises cannot happen.
+    ///
+    /// So every field is named, including the ones that are not checks: discarding them by name
+    /// costs one line each and is what makes the next addition — of any type — stop the build until
+    /// somebody decides which half it belongs in.
+    pub fn checks(&self) -> [(&'static str, &HealthCheck); Self::CHECK_COUNT] {
         let HealthReport {
             registry,
             sbx,
@@ -506,9 +524,25 @@ impl HealthReport {
             memory,
             disk,
             gitgate,
+            token_expiry,
+            proxy_injection,
             warden,
             cover,
-            ..
+            // Not checks, and named one by one rather than swept up by a wildcard, which is the
+            // whole point: a field added to the struct fails to compile until somebody has decided
+            // which of these two halves it belongs in.
+            ok: _,
+            build: _,
+            logins: _,
+            expired_logins: _,
+            runtime_updates: _,
+            models: _,
+            dark_boxes: _,
+            stale_boxes: _,
+            uncovered_boxes: _,
+            uncapped_boxes: _,
+            runtimes: _,
+            git_credential: _,
         } = self;
         [
             ("registry", registry),
@@ -521,6 +555,19 @@ impl HealthReport {
             ("memory", memory),
             ("disk", disk),
             ("gitgate", gitgate),
+            // Named for what it is about rather than for the field, like "isolation" below: `/v2`
+            // prints this key verbatim as the row's name (`src/web/v2.html:229`), beside box names
+            // and PR numbers. "expiry" on its own would be the one-word version and it is wrong
+            // here — this report also carries `expired_logins`, so an unqualified "expiry" names
+            // two different deadlines with different owners. "token life" is the label the
+            // cockpit's own `CHECKS` gives this check, so the diagnostics pane and the queue say
+            // one thing rather than two.
+            ("token life", token_expiry),
+            // "proxy" alone would read as "is the proxy working", which is not the question: the
+            // check is about WHOSE credential the proxy answers with, and a proxy that is working
+            // perfectly is exactly the case it fires on. "proxy credential" is what the same
+            // `CHECKS` calls it, for the same reason.
+            ("proxy credential", proxy_injection),
             ("warden", warden),
             // Named for what it is about rather than for the field: this key is what `/v2` puts
             // on the row, and "isolation" is a word somebody can act on where "cover" is jargon.
@@ -3242,6 +3289,128 @@ mod tests {
         }
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The one list is the whole list**: every `HealthCheck` field on [`HealthReport`] is named in
+    /// [`HealthReport::checks`], read out of this file's own source text (SKEIN-1000).
+    ///
+    /// **Be exact about what restores the promise and what this adds, because they are not the same
+    /// thing.** `checks`'s doc comment promises that a forgotten check is a compile error. What
+    /// delivers that is the *pattern* — with no `..`, a field added to the struct does not compile
+    /// until it is named on one side or the other — and no `#[test]` can assert it, because a
+    /// compile error is not a test outcome. This test does not restore that property and must not
+    /// be read as evidence of it; there is no compile-fail harness in this tree to assert it with.
+    ///
+    /// What it does is cover the two ways the promise goes quiet again:
+    ///
+    /// * **The `..` comes back**, and with it the silence this item is about. The first assertion
+    ///   is about the source construct because the promise is made of the source construct.
+    /// * **A check is named and then thrown away.** `token_expiry: _` in the discard block compiles
+    ///   perfectly, satisfies the pattern, and puts the field back in the dark. The set comparison
+    ///   catches that by name — which is why it compares names and not just [`CHECK_COUNT`].
+    ///
+    /// [`CHECK_COUNT`]: HealthReport::CHECK_COUNT
+    ///
+    /// Two things it does **not** see, said plainly so nobody reads more into a green run:
+    ///
+    /// * a check whose field is not spelled `HealthCheck` — a type alias, or an
+    ///   `Option<HealthCheck>` — since the struct half matches that type literally. Every check
+    ///   field is a bare `HealthCheck` today; one that is not would be invisible here while still
+    ///   failing to compile in the pattern, so the half that is missing is the cheaper half.
+    /// * whether a key is a name anybody can act on, or whether the check reaches a surface.
+    ///   `the_proxy_check_is_on_the_banner_and_in_the_diagnostics_pane` below is that half, for the
+    ///   page; nothing checks the wording, and nothing can.
+    ///
+    /// **The concrete changes that make it fail, named before it was written:** putting `..` back
+    /// in the pattern fails `the destructuring must not end in ..`; turning `token_expiry,` into
+    /// `token_expiry: _` and deleting its array entry fails `every check field is in the list`.
+    #[test]
+    fn every_health_check_field_is_named_in_the_list() {
+        let source = include_str!("health.rs");
+        // The first occurrence of each anchor is the definition, which is above this test module —
+        // so the copies of these strings in this function's own body are never what gets read.
+        let fn_at = source
+            .find("pub fn checks(&self)")
+            .expect("`checks` is not declared the way this test finds it — did it get renamed?");
+        let pattern_end = fn_at
+            + source[fn_at..]
+                .find("} = self;")
+                .expect("`checks` no longer destructures `self`, so this test reads nothing");
+        assert!(
+            !source[fn_at..pattern_end].contains(".."),
+            "the destructuring must not end in `..`: that is the whole of what makes a forgotten \
+             check a compile error, and while it was there `token_expiry` and `proxy_injection` \
+             both reached the struct without reaching this list, so the cockpit went red over a \
+             credential the work queue could not name (SKEIN-1000)"
+        );
+
+        // The array literal, by bracket depth rather than by a closing spelling — a `];` or an
+        // indent is a guess about rustfmt, and this is not.
+        let open = pattern_end
+            + source[pattern_end..]
+                .find('[')
+                .expect("`checks` returns no array literal");
+        let mut depth = 0usize;
+        let mut close = open;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = open + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let listed: std::collections::BTreeSet<&str> = source[open + 1..close]
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('('))
+            .map(|line| {
+                line.trim_end_matches(',')
+                    .trim_end_matches(')')
+                    .rsplit_once(", ")
+                    .unwrap_or_else(|| panic!("this is not a `(\"key\", field)` entry: {line}"))
+                    .1
+                    .trim()
+            })
+            .collect();
+        // Proves the extraction read the WHOLE array before anything is concluded from it: a scan
+        // that stopped early would otherwise report the fields it never reached as missing, which
+        // is a red that sends the reader to the wrong file.
+        assert_eq!(
+            listed.len(),
+            HealthReport::CHECK_COUNT,
+            "this test found {} of `checks`'s {} entries — it is mis-parsing the array, not \
+             finding a bug in it: {listed:?}",
+            listed.len(),
+            HealthReport::CHECK_COUNT
+        );
+
+        let struct_at = source
+            .find("pub struct HealthReport {")
+            .expect("`HealthReport` is not declared the way this test finds it");
+        let struct_end = struct_at
+            + source[struct_at..]
+                .find("\n}\n")
+                .expect("`HealthReport` is never closed at column 0");
+        let fields: std::collections::BTreeSet<&str> = source[struct_at..struct_end]
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|rest| rest.split_once(": "))
+            .filter(|(_, ty)| *ty == "HealthCheck,")
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            fields, listed,
+            "every check field is in the list, and these two are not the same set. A field on the \
+             left and not the right is a check nothing looks at — `who_needs_you` builds the work \
+             queue from `checks()` alone, so it cannot produce a row for one (SKEIN-1000). A name \
+             on the right and not the left is a binding this test cannot match to a field."
+        );
     }
 
     /// **The proxy check reaches the banner and the diagnostics pane, read out of the two arrays
