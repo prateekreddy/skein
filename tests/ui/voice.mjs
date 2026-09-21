@@ -270,4 +270,260 @@ check("and the backlog survives, so switching one on tells you what you missed",
 
 Date.now = realNow;
 
+// --- the ear: what opens the microphone, what does not, and what it says when it cannot ----------
+//
+// The same lift, applied to the other half of this feature. The mouth's rules were already here;
+// the ear's were asserted by nothing, and both bugs below shipped and stayed shipped because the
+// only test of the ear was `smoke.mjs`, which stands in a recogniser that cannot fail.
+//
+// What the fake recogniser records is deliberately small: which objects were told to `start`, which
+// were told to `stop`, what was set on them before the start, and what went into the strip. "The
+// microphone is open" is then `started && !stopped`, which is a property of the real code's
+// behaviour rather than of its text — the distinction `src/cockpit.rs` makes about the switch it
+// stopped asserting by string match.
+const earSource = [
+  "VOICE_LANG", "VOICE_TROUBLE", "recogniser", "localReady", "askLocal",
+  "hearing", "heardFinal", "listen", "stopListening",
+  "pttTimer", "PTT_HOLD", "holdPtt", "endPtt",
+].map(grab).join("\n");
+
+// One world per scenario, because `localAsked` is a once-ever latch and a shared world would carry
+// the first scenario's answer into every other one.
+function ear({ available, availableOnDevice, recognition = true, constructThrows, startThrows } = {}) {
+  const started = [], shown = [], asked = [];
+  let timers = [], seq = 0;
+  class Rec {
+    constructor() {
+      if (constructThrows) throw new Error("this browser will not make one");
+      this.phrases = [];
+      Rec.last = this;
+    }
+    start() {
+      if (startThrows) throw new Error("this browser will not start one");
+      this.started = true;
+      started.push(this);
+    }
+    // `stop` finalises rather than discards, which is what the page relies on to hear a command at
+    // all — so the fake ends the session the way a real one does.
+    stop() { this.stopped = true; this.onend?.(); }
+  }
+  if (available) Rec.available = opts => { asked.push(opts); return available(opts); };
+  if (availableOnDevice) Rec.availableOnDevice = lang => { asked.push(lang); return availableOnDevice(lang); };
+  const strip = { classList: { remove() {}, add() {}, toggle() {} }, querySelector: () => ({}) };
+  const world = new Function(
+    "window", "setTimeout", "clearTimeout", "showHeard", "vstrip", "heard", "boxes",
+    `${earSource}
+     return { listen, stopListening, holdPtt, endPtt, recogniser,
+              localReadyIs: () => localReady, listening: () => hearing };`,
+  )(
+    { SpeechRecognition: recognition ? Rec : undefined },
+    (fn, ms) => { timers.push({ fn, ms, id: ++seq }); return seq; },
+    id => { timers = timers.filter(t => t.id !== id); },
+    text => shown.push(text),
+    () => strip,
+    () => {},
+    [],
+  );
+  return {
+    ...world,
+    Rec,
+    asked,
+    shown,
+    // Every recogniser this world was told to start and has not been told to stop. A push-to-talk
+    // whose key is up and whose count here is not zero is the failure the page's own comment names:
+    // "the mic open for as long as the tab lives".
+    open: () => started.filter(r => !r.stopped).length,
+    fire: () => { const due = timers; timers = []; for (const t of due) t.fn(); },
+    pending: () => timers.length,
+  };
+}
+const key = { code: "AltRight" };
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+// What a failed attempt to listen must never be: the code on its own. A sentence is the thing a
+// person can act on, and the code is what sent the owner to ask an agent what his cockpit meant.
+const sentence = text => typeof text === "string" && text.trim().split(/\s+/).length >= 5;
+
+// --- what it says when it cannot listen ---------------------------------------------------------
+{
+  const e = ear({ recognition: false });
+  await e.listen();
+  check(
+    "a browser with no recogniser is told so, rather than nothing happening at all",
+    [e.shown.length, sentence(e.shown[0]), e.open()],
+    [1, true, 0],
+  );
+}
+{
+  const e = ear({ constructThrows: true });
+  await e.listen();
+  check(
+    "and so is one that has the name but will not make one",
+    [e.shown.length, sentence(e.shown[0]), e.open()],
+    [1, true, 0],
+  );
+}
+{
+  const e = ear({ startThrows: true });
+  await e.listen();
+  check(
+    "a start that throws says so and leaves nothing listening",
+    [sentence(e.shown.at(-1)), e.listening(), e.open()],
+    [true, null, 0],
+  );
+}
+{
+  // The reported bug, at the surface the owner actually met it on.
+  const e = ear();
+  await e.listen();
+  e.Rec.last.onerror({ error: "service-not-allowed" });
+  const said = e.shown.at(-1);
+  check(
+    "the refused service is a sentence, and the error code is not the message",
+    [sentence(said), said.includes("service-not-allowed"), e.listening()],
+    [true, false, null],
+  );
+}
+{
+  const e = ear();
+  await e.listen();
+  e.Rec.last.onerror({ error: "not-allowed" });
+  check("a blocked microphone still says it is blocked", e.shown.at(-1), "the microphone is blocked for this page");
+}
+{
+  const e = ear();
+  await e.listen();
+  e.Rec.last.onerror({ error: "some-error-nobody-has-seen" });
+  const said = e.shown.at(-1);
+  check(
+    "an error this page has never seen still gets a sentence, with its code inside it",
+    [sentence(said), said.includes("some-error-nobody-has-seen")],
+    [true, true],
+  );
+}
+{
+  // Not every ending is a failure: a key released with nothing said must not accuse the browser of
+  // anything. `listening…` is the only line these two leave behind.
+  const e = ear();
+  await e.listen();
+  e.Rec.last.onerror({ error: "no-speech" });
+  await e.listen();
+  e.Rec.last.onerror({ error: "aborted" });
+  check("silence and a change of mind explain nothing", e.shown, ["listening…", "listening…"]);
+}
+
+// --- on-device only where it is already there ---------------------------------------------------
+//
+// `processLocally` is a REQUIREMENT, not a preference: set it with no local model and the whole
+// recognition fails instead of falling back. Measured in Chromium 151 with no model installed —
+// `available({langs:["en-US"]})` is "available", `available({langs:["en-US"],processLocally:true})`
+// is "unavailable", and a start under the flag ends in an error with nothing heard. So the only
+// safe time to ask for it is when the answer is already in, and the only safe answer is "available".
+for (const [state, wanted] of [["available", true], ["unavailable", undefined],
+                               ["downloadable", undefined], ["downloading", undefined]]) {
+  const e = ear({ available: async () => state });
+  e.holdPtt(key);              // the hold is what asks
+  await flush();               // …and the answer arrives inside the 260 ms it lasts
+  e.fire();                    // …which is when the mic opens
+  check(
+    `a model that is "${state}" ${wanted ? "is used" : "is not asked for"}`,
+    [e.Rec.last.processLocally, e.open()],
+    [wanted, 1],
+  );
+}
+{
+  const e = ear({ available: async () => "available" });
+  e.holdPtt(key);
+  await flush();
+  e.fire();
+  check(
+    "the question is asked about the language the ear actually listens in",
+    [e.asked[0].langs, e.asked[0].processLocally, e.Rec.last.lang],
+    [[e.Rec.last.lang], true, "en-US"],
+  );
+}
+{
+  // The name this API shipped under before it was renamed. A probe that knows only one spelling
+  // answers `undefined` in the browser that has the other, and `undefined` is a permanent "no".
+  const e = ear({ availableOnDevice: async () => "available" });
+  e.holdPtt(key);
+  await flush();
+  e.fire();
+  check("the older spelling of the question is asked too", [e.asked, e.Rec.last.processLocally], [["en-US"], true]);
+}
+{
+  const e = ear();            // a browser with a recogniser and no way to ask about on-device
+  e.holdPtt(key);
+  await flush();
+  e.fire();
+  check(
+    "a browser that cannot be asked still listens, on whatever it uses by default",
+    [e.Rec.last.processLocally, e.open()],
+    [undefined, 1],
+  );
+}
+{
+  // Never awaited: the answer arriving late must not hold up the microphone, and must not force
+  // anything on a recogniser that is already running.
+  let settle;
+  const e = ear({ available: () => new Promise(r => { settle = r; }) });
+  e.holdPtt(key);
+  e.fire();
+  const opened = e.open();
+  settle("available");
+  await flush();
+  check(
+    "an answer that has not come back yet costs the hold nothing",
+    [opened, e.Rec.last.processLocally],
+    [1, undefined],
+  );
+}
+
+// --- and the microphone closes, however the hold ends -------------------------------------------
+//
+// The interleaving this is about: keydown starts the 260 ms timer, the key comes back up before it
+// fires, and whatever the release does has to leave nothing running — including in a world where
+// the start is not instantaneous. Make `listen()` asynchronous without holding the release and this
+// is the failure: `stopListening()` runs while the start is still in flight, finds `hearing` null,
+// stops nothing, and the mic opens after the key is gone with nothing left to close it.
+{
+  const e = ear({ available: async () => "available" });
+  e.holdPtt(key);              // the hold begins
+  e.fire();                    // …the 260 ms elapses and the start is made
+  e.endPtt();                  // …and the key comes up while it is still being made
+  await flush();               // …and now anything the start was waiting on comes back
+  check("a release that lands mid-start leaves no microphone open", e.open(), 0);
+}
+{
+  const e = ear();
+  e.holdPtt(key);
+  e.endPtt();                  // the key came up before the hold window elapsed
+  e.fire();                    // …so nothing is left to fire
+  check("a hold released before it opens anything opens nothing", [e.pending(), e.open()], [0, 0]);
+}
+{
+  // SKEIN-1002: `blur` is the release that arrives with no `keyup` behind it — the keyup goes to
+  // whatever window took the focus — so cancelling the pending hold has to be part of it. It was
+  // not, and the mic opened 210 ms into a page that was no longer in front of anybody.
+  const e = ear();
+  e.holdPtt(key);
+  e.endPtt();                  // what `window.blur` runs
+  e.fire();
+  check("losing the window mid-hold opens no microphone at all", [e.open(), e.listening()], [0, null]);
+}
+{
+  const e = ear();
+  e.holdPtt(key);
+  e.fire();
+  check("and a hold that runs its course does open one", [e.open(), e.listening() !== null], [1, true]);
+  e.endPtt();
+  check("which the release then closes", e.open(), 0);
+}
+{
+  const e = ear();
+  e.holdPtt(key);
+  e.holdPtt({ code: "BracketLeft" });   // ⌥[ — a chord, not a held mic
+  e.fire();
+  check("a chord cancels the hold rather than opening the mic", [e.pending(), e.open()], [0, 0]);
+}
+
 done();

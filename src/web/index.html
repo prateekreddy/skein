@@ -8227,20 +8227,112 @@ function heard(raw) {
   showHeard(`“${raw}” — not a command I know`, "done");
 }
 
-/// Start listening, or do nothing if this browser has no recogniser.
+// The one language this ear listens in, named once because two places have to agree on it: the
+// recogniser is set to it, and the on-device question below is asked ABOUT it. Asking whether a
+// model exists for one language and then listening in another is a probe that answers about
+// nothing.
+const VOICE_LANG = "en-US";
+
+/// The browser's recogniser, or null where there is none.
+///
+/// One spelling of the lookup, because everything that reaches for it has to reach for the SAME
+/// object: `tests/ui/smoke.mjs` stands a fake one in `window` before it holds the key, and a second
+/// lookup written differently is one the fake does not cover.
+function recogniser() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+/// Why an attempt to listen ended, in words rather than in its code.
+///
+/// `could not listen (service-not-allowed)` is what this used to say, and the owner asked what it
+/// meant instead of acting on it — which is the measure of an error message being wrong. Every
+/// entry here names what happened and what is left to do, the way the microphone arm already did.
+/// The last clause matters more than it looks: the ear is a shortcut, not the only way in, and
+/// somebody who has just been told it will not work needs to know they can still type.
+const VOICE_TROUBLE = {
+  "not-allowed": "the microphone is blocked for this page",
+  "service-not-allowed": "this browser will not let a page use its speech service — you can still type to a box",
+  "language-not-supported": `this browser has no speech model for ${VOICE_LANG} — you can still type to a box`,
+  "audio-capture": "no microphone answered — check which input this browser is using",
+  network: "the speech service could not be reached — check the network, or type to a box",
+  "phrases-not-supported": "this browser would not take the fleet's box names — try again, it listens without them",
+};
+
+// Whether this machine can recognise speech WITHOUT sending it anywhere: `null` until asked, then
+// `true` or `false`. It is a cached answer rather than a question asked at the moment the mic
+// opens, and both halves of that are load-bearing.
+//
+// **Asking is asynchronous and opening the mic must not be.** The availability query returns a
+// promise, and an `await` between the key going down and the mic opening is a window in which the
+// key can come back UP: the release runs `stopListening()`, finds `hearing` still null because the
+// start has not finished, stops nothing — and then the start completes and opens the microphone
+// after the key is gone, with nothing left that will ever close it. That is precisely the failure
+// the `blur` handler below exists to prevent, so the ear is not given a second road into it. The
+// question is asked when a hold BEGINS, inside the 260 ms the hold already costs, and `listen()`
+// only ever reads what has already come back.
+//
+// **So the first hold of a session may use the browser's default, and that is the right trade.**
+// Where the answer has not arrived, nothing is forced and the browser chooses for itself — which is
+// exactly what it would have done had this page never asked.
+let localReady = null, localAsked = false;
+
+/// Ask — once, and never awaited — whether recognition can happen on this device.
+///
+/// Only `"available"` counts. `"downloadable"` and `"downloading"` are a model that is not here
+/// yet, and this page does not download one or ask to: it is a two-second command, and a first use
+/// that stalls on a download is worse than one that quietly uses the recogniser the browser already
+/// has.
+function askLocal(Recognition) {
+  if (localAsked || !Recognition) return;
+  localAsked = true;
+  try {
+    // Both spellings, because the API was renamed after it shipped. `available({langs,
+    // processLocally})` is what is there now — the statics on `SpeechRecognition` in Chromium 151
+    // are exactly `available` and `install` — while `availableOnDevice(lang)` is the explainer's
+    // original name. A probe that knows only one of them returns `undefined` in the browser that
+    // has the other, and `undefined` is silently "no, for ever".
+    const asked = Recognition.available
+      ? Recognition.available({ langs: [VOICE_LANG], processLocally: true })
+      : Recognition.availableOnDevice?.(VOICE_LANG);
+    Promise.resolve(asked).then(state => { localReady = state === "available"; }, () => { localReady = false; });
+  } catch { localReady = false; }
+}
+
+/// Start listening, and say so when we cannot.
+///
+/// Every exit from here puts a sentence in the strip. Holding a key and getting nothing is
+/// indistinguishable from not having held it long enough (SKEIN-997), and by design the person
+/// holding it is not looking at the screen — so whatever is on the screen when they do look has to
+/// be the answer.
 function listen() {
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recognition || hearing) return;
+  const Recognition = recogniser();
+  if (!Recognition) return showHeard("this browser cannot listen — you can still type to a box", "done");
+  // Asked here as well as on the key press, because the command palette's "Listen for a command"
+  // reaches `listen()` with no hold in front of it. Costs nothing on the second call.
+  askLocal(Recognition);
+  if (hearing) return;
   let r;
-  try { r = new Recognition(); } catch { return; }
-  r.lang = "en-US";
+  try { r = new Recognition(); }
+  catch { return showHeard("this browser would not open a recogniser — you can still type to a box", "done"); }
+  r.lang = VOICE_LANG;
   r.continuous = false;
   r.interimResults = true;
   r.maxAlternatives = 1;
-  // On-device when the browser can: it keeps working with the network down, and the words never
-  // leave the machine. Best-effort — where it is unsupported the browser uses its own default, and
-  // a two-second command is the least sensitive thing on this page either way.
-  try { r.processLocally = true; } catch {}
+  // On-device only where the model is ALREADY installed, and never as a preference to fall back
+  // from, because `processLocally` is a REQUIREMENT and not a hint: set it with no local model and
+  // the whole recognition fails rather than going to the browser's own recogniser. Measured in
+  // Chromium 151 on a machine with no model — `available({langs:["en-US"]})` answers `"available"`
+  // while the same question with `processLocally: true` answers `"unavailable"`, and a start under
+  // the flag ends in an error event with nothing heard. Left unset, the browser chooses, which is
+  // the behaviour that works everywhere.
+  //
+  // **This line used to be `try { r.processLocally = true; } catch {}` and the `try` was guarding
+  // the wrong failure.** It catches a throw on ASSIGNMENT, which cannot happen: the property is on
+  // the prototype where it is supported, and assigning it where it is not just adds a property
+  // nobody reads. So the comment's "where it is unsupported the browser uses its own default" was
+  // true only of the browsers that ignore the flag entirely, and false — silently, permanently —
+  // of every browser that honours it without a model to honour it with.
+  if (localReady) r.processLocally = true;
   // The fleet's own vocabulary. Box names and branches are exactly the words a general recogniser
   // gets wrong, and exactly the ones skein knows. Proposed rather than shipped, so it is offered and
   // ignored where it is not understood — resolution against the live board is what actually carries
@@ -8262,9 +8354,15 @@ function listen() {
   };
   r.onerror = e => {
     hearing = null;
-    if (e.error === "not-allowed") showHeard("the microphone is blocked for this page", "done");
-    else if (e.error !== "aborted" && e.error !== "no-speech") showHeard(`could not listen (${e.error})`, "done");
-    else vstrip().classList.remove("show");
+    // `aborted` and `no-speech` are not failures — they are a key released with nothing said — so
+    // they take the strip away rather than explaining themselves. Everything else is something the
+    // person is owed a sentence about, and a code this page has never seen still gets one, with the
+    // code inside it: naming what we cannot explain beats "could not listen" on its own.
+    if (e.error === "aborted" || e.error === "no-speech") vstrip().classList.remove("show");
+    else showHeard(
+      VOICE_TROUBLE[e.error] || `this browser refused to listen (${e.error}) — you can still type to a box`,
+      "done",
+    );
   };
   r.onend = () => {
     hearing = null;
@@ -8273,7 +8371,7 @@ function listen() {
   };
   hearing = r;
   try { r.start(); showHeard("listening…", "listening"); }
-  catch { hearing = null; }
+  catch { hearing = null; showHeard("this browser would not start listening — you can still type to a box", "done"); }
 }
 function stopListening() {
   // `stop` rather than `abort`: it finalises what was already said instead of discarding it, which
@@ -8295,23 +8393,42 @@ const PTT_HOLD = 260;
 // never saw the second key of exactly the chords this is meant to stand aside for — the mic opened
 // 260ms into every ⌥[ tab switch, whenever any box tab was open. The comment above said a chord
 // cancels the timer; it did not, and a browser test caught it after months of failing unnoticed.
-document.addEventListener("keydown", e => {
+function holdPtt(e) {
   if (e.code !== "AltRight" || e.repeat) {
     // Any other key while Alt is down means a chord, not a held mic.
     if (pttTimer && e.code !== "AltRight") { clearTimeout(pttTimer); pttTimer = null; }
     return;
   }
   if (pttTimer || hearing) return;
+  // The hold is also the only moment this page asks whether the machine can hear on its own. It
+  // happens here rather than at load for two measured reasons: `available({processLocally:true})`
+  // CRASHES the renderer in Playwright's headless shell, which is the browser every suite in
+  // `tests/ui/` runs, and those suites stand their own recogniser in `window` before they press
+  // this key — so asking through `recogniser()` at press time asks the fake, exactly as the rest of
+  // the ear does. A page that never listens never asks at all, which is also the right answer for a
+  // query the platform treats as fingerprinting surface.
+  askLocal(recogniser());
   pttTimer = setTimeout(() => { pttTimer = null; listen(); }, PTT_HOLD);
-}, true);
-document.addEventListener("keyup", e => {
-  if (e.code !== "AltRight") return;
+}
+/// The end of a hold, however it ends: cancel one that has not opened the mic yet, and stop one
+/// that has.
+///
+/// **Both halves, always.** `keyup` used to be the only path that cleared the timer and `blur` the
+/// only one that stopped the recogniser, and the gap between them was reachable: lose the window
+/// 50 ms into a hold and `blur` stopped a `hearing` that was still null, cancelled nothing, and the
+/// timer fired 210 ms later into a page that no longer had focus — while the `keyup` went to
+/// whatever window did. Nothing was left that could close it, since a second `blur` cannot fire on
+/// a window that is already blurred, so the microphone stayed open for the life of the tab
+/// (SKEIN-1002) — which is the exact failure the comment on the `blur` line claimed to prevent.
+function endPtt() {
   if (pttTimer) { clearTimeout(pttTimer); pttTimer = null; }
   stopListening();
-});
+}
+document.addEventListener("keydown", holdPtt, true);
+document.addEventListener("keyup", e => { if (e.code === "AltRight") endPtt(); });
 // Losing the window with the key down would otherwise leave the mic open for as long as the tab
 // lives — the one failure of a push-to-talk that nobody notices until they hear themselves back.
-window.addEventListener("blur", stopListening);
+window.addEventListener("blur", endPtt);
 
 // ---------- the mouth: skein says which box needs you ----------
 //
