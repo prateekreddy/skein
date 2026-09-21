@@ -1215,61 +1215,61 @@ cited_by = ["docs/recovery-survey.md"]
 line = "_ => HealthCheck::unknown(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:694"]
+["src/health.rs:741"]
 line = "(Some(boxes), true) => HealthCheck::unknown(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:772"]
+["src/health.rs:819"]
 line = "None => HealthCheck::unsatisfied("
 window = "// unsatisfied arm has always been for: something a person can start.\u000bNone => HealthCheck::unsatisfied(\u000bnote(crate::warden_client::sighting_failure().unwrap_or_else(|| {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:838"]
+["src/health.rs:885"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(\"every running box is under the current isolation\"),\u000bfalse => HealthCheck::unsatisfied(\u000bformat!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:908"]
+["src/health.rs:955"]
 line = "Unusable { why, refused } => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1444"]
+["src/health.rs:1491"]
 line = "p if p.killed > 0 => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1479"]
+["src/health.rs:1526"]
 line = "None => HealthCheck::unsatisfied("
 window = "// box across. Nothing may drive this on its own.\u000bNone => HealthCheck::unsatisfied(\u000b\"no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1516"]
+["src/health.rs:1563"]
 line = "Err(error) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1527"]
+["src/health.rs:1574"]
 line = "(false, true) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1529"]
+["src/health.rs:1576"]
 line = "format!(\"install {name}, or start the server from a shell whose PATH has it\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1548"]
+["src/health.rs:1595"]
 line = "false => HealthCheck::unsatisfied("
 window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1639"]
+["src/health.rs:1686"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1649"]
+["src/health.rs:1696"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:2423"]
+["src/health.rs:2470"]
 line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
 cited_by = ["docs/recovery-survey.md"]
 
