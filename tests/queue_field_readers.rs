@@ -22,6 +22,12 @@
 //! page as a property access at all, without proving the object it came from is this payload. That
 //! is the error worth making: a false accusation gets this test deleted, a miss costs one census.
 //! `tests/page_scripts.rs` states the same trade for the same reason.
+//!
+//! **Loose about which object, strict about comments.** A line that opens a comment is not a read,
+//! because the looseness above only buys the first trade if the miss stays the expensive direction:
+//! with no comment filter at all, one line of prose naming `.thatname` excused a field nothing
+//! reads, and the gate went green over what it exists to catch (SKEIN-992). [`page_reads`] carries
+//! the four openers, how they were derived and what the filter does not see.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -207,7 +213,55 @@ fn renamed(attrs: &str) -> Option<String> {
 }
 
 /// Does the page read a property by this name, anywhere?
+///
+/// **A line that opens a comment is not a read** (SKEIN-992), and this scanner had no comment
+/// filter of any kind until it was. The direction that costs is reassurance: the gate below refuses
+/// a serialised field nothing reads, so one comment line writing `.thatname` anywhere in 13,233
+/// lines of page was enough to excuse it — a gate going green over exactly what it exists to catch.
+/// It is the defect SKEIN-987 fixed in the route gate, in the census that watches the other wire.
+///
+/// **The four openers are the ones the two scanned files actually use**, counted rather than copied
+/// from SKEIN-987's list, since [`PAGE`] is not the set that fix scanned:
+///
+/// ```sh
+/// for f in src/web/index.html src/web/vendor/cockpit.js; do
+///   for op in '<!--' '//' '/\*' '\*'; do printf '%s %s %s\n' "$f" "$op" \
+///     "$(grep -cE "^[[:space:]]*$op" $f)"; done; done
+/// ```
+///
+/// `index.html` is HTML with its script inline, so it has all four — 16 `<!--`, 3,514 `//`, 160
+/// `/*`, 3 `*`; `cockpit.js` is JavaScript and has three of them — 622, 5, 48. (Two of the three
+/// `*` lines in `index.html` are CSS universal selectors rather than comment interiors, at 29 and
+/// 1386. Skipping them can only lose matches, never invent one, and a stylesheet cannot read a
+/// field.)
+///
+/// Measured before the change, across the 118 serialised fields: 108 read by the page raw, 108 read
+/// with comment-opening lines dropped — **no field is excused this way today**, so this is a latent
+/// hole rather than a live one. Fifteen fields already match on a comment line, `Pr.url` and
+/// `FailedCheck.url` on three each; every one of them also has a real reader, which is the only
+/// reason the count did not move.
+///
+/// The honest limit, because it reads as more coverage than it is: this is per LINE, so it sees the
+/// line a comment OPENS on and not the interior of one that runs on. `src/web/index.html:1733`
+/// names `.claude` inside a comment that opened at 1732 and closes at 1744, and it is still
+/// scanned — one of four such interior lines in that file, none of which happens to name a payload
+/// field today (`.claude`, `.md`, `.mjs`, `.md`). `cockpit.js` has none, because its block comments
+/// indent their interiors with `*`, which is one of the four. SKEIN-996 carries what is left, with
+/// the reason a comment tracker is not obviously an improvement: a `<!--` inside a string would
+/// swallow every read after it, which is the direction that makes this gate green over anything.
 fn page_reads(page: &str, field: &str) -> bool {
+    page.lines().any(|line| line_reads(line, field))
+}
+
+/// One line of the page, read the way [`page_reads`] reads the whole of it.
+///
+/// Split out so the comment filter and the match live at the same granularity: the check is per
+/// line, and a whole-page `match_indices` cannot tell which line it landed on.
+fn line_reads(line: &str, field: &str) -> bool {
+    let t = line.trim_start();
+    if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") || t.starts_with("<!--") {
+        return false;
+    }
     let dotted = format!(".{field}");
     let boundary = |s: &str, at: usize, len: usize| {
         s[at + len..]
@@ -215,10 +269,10 @@ fn page_reads(page: &str, field: &str) -> bool {
             .next()
             .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
     };
-    page.match_indices(&dotted)
-        .any(|(at, _)| boundary(page, at, dotted.len()))
-        || page.contains(&format!("[\"{field}\"]"))
-        || page.contains(&format!("['{field}']"))
+    line.match_indices(&dotted)
+        .any(|(at, _)| boundary(line, at, dotted.len()))
+        || line.contains(&format!("[\"{field}\"]"))
+        || line.contains(&format!("['{field}']"))
 }
 
 /// Every `Type.field` named in `docs/queue-fields.md`'s machine-readable list.
@@ -236,12 +290,23 @@ fn declared() -> BTreeSet<String> {
 
 /// The whole census: every serialised field, and whether the page reads it.
 fn census() -> Vec<(String, bool)> {
-    let page = PAGE.map(read).join("\n");
+    let units: Vec<String> = PAYLOAD_UNITS.iter().map(|u| read_unit(u)).collect();
+    census_of(&units, &PAGE.map(read).join("\n"))
+}
+
+/// The census over source and page text handed in, rather than read off disk.
+///
+/// Lifted out of [`census`] so a test can drive what both gates below actually consume — the
+/// composition of [`serialised_fields`] and [`page_reads`] — over fixtures, instead of a second
+/// copy of it (SKEIN-992, following SKEIN-987's `unasked`). Neither scanner was wrong on its own
+/// there either, and an assertion on `page_reads` alone would not watch a field go from excused to
+/// needing a reader.
+fn census_of(units: &[String], page: &str) -> Vec<(String, bool)> {
     let mut all = Vec::new();
-    for file in PAYLOAD_UNITS {
-        for (ty, fields) in serialised_fields(&read_unit(file)) {
+    for source in units {
+        for (ty, fields) in serialised_fields(source) {
             for f in fields {
-                let read_by_page = page_reads(&page, &f);
+                let read_by_page = page_reads(page, &f);
                 all.push((format!("{ty}.{f}"), read_by_page));
             }
         }
@@ -251,17 +316,26 @@ fn census() -> Vec<(String, bool)> {
     all
 }
 
+/// Every field in `all` that the page does not read and `declared` does not excuse — the gate's
+/// own verdict, lifted out of [`every_serialised_queue_field_has_a_reader_or_a_declared_reason`]
+/// for the reason [`census_of`] gives.
+fn unread_and_undeclared<'a>(
+    all: &'a [(String, bool)],
+    declared: &BTreeSet<String>,
+) -> Vec<&'a str> {
+    all.iter()
+        .filter(|(_, read)| !read)
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !declared.contains(*name))
+        .collect()
+}
+
 /// The gate. A serialised field is read by the page, or `docs/queue-fields.md` says why not.
 #[test]
 fn every_serialised_queue_field_has_a_reader_or_a_declared_reason() {
     let declared = declared();
     let all = census();
-    let undeclared: Vec<&str> = all
-        .iter()
-        .filter(|(_, read)| !read)
-        .map(|(name, _)| name.as_str())
-        .filter(|name| !declared.contains(*name))
-        .collect();
+    let undeclared = unread_and_undeclared(&all, &declared);
 
     println!(
         "queue payloads: {} serialised fields, {} read by the page, {} declared in {DECLARED}",
@@ -426,6 +500,104 @@ fn the_gate_does_not_accuse_a_field_the_page_reads() {
     assert!(!page_reads("x.lane_two", "lane"));
     assert!(page_reads("x.lane;", "lane"));
     assert!(page_reads("x[\"lane\"]", "lane"));
+}
+
+/// **A field named only in a page comment still has no reader, and the gate has to say so**
+/// (SKEIN-992).
+///
+/// [`page_reads`] searched the whole page text with no comment filter of any kind, and the pages
+/// discuss field names as readily as they read them — 15 of the 118 serialised fields match on a
+/// comment line today. So one comment writing `.thatname` was enough to satisfy
+/// [`every_serialised_queue_field_has_a_reader_or_a_declared_reason`] for a field nothing reads:
+/// the gate whose own message says the field "is computed on every refresh, cached, and sent over
+/// the wire, and no failure will ever mention it", talked out of it by prose. Both gates take the
+/// same census, so the other one inverts the same way — a comment can make a live exemption in
+/// `docs/queue-fields.md` look outlived and get a true declaration deleted. That is why one of the
+/// three assertions in the loop is on the census entry itself: it is the input both gates share,
+/// and asserting it covers the second gate without a second copy of that gate's arithmetic.
+///
+/// The verdict is driven through [`unread_and_undeclared`], the gate's own composition, and not
+/// through [`page_reads`]: neither scanner was wrong by itself, and an assertion on the scanner
+/// would not have watched a field go from excused to named.
+///
+/// All four comment forms, because [`PAGE`] is HTML with inline script plus a JavaScript bundle and
+/// uses all four — the list is derived in [`page_reads`]'s doc comment rather than copied from
+/// SKEIN-987, which scanned a different set of files.
+#[test]
+fn a_field_named_only_in_a_page_comment_still_has_no_reader() {
+    let source = "\
+#[derive(Serialize)]
+pub struct Invented {
+    pub only_in_a_comment: String,
+}
+"
+    .to_string();
+    assert_eq!(
+        serialised_fields(&source).get("Invented"),
+        Some(&vec!["only_in_a_comment".to_string()]),
+        "the fixture payload did not parse, so what follows proves nothing"
+    );
+    let units = [source];
+    let no_declarations = BTreeSet::new();
+
+    for (form, page) in [
+        (
+            "<!--",
+            "        <!-- The pane is rendered from `q.only_in_a_comment` rather than here. -->",
+        ),
+        (
+            "//",
+            "        // `q.only_in_a_comment` used to be drawn here; the row went away.",
+        ),
+        (
+            "/*",
+            "        /* the row read q.only_in_a_comment before the pane was rewritten */",
+        ),
+        (
+            "*",
+            "         * and the caption came from q.only_in_a_comment, which nothing draws now",
+        ),
+    ] {
+        // The verdict first, deliberately: it is the assertion whose failure says what the defect
+        // costs, and a reader who sees it go red should read that sentence before the two below,
+        // which only localise it.
+        assert_eq!(
+            unread_and_undeclared(&census_of(&units, page), &no_declarations),
+            vec!["Invented.only_in_a_comment"],
+            "the gate did not name a field whose only mention in the page is a {form} comment, \
+             which is the gate going green over exactly what it exists to catch"
+        );
+        assert_eq!(
+            census_of(&units, page),
+            vec![("Invented.only_in_a_comment".to_string(), false)],
+            "the census BOTH gates take says a field named only in a {form} comment is read by \
+             the page — so a serialised field nothing reads is excused, and a live exemption for \
+             it in {DECLARED} reads as outlived"
+        );
+        assert!(
+            !page_reads(page, "only_in_a_comment"),
+            "a line opening a {form} comment only NAMES the field, and it was read as a read of it"
+        );
+    }
+
+    // The control: the same field, the same fixture, an actual read. Without this the assertions
+    // above would pass just as happily on a scanner that had stopped matching anything at all.
+    let drawn = "        row.textContent = q.only_in_a_comment;";
+    assert!(
+        page_reads(drawn, "only_in_a_comment"),
+        "a line that does read the field was not read as reading it, which would make every \
+         assertion above pass by matching nothing at all"
+    );
+    assert_eq!(
+        census_of(&units, drawn),
+        vec![("Invented.only_in_a_comment".to_string(), true)],
+        "the census says a field the page reads on a plain code line is unread"
+    );
+    assert!(
+        unread_and_undeclared(&census_of(&units, drawn), &no_declarations).is_empty(),
+        "the page reads the field and the gate named it anyway — the false accusation that gets a \
+         gate like this deleted"
+    );
 }
 
 /// `skip_serializing_if` still puts the field on the wire; a bare skip does not.
