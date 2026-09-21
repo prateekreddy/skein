@@ -26,7 +26,7 @@ the prose against.
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 157 unique, 160 occurrences
-grep -c 'function ' src/web/index.html                          # 428
+grep -c 'function ' src/web/index.html                          # 432
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -307,6 +307,15 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   resolution (named box → last spoken → selected → the only one owed an answer). Including
   **`tell it <words>` / `tell <box> <words>`, which posts a free-form prompt to the agent verbatim** —
   a second write path into a box, by voice.
+- **The composer stays a plain text field, because that is what makes a prompt dictatable.** There
+  are two shapes of voice here and the cockpit ships only one of them itself. Holding right-⌥ is
+  fire-and-forget: a closed verb list (`VOICE_VERBS`), and one open path (`tell`) that posts what it
+  heard with nothing in between to read first. **Writing a *prompt* by voice is the operating
+  system's job** — macOS Dictation into the mailbox composer (`#mbx-body`, "Message to the box(es)…
+  (⌘↵ to send)"), which transcribes on the Mac, leaves the words on screen to be read and edited,
+  and sends them on ⌘↵. A composer that stops being a field the OS can dictate into therefore loses
+  a capability nothing else provides. Nothing in the cockpit says any of this, which is how the
+  owner came to ask how to "enable voice for writing prompts".
 - **Desktop notifications** — permission, per-box tag and renotify, click focuses and opens the box.
 - **Writing a module note from the cockpit**, with a one-at-a-time lock, a fresh/stale/absent chip,
   per-module owners, and the rule that notes answer questions about a PR and never write its summary.
