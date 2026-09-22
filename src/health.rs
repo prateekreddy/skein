@@ -2314,7 +2314,7 @@ mod tests {
         // SKEIN-1027: this used to `.join()` a plain blocking `accept()` with no deadline of its
         // own at all, so a probe that never reached this listener for any reason would hang the
         // test forever. `finish_responder` unblocks it the same way `fake_proxy` now does.
-        let _ = finish_responder(port, handle);
+        finish_responder(port, handle);
         assert_eq!(
             reachable,
             GithubReach::Reachable,

@@ -1269,7 +1269,7 @@ line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:2634"]
+["src/health.rs:2656"]
 line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
 cited_by = ["docs/recovery-survey.md"]
 
