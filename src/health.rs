@@ -2294,7 +2294,9 @@ mod tests {
         }
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
+            let _ = ready_tx.send(());
             if let Ok((mut sock, _)) = listener.accept() {
                 let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                 let mut buf = [0u8; 1024];
@@ -2303,8 +2305,16 @@ mod tests {
                 let _ = sock.flush();
             }
         });
+        // Confirmed accepting before the probe starts, for the same reason `fake_proxy` in this
+        // module is (SKEIN-1024): `probe_github_reach_at` carries its own fixed wall-clock budget
+        // (`-m 5`), and a brand-new thread racing that budget for its first scheduler slot is a
+        // guess about the box's load, not a fact this test controls.
+        wait_until_accepting(ready_rx);
         let reachable = probe_github_reach_at(&format!("http://127.0.0.1:{port}/"));
-        let _ = handle.join();
+        // SKEIN-1027: this used to `.join()` a plain blocking `accept()` with no deadline of its
+        // own at all, so a probe that never reached this listener for any reason would hang the
+        // test forever. `finish_responder` unblocks it the same way `fake_proxy` now does.
+        finish_responder(port, handle);
         assert_eq!(
             reachable,
             GithubReach::Reachable,
@@ -2422,7 +2432,7 @@ mod tests {
             fake_proxy("HTTP/1.1 200 OK\r\nx-ratelimit-limit: 5000\r\nContent-Length: 0\r\n\r\n");
         let injected =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let _ = served.join();
+        let _ = finish_responder(port, served);
         assert_eq!(
             injected,
             ProxyCredential::Injected { ceiling: 5000 },
@@ -2437,7 +2447,7 @@ mod tests {
         ));
         let stripped =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let _ = served.join();
+        let _ = finish_responder(port, served);
         assert_eq!(
             stripped,
             ProxyCredential::Untouched,
@@ -2447,7 +2457,7 @@ mod tests {
         let (port, served) = fake_proxy("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         let untouched =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let _ = served.join();
+        let _ = finish_responder(port, served);
         assert_eq!(
             untouched,
             ProxyCredential::Untouched,
@@ -2486,7 +2496,7 @@ mod tests {
         let (port, served) = fake_proxy("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         let _ =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let request = served.join().expect("the fake proxy thread");
+        let request = finish_responder(port, served);
         // First, because it is the one an empty request answers: a probe that reached the proxy at
         // all is the precondition for anything the bytes say about what it sent.
         assert!(
@@ -2511,47 +2521,91 @@ mod tests {
     /// reaching out.
     const PROBE_TARGET_FOR_TESTS: &str = "http://api.github.invalid/rate_limit";
 
+    /// Blocks the caller until a just-spawned responder thread confirms it is actually about to
+    /// `accept()`, not merely that its listener is bound.
+    ///
+    /// **SKEIN-1024:** a narrowing, not the fix. `TcpListener::bind` already completes the
+    /// kernel-side `listen()`, so a probe's connection lands in the backlog whether or not the
+    /// responder thread has run; what this adds is that the probe starts only once the thread
+    /// has been scheduled at least once, so a responder that never ran before the probe's own
+    /// fixed budget (`curl -m 8`) expired is ruled out rather than guessed about. Holding the
+    /// thread past that budget does reproduce the ticket's text, but no load this box could
+    /// produce ever held a thread that long.
+    ///
+    /// **What the ticket actually saw** is the race [`finish_responder`] closes: the fixture's
+    /// own deadline, counted from thread start, dropped the listener before a late-starting
+    /// probe connected, so the probe was refused (`000`) and the captured request was empty.
+    /// Planting an 11s delay between this call and the probe reproduced that verbatim against
+    /// a 10s thread-start deadline, and passes now that no deadline exists.
+    ///
+    /// Kept because it is cheap and removes one way for the responder to lose a race it cannot
+    /// see; what makes these tests safe on a loaded box is that the test side has no wall clock
+    /// at all (see [`finish_responder`]). The production timeouts are untouched: they are the
+    /// budget a real proxy gets, and no business of this fixture's.
+    fn wait_until_accepting(ready: std::sync::mpsc::Receiver<()>) {
+        ready
+            .recv()
+            .expect("the fake server's thread panicked before it could start accepting");
+    }
+
+    /// Ends a single-shot responder thread with **no wall clock at all**.
+    ///
+    /// **SKEIN-1024, second round:** a fixed deadline counted from when the responder thread
+    /// STARTS races the very probe it exists to protect, because the probe can be slow to even
+    /// *begin* — a `curl` slow to fork under load, a wait on `env_lock` — for reasons that have
+    /// nothing to do with whether the responder is listening. Planting an 11s delay between the
+    /// readiness signal and the probe starting, with the old 10s-from-thread-start watchdog still
+    /// in place, reproduced the ticket's exact failure again: the watchdog fired first, the
+    /// responder accepted the watchdog's own empty connection and returned, and the real probe's
+    /// connection — arriving after the listener was already dropped — was refused. Worse, that
+    /// watchdog thread was detached (`drop` does not stop a thread), so on an ordinary run it
+    /// still fired 10s after thread-start regardless of whether the real connection had already
+    /// been served; by then the ephemeral port can belong to a LATER test's fake server, and the
+    /// watchdog steals that server's one accept.
+    ///
+    /// There is nothing to guess at here: a production probe already bounds itself (`curl -m`), so
+    /// by the time it returns to its caller it has either gotten an answer or given up for good.
+    /// One connection from THIS thread, now — synchronously, the instant our own test code gets
+    /// here, never on a timer and never from a detached thread — either unblocks a responder still
+    /// waiting (the probe never reached it, or gave up before the responder was scheduled), or is
+    /// refused against a socket nothing is listening on any more, because the real connection
+    /// already arrived and the responder has already returned and dropped the listener. Either way
+    /// at most one connection is EVER accepted — the real one or this one, never both — because the
+    /// responder calls `accept()` exactly once, and never after this function returns, because
+    /// nothing here runs on a delay.
+    fn finish_responder<T>(port: u16, handle: std::thread::JoinHandle<T>) -> T {
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        handle.join().expect("the fake server's thread panicked")
+    }
+
     /// A listener that answers one request as a proxy would, and hands the request back.
     ///
-    /// **`accept` has a deadline, and that is not tidiness.** Written with a plain blocking
-    /// `accept`, the sabotage this helper exists to catch — taking `-x` off the probe, so it never
-    /// reaches the proxy at all — made the test HANG rather than fail, which is the one outcome
-    /// `CONTRIBUTING.md`'s third rule says is worse than no test: a run that never finishes reports
-    /// nothing, and under `--no-fail-fast` it stops the thirty-six binaries behind it too. So the
-    /// wait ends, and the caller gets an empty request to assert about.
+    /// A plain blocking `accept()`, with no deadline of its own: the sabotage this exists to catch
+    /// — taking `-x` off the probe, so it never reaches the proxy at all — cannot make this HANG,
+    /// because [`finish_responder`] unblocks it deterministically the instant the probe (which
+    /// bounds itself) returns, whether or not a real connection ever arrived.
     fn fake_proxy(answer: impl Into<String>) -> (u16, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let answer = answer.into();
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
-        listener
-            .set_nonblocking(true)
-            .expect("a loopback listener can be polled");
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
+            let _ = ready_tx.send(());
             let mut seen = String::new();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut sock, _)) => {
-                        let _ = sock.set_nonblocking(false);
-                        let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-                        let mut buf = [0u8; 4096];
-                        if let Ok(read) = sock.read(&mut buf) {
-                            seen = String::from_utf8_lossy(&buf[..read]).to_string();
-                        }
-                        let _ = sock.write_all(answer.as_bytes());
-                        let _ = sock.flush();
-                        break;
-                    }
-                    Err(why) if why.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(_) => break,
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0u8; 4096];
+                if let Ok(read) = sock.read(&mut buf) {
+                    seen = String::from_utf8_lossy(&buf[..read]).to_string();
                 }
+                let _ = sock.write_all(answer.as_bytes());
+                let _ = sock.flush();
             }
             seen
         });
+        wait_until_accepting(ready_rx);
         (port, handle)
     }
 
@@ -3987,7 +4041,9 @@ mod tests {
         // And one that answers, advertising both doers.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
+            let _ = ready_tx.send(());
             for mut stream in listener.incoming().flatten() {
                 use std::io::{Read, Write};
                 let mut raw = [0u8; 4096];
@@ -4002,6 +4058,10 @@ mod tests {
                 );
             }
         });
+        // Confirmed accepting before the probe starts (SKEIN-1024): `sighting()`'s own budget
+        // (`GLANCE`, 2s) is tighter than the injection probe's, so a brand-new thread racing it for
+        // a first scheduler slot is, if anything, more exposed to the same guess about load.
+        wait_until_accepting(ready_rx);
         std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
         let answering = warden_health(crate::warden_client::sighting());
         std::env::remove_var("SKEIN_WARDEN");
@@ -4042,7 +4102,9 @@ mod tests {
         // setting `$SKEIN_WARDEN_PORT` without `$SKEIN_WARDEN`.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
+            let _ = ready_tx.send(());
             for mut stream in listener.incoming().flatten() {
                 use std::io::{Read, Write};
                 let mut raw = [0u8; 2048];
@@ -4052,6 +4114,9 @@ mod tests {
                 );
             }
         });
+        // Confirmed accepting before the probe starts -- see SKEIN-1024, noted at the sibling test
+        // above.
+        wait_until_accepting(ready_rx);
         std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
         let refused = warden_health(crate::warden_client::sighting());
         std::env::remove_var("SKEIN_WARDEN");

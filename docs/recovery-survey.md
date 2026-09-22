@@ -474,7 +474,7 @@ detected and the surface clears with nobody pressing anything.
 ## 2. `HealthCheck::unknown` — the fix field is empty by construction
 
 `src/health.rs:94` documents `unknown` as "could not be answered — `detail` says why it could not,
-not what is wrong", and `src/health.rs:2602` asserts the `fix` is empty. That is a defensible rule
+not what is wrong", and `src/health.rs:2656` asserts the `fix` is empty. That is a defensible rule
 for *not a fault*, and it is also how a person ends up reading a `!` on their board with nothing
 under it. Every row here is watched by the same 15s poll, so requirement 3 is met and requirement 2
 is not — **except the first row, which now carries its next step inside `detail`** (SKEIN-770). That
