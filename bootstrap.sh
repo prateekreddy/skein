@@ -11,9 +11,10 @@
 # wrapper script and no toolchain (SKEIN-312). `sbx exec` reads this on stdin, which is why it is a
 # script a person can read before they run it rather than a pipe into a shell.
 #
-# It is also **the one implementation of the build**. `fleet::build_script` runs this same file with
-# SKEIN_BOOTSTRAP_STOP_AFTER=build, so an upgrade from the cockpit and a first install cannot come
-# out differently — a second copy in Rust would be right on the day it was written.
+# It is also **the one implementation of the build**. Fleet creation runs this same file with
+# SKEIN_BOOTSTRAP_STOP_AFTER=build, and the cockpit's Update button runs all of it, so an upgrade
+# from the cockpit and a first install cannot come out differently — a second copy in Rust would be
+# right on the day it was written.
 #
 # ## Why the toolchain is not the sandbox's own
 #
@@ -60,11 +61,49 @@ url="${SKEIN_SOURCE_URL:-https://github.com/prateekreddy/skein.git}"
 # clone (SKEIN-461). Set SKEIN_SOURCE_REF to build a branch, tag or sha instead.
 ref="${SKEIN_SOURCE_REF:-}"
 
-# `build` stops after the binary is installed and the revision printed — how the cockpit's upgrade
-# path reuses this file without restarting anything. Empty means go all the way to a serving fleet.
+# `build` stops after the binary is installed and the revision printed — how fleet creation
+# (`fleet::build_server_in_sandbox`) reuses this file without restarting anything. Empty means go
+# all the way to a serving fleet, which is what a hand run and the cockpit's Update button both do.
 stop_after="${SKEIN_BOOTSTRAP_STOP_AFTER:-}"
 
+# Who started this, so a message can say how to start it again. `update` is the cockpit's Update
+# button (`update::run_script` sets it); anything else is a person with this file.
+from="${SKEIN_BOOTSTRAP_FROM:-}"
+if [ "$from" = update ]; then
+  what=update
+  again="press Update skein again"
+else
+  what=install
+  again="run bootstrap.sh again"
+fi
+
 say() { printf 'skein: %s\n' "$1" >&2; }
+
+# ---- nothing here may ask a question, because nobody is there to answer it -----------------------
+#
+# The Update button runs this file in a detached tmux pane that no person can see. On 2026-09-22 the
+# fetch below was refused the stored GitHub token, and git did what it does next: it opened the
+# pane's terminal and printed `Username for 'https://github.com':`. It waited there for 37 minutes,
+# with the button disabled and no line in the log saying why, until someone found the pane and
+# pressed C-c (SKEIN-1032). A hand run is no better placed: `sbx exec -i … bash < bootstrap.sh` feeds
+# this file on stdin, so there is no one at a prompt there either.
+#
+# So every way a command here can ask is closed, once, for everything below:
+#
+#   * `GIT_TERMINAL_PROMPT=0` — git dies with "terminal prompts disabled" instead of reading
+#     /dev/tty. The one that matters; `repos::fleet_git` sets it for the same reason (SKEIN-951).
+#   * `GIT_ASKPASS=` — empty, not unset. git asks an askpass program BEFORE it looks at the
+#     setting above, taking `GIT_ASKPASS`, then `core.askPass`, then `SSH_ASKPASS`; an empty
+#     `GIT_ASKPASS` is taken and skips all three, which unsetting it would not.
+#   * `GCM_INTERACTIVE=never` — Git Credential Manager, if an image has it, has its own prompts.
+#   * ssh, which none of the above reaches, is told `BatchMode=yes` further down, where there is a
+#     git to ask what ssh command it would otherwise have used.
+#
+# A refused credential then fails in seconds, and remote_git below says which one and what to do.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=
+export GCM_INTERACTIVE=never
+unset SSH_ASKPASS
 
 # ---- the fleet root, the one line here that needs sudo -------------------------------------------
 
@@ -388,17 +427,133 @@ fi
 
 # ---- the source ---------------------------------------------------------------------------------
 
+# ssh, which `GIT_TERMINAL_PROMPT` does not reach: it asks for a key's passphrase or about an
+# unknown host key on /dev/tty itself. `BatchMode=yes` makes it refuse instead, added to whatever
+# command git would have run anyway — `$GIT_SSH_COMMAND`, else `core.sshCommand` — so a key chosen
+# there is kept. `repos::ssh_that_cannot_ask` is the same rule for the fleet's own mirrors.
+ssh_cmd="${GIT_SSH_COMMAND:-$(git config --get core.sshCommand 2>/dev/null || true)}"
+export GIT_SSH_COMMAND="${ssh_cmd:-ssh} -o BatchMode=yes"
+
+# `owner/name`, and the host, out of a remote URL — `https://host/owner/name.git` and
+# `git@host:owner/name.git` alike. Only ever used to word a message.
+slug_of() {
+  printf '%s' "$1" | sed -E 's#^[a-z+]+://[^/]*/##; s#^[^/@:]+@[^:]+:##; s#\.git/*$##; s#/+$##'
+}
+host_of() {
+  printf '%s' "$1" | sed -E 's#^[a-z+]+://([^/@]*@)?([^/:]*).*#\2#; s#^[^/@:]+@([^:]+):.*#\1#'
+}
+
+# Whether git's credential helper is skein's own, `src/git-credential-skein.sh` — the only helper
+# whose files this can name.
+skein_helper() {
+  case "$(git config --get-all credential.helper 2>/dev/null)" in
+    *git-credential-skein*) return 0 ;;
+  esac
+  return 1
+}
+
+# The files skein's helper reads a token from for `$1` (owner/name), in the order it reads them:
+# the same lookup as `src/git-credential-skein.sh`, narrowest first.
+token_candidates() {
+  printf '%s\n' \
+    "$SKEIN_GIT_TOKENS/${1%%/*}%2F${1#*/}" \
+    "$SKEIN_GIT_TOKENS/read/${1%%/*}" \
+    "$SKEIN_GIT_TOKENS/read/_any"
+}
+
+# The file skein's helper handed git a token from for `$1`, or nothing: the first readable non-empty
+# candidate, as the helper takes it. Only asked when that helper is the one configured, because only
+# then is the answer about the token git actually sent.
+# `the_updates_fetch_names_the_file_whose_token_was_refused` runs the real helper and checks this
+# names the file it read.
+token_file_for() {
+  skein_helper && [ -n "${SKEIN_GIT_TOKENS:-}" ] || return 0
+  token_candidates "$1" | while IFS= read -r candidate; do
+    if [ -r "$candidate" ] && [ -s "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      break
+    fi
+  done
+}
+
+# Run a git that talks to the remote `$1`; on failure, say why in the owner's terms and stop.
+#
+# git's own words are passed through first, whole — they are the evidence. What is added is what
+# git cannot say: that this was a credential, which one, where it lives, and what to do. The two
+# cases are git's two sentences for them. "Authentication failed" is a credential that was SENT and
+# refused (git says it only after a helper answered); "could not read Username" is none at all, for
+# a remote that wanted one. A failure that is neither is not guessed at.
+remote_git() {
+  remote="$1"
+  shift
+  # git's stderr is kept in a variable, not a file, and its stdout passes through on descriptor 4:
+  # no `mktemp`, `cat` or `rm`, none of which this file may assume before it has a build to run.
+  exec 4>&1
+  said=$("$@" 2>&1 1>&4 4>&-) && rc=0 || rc=$?
+  exec 4>&-
+  [ -z "$said" ] || printf '%s\n' "$said" >&2
+  [ "$rc" = 0 ] && return 0
+
+  slug=$(slug_of "$remote")
+  host=$(host_of "$remote")
+  if [ "$host" = github.com ]; then who=GitHub; else who="$host"; fi
+  case "$said" in
+    *"Authentication failed"*)
+      file=$(token_file_for "$slug")
+      say ""
+      say "$who refused the stored token for $slug, so the $what stopped here instead of waiting at a"
+      say "password prompt nobody can see."
+      if [ -n "$file" ]; then
+        say "The token git sent is the one in $file."
+        say "Replace that token (or the stored GitHub token it is a copy of) with one that can read"
+        say "$slug, then $again."
+      else
+        helpers=$(git config --get-all credential.helper 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+        say "git got that token from its credential helper (${helpers:-none configured}), and skein"
+        say "cannot tell which file it read."
+        say "Replace that token with one that can read $slug, then $again."
+      fi
+      ;;
+    *"could not read Username"* | *"could not read Password"*)
+      say ""
+      say "$who asked for a login to read $slug and this $what had no token for it, so it stopped"
+      say "here instead of waiting at a password prompt nobody can see."
+      if skein_helper && [ -n "${SKEIN_GIT_TOKENS:-}" ]; then
+        say "skein's credential helper looked for one in these files and found none:"
+        token_candidates "$slug" | sed 's/^/skein:     /' >&2
+        say "Put a token that can read $slug in the first of them, then $again."
+      elif skein_helper; then
+        say "skein's credential helper is configured, but this $what was given no SKEIN_GIT_TOKENS"
+        say "directory, so it had nowhere to look for a token."
+        say "Store a token that can read $slug where skein keeps GitHub tokens, then $again."
+      else
+        say "Store a token that can read $slug where git's credential helper will find it, then"
+        say "$again."
+      fi
+      ;;
+    *"Permission denied (publickey"* | *"Host key verification failed"*)
+      say ""
+      say "$host refused this sandbox's ssh key for $slug (or does not know the host yet), so the"
+      say "$what stopped here instead of waiting at an ssh prompt nobody can see."
+      say "Give the sandbox a key $host accepts for $slug, or point SKEIN_SOURCE_URL at an https"
+      say "remote, then $again."
+      ;;
+  esac
+  exit 1
+}
+
 if [ -d "$src/.git" ]; then
   say "fetching ${ref:-the default branch}"
   # `HEAD` is a ref the remote always has, and it is the same thing a bare clone would take.
-  git -C "$src" fetch --depth 1 origin "${ref:-HEAD}"
+  remote_git "$(git -C "$src" remote get-url origin 2>/dev/null || printf '%s' "$url")" \
+    git -C "$src" fetch --depth 1 origin "${ref:-HEAD}"
   git -C "$src" checkout -f FETCH_HEAD
 else
   say "cloning $url at ${ref:-the default branch}"
   if [ -n "$ref" ]; then
-    git clone --depth 1 --branch "$ref" "$url" "$src"
+    remote_git "$url" git clone --depth 1 --branch "$ref" "$url" "$src"
   else
-    git clone --depth 1 "$url" "$src"
+    remote_git "$url" git clone --depth 1 "$url" "$src"
   fi
 fi
 
@@ -777,6 +932,27 @@ is_ours() {
     | grep -qxF -e "SKEIN_HOME=$skein_home" -e "SKEIN_FLEET_ROOT=$fleet_root"
 }
 
+# **Never this run's own ancestors, however much they look like ours.** The Update button runs this
+# file in a tmux pane, and when the cockpit's own server was what started that tmux server, the tmux
+# server inherited the listening socket (skein-server's descriptor 3 is not close-on-exec) and has
+# the server's environment — so it holds :$port and names this install's volume, which is both
+# halves of "provably ours" above. Stopping it ends this run mid-sentence, with no exit status
+# recorded, which is the stranded pane of SKEIN-1032 by another road. Measured on tmux 3.x: a tmux
+# server started by a process holding a listener holds it too; the pane under it does not.
+#
+# `$$` rather than the subshell's own pid because that is what POSIX sh has; the subshell the Update
+# button runs this in is a child of `$$`, holds nothing, and so needs no entry of its own.
+ancestors=''
+a=$$
+while [ -n "$a" ] && [ "$a" -gt 1 ] 2>/dev/null; do
+  ancestors="$ancestors $a "
+  a=$(awk '/^PPid:/ { print $2 }' "/proc/$a/status" 2>/dev/null)
+done
+is_ancestor() { case "$ancestors" in *" $1 "*) return 0 ;; esac; return 1; }
+
+# What the fix below may stop: provably ours, and not something this run is running inside.
+stoppable() { is_ours "$1" && ! is_ancestor "$1"; }
+
 # Field 22 of `/proc/<pid>/stat`, the process's start time: with the pid, what makes "the process I
 # read a moment ago" a fact rather than a number that may since have been reused. Empty for a
 # process that is gone or a zombie — neither of which is anything to signal.
@@ -810,7 +986,7 @@ if ! await_expected; then
   mine=''
   strangers=''
   for p in $holders; do
-    if is_ours "$p"; then mine="$mine $p"; else strangers="$strangers $p"; fi
+    if stoppable "$p"; then mine="$mine $p"; else strangers="$strangers $p"; fi
   done
 
   if [ -n "$mine" ] && [ -z "$strangers" ] && [ -n "$expected" ]; then
@@ -855,9 +1031,15 @@ if [ -z "$expected" ] || [ "$answering" != "$expected" ]; then
     say "Holding :$port:"
     for p in $holders; do
       say "    pid $p  $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)"
-      is_ours "$p" || strangers="$strangers $p"
+      stoppable "$p" || strangers="$strangers $p"
     done
   fi
+  for p in $strangers; do
+    if is_ancestor "$p"; then
+      say "pid $p is the process this $what is running under, which inherited :$port from the cockpit"
+      say "that started it; this $what does not stop it, because that would end the $what itself."
+    fi
+  done
   if [ -n "$strangers" ]; then
     say "This install did not stop pid${strangers} itself: it stops only what it can prove is its"
     say "own — a process naming $doorway or $server, or this fleet's volume or"
@@ -885,6 +1067,8 @@ fi
 
 say "built $revision"
 say "the cockpit is listening on :$port inside the sandbox, and answers as $answering — the build just installed"
+# The rest is for a first install, and the Update button's reader already has the cockpit open.
+[ "$from" = update ] && exit 0
 cat >&2 <<EOF
 
 skein: open what the cockpit prints for its token, and the install is done.
