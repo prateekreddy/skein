@@ -12515,7 +12515,7 @@ for a in sys.argv[2:]:
             "git",
             &format!(
                 "mkdir -p {checkout}\nprintf 'DOORWAY' > {checkout}/server-doorway.py\ncase \"$*\" \
-                 in *rev-parse*) echo deadbee ;; esac\nexit 0",
+                 in *rev-parse*|*describe*) echo deadbee ;; esac\nexit 0",
                 checkout = checkout.display()
             ),
         );
@@ -12530,9 +12530,11 @@ for a in sys.argv[2:]:
         for present in ["cc", "curl", "jq"] {
             stub(present, "exit 0");
         }
-        // python3 is a stub here only so the image counts as complete; assertion 3 replaces it
-        // with one that records.
-        stub("python3", "exit 0");
+        // python3 is a stub here so the image counts as complete, and so the install's last step
+        // — asking the server on the port which build it is (`python3 -`) — is answered with the
+        // build the git stub reports, since nothing here serves. Assertion 3 replaces it with one
+        // that records. The real question, against a real doorway, is `tests/fleet_move.rs`'s.
+        stub("python3", "[ \"$1\" = - ] && echo deadbee\nexit 0");
 
         let path = format!("{}:{}", bin.display(), env!("PATH"));
         let out = std::process::Command::new("bash")
@@ -12816,7 +12818,7 @@ for a in sys.argv[2:]:
         stub(
             "git",
             &log,
-            "case \"$*\" in *rev-parse*) echo deadbee ;; esac\nexit 0",
+            "case \"$*\" in *rev-parse*|*describe*) echo deadbee ;; esac\nexit 0",
         );
         stub(
             "cargo",
@@ -12833,6 +12835,9 @@ for a in sys.argv[2:]:
         for present in ["cc", "curl", "python3", "tmux", "jq"] {
             stub(present, &log, "exit 0");
         }
+        // Nothing serves here, so the install's closing question — which build answers on the
+        // port, asked as `python3 -` — is answered by the stub with the build git reports.
+        stub("python3", &log, "[ \"$1\" = - ] && echo deadbee\nexit 0");
         // Re-stubbed after the loop: the supervisor must be *started*, so `has-session` has to say
         // there is none. A stub that exited 0 for everything would take the reload branch and this
         // would assert nothing about what the session is given.
@@ -14311,9 +14316,11 @@ for a in sys.argv[2:]:
         /// the scan below is what decides: a name the code gains and this does not carry fails, and
         /// a name this carries and the code has dropped fails too.
         ///
-        /// `server.tmux` was here and is not, and that is the second half of SKEIN-529 working as
-        /// intended: the scan reads names spelled after `{}/.skein/` and `$skein_dir/`, and the
-        /// socket is now spelled under `private/` on both sides, so nothing anchors it any more.
+        /// `server.tmux` left this list with SKEIN-529, when the socket moved under `private/` on
+        /// both sides, and came back with SKEIN-1020 for `review-github.token`'s reason:
+        /// `start-door.sh` spells the OLD path, because a fleet serving since before the move still
+        /// has its cockpit's session there and the upgrade has to find it and move it. It is the
+        /// live socket on such a fleet, so it is skein's own and never a stray.
         /// `review-github.token` stays because `stale_sandbox_secrets` still spells the OLD path it
         /// exists to delete.
         const FILES: &[&str] = &[
@@ -14323,6 +14330,7 @@ for a in sys.argv[2:]:
             "review-github.token",
             "server-doorway.py",
             "server.door",
+            "server.tmux",
             "skein",
             "skein-home",
             "skein-server",
