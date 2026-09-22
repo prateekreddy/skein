@@ -49,8 +49,78 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Per-process counter for request-body temp names, so two threads never pick the same one.
+/// Per-process counter for [`RequestScratch`] names, so two threads never pick the same one.
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+/// How many taken names [`RequestScratch::new`] steps past before it gives up and says so.
+const SCRATCH_ATTEMPTS: u32 = 64;
+
+/// **The directory a GitHub call keeps its request body and header dump in, made for that call and
+/// entered by nobody else** (SKEIN-1022).
+///
+/// Both files used to sit directly in the temp directory under a name anyone could predict —
+/// `skein-req-<pid>-<n>`, with `n` counting up from nought — and both opens FOLLOWED whatever was
+/// already there: `File::create` has no `O_EXCL`, and curl's `-D` is the same (measured with curl
+/// 8.18.0: a symlink at the `-D` path had its target truncated and replaced by the header block). On
+/// a host with a shared world-writable `/tmp` and `fs.protected_symlinks=0`, another local user could
+/// plant a symlink at the next name and have skein overwrite any file skein can write.
+///
+/// **A directory, rather than `create_new` on each file, because skein does not open the second
+/// file — curl does**, and nothing tells curl to refuse a symlink. Pre-creating the header file
+/// exclusively would hold only where `/tmp` is sticky: without the sticky bit the other user may
+/// unlink it and plant the symlink between this side's create and curl's open. `mkdir` is exclusive
+/// by definition, fails on a symlink at the name rather than following it (`EEXIST`, measured), and
+/// makes the directory 0700 at birth — so no path under it can be planted, whichever program opens
+/// it. The request body is still written with [`crate::secret::create_private`] inside it.
+///
+/// **A name already taken is stepped past, never used and never removed.** Whatever is there —
+/// somebody's planted symlink, or the directory of an earlier run that was SIGKILLed before its
+/// guard could drop, which the pid and counter can repeat after a reboot — is not this call's, and a
+/// GitHub call must not start failing over debris. So the next counter value is tried, up to
+/// [`SCRATCH_ATTEMPTS`], and only a temp directory full of taken names is an error.
+///
+/// **The pid is the LAST field of the name**, `skein-gh-<n>-<pid>`, and that is deliberate:
+/// `tests/common/mod.rs`'s `sweep_abandoned` reads the last `-` field of every `skein-*` entry
+/// in the temp directory as the pid of the run that owns it, and removes the entry when no such
+/// process is alive. Under the old `<pid>-<n>` shape it would have read the COUNTER as a pid — and
+/// a directory, unlike the old loose files, is something `remove_dir_all` removes. Pid last, a live
+/// call's directory is kept and a killed one's is swept.
+struct RequestScratch {
+    dir: std::path::PathBuf,
+}
+
+impl RequestScratch {
+    fn new(base: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt as _;
+        for _ in 0..SCRATCH_ATTEMPTS {
+            let dir = base.join(format!(
+                "skein-gh-{}-{}",
+                REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                std::process::id()
+            ));
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(RequestScratch { dir }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{SCRATCH_ATTEMPTS} names in a row were already taken in {}",
+                base.display()
+            ),
+        ))
+    }
+}
+
+impl Drop for RequestScratch {
+    /// `remove_dir_all` does not follow a symlink inside what it removes, and nothing but this call
+    /// could have put one there.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
 
 /// How long a hold lasts when `/rate_limit` reports nothing spent, or cannot be read at all.
 ///
@@ -357,8 +427,9 @@ fn call(
 ///
 /// The dump goes to a FILE and never to stdout, for the same reason the request body does: stdout
 /// already carries the body with the status written after it, and a header block mixed into that
-/// would be split off as the status by the `rsplit_once('\n')` below. 0600, and removed on every
-/// path out including the deadline and the transport failure.
+/// would be split off as the status by the `rsplit_once('\n')` below. 0600, inside a directory
+/// only this call can enter ([`RequestScratch`]), and removed on every path out including the
+/// deadline and the transport failure.
 fn call_reading_headers(
     method: &str,
     url: &str,
@@ -383,50 +454,41 @@ fn call_reading_headers(
     // request body.
     //
     // A file is safe for this half and not for the other: the body is a query, while the token is
-    // the thing that must never touch the filesystem or `ps`. 0600 and removed either way.
-    let body_file = body.map(|body| {
-        let path = std::env::temp_dir().join(format!(
-            "skein-req-{}-{}",
-            std::process::id(),
-            REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let write = || -> std::io::Result<()> {
-            let mut file = std::fs::File::create(&path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            }
-            file.write_all(body.as_bytes())
-        };
-        write().map(|()| path.clone()).map_err(|e| {
-            let _ = std::fs::remove_file(&path);
-            format!("writing the request body: {e}")
-        })
-    });
-    let body_file = match body_file {
-        Some(Ok(path)) => Some(path),
-        Some(Err(e)) => return Err(e),
-        None => None,
-    };
-    // Where curl is told to write the response headers, when anybody wants them. Named before the
-    // arguments are built and cleaned up beside `body_file` on every path out, so the two temporary
-    // files have one lifetime between them rather than two that can disagree.
-    let header_file = match keep_headers {
+    // the thing that must never touch the filesystem or `ps`.
+    //
+    // Both files live in one directory this call made for itself, and only when there is a file to
+    // put in it — see [`RequestScratch`] for why a directory, and why that closes the header half
+    // too. Dropped on every path out, including the `?`s below, which the closure it replaced
+    // could not reach.
+    let scratch = match body.is_some() || keep_headers {
         false => None,
-        true => Some(std::env::temp_dir().join(format!(
-            "skein-hdr-{}-{}",
-            std::process::id(),
-            REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ))),
+        true => Some(
+            RequestScratch::new(&std::env::temp_dir())
+                .map_err(|e| format!("making a private directory for the request: {e}"))?,
+        ),
     };
-    // Both temporary files, removed on every path out of this function — the spawn failure, the
-    // missing pipes, the deadline, and the ordinary return. Written once so that a return added
-    // later cannot leave a request body or a header dump behind in `/tmp`.
-    let scrub = || {
-        for path in [&body_file, &header_file].into_iter().flatten() {
-            let _ = std::fs::remove_file(path);
+    let body_file = match (body, &scratch) {
+        (Some(body), Some(scratch)) => {
+            let path = scratch.dir.join("request");
+            crate::secret::create_private(&path)
+                .and_then(|mut file| file.write_all(body.as_bytes()))
+                .map_err(|e| format!("writing the request body: {e}"))?;
+            Some(path)
         }
+        _ => None,
+    };
+    // Where curl is told to write the response headers, when anybody wants them. Created here,
+    // 0600, so that what curl opens is a file this call already owns: measured with curl 8.18.0, a
+    // `-D` path that exists is truncated and written in place (same inode, mode kept), and one that
+    // is a symlink is FOLLOWED — which is why the directory, not this file, is the defence.
+    let header_file = match (keep_headers, &scratch) {
+        (true, Some(scratch)) => {
+            let path = scratch.dir.join("headers");
+            crate::secret::create_private(&path)
+                .map_err(|e| format!("making the response-header file: {e}"))?;
+            Some(path)
+        }
+        _ => None,
     };
     let mut args: Vec<String> = vec![
         "-sS".into(),
@@ -508,13 +570,7 @@ fn call_reading_headers(
                 format!("curl: {e}")
             }
         });
-    let mut child = match child {
-        Ok(child) => child,
-        Err(e) => {
-            scrub();
-            return Err(e);
-        }
-    };
+    let mut child = child?;
     // Registered before this side blocks on anything, so a Ctrl-C arriving between the spawn and
     // the first `try_wait` finds the group rather than an empty table. Underscored because the
     // waiting loop below returns from inside: the guard goes when the scope does, which is the line
@@ -536,7 +592,6 @@ fn call_reading_headers(
         _ => {
             // The GROUP, not the pid: see the spawn above. `end_group` reaps as well.
             crate::util::end_group(&mut child);
-            scrub();
             return Err("curl started without pipes".into());
         }
     };
@@ -572,7 +627,6 @@ fn call_reading_headers(
                 Some(status) => break status,
                 None if std::time::Instant::now() >= deadline => {
                     crate::util::end_group(&mut child);
-                    scrub();
                     let got = arrived.load(std::sync::atomic::Ordering::Relaxed);
                     return Err(match got {
                         0 => format!("GitHub did not answer within {}s", timeout.as_secs()),
@@ -590,13 +644,13 @@ fn call_reading_headers(
     };
     let stdout = out_thread.join().unwrap_or_default();
     let stderr = err_thread.join().unwrap_or_default();
-    // Read before the scrub, and empty when nobody asked for it or curl never got as far as a
+    // Read before `scratch` goes, and empty when nobody asked for it or curl never got as far as a
     // response — which is a real state the caller must tell apart from "no such header".
     let headers = header_file
         .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
-    scrub();
+    drop(scratch);
     if !status.success() {
         return Err(transport_failure(
             status.code(),
@@ -2591,5 +2645,135 @@ mod tests {
         let got = got.expect("a dead connection on a GET must be asked again");
         assert_eq!(got.get("login").and_then(|v| v.as_str()), Some("someone"));
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// **A path planted where a GitHub call keeps its request body is refused, not written
+    /// through, and debris at the name costs the call nothing** (SKEIN-1022).
+    ///
+    /// Planted at the exact names the next call will try, in the real temp directory, because
+    /// that is what the attacker in [`RequestScratch`]'s doc does: a symlink at the first name to a
+    /// directory this test owns, and at the second a real directory holding a stale `request`,
+    /// the way a SIGKILLed run leaves one. The call must step past both into the third name.
+    ///
+    /// Counterfactuals, each planted and watched: `DirBuilder::create` swapped for
+    /// `create_dir_all`, which accepts a directory that is already there and so follows the
+    /// symlink, fails `nothing is written through the planted symlink`; `AlreadyExists` returning
+    /// its error rather than stepping to the next name fails `a taken name is stepped past`; a
+    /// `remove_dir_all` of a taken name before stepping past it fails `somebody else's directory
+    /// is left as it was`; and a `RequestScratch` that is never removed fails `nothing of the call
+    /// is left behind`. A stub on loopback answers, so nothing here reaches GitHub.
+    #[test]
+    fn a_path_planted_at_the_request_scratch_name_is_stepped_past_not_written_through() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::Ordering;
+        let _g = crate::testutil::env_lock();
+
+        // A GitHub that records what it was sent and answers with a header only `-D` can see.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+        let recording = received.clone();
+        std::thread::spawn(move || {
+            if let Some(mut stream) = listener.incoming().flatten().next() {
+                let mut buf = [0u8; 4096];
+                let mut got = Vec::new();
+                // Until the body has arrived: it is the one thing this test sends.
+                while !String::from_utf8_lossy(&got).contains("\"example\"") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => got.extend_from_slice(&buf[..n]),
+                    }
+                }
+                *recording.lock().unwrap() = got;
+                let body = b"{\"ok\":true}";
+                let head = format!(
+                    "HTTP/1.1 200 X\r\nX-Skein-Example: thing\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        // Whatever is planted goes afterwards, however this test ends.
+        struct Planted(Vec<std::path::PathBuf>);
+        impl Drop for Planted {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = std::fs::remove_file(path);
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+        let base = std::env::temp_dir();
+        let name = |n: u64| base.join(format!("skein-gh-{n}-{}", std::process::id()));
+        let first = REQUESTS.load(Ordering::SeqCst);
+        let (symlink, debris, used) = (name(first), name(first + 1), name(first + 2));
+        let _planted = Planted(vec![symlink.clone(), debris.clone()]);
+
+        let victim = crate::testutil::tempdir();
+        let victim: &std::path::Path = victim.as_ref();
+        std::os::unix::fs::symlink(victim, &symlink).expect("planting the symlink");
+        std::fs::create_dir(&debris).expect("planting the debris");
+        std::fs::write(debris.join("request"), "a SIGKILLed run's body").unwrap();
+        // Presence before absence: the symlink leads where the attack needs it to.
+        assert!(
+            std::fs::metadata(&symlink).is_ok_and(|m| m.is_dir()),
+            "the planted symlink does not resolve to a directory, so nothing below tests anything"
+        );
+
+        let answered = call_reading_headers(
+            "POST",
+            // `/rate_limit` is the one path a rate hold does not gate, so a hold left by a
+            // neighbouring test cannot turn this into a refusal that never makes a directory.
+            &format!("http://127.0.0.1:{port}/rate_limit"),
+            &fixture_token(),
+            Some("{\"thing\":\"example\"}"),
+            "application/json",
+            Duration::from_secs(10),
+            true,
+        );
+
+        let written: Vec<_> = std::fs::read_dir(victim).unwrap().flatten().collect();
+        assert!(
+            written.is_empty(),
+            "nothing is written through the planted symlink, yet {:?} appeared in its target",
+            written.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            REQUESTS.load(Ordering::SeqCst),
+            first + 3,
+            "a taken name is stepped past: two names were taken, so the third is the one used \
+             (another value here also means something else took a name meanwhile)"
+        );
+        let (status, body, headers) =
+            answered.expect("a taken name is stepped past, not reported as a failed call");
+        assert_eq!((status, body.as_str()), (200, "{\"ok\":true}"));
+        assert!(
+            headers.contains("X-Skein-Example: thing"),
+            "the header dump did not come back: {headers:?}"
+        );
+        let sent = String::from_utf8_lossy(&received.lock().unwrap()).into_owned();
+        assert!(
+            sent.contains("{\"thing\":\"example\"}"),
+            "the request body did not reach the stub: {sent}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(debris.join("request"))
+                .ok()
+                .as_deref(),
+            Some("a SIGKILLed run's body"),
+            "somebody else's directory is left as it was"
+        );
+        assert!(
+            std::fs::symlink_metadata(&symlink).is_ok_and(|m| m.file_type().is_symlink()),
+            "somebody else's directory is left as it was — the symlink is gone"
+        );
+        assert!(
+            !used.exists(),
+            "nothing of the call is left behind, yet {} is still there",
+            used.display()
+        );
     }
 }

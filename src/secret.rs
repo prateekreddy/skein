@@ -302,7 +302,10 @@ fn temp_beside(path: &Path) -> PathBuf {
 /// protection that is silently absent on half the machines skein runs on, and `libc` is a
 /// dependency this crate does not otherwise have. `a_symlink_at_the_temp_path_is_not_followed`
 /// checks the property that is actually here rather than the flag that would imply it.
-fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+///
+/// `pub(crate)` because `github::call_reading_headers` writes each request body with it: a file
+/// that is 0600 at birth and never somebody else's symlink is what that wants too (SKEIN-1022).
+pub(crate) fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
