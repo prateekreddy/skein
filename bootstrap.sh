@@ -744,17 +744,102 @@ port_holders() {
 # `$SKEIN_BOOTSTRAP_ANSWER_WAIT` is a seam for the tests of the failure below, which would
 # otherwise each spend the whole wait finding out what they already know.
 answer_wait="${SKEIN_BOOTSTRAP_ANSWER_WAIT:-60}"
-waited=0
-answering=''
-while :; do
-  answering=$(answering_build)
-  if [ -n "$expected" ] && [ "$answering" = "$expected" ]; then
-    break
+await_expected() {
+  waited=0
+  answering=''
+  while :; do
+    answering=$(answering_build)
+    if [ -n "$expected" ] && [ "$answering" = "$expected" ]; then
+      return 0
+    fi
+    [ "$waited" -ge "$answer_wait" ] && return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# ---- and when it is not: fix what is provably ours, and hand over what is not --------------------
+#
+# A cockpit left serving the old build is not an error to report and walk away from; the person
+# who ran this wanted the new build answering, and when what stands in the way is a piece of THIS
+# install — a doorway or server started before the upgrade and never replaced — this file is the
+# one thing that can say so for certain, so it stops it and asks again. A short gap on the port is
+# the price, and a stale cockpit is worse.
+#
+# "Provably ours" is narrow on purpose: the process's command line names this install's doorway or
+# server path as an argument, or its environment names this install's volume or fleet root. A
+# fixture's doorway on the same port (SKEIN-1019), another user's process, or one whose `/proc` this
+# user cannot read, is none of those, and is left alone — named, with the one command that frees
+# the port, because stopping a stranger's process on a guess is the worse failure.
+is_ours() {
+  tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null | grep -qxF -e "$doorway" -e "$server" && return 0
+  tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null \
+    | grep -qxF -e "SKEIN_HOME=$skein_home" -e "SKEIN_FLEET_ROOT=$fleet_root"
+}
+
+# Field 22 of `/proc/<pid>/stat`, the process's start time: with the pid, what makes "the process I
+# read a moment ago" a fact rather than a number that may since have been reused. Empty for a
+# process that is gone or a zombie — neither of which is anything to signal.
+started_at() {
+  awk '{ sub(/^.*\) /, ""); if ($1 != "Z") print $20 }' "/proc/$1/stat" 2>/dev/null
+}
+
+# Stop pid $1, known to have started at $2: TERM, a few seconds, then KILL — rechecking before
+# each signal that the pid is still that process, so a pid reused in between is never touched.
+stop_recorded() {
+  [ -n "$2" ] && [ "$(started_at "$1")" = "$2" ] || return 0
+  kill -TERM "$1" 2>/dev/null || return 0
+  n=0
+  while [ "$n" -lt 30 ]; do
+    [ "$(started_at "$1")" = "$2" ] || return 0
+    sleep 0.1
+    n=$((n + 1))
+  done
+  [ "$(started_at "$1")" = "$2" ] && kill -KILL "$1" 2>/dev/null
+  return 0
+}
+
+port_free() {
+  hex=$(printf ':%04X' "$port")
+  ! awk -v p="$hex" '$4 == "0A" && substr($2, length($2) - 4) == p { found = 1 } END { exit !found }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+if ! await_expected; then
+  holders=$(port_holders)
+  mine=''
+  strangers=''
+  for p in $holders; do
+    if is_ours "$p"; then mine="$mine $p"; else strangers="$strangers $p"; fi
+  done
+
+  if [ -n "$mine" ] && [ -z "$strangers" ] && [ -n "$expected" ]; then
+    say "the cockpit on :$port answers as ${answering:-nothing}, not $expected; stopping pid${mine}, this"
+    say "install's own doorway/server from before the upgrade, which still holds the port"
+    # Recorded before anything is signalled: the supervisor loop that would restart a stopped
+    # doorway (its parent, when that parent is this install's `while [ -f '$doorway' ]`), then the
+    # holders themselves. The loop goes first, or it puts back what was just stopped.
+    loops=''
+    for p in $mine; do
+      parent=$(awk '/^PPid:/ { print $2 }' "/proc/$p/status" 2>/dev/null)
+      if [ -n "$parent" ] && tr '\0' ' ' <"/proc/$parent/cmdline" 2>/dev/null \
+        | grep -qF -- "while [ -f '$doorway' ]"; then
+        loops="$loops $parent:$(started_at "$parent")"
+      fi
+    done
+    recorded=''
+    for p in $mine; do recorded="$recorded $p:$(started_at "$p")"; done
+    for e in $loops $recorded; do stop_recorded "${e%%:*}" "${e#*:}"; done
+
+    n=0
+    while ! port_free && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+    # Stopping the loop above ends that session. If it was the one on `$sock`, nothing supervises
+    # the port any more, and the door has to be put back; if another is there, its doorway is
+    # already retrying the bind and needs nothing.
+    tmux -S "$sock" has-session -t skein-server 2>/dev/null || "$skein_dir/start-door.sh"
+    await_expected || true
   fi
-  [ "$waited" -ge "$answer_wait" ] && break
-  sleep 1
-  waited=$((waited + 1))
-done
+fi
 
 if [ -z "$expected" ] || [ "$answering" != "$expected" ]; then
   say "built $revision and installed it at $server, but the cockpit on :$port is not serving it."
@@ -765,17 +850,36 @@ if [ -z "$expected" ] || [ "$answering" != "$expected" ]; then
     say "Nothing answered /api/health on :$port with a build within ${answer_wait}s."
   fi
   holders=$(port_holders)
+  strangers=''
   if [ -n "$holders" ]; then
     say "Holding :$port:"
     for p in $holders; do
       say "    pid $p  $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)"
+      is_ours "$p" || strangers="$strangers $p"
     done
-  else
-    say "Nothing this user can see is holding :$port."
   fi
-  say "The doorway this install started is the tmux session on $sock:"
-  say "    tmux -S $sock capture-pane -p -t skein-server"
-  say "Once whatever holds :$port is stopped, $skein_dir/start-door.sh puts the new build behind it."
+  if [ -n "$strangers" ]; then
+    say "This install did not stop pid${strangers} itself: it stops only what it can prove is its"
+    say "own — a process naming $doorway or $server, or this fleet's volume or"
+    say "root in its environment — and that is not. If it should not be holding :$port, this frees it:"
+    say ""
+    say "    kill${strangers}"
+  elif [ -z "$holders" ] && port_free; then
+    say "Nothing is listening on :$port at all, so the doorway this install started has not come up."
+    say "What it says is here:"
+    say ""
+    say "    tmux -S $sock capture-pane -p -t skein-server"
+  elif [ -z "$holders" ]; then
+    say "Nothing this user can see is holding :$port, so whatever holds it belongs to another user and"
+    say "this install cannot tell what it is. If it should not be holding :$port, this frees it:"
+    say ""
+    say "    sudo fuser -k $port/tcp"
+  else
+    say "It is this install's own, and stopping it did not bring the new build up. What the doorway"
+    say "says is here:"
+    say ""
+    say "    tmux -S $sock capture-pane -p -t skein-server"
+  fi
   exit 1
 fi
 

@@ -1669,17 +1669,152 @@ fn bootstrap_over_two_supervisors_keeps_the_one_holding_the_port_and_ends_the_ot
     assert!(ok, "the install did not succeed:\n{said}");
 }
 
-/// **The check that would have told the truth**: when what answers on the port is not the build
-/// just installed, the install says so, fails, and names the pid holding the port — rather than
-/// printing "built <sha>" and "listening" over a cockpit serving something else.
+/// Field 22 of `/proc/<pid>/stat`, or `None` for a process that is gone or a zombie — the same
+/// "is it still that process" question bootstrap.sh asks before it signals anything.
+fn started_at(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(") ")? + 2..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    if fields.first() == Some(&"Z") {
+        return None;
+    }
+    fields.get(19)?.parse().ok()
+}
+
+/// Kills, on the way out of a test however it leaves, exactly the processes it recorded — each
+/// only if it is still the process that was recorded (`BoxlikeNamespace`'s rule in
+/// `src/testutil.rs`). Never by pattern: another lane's fixture can have the same shape.
+struct Recorded(Vec<(u32, u64)>);
+
+impl Drop for Recorded {
+    fn drop(&mut self) {
+        for &(pid, started) in &self.0 {
+            if started_at(pid) == Some(started) {
+                // SAFETY: `kill` has no memory effects; the pid was recorded by this test and
+                // checked on the line above to still be the process it recorded.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+    }
+}
+
+/// **A stale cockpit that is this install's own is FIXED, not reported.** A doorway from this same
+/// fleet — started before the upgrade, supervised by nothing any more, still holding the port and
+/// answering with the old build — is exactly what an upgrade exists to replace, and bootstrap.sh is
+/// the one thing that can prove it is its own (its command line names this install's doorway). So
+/// it stops it, lets the new supervisor's doorway take the port, and the new build answers.
 ///
-/// The holder here is a stale server from an older build that no supervisor knows about — the
-/// shape of the stranded fixture doorway that took :7878 on the live fleet (SKEIN-1019).
-///
-/// What would make it fail: trusting the file on disk, i.e. removing the closing check — the
-/// install then reports success, which is the first assertion.
+/// What would make it fail: reporting instead of fixing — the install then exits 1 over a holder
+/// it could have stopped, which is the first assertion.
 #[test]
-fn bootstrap_fails_naming_the_holder_when_the_answering_build_is_not_the_one_it_installed() {
+fn bootstrap_stops_its_own_stale_doorway_and_the_new_build_answers() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+
+    // The stale cockpit: this fleet's own doorway, orphaned — started through `sh … &` so that it
+    // is reparented and reaped as a leftover in a real sandbox is — with the old build behind it.
+    fleet.retire(&fleet.new_sock());
+    let skein = fleet.fleet_root.join(".skein");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "SKEIN_HOME='{h}' python3 '{d}' '{p}' '{s}' '{st}' </dev/null >'{log}' 2>&1 & echo $!",
+            h = fleet.home.display(),
+            d = fleet.doorway().display(),
+            p = fleet.port,
+            s = skein.join("skein-server").display(),
+            st = skein.join("server.door").display(),
+            log = root.join("stale-door.log").display(),
+        ))
+        .env_clear()
+        .env("PATH", fleet.path())
+        .output()
+        .expect("the stale doorway started");
+    let door: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("the stale doorway's pid");
+    let mut recorded = Recorded(vec![]);
+    if let Some(started) = started_at(door) {
+        recorded.0.push((door, started));
+    }
+    assert!(
+        fleet.wait_answering("aaaa111"),
+        "the stale doorway never served — the fixture is wrong, not the install"
+    );
+    let server: Vec<u32> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|pid| {
+            fs::read_to_string(format!("/proc/{pid}/status"))
+                .unwrap_or_default()
+                .lines()
+                .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["PPid:", &door.to_string()])
+        })
+        .collect();
+    for &pid in &server {
+        if let Some(started) = started_at(pid) {
+            recorded.0.push((pid, started));
+        }
+    }
+    assert_eq!(
+        recorded.0.len(),
+        2,
+        "the fixture does not have a stale doorway with its server behind it: {:?}",
+        recorded.0
+    );
+
+    let (ok, said) = fleet.bootstrap("bbbb222", 5);
+    assert!(
+        ok,
+        "the install reported its own stale doorway instead of stopping it — the fix was one it \
+         could prove was its own to make:\n{said}"
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("bbbb222"),
+        "the new build is not answering after the stale doorway was stopped:\n{said}"
+    );
+    for &(pid, started) in &recorded.0 {
+        assert_ne!(
+            started_at(pid),
+            Some(started),
+            "pid {pid} of the stale cockpit is still running:\n{said}"
+        );
+    }
+    assert!(
+        said.contains("stopping pid") && said.contains(&door.to_string()),
+        "the install did not say what it stopped and why:\n{said}"
+    );
+    assert!(
+        said.contains("answers as bbbb222"),
+        "the install did not end by naming the build that answers:\n{said}"
+    );
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "the fix did not leave exactly one supervisor:\n{said}"
+    );
+}
+
+/// **A holder that is NOT provably this install's is left alone** — named, with the one command
+/// that frees the port, and a sentence saying why the install did not run it itself. The holder is
+/// a stale server from a DIFFERENT fleet root, which is the shape of the stranded fixture doorway
+/// that took :7878 on the live fleet (SKEIN-1019): stopping it on a guess is the worse failure.
+///
+/// What would make it fail: judging a stranger to be ours — the install then stops it, which is
+/// the first assertion; or trusting the file on disk, i.e. removing the closing check — the
+/// install then reports success, which is the second.
+#[test]
+fn bootstrap_leaves_a_holder_that_is_not_its_own_and_names_the_command_that_frees_the_port() {
     let _env = env_lock();
     if cannot_hold_a_door() {
         return;
@@ -1687,15 +1822,19 @@ fn bootstrap_fails_naming_the_holder_when_the_answering_build_is_not_the_one_it_
     let root = scratch();
     let fleet = Install::new(&root);
 
-    // A stale server holding the port: the stand-in, pre-built at an old revision, run bare.
-    let stale = root.join("stale-server");
+    // Another fleet's server, from an older build, holding the port: its own fleet root, its own
+    // volume, its own path — nothing about it names this install.
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir_all(elsewhere.join("skein")).unwrap();
+    fs::write(elsewhere.join("skein/api-token"), format!("{TOKEN}\n")).unwrap();
+    let stale = elsewhere.join("stale-server");
     fs::write(&stale, SERVER.replace("@BUILD@", "0ld0000")).unwrap();
     let child = Command::new("python3")
         .arg(&stale)
         .env_clear()
         .env("PATH", fleet.path())
-        .env("SKEIN_FLEET_ROOT", &fleet.fleet_root)
-        .env("SKEIN_HOME", &fleet.home)
+        .env("SKEIN_FLEET_ROOT", elsewhere.join("boxes"))
+        .env("SKEIN_HOME", elsewhere.join("skein"))
         .env("STALE_PORT", fleet.port.to_string())
         .spawn()
         .expect("the stale server ran");
@@ -1706,24 +1845,37 @@ fn bootstrap_fails_naming_the_holder_when_the_answering_build_is_not_the_one_it_
             let _ = self.0.wait();
         }
     }
-    let stale_server = Reap(child);
+    let stranger = Reap(child);
+    let pid = stranger.0.id();
     assert!(
         fleet.wait_answering("0ld0000"),
         "the stale server never answered — the fixture is wrong, not the install"
     );
+    let started = started_at(pid).expect("the stale server is running");
 
     let (ok, said) = fleet.bootstrap("aaaa111", 3);
+    assert_eq!(
+        started_at(pid),
+        Some(started),
+        "the install stopped pid {pid}, a process from another fleet root that it could not prove \
+         was its own:\n{said}"
+    );
     assert!(
         !ok,
-        "the install reported success while an older build answered on the cockpit's port:\n{said}"
+        "the install reported success while another fleet's older build answered on the \
+         cockpit's port:\n{said}"
     );
     assert!(
-        said.contains("0ld0000"),
-        "the install did not say which build is answering:\n{said}"
+        said.contains(&format!("    kill {pid}\n")),
+        "the install did not give the one command that frees the port:\n{said}"
     );
     assert!(
-        said.contains(&format!("pid {}", stale_server.0.id())),
-        "the install did not name the process holding the port:\n{said}"
+        said.contains("did not stop") && said.contains("prove"),
+        "the install did not say why it left the holder running:\n{said}"
+    );
+    assert!(
+        said.contains("0ld0000") && said.contains(&format!("pid {pid}")),
+        "the install did not say what answers and who holds the port:\n{said}"
     );
     assert!(
         !said.contains("answers as"),
