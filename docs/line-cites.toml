@@ -313,13 +313,13 @@ line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server.rs:5162"]
+line = "async fn login_terminal("
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server.rs:5168"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:5162"]
-line = "async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:5171"]
@@ -1269,7 +1269,7 @@ line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:2602"]
+["src/health.rs:2634"]
 line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
 cited_by = ["docs/recovery-survey.md"]
 
