@@ -361,7 +361,7 @@ pub(crate) fn local_liveness(
 /// Split on the last `)` rather than the first, and on `)` rather than on whitespace, because a
 /// process's `comm` is arbitrary bytes in parens: a box named `foo bar)baz` would break every
 /// simpler parse, and the failure would be a box reported dead while it ran.
-fn parse_proc_starttime(stat: &str) -> Option<u64> {
+pub(crate) fn parse_proc_starttime(stat: &str) -> Option<u64> {
     let after = stat.rsplit_once(')')?.1;
     // Field 22 overall is field 20 of what follows the comm — the probe's `cut -d' ' -f20`.
     after.split_whitespace().nth(19)?.parse().ok()
@@ -2832,20 +2832,34 @@ mod tests {
         std::env::set_var("SKEIN_HOME", &dir);
         let anchor_at = dir.join("anchor");
         let bwrap_err = dir.join("bwrap.err");
-        let mut boxlike = std::process::Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "--"])
-            .arg("bash")
-            .arg("-c")
-            .arg(format!("echo $$ > {}; sleep 60", anchor_at.display()))
-            // stdout nulled: a child that outlives this holds an inherited pipe open, and
-            // `cargo test` then looks like a hang long after the test finished. stderr goes to a
-            // FILE rather than to `/dev/null` for the same reason inverted — a file holds no pipe
-            // open, so it costs nothing here and it is the only place bwrap's own refusal is
-            // recorded. Nulling it is why 179KB of CI log never said `apparmor` or `userns`.
-            .stdout(std::process::Stdio::null())
-            .stderr(std::fs::File::create(&bwrap_err).expect("a file for bwrap's stderr"))
-            .spawn()
-            .expect("start a box-like namespace");
+        // **Into the guard at the spawn, not at the end.** Everything below unwinds past a plain
+        // teardown — four assertions, an `expect`, and the `panic!` in the anchor wait a few lines
+        // down, which is itself a panic that would strand the bwrap it is complaining about
+        // (SKEIN-1008). `BoxlikeNamespace` kills the anchor and then the bwrap from its `Drop`, so
+        // the failing run leaves as little behind as the passing one.
+        //
+        // There is **no `--unshare-pid`**, which is what makes the anchor a separate thing to kill:
+        // it is an ordinary process in this pid namespace, and `bash -c` execs the last command of
+        // its string, so the anchor pid IS the `sleep 60`. Killing the bwrap reaches the bwrap and
+        // nothing else, and bwrap is what was WAITING on the anchor — so bwrap first reparents the
+        // sleep to pid 1 to run out its full minute (SKEIN-1005, which is SKEIN-861/892 in the Rust
+        // tier long after `tests/ui/lift.mjs` fixed the same two lines).
+        let mut boxlike = crate::testutil::BoxlikeNamespace::holding(
+            std::process::Command::new("bwrap")
+                .args(["--dev-bind", "/", "/", "--"])
+                .arg("bash")
+                .arg("-c")
+                .arg(format!("echo $$ > {}; sleep 60", anchor_at.display()))
+                // stdout nulled: a child that outlives this holds an inherited pipe open, and
+                // `cargo test` then looks like a hang long after the test finished. stderr goes to
+                // a FILE rather than to `/dev/null` for the same reason inverted — a file holds no
+                // pipe open, so it costs nothing here and it is the only place bwrap's own refusal
+                // is recorded. Nulling it is why 179KB of CI log never said `apparmor` or `userns`.
+                .stdout(std::process::Stdio::null())
+                .stderr(std::fs::File::create(&bwrap_err).expect("a file for bwrap's stderr"))
+                .spawn()
+                .expect("start a box-like namespace"),
+        );
         let anchor: u32 = {
             let mut found = None;
             for _ in 0..100 {
@@ -2866,13 +2880,14 @@ mod tests {
             })
         };
 
+        // **The first statement after the pid is known**, so there is no window at all in which
+        // this test has an anchor the guard has not been told about. The guard hands back the stamp
+        // it recorded, so the number this placement record is addressed by IS the number compared
+        // against before anything is signalled: read twice it could differ twice, read once it
+        // cannot.
+        let ns_start: u64 = boxlike.inside(anchor);
+
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
-        let stat = std::fs::read_to_string(format!("/proc/{anchor}/stat")).unwrap_or_default();
-        let ns_start: u64 = stat
-            .rsplit_once(") ")
-            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
-            .and_then(|f| f.parse().ok())
-            .unwrap_or(0);
         let place = Place {
             name: "demo".into(),
             sandbox: "skein-fleet".into(),
@@ -2915,37 +2930,11 @@ mod tests {
         );
         assert_ne!(said, mine, "the command ran here rather than in the box");
 
-        // **The anchor goes first and bwrap second, and killing bwrap first is precisely what
-        // orphans the anchor** (SKEIN-1005, which is SKEIN-861/892 in the Rust tier long after
-        // `tests/ui/lift.mjs` fixed the same two lines). There is no `--unshare-pid` above, so the
-        // anchor is in this process's pid namespace; `bash -c` execs the last command of its
-        // string, so the anchor pid IS the `sleep 60` and its argv is the two words `exec` left it
-        // with. `boxlike.kill()` reaches the bwrap and nothing else, and bwrap is what was WAITING
-        // on the anchor — so the anchor is reparented to pid 1 and runs out its full minute, on
-        // success as well as on failure, once per run of this test. Measured on this branch before
-        // this block: `cargo test --lib -- a_crossing_in_the_fleet_enters_the_box_without_sbx`
-        // ("1 passed") and then `node tests/ui/harness/leaks.mjs` three times 4s apart, 3 of 3 red
-        // over one pid ageing 0s, 5s, 9s at `ppid=1`.
-        //
-        // **`ns_start` is a pid-reuse guard rather than decoration.** This box is shared between
-        // several checkouts, the anchor may have died on its own, and by now its pid may be worn
-        // by a stranger — a `pkill` here once reaped 72 tmux servers whose owners could not
-        // afterwards be named, which `fixtureScopes` in `tests/ui/harness/leaks.mjs` records. The
-        // `starttime` this test already read to stamp the placement record is what tells the
-        // anchor from the stranger, and it is read back through the same [`parse_proc_starttime`]
-        // the crossing's own guard uses rather than through a second parse of field 22.
-        let still_the_anchor = std::fs::read_to_string(format!("/proc/{anchor}/stat"))
-            .ok()
-            .and_then(|stat| parse_proc_starttime(&stat))
-            .is_some_and(|started| started == ns_start);
-        if still_the_anchor {
-            // SAFETY: `kill` has no memory effects, and `anchor` is a pid this test's own bwrap
-            // wrote into a file in this test's own fixture directory, checked just above to be
-            // still the same process it was when that pid was read.
-            unsafe { libc::kill(anchor as libc::pid_t, libc::SIGKILL) };
-        }
-        let _ = boxlike.kill();
-        let _ = boxlike.wait();
+        // **No teardown here, and that is the point.** SKEIN-1005 put the kill at the bottom of
+        // this body — anchor first and bwrap second, which is the right order and was the whole of
+        // its finding — but four assertions and an `expect` stand between it and the spawn, so the
+        // run that failed was exactly the run that leaked. It is `crate::testutil::BoxlikeNamespace`
+        // now, and `boxlike` is dropped by every way out of this function (SKEIN-1008).
         std::env::remove_var("SKEIN_HOME");
     }
 

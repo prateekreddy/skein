@@ -507,6 +507,108 @@ pub(crate) fn bwrap_works() -> bool {
         .unwrap_or(false)
 }
 
+/// A box-like namespace a test started, and everything inside it that must die with it — **on the
+/// panicking path as much as the returning one.**
+///
+/// Both in-crate fixtures that make one spawn a `bwrap` whose `bash -c` execs a `sleep`, with no
+/// `--unshare-pid` — so the sleeping anchor is an ordinary process in this pid namespace that bwrap
+/// is merely *waiting on*. Killing the bwrap first does not end it, it orphans it, and it then runs
+/// out its full minute at `ppid=1` (SKEIN-1005). The ordering in the drop below is that fix; this
+/// type is the half SKEIN-1005 left, because the teardown it wrote was four statements at the bottom
+/// of a test body with four assertions and an `expect` between them and the spawn. A run that PASSED
+/// left nothing behind and a run that FAILED stranded both — the worst possible distribution, since
+/// the reader is already looking at a red and `tests/ui/harness/leaks.mjs` then puts a second red on
+/// top of the one they came to read (SKEIN-913).
+///
+/// **One caller so far, and the other is filed rather than assumed.**
+/// `place::tests::a_crossing_in_the_fleet_enters_the_box_without_sbx` uses this;
+/// `fleet::tests::a_stop_reaches_what_walked_out_of_the_tmux_tree` is the second fixture of the same
+/// shape and still has the two trailing statements — three processes to strand rather than one, and
+/// its `while :; do sleep 0.5; done` has no minute to run out at all. That is SKEIN-1011, and the
+/// `Vec` below is a `Vec` for it rather than for the single anchor today's caller records.
+///
+/// `tests/ui/lift.mjs`'s `boxlikeNamespace` has had this since SKEIN-861: it registers its `stop`
+/// with `quiesceOnExit`, which runs on a throw and on a Ctrl-C as well as on a normal return. This
+/// is that coverage in the Rust tier, where `Drop` is the only thing a panic is guaranteed to run.
+///
+/// **A recorded pid is killed only while it is still the process that was recorded.** Pids recycle,
+/// this box is shared between checkouts, and a `pkill` here once reaped 72 tmux servers whose owners
+/// could not afterwards be named — which `fixtureScopes` in `tests/ui/harness/leaks.mjs` records.
+/// So [`Self::inside`] reads the pid's `starttime` as it records it, and the drop reads it again at
+/// the moment of killing: a number that has changed means a stranger wears that pid now, and nothing
+/// is sent. Reading it **once**, here, is also what stops the stamp a caller writes into a placement
+/// record from differing from the stamp compared against at kill time — `inside` hands back the
+/// number it recorded, so there is one read and no second parse of field 22 to drift from it.
+///
+/// **Nothing in the drop can panic**, which matters more here than usual: a panic in a `Drop` during
+/// an unwind aborts the process, so a guard that unwrapped would turn a clean test failure into an
+/// abort that says nothing about the assertion that failed — the failure this exists to make legible
+/// made illegible instead. Every fallible step there is consumed rather than unwrapped, by way of
+/// [`started_at`] — `read_to_string().ok()`, then [`crate::place::parse_proc_starttime`], which is
+/// already an `Option`, then `unwrap_or(0)`, where `0` is a value the comparison rejects rather than
+/// a value it trusts. The child's `kill` and `wait` are `let _ =`, and `libc::kill` reports by
+/// return value and panics on nothing. There is no indexing, no slicing and no assertion.
+pub(crate) struct BoxlikeNamespace {
+    /// The `bwrap` itself — this process's own child, so it can be both signalled and reaped.
+    outer: std::process::Child,
+    /// `(pid, starttime)` for every process *inside* the namespace the fixture has named. Killed in
+    /// the order they were recorded, and all of them before `outer`.
+    held: Vec<(u32, u64)>,
+}
+
+impl BoxlikeNamespace {
+    /// Take ownership of a spawned `bwrap`.
+    ///
+    /// Do this **at the spawn**, before the wait for the anchor to report itself: that wait ends in
+    /// a `panic!` of its own when the namespace never starts, and until the child is in here that
+    /// panic strands the very bwrap it is complaining about.
+    pub(crate) fn holding(outer: std::process::Child) -> Self {
+        Self {
+            outer,
+            held: Vec::new(),
+        }
+    }
+
+    /// Record a process inside the namespace, and answer with the `starttime` recorded for it.
+    ///
+    /// `0` when `/proc` would not say — which is also the value that makes a placement record
+    /// unprovable, so a caller that stamps an address with it is refused rather than handed a false
+    /// one. A `0` is never killed on either: there is nothing to tell the process from a stranger
+    /// that inherited its pid.
+    pub(crate) fn inside(&mut self, pid: u32) -> u64 {
+        let started = started_at(pid);
+        self.held.push((pid, started));
+        started
+    }
+}
+
+/// Field 22 of `/proc/<pid>/stat`, or `0` — read through the parser the crossing's own anchor guard
+/// uses, so the fixture cannot disagree with production about what a stamp is.
+fn started_at(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| crate::place::parse_proc_starttime(&stat))
+        .unwrap_or(0)
+}
+
+impl Drop for BoxlikeNamespace {
+    /// The anchor goes first and bwrap second, because killing bwrap first is precisely what orphans
+    /// the anchor (SKEIN-1005): bwrap is what was *waiting* on it.
+    fn drop(&mut self) {
+        for &(pid, started) in &self.held {
+            if started == 0 || started_at(pid) != started {
+                continue;
+            }
+            // SAFETY: `kill` has no memory effects, and `pid` is one a fixture in this process read
+            // out of its own namespace, checked on the line above to still be the same process it
+            // was when it was recorded.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let _ = self.outer.kill();
+        let _ = self.outer.wait();
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Skipping, out loud — and refusable
 // ---------------------------------------------------------------------------------------------
@@ -653,6 +755,138 @@ mod tests {
             env::var("SKEIN_TESTUTIL_PIN_TWICE").unwrap(),
             "before",
             "a variable pinned twice was restored to the intermediate value, not the original"
+        );
+    }
+
+    /// Is this pid still the process that was stamped, and still doing something?
+    ///
+    /// Two halves, and dropping either makes this lie in a different direction. `SIGKILL` makes a
+    /// **zombie** of anything whose parent has not reaped it yet, and `/proc/<pid>` outlives the
+    /// process by exactly that window — so presence alone would report a killed process as running.
+    /// And the **stamp** is the pid-reuse guard the rest of this file turns on: a pid stops naming
+    /// the same thing the moment it is free, so a bare number would report a stranger as ours.
+    fn still_running(pid: u32, stamp: u64) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        if crate::place::parse_proc_starttime(&stat) != Some(stamp) {
+            return false;
+        }
+        stat.rsplit_once(") ")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z")
+    }
+
+    /// **A panicking test takes the process its fixture started with it**, which is the whole of
+    /// [`BoxlikeNamespace`].
+    ///
+    /// A happy-path version would pass against exactly what this replaces. SKEIN-1005's teardown
+    /// was four statements at the bottom of a test body, and it reaps perfectly for as long as
+    /// nothing above it fails; what it cannot do is reap on the path that matters. The failing run
+    /// is both the one that still has something running and the one whose reader can least afford a
+    /// second red on top of the one they came to read (SKEIN-913). So the panic is the fixture here
+    /// rather than decoration.
+    ///
+    /// **The shape is the real one and not a convenient one.** The `sleep` is backgrounded and
+    /// reports its OWN pid, so the guard's child is the shell and the recorded process is a
+    /// GRANDCHILD — which is the arrangement that makes an anchor a separate thing to kill at all,
+    /// because killing the shell alone only reparents the sleep to pid 1 to run out its clock. No
+    /// `bwrap`: what is under test is the guard and not the namespace, and a bwrap here would make
+    /// this skip on every machine that refuses an unprivileged user namespace, which is the machine
+    /// CI runs on.
+    ///
+    /// **The concrete change that makes it fail**, run before this sentence was written: emptying
+    /// the `for` loop in `Drop for BoxlikeNamespace` — or moving that kill back out into a
+    /// statement after the `panic!` — leaves the sleep alive, and the assertion fires naming its
+    /// pid. Deleting the `impl Drop` outright fails the same assertion for the same reason.
+    ///
+    /// It cleans up **before** it asserts, so a failing run of this test is not itself the leak it
+    /// is about.
+    #[test]
+    fn a_panicking_test_takes_the_process_its_boxlike_namespace_started() {
+        let dir = tempdir();
+        let pidfile = dir.join("inner");
+        let shell = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("sleep 60 & echo $! > {}; wait", pidfile.display()))
+            // Nulled for the reason the bwrap fixtures null theirs: a process that outlives this
+            // holding an inherited pipe open makes `cargo test` look like a hang long afterwards.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start a shell that backgrounds a sleep");
+        let mut held = BoxlikeNamespace::holding(shell);
+        let inner: u32 = {
+            let mut found = None;
+            for _ in 0..100 {
+                if let Ok(text) = std::fs::read_to_string(&pidfile) {
+                    if let Ok(pid) = text.trim().parse() {
+                        found = Some(pid);
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            // Panicking here is safe in the sense this whole type is about: `held` already owns the
+            // shell, so the guard drops on the way out and the fixture does not survive its own
+            // failure to report.
+            found.expect("the fixture never reported the pid it backgrounded")
+        };
+        // Stamped by this test from `/proc` **before** the guard is told, and the two compared:
+        // everything below observes the process through this test's own number, so a guard that
+        // recorded the wrong one fails the assertion that says so rather than the premise. (Found
+        // by sabotaging `inside` to record `started_at(pid) + 1`: with a shared number, the
+        // corruption surfaced as "was not running to begin with", which names the wrong defect.)
+        let stamp = started_at(inner);
+        assert!(
+            stamp > 0,
+            "/proc would not stamp pid {inner}, so this test cannot tell it from a stranger later \
+             and proves nothing"
+        );
+        assert_eq!(
+            held.inside(inner),
+            stamp,
+            "the guard recorded a different start time than /proc reports for pid {inner} — it \
+             would then decline to kill its own anchor, mistaking it for a recycled pid"
+        );
+        assert!(
+            still_running(inner, stamp),
+            "the fixture's own process was not running to begin with"
+        );
+
+        // Caught rather than allowed to fail the test, and the hook silenced so the deliberate
+        // panic does not read as a failure in the output — the idiom
+        // [`a_test_that_panics_still_puts_the_environment_back`] above uses, for the same reason.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = held;
+            panic!("as a failing assertion would");
+        }));
+        std::panic::set_hook(hook);
+        assert!(outcome.is_err(), "the closure was supposed to unwind");
+
+        // Read by PID and stamp, never by matching a program name: a pattern over names is how a
+        // check came to answer `0` on a box carrying 195 matching processes (SKEIN-647).
+        let mut gone = false;
+        for _ in 0..100 {
+            if !still_running(inner, stamp) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !gone {
+            // SAFETY: `kill` has no memory effects, and `inner` is a pid this test's own shell
+            // reported into this test's own temporary directory, checked on the line above to still
+            // be the same process it was when it was stamped.
+            unsafe { libc::kill(inner as libc::pid_t, libc::SIGKILL) };
+        }
+        assert!(
+            gone,
+            "the process this fixture started (pid {inner}) outlived the panic that unwound past \
+             its guard — a test that leaks when it fails poisons every later run in the same \
+             worktree, which is SKEIN-1008 back"
         );
     }
 
