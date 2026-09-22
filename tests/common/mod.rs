@@ -319,7 +319,7 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // blocked-egress hint guard on it, and without it here a machine with no curl skips them while
     // this list still says the binary needs only jq and git (SKEIN-548).
     ("git_write_request", &[JQ, GIT, CURL]),
-    ("isolation_bwrap", &[BWRAP, PYTHON3]),
+    ("isolation_bwrap", &[BWRAP, JQ, PYTHON3]),
     ("mail_provenance", &[JQ, FLOCK]),
     // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
     // `tests/server.rs` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
