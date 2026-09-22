@@ -87,9 +87,16 @@ tracker item is the record; this list only points at it.
 * **SKEIN-940**: a box can write `"state": "granted"` into its own git-write request, and the
   cockpit then shows the request as answered and offers no button. No grant is recorded, so the box
   gains nothing, but the owner is never asked.
-* **SKEIN-947**: `/api/path` answers whether any host path exists. It needs the API token, so it
-  is not a box's reach unless the token has leaked, but it answers for the whole host
-  filesystem.
+* **SKEIN-947**: `/api/path` (`src/bin/skein-server.rs:3893`) says whether any path exists and
+  whether it is a file, a folder or a link. It answers for the **sandbox's** filesystem, not the
+  host's: the fleet root, `.skein/private/`, `/etc`, and the sandbox's own `~/.ssh`. A permission
+  error also comes back worded differently from a missing path. It needs the API token, so it is
+  not a box's reach unless the token has leaked. Its one caller is the SSH key field on `/`
+  (`src/web/index.html:10958`), and that field names a key **on the host**, which skein in the
+  fleet cannot see and does not read (`src/config.rs:399`). So the answers that caller gets are
+  about the wrong machine: `~/.ssh/id_ed25519` reads "nothing there yet" even when the key is
+  on the host. No set of allowed roots would let the route answer that field truthfully. Closing
+  this changes what the field shows, and that is waiting on the owner.
 * **SKEIN-960**: on some live boxes the agent's own config trusts the filesystem root. For a
   working directory outside a git repository, that runs a folder's `.claude/settings.json` hooks
   without asking. skein did not write the entry.

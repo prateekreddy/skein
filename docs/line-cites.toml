@@ -214,6 +214,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server.rs:3893"]
+line = "async fn api_path(Query(q): Query<HashMap<String, String>>) -> Json<serde_json::Value> {"
+cited_by = ["docs/threat-model.md"]
+
 ["src/bin/skein-server.rs:4253"]
 historical = "the sentence this cited is the one SKEIN-702 replaced, and `src/bin/skein-server.rs:4464` keeps the record of the swap: “The old sentence — ‘too many terminals open — close one and retry’ — named”. `docs/recovery-survey.md` cites it twice as what the survey read on 2026-09-09, which is the only record of what was wrong; re-pointing it at the new wording would make the survey claim to have found a defect that was not there."
 cited_by = ["docs/recovery-survey.md"]
@@ -711,6 +715,10 @@ cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:2598"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
+cited_by = ["docs/threat-model.md"]
+
+["src/config.rs:399"]
+line = "\"{key} is a path on the host, and skein is running inside the fleet — it cannot read the \\"
 cited_by = ["docs/threat-model.md"]
 
 ["src/config.rs:491"]
@@ -1745,6 +1753,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/web/index.html:10205"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/web/index.html:10958"]
+line = "checkPathLater(\"set-sshkey\", \"set-sshkey-note\");"
+cited_by = ["docs/threat-model.md"]
 
 ["src/web/index.html:11439"]
 line = "? `board is ${age}s stale — the server stopped answering`"
