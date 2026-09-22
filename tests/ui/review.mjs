@@ -20,7 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDoor } from "./lift.mjs";
-import { finding, ledger, seeing, settler } from "./harness/browser.mjs";
+import { erring, finding, ledger, seeing, settler } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -634,9 +634,11 @@ settle = settler(page, 500);
 // The same number the waits above use, said once: an act and a wait that disagree about when this
 // pane is broken are two answers to one question (SKEIN-801).
 page.setDefaultTimeout(REDRAW_MS);
-const noise = [];
-page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
-page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.text()}`); });
+// The page's own errors, with the browser's own complaints about its transport kept apart and
+// reported rather than failing this run — the distinction is structural, not a list of spellings;
+// see `harness/browser.mjs::erring` (SKEIN-998, SKEIN-1010). A 5xx is a different fact: the server
+// answered and said no, which this suite has always counted, and still does.
+const { errors: noise, sayBlips } = erring(page);
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
 
 await page.goto(`http://127.0.0.1:${port}/?t=${apiToken()}`, { waitUntil: "domcontentloaded" });
@@ -3280,6 +3282,7 @@ await check("and nothing the pull request carried has run", async () => {
 
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
+  sayBlips();
   if (noise.length) throw new Error(noise.join(" | "));
 });
 

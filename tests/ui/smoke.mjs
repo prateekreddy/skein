@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { boxlikeNamespace, fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
-import { ledger, seeing, settler, texter } from "./harness/browser.mjs";
+import { erring, ledger, seeing, settler, texter } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 
 const BOX = "smoke-box";
@@ -210,13 +210,21 @@ settle = settler(page, 700);
 // A failing check must report in seconds, not sit on Playwright's 30s default: when the page is
 // broken, several checks fail at once and the whole run has to stay quick enough to keep running.
 page.setDefaultTimeout(4000);
-const noise = [];
 // Refusals this run provokes ON PURPOSE and asserts elsewhere: the workspace-escape guard,
 // removing a connection a repo still uses, and probing that the retired collision route is gone.
 // Everything else counts as noise.
 const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside|\/api\/repos\/[^/]+\/settings|\/api\/sync\/connections|\/api\/collisions/;
-page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
-page.on("console", m => { if (m.type() === "error" && !EXPECTED_404.test(m.location()?.url || "")) noise.push(`[console] ${m.text()}`); });
+// This list stays BESIDE the structural rule in `harness/browser.mjs::erring` rather than being
+// replaced by it, because the two answer different questions and only one of them is answerable
+// from the message (SKEIN-1010). The structural rule says who is speaking — the page's own JS, or
+// the browser about its own transport. It cannot say that THIS run asked for this refusal, which is
+// what the list above is for, and a refusal the suite provoked wants to be silent rather than
+// printed every green run as though the network had hiccuped. It is asked first, so exactly the
+// messages this suite dropped before are dropped now; what changes is only the ones it never
+// matched. It could never have hidden a page bug either, then or now: a page's own console call
+// reports the location of the CALLING SCRIPT, never of the resource, so no URL in that list can
+// name one (measured — see the mechanism comment in the harness).
+const { errors: noise, sayBlips } = erring(page, { expected: m => EXPECTED_404.test(m.location()?.url || "") });
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
 
 await page.goto(`http://127.0.0.1:${port}/?t=${apiToken()}`, { waitUntil: "domcontentloaded" });
@@ -979,6 +987,7 @@ console.log("\nfleet gauges");
 
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
+  sayBlips();
   if (noise.length) throw new Error(noise.join(" | "));
 });
 

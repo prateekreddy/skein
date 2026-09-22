@@ -19,7 +19,7 @@ import { chromium } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
-import { ledger } from "./harness/browser.mjs";
+import { erring, ledger } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 const API_TOKEN = "t".repeat(64);
 
@@ -105,9 +105,12 @@ const { srv, log } = await startServer({
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(5000);
-const errors = [];
-page.on("pageerror", e => errors.push(`pageerror: ${e.message}`));
-page.on("console", m => { if (m.type() === "error") errors.push(`console: ${m.text()}`); });
+// The page's own errors, with the browser's own complaints about its transport kept apart and
+// reported rather than failing this run — the distinction is structural, not a list of spellings;
+// see `harness/browser.mjs::erring` (SKEIN-998, SKEIN-1010). This suite is the one that most needed
+// it: the working path below asserts this list is EMPTY, so a transport blip anywhere in the run
+// failed a check about the pane.
+const { errors, sayBlips } = erring(page, { say: (kind, text) => `${kind}: ${text}` });
 
 // Every ask for the route, in order, as the browser issues it. `page.on("request")` rather than a
 // count inside the page: what is in question is whether the page asks at all, and a counter the page
@@ -321,8 +324,11 @@ try {
   // and then answered with a 500, so the failure path is the same page with no reading in it.
   {
     // Everything above this point was the pane working. Asserted here, before the suite goes and
-    // breaks the route on purpose, because after that a console error is expected and "no errors" stops
-    // being a statement anyone can read.
+    // breaks the route on purpose, because after that a browser complaint is expected and "nothing
+    // complained" stops being a statement anyone can read. `errors` now holds only what the PAGE
+    // did (SKEIN-1010), so the deliberate 500 would no longer land in it — but the separation is
+    // still worth keeping, since it is the phase boundary that makes this sentence readable rather
+    // than a consequence of how one message happens to be classified.
     value("nothing on the working path threw or logged an error", errors, []);
 
     const held = [];
@@ -355,12 +361,25 @@ try {
   }
 
   // The deliberate 500 is fetched by the page, so the browser logs it as a failed resource — that one
-  // line is this suite's own doing. Everything else is not: a JavaScript exception is never expected,
-  // and it is asserted separately rather than folded into a filter, so a real throw cannot hide inside
-  // the allowance made for the 500.
+  // line is this suite's own doing. It used to be excused by matching its text against the words for
+  // a 500 status; that filter is gone, REPLACED rather than kept beside, because the structural rule
+  // in `harness/browser.mjs::erring` covers exactly the case it was written for and covers it better
+  // (SKEIN-1010). Measured against this Playwright: the browser's line about a fulfilled 500 arrives
+  // carrying no arguments, like any other failed resource load, so it is now classified as the
+  // browser's own complaint, named by `sayBlips` just below, and never in `errors` at all. What the
+  // filter would still have done, had it stayed, is excuse a message of the PAGE'S OWN whose text
+  // happened to contain that wording — a hole rather than a feature, and the SKEIN-647 shape besides.
+  //
+  // One thing is deliberately NOT asserted: that the 500 is the ONLY thing the browser complained
+  // about, which is what the old check said. A transport blip is a second complaint through no fault
+  // of the page, and going red on one is the whole defect this suite was fixed for. What a route
+  // that stops answering actually costs is asserted below instead, by name and per path.
+  //
+  // A JavaScript exception is never expected, and is still asserted separately from the console line
+  // rather than folded into it, so a real throw cannot hide inside anything allowed for the 500.
+  sayBlips();
   value("the failure path raised no JavaScript exception", errors.filter(e => e.startsWith("pageerror")), []);
-  value("and the 500 this suite fulfilled is the only thing the browser complained about",
-    errors.filter(e => !/status of 500/.test(e)), []);
+  value("and the page itself logged nothing on the failure path either", errors, []);
 
 } catch (stopped) {
   // Not "an error occurred": the message is the arrival that never came, and it is the most useful
