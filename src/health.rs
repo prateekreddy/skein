@@ -2311,7 +2311,10 @@ mod tests {
         // guess about the box's load, not a fact this test controls.
         wait_until_accepting(ready_rx);
         let reachable = probe_github_reach_at(&format!("http://127.0.0.1:{port}/"));
-        let _ = handle.join();
+        // SKEIN-1027: this used to `.join()` a plain blocking `accept()` with no deadline of its
+        // own at all, so a probe that never reached this listener for any reason would hang the
+        // test forever. `finish_responder` unblocks it the same way `fake_proxy` now does.
+        let _ = finish_responder(port, handle);
         assert_eq!(
             reachable,
             GithubReach::Reachable,
@@ -2429,7 +2432,7 @@ mod tests {
             fake_proxy("HTTP/1.1 200 OK\r\nx-ratelimit-limit: 5000\r\nContent-Length: 0\r\n\r\n");
         let injected =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let _ = served.join();
+        let _ = finish_responder(port, served);
         assert_eq!(
             injected,
             ProxyCredential::Injected { ceiling: 5000 },
@@ -2444,7 +2447,7 @@ mod tests {
         ));
         let stripped =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let _ = served.join();
+        let _ = finish_responder(port, served);
         assert_eq!(
             stripped,
             ProxyCredential::Untouched,
@@ -2454,7 +2457,7 @@ mod tests {
         let (port, served) = fake_proxy("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         let untouched =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let _ = served.join();
+        let _ = finish_responder(port, served);
         assert_eq!(
             untouched,
             ProxyCredential::Untouched,
@@ -2493,7 +2496,7 @@ mod tests {
         let (port, served) = fake_proxy("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         let _ =
             probe_proxy_injection_at(&format!("http://127.0.0.1:{port}"), PROBE_TARGET_FOR_TESTS);
-        let request = served.join().expect("the fake proxy thread");
+        let request = finish_responder(port, served);
         // First, because it is the one an empty request answers: a probe that reached the proxy at
         // all is the precondition for anything the bytes say about what it sent.
         assert!(
@@ -2545,17 +2548,42 @@ mod tests {
             .expect("the fake server's thread panicked before it could start accepting");
     }
 
+    /// Ends a single-shot responder thread with **no wall clock at all**.
+    ///
+    /// **SKEIN-1024, second round:** a fixed deadline counted from when the responder thread
+    /// STARTS races the very probe it exists to protect, because the probe can be slow to even
+    /// *begin* — a `curl` slow to fork under load, a wait on `env_lock` — for reasons that have
+    /// nothing to do with whether the responder is listening. Planting an 11s delay between the
+    /// readiness signal and the probe starting, with the old 10s-from-thread-start watchdog still
+    /// in place, reproduced the ticket's exact failure again: the watchdog fired first, the
+    /// responder accepted the watchdog's own empty connection and returned, and the real probe's
+    /// connection — arriving after the listener was already dropped — was refused. Worse, that
+    /// watchdog thread was detached (`drop` does not stop a thread), so on an ordinary run it
+    /// still fired 10s after thread-start regardless of whether the real connection had already
+    /// been served; by then the ephemeral port can belong to a LATER test's fake server, and the
+    /// watchdog steals that server's one accept.
+    ///
+    /// There is nothing to guess at here: a production probe already bounds itself (`curl -m`), so
+    /// by the time it returns to its caller it has either gotten an answer or given up for good.
+    /// One connection from THIS thread, now — synchronously, the instant our own test code gets
+    /// here, never on a timer and never from a detached thread — either unblocks a responder still
+    /// waiting (the probe never reached it, or gave up before the responder was scheduled), or is
+    /// refused against a socket nothing is listening on any more, because the real connection
+    /// already arrived and the responder has already returned and dropped the listener. Either way
+    /// at most one connection is EVER accepted — the real one or this one, never both — because the
+    /// responder calls `accept()` exactly once, and never after this function returns, because
+    /// nothing here runs on a delay.
+    fn finish_responder<T>(port: u16, handle: std::thread::JoinHandle<T>) -> T {
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        handle.join().expect("the fake server's thread panicked")
+    }
+
     /// A listener that answers one request as a proxy would, and hands the request back.
     ///
-    /// **`accept` still has a deadline, and that is not tidiness** — but it is no longer a poll
-    /// interval racing the machine's load for a chance to run. The sabotage this exists to catch —
-    /// taking `-x` off the probe, so it never reaches the proxy at all — must not make the test
-    /// HANG, which is the one outcome `CONTRIBUTING.md`'s third rule says is worse than no test: a
-    /// run that never finishes reports nothing, and under `--no-fail-fast` it stops the thirty-six
-    /// binaries behind it too. So a watchdog connects to this exact listener itself after a
-    /// generous wait, which unblocks the plain blocking `accept()` below deterministically — a fact
-    /// about the listener the test itself created, not a guess about how busy the box is — and the
-    /// caller gets an empty request to assert about, same as before.
+    /// A plain blocking `accept()`, with no deadline of its own: the sabotage this exists to catch
+    /// — taking `-x` off the probe, so it never reaches the proxy at all — cannot make this HANG,
+    /// because [`finish_responder`] unblocks it deterministically the instant the probe (which
+    /// bounds itself) returns, whether or not a real connection ever arrived.
     fn fake_proxy(answer: impl Into<String>) -> (u16, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let answer = answer.into();
@@ -2565,11 +2593,6 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
             let _ = ready_tx.send(());
-            let watchdog_port = port;
-            let watchdog = std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                let _ = std::net::TcpStream::connect(("127.0.0.1", watchdog_port));
-            });
             let mut seen = String::new();
             if let Ok((mut sock, _)) = listener.accept() {
                 let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
@@ -2580,7 +2603,6 @@ mod tests {
                 let _ = sock.write_all(answer.as_bytes());
                 let _ = sock.flush();
             }
-            drop(watchdog);
             seen
         });
         wait_until_accepting(ready_rx);
