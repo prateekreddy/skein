@@ -202,6 +202,15 @@ function rowsOf(out) {
 const leaking = out =>
   rowsOf(out).filter(r => /which is this run's leak$/.test(r.headline)).map(r => r.pid);
 
+/** Every kind of report `pid` is printed under, by the headline's own words — `[]` when it is not
+ * printed at all. The four headlines [`main`] writes, each matched at the clause that says whose. */
+const listedUnder = (out, pid) => [...new Set(rowsOf(out).filter(r => r.pid === pid).map(r =>
+  /which is this run's leak$/.test(r.headline) ? "this run's leak"
+    : /not this worktree's/.test(r.headline) ? "another lane's"
+      : /a run is in flight rather than a leak$/.test(r.headline) ? "in flight"
+        : /cannot be told from here/.test(r.headline) ? "unclear"
+          : `an unknown headline: ${r.headline.slice(0, 60)}`))].sort();
+
 /** How `leaks.mjs` reported `pid`: the surface it matched on and the prefix it named, or `null`
  * when it did not report it at all. */
 function reportOf(out, pid) {
@@ -209,9 +218,64 @@ function reportOf(out, pid) {
   return row ? { where: row.where, prefix: row.prefix } : null;
 }
 
+/** The gate, run as a person runs it — over the whole box.
+ *
+ * **What this may be asked is only what no other process can take away**: that it is red while an
+ * orphan of this run's is alive (nothing subtracts from a leak), and that no secret reaches its
+ * text. Everything about which ROWS it printed is a question for [`reportOver`] instead. */
 function report() {
   const r = spawnSync(process.execPath, [LEAKS], { encoding: "utf8" });
   return { out: `${r.stdout}${r.stderr}`, status: r.status };
+}
+
+// --- the gate over the processes this suite made, and nothing else ------------------------------
+// **Seven reds in one file had one cause, and it was this file's, not the box's** (SKEIN-1016, and
+// SKEIN-780, 781, 796 and 803 before it, each patched one assertion at a time). The gate reads the
+// whole of `/proc`, and every check that read the gate's ROWS was therefore a claim about what else
+// was running: a report caps at forty rows, twenty from each end, so another lane's thirty young
+// fixture processes decide whether the one this suite planted is printed at all. Rerun alone, the
+// same check passed — which is SKEIN-913's cost exactly, a red that is somebody else's.
+//
+// Moving each such check to the module (SKEIN-780's division, which was right for the questions it
+// moved) cannot reach what these ask: that [`main`] itself puts a row under the right headline, prints
+// both ends of a report, and exits on the count it printed. That is `main`'s own loop, and a copy of it
+// here would assert this file's idea of `main`. So `main` is run unchanged, and what is narrowed is
+// the one thing that was never this suite's — the process table it lists. `leaks.mjs` enumerates `/proc`
+// with `readdirSync` alone; a preload hands it a listing holding only `scope`, and every other read
+// (`cmdline`, `environ`, `stat`, `cwd`) goes to the real kernel, so each verdict is exactly the one
+// the whole box would get: parentage, cohort and attribution are all read off the real processes.
+//
+// **And it proves it took, every time.** A preload that stopped applying — `leaks.mjs` moving to
+// `opendirSync`, say — would hand these checks the whole box again, and they would go back to
+// flaking rather than failing. Both halves print their population, so each run checks that both are
+// the size of the scope it was handed; a wider view fails that check, by name, first.
+const SCOPE_VAR = "SKEIN_LEAKCHECK_SCOPE";
+const SCOPE_PRELOAD = `data:text/javascript,${encodeURIComponent(`
+  import fs from "node:fs";
+  import { syncBuiltinESMExports } from "node:module";
+  const only = new Set((process.env.${SCOPE_VAR} || "").split(",").filter(Boolean));
+  const real = fs.readdirSync;
+  fs.readdirSync = function (dir, ...rest) {
+    const names = real.call(this, dir, ...rest);
+    return dir === "/proc" ? names.filter(n => !/^\\d+$/.test(n) || only.has(String(n))) : names;
+  };
+  syncBuiltinESMExports();
+`)}`;
+/** Every live process this run made, by the tokens it planted — each fixture path, tag and lane
+ * here ends `-<this pid>`, so no other lane's can match, and a cohort this suite built is whole. */
+const OURS = new RegExp(`leakcheck-(?:[a-z]+-)*${process.pid}(?![0-9])`);
+const ourPids = () => under.processes()
+  .filter(p => OURS.test(p.args) || (p.envState === "read" && OURS.test(p.env)))
+  .map(p => p.pid);
+/** The gate's output and exit status over `ourPids()` alone, checked to have read exactly those. */
+function reportOver(what) {
+  const scope = ourPids();
+  const r = spawnSync(process.execPath, ["--import", SCOPE_PRELOAD, LEAKS],
+    { encoding: "utf8", env: { ...process.env, [SCOPE_VAR]: scope.join(",") } });
+  const out = `${r.stdout}${r.stderr}`;
+  check(`the gate over ${what} read the ${scope.length} processes it was handed and no others`,
+    [...out.matchAll(/ of (\d+) processes$/gm)].map(m => Number(m[1])), [scope.length, scope.length]);
+  return { out, status: r.status };
 }
 
 /** This pid's parent, read here rather than asked of the module: what the module's own answer is
@@ -248,9 +312,9 @@ const ppidOf = pid => {
 // the environment it matched in. And which rows survive the cap — the link between the two — is
 // asked of [`reportLines`] at the bottom of this file, over rows this suite owns (SKEIN-780).
 //
-// What no check here can own is the middle: that [`main`]'s own loop carries `where` from the scan
-// into the record it prints. Naming it costs a row in a full report, and a row in a full report is
-// the thing that is not this suite's to ask for.
+// **The middle is owned now as well** (SKEIN-1016): that [`main`]'s own loop carries `where` from
+// the scan into the record it prints. It was not assertable while the report was the whole box's,
+// because naming it costs a row in a full report; over this child alone the row is the only one.
 //
 // **And the answer says which fact it found, because `null` was three of them** (SKEIN-796, which
 // is this same check failing `got null` at `39ae9fe` — where it still read the report, and wanted
@@ -267,7 +331,7 @@ const ppidOf = pid => {
 // 40 of 40 carried the fixture in `/proc/<pid>/environ`, 0 read the parent's environment, and 25
 // rounds of this whole check under eight CPU spinners were 25 of 25 green. A handshake would be a
 // mechanism against a cause that is not there.
-const alive = report();
+const alive = reportOver("the child naming its fixture only in its environment");
 /** Where the scan saw the child's fixture — or which of the three things went wrong instead. */
 const sightingOfTheProbe = () => {
   const scanned = under.processes().find(p => p.pid === kid.pid);
@@ -280,6 +344,8 @@ const sightingOfTheProbe = () => {
 check("a process naming a fixture only in its environment is found, and by the derived prefix",
   sightingOfTheProbe(), { where: "environment" });
 check("the report does not print the environment it matched in", alive.out.includes(SECRET), false);
+check("and the row the gate prints for it says it was seen in the environment, by the derived prefix",
+  reportOf(alive.out, kid.pid), { where: "environment", prefix });
 check("this pid's own environment reads", environOf(kid.pid).envState, "read");
 
 // --- and a run in flight is not a leak, by fixture name either ---------------------------------
@@ -315,6 +381,11 @@ const classifyKid = () => {
 };
 check("a fixture-named process of this worktree whose parent is alive is a run in flight",
   classifyKid(), { bucket: "attached", ...probeBasis });
+// **And the gate's own exit code says so, which is the assertion SKEIN-913 had to give up.** Over
+// the whole box, `status === 0` was a claim about every other suite in the same `cargo test --all`;
+// over this child alone it is a claim about `main`, and it is the one that fails if the prefix half
+// goes back to exiting on whatever it FOUND rather than on what it attributed.
+check("and the gate over it alone is green, by its exit code", alive.status, 0);
 // The tie to this worktree is `CARGO_MANIFEST_DIR`, and it must not be what the check above matched
 // on — otherwise that check would be reading the worktree rather than the fixture and would pass
 // whatever the buckets meant.
@@ -436,6 +507,24 @@ spawn("/usr/bin/setsid", ["--fork", "bash", "-c", "exec sleep 30"], {
  * The answer carries what it last saw, so a timeout reports `bash -c …` rather than `null` — three
  * facts behind one word is what SKEIN-796 was about. */
 const PROBE_DEADLINE_MS = 10_000;
+/** Wait until none of `pids` is in the scan any more, and answer with the ones still there.
+ *
+ * **A deadline on a condition this suite caused, not a guess at how long a kill takes** (SKEIN-1015's
+ * family). Each "it is gone once the process is" check below used to sleep 300ms and look once, and
+ * how long a SIGKILLed process takes to leave `/proc` is a scheduling question: it has to run to die,
+ * and an orphan has to be reaped by pid 1 as well. Returning the moment the condition holds costs
+ * nothing on a quiet box; a scan that goes on reporting a dead pid still fails, at the deadline, with
+ * the pids it kept. */
+async function goneFromTheScan(pids) {
+  const wanted = pids.filter(Boolean);
+  const until = Date.now() + PROBE_DEADLINE_MS;
+  for (;;) {
+    const still = under.processes().filter(p => wanted.includes(p.pid)).map(p => p.pid);
+    if (!still.length) return true;
+    if (Date.now() >= until) return { stillScanned: still, deadlineExpiredMs: PROBE_DEADLINE_MS };
+    await new Promise(r => setTimeout(r, 25));
+  }
+}
 async function orphanProbe() {
   let last = "<never seen>";
   // A wall-clock deadline rather than a count of attempts: one pass reads every readable
@@ -445,16 +534,17 @@ async function orphanProbe() {
   // is "this did not happen", not a guess at how long it should take.
   const until = Date.now() + PROBE_DEADLINE_MS;
   while (Date.now() < until) {
-    // Found by its environment, never by its argv: the argv is the thing under test.
-    const found = under.processes().find(p =>
+    // Found by its environment, never by its argv: the argv is the thing under test. EVERY carrier
+    // is judged and not the first — `setsid`'s own parent carries the tag too until it exits, and
+    // `/proc` lists in pid order, which is an order the box chooses (see [`exportedProbe`]).
+    const carriers = under.processes().filter(p =>
       p.envState === "read" && p.env.includes(`SKEIN_LEAKCHECK_ORPHAN=${ORPHAN_TAG}`));
-    if (found) {
-      last = found.args;
-      if (found.args === "sleep 30") return { pid: found.pid };
-    }
+    if (carriers.length) last = carriers.map(p => p.args).join(" | ");
+    const found = carriers.find(p => p.args === "sleep 30");
+    if (found) return { pid: found.pid };
     await new Promise(r => setTimeout(r, 25));
   }
-  return { pid: null, lastArgvSeen: last, waitedMs: PROBE_DEADLINE_MS, ...probeBasis };
+  return { pid: null, lastArgvSeen: last, deadlineExpiredMs: PROBE_DEADLINE_MS, ...probeBasis };
 }
 const orphan = await orphanProbe();
 
@@ -479,14 +569,18 @@ const classifyOrphan = () => {
 };
 check("and it is an orphan of this worktree rather than a run in flight",
   classifyOrphan(), { bucket: "orphans" });
-// **What this pair owns, and the one link it does not.** The status is a single integer and the
-// prefix scan above can produce it too — on a box where another lane's fixture processes are live it
-// is 1 whatever the marker scan decided, so "the marker bucket reaches the exit code" is not a
-// claim this check can make on its own. Verified by sabotage instead, with the box quiet:
-// disconnecting `marks.length` from `main`'s return makes this go `got 0, want 1`. What the two
-// checks below own unconditionally is the rest of the chain — that the orphan is in the report, and
-// that the run is not green — and the classification above is asked of the module, where the box
-// cannot reach it. Same division as SKEIN-780, and the same middle nobody can assert.
+// **The whole box is asked only what nothing on it can take away** — that the gate is red while
+// this orphan lives, because nothing subtracts from a leak, and that the count line is printed.
+//
+// **And the link that used to be verified by sabotage alone is asserted now.** Over the whole box the
+// status is one integer that the prefix half can produce too — any lane's live fixture process makes
+// it 1 whatever the marker scan decided — so "the marker bucket reaches the exit code" was not a
+// claim this check could make, and it said so. Over this orphan alone it is: the orphan carries no
+// fixture name, so the prefix half has nothing to be red about and a 1 can only have come from the
+// marker bucket. Disconnecting `marks.length` from `main`'s return makes that check `got 0, want 1`
+// on any box, busy or not. Which ROW the gate prints is asked of the same run, for the reason given
+// beside [`reportOver`]: `includes(String(pid))` over the whole box's text was also true of any
+// longer pid that happened to contain this one, and false of this one once the cap had cut it.
 const markerRun = report();
 check("and the gate fails rather than passing over it", markerRun.status, 1);
 check("the report says how many processes carry the marker, not only that some do",
@@ -507,14 +601,17 @@ check("and it says it on a box where nothing carries the marker at all",
     leaks: /0 of them are this worktree's with nothing left of the run that made them/
       .test(quietBox) },
   { population: true, leaks: true });
+const markerOnly = reportOver("the marked orphan alone");
+check("and the marker bucket alone reaches the exit code, with nothing else there to be red about",
+  markerOnly.status, 1);
 check("and it names the orphan it is failing over",
-  markerRun.out.includes(String(orphan.pid)), true);
+  leaking(markerOnly.out).includes(orphan.pid), true);
 check("the report does not print the environment it matched in",
-  markerRun.out.includes(ORPHAN_SECRET), false);
+  { wholeBox: markerRun.out.includes(ORPHAN_SECRET), scoped: markerOnly.out.includes(ORPHAN_SECRET) },
+  { wholeBox: false, scoped: false });
 reapOrphan();
-if (orphan.pid) await new Promise(r => setTimeout(r, 300));
 check("and it is gone from the scan once the process is",
-  orphan.pid ? under.processes().some(p => p.pid === orphan.pid) : "the probe was never made", false);
+  orphan.pid ? await goneFromTheScan([orphan.pid]) : "the probe was never made", true);
 
 // --- a stand-in that EXPORTS its fixture before it execs ---------------------------------------
 // **What the probe above cannot be told apart from, and the reason naming it at the spawn is the
@@ -596,22 +693,34 @@ quiesceOnExit([], () => { try { usingStall.kill("SIGKILL"); } catch { /* already
  * child is reparented, so a classification taken at the wrong instant grades a process whose parent
  * is still alive and calls a leak a run in flight. [`startTmux`] settles the same way for the same
  * reason. Found by its environment, never by its argv: the argv is what the fix cannot restore and
- * is the thing under test. */
+ * is the thing under test.
+ *
+ * **Every process carrying the plant's fixture is judged, and not the first one `/proc` lists**
+ * (SKEIN-1015, SKEIN-1017). The in-flight plant has a partner by design — [`usingStall`], which
+ * carries the same tag and the same fixture, because that is what makes the fixture in flight — and
+ * this used to be `find`. `/proc` lists in pid order, so whenever the partner's pid was the lower of
+ * the two, `find` returned the partner on every pass, the partner never satisfies the condition, and
+ * the plant was never looked at: both reports show `lastSeen: "/usr/bin/sleep 30 ppid=<this suite>"`,
+ * which is the partner's argv — the plant's is `sleep 30`, from `exec` in `sh`. Which pid is lower is
+ * decided by whether `setsid` forks before this process spawns the partner, and load decides that:
+ * replayed on this box at load 14, `find` returned the partner in 5 of 30 trials. So those items
+ * were never a budget that was too short, and a longer one would have waited longer for a process it
+ * was not looking at. The answer on a timeout names every carrier it saw and says that the deadline
+ * is what expired. */
 async function exportedProbe(which) {
-  let last = "<never seen>";
+  let last = ["<never seen>"];
   const until = Date.now() + PROBE_DEADLINE_MS;
   while (Date.now() < until) {
-    const found = under.processes().find(p =>
+    const carriers = under.processes().filter(p =>
       p.envState === "read"
       && p.env.includes(`SKEIN_LEAKCHECK_EXPORTED=${EXPORTED_TAG}`)
       && p.env.includes(`SKEIN_TEST_FIXTURE=${exportedRoot(which)}`));
-    if (found) {
-      last = `${found.args} ppid=${ppidOf(found.pid)}`;
-      if (found.args === "sleep 30" && ppidOf(found.pid) === 1) return { pid: found.pid, which };
-    }
+    if (carriers.length) last = carriers.map(p => `${p.args} ppid=${ppidOf(p.pid)}`);
+    const found = carriers.find(p => p.args === "sleep 30" && ppidOf(p.pid) === 1);
+    if (found) return { pid: found.pid, which };
     await new Promise(r => setTimeout(r, 25));
   }
-  return { pid: null, which, lastSeen: last, waitedMs: PROBE_DEADLINE_MS, ...probeBasis };
+  return { pid: null, which, carriersSeen: last, deadlineExpiredMs: PROBE_DEADLINE_MS, ...probeBasis };
 }
 const stallLeak = await exportedProbe("leak");
 const stallFlight = await exportedProbe("inflight");
@@ -650,7 +759,7 @@ check("and one whose fixture a live process is still using is a run in flight, p
 // The gate over both at once: red about the one with nothing left of its run, and silent about the
 // one whose fixture is still in use. That pair is what stops this being "make the red go away" —
 // the same shape, the same argv, and the verdict turns on the cohort alone.
-const stallRun = report();
+const stallRun = reportOver("the two stand-ins and the run still using one");
 check("the gate is red over the stranded stand-in and not over the one still in use",
   { status: stallRun.status,
     leak: leaking(stallRun.out).includes(stallLeak.pid),
@@ -658,9 +767,8 @@ check("the gate is red over the stranded stand-in and not over the one still in 
   { status: 1, leak: true, inflight: false });
 reapExported();
 try { usingStall.kill("SIGKILL"); } catch { /* already gone */ }
-await new Promise(r => setTimeout(r, 300));
 check("and both are gone from the scan once the processes are",
-  under.processes().some(p => [stallLeak.pid, stallFlight.pid].includes(p.pid)), false);
+  await goneFromTheScan([stallLeak.pid, stallFlight.pid]), true);
 
 // --- and the real anchor a box-like namespace leaves -------------------------------------------
 // **The call site itself, because the rule above is only worth what the spawn actually carries**
@@ -760,14 +868,12 @@ if (!bwrapWorks()) {
   // What a reader is handed, which is what the item was filed about: the row used to say
   // `SKEIN_TEST` and two words. The marker still finds it — both halves reach it now — and the
   // prefix half's report is printed first, so this is the row the reader meets.
-  const anchorRun = report();
+  const anchorRun = reportOver("the stranded anchor");
   check("and the row it is red about names the fixture rather than only the marker",
     { red: leaking(anchorRun.out).includes(box.ns_pid), row: reportOf(anchorRun.out, box.ns_pid) },
     { red: true, row: { where: "environment", prefix } });
   box.stop();
-  await new Promise(r => setTimeout(r, 300));
-  check("and it is gone from the scan once the anchor is",
-    under.processes().some(p => p.pid === box.ns_pid), false);
+  check("and it is gone from the scan once the anchor is", await goneFromTheScan([box.ns_pid]), true);
   rmSync(anchorRoot, { recursive: true, force: true });
 }
 
@@ -931,18 +1037,20 @@ check("this worktree's orphan is a leak, another lane's is theirs, a live parent
 check("and the other lane's path is not itself a fixture name, so `theirs` is about the worktree",
   fixtureRegex(prefixes).test(`CARGO_MANIFEST_DIR=${OTHER_WORKTREE}`), false);
 
-const attribRun = report();
+const attribRun = reportOver("the three attribution plants");
 check("the gate fails over this worktree's orphan, which only the prefix half can see",
   attribRun.status, 1);
 check("and names it among the rows it is red about", leaking(attribRun.out).includes(pair.mine), true);
 // The greens, asked of the same report in the same breath — which is how the two verdicts were seen
-// to contradict each other, and therefore how they have to be seen to agree. Absence rather than
-// presence, deliberately: a report caps at forty rows per bucket, so "it is listed" is a claim
-// about how busy the box is (SKEIN-781) while "it is not among the red rows" is not.
-check("and neither the other lane's orphan nor the run in flight is one of them",
-  { elsewhere: leaking(attribRun.out).includes(pair.elsewhere),
-    inFlight: leaking(attribRun.out).includes(flight.pid) },
-  { elsewhere: false, inFlight: false });
+// to contradict each other, and therefore how they have to be seen to agree. **Where each is
+// printed, and not only where it is not.** This was absence alone, deliberately, while the report was
+// the whole box's: its cap made "it is listed" a claim about how busy the box was (SKEIN-781). Over
+// these three there is no cap to spend, so the report is asked the thing SKEIN-913 was about — that
+// another lane's orphan is printed under a headline saying whose it is, and a run in flight under
+// one saying so — and being printed under the red headline as well would fail it just the same.
+check("and the other lane's orphan is printed as theirs and the run in flight as in flight",
+  { elsewhere: listedUnder(attribRun.out, pair.elsewhere), inFlight: listedUnder(attribRun.out, flight.pid) },
+  { elsewhere: ["another lane's"], inFlight: ["in flight"] });
 check("and no probe's environment reaches the report", attribRun.out.includes(ATTRIB_SECRET), false);
 
 // **And the exit code follows the count the report prints, which is the link nothing else here
@@ -952,34 +1060,31 @@ check("and no probe's environment reaches the report", attribRun.out.includes(AT
 // alive: the gate then prints `0 of them are this worktree's with nothing left of the run that
 // made them` in both halves and must exit 0.
 //
-// **The count is read out of the run's OWN output rather than asked of the module afterwards**, and
-// that is the whole of why this is assertable at all. A second observation would be a second
-// moment: an orphan another suite in this same `cargo test --all` leaks for a second lands between
-// them, and the check goes red over a gate that was right (SKEIN-803's shape, and SKEIN-798's). Read
-// from the same text the status came with, there is no window — the implication holds whatever else
-// the box did, and it fails the instant the exit code stops following the attribution.
+// **The count is read out of the run's OWN output rather than asked of the module afterwards**, so
+// that the status and the count are one moment (SKEIN-803's shape, and SKEIN-798's). Over the whole
+// box that was ALL this could say — the counts were whatever the box held, so the check was an
+// implication, "the status is 1 exactly when a count is non-zero". Over these two greens alone the
+// answer itself is this suite's: both counts nought and the gate green, and a `main` that exits on
+// what it found, or prints a count that is not the one it exits on, fails it on any box.
 reapAttrib("mine");
-await new Promise(r => setTimeout(r, 300));
 // The removal is verified before anything is read into the run that follows it. A reap that missed
 // leaves the gate legitimately red and the check below would be reading the plant's own leak as the
 // module's answer — which is a sabotage that was a no-op reported as a verdict.
 check("the red plant is gone before the green-only run is read",
-  under.processes().some(p => p.pid === pair.mine), false);
+  await goneFromTheScan([pair.mine]), true);
 /** What the gate itself counted as this run's leaks — one number per half, off its own report. */
 const redCounted = out =>
   [...out.matchAll(/^ {2}(\d+) of them are this worktree's with nothing left of the run/gm)]
     .map(m => Number(m[1]));
-const greenOnly = report();
-const counted = redCounted(greenOnly.out);
-check("with only the greens left, the exit code is whatever the report's own two counts say",
-  { halves: counted.length, status: greenOnly.status },
-  { halves: 2, status: counted.some(n => n > 0) ? 1 : 0 });
+const greenOnly = reportOver("the two green plants");
+check("with only the greens left, both halves count no leak and the gate is green",
+  { counted: redCounted(greenOnly.out), status: greenOnly.status },
+  { counted: [0, 0], status: 0 });
 
 reapAttrib();
 try { flight.kill("SIGKILL"); } catch { /* already gone */ }
-await new Promise(r => setTimeout(r, 300));
 check("and they are gone from the scan once the processes are",
-  under.processes().some(p => [pair.mine, pair.elsewhere, flight.pid].includes(p.pid)), false);
+  await goneFromTheScan([pair.mine, pair.elsewhere, flight.pid]), true);
 
 // --- a tmux a suite daemonises: parentless from birth, and not always this worktree's ----------
 // **The sixth time this check went red for a reason a reader could see was not theirs, and the
@@ -1197,11 +1302,13 @@ check("and one that names both checkouts and stands in neither is neither's, not
   { ...classifyTmux(unclear.pid), namesThisWorktree: namesThisWorktree(unclear.pid) },
   { prefix: "unclear", marker: "unclear", namesThisWorktree: true });
 
-// The gate itself, over all three at once — which is where the contradiction would have been
-// visible in the first place, and the only place the three verdicts can be read as one output.
-// Red is owned (a leak of this worktree's makes the gate exit 1 whatever else is on the box) and
-// green is asserted as absence from the red rows, for the reason the attribution section gives.
-const tmuxRun = report();
+// The gate itself, over all four at once — which is where the contradiction would have been
+// visible in the first place, and the only place the four verdicts can be read as one output. Over
+// these plants and nothing else, for the reason given beside [`reportOver`]: the two "is printed"
+// checks below are the pair SKEIN-1016 saw fail, because the report of other lanes' processes is
+// the one the whole box fills, and past forty rows a one-second-old tmux of this suite's is not in
+// either end of it.
+const tmuxRun = reportOver("the four tmux plants");
 check("the gate is red over the stranded tmux and none of the other three",
   { status: tmuxRun.status,
     stranded: leaking(tmuxRun.out).includes(stranded.pid),
@@ -1219,9 +1326,8 @@ check("and it says whose the one from the other checkout is, rather than only th
   true);
 reapTmux();
 try { usingIt.kill("SIGKILL"); } catch { /* already gone */ }
-await new Promise(r => setTimeout(r, 300));
 check("and all four are gone from the scan once the servers are",
-  under.processes().some(p => planted.map(t => t.pid).includes(p.pid)), false);
+  await goneFromTheScan(planted.map(t => t.pid)), true);
 dropLane();
 
 // --- the marker's NAME is read out of the code, and a disagreement refuses ----------------------
@@ -1795,7 +1901,7 @@ for (let i = 0; i < CAP_PROBE; i++) {
   }));
 }
 quiesceOnExit([], () => { for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} } });
-const crowded = report();
+const crowded = reportOver("the crowd");
 check("the report says it could not fit them all", /more, between the oldest/.test(crowded.out), true);
 // The young end printed at all, and carrying THIS RUN'S OWN processes — asked by pid, which is a
 // fact about the crowd, and not by age, which is a fact about the clock (SKEIN-798).
@@ -1813,23 +1919,20 @@ check("the report says it could not fit them all", /more, between the oldest/.te
 // `age` was only ever a proxy for "is one of mine", and a bad one: it is the only term in the check
 // that moves with how busy the box is.
 //
-// Still "at least one" rather than "all": the young end is twenty rows and the crowd is forty-six,
-// and on a box several agents share some of those rows are somebody else's.
+// **And then it went red for the reason it had just been rewritten to survive** (SKEIN-1016): it
+// passed alone, and with another lane's suite on the box it printed `ofTheCrowdInTheReport: 0` —
+// forty-six processes of this suite's, and not one row of them in the report. The crowd names no
+// worktree, so it is printed with every other lane's fixture processes; a pid only tells this suite
+// which rows are its own once they are printed, and on a box whose other lanes hold more than twenty
+// processes as young as the crowd, the young end is theirs. Asked over the crowd alone the report
+// holds nothing else, so the young end is twenty rows and every one of them is the crowd's —
+// "every" rather than "at least one" now, because nobody else's row can be there.
 const ours = new Set(crowd.map(c => c.pid));
-// **And the answer says which fact it found, because `false` was several of them.** This went red
-// once inside `cargo test --all` with three lanes' gate runs on the box, and passed 3 of 3 standing
-// alone a minute later — at which point there was nothing in the output to say whether the crowd
-// had been crowded out of the young end by younger rows of somebody else's, printed in a different
-// report, or not printed at all. Each of those is a different thing to do next, and the first is
-// the box rather than the rule. Same argument as SKEIN-796, one check over.
-const crowdRows = rowsOf(crowded.out).filter(r => ours.has(r.pid));
+const crowdRows = rowsOf(crowded.out);
+const tailRows = crowdRows.filter(r => r.section === "tail");
 check("and its young end is printed, where a run's own leak is",
-  crowdRows.some(r => r.section === "tail") || {
-    ofTheCrowdInTheReport: crowdRows.length,
-    inSections: [...new Set(crowdRows.map(r => r.section))],
-    underHeadlines: [...new Set(crowdRows.map(r => r.headline.slice(0, 44)))],
-    capsPrinted: (crowded.out.match(/more, between the oldest/g) || []).length,
-  }, true);
+  { tailRows: tailRows.length, everyOneOfThemTheCrowds: tailRows.every(r => ours.has(r.pid)) },
+  { tailRows: REPORT_CAP / 2, everyOneOfThemTheCrowds: true });
 for (const c of crowd) { try { c.kill("SIGKILL"); } catch {} }
 
 // --- the cap, over rows nobody else can add to -------------------------------------------------
