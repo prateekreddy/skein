@@ -315,17 +315,6 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "skein-secret-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn mode_of(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
@@ -444,7 +433,7 @@ mod tests {
     /// becomes 0600 later, which is a window a reader can win.
     #[test]
     fn the_file_is_owner_only_before_it_holds_anything() {
-        let dir = scratch("mode");
+        let dir = crate::testutil::tempdir();
         let path = dir.join("brand-new");
         let file = create_private(&path).expect("a fresh path is creatable");
         assert_eq!(
@@ -480,8 +469,11 @@ mod tests {
     /// straight to the path does exactly that; a rename does not.
     #[test]
     fn a_symlink_at_the_destination_is_replaced_rather_than_followed() {
-        let dir = scratch("dst-link");
-        let outside = scratch("dst-link-outside").join("somebody-elses-file");
+        let dir = crate::testutil::tempdir();
+        // Bound, not chained: `tempdir().join(…)` would drop the guard, and the directory with it,
+        // before the file below is written into it.
+        let outside_dir = crate::testutil::tempdir();
+        let outside = outside_dir.join("somebody-elses-file");
         std::fs::write(&outside, "not a credential").unwrap();
         let path = dir.join("api-token");
         std::os::unix::fs::symlink(&outside, &path).unwrap();
@@ -508,8 +500,8 @@ mod tests {
     /// is what is doing the refusing.
     #[test]
     fn a_symlink_at_the_temp_path_is_not_followed() {
-        let dir = scratch("tmp-link");
-        let outside_dir = scratch("tmp-link-outside");
+        let dir = crate::testutil::tempdir();
+        let outside_dir = crate::testutil::tempdir();
 
         let guarded = outside_dir.join("guarded");
         std::fs::write(&guarded, "not a credential").unwrap();
@@ -543,7 +535,7 @@ mod tests {
     /// Absent is `None`; unreadable is an error, and never quietly "no credential".
     #[test]
     fn a_missing_secret_is_none_and_an_unreadable_one_is_an_error() {
-        let dir = scratch("read");
+        let dir = crate::testutil::tempdir();
         assert!(read(&dir.join("nothing-here")).unwrap().is_none());
 
         let empty = dir.join("empty");
@@ -569,7 +561,7 @@ mod tests {
     /// Minted from the kernel, hex, at the width asked for, and on disk before it is returned.
     #[test]
     fn a_minted_secret_is_random_hex_of_the_width_asked_for() {
-        let dir = scratch("mint");
+        let dir = crate::testutil::tempdir();
         let a = mint(&dir.join("one"), 32).unwrap();
         let b = mint(&dir.join("two"), 32).unwrap();
         assert_eq!(a.expose().len(), 64, "32 bytes is 64 hex characters");
@@ -659,7 +651,7 @@ mod tests {
     /// The bytes land exactly as given, newline and all, with the same file discipline.
     #[test]
     fn raw_bytes_are_written_without_being_trimmed() {
-        let dir = scratch("bytes");
+        let dir = crate::testutil::tempdir();
         let path = dir.join(".credentials.json");
         write_bytes(&path, b"{\"claudeAiOauth\":{}}\n").unwrap();
         assert_eq!(

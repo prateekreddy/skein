@@ -342,7 +342,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5538"]
+["src/bin/skein-server.rs:5562"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 

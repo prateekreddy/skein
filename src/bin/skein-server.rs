@@ -5276,6 +5276,30 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
+/// A scratch directory for this binary's tests, named so that what looks after the library's test
+/// scratch recognises it too (SKEIN-1007).
+///
+/// `testutil::tempdir()` itself is out of reach, for the reason `review_routes`' `EnvPins` gives:
+/// `testutil` is `#[cfg(test)]` inside the LIBRARY, and this is a separate `[[bin]]`. So what is
+/// shared is the NAME. `skein-test-` at the head is the prefix `tests/ui/harness/leaks.mjs` derives
+/// from `tempdir()`, so a process carrying this path is a fixture process to it; and it is the one
+/// `testutil::sweep_stale_runs` removes once it is over an hour old, so a directory a panicking test
+/// here leaves behind is reaped like one of the library's own.
+///
+/// The fixed head comes FIRST. `home_for` used to spell its home `skein-{what}-{pid}`, whose
+/// literal cut at the first `{` is the bare stem `skein-` — a derived prefix that would match this
+/// repository's own checkout path on every process that names it.
+///
+/// Emptied first: the name is pid-unique, not run-unique, and a recycled pid finds a crashed run's
+/// leftovers.
+fn scratch_dir(what: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("skein-test-server-{}-{what}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory for this test");
+    dir
+}
+
+#[cfg(test)]
 mod tests {
     use super::{flag, note_is_for_this_repo, origin_ok, refuse_unknown_args, slow_down};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
@@ -5557,9 +5581,7 @@ mod review_routes {
     /// One home per test function, named after it — `cargo` runs these as threads in one process,
     /// so two tests sharing a directory share `repos.json` and each other's failures.
     fn home_for(what: &str) -> std::path::PathBuf {
-        let home = std::env::temp_dir().join(format!("skein-{what}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
+        let home = super::scratch_dir(what);
         std::fs::write(
             home.join("repos.json"),
             format!(
@@ -7198,8 +7220,7 @@ mod upload_deadline {
     /// and goes on running, and `gone` fires naming the pids it can still see.
     #[test]
     fn an_abandoned_upload_takes_its_grandchildren_with_it() {
-        let dir = std::env::temp_dir().join(format!("skein-dl916-sink-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a directory for the fixture");
+        let dir = scratch_dir("dl916-sink");
         let escapee = Escapee::new(&dir);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
