@@ -1141,27 +1141,27 @@ line = "let body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:690"]
+["src/gitgate.rs:787"]
 line = "if scope != \"repo\" && scope != \"fleet\" {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:814"]
+["src/gitgate.rs:911"]
 line = "\"could not sign the App JWT: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1348"]
+["src/gitgate.rs:1445"]
 line = "return Err(\"no GitHub App configured: Settings → GitHub App ID\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1357"]
+["src/gitgate.rs:1454"]
 line = "\"the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub App ID\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1361"]
+["src/gitgate.rs:1458"]
 line = "return Err(format!(\"the GitHub App key is not at {key}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1449"]
+["src/gitgate.rs:1546"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
 cited_by = ["docs/recovery-survey.md"]
 

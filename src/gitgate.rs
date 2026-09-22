@@ -125,7 +125,8 @@ pub struct Request {
     pub reason: String,
     #[serde(default)]
     pub asked: String,
-    /// `pending` → `granted` | `denied`.
+    /// `pending` → `granted` | `denied`. **As [`list`] returns it, this is the host's answer**, from
+    /// [`decision_path`]; whatever the box's own file says here is thrown away (SKEIN-940).
     #[serde(default)]
     pub state: String,
     #[serde(default)]
@@ -389,6 +390,34 @@ fn grants_path() -> std::path::PathBuf {
     crate::config::skein_home().join("git-grants.json")
 }
 
+/// Where the fleet owner's answer to one request is kept: on the **host**, one file per request,
+/// under the box that asked (SKEIN-940).
+///
+/// The queue says what was ASKED and this says what was DECIDED, and the two are kept apart because
+/// only one of them is a box's to write. The queue file is bound read-write into the asking box,
+/// so its `state` is that box's word like every other field in it — and it used to be the only
+/// record a denial ever had, and the only thing the cockpit read to decide whether to offer Grant.
+/// A box that wrote `"state": "granted"` into its own ask was shown as answered, with nothing to
+/// press, and its owner was never asked. [`grants_path`] could not stand in for this: it is keyed
+/// by box and repository rather than by request, and it holds approvals only.
+///
+/// Beside [`grants_path`] and for its reason: `$SKEIN_HOME` is the volume on an in-fleet fleet, and
+/// the launcher covers the volume in every box except for that box's own state, bound read-only. The
+/// bwrap test `a_box_cannot_answer_its_own_git_write_request` runs a box that tries to write here.
+///
+/// **Under the box, because an id is not an identity** — the reason
+/// [`crate::substrate`]'s decisions are filed the same way (ISO-7). A box can read every other box's
+/// queue and file the id it saw a neighbour use; keyed by id alone, the neighbour's answer would be
+/// painted onto the copy.
+pub fn decision_path(box_name: &str, id: &str) -> Option<std::path::PathBuf> {
+    (crate::util::valid_name(box_name) && id_is_nameable(id)).then(|| {
+        crate::config::skein_home()
+            .join("gitgate")
+            .join(box_name)
+            .join(format!("{id}.json"))
+    })
+}
+
 /// Where a box finds the token for a repository it may write.
 ///
 /// Inside the box's own host-mounted state directory, which is the whole reason this design needs no
@@ -447,7 +476,58 @@ fn list_script() -> String {
 /// Every access request the fleet knows about, oldest first.
 pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
     let out = crate::place::own_sandbox(sandbox).exec(&list_script(), Duration::from_secs(30))?;
-    Ok(parse_requests(&out))
+    Ok(decided_over(parse_requests(&out)))
+}
+
+/// The host's answer wins over the box's copy of it, request by request (SKEIN-940).
+///
+/// Separate and pure because it is the rule, not a detail of reading — the same rule as
+/// [`crate::substrate`]'s function of the same name. What the host decided replaces the three fields
+/// a decision owns: the state, when, and **the repository that was decided on**, so a box that
+/// edits its ask after the answer cannot make the row describe a different grant. What survives from
+/// the box is the ask itself — its reason and when it asked — because that is the part only the box
+/// can know, and the server does not keep it when a person decides.
+fn decided_over(asked: Vec<Request>) -> Vec<Request> {
+    asked
+        .into_iter()
+        .map(|mut asked| match decision(&asked.box_name, &asked.id) {
+            Some(host) => {
+                asked.state = host.state;
+                asked.decided = host.decided;
+                asked.repo = host.repo;
+                asked
+            }
+            None => undecided(asked),
+        })
+        .collect()
+}
+
+/// A request the host has not answered, as it is allowed to describe itself.
+///
+/// `pending` rather than dropping the row: an ask that vanishes looks, to the box that filed it,
+/// exactly like one nobody got to, and there is a person who can answer this one. Whatever `state`
+/// and `decided` the file carried are the box's own bytes, and are thrown away here.
+fn undecided(mut asked: Request) -> Request {
+    asked.state = "pending".into();
+    asked.decided = String::new();
+    asked
+}
+
+/// The answer skein recorded for this request, if there is one. An unreadable file reads as none,
+/// which puts the row back in front of its owner with a button on it — the direction a person can
+/// see and fix, rather than a request silently counted as answered.
+fn decision(box_name: &str, id: &str) -> Option<Request> {
+    let path = decision_path(box_name, id)?;
+    crate::util::read_json_or_why::<Request>(&path)
+        .ok()
+        .flatten()
+}
+
+fn write_decision(path: &std::path::Path, req: &Request) -> Result<(), String> {
+    let dir = path.parent().ok_or("no decisions directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let body = serde_json::to_vec_pretty(req).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(path, dir, &body)
 }
 
 /// The script that records a decision against a request.
@@ -503,19 +583,36 @@ pub fn decide(
     if let Some(why) = rendered.problem() {
         return Err(format!("refusing to act on this request: {why}"));
     }
+    let path = decision_path(&rendered.box_name, &rendered.id).ok_or("unusable request id")?;
     let state = if approve { "granted" } else { "denied" };
+    // The grant first, because it is what skein acts on: an answer recorded as granted with no
+    // grant behind it would be a row telling its owner something that is not true.
     if approve {
         record(rendered, hours)?;
     }
-    // Courtesy, so the asking box can see it was answered — and best-effort, because the record
-    // above is what skein acts on. A box that deletes its request has changed nothing that matters.
+    let mut done = rendered.clone();
+    done.state = state.into();
+    done.decided = chrono::Utc::now().to_rfc3339();
+    // The answer, where [`list`] reads it and no box can write it (SKEIN-940). A denial had no
+    // record anywhere else.
+    write_decision(&path, &done).map_err(|e| {
+        format!(
+            "{} but skein could not record the answer ({e}), so the request will still be shown as \
+             waiting",
+            if approve {
+                "the grant is recorded and will be honoured,"
+            } else {
+                "the request was denied,"
+            }
+        )
+    })?;
+    // Courtesy only, and it must stay that way: the box reads its own file to learn what happened,
+    // and skein never reads that answer back — [`list`] takes the state from the record above.
+    // Best-effort, because a box that deletes its request has changed nothing that matters.
     let _ = crate::place::own_sandbox(sandbox).exec(
         &decision_script(&rendered.box_name, &rendered.id, state),
         Duration::from_secs(30),
     );
-    let mut done = rendered.clone();
-    done.state = state.into();
-    done.decided = chrono::Utc::now().to_rfc3339();
     Ok(done)
 }
 
@@ -3052,5 +3149,150 @@ mod tests {
         let answered = check_token(&Secret::new("skein-test-write-token"), "acme/thing");
         std::env::remove_var("SKEIN_GITHUB_API");
         assert_eq!(answered, Ok(true), "a token that can push must read as one");
+    }
+
+    // ─────────────── who answers a request (SKEIN-940) ───────────────
+
+    /// A fresh `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` together. Both, because [`decide`]'s courtesy
+    /// write names the queue under the fleet root, and an unpinned fleet root is `/boxes`, the
+    /// owner's live queue.
+    fn fresh_fleet() -> (
+        crate::testutil::EnvGuard,
+        crate::testutil::TempDir,
+        crate::testutil::EnvPins,
+    ) {
+        let lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", dir.join("home"));
+        env.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        (lock, dir, env)
+    }
+
+    /// A request as a box files it, with whatever state the box chose to write into it.
+    fn asked_by(box_name: &str, id: &str, repo: &str, state: &str) -> Request {
+        Request {
+            id: id.into(),
+            box_name: box_name.into(),
+            repo: repo.into(),
+            reason: "one change in the sibling".into(),
+            asked: "2026-09-22T12:00:00Z".into(),
+            decided: match state {
+                "pending" => String::new(),
+                _ => "2026-09-22T12:00:01Z".into(),
+            },
+            state: state.into(),
+        }
+    }
+
+    /// **A box cannot answer its own request by writing the answer into it** (SKEIN-940).
+    ///
+    /// Every field of a queue file is the asking box's word, `state` included, and the cockpit
+    /// offers Grant and Deny only on a row whose state is `pending`. So a box that wrote `granted`
+    /// was drawn as answered, with nothing to press, and its owner was never asked. Nobody has
+    /// answered either of these, so both must come back `pending` with no decision time, whatever
+    /// the file said — while the ask itself, the reason and when, is still the box's to state.
+    ///
+    /// **What would make this fail**: [`decided_over`] falling back to the box's own request
+    /// (`None => asked`), which is the shape `list` had before this.
+    #[test]
+    fn a_request_the_host_never_answered_is_pending_whatever_its_own_file_says() {
+        let (_lock, _dir, _env) = fresh_fleet();
+        let shown = decided_over(vec![
+            asked_by("web-main", "20260922-120000-1", "acme/thing", "granted"),
+            asked_by("web-main", "20260922-120000-2", "acme/thing", "denied"),
+        ]);
+        for r in &shown {
+            assert_eq!(
+                r.state, "pending",
+                "a request nobody answered is shown as {:?} because its own file says so — the \
+                 cockpit draws no Grant button on it and its owner is never asked",
+                r.state
+            );
+            assert_eq!(
+                r.decided, "",
+                "the box's own decision time survived onto a request nobody decided"
+            );
+            assert_eq!(
+                r.reason, "one change in the sibling",
+                "the ask itself was lost"
+            );
+        }
+    }
+
+    /// **The owner's answer is the one shown, and a box cannot take it back or re-describe it.**
+    ///
+    /// Both answers, because a denial had no record anywhere but the box's own file: with only the
+    /// grant record on the host, a denied request would come back as waiting, and a box could have
+    /// written `pending` over a denial to be asked again. After deciding, the box rewrites both of
+    /// its files — `pending` again, and a different repository.
+    ///
+    /// **What would make this fail**: [`decide`] not writing [`decision_path`] (both rows come back
+    /// `pending`, first assertion), or [`decided_over`] keeping the box's `repo` (the row describes a
+    /// repository nobody granted, third assertion).
+    #[test]
+    fn the_owners_answer_is_recorded_where_the_box_cannot_take_it_back() {
+        let (_lock, _dir, _env) = fresh_fleet();
+        // The courtesy write into the box's file is a crossing; it is best-effort and nothing here
+        // is about it.
+        let _crossing = crate::place::seam::doing_nothing();
+        let denied = asked_by("web-main", "20260922-120000-3", "acme/thing", "pending");
+        let granted = asked_by("web-main", "20260922-120000-4", "acme/other", "pending");
+        decide("example-fleet", &denied, false, None).expect("deny");
+        decide("example-fleet", &granted, true, Some(24)).expect("grant");
+
+        let rewritten = [&denied, &granted].map(|r| Request {
+            state: "pending".into(),
+            decided: String::new(),
+            repo: "acme/crown-jewels".into(),
+            ..r.clone()
+        });
+        let shown = decided_over(rewritten.to_vec());
+        assert_eq!(
+            [shown[0].state.as_str(), shown[1].state.as_str()],
+            ["denied", "granted"],
+            "the box wrote `pending` over its owner's answers and was believed"
+        );
+        assert!(
+            shown.iter().all(|r| !r.decided.is_empty()),
+            "an answered request lost when it was answered: {shown:?}"
+        );
+        assert_eq!(
+            [shown[0].repo.as_str(), shown[1].repo.as_str()],
+            ["acme/thing", "acme/other"],
+            "the row names the repository the box wrote afterwards, not the one its owner decided"
+        );
+        assert_eq!(
+            grants().len(),
+            1,
+            "only the approval is a grant; a denial must not become one"
+        );
+    }
+
+    /// **An answer to one box is not an answer to another box that files the same id.**
+    ///
+    /// Every box can read every other box's queue, so a box can file, in its own drop-box, the id
+    /// it watched a neighbour's request be answered under. The answer is keyed by the box the
+    /// request came from, which is the directory it was read from and not a field anyone wrote.
+    ///
+    /// **What would make this fail**: [`decision_path`] dropping the box from the path, so one
+    /// id's answer is shown on every box's request that uses it.
+    #[test]
+    fn an_answer_to_one_box_is_not_an_answer_to_another_box_using_the_same_id() {
+        let (_lock, _dir, _env) = fresh_fleet();
+        let _crossing = crate::place::seam::doing_nothing();
+        let id = "20260922-120000-5";
+        decide(
+            "example-fleet",
+            &asked_by("other-main", id, "acme/thing", "pending"),
+            true,
+            Some(24),
+        )
+        .expect("grant the neighbour");
+        let shown = decided_over(vec![asked_by("web-main", id, "acme/thing", "granted")]);
+        assert_eq!(
+            shown[0].state, "pending",
+            "a copy of a neighbour's id was shown with the neighbour's answer"
+        );
     }
 }

@@ -42,6 +42,7 @@ says, and the rows below are mostly about files for that reason.
 | the cockpit's tmux socket, at the path current code puts it | **no**, `connect()` refused; see SKEIN-831 under Open for fleets created earlier | bwrap test `a_box_cannot_connect_to_the_fleets_tmux_socket` |
 | the launcher, the credential helper, skein's source and toolchain under `.skein` | read-only | bwrap test `a_box_can_read_what_skein_was_built_from_and_cannot_write_it` |
 | its own git-write and package request queues | writes its own; reads every other box's; writes no other box's | bwrap test `a_box_can_write_its_own_request_queue_and_no_other_boxs` |
+| the fleet owner's answers to its git-write requests, and the grants they made (`gitgate/<box>/` and `git-grants.json` on the volume) | **no**. So the `state` a box writes into its own request is never what the cockpit shows: a request with no answer on record is shown as waiting, whatever its file says | bwrap test `a_box_cannot_answer_its_own_git_write_request`, which reads the fleet back through `gitgate::list`; `gitgate::decision_path` |
 | `/run/user/<uid>` and `/run/secrets` | **no**, a private tmpfs per box | bwrap test `nothing_but_the_socket_directory_comes_through_the_run_cover` (the first); test `the_launcher_covers_what_run_shares_and_names_what_it_does_not` in `src/cockpit.rs` (both); `src/box-session.sh:1886`, `src/box-session.sh:1887` |
 | **other boxes' agents, by message** | **yes**, on by default, per repo; no approval gate, since `crossSessionInbound` is seeded to `accept` (`src/box-session.sh:1235`) | bwrap test `a_box_is_never_discoverable_on_a_socket_it_cannot_reach`; off is `src/box-session.sh:1950` |
 | **the shared toolchain `~/.local`** | **reads the fleet's copy, writes its own** (SKEIN-963). A copy-on-write overlay per box: the sandbox's `~/.local` is the lower layer, the upper layer is a tmpfs bwrap makes inside the box. So a box sees every tool installed outside it, its own writes are private to it and gone at its next restart, and nothing it writes reaches another box — which matters because `~/.local/bin` is still first on every box's `PATH` (`src/box-session.sh:122`). `~/.local/state` is the exception: bound back from the box's own home, so the work-tracker stamps survive a restart | code: `src/box-session.sh:791`, `src/box-session.sh:1295`, `src/box-session.sh:1312`; bwrap tests `a_binary_one_box_plants_is_not_what_another_box_runs`, `a_box_still_sees_the_shared_toolchain_under_its_private_overlay` |
@@ -84,9 +85,6 @@ tracker item is the record; this list only points at it.
   the old path in the readable half of `.skein`, where a box can `connect()` to it. A tmux client
   can make the server run commands, so that is fleet-scope execution. It lasts until that fleet's
   tmux server restarts.
-* **SKEIN-940**: a box can write `"state": "granted"` into its own git-write request, and the
-  cockpit then shows the request as answered and offers no button. No grant is recorded, so the box
-  gains nothing, but the owner is never asked.
 * **SKEIN-947**: `/api/path` answers whether any host path exists. It needs the API token, so it
   is not a box's reach unless the token has leaked, but it answers for the whole host
   filesystem.
