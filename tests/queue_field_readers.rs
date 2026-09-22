@@ -241,16 +241,100 @@ fn renamed(attrs: &str) -> Option<String> {
 /// `FailedCheck.url` on three each; every one of them also has a real reader, which is the only
 /// reason the count did not move.
 ///
-/// The honest limit, because it reads as more coverage than it is: this is per LINE, so it sees the
-/// line a comment OPENS on and not the interior of one that runs on. `src/web/index.html:1733`
-/// names `.claude` inside a comment that opened at 1732 and closes at 1744, and it is still
-/// scanned — one of four such interior lines in that file, none of which happens to name a payload
-/// field today (`.claude`, `.md`, `.mjs`, `.md`). `cockpit.js` has none, because its block comments
-/// indent their interiors with `*`, which is one of the four. SKEIN-996 carries what is left, with
-/// the reason a comment tracker is not obviously an improvement: a `<!--` inside a string would
-/// swallow every read after it, which is the direction that makes this gate green over anything.
+/// **`<!--` is a SPAN here and not only a line** (SKEIN-996). The per-line form above saw the line
+/// a comment opens on and not the interior of one that runs on: `src/web/index.html:1733` names
+/// `.claude` inside a comment that opened at 1732 and closes at 1744, and it was still scanned —
+/// one of four such interior lines in that file (`.claude`, `.md`, `.mjs`, `.md`). None of the four
+/// named a payload field, so the count of fields the page reads is 108 either way; this closes a
+/// latent hole rather than a live one, and the number is the evidence for that rather than a claim.
+/// [`without_html_comments`] does the blanking and carries the argument about the direction that
+/// would be worse — a `<!--` inside a string swallowing every read after it. `<!--` stays in
+/// [`line_reads`]'s list too: that function is per line by contract and a caller who has not masked
+/// its text should get the SKEIN-992 behaviour, not none.
+///
+/// The limit that is left: `//`, `*` and `/*` are still per line, so a JavaScript block comment
+/// whose interiors do not begin with `*` still reads as code. `cockpit.js` indents every one of its
+/// interiors with `*`, which is why it had none of the four lines above.
 fn page_reads(page: &str, field: &str) -> bool {
-    page.lines().any(|line| line_reads(line, field))
+    without_html_comments(page)
+        .lines()
+        .any(|line| line_reads(line, field))
+}
+
+/// `page` with every HTML comment blanked out — same lines, same line numbers, and the code that
+/// shares a line with a comment left standing.
+///
+/// **What makes a span safe to blank at all is that the opener is anchored where the per-line
+/// filter anchored it**: a `<!--` opens a comment only when it begins its line (after leading
+/// whitespace), which is the exact predicate SKEIN-992 shipped. The swallow SKEIN-996 was left open
+/// for — `page.innerHTML = '<!-- ' + x`, a `<!--` inside a string putting the scanner in a comment
+/// it never leaves — cannot open one here, because that line begins with `page`. In this census the
+/// swallow direction is a false accusation rather than a silent pass, which is the loud one; it is
+/// still the one that gets a gate deleted, and the test plants that exact line into the real pages
+/// and measures what this blanks.
+///
+/// **An opener with no `-->` after it anywhere blanks its own line and nothing else** — the
+/// per-line behaviour, exactly. Running to the end of the file is the one thing this must not do:
+/// an unclosed `<!--` is likelier to be this scanner failing to find the closer than a page with
+/// 6,000 commented-out lines. So no input makes this see LESS than the per-line filter saw, and
+/// none makes it blank past a `-->`.
+///
+/// Blanked rather than deleted, so a line still sits where [`page_reads`]'s doc cites it. It is
+/// idempotent — nothing it returns can open a comment — which is what lets [`census`] mask each
+/// page on its own AND [`page_reads`] mask whatever it is handed.
+///
+/// A copy of the one in `src/bin/skein-server.rs`'s `cockpit_routes` module, and the duplication is
+/// a compilation boundary rather than an oversight: that module is `#[cfg(test)]` inside a BINARY
+/// target, so it exists in that binary's test build and in no other, and an integration test cannot
+/// see it. The alternatives are worse than one copy — a text scanner in the library's production
+/// surface that exists only to serve two test scanners, or a third file `#[path]`-included by both,
+/// which is a mechanism no test in this tree uses.
+fn without_html_comments(page: &str) -> String {
+    let lines: Vec<&str> = page.lines().collect();
+    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(open) = opens_html_comment(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        // The first `-->` at or after the opener, on its own line or a later one.
+        let closed = lines.iter().enumerate().skip(i).find_map(|(j, line)| {
+            let from = if j == i { open + 4 } else { 0 };
+            line[from..].find("-->").map(|k| (j, from + k + 3))
+        });
+        match closed {
+            Some((j, end)) => {
+                for (m, text) in out.iter_mut().enumerate().take(j + 1).skip(i) {
+                    let from = if m == i { open } else { 0 };
+                    let to = if m == j { end } else { text.len() };
+                    *text = blanked(text, from, to);
+                }
+                i = j + 1;
+            }
+            None => {
+                out[i] = blanked(&out[i], open, out[i].len());
+                i += 1;
+            }
+        }
+    }
+    out.join("\n")
+}
+
+/// Where a line's HTML comment opens, if it opens one at all.
+fn opens_html_comment(line: &str) -> Option<usize> {
+    let t = line.trim_start();
+    t.starts_with("<!--").then(|| line.len() - t.len())
+}
+
+/// `line` with `from..to` replaced by as many spaces as it held characters.
+fn blanked(line: &str, from: usize, to: usize) -> String {
+    format!(
+        "{}{}{}",
+        &line[..from],
+        " ".repeat(line[from..to].chars().count()),
+        &line[to..]
+    )
 }
 
 /// One line of the page, read the way [`page_reads`] reads the whole of it.
@@ -291,7 +375,13 @@ fn declared() -> BTreeSet<String> {
 /// The whole census: every serialised field, and whether the page reads it.
 fn census() -> Vec<(String, bool)> {
     let units: Vec<String> = PAYLOAD_UNITS.iter().map(|u| read_unit(u)).collect();
-    census_of(&units, &PAGE.map(read).join("\n"))
+    // Each page masked on ITS OWN before they are joined, so a `<!--` at the end of one file
+    // cannot be closed by a `-->` in the next and take the gap between them with it. [`page_reads`]
+    // masks again and finds nothing left to mask, which is the property its doc comment names.
+    census_of(
+        &units,
+        &PAGE.map(read).map(|p| without_html_comments(&p)).join("\n"),
+    )
 }
 
 /// The census over source and page text handed in, rather than read off disk.
@@ -597,6 +687,142 @@ pub struct Invented {
         unread_and_undeclared(&census_of(&units, drawn), &no_declarations).is_empty(),
         "the page reads the field and the gate named it anyway — the false accusation that gets a \
          gate like this deleted"
+    );
+}
+
+/// **And the same for a field named on a page comment's INTERIOR line** (SKEIN-996).
+///
+/// The half SKEIN-992 left: its filter was per line, so it saw the line a comment opens on and not
+/// the lines under it. `src/web/index.html:1733` names `.claude` inside a comment that opened at
+/// 1732, and it was scanned as page text — so the sentence that test carries, about a gate talked
+/// out of its own finding by prose, was still true one line further down.
+///
+/// The three directions that must not change are asserted beside it, because they are the reason
+/// SKEIN-996 was left open rather than fixed: code after a comment that closes on its own line,
+/// code under a comment that is never closed, and code under a `<!--` inside a string. The last is
+/// asserted twice — once on a fixture, and once by planting that line into the real pages and
+/// measuring what the mask blanks, because the fixture is small enough to have no `-->` after it
+/// and the danger only exists where there is one.
+///
+/// The verdict is driven through [`unread_and_undeclared`] and [`census_of`], for the reason
+/// [`a_field_named_only_in_a_page_comment_still_has_no_reader`] gives: neither scanner is wrong on
+/// its own, and an assertion on [`page_reads`] alone would not watch a field go from excused to
+/// named.
+#[test]
+fn a_field_named_inside_a_multi_line_page_comment_still_has_no_reader() {
+    let source = "\
+#[derive(Serialize)]
+pub struct Invented {
+    pub only_in_a_comments_interior: String,
+}
+"
+    .to_string();
+    assert_eq!(
+        serialised_fields(&source).get("Invented"),
+        Some(&vec!["only_in_a_comments_interior".to_string()]),
+        "the fixture payload did not parse, so what follows proves nothing"
+    );
+    let units = [source];
+    let no_declarations = BTreeSet::new();
+    let named = "Invented.only_in_a_comments_interior";
+
+    // The shape `src/web/index.html:1733` is in: the field named two lines under the `<!--`.
+    let page = [
+        "        <!-- Where this pane's rows come from:",
+        "             the caption is `q.only_in_a_comments_interior`, which the server",
+        "             renders rather than the page. -->",
+    ]
+    .join("\n");
+    let page = page.as_str();
+    assert_eq!(
+        unread_and_undeclared(&census_of(&units, page), &no_declarations),
+        vec![named],
+        "the gate did not name a field whose only mention in the page is a line INSIDE an HTML \
+         comment, which is the gate going green over exactly what it exists to catch"
+    );
+    assert_eq!(
+        census_of(&units, page),
+        vec![(named.to_string(), false)],
+        "the census BOTH gates take says a field named on a comment's interior line is read by the \
+         page — so a serialised field nothing reads is excused, and a live exemption for it in \
+         {DECLARED} reads as outlived"
+    );
+    assert!(
+        !page_reads(page, "only_in_a_comments_interior"),
+        "a line inside an HTML comment only NAMES the field, and it was read as a read of it"
+    );
+
+    // And the three directions that must NOT change, each with what it costs if it does.
+    for (what, page) in [
+        (
+            "code after a comment that closes on its own line",
+            "  <!-- the old caption --> row.textContent = q.only_in_a_comments_interior;",
+        ),
+        (
+            "code under a comment that is never closed",
+            "  <!-- this comment is never closed\n  row.textContent = q.only_in_a_comments_interior;",
+        ),
+        (
+            "code under a `<!--` that is inside a string",
+            "  page.innerHTML = '<!-- ' + x;\n  row.textContent = q.only_in_a_comments_interior;",
+        ),
+    ] {
+        assert_eq!(
+            census_of(&units, page),
+            vec![(named.to_string(), true)],
+            "{what}: the page reads the field and the census says it does not — a false accusation \
+             against working code, which is what gets a gate like this deleted, and for an \
+             unclosed comment or a string it is every read in the rest of the file"
+        );
+    }
+
+    // The same string, planted into the real pages — and measured on the MASK rather than on the
+    // census, which is not a preference.
+    //
+    // **The census's own count cannot move under this plant, so an assertion on it proves
+    // nothing.** Measured: with the string planted at the top of each page, and every line above
+    // index.html's first closer therefore swallowed, 108 of the 118 fields are still read — no
+    // serialised field's only reader lies in the region a stray opener could take. That version of
+    // this assertion passed against a scanner that treated `<!--` anywhere on a line as an opener,
+    // which is the exact defect it is here for. So what is asserted is the property itself: a
+    // `<!--` inside a string must not blank a line that was not already blank. 97 lines blanked
+    // in index.html and none in cockpit.js, where under that scanner index.html goes to 1,721.
+    let blanked_lines = |text: &str| -> usize {
+        let masked = without_html_comments(text);
+        text.lines()
+            .zip(masked.lines())
+            .filter(|(raw, cooked)| raw != cooked)
+            .count()
+    };
+    let mut plantable = 0;
+    for name in PAGE {
+        let text = read(name);
+        // `cockpit.js` holds no `-->` at all, so nothing in it can be swallowed.
+        if !text.contains("-->") {
+            continue;
+        }
+        plantable += 1;
+        assert_eq!(
+            blanked_lines(&format!("  page.innerHTML = '<!-- ' + x;\n{text}")),
+            blanked_lines(&text),
+            "{name}: one `<!--` inside a string blanked lines that are not comments, and every \
+             field whose only reader is among them stops having one"
+        );
+    }
+    assert!(
+        plantable > 0,
+        "no page holds a `-->` at all, so there is nowhere a stray opener could run to and the \
+         counts above would be equal whatever this scanner did"
+    );
+
+    // And the idempotence [`census`] leans on when it masks each page before [`page_reads`] masks
+    // the join of them.
+    let masked = without_html_comments(page);
+    assert_eq!(
+        without_html_comments(&masked),
+        masked,
+        "masking is not idempotent, so masking twice is not the same as masking once and the two \
+         call sites disagree about what the page says"
     );
 }
 

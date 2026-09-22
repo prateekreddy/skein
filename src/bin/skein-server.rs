@@ -6322,6 +6322,76 @@ mod cockpit_routes {
         "GET"
     }
 
+    /// `page` with every HTML comment blanked out — same lines, same line numbers, and the code
+    /// that shares a line with a comment left standing.
+    ///
+    /// **What makes a span safe to blank at all is that the opener is anchored where the per-line
+    /// filter anchored it**: a `<!--` opens a comment only when it begins its line (after leading
+    /// whitespace), which is the exact predicate SKEIN-987 shipped. The swallow SKEIN-991 was left
+    /// open for — `page.innerHTML = '<!-- ' + x`, a `<!--` inside a string putting the scanner in a
+    /// comment it never leaves and silently dropping every request after it — cannot open one here,
+    /// because that line begins with `page`. That direction is worse than the hole being closed: one
+    /// excused route against a gate gone quiet over a whole file. So the anchor is what this is
+    /// built on rather than something hoped about, and the test plants that exact line into the real
+    /// pages and counts.
+    ///
+    /// **An opener with no `-->` after it anywhere blanks its own line and nothing else** — the
+    /// per-line behaviour, exactly. Running to the end of the file is the one thing this must not
+    /// do, for the same reason: an unclosed `<!--` is likelier to be this scanner failing to find
+    /// the closer than a page with 6,000 commented-out lines. So no input makes this see LESS than
+    /// the per-line filter saw, and none makes it blank past a `-->`.
+    ///
+    /// Blanked rather than deleted, because the gates report `index.html:1895` and a deleted line
+    /// would move every number under it. Measured over [`scanned`]: 17 openers, all of them
+    /// multi-line and all of them closed, changing 104 lines of 13,922.
+    fn without_html_comments(page: &str) -> String {
+        let lines: Vec<&str> = page.lines().collect();
+        let mut out: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let Some(open) = opens_html_comment(lines[i]) else {
+                i += 1;
+                continue;
+            };
+            // The first `-->` at or after the opener, on its own line or a later one.
+            let closed = lines.iter().enumerate().skip(i).find_map(|(j, line)| {
+                let from = if j == i { open + 4 } else { 0 };
+                line[from..].find("-->").map(|k| (j, from + k + 3))
+            });
+            match closed {
+                Some((j, end)) => {
+                    for (m, text) in out.iter_mut().enumerate().take(j + 1).skip(i) {
+                        let from = if m == i { open } else { 0 };
+                        let to = if m == j { end } else { text.len() };
+                        *text = blanked(text, from, to);
+                    }
+                    i = j + 1;
+                }
+                None => {
+                    out[i] = blanked(&out[i], open, out[i].len());
+                    i += 1;
+                }
+            }
+        }
+        out.join("\n")
+    }
+
+    /// Where a line's HTML comment opens, if it opens one at all.
+    fn opens_html_comment(line: &str) -> Option<usize> {
+        let t = line.trim_start();
+        t.starts_with("<!--").then(|| line.len() - t.len())
+    }
+
+    /// `line` with `from..to` replaced by as many spaces as it held characters.
+    fn blanked(line: &str, from: usize, to: usize) -> String {
+        format!(
+            "{}{}{}",
+            &line[..from],
+            " ".repeat(line[from..to].chars().count()),
+            &line[to..]
+        )
+    }
+
     /// Every `/api/…` path a page can BUILD, as `(1-based line, path)` with `${…}` left standing.
     ///
     /// Two narrowings, both to keep this from reporting prose as a request. The `/api/` must open a
@@ -6339,25 +6409,26 @@ mod cockpit_routes {
     /// counts asks through here too, so **a prose mention was enough to make a route nothing calls
     /// read as called** — the defect SKEIN-308 wrote that gate for, inverted.
     ///
-    /// The honest limit, since it is the kind that reads as covered: this is per LINE, so it sees
-    /// the line a comment OPENS on and not the interior of one that runs on. There is a live
-    /// example three lines above the one this fixed — `src/web/index.html:1895` names
-    /// `/api/fleet/plan` in backticks, inside a comment that opened at 1880 — and it is still
-    /// counted as a request. That route is fetched for real at `index.html:10698` so it costs
-    /// nothing today, but the hole is the same shape as the one above (SKEIN-991). Tracking the
-    /// comment state across lines would close it and open a worse one: a `<!--` inside a string
-    /// would silently swallow every request after it, which is the direction that makes a gate
-    /// green over anything.
+    /// **`<!--` has since left that per-line list and become a SPAN** (SKEIN-991), because the
+    /// per-line form saw the line a comment opens on and not the interior of one that runs on:
+    /// `src/web/index.html:1895` named `/api/fleet/plan` in backticks, three lines inside a comment
+    /// that opened at 1880, and counted as a request to it. [`without_html_comments`] blanks the
+    /// whole span instead, and carries the argument about the direction that would be worse.
+    /// Measured across [`scanned`]: 100 asks before, 97 after — the three it drops are prose
+    /// (`index.html:1881` `/api/health`, `:1895` `/api/fleet/plan`, `:1931` `/api/update`), and all
+    /// three routes are fetched for real elsewhere in the same page, so nothing became uncalled.
+    ///
+    /// The limit that is left, since it is the kind that reads as covered: `//`, `*` and `/*` are
+    /// still per LINE. A JavaScript block comment whose interior lines do not begin with `*` is
+    /// still read as code. `cockpit.js` indents every one of its interiors with `*` and
+    /// `index.html` has three `*` lines in all, so there is nothing in the tree that costs today.
     fn asked_for(page: &str) -> Vec<(usize, String, &'static str)> {
+        let page = without_html_comments(page);
         let lines: Vec<&str> = page.lines().collect();
         let mut out = Vec::new();
         for (n, line) in lines.iter().enumerate() {
             let t = line.trim_start();
-            if t.starts_with("//")
-                || t.starts_with('*')
-                || t.starts_with("/*")
-                || t.starts_with("<!--")
-            {
+            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
                 continue;
             }
             let b = line.as_bytes();
@@ -6868,6 +6939,126 @@ mod cockpit_routes {
             "a route nothing calls read as called, because a comment names it — the defect \
              SKEIN-308's gate exists to catch, inverted: the gate goes green over a handler \
              reachable only by typing its URL"
+        );
+    }
+
+    /// **And the same for a route named on a comment's INTERIOR line** (SKEIN-991).
+    ///
+    /// The half SKEIN-987 left: its filter was per line, so it saw the line a comment opens on and
+    /// not the lines under it. `src/web/index.html:1895` names `/api/fleet/plan` in backticks
+    /// inside a comment that opened at 1880, and it counted as a request — so the sentence above
+    /// about a handler reachable only by typing its URL was still true, one line further down.
+    ///
+    /// The four shapes are asserted together because three of them are the reason this was left
+    /// alone rather than fixed, and a fix that closed the first and opened any of the others would
+    /// be worse than what it replaced: code after a comment that closes on its own line, code under
+    /// a comment that is never closed, and code under a `<!--` that is inside a string. The last is
+    /// asserted twice — once on a fixture, and once by planting that line into the real pages and
+    /// counting, because the fixture is small enough to have no `-->` after it and the danger only
+    /// exists where there is one.
+    #[test]
+    fn a_route_named_inside_a_multi_line_html_comment_still_has_no_caller() {
+        // Assembled, like every other router fixture here: `docs/parity.md` counts this binary's
+        // routes by grepping its source for the router's own call.
+        let router = format!(
+            " .{}(\"/api/only-in-a-comments-interior\", {}(h)) ",
+            "route", "get"
+        );
+        let routes = entries(&router);
+        assert_eq!(
+            routes,
+            vec![("/api/only-in-a-comments-interior", vec!["get"])],
+            "the fixture router did not parse, so what follows proves nothing"
+        );
+
+        // The shape `src/web/index.html:1895` is in: the route named in backticks, two lines under
+        // the `<!--` that opened the comment.
+        let page = [
+            "        <!-- Where the fleet pane's two sentences come from:",
+            "             the line to run on the host is `/api/only-in-a-comments-interior`,",
+            "             rendered verbatim rather than rebuilt here. -->",
+        ]
+        .join("\n");
+        let page = page.as_str();
+        assert!(
+            asked_for(page).is_empty(),
+            "a route named on a line INSIDE an HTML comment was read as a request to it: {:?}",
+            asked_for(page)
+        );
+        let asks: Vec<(&str, usize, String, &'static str)> = asked_for(page)
+            .into_iter()
+            .map(|(line, path, method)| ("fixture.html", line, path, method))
+            .collect();
+        assert_eq!(
+            unasked(&routes, &asks),
+            vec![("/api/only-in-a-comments-interior", "get")],
+            "a route nothing calls read as called, because a comment's interior line names it — \
+             SKEIN-987's defect one line further down"
+        );
+
+        // And the three directions that must NOT change, each with what it costs if it does.
+        let seen = |page: &str| -> Vec<String> {
+            asked_for(page).into_iter().map(|(_, p, _)| p).collect()
+        };
+        assert_eq!(
+            seen("  <!-- the old pane is gone --> fetch(\"/api/after-a-closed-comment\");"),
+            vec!["/api/after-a-closed-comment"],
+            "a comment that opens and closes on one line hid the code written after it, which the \
+             per-line filter this replaces did too — the whole line went"
+        );
+        assert_eq!(
+            seen("  <!-- this comment is never closed\n  fetch(\"/api/after-an-unclosed-comment\");"),
+            vec!["/api/after-an-unclosed-comment"],
+            "an unclosed `<!--` swallowed the rest of the page: every request after it stops being \
+             counted, this gate goes green over anything, and \
+             every_method_this_router_registers_has_a_caller_or_a_declared_reason accuses routes \
+             the page does call"
+        );
+        assert_eq!(
+            seen("  page.innerHTML = '<!-- ' + x;\n  fetch(\"/api/after-a-string\");"),
+            vec!["/api/after-a-string"],
+            "a `<!--` inside a JavaScript string opened a comment — the swallow above, reachable \
+             from a line of ordinary code"
+        );
+
+        // The same string, planted into the real pages, and measured on the MASK rather than on
+        // the request count — which is not a preference.
+        //
+        // **A stray opener cannot cost this gate a request on today's pages, so a count would
+        // prove nothing.** Measured: index.html's 16 closers all sit between 1648 and 1956 and its
+        // first request is at 2109; v2.html's one closer is at 144 and its first request at 239;
+        // cockpit.js holds no `-->` at all. There is no position in any of the three where a
+        // comment a string opened could reach a `fetch`. Written as a request count this passed
+        // against a scanner that treated `<!--` anywhere on a line as an opener, which is the
+        // exact defect it is here for. So the property itself is asserted, one level down: a
+        // `<!--` inside a string must not blank a line that was not already blank. 104 lines
+        // blanked across the three pages — index.html 97, v2.html 7, cockpit.js 0 — where under
+        // that scanner index.html alone goes to 1,721.
+        let blanked_lines = |text: &str| -> usize {
+            let masked = without_html_comments(text);
+            text.lines()
+                .zip(masked.lines())
+                .filter(|(raw, cooked)| raw != cooked)
+                .count()
+        };
+        let mut plantable = 0;
+        for (name, page) in scanned() {
+            // `cockpit.js` holds no `-->` at all, so nothing in it can be swallowed.
+            if !page.contains("-->") {
+                continue;
+            }
+            plantable += 1;
+            assert_eq!(
+                blanked_lines(&format!("  page.innerHTML = '<!-- ' + x;\n{page}")),
+                blanked_lines(page),
+                "{name}: one `<!--` inside a string blanked lines that are not comments, and every \
+                 request among them stops being counted"
+            );
+        }
+        assert!(
+            plantable > 0,
+            "no page holds a `-->` at all, so there is nowhere a stray opener could run to and the \
+             counts above would be equal whatever this scanner did"
         );
     }
 }
