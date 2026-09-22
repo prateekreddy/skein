@@ -48,7 +48,7 @@ checks out the real `feat/auth` branch.
 
 **Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): whether an unscoped box falls
 back to the account token (`seed_gh_secret`, read by `box_credential`), the default agent, the base
-branch for PRs (`base_branch`), confirm-before-Destroy, and an SSH key path. Where the table below
+branch for PRs (`base_branch`), and confirm-before-Destroy. Where the table below
 lists a matching `$SKEIN_*` variable, the environment still overrides the saved value for headless
 use; the base branch has none and is the saved value alone, which `fleet::base_branch` then checks
 against what the remote actually has (`git ls-remote --symref`) before using it.
@@ -58,8 +58,9 @@ against what the remote actually has (`git ls-remote --symref`) before using it.
 enforces it; a `fleet`-mode box instead keeps the sbx proxy, which injects the account credential —
 see [One repo to write, the rest to read](#one-repo-to-write-the-rest-to-read), and SKEIN-548. For SSH
 remotes (`git@…`/`ssh://…`), sbx forwards your **host SSH agent** into the box (the private key stays
-on the host); set an SSH key path in Settings and skein `ssh-add`s it so it's available to forward.
-`skein add` warns up-front if a repo's `origin` is SSH so you can switch it to HTTPS or load the key.
+on the host). Run `ssh-add` on the host to load a key: skein in the fleet cannot read a key file
+on the host, so it takes no key path (SKEIN-947). `skein add` warns up-front if a repo's `origin`
+is SSH so you can switch it to HTTPS or load the key.
 Note that scoping does **not** cover SSH: `github.com:22` is reachable direct and the host agent is
 also reachable at `SSH_AUTH_SOCK_GATEWAY=gateway.docker.internal:3129`, so any key in the host agent is usable by every box for
 every repo it reaches (SKEIN-929) — the launcher's socket cover blanks only the box's local agent.
@@ -422,7 +423,6 @@ real env vars still win). Copy [`.env.example`](../.env.example) to `.env` and y
 | var | what | default |
 |-----|------|---------|
 | `SKEIN_HOME` | skein's own dir (`repos.json`, embedded `kit/`, cloned repos) | `~/.skein` |
-| `SKEIN_SSH_KEY` | path to a private SSH key skein `ssh-add`s into the host agent (sbx forwards it into boxes for SSH git push; the key never enters a box). Ignored by boxes with scoped GitHub access — the agent socket is bound over there, since it signs for every repo the key reaches | — |
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
 | `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |

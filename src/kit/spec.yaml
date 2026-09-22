@@ -65,7 +65,7 @@ memory: |
      is the expected state there rather than a fault — use HTTPS.**
   5. If HTTPS has no `gh` session, ask the user to enable "Seed gh token into sbx" in Skein
      Settings (and run `gh auth login` on the host if needed). If SSH has no identities, ask them
-     to set the host SSH key path in Skein Settings or switch `origin` to HTTPS.
+     to run `ssh-add` on the host (skein forwards that agent) or switch `origin` to HTTPS.
 
   State the failing command and its exact stderr when asking. Do not loop on `gh auth login`, create
   keys, rewrite the remote, or copy credentials without the user's explicit direction.

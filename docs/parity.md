@@ -24,9 +24,9 @@ inside a reproduction block is worse than one in prose, because the block is wha
 the prose against.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 157 unique, 160 occurrences
-grep -c 'function ' src/web/index.html                          # 432
+grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 85, missing every entry whose path is on the line below)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 156 unique, 159 occurrences
+grep -c 'function ' src/web/index.html                          # 430
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -362,7 +362,7 @@ describe a replacement — "a local filesystem path is a valid git remote, so a 
 still works: skein clones it into the mirror and fetches from your path" — and that replacement was
 never built. It is true of git and false of skein. `registrable_source` (`src/repos.rs:855`) requires
 a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
-everything else before it clones anything (`src/repos.rs:1831`), in the words *"is a path, and skein
+everything else before it clones anything (`src/repos.rs:1821`), in the words *"is a path, and skein
 registers repos by remote"*.
 
 So the cost is larger than the old entry admitted, and it is stated here rather than in the future
@@ -478,9 +478,12 @@ asserts its *absence* from the served page, so §5 no longer lists it as a capab
 this section is where it lives now. The native host picker needs a host process with display access,
 which in-fleet skein cannot have. Browse existed mainly to pick a
 local repository path, and repositories are remotes now, so its main job is gone with it. The
-remaining fields — the shared-data folder and the SSH key path — become text inputs **with a check
-that reports whether the path resolved**, which satisfies law 1 without a host round-trip. A
-warden-served picker was considered and rejected: another warden endpoint for an affordance used twice in a fleet's life.
+remaining fields, the shared-data folder and the SSH key path, first became text inputs with a
+check that reported whether the path resolved. **Both fields are gone now, and so is the check.**
+The shared-data folder went with SKEIN-535. The SSH key path went with SKEIN-947, because it named
+a file on the host, and the check (`GET /api/path`) answered for the sandbox's filesystem, so
+every answer was about the wrong machine. A warden-served picker was considered and rejected:
+another warden endpoint for an affordance used twice in a fleet's life.
 
 **The host ssh-agent path — the key file, not the agent.** An earlier revision of this section said
 in-fleet skein has *no host ssh-agent*, and prescribed moving SSH remotes to the warden or to HTTPS
@@ -488,10 +491,11 @@ on that basis. That is work the move does not require. `sbx create` forwards the
 the sandbox, so `$SSH_AUTH_SOCK` inside the fleet **is** the host's agent and `ssh-add -l` lists the
 host's keys — the forward is in the same place whether skein stands beside the sandbox or inside it
 (`docs/delivery.md`, SKEIN-108). What does not travel is the key **file**: `~/.ssh/id_ed25519` is a
-host path and the sandbox has its own `~`, so `ensure_ssh_key` refuses in-fleet with *where to run
-`ssh-add`* rather than failing on a missing file, which would read as a mistyped path
-(`src/config.rs`, the `in_fleet()` branch of `ensure_ssh_key`). **The parity requirement is the
-refusal message and the forwarded agent, not a replacement transport.**
+host path and the sandbox has its own `~`. So skein no longer takes a key path at all (SKEIN-947).
+The Settings field, the `ssh_key` setting and `$SKEIN_SSH_KEY` are gone, because nothing in the
+fleet could load what they named. Settings says instead: *skein uses your host's SSH agent — run
+`ssh-add` on the host and every box can use your keys.* **The parity requirement is that sentence
+and the forwarded agent, not a replacement transport.**
 
 **Transport reporting.** The first draft listed this as parity *and* deleted the transport. The
 transport goes; the readout goes with it. This is recorded here because §12.2 of the first draft
@@ -723,9 +727,11 @@ is gone.
 **Two smaller things go with it, listed so neither is read as an oversight.** `/v2` no longer probes
 a typed path at all: `GET /api/path` answered the shared-data folder field and only that one there —
 the source field is a remote and was deliberately never wired (SKEIN-806) — so `resolves` and
-`checkLater` went with the field that was their only caller. `/` still probes, on the SSH key path,
-which is a host path skein really does read. And the two element ids the field owned, `ar-store` and
-`ar-store-note`, are why the id count at the top of this document moved from 158 to 156.
+`checkLater` went with the field that was their only caller. `/` kept probing, on the SSH key path,
+until SKEIN-947 found that skein cannot read that path from the fleet, and removed the field and
+the route. And the two element ids the field owned, `ar-store` and `ar-store-note`, are why the id
+count at the top of this document moved from 158 to 156. SKEIN-947 then took `set-sshkey` and
+`set-sshkey-note` and added `set-sshagent`, which is 157 to 156.
 
 **The "no review — read again" control is gone, and a stack can no longer name a step that was
 read without one** (SKEIN-660, and it was SKEIN-371's). The row control, its "skein read this commit
@@ -760,7 +766,7 @@ Three verdicts, and the middle one is the load-bearing one:
 | Adopt-in-place is removed, and nothing replaced it | **holds** | it was a surface question after all, and this row said it was not: both boards invited a path and both have stopped. `/v2`'s setup hint asserted "a local path is a valid git remote, so it works" and its source field was wired to the path resolver, which answered a typed directory with a green `found: folder` while the server refused that same source on submit. The hint now reads "The repo's git URL"; the probe is gone from the source field (SKEIN-588, SKEIN-806) — and gone from `/v2` altogether, since the store field it was kept for went with SKEIN-535 |
 | Pointing a repo at a store you already have is CLI-only | **holds** | the field is gone from both boards and neither sends `store`; `src/cockpit.rs`'s setup test asserts `/v2` does not, and `tests/ui/onboarding.mjs` asserts `/` has no `#ar-store` and still names `skein add --store` so the capability is discoverable. The route refuses the field for either of them |
 | Foreign sandbox display | **holds** | `/v2` reads `/api/queue`, whose rows are boxes, pull requests and setup faults (`queue::Source`). There is no sandbox row and no `foreign:` term in the page |
-| `/api/pick-path` and Browse | **holds, and gone from `/` too** | a path is **typed**, never picked: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip, and a link is reported as a link. That probe now runs on `/` only, at the SSH key path; `/v2` has no path field left to probe since SKEIN-535 removed the shared-data folder, so it asks nothing. `pick-path` is not referenced by either page, and one test asserts that of both. SKEIN-106 moved `/`'s three Browse buttons to the same typed path and deleted the route, the handler and `health::pick_path` — it popped the *host's* native dialog, which needs a display the in-fleet skein does not have, and it was already unusable over Tailscale where the advice was "keep typing" |
+| `/api/pick-path` and Browse | **holds, and gone from `/` too** | no path is picked, and none is probed any more. `GET /api/path` is deleted (SKEIN-947): it answered for the sandbox's filesystem, and the last field it served, the SSH key path, named a file on the host. `/v2` lost its path field with SKEIN-535 and `/` lost its own with SKEIN-947, and one test asserts that neither board asks. `pick-path` is not referenced by either page, and one test asserts that of both. SKEIN-106 moved `/`'s three Browse buttons to the same typed path and deleted the route, the handler and `health::pick_path` — it popped the *host's* native dialog, which needs a display the in-fleet skein does not have, and it was already unusable over Tailscale where the advice was "keep typing" |
 | The host ssh-agent path | not a surface question | a credential path, not a screen |
 | Transport reporting | **holds** | nothing in `/v2` reads a transport field; there is no readout to port |
 | Every copy rule has a test | not a surface question | `tests/resize_rules.rs`, unchanged by either board |

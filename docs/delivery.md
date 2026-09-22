@@ -286,9 +286,8 @@ per-repo tokens are skein's own and flow down only, and only the account token i
 work was stopping skein *claiming* one it cannot have, since that label is what the checklist reads
 as "boxes can push". And **the forwarded ssh-agent is not invalidated by the move** (SKEIN-108): the
 forward is `sbx create`'s, from the host into the sandbox, so it is in the same place whether skein
-is beside it or outside it. What does not travel is the key *file*, which is a host path — so
-`ensure_ssh_key` refuses with where to run `ssh-add` rather than failing on a missing file, which
-reads as a mistyped path.
+is beside it or outside it. What does not travel is the key *file*, which is a host path. So
+skein takes no key path any more (SKEIN-947), and Settings says to run `ssh-add` on the host.
 
 **Every host-only call is answered** (SKEIN-104), and they did not all want the same answer. Two
 stop existing: in-fleet the agent's port is not published at all — it is on loopback at the port it

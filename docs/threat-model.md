@@ -80,6 +80,13 @@ tracker item is the record; this list only points at it.
   itself back at the proxy, or clears `NO_PROXY`, is on whatever the proxy does that day. skein
   cannot change that from inside the sandbox; it can only be the thing that notices, which is the
   whole of what the `proxy_injection` row claims.
+* **SKEIN-947** is no longer listed here because the route is gone. `/api/path` said whether any
+  path on the sandbox's filesystem existed, and what it was, to anyone holding the API token. That
+  covered the fleet root, `.skein/private/` and `/etc`. Its last caller, the SSH key field, named a
+  key on the host that skein in the fleet cannot read. The field, the route, the `ssh_key` setting
+  and `$SKEIN_SSH_KEY` were all deleted, and Settings now says to run `ssh-add` on the host. Test
+  `server_serves_ui_vendor_and_guards_routes` (`tests/server.rs`) asserts that the route answers like a
+  path that never existed.
 * **SKEIN-831**: a fleet that was serving before the socket move keeps the cockpit's tmux socket at
   the old path in the readable half of `.skein`, where a box can `connect()` to it. A tmux client
   can make the server run commands, so that is fleet-scope execution. It lasts until that fleet's
@@ -87,16 +94,6 @@ tracker item is the record; this list only points at it.
 * **SKEIN-940**: a box can write `"state": "granted"` into its own git-write request, and the
   cockpit then shows the request as answered and offers no button. No grant is recorded, so the box
   gains nothing, but the owner is never asked.
-* **SKEIN-947**: `/api/path` (`src/bin/skein-server.rs:3893`) says whether any path exists and
-  whether it is a file, a folder or a link. It answers for the **sandbox's** filesystem, not the
-  host's: the fleet root, `.skein/private/`, `/etc`, and the sandbox's own `~/.ssh`. A permission
-  error also comes back worded differently from a missing path. It needs the API token, so it is
-  not a box's reach unless the token has leaked. Its one caller is the SSH key field on `/`
-  (`src/web/index.html:10958`), and that field names a key **on the host**, which skein in the
-  fleet cannot see and does not read (`src/config.rs:399`). So the answers that caller gets are
-  about the wrong machine: `~/.ssh/id_ed25519` reads "nothing there yet" even when the key is
-  on the host. No set of allowed roots would let the route answer that field truthfully. Closing
-  this changes what the field shows, and that is waiting on the owner.
 * **SKEIN-960**: on some live boxes the agent's own config trusts the filesystem root. For a
   working directory outside a git repository, that runs a folder's `.claude/settings.json` hooks
   without asking. skein did not write the entry.

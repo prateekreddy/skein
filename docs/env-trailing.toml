@@ -40,9 +40,6 @@ vars = ["SKEIN_HOME"]
 [leaks."src/config::a_fleet_always_has_a_name_however_the_file_was_written"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/config::a_key_on_the_host_is_not_loaded_from_inside_the_fleet"]
-vars = ["SKEIN_HOME"]
-
 [leaks."src/config::an_absent_config_is_not_an_error_and_saves_normally"]
 vars = ["SKEIN_HOME"]
 

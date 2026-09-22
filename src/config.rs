@@ -127,11 +127,11 @@ pub struct Config {
     /// reads this to decide whether to prompt.
     #[serde(default = "default_true")]
     pub confirm_destroy: bool,
-    /// Path to a private SSH key (host) to load into the host ssh-agent so sbx forwards it into boxes
-    /// for SSH git push (`git@…`/`ssh://` remotes). Empty ⇒ rely on whatever's already in the agent.
-    /// `$SKEIN_SSH_KEY` overrides. The key never enters a box — only the agent socket is forwarded.
-    #[serde(default)]
-    pub ssh_key: String,
+    // No `ssh_key` (SKEIN-947). It named a key file on the host, which skein in the fleet cannot
+    // read, so nothing ever loaded it. A person runs `ssh-add` on the host and `sbx` forwards that
+    // agent. A config.json written before still carries the key and still loads, because serde
+    // ignores a field this struct does not have:
+    // `a_config_that_still_names_an_ssh_key_loads_and_keeps_its_other_settings`.
     /// Scope every box's GitHub credential to the repository it works on: write there, read
     /// everywhere, and a cockpit prompt for anything else. See [`crate::gitgate`].
     ///
@@ -370,38 +370,6 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
-/// Ensure the configured SSH key is loaded in the host ssh-agent, so sbx forwards it into boxes for
-/// SSH git push. `$SKEIN_SSH_KEY` overrides the config. No key configured ⇒ no-op (the agent's
-/// existing keys, if any, are forwarded as-is). The key itself never enters a box — only the agent
-/// socket is forwarded (docs.docker.com/ai/sandboxes/security/credentials). Best-effort: returns Err
-/// (logged by callers) but never panics. Idempotent — `ssh-add` of an already-loaded key is a no-op.
-pub fn ensure_ssh_key() -> Result<(), String> {
-    let key = env::var("SKEIN_SSH_KEY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| load_config().ssh_key);
-    let key = key.trim();
-    if key.is_empty() {
-        return Ok(());
-    }
-    // In-fleet skein cannot do this, and the reason is worth being exact about because half of it
-    // still works. The **agent** is reachable: `sbx` forwards the host's into the sandbox, so
-    // `$SSH_AUTH_SOCK` there is the host's agent and `ssh-add -l` lists the host's keys. The **key
-    // file** is not — `~/.ssh/id_ed25519` is a path on the host, and the sandbox has its own `~`.
-    //
-    // So this would fail on the file, which is the right outcome by accident and the wrong message
-    // for it: "ssh key not found" reads as a mistyped path. The person's move is to run `ssh-add`
-    // on the host, where both the key and their agent are, and the forward carries it in from
-    // there — exactly as it does for a host-driven skein, which also never handles the key itself.
-    // Always, now that in-fleet is the only place skein runs: the key is a host path and this
-    // process is not on the host. Everything below this line was the host arm and went with it.
-    Err(format!(
-        "{key} is a path on the host, and skein is running inside the fleet — it cannot read the \
-         key. Run `ssh-add {key}` on the host instead: sbx forwards that agent into the sandbox, \
-         and the key itself never enters it either way"
-    ))
-}
-
 pub(crate) fn config_json() -> PathBuf {
     skein_home().join("config.json")
 }
@@ -637,7 +605,6 @@ impl Default for Config {
             default_agent: default_agent(),
             base_branch: String::new(),
             confirm_destroy: default_true(),
-            ssh_key: String::new(),
             scope_git_to_repo: default_true(),
             github_app_id: String::new(),
             github_app_key: String::new(),
@@ -1010,41 +977,40 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
-    /// The key is on the host and the agent is the host's; only one of them is reachable in-fleet.
+    /// **A config.json from before SKEIN-947 still loads, and keeps every other setting in it.**
     ///
-    /// `sbx` forwards the host's ssh-agent into the sandbox, so `$SSH_AUTH_SOCK` there IS the host's
-    /// agent — the forward belongs to the sandbox rather than to skein, and does not change with
-    /// where skein runs. What does not travel is the key *file*: `~/.ssh/id_ed25519` names a path on
-    /// the host, and the sandbox has its own `~`.
-    ///
-    /// So `ssh-add` from inside would fail on the file, which is the right outcome reached by the
-    /// wrong route — "ssh key not found" reads as a mistyped path, and sends somebody to fix a
-    /// setting rather than to run one command where their key already is.
+    /// `ssh_key` left `Config`, but files written while it was there still carry it. Two ways to
+    /// get that wrong, and each fails an assertion here: a `deny_unknown_fields` on `Config`
+    /// fails the whole parse, so `confirm_destroy` reads back as its default and `config_error`
+    /// reports it. A field that came back under the old name would be read again, and nothing in
+    /// the struct says so, which is why the serialised form is checked for the name as well.
     #[test]
-    fn a_key_on_the_host_is_not_loaded_from_inside_the_fleet() {
-        let _g = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env::set_var("SKEIN_SSH_KEY", "~/.ssh/id_ed25519");
+    fn a_config_that_still_names_an_ssh_key_loads_and_keeps_its_other_settings() {
+        let _g = env_lock();
+        let home = tempdir();
+        // Restored from `Drop`, so a failing assertion below cannot leave `$SKEIN_HOME` pointing at
+        // a directory that is gone for the next test in this process.
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        fs::write(
+            config_json(),
+            r#"{"confirm_destroy": false, "ssh_key": "~/.ssh/id_ed25519"}"#,
+        )
+        .unwrap();
 
-        let why = ensure_ssh_key().expect_err("skein read a host key path from inside the sandbox");
         assert!(
-            why.contains("on the host") && why.contains("ssh-add"),
-            "the refusal does not say where to run it: {why}"
+            config_error().is_none(),
+            "an old config with ssh_key in it no longer parses: {:?}",
+            config_error()
         );
         assert!(
-            !why.contains("not found"),
-            "it still reads as a mistyped path, which is the wrong thing to go and check: {why}"
+            !load_config().confirm_destroy,
+            "the other settings in an old config were dropped because it names ssh_key"
         );
-
-        // No key configured is a no-op in both, and stays one: the agent's existing keys are
-        // forwarded as-is, and there is nothing for skein to do about them either way.
-        env::remove_var("SKEIN_SSH_KEY");
-        let mut cfg = load_config();
-        cfg.ssh_key = String::new();
-        save_config(&cfg).unwrap();
-        assert!(ensure_ssh_key().is_ok());
-
-        env::remove_var("SKEIN_HOME");
+        let written = serde_json::to_string(&load_config()).unwrap();
+        assert!(
+            !written.contains("ssh_key"),
+            "Config carries ssh_key again, and nothing in the fleet can act on it: {written}"
+        );
     }
 }

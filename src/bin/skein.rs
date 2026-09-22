@@ -847,9 +847,8 @@ fn cmd_doctor() -> Result<(), String> {
         );
     }
     println!(
-        "{DIM}·{RESET} settings      gh-seed:{} ssh-key:{} {DIM}({}){RESET}",
+        "{DIM}·{RESET} settings      gh-seed:{} {DIM}({}){RESET}",
         on_off(cfg.seed_gh_secret),
-        if cfg.ssh_key.is_empty() { "—" } else { "set" },
         // A file that is not there is not a fault: skein writes one the first time something is
         // saved, and every setting is at this build's default until then. Naming a path that does
         // not exist reads as "go and look at it", which sends someone after a file to explain
@@ -911,8 +910,8 @@ fn cmd_doctor() -> Result<(), String> {
         // Whose agent this is. `sbx` forwards the host's into the sandbox at create, and skein runs
         // in that sandbox — the forward is a property of the sandbox rather than of skein — so
         // `ssh-add -l` here lists the HOST's keys, and the fix for an empty list is on the host,
-        // where the key file is. Saying "set an ssh key in settings" would point at a field skein
-        // cannot act on from here (`ensure_ssh_key`), which is the loss `docs/parity.md` §7 records.
+        // where the key file is. There is no key setting to point at: skein in the fleet cannot read
+        // a key file on the host, so the field went (SKEIN-947) and `ssh-add` there is the whole fix.
         let whose = "the host's, forwarded into this sandbox";
         match loaded {
             true => println!("{OK} ssh agent     keys loaded {DIM}({whose}){RESET}"),

@@ -1849,7 +1849,7 @@
             </details>
 
             <div class="set-head">Host SSH key<span class="sub">not a box credential — the host agent sbx forwards</span></div>
-            <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box. A scoped box has this socket blanked, since a forwarded agent signs for anything the key reaches and would undo the scoping above</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><span class="pathnote" id="set-sshkey-note"></span></div></label>
+            <div class="set-desc" id="set-sshagent">skein uses your host's SSH agent — run <code>ssh-add</code> on the host and every box can use your keys.</div>
           </section>
           <section class="set-pane" data-pane="fleet">
             <!-- What the numbers below are a share of. They are meaningless without it: 26g is
@@ -9698,7 +9698,6 @@ function openSettings(pane = "repos") {
     document.getElementById("set-gitemail").value = settings.git_email || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
     document.getElementById("set-boxhigh").value = settings.box_memory_high || "";
-    document.getElementById("set-sshkey").value = settings.ssh_key || "";
     document.getElementById("set-ai").checked = !!settings.ai_enrichment;
     // `!== false` rather than `!!`: this one defaults ON, so a settings payload from a server that
     // predates the field must read as on, not as off.
@@ -10125,7 +10124,6 @@ function settingsPayload() {
     git_email: document.getElementById("set-gitemail").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),
     box_memory_high: document.getElementById("set-boxhigh").value.trim(),
-    ssh_key: document.getElementById("set-sshkey").value.trim(),
     ai_enrichment: document.getElementById("set-ai").checked,
     review_summaries: document.getElementById("set-prai").checked,
     review_model: document.getElementById("set-review-model").value.trim(),
@@ -10920,42 +10918,11 @@ nbBranch.addEventListener("keydown", e => {
 document.getElementById("ar-go").addEventListener("click", submitAddRepo);
 document.getElementById("ar-src").addEventListener("input", arUpdateDerived);
 nbRepo.addEventListener("change", fillRepoSelect);
-// A typed path, and the surface says what it found — the same answer /v2 gives, for the same
-// reason. Browse popped the HOST's native dialog, which needs a display skein-in-fleet does not have
-// and a host filesystem it is not standing on; it was already unusable over Tailscale, where the
-// advice was "keep typing". So typing is the path, and the check is what makes typing bearable:
-// nothing here validates by accepting silently, and a link is reported as a link.
-async function resolvesPath(path, into) {
-  const el = document.getElementById(into);
-  if (!el) return;
-  const said = (text, cls) => { el.textContent = text; el.className = "pathnote" + (cls ? " " + cls : ""); };
-  if (!path.trim()) return said("");
-  if (DEMO) return said("");
-  try {
-    const answer = await fetch(`/api/path?p=${encodeURIComponent(path.trim())}`);
-    const found = await answer.json();
-    if (found.resolved) said(`found: ${found.kind}`, "ok");
-    // Not an error: a URL in the source field and a folder that does not exist yet are both
-    // ordinary, and both worth showing rather than hiding.
-    else said(found.kind === "missing" ? "nothing there yet" : "", "");
-  } catch { said(""); }
-}
-let pathChecking = {};
-function checkPathLater(inputId, noteId) {
-  const input = document.getElementById(inputId);
-  if (!input) return;
-  input.addEventListener("input", () => {
-    clearTimeout(pathChecking[inputId]);
-    pathChecking[inputId] = setTimeout(() => resolvesPath(input.value, noteId), 250);
-  });
-}
-// **Nothing in the add-repo dialog is wired to this probe, and both absences are deliberate.**
-// NOT ar-src: a repo is a remote, so a green "found: folder" affirmed what add_repo refuses
-// (SKEIN-806). And there is no longer an ar-store to wire — the route refuses `store` outright
-// (SKEIN-535), so a field answering "found: folder" for a path the server would reject is the same
-// defect in the same dialog, one field along. The SSH key path is a host path skein really does
-// read, which is why it keeps the probe.
-checkPathLater("set-sshkey", "set-sshkey-note");
+// **Nothing on this page asks the server about a typed path, and nothing can** (SKEIN-947). The
+// probe's last field was the SSH key path, which named a file on the host that skein in the fleet
+// cannot see, so every answer it gave was about the wrong machine. The field and `/api/path` went
+// together, and Settings now says to run `ssh-add` on the host. The add-repo source field never
+// probed (SKEIN-806): a repo is a remote, and "found: folder" affirmed what add_repo refuses.
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
