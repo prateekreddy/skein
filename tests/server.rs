@@ -89,10 +89,18 @@ fn on_the_first_descriptor(fd: RawFd) -> std::io::Result<()> {
 /// `told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind` below).
 ///
 /// It is also the shape the fleet actually starts a server in — `src/server-doorway.py:213` sets
-/// the same `LISTEN_FDS=1` on the same descriptor — so the thirteen spawns in this file now
-/// exercise the production start, where one of them did. That is the line in the doorway's `spawn`,
-/// which is the one that starts a *server*; the cite here used to be `:186`, which is the same
-/// assignment in `reexec`, where the doorway replaces its own image.
+/// the same `LISTEN_FDS=1` on the same descriptor — so every server this file spawns through here
+/// or through [`serving`] now exercises the production start, the way only the doorway's own spawn
+/// used to. That is the line in the doorway's `spawn`, which is the one that starts a *server*; the
+/// cite here used to be `:186`, which is the same assignment in `reexec`, where the doorway
+/// replaces its own image.
+///
+/// **No count of spawns here, on purpose** (SKEIN-993). An earlier version of this paragraph said
+/// "the thirteen spawns in this file now exercise the production start"; the file grew and the
+/// number did not move with it, so it went on saying thirteen once there were eighteen and nothing
+/// noticed — nothing read it. The property the paragraph needs is that `handed_with`, below, sets
+/// `LISTEN_FDS` unconditionally on whatever it is given, which does not get truer or falser as
+/// tests are added or removed, so there is nothing here for a number to protect.
 ///
 /// `LISTEN_PID` is removed rather than set: it is the half of the convention that names the process
 /// the descriptors are for, and this side of the fork there is no pid to name. `descriptor` accepts
