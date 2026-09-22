@@ -134,6 +134,13 @@ ENVIRONMENTAL = [
         "the same mode-bit fixture, for the request path",
     ),
     (
+        "tests/isolation_bwrap.rs",
+        "the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it",
+        "asks whether a real write lands under /usr/local/share/npm-global (write_lands_under, "
+        "SKEIN-1021) rather than reading its mode bits, so it correctly skips on a host that mounts "
+        "that path read-only — a fact about how this machine mounted it, not about this tree",
+    ),
+    (
         "tests/usage.rs",
         "the_reader_reproduces_an_independent_tally_of_the_same_transcripts",
         "compares the reader against an oracle taken from a corpus of REAL transcripts, named by "
