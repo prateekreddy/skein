@@ -108,7 +108,6 @@ revStackRun = "the ONE global that held the stack read in progress, before `revS
 # ---- proposed, not built -------------------------------------------------------------------
 SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."
 ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."
-pane_pid = "turn-state.md's probe table names the pid a probe would read under. The table is the design; O7 is not implemented."
 observed_at = "a field of the signal shape architecture.md §2.2 designs (the table at :84). Nothing carries it yet — `src/signal.rs` is the taxonomy, and its `//!` at :35 is arguing about where the answering Source belongs in that same design."
 
 ensure_fleet_server = "the host-side move — install the server over stdin, reload the doorway, publish the port — deleted with host-driven skein (SKEIN-576, architecture \u00a713a). `bootstrap.sh` installs and starts the server INSIDE the sandbox and a person publishes the port. Named in the PAST TENSE by `src/fleet.rs`'s account of where \u00a79.4's guard went (it moved to `cockpit_port_advice`, because the person who now runs `sbx ports --publish` is acting on what skein told them) and by `tests/fleet_move.rs`, which records which driver each retargeted test used to have."

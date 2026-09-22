@@ -1882,3 +1882,107 @@ fn bootstrap_leaves_a_holder_that_is_not_its_own_and_names_the_command_that_free
         "the install claimed a build answered that did not:\n{said}"
     );
 }
+
+/// A doorway too old to reload: it ignores SIGUSR1, binds the port itself, stamps itself, and goes
+/// on answering with the build it was started at. `@BUILD@` is that build.
+fn deaf_doorway(build: &str) -> String {
+    let deaf = SERVER.replace("@BUILD@", build).replace(
+        "import http.server, json, os, socket\n",
+        "import http.server, json, os, signal, socket, sys\n\
+         signal.signal(signal.SIGUSR1, signal.SIG_IGN)\n\
+         os.environ[\"STALE_PORT\"] = sys.argv[1]\n\
+         open(sys.argv[3], \"w\").write(\"%d %s\\n\" % (os.getpid(), sys.argv[1]))\n",
+    );
+    assert!(
+        deaf.contains("SIG_IGN"),
+        "the stand-in server's imports changed, so the deaf doorway is not deaf"
+    );
+    deaf
+}
+
+/// **The reload did not take**: the supervisor on the new socket is the CURRENT one, and its
+/// doorway ignored the SIGUSR1 and goes on serving the old build. This is the likeliest way a
+/// real upgrade ends up here, and it is the one where fixing it ends the only supervisor there is
+/// — so the install has to put one back, with `start-door.sh`, or it leaves the port unsupervised.
+///
+/// What would make it fail: dropping the step that puts the door back (the `has-session ||
+/// start-door.sh` line). The stale doorway and its loop are still stopped, nothing replaces them,
+/// nothing answers, and the install exits 1 — which is the first assertion.
+#[test]
+fn bootstrap_replaces_a_supervisor_whose_doorway_ignored_the_reload() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+
+    // The current session, with a doorway in it that will not reload.
+    fleet.retire(&fleet.new_sock());
+    fs::write(fleet.doorway(), deaf_doorway("aaaa111")).unwrap();
+    fleet.start_supervisor(&fleet.new_sock());
+    assert!(
+        fleet.wait_answering("aaaa111"),
+        "the deaf doorway never served — the fixture is wrong, not the install"
+    );
+    let loop_pid: u32 = String::from_utf8_lossy(
+        &Command::new("tmux")
+            .args([
+                "-S",
+                &fleet.new_sock(),
+                "list-panes",
+                "-t",
+                "skein-server",
+                "-F",
+                "#{pane_pid}",
+            ])
+            .output()
+            .expect("tmux list-panes")
+            .stdout,
+    )
+    .trim()
+    .parse()
+    .expect("the supervisor loop's pid");
+    let door = fleet.door_pid().expect("the deaf doorway stamped");
+    let mut recorded = Recorded(vec![]);
+    for pid in [loop_pid, door] {
+        if let Some(started) = started_at(pid) {
+            recorded.0.push((pid, started));
+        }
+    }
+    assert_eq!(
+        recorded.0.len(),
+        2,
+        "the fixture does not have a live supervisor loop with a deaf doorway in it"
+    );
+
+    let (ok, said) = fleet.bootstrap("bbbb222", 5);
+    assert!(
+        ok,
+        "the install stopped a doorway that ignored its reload, and the supervisor it stopped with \
+         it was the only one — so nothing was put back behind the port:\n{said}"
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("bbbb222"),
+        "the new build is not answering after the deaf doorway was replaced:\n{said}"
+    );
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "the install did not end with exactly one supervisor, on the new socket:\n{said}"
+    );
+    for &(pid, started) in &recorded.0 {
+        assert_ne!(
+            started_at(pid),
+            Some(started),
+            "pid {pid} of the stale supervisor is still running:\n{said}"
+        );
+    }
+    assert!(
+        said.contains("stopping pid") && said.contains(&door.to_string()),
+        "the install did not say what it stopped and why:\n{said}"
+    );
+}
