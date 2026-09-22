@@ -2923,6 +2923,22 @@ fn a_box_still_sees_the_shared_toolchain_under_its_private_overlay() {
     );
 }
 
+/// Whether a write can actually land under `dir`, proved by attempting one rather than by asking
+/// permission bits.
+///
+/// `access(2)` — what `/usr/bin/test -w` calls — can answer "writable" from mode bits alone while
+/// the mount itself is read-only; it is not required to know about `EROFS` at all. Measured on this
+/// box after the host started mounting `/usr/local/share/npm-global` read-only: `test -w
+/// /usr/local/share/npm-global` exits 0 ("writable"), while `touch
+/// /usr/local/share/npm-global/.probe` answers "Read-only file system". Only a real write, and a
+/// real removal, tells a working cover from a machine that never had the hole.
+fn write_lands_under(dir: &Path) -> bool {
+    let probe = dir.join(format!(".skein-write-probe-{}", std::process::id()));
+    let landed = fs::write(&probe, b"probe").is_ok();
+    let _ = fs::remove_file(&probe);
+    landed
+}
+
 /// **The npm prefix a box actually runs `claude` from is read-only inside a box** (SKEIN-968).
 ///
 /// A private `~/.local` does not close this and never could: `/usr/local/share/npm-global` is not
@@ -2951,12 +2967,7 @@ fn the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it() {
         skip("this machine has no /usr/local/share/npm-global, so there is no npm prefix to cover");
         return;
     }
-    if !Command::new("test")
-        .args(["-w", PREFIX])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    if !write_lands_under(Path::new(PREFIX)) {
         skip(
             "/usr/local/share/npm-global is already unwritable by this user, so nothing here can \
              tell a working cover from a machine that never had the hole",
