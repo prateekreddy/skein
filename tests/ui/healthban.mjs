@@ -41,27 +41,42 @@ const t = harness();
 // over the same report that the browser makes; `renderDiagnostics`, `render` and
 // `renderModelChoices` are stubs because they draw other surfaces entirely, and `openSettings`
 // records instead, since where the click goes is one of the contracts.
-function world() {
+//
+// `throws` names one of the four steps `loadHealth` runs before the banner, and that step throws
+// an error carrying its own name (SKEIN-1012) — for `renderLoginBanner` that means a throwing stub
+// in place of the lifted one. `console` is the world's own and records, so "the throw still
+// surfaces" is a thing this suite can read rather than a thing it hopes; nothing else in the lifted
+// code writes to it. `fetchFails` makes the poll's own fetch reject.
+const STEPS = ["render", "renderDiagnostics", "renderLoginBanner", "renderModelChoices"];
+function world({ throws = null, fetchFails = false } = {}) {
   const { reg, document, where } = stubDom();
-  const state = { health: { ok: true }, opened: [] };
+  const state = { health: { ok: true }, opened: [], logged: [] };
   const fetch = url => {
+    if (fetchFails) return Promise.reject(new Error("the server went away"));
     if (url === "/api/health") return Promise.resolve({ json: () => Promise.resolve(state.health) });
     return Promise.resolve({ json: () => Promise.resolve({}) });
   };
+  const console = {
+    error: (...args) => state.logged.push(["error", ...args]),
+    warn: (...args) => state.logged.push(["warn", ...args]),
+  };
+  const stub = name => throws === name
+    ? `const ${name} = () => { throw new Error("${name} fell over"); };`
+    : `const ${name} = () => {};`;
   const src = `
     const DEMO = false;
     let boxes = [];
-    const render = () => {};
-    const renderDiagnostics = () => {};
-    const renderModelChoices = () => {};
+    ${stub("render")}
+    ${stub("renderDiagnostics")}
+    ${stub("renderModelChoices")}
     const openSettings = pane => state.opened.push(pane);
     ${grab("esc")}
     ${grab("lastHealth")}
     ${grab("loadHealth")}
-    ${grab("renderLoginBanner")}
+    ${throws === "renderLoginBanner" ? stub("renderLoginBanner") : grab("renderLoginBanner")}
     return { loadHealth: () => loadHealth() };
   `;
-  const made = new Function("fetch", "document", "state", src)(fetch, document, state);
+  const made = new Function("fetch", "document", "state", "console", src)(fetch, document, state, console);
   return { ...made, reg, where, state, ban: () => reg.get("healthban") || null };
 }
 
@@ -75,6 +90,15 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
 // row says the whole detail".
 const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, fix });
 
+// `counted`, as `HealthReport::counted_on_the_wire` sends it today: every check but `ai`, in the
+// report's order (SKEIN-1013). A fixture, not a decision — the page reads this off the report and
+// keeps no list of its own, and `the_report_tells_the_page_which_checks_count` in src/health.rs is
+// what holds the real report to `OnBanner`. An unhealthy report without it is not one the server
+// can send, so `unhealthy` is how every `ok: false` fixture below is written.
+const COUNTED = ["registry", "sbx", "git", "gh", "probes", "mailbox", "memory", "disk", "gitgate",
+  "token_expiry", "proxy_injection", "warden", "cover"];
+const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
+
 // --- an unsatisfied counted check puts a row above the app, saying what is wrong ----------------
 //
 // The row used to read `environment: registry, sbx` — two nouns, no verb, no consequence, with
@@ -83,7 +107,7 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // without opening anything, and stopping before the rest of the paragraph.
 {
   const w = world();
-  w.state.health = { ok: false, registry: bad("the registry is unreachable", "check the network") };
+  w.state.health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
   w.loadHealth();
   await settle();
   const ban = w.ban();
@@ -100,12 +124,11 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // --- several failures are COUNTED, not listed, so the row stays one readable sentence ------------
 {
   const w = world();
-  w.state.health = {
-    ok: false,
+  w.state.health = unhealthy({
     registry: bad("the registry is unreachable", "check the network"),
     sbx: bad("the sandbox runtime is missing", "install it"),
     disk: bad("the disk is nearly full", "clear build output"),
-  };
+  });
   w.loadHealth();
   await settle();
   t.check("three failures give one sentence and a count of the rest",
@@ -123,7 +146,7 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // interruption that cannot be cleared by fixing anything, and the next red is read past too.
 {
   const w = world();
-  w.state.health = { ok: false, registry: bad("the registry is unreachable", "check the network") };
+  w.state.health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
   w.loadHealth();
   await settle();
   t.check("the row is up while the fleet is unhealthy", !!w.ban(), true);
@@ -146,22 +169,92 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
   const w = world();
   // The report a `NotCounted` fault actually produces: `first_counted_fault` skips it, so `ok`
   // stays true however loud the check itself is.
-  w.state.health = { ok: true, ai: bad("enrichment is off", "turn it on in Settings") };
+  w.state.health = { ok: true, counted: COUNTED, ai: bad("enrichment is off", "turn it on in Settings") };
   w.loadHealth();
   await settle();
   t.check("a check the banner does not count cannot raise it on its own", w.ban(), null);
   // Non-vacuity, and it is what makes the absence above a fact about `NotCounted` rather than about
   // a world that never paints: the same world, one counted fault later, DOES raise the row.
-  w.state.health = {
-    ok: false,
-    registry: bad("the registry is unreachable", "check the network"),
+  //
+  // `disk` and not `registry` since SKEIN-1013, and that is the tightening: `registry` is ahead of
+  // `ai` in the report's order, so it would have been the headline under the old `failed[0]` too
+  // and this could not have told the two rules apart. `disk` is BEHIND `ai`, so the row below says
+  // `disk` only if the headline is chosen by what counts rather than by position.
+  w.state.health = unhealthy({
     ai: bad("enrichment is off", "turn it on in Settings"),
-  };
+    disk: bad("the disk is nearly full", "clear build output"),
+  });
   w.loadHealth();
   await settle();
   t.check("while a counted one does, which is what makes that a real absence", !!w.ban(), true);
+  // The owner's rule, in his words "a check that raised it": the one sentence a reader can read
+  // and copy is always the reason the banner is up.
+  t.check("the headline is the counted fault, not the uncounted one ahead of it in the list",
+    w.ban()?.textContent, "disk: the disk is nearly full (+1 more)");
   t.check("and once the row is up for a counted reason, the uncounted check is named on it too",
     (w.ban()?.title || "").includes("ai: enrichment is off"), true);
+}
+
+// --- a banner up for no failing counted check still counts the uncounted one ----------------------
+//
+// Stale sessions raise the banner and are not a check (`health_report`'s `ok`), so the headline is
+// the environment line — and an uncounted failure on the same report cannot become the headline in
+// its place, but it is not dropped either: it is in the count and the tooltip, as it is when a
+// counted check leads (SKEIN-1013).
+{
+  const w = world();
+  w.state.health = unhealthy({
+    ai: bad("enrichment is off", "turn it on in Settings"),
+    stale_boxes: ["example-two"],
+  });
+  w.loadHealth();
+  await settle();
+  t.check("an uncounted fault does not take the headline from the reason the banner is up",
+    w.ban()?.textContent, "environment: probe updates · 1 stale (+1 more)");
+  t.check("and it is still in the tooltip",
+    (w.ban()?.title || "").includes("ai: enrichment is off"), true);
+}
+
+// --- NOTHING DRAWN BEFORE THE BANNER CAN CANCEL IT -----------------------------------------------
+//
+// SKEIN-1012, the owner's call: "banner can't be cancelled". `loadHealth` runs four other drawing
+// steps before it builds the row, and they used to share the handler's one `.catch(() => {})`, so
+// a throw in any of them skipped the row — silently, on a report that already said `ok: false`.
+// Measured before it was fixed, not argued: this suite's own world once lacked
+// `renderModelChoices`, and the row was never built. Each of the four is made to throw in turn, on
+// a report with a counted fault, and two things must hold: the row is there, saying what is wrong,
+// and the throw reached the console under the step's own name rather than vanishing.
+for (const name of STEPS) {
+  const w = world({ throws: name });
+  w.state.health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
+  w.loadHealth();
+  await settle();
+  t.check(`a throw in ${name} does not cost the banner`,
+    w.ban()?.textContent, "registry: the registry is unreachable");
+  t.check(`and the throw from ${name} reaches the console, not a swallow`,
+    w.state.logged.some(([how, said, e]) =>
+      how === "error" && String(said).includes(name) && e?.message === `${name} fell over`),
+    true);
+}
+
+// Non-vacuity for the console half: a world where nothing throws logs nothing, so the `some` above
+// is reading this change's lines and not something the page always prints.
+{
+  const w = world();
+  w.state.health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
+  w.loadHealth();
+  await settle();
+  t.check("a poll where nothing throws says nothing to the console", w.state.logged, []);
+}
+
+// And the poll's own failure is said rather than swallowed: what the terminal `.catch` receives now
+// is the fetch, the parse, or the banner block itself.
+{
+  const w = world({ fetchFails: true });
+  w.loadHealth();
+  await settle();
+  t.check("a failed health poll is reported to the console",
+    w.state.logged.some(([how, , e]) => how === "warn" && e?.message === "the server went away"), true);
 }
 
 // --- NOT KNOWING is not BEING BROKEN -------------------------------------------------------------
@@ -173,11 +266,10 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // nobody has established are wrong.
 {
   const w = world();
-  w.state.health = {
-    ok: false,
+  w.state.health = unhealthy({
     registry: bad("the registry is unreachable", "check the network"),
     probes: { level: "unknown", detail: "the probe timed out" },
-  };
+  });
   w.loadHealth();
   await settle();
   t.check("an unanswered check is reported in the tooltip, in those words",
@@ -194,7 +286,7 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // have gone dark, which no check in the array reports. The row must not be blank.
 {
   const w = world();
-  w.state.health = { ok: false, dark_boxes: ["example-one"], stale_boxes: ["example-two"] };
+  w.state.health = unhealthy({ dark_boxes: ["example-one"], stale_boxes: ["example-two"] });
   w.loadHealth();
   await settle();
   t.check("a fault with no named check still leaves a readable row",
@@ -208,7 +300,7 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // anybody to.
 {
   const w = world();
-  w.state.health = { ok: false, registry: bad("the registry is unreachable", "check the network") };
+  w.state.health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
   w.loadHealth();
   await settle();
   w.ban()?.onclick();

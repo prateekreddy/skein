@@ -2936,42 +2936,52 @@ async fn api_health() -> Json<serde_json::Value> {
             // what this used to do with `ok: false`. `ok: false` on the report itself stays, so the
             // cockpit still says something is wrong; it is now the report that is broken rather
             // than everything it was asked about.
-            .unwrap_or_else(|error| skein::health::HealthReport {
-                ok: false,
-                // The one field a crashed health task can still answer: it is about the binary,
-                // not about anything the task had to go and ask.
-                build: skein::health::BUILD_REVISION,
-                registry: skein::health::HealthCheck::unknown(format!(
-                    "the health check itself failed: {error}"
-                )),
-                sbx: skein::health::HealthCheck::unknown("the health check itself failed"),
-                git: skein::health::HealthCheck::unknown("the health check itself failed"),
-                gh: skein::health::HealthCheck::unknown("the health check itself failed"),
-                ai: skein::health::HealthCheck::unknown("the health check itself failed"),
-                probes: skein::health::HealthCheck::unknown("the health check itself failed"),
-                mailbox: skein::health::HealthCheck::unknown("the health check itself failed"),
-                memory: skein::health::HealthCheck::unknown("the health check itself failed"),
-                disk: skein::health::HealthCheck::unknown("the health check itself failed"),
-                gitgate: skein::health::HealthCheck::unknown("the health check itself failed"),
-                token_expiry: skein::health::HealthCheck::unknown("the health check itself failed"),
-                proxy_injection: skein::health::HealthCheck::unknown(
-                    "the health check itself failed",
-                ),
-                warden: skein::health::HealthCheck::unknown("the health check itself failed"),
-                cover: skein::health::HealthCheck::unknown("the health check itself failed"),
-                logins: Vec::new(),
-                expired_logins: Vec::new(),
-                runtime_updates: Vec::new(),
-                models: Vec::new(),
-                dark_boxes: Vec::new(),
-                stale_boxes: Vec::new(),
-                uncovered_boxes: Vec::new(),
-                uncapped_boxes: Vec::new(),
-                runtimes: skein::runtime::supported_runtimes(),
-                // Empty rather than guessed: this is the report for a health task that *failed*, and
-                // the checklist reads this field as "boxes can push". Naming a credential here would
-                // tick that step off on the strength of a crash.
-                git_credential: String::new(),
+            .unwrap_or_else(|error| {
+                let mut report = skein::health::HealthReport {
+                    ok: false,
+                    // Written below from the report itself, as `health_report` does: nothing
+                    // here is a fault so it chooses no headline, but the page reads this as what
+                    // `OnBanner` says and it must not say something else (SKEIN-1013).
+                    counted: Vec::new(),
+                    // The one field a crashed health task can still answer: it is about the binary,
+                    // not about anything the task had to go and ask.
+                    build: skein::health::BUILD_REVISION,
+                    registry: skein::health::HealthCheck::unknown(format!(
+                        "the health check itself failed: {error}"
+                    )),
+                    sbx: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    git: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    gh: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    ai: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    probes: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    mailbox: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    memory: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    disk: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    gitgate: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    token_expiry: skein::health::HealthCheck::unknown(
+                        "the health check itself failed",
+                    ),
+                    proxy_injection: skein::health::HealthCheck::unknown(
+                        "the health check itself failed",
+                    ),
+                    warden: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    cover: skein::health::HealthCheck::unknown("the health check itself failed"),
+                    logins: Vec::new(),
+                    expired_logins: Vec::new(),
+                    runtime_updates: Vec::new(),
+                    models: Vec::new(),
+                    dark_boxes: Vec::new(),
+                    stale_boxes: Vec::new(),
+                    uncovered_boxes: Vec::new(),
+                    uncapped_boxes: Vec::new(),
+                    runtimes: skein::runtime::supported_runtimes(),
+                    // Empty rather than guessed: this is the report for a health task that
+                    // *failed*, and the checklist reads this field as "boxes can push". Naming a
+                    // credential here would tick that step off on the strength of a crash.
+                    git_credential: String::new(),
+                };
+                report.counted = report.counted_on_the_wire();
+                report
             })
     };
     // `ok: false` and nothing else, for the reason the arm above gives: a report the page cannot

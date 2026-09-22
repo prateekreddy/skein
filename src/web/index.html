@@ -11525,6 +11525,18 @@ function connect() {
 let lastHealth = null;
 function loadHealth() {
   if (DEMO) return;
+  // **Nothing drawn before the banner can cancel it** (SKEIN-1012, the owner's call: "banner can't
+  // be cancelled"). Every step below that is not the banner is a call into drawing code about
+  // something else, and they all used to share this handler's one `.catch(() => {})` — so a throw
+  // in any of them skipped the banner, silently, on a fleet whose report already said `ok: false`.
+  // That is SKEIN-1003's failure reached by a second route: nothing on screen and nothing sending
+  // anybody to the diagnostics pane. It was live, not argued: `loginban.mjs` defined no
+  // `renderModelChoices` for as long as it existed, and never once reached the banner block.
+  // So each step gets its own guard, its throw goes to the console under its own name, and the
+  // banner is drawn from the report whatever happened to the others.
+  const step = (name, draw, ...args) => {
+    try { draw(...args); } catch (e) { console.error(`skein: ${name} threw during the health poll; the health banner is drawn regardless`, e); }
+  };
   fetch("/api/health").then(r => r.json()).then(health => {
     const hadNoReport = !lastHealth;
     lastHealth = health;
@@ -11532,11 +11544,11 @@ function loadHealth() {
     // report the dialog can trust synchronously, and it costs nothing on a host.
     // The first-run checklist ticks off this report, so it has to redraw when the report lands —
     // otherwise the steps sit unticked until the next box event, which on an empty fleet never comes.
-    if (hadNoReport || !boxes.length) render(boxes || []);
-    renderDiagnostics();
+    if (hadNoReport || !boxes.length) step("render", render, boxes || []);
+    step("renderDiagnostics", renderDiagnostics);
     // Before the `health.ok` early return: a fleet can be healthy by every environment check and
     // still hold a dead credential, and this banner rides the same poll rather than earning one.
-    renderLoginBanner(health.expired_logins || []);
+    step("renderLoginBanner", renderLoginBanner, health.expired_logins || []);
     // A newer agent CLI used to be a bar here too. It is Settings -> Update now, deliberately: a
     // dead credential has STOPPED work and an old CLI has not, so only one of them is worth taking
     // the top of a board somebody is trying to read. The check is unchanged; where it is drawn is
@@ -11546,7 +11558,7 @@ function loadHealth() {
     // takes AND still a text box, so an exact build name stays typeable when the list is short,
     // wrong, or — because skein could not ask — empty. One control, and the free-text setting the
     // owner already had is not taken away to give him the picker he asked for.
-    renderModelChoices(health.models || []);
+    step("renderModelChoices", renderModelChoices, health.models || []);
     let banner = document.getElementById("healthban");
     if (health.ok) { banner?.remove(); return; }
     if (!banner) {
@@ -11568,8 +11580,15 @@ function loadHealth() {
     //
     // Carrying a check the verdict does not count is deliberate and costs nothing: a check the
     // Rust side marks `NotCounted` gets named here when the banner is already up for some other
-    // reason, and stays unable to raise one by itself. The asymmetry only bites the other way
-    // round.
+    // reason, and stays unable to raise one by itself.
+    //
+    // **And it cannot take the headline** (SKEIN-1013, the owner's call: "a check that raised
+    // it"). The row's one sentence — the only part a person can read on a phone and copy — used
+    // to be `failed[0]` in this list's order, and `ai` sits ahead of seven counted checks, so a
+    // fleet with a full disk and an uncounted `ai` fault would have headlined `ai` and put the
+    // disk in the tooltip. The headline is now the first failure the report says is `counted`;
+    // the page does not decide which those are, because `OnBanner` does and the report carries
+    // its answer. Uncounted failures are still in the row's count of the rest, and the tooltip.
     const CHECKED = ["registry","sbx","git","gh","probes","mailbox","ai","memory","disk","gitgate","token_expiry","proxy_injection","warden","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
@@ -11577,20 +11596,28 @@ function loadHealth() {
     const stale = health.stale_boxes?.length || 0, dark = health.dark_boxes?.length || 0;
     // The banner used to read `environment: registry, sbx` — two nouns, no verb, no consequence,
     // with every actual detail hidden in a `title` tooltip that cannot be copied, read on a phone,
-    // or survive a scroll. The first failure's own sentence says what is wrong and usually what to
-    // do; the rest stay in the tooltip until there is a diagnostics pane to put them in.
-    const first = failed.length ? (health[failed[0]]?.detail || "").split(".")[0] : "";
-    const extra = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
-    banner.textContent = failed.length
-      ? `${failed[0]}: ${first}${extra}`
-      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
+    // or survive a scroll. The first counted failure's own sentence says what is wrong and usually
+    // what to do; the rest stay in the tooltip until there is a diagnostics pane to put them in.
+    const counted = new Set(health.counted || []);
+    const lead = failed.find(key => counted.has(key));
+    const first = lead ? (health[lead]?.detail || "").split(".")[0] : "";
+    // Everything failed that is not the headline — so when no counted check has failed and the
+    // banner is up for stale sessions, an uncounted failure is still counted here, not dropped.
+    const rest = failed.length - (lead ? 1 : 0);
+    const extra = rest ? ` (+${rest} more)` : "";
+    banner.textContent = lead
+      ? `${lead}: ${first}${extra}`
+      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}${extra}`;
     banner.title = [
       ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
       ...unsure.map(key => `${key}: could not be checked — ${health[key]?.detail || "no reason given"}`),
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
       ...(stale ? [`stale sessions: ${health.stale_boxes.join(", ")}`] : [])
     ].join("\n");
-  }).catch(() => {});
+    // Said rather than swallowed (SKEIN-1012): what reaches here now is the fetch, the parse, or
+    // the banner block itself — and a server that is down already has the staleness banner saying
+    // so, so a warning per poll is the cost of never again losing a throw without a trace.
+  }).catch(e => console.warn("skein: the health poll failed", e));
 }
 
 // ---------- the fleet's login, repaired from the page (SKEIN-212) ----------
