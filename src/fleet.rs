@@ -20448,7 +20448,7 @@ for a in sys.argv[2:]:
         // A namespace with three processes in it: one that would be the tmux server, one that
         // reparented away from it, and one that ignores `TERM`. No `--unshare-pid`, for the reason
         // `box-session.sh` gives — the anchor has to be the pid skein sees from outside.
-        let mut boxlike = std::process::Command::new("bwrap")
+        let spawned = std::process::Command::new("bwrap")
             // The root, and nothing else bound over it. A private `/tmp` is what a real box gets and
             // it is wrong here: the two pid files are written by absolute path, and binding over
             // `/tmp` made those paths resolve to nothing inside the namespace — so the fixture
@@ -20462,8 +20462,8 @@ for a in sys.argv[2:]:
                 // the anchor's child and the premise assertion below caught it, which is what that
                 // assertion is for.
                 // A minute, not five. On the passing path the sweep is what ends all of these,
-                // and on a failing one nothing does — Rust runs no cleanup through a panic — so the
-                // number is how long a failed run litters the machine with sleeping processes.
+                // and on a failing one the guard below does — so the number only matters when the
+                // test binary itself is killed before that guard's `Drop` can run.
                 //
                 // The stubborn one ignores `TERM` and is what makes the escalation to `KILL` a
                 // tested path rather than a hoped-for one: a build, a database, an editor with
@@ -20490,6 +20490,17 @@ for a in sys.argv[2:]:
             .stderr(std::fs::File::create(&bwrap_err).expect("a file for bwrap's stderr"))
             .spawn()
             .expect("start a box-like namespace");
+        // **Into the guard on the line after the spawn, and each process into it as it reports
+        // itself** (SKEIN-1011). On the passing path the sweep under test is what ends all three; on
+        // a failing one — exactly the run where the sweep did NOT end them — the two statements
+        // that used to sit at the bottom of this body never ran, and the stubborn loop has no clock
+        // to run out, so it spun until somebody noticed. It traps `TERM`; the guard sends `KILL`.
+        //
+        // The guard cannot be what makes this test pass: it acts only in its `Drop`, at the end of
+        // this scope, after every assertion below. Proven by making the sweep kill nothing — the
+        // test then fails at "the box's own anchor survived being stopped", and the three recorded
+        // pids are gone afterwards all the same.
+        let mut boxlike = crate::testutil::BoxlikeNamespace::holding(spawned);
 
         let read = |at: &std::path::Path| -> u32 {
             for _ in 0..100 {
@@ -20507,9 +20518,15 @@ for a in sys.argv[2:]:
                 said.trim()
             );
         };
+        // Recorded one at a time rather than after all three: a `read` that panics on the second
+        // must not strand the first. The anchor's `starttime` is the one `inside` recorded, so the
+        // stamp the sweep is handed and the stamp the guard kills by are one read, not two.
         let anchor = read(&anchor_at);
+        let anchor_start = boxlike.inside(anchor);
         let strayed = read(&strayed_at);
+        boxlike.inside(strayed);
         let stubborn = read(&stubborn_at);
+        boxlike.inside(stubborn);
         assert!(
             alive(anchor) && alive(strayed) && alive(stubborn),
             "the fixture never started: anchor {anchor} alive {}, strayed {strayed} alive {}, \
@@ -20538,10 +20555,10 @@ for a in sys.argv[2:]:
              and this proves nothing"
         );
 
-        let (generation, start) = stamp_of(anchor);
+        let (generation, _) = stamp_of(anchor);
         let script = format!(
             "{look}; {sweep}",
-            look = namespace_kill(anchor, &generation, start),
+            look = namespace_kill(anchor, &generation, anchor_start),
             sweep = namespace_sweep(),
         );
         let ran = std::process::Command::new("bash")
@@ -20589,8 +20606,6 @@ for a in sys.argv[2:]:
             "the process that ignores TERM is still running: the sweep never escalated to KILL, so \
              a box stops with its build, its database or its editor still in it"
         );
-        let _ = boxlike.kill();
-        let _ = boxlike.wait();
     }
 
     /// The sweep looks for the box **once**, before it signals anything — and this is the guard on
