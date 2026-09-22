@@ -27,6 +27,7 @@ the prose against.
 grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 157 unique, 160 occurrences
 grep -c 'function ' src/web/index.html                          # 432
+grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -328,8 +329,11 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   symlink from the mirror, `rw` seeded once and live fleet-wide, with surfaced paths excluded from git
   so `git add -A` cannot stage a host-absolute symlink.
 - **`$HOME/shared`** — a project-scoped durable workspace symlinked into every box, failing loudly.
-- **The health banner** — always-on, seven checks plus dark and stale box counts, showing the first
-  failure's own sentence and clicking through to diagnostics.
+- **The health banner** — always-on, every check the report carries (`const CHECKED`, counted in the
+  block at the top of this document) plus dark and stale box counts, showing the first failure's own
+  sentence and clicking through to diagnostics. It read "seven checks" until SKEIN-1004 while
+  `CHECKED` held twelve: the one claim in this section that stated no command of its own, so
+  `tests/parity_numbers.rs` had nothing to run and the number could only go stale quietly.
 - **Row hook-health with one-click repair** — `no signals` and `update probes`, the latter for a
   session predating the installed probe contract.
 - **The `open` scope tag** — badges a box holding the fleet-wide credential.

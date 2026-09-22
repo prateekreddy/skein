@@ -160,6 +160,38 @@ fn the_parity_gate_still_reproduces_its_own_counts() {
         "grep -oE 'id=\"[a-zA-Z0-9_-]+\"' src/web/index.html | wc -l",
     );
 
+    // The health banner's checks — the claim that had no command at all (SKEIN-1004). It read
+    // "seven checks" from the audit that wrote it while `CHECKED` grew to twelve and then to
+    // fourteen, and the gate cannot run what the line does not state, so it was the one number in
+    // §5a that could only go stale quietly.
+    //
+    // The count is the page's list and not the report's `CHECK_COUNT`, because the claim is about
+    // what the banner shows: `CHECKED` is what a raised banner filters to find something to name.
+    // `health::tests::every_check_the_report_carries_is_named_on_the_page` is what holds that list
+    // level with the checks the report actually sends.
+    let checked = {
+        let start = "const CHECKED = [";
+        let from = index
+            .find(start)
+            .expect("src/web/index.html has no `const CHECKED` — the banner's list was renamed")
+            + start.len();
+        let to = from + index[from..].find(']').expect("`CHECKED` is never closed");
+        // The same shape the stated command measures: a quoted lower-case key per entry.
+        index[from..to]
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('"'))
+            .filter(|key| {
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            })
+            .count() as u64
+    };
+    check(
+        "checks on the health banner",
+        stated(&parity, "grep -o 'const CHECKED"),
+        checked,
+        "grep -o 'const CHECKED = \\[[^]]*\\]' src/web/index.html | grep -o '\"[a-z_]*\"' | wc -l",
+    );
+
     check(
         "JavaScript functions in the page",
         stated(&parity, "grep -c 'function '"),

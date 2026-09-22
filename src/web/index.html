@@ -11556,32 +11556,21 @@ function loadHealth() {
       banner = document.createElement("button"); banner.id = "healthban";
       banner.onclick = () => openSettings("diag"); document.body.prepend(banner);
     }
-    // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
-    // answering — and by then the banner is not what you are looking at.
-    // "cover" among them for the reason "memory" is: a box running under an older isolation has no
-    // symptom at all — it looks exactly like every covered box — so if the banner does not say it,
-    // nothing does.
-    // "warden" among them for the same reason again: fleet create and destroy go only through it
-    // and there is no fallback, so a host without one has lost two lifecycle operations with no
-    // symptom until somebody presses Launch — which on an upgrade is weeks after the cause.
-    // "disk" among them because it is the one resource the fleet actually runs out of, and the
-    // failure lands in the middle of a build in whichever box happened to ask for the next block —
-    // usually not the box that took the space. `health.ok` counts it, so leaving it out here would
-    // put a red banner on screen with nothing in it to read.
-    // "token_expiry" among them for the reason "cover" is: a GitHub credential inside its renewal
-    // window has no symptom at all until the day it stops working, and on that day every box loses
-    // GitHub at once and it reads as an auth bug. `health.ok` counts it, so leaving it out here
-    // would put a red banner on screen with nothing in it to read (SKEIN-928).
-    // "proxy_injection" among them for the reason "token_expiry" is, one step further on: an
-    // injected account credential has no symptom from inside a box at all — every request simply
-    // works, including the ones against repositories this fleet was never granted — so the first
-    // sign of it is somebody else's repository turning up in a diff. skein cannot close it (it is
-    // set on the HOST with `sbx secret set`), which is exactly why the banner is the whole of
-    // skein's answer: not a refusal to start, because a false positive would lock the owner out of
-    // their own fleet, and not a `skein doctor` line, because a boundary nobody looks at is a
-    // boundary nobody knows has gone (SKEIN-548). `health.ok` counts it, so leaving it out here
-    // would put a red banner on screen with nothing in it to read.
-    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","disk","gitgate","token_expiry","proxy_injection","warden","cover"];
+    // **Every check the report carries, and the list is not a selection any more** (SKEIN-1003).
+    // It used to hold twelve of the fourteen, hand-written, and the two it was short of were the
+    // two nobody had decided about: "gh" — which is "curl is installed" and "GitHub can be reached
+    // at all" (SKEIN-548, SKEIN-926) — and "ai". Whether a check turns the banner red is decided
+    // in ONE place, `OnBanner` in `src/health.rs`, and the page is not that place: a key missing
+    // from here cannot suppress a banner, it can only produce `ok: false` with nothing in the row
+    // to read, which is the one failure this list has ever had. So it carries all of them, and
+    // `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's own
+    // fields — a new check is on this list or that test fails by name.
+    //
+    // Carrying a check the verdict does not count is deliberate and costs nothing: a check the
+    // Rust side marks `NotCounted` gets named here when the banner is already up for some other
+    // reason, and stays unable to raise one by itself. The asymmetry only bites the other way
+    // round.
+    const CHECKED = ["registry","sbx","git","gh","probes","mailbox","ai","memory","disk","gitgate","token_expiry","proxy_injection","warden","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");
