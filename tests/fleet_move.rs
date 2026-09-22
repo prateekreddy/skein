@@ -1986,3 +1986,568 @@ fn bootstrap_replaces_a_supervisor_whose_doorway_ignored_the_reload() {
         "the install did not say what it stopped and why:\n{said}"
     );
 }
+
+// ---- the Update button's own run: SKEIN-1031 and SKEIN-1032 ------------------------------------
+//
+// Everything above runs `bootstrap.sh` the way a person does, on stdin. The Update button does not:
+// `update::start` hands `update::run_script` to a detached tmux pane, and those bytes are all of
+// bootstrap wrapped in a subshell whose output goes to the log the pane tails, with a marker after.
+// So these run THOSE bytes — the same call `update::launch` makes — rather than a copy of their
+// shape, in the fixture fleet above. The one thing left out is the tmux detach, which is a
+// launcher and not part of what the run does; in its place is a terminal of the run's own, because
+// a prompt on a terminal nobody is watching is the failure SKEIN-1032 is about, and a test with no
+// terminal cannot see one — git without a terminal fails at once, prompt setting or none.
+
+/// Runs `argv` on a pseudo-terminal of its own, as a tmux pane would, and kills its whole process
+/// group at the deadline. Prints `exit <status>` or `TIMEOUT`, then everything written to the
+/// terminal — which is where a prompt goes, whatever the run's own output is redirected to.
+const PTY_RUN: &str = r#"import os, pty, select, signal, sys, time
+limit = float(sys.argv[1])
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[2], sys.argv[2:])
+said, status, end = b"", None, time.time() + limit
+while True:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if ready:
+        try:
+            said += os.read(fd, 4096)
+        except OSError:
+            pass
+    done, st = os.waitpid(pid, os.WNOHANG)
+    if done:
+        status = st
+        break
+    if time.time() > end:
+        os.killpg(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        break
+print("exit %d" % os.waitstatus_to_exitcode(status) if status is not None else "TIMEOUT")
+sys.stdout.write(said.decode(errors="replace"))
+"#;
+
+/// What one run of the Update button's script came to.
+struct UpdateRun {
+    /// It ended by itself before the deadline.
+    finished: bool,
+    /// Everything that reached its terminal — a prompt, if anything asked one.
+    tty: String,
+    /// The log the Update pane tails.
+    log: String,
+    /// The marker the pane stops at, when there is one.
+    marker: Option<String>,
+}
+
+impl Install {
+    /// Run the Update button's script — `skein::update::run_script`, exactly the bytes
+    /// `update::launch` hands to tmux — at revision `rev`, on a terminal of its own, stopped at
+    /// `limit`, with `env` added to the fixture's own. `under` is a command to run it beneath,
+    /// standing in for whatever the pane's tmux server is.
+    fn update_under(
+        &self,
+        rev: &str,
+        limit: Duration,
+        source_url: &str,
+        env: &[(&str, String)],
+        under: &[String],
+    ) -> UpdateRun {
+        fs::write(self.root.join("rev"), rev).unwrap();
+        let log = self.home.join("update.log");
+        let done = self.home.join("update.done");
+        let _ = fs::remove_file(&done);
+        fs::write(&log, "").unwrap();
+        // The script reads these as it is assembled — `fleet::bootstrap_env` — so they are pinned
+        // for exactly that call, and put back before anything runs.
+        let script = {
+            let mut pins = env_pins();
+            pins.set("SKEIN_FLEET_ROOT", &self.fleet_root);
+            pins.set("SKEIN_HOME", &self.home);
+            pins.set("SKEIN_SERVER_PORT", self.port.to_string());
+            pins.set("SKEIN_SOURCE_URL", source_url);
+            pins.set("SKEIN_SOURCE_REF", "");
+            skein::update::run_script(&log.to_string_lossy(), &done.to_string_lossy())
+        };
+        let at = self.root.join("update-run.sh");
+        fs::write(&at, script).unwrap();
+        let runner = self.root.join("pty-run.py");
+        fs::write(&runner, PTY_RUN).unwrap();
+
+        let mut argv: Vec<String> = under.to_vec();
+        argv.extend([
+            "python3".to_string(),
+            runner.to_string_lossy().into_owned(),
+            limit.as_secs().to_string(),
+            "sh".to_string(),
+            at.to_string_lossy().into_owned(),
+        ]);
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .env("PATH", self.path())
+            .env("HOME", self.root.join("container-home"))
+            .env("SKEIN_MEMINFO", self.root.join("meminfo"))
+            .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
+            .output()
+            .expect("the update's run started");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        let (head, tty) = said.split_once('\n').unwrap_or((&said, ""));
+        UpdateRun {
+            finished: head.starts_with("exit "),
+            tty: tty.to_string(),
+            log: fs::read_to_string(&log).unwrap_or_default(),
+            marker: fs::read_to_string(&done).ok(),
+        }
+    }
+
+    fn update(&self, rev: &str, limit: Duration, env: &[(&str, String)]) -> UpdateRun {
+        self.update_under(rev, limit, "file:///nowhere", env, &[])
+    }
+
+    /// Swap the stub `git` for this machine's own, with a checkout whose `origin` is `origin` and
+    /// skein's REAL credential helper configured the way a box's gitconfig configures it.
+    ///
+    /// The helper answers only for `https://github.com`, and this remote is `http://127.0.0.1`, so
+    /// it is reached through a wrapper that re-addresses git's question to github.com and hands it
+    /// to `src/git-credential-skein.sh` unchanged. The helper's lookup — which file, in what order —
+    /// is therefore the real one, and nothing is ever sent to github.com: git's request goes to
+    /// the address in `origin`, whatever the helper was told.
+    fn with_real_git(&self, origin: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::remove_file(self.root.join("bin/git")).expect("the stub git was there to remove");
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .env_clear()
+                .env("PATH", self.path())
+                .env("HOME", self.root.join("container-home"))
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "git {args:?} failed in the fixture");
+        };
+        let src = self.fleet_root.join(".skein/src");
+        fs::create_dir_all(&src).unwrap();
+        git(&["init", "-q", &src.to_string_lossy()]);
+        git(&[
+            "-C",
+            &src.to_string_lossy(),
+            "remote",
+            "add",
+            "origin",
+            origin,
+        ]);
+
+        let helper_dir = self.root.join("helper");
+        fs::create_dir_all(&helper_dir).unwrap();
+        let wrapper = helper_dir.join("git-credential-skein");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n\
+                 sed -e 's/^protocol=http$/protocol=https/' \
+                 -e 's/^host=127\\.0\\.0\\.1:[0-9]*$/host=github.com/' \
+                 | sh '{}' \"$@\"\n",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/src/git-credential-skein.sh")
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            self.root.join("container-home/.gitconfig"),
+            format!(
+                "[credential]\n\thelper = {}\n\tuseHttpPath = true\n",
+                wrapper.display()
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(self.root.join("tokens/read")).unwrap();
+    }
+}
+
+/// A git remote that refuses everyone: every request is answered `401` with a Basic challenge, and
+/// the `Authorization` header each one carried (or an empty string) is recorded.
+fn refusing_remote() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = heard.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream);
+            let mut auth = String::new();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.strip_prefix("Authorization: ") {
+                    auth = v.trim().to_string();
+                }
+                line.clear();
+            }
+            seen.lock().unwrap().push(auth);
+            let _ = reader.get_mut().write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"skein-test\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    (port, heard)
+}
+
+/// The fixture's size, stated: a fresh fleet records none until its first run passes the gate.
+fn stated_size() -> Vec<(&'static str, String)> {
+    vec![
+        ("SKEIN_FLEET_MEMORY", "4g".to_string()),
+        ("SKEIN_FLEET_CPUS", "2".to_string()),
+    ]
+}
+
+/// **The Update button's fetch, for a remote that wants a login and gets none, ends in seconds
+/// with the reason in the pane's log — it does not sit at a password prompt nobody can see**
+/// (SKEIN-1032).
+///
+/// This is the path that stranded the owner on 2026-09-22. git prompts only when NO credential
+/// came from a helper — measured on git 2.53: a helper's token that is refused ends at once in
+/// "Authentication failed", prompt setting or none, while a remote that asks and gets nothing
+/// prints `Username for …` on the terminal and waits. So the `Username for 'https://github.com':`
+/// on the live pane means the helper handed git nothing; the refused-token case is the next test.
+///
+/// **What would make it fail:** removing `export GIT_TERMINAL_PROMPT=0` from bootstrap.sh. git then
+/// prompts on the run's terminal, the runner kills it at the deadline, and the first assertion
+/// fails by name with the prompt quoted — bounded, so the suite does not hang with it. Dropping the
+/// explanation instead fails the log assertion; dropping the `exit 1` the marker assertion.
+#[test]
+fn the_updates_fetch_for_a_remote_that_wants_a_login_fails_fast_instead_of_prompting() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (port, heard) = refusing_remote();
+    fleet.with_real_git(&format!(
+        "http://127.0.0.1:{port}/skein-test-owner/thing.git"
+    ));
+    let tokens = root.join("tokens");
+    let mut env = stated_size();
+    env.push(("SKEIN_GIT_TOKENS", tokens.to_string_lossy().into_owned()));
+
+    let limit = Duration::from_secs(30);
+    let ran = fleet.update("bbbb222", limit, &env);
+    assert!(
+        ran.finished,
+        "the Update button's run was still going after {limit:?} — git is waiting at a prompt on a \
+         terminal nobody can see, which is the 37-minute hang of SKEIN-1032. The terminal says:\n{}\n\
+         and the log:\n{}",
+        ran.tty, ran.log
+    );
+    assert!(
+        !heard.lock().unwrap().is_empty(),
+        "the refusing remote was never asked — the fixture is wrong, not the update:\n{}",
+        ran.log
+    );
+    assert!(
+        !ran.tty.contains("Username for"),
+        "the run asked for a username on its terminal:\n{}",
+        ran.tty
+    );
+    assert_eq!(
+        ran.marker.as_deref(),
+        Some("1"),
+        "the run did not end as a failed update, so the pane would not show it finished:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains(
+            "asked for a login to read skein-test-owner/thing and this update had no token"
+        ) && ran
+            .log
+            .contains(&format!("{}/skein-test-owner%2Fthing", tokens.display()))
+            && ran.log.contains("press Update skein again"),
+        "the pane's log does not say, in the owner's terms, that no token reached the fetch, \
+         where skein looked for one, and what to do next:\n{}",
+        ran.log
+    );
+}
+
+/// **A stored token the remote refuses is named — by the file it came from, never by its contents
+/// — and the run ends in seconds with a failed marker** (SKEIN-1032).
+///
+/// The token is read by skein's real credential helper out of `read/<owner>`, the file a host
+/// places for a box, and sent: the remote's own record of the `Authorization` header is checked
+/// first, so this cannot pass on a helper that answered nothing.
+///
+/// **What would make it fail:** bootstrap.sh's token_file_for naming nothing (or the wrong file) fails the path
+/// assertion; printing the token fails the contents assertion; losing the `exit 1` fails the
+/// marker. Removing `GIT_TERMINAL_PROMPT=0` does NOT fail this one, and that is measured rather
+/// than overlooked: git never prompts after a helper's token is refused. The test above is the one
+/// that sabotage fails.
+#[test]
+fn the_updates_fetch_names_the_file_whose_token_was_refused() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (port, heard) = refusing_remote();
+    fleet.with_real_git(&format!(
+        "http://127.0.0.1:{port}/skein-test-owner/thing.git"
+    ));
+    let tokens = root.join("tokens");
+    let file = tokens.join("read/skein-test-owner");
+    fs::write(&file, "skein-test-refused-token\n").unwrap();
+    let mut env = stated_size();
+    env.push(("SKEIN_GIT_TOKENS", tokens.to_string_lossy().into_owned()));
+
+    let limit = Duration::from_secs(30);
+    let ran = fleet.update("bbbb222", limit, &env);
+    assert!(
+        ran.finished,
+        "the Update button's run was still going after {limit:?}; its terminal says:\n{}\nand the \
+         log:\n{}",
+        ran.tty, ran.log
+    );
+    // `printf 'x-access-token:skein-test-refused-token' | base64` — what the helper sends.
+    assert!(
+        heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a == "Basic eC1hY2Nlc3MtdG9rZW46c2tlaW4tdGVzdC1yZWZ1c2VkLXRva2Vu"),
+        "the stored token never reached the remote, so nothing here was refused — the fixture is \
+         wrong, not the update. The remote heard {:?}",
+        heard.lock().unwrap()
+    );
+    assert_eq!(
+        ran.marker.as_deref(),
+        Some("1"),
+        "a refused token did not end the run as a failed update:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log
+            .contains("refused the stored token for skein-test-owner/thing")
+            && ran.log.contains("press Update skein again"),
+        "the pane's log does not say the stored token was refused, for which repository, and \
+         what to do:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains(&format!(
+            "The token git sent is the one in {}.",
+            file.display()
+        )),
+        "the log does not name the file the refused token came from:\n{}",
+        ran.log
+    );
+    assert!(
+        !ran.log.contains("skein-test-refused-token"),
+        "the log printed the token itself:\n{}",
+        ran.log
+    );
+}
+
+/// **The Update button ends the way bootstrap does: with the new build answering, even over a
+/// doorway that ignored the reload** (SKEIN-1031).
+///
+/// The same fixture as `bootstrap_replaces_a_supervisor_whose_doorway_ignored_the_reload` — the
+/// current supervisor, with a doorway in it that will not reload — driven through the button's own
+/// script instead of a hand run. The button used to send a bare `kill -USR1` after the marker and
+/// trust it, so here it left the old build serving, said nothing, and marked the update a success.
+///
+/// **What would make it fail:** skipping the closing check on the button's path — for instance
+/// `[ "$from" = update ] && exit 0` just before it in bootstrap.sh, or the update running bootstrap
+/// under `SKEIN_BOOTSTRAP_STOP_AFTER=build` again. The deaf doorway then goes on answering
+/// `aaaa111`, which the answering assertion names.
+#[test]
+fn the_update_button_ends_with_the_new_build_answering_over_a_doorway_that_ignored_the_reload() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+
+    fleet.retire(&fleet.new_sock());
+    fs::write(fleet.doorway(), deaf_doorway("aaaa111")).unwrap();
+    fleet.start_supervisor(&fleet.new_sock());
+    assert!(
+        fleet.wait_answering("aaaa111"),
+        "the deaf doorway never served — the fixture is wrong, not the update"
+    );
+    let loop_pid: u32 = String::from_utf8_lossy(
+        &Command::new("tmux")
+            .args([
+                "-S",
+                &fleet.new_sock(),
+                "list-panes",
+                "-t",
+                "skein-server",
+                "-F",
+                "#{pane_pid}",
+            ])
+            .output()
+            .expect("tmux list-panes")
+            .stdout,
+    )
+    .trim()
+    .parse()
+    .expect("the supervisor loop's pid");
+    let door = fleet.door_pid().expect("the deaf doorway stamped");
+    let mut recorded = Recorded(vec![]);
+    for pid in [loop_pid, door] {
+        if let Some(started) = started_at(pid) {
+            recorded.0.push((pid, started));
+        }
+    }
+    assert_eq!(
+        recorded.0.len(),
+        2,
+        "the fixture does not have a live supervisor loop with a deaf doorway in it"
+    );
+
+    let limit = Duration::from_secs(90);
+    let ran = fleet.update(
+        "bbbb222",
+        limit,
+        &[("SKEIN_BOOTSTRAP_ANSWER_WAIT", "5".to_string())],
+    );
+    assert!(
+        ran.finished,
+        "the Update button's run did not end within {limit:?}:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("bbbb222"),
+        "after the Update button's run the cockpit still answers as the old build — the button \
+         trusted a reload the doorway ignored, and checked nothing:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        ran.marker.as_deref(),
+        Some("0"),
+        "the new build answers but the run did not record a success, so the pane would say the \
+         update failed:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains("stopping pid") && ran.log.contains(&door.to_string()),
+        "the pane's log does not say what the update stopped and why:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains("answers as bbbb222"),
+        "the pane's log does not end by naming the build that answers:\n{}",
+        ran.log
+    );
+    assert!(
+        !ran.log.contains("sbx ports"),
+        "the button's log carries the first-install epilogue, which is for a person at a shell:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "the update did not end with exactly one supervisor, on the new socket:\n{}",
+        ran.log
+    );
+    for &(pid, started) in &recorded.0 {
+        assert_ne!(
+            started_at(pid),
+            Some(started),
+            "pid {pid} of the stale supervisor is still running:\n{}",
+            ran.log
+        );
+    }
+}
+
+/// Holds the cockpit's port as an old build, with this fleet's volume in its environment — both
+/// halves of what bootstrap calls "provably ours" — and runs the update BENEATH itself, as the
+/// tmux server hosting the Update pane does when the cockpit's own server started it and it
+/// inherited the listening socket. Writes `survived <status>` when the run below it ends.
+const HOLDING_PARENT: &str = r#"import http.server, json, os, subprocess, sys, threading
+class Old(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"build": "0ld0000"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+held = http.server.HTTPServer(("", int(os.environ["STALE_PORT"])), Old)
+threading.Thread(target=held.serve_forever, daemon=True).start()
+status = subprocess.call(sys.argv[2:])
+open(sys.argv[1], "w").write("survived %d\n" % status)
+"#;
+
+/// **The closing check never stops the process the update is running under**, however much it
+/// looks like this install's own stale cockpit.
+///
+/// Now that the Update button runs bootstrap's fix, the fix can meet its own ancestry: skein-server
+/// hands its children the listening socket (its descriptor 3 is not close-on-exec), so a tmux
+/// server it started holds :port with this install's `SKEIN_HOME` in its environment — and the
+/// Update pane runs inside that tmux server. Stopping it would end the update with no status
+/// recorded, the stranded pane of SKEIN-1032 by another road.
+///
+/// **What would make it fail:** bootstrap.sh's stoppable without its is_ancestor half. The fix then TERMs the
+/// parent, which never writes `survived`, and the first assertion names that.
+#[test]
+fn the_closing_check_never_stops_the_process_the_update_is_running_under() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+    fleet.retire(&fleet.new_sock());
+
+    let parent = root.join("holding-parent.py");
+    fs::write(&parent, HOLDING_PARENT).unwrap();
+    let survived = root.join("survived");
+    let ran = fleet.update_under(
+        "bbbb222",
+        Duration::from_secs(60),
+        "file:///nowhere",
+        &[
+            ("SKEIN_BOOTSTRAP_ANSWER_WAIT", "3".to_string()),
+            ("STALE_PORT", fleet.port.to_string()),
+            ("SKEIN_HOME", fleet.home.to_string_lossy().into_owned()),
+        ],
+        &[
+            "python3".to_string(),
+            parent.to_string_lossy().into_owned(),
+            survived.to_string_lossy().into_owned(),
+        ],
+    );
+    assert!(
+        fs::read_to_string(&survived).is_ok_and(|s| s.starts_with("survived")),
+        "the update stopped the process it was running under — the Update pane's own tmux server, \
+         in a real fleet — so the run ended without recording how:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.finished,
+        "the Update button's run did not end:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        ran.marker.as_deref(),
+        Some("1"),
+        "the old build still answers, and the run did not say the update failed:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log
+            .contains("is the process this update is running under"),
+        "the log does not say why the holder of the port was left running:\n{}",
+        ran.log
+    );
+}

@@ -575,24 +575,24 @@ pub fn build_server_in_sandbox(sandbox: &str) -> Result<String, String> {
 /// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` asserts the shell derives the
 /// same paths this module does, by running it.
 fn build_script() -> String {
+    build_script_stopping("SKEIN_BOOTSTRAP_STOP_AFTER=build\nexport SKEIN_BOOTSTRAP_STOP_AFTER\n")
+}
+
+/// ALL of `bootstrap.sh`, for [`crate::update`] (SKEIN-1031; `update::run_script` says why). Both
+/// are names for the one assembler below, not copies of it.
+pub fn build_script_for_update() -> String {
+    build_script_stopping("")
+}
+
+fn build_script_stopping(stop: &str) -> String {
     format!(
-        "{exports}\nSKEIN_BOOTSTRAP_STOP_AFTER=build\nexport SKEIN_BOOTSTRAP_STOP_AFTER\n{BOOTSTRAP_SH}",
+        "{exports}\n{stop}{BOOTSTRAP_SH}",
         exports = bootstrap_env()
             .iter()
             .map(|(k, v)| format!("{k}={}\nexport {k}", sh_quote(v)))
             .collect::<Vec<_>>()
             .join("\n"),
     )
-}
-
-/// [`build_script`] for [`crate::update`], which runs the same bytes when the cockpit updates
-/// itself.
-///
-/// A function rather than making `build_script` public, so the one-implementation claim above stays
-/// checkable: there is still exactly one place that assembles the script, and this is a name for it
-/// rather than a second way in.
-pub fn build_script_for_update() -> String {
-    build_script()
 }
 
 /// Run `script` in a detached tmux session, refusing rather than starting a second one.
