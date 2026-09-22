@@ -96,6 +96,17 @@
 //     from `git worktree list` — git's own record of every lane on this box, derived like
 //     everything else here, never a list of paths in this file.
 //
+// **And a seventh time, over the one surface nobody had pointed a reader at** (SKEIN-1006). The
+// derivation read `tests/` and nothing else, so `skein-test-` — the name of the fixture directory
+// of every `#[cfg(test)]` test in `src/`, built by `crate::testutil::tempdir()` — was not a derived
+// prefix at all, and the check could not have printed it on any run it has ever made. A unit test's
+// stranded process carrying `SKEIN_HOME=/tmp/skein-test-<pid>-<seq>` and nothing else was therefore
+// fixture-named to nothing: one witness instead of two, no cohort, so [`fixturesRunning`] could not
+// reach it and every parentless one was red whether its run was still going or not. The fix is a
+// third reader rather than a fourth directory, because the library names its fixture in the HELPER
+// and not at the call site — see [`libraryPrefixes`], and [`SOURCES`] for why that is the opposite
+// of the rule the other two tiers follow.
+//
 // The other half is [`quiesceOnExit`], and it is `tests/common/mod.rs`'s `Scratch` argument
 // transplanted: *whatever has to stop, stops on every path; only the removal is conditional*. The
 // node tier had no equivalent — `srv.kill()` sat at the top level of each suite, after the last
@@ -444,15 +455,33 @@ export function quiesce() {
 // the check: names read out of the code that creates the fixtures
 // ---------------------------------------------------------------------------------------------
 
-/** Where a fixture prefix is written down, how to read it back, and which language's comments to
- * cut out of it first.
+/** Where a fixture prefix is written down, how to read it back, which language's comments to cut
+ * out of it first, and the shape the refusal below names when a tier yields nothing.
  *
- * `tests/common/mod.rs` is deliberately absent: it holds `Scratch::at(root, prefix)`, the
- * implementation, whose `prefix` is a variable. Only call sites name a fixture. */
+ * `tests/common/mod.rs` is deliberately absent from the `tests` tier: it holds
+ * `Scratch::at(root, prefix)`, the implementation, whose `prefix` is a variable. Only call sites
+ * name a fixture there.
+ *
+ * **`src/` is the opposite case, and it is why there is a third reader rather than a third
+ * directory on the first one** (SKEIN-1006). Nothing in the library names a fixture at a call site:
+ * `crate::testutil::tempdir()` takes no arguments and the name is a literal in its own body, so the
+ * rule that governs the two tiers above — read the call sites, never the helper — would derive
+ * nothing here however many directories it was pointed at. What is read instead is the helper, the
+ * way [`testMarker`] reads `util::TEST_MARKER` and [`sharedFixtureRoot`] reads `lift.mjs`'s
+ * `fixtureRoot`: the one place that decides the name.
+ *
+ * `shape` rides on the entry rather than living in a conditional inside the refusal, so that a
+ * tier cannot be added without saying what was renamed when it goes quiet — which is the whole of
+ * what that message is for. */
 const SOURCES = [
-  { dir: "tests", ext: ".rs", tier: "rust", lang: "rust", read: rustPrefixes },
-  { dir: "tests/ui", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes },
-  { dir: "tests/ui/harness", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes },
+  { dir: "tests", ext: ".rs", tier: "rust", lang: "rust", read: rustPrefixes,
+    shape: '`Scratch::boxes("…")` / `Scratch::temp("…")`' },
+  { dir: "src", ext: ".rs", tier: "library", lang: "rust", read: libraryPrefixes,
+    shape: '`fn tempdir()` building `env::temp_dir().join(format!("…"))`' },
+  { dir: "tests/ui", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes,
+    shape: '`mkdtempSync(…, "…")` / `freshFixture(…, "…")`' },
+  { dir: "tests/ui/harness", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes,
+    shape: '`mkdtempSync(…, "…")` / `freshFixture(…, "…")`' },
 ];
 
 /** `Scratch::boxes("skein-move-it")` and `Scratch::boxes(&format!("skein-fleet-it-{what}"))`.
@@ -461,6 +490,41 @@ const SOURCES = [
  * is what the directory name starts with and therefore all the check needs. */
 function rustPrefixes(text) {
   return [...text.matchAll(/Scratch::(?:boxes|temp)\(\s*(?:&format!\(\s*)?"([^"]+)"/g)]
+    .map(m => m[1].split("{")[0])
+    .filter(Boolean);
+}
+
+/** The library's own scratch helper: `fn tempdir()` returning
+ * `env::temp_dir().join(format!("skein-test-{}-{}", …))`, cut at the first `{` for
+ * [`rustPrefixes`]'s reason.
+ *
+ * **Every unit test in the crate was invisible to the prefix half, and it is the surface again**
+ * (SKEIN-1006, after SKEIN-687 and SKEIN-861). The derivation read `tests/` and nothing else, so
+ * `skein-test-` — the name of the scratch directory of every unit test in `src/` that asks for one,
+ * 307 call sites across 43 files (`grep -rno "testutil::tempdir()" src/ | wc -l`) — was not a
+ * derived prefix at all. It could not have been printed on any run this check has ever made, and a
+ * process whose only fixture path was `SKEIN_HOME=/tmp/skein-test-<pid>-<seq>` was therefore
+ * fixture-named to nothing: its one witness was `$SKEIN_TEST`, it could be in no cohort, so
+ * [`fixturesRunning`] — SKEIN-990's rule — could not reach it and it was judged on parentage
+ * alone, and the row a reader was handed said `environment SKEIN_TEST` and named no fixture.
+ * Measured on this branch before the change: `fixturePrefixes()` held 61 prefixes from 75 files
+ * and none of them began `skein-test`.
+ *
+ * **It reads one helper and not every `temp_dir().join(format!(…))` in `src/`, and the difference
+ * is measured rather than tidy.** Nine other sites build a scratch directory by hand there, and two
+ * of them are not fixtures at all (`skein-req-`, `skein-hdr-` in `github.rs` are production request
+ * bodies, which a live GitHub call really does create). One is worse than not a fixture:
+ * `src/bin/skein-server.rs`'s `home_for` interpolates at the HEAD of its name, so its literal cut
+ * at the first `{` is the bare stem every other prefix in this repository begins with — and
+ * [`fixtureRegex`] built on that stem matches the checkout path of this repository itself, on every
+ * process that names it. A reader that swept the directory would have derived it the day it was
+ * pointed at `src/bin/`. So this one reads the sanctioned helper — the one
+ * `testutil::sweep_stale_runs` also knows by name, and the only one whose leftovers anything cleans
+ * up — and the hand-rolled nine are a separate defect, written down as SKEIN-1007 rather than
+ * widened into here. */
+function libraryPrefixes(text) {
+  return [...text.matchAll(
+    /fn\s+tempdir\s*\(\s*\)[^{]*\{[^}]*temp_dir\(\)\s*\.join\(\s*format!\(\s*"([^"]+)"/g)]
     .map(m => m[1].split("{")[0])
     .filter(Boolean);
 }
@@ -666,12 +730,15 @@ export function fixturePrefixes(repo = REPO) {
   }
   for (const source of SOURCES) {
     if (!tiers[source.tier]) {
+      // Every directory of the tier and not just this entry's, because the node tier has two and a
+      // message naming one of them sends its reader to look in half the places the count came
+      // from — the same "said less than it looked at" error the denied line in [`main`] exists to
+      // not make.
+      const where = SOURCES.filter(s => s.tier === source.tier).map(s => `${s.dir}/`).join(", ");
       throw new Error(
         `the leak check derived no fixture prefix from the ${source.tier} tier, so a count from it \
-would mean nothing. Either the call sites moved, or the shapes ${source.tier === "rust"
-          ? "`Scratch::boxes(\"…\")` / `Scratch::temp(\"…\")`"
-          : "`mkdtempSync(…, \"…\")` / `freshFixture(…, \"…\")`"} were renamed — fix this reader, \
-do not widen it by hand.`);
+would mean nothing. Either the call sites moved out of ${where}, or the shape ${source.shape} was \
+renamed — fix this reader, do not widen it by hand.`);
     }
   }
   return {

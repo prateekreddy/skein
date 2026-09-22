@@ -1468,11 +1468,21 @@ const cut = under.codeOnly || (text => text);
 // assembled rather than spelt out, because `fixturePrefixes` reads this file too — a literal
 // `mkdtempSync(dir, "…")` here would enter the real derived list and the gate would hunt this box
 // for a name only this check ever knew. That is the trap the counter above `emptyDir` exists for,
-// and it is SKEIN-882 again. Rust shapes need no such care: only `tests/*.rs` is read for them.
+// and it is SKEIN-882 again. Rust shapes need no such care, and it is not because they are Rust:
+// the two readers that look for them are pointed at `tests/*.rs` and `src/*.rs`, and this file is
+// in neither — so a Rust call site spelt out here reaches no derivation at all.
 const HIDDEN = "skein-cutprobe";
 const jsCall = `mkdtempSync(join(dir, ${JSON.stringify(HIDDEN)}))`;
 const jsFresh = `freshFixture(root, ${JSON.stringify(HIDDEN)})`;
 const rustCall = `Scratch::temp("${HIDDEN}")`;
+// The library tier's shape, which is a HELPER and not a call site (SKEIN-1006): the crate's own
+// scratch directories are named inside `tempdir`'s body, so what the reader must recognise is the
+// definition. A prefix of its own, so that a tree deriving from all three tiers says which name
+// came from which — two tiers answering with one string cannot tell a reader that the third was
+// read at all.
+const LIBRARY_HIDDEN = "skein-libprobe";
+const libraryCall =
+  `fn tempdir() -> TempDir { env::temp_dir().join(format!("${LIBRARY_HIDDEN}{}-{}", a, b)) }`;
 
 // Each case is a hazard this tree really holds, and `want` is whether the name is still there
 // after the cut — `false` where prose must lose it, `true` where a call site must keep it.
@@ -1531,11 +1541,18 @@ check("a shape a comment quotes is cut, and one at a call site survives every qu
 // reason `repoNaming` gives: the disagreement has to be one this suite made, not a state the tree
 // has to be put into — and "a tier whose every call site is prose" is not a state this tree could
 // be put into at all without deleting the fixtures every other suite uses.
-function repoDeriving(rustSource, nodeSource) {
+//
+// **Three tiers rather than two since SKEIN-1006.** `librarySource` defaults to a real definition
+// so that every case below states only the thing it is about, exactly as `realRust` and `realNode`
+// do for the other two — a default of prose would make every one of these trees refuse for a
+// reason none of them is asking about.
+function repoDeriving(rustSource, nodeSource, librarySource = realLibrary) {
   const at = path.join(skeleton, `deriving-${++skeletons}`);
   mkdirSync(path.join(at, "tests", "ui", "harness"), { recursive: true });
+  mkdirSync(path.join(at, "src"), { recursive: true });
   writeFileSync(path.join(at, "tests", "one.rs"), rustSource);
   writeFileSync(path.join(at, "tests", "ui", "one.mjs"), nodeSource);
+  writeFileSync(path.join(at, "src", "one.rs"), librarySource);
   return at;
 }
 /** `under.fixturePrefixes(repo)`'s prefixes, or the word `refused` — never the exception, so that
@@ -1549,12 +1566,32 @@ const prefixesOf = repo => {
 };
 const realRust = `fn t() { let s = ${rustCall}; }\n`;
 const realNode = `const d = ${jsCall};\n`;
-check("a tree whose two tiers both have real call sites derives both names",
-  prefixesOf(repoDeriving(realRust, realNode)), [HIDDEN]);
+const realLibrary = `${libraryCall}\n`;
+check("a tree whose three tiers all have real call sites derives all three names",
+  prefixesOf(repoDeriving(realRust, realNode)), [LIBRARY_HIDDEN, HIDDEN].sort());
 check("and one where the rust tier's only shape is in a doc comment REFUSES, not counts it",
   prefixesOf(repoDeriving(`/// ${rustCall} is what this reads\n`, realNode)), "refused");
 check("and one where the node tier's only shape is in a block comment REFUSES too",
   prefixesOf(repoDeriving(realRust, `/**\n * ${jsFresh}\n */\n`)), "refused");
+// **The third tier gets the same refusal, and it is the property SKEIN-1006 turns on** — a tier
+// that derives nothing must stop the check rather than quietly take a name off the count. A tier
+// added without one is a tier that can go silent, which is SKEIN-647 hiding inside the fix for it.
+check("and one where the library tier's helper is only quoted in prose REFUSES as well",
+  prefixesOf(repoDeriving(realRust, realNode, `// ${libraryCall}\n`)), "refused");
+// The reason the refusal message is on the SOURCES entry rather than in a conditional inside it:
+// each tier must say which shape went missing, and a tier whose message named another tier's shape
+// would send its reader to rewrite the wrong reader.
+check("and the refusal names the shape the tier that went quiet was reading",
+  (() => {
+    try {
+      under.fixturePrefixes(repoDeriving(realRust, realNode, `// ${libraryCall}\n`));
+      return "it did not refuse";
+    } catch (e) {
+      return { tier: /the library tier/.test(e.message), shape: /fn tempdir\(\)/.test(e.message),
+        andNotAnotherTiers: !/Scratch::|mkdtempSync/.test(e.message) };
+    }
+  })(),
+  { tier: true, shape: true, andNotAnotherTiers: true });
 // And what was cut is reported rather than dropped in silence: the same distinction the printed
 // prefix list is for, one level down. A cutter that fired and a cutter with nothing to remove are
 // told apart by this and by nothing else.
@@ -1568,7 +1605,8 @@ const both = (() => {
   }
 })();
 check("a name only prose carries is reported as quoted and is not a prefix",
-  { prefixes: both.prefixes, quoted: both.quoted }, { prefixes: [HIDDEN], quoted: [QUOTED] });
+  { prefixes: both.prefixes, quoted: both.quoted },
+  { prefixes: [LIBRARY_HIDDEN, HIDDEN].sort(), quoted: [QUOTED] });
 
 // This repository, which is where it was measured: `…` was prefix number 57 and is now none.
 //
@@ -1589,8 +1627,60 @@ check("this tree's prose is quoted, reported, and in none of the names the gate 
     anyQuotedIsAPrefix: derived.quoted.some(q => derived.prefixes.includes(q)),
     ellipsisIsAPrefix: derived.prefixes.includes("…") },
   { quotedSomething: true, anyQuotedIsAPrefix: false, ellipsisIsAPrefix: false });
-check("and both tiers still count real call sites, which is what makes a zero mean anything",
-  { rust: derived.tiers.rust > 0, node: derived.tiers.node > 0 }, { rust: true, node: true });
+check("and all three tiers still count real call sites, which is what makes a zero mean anything",
+  { rust: derived.tiers.rust > 0, library: derived.tiers.library > 0, node: derived.tiers.node > 0 },
+  { rust: true, library: true, node: true });
+
+// --- and the crate's own scratch helper is one of the names the gate hunts for ------------------
+// **Every unit test in `src/` was invisible to the prefix half until SKEIN-1006**, because the
+// derivation read `tests/` and nothing else while `crate::testutil::tempdir()` — which builds the
+// fixture directory of every `#[cfg(test)]` test there is here — lives in `src/`. Measured on this
+// branch before the change: 61 prefixes from 75 files, and not one of them began `skein-test`.
+//
+// The assertion is a JOIN and not a string, and that is the whole care in it. Writing the name
+// here would be `leaks.mjs`'s own defect committed in its test — a check that passes on a name
+// nothing produces the morning somebody renames the helper. So this repository's REAL
+// `src/testutil.rs` is handed to the reader in a synthetic tree, and what is asserted is that what
+// the reader finds in it is also in the list the gate prints. Drop the `src` entry from `SOURCES`
+// and the tree refuses; point the reader at a shape this file no longer writes and it refuses too;
+// derive a name the gate does not publish and the second half goes red.
+const realTestutil = (() => {
+  try {
+    return readFileSync(path.join(worktree || ".", "src", "testutil.rs"), "utf8");
+  } catch {
+    return null;
+  }
+})();
+const fromRealHelper = realTestutil === null
+  ? "this checkout has no src/testutil.rs to read"
+  : prefixesOf(repoDeriving(realRust, realNode, realTestutil));
+const libraryNames = Array.isArray(fromRealHelper)
+  ? fromRealHelper.filter(p => p !== HIDDEN && p !== LIBRARY_HIDDEN)
+  : [];
+check("the library reader recognises this repository's own scratch helper, and the gate hunts for what it finds",
+  { read: Array.isArray(fromRealHelper) ? true : fromRealHelper,
+    derivedOne: libraryNames.length,
+    andTheGatePublishesIt: libraryNames.every(p => derived.prefixes.includes(p)) },
+  { read: true, derivedOne: 1, andTheGatePublishesIt: true });
+
+// The row SKEIN-1005 was filed over, built rather than spawned for `rowNaming`'s reason: a unit
+// test's stranded bwrap anchor, whose argv is the two words `exec` left it with and whose only
+// fixture path is the `$SKEIN_HOME` it inherited. Before the tier above it was named by nothing —
+// one witness (`$SKEIN_TEST`) instead of two, and a process that names no fixture can be in no
+// cohort, so `fixturesRunning` could not reach it and it was judged on parentage alone.
+//
+// `basis` is asserted beside the answer, and not left as a branch that would quietly make this
+// check about nothing: without a library-tier name and a worktree there is no row to build, and a
+// check that reports "no basis" on both sides is a check that cannot fail.
+const anchorNamedBy = libraryNames.length === 1 && worktree
+  ? namedBy(rowNaming(
+    `CARGO_MANIFEST_DIR=${worktree} SKEIN_HOME=/tmp/${libraryNames[0]}${process.pid}-0`,
+    "sleep 60"), worktree)
+  : null;
+check("a unit test's orphaned anchor, named only by the $SKEIN_HOME it inherited, is named by the prefix scan",
+  { basis: libraryNames.length === 1 && Boolean(worktree),
+    namedByTheLibrarysPrefix: anchorNamedBy !== null && anchorNamedBy === libraryNames[0] },
+  { basis: true, namedByTheLibrarysPrefix: true });
 
 // --- and one worktree does not claim a sibling whose path it is a prefix of ---------------------
 // **A bug in the first draft of `fromWorktree`, caught before it shipped and asserted so it cannot
