@@ -1723,13 +1723,11 @@ mod tests {
 
     #[test]
     fn a_files_age_comes_from_the_file_and_is_absent_when_it_cannot() {
-        let dir = std::env::temp_dir().join(format!("skein-ago-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::tempdir();
         let f = dir.join("x");
         fs::write(&f, "hi").unwrap();
         assert_eq!(file_ago(&f).as_deref(), Some("0s ago"));
         assert!(file_ago(&dir.join("nope")).is_none());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A cap is a display concern, so it must not be able to fail — and as a byte slice it could.

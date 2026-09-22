@@ -378,7 +378,9 @@ fn nobodys(name: &str, age: std::time::Duration) -> bool {
 /// the guard missed however it got there.
 ///
 /// Only this crate's own scratch — `skein-test-*` under the temp directory, which nothing but
-/// [`tempdir`] creates — and only what is older than [`STALE`], so a run beside this one is safe.
+/// [`tempdir`] and the server binary's copy of its naming (`scratch_dir` in
+/// `src/bin/skein-server.rs`, which cannot reach this module) creates — and only what is older than
+/// [`STALE`], so a run beside this one is safe.
 fn sweep_stale_runs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

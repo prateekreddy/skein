@@ -498,8 +498,7 @@ mod tests {
     /// assumption about which cgroup a process was in when the kernel took it.
     #[test]
     fn the_counters_are_read_per_cgroup_and_the_kernels_own_tally_is_kept() {
-        let dir = std::env::temp_dir().join(format!("skein-cg-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testutil::tempdir();
         for name in WATCHED {
             let base = dir.join("cgroup").join(name);
             std::fs::create_dir_all(&base).unwrap();
@@ -527,7 +526,6 @@ mod tests {
             &dir.join("cgroup").to_string_lossy(),
             &dir.join("vmstat").to_string_lossy(),
         );
-        let _ = std::fs::remove_dir_all(&dir);
 
         // The three cgroups `fleet::rate_between` names, each with its own figure rather than a sum.
         assert_eq!(got["skein"]["high"], 7);

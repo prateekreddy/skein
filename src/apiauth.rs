@@ -306,8 +306,7 @@ mod tests {
         // then deleted the directory. It passed alone and took a neighbour down whenever a second
         // $SKEIN_HOME test existed in this module, which is the shape of a flake nobody can place.
         let _lock = crate::testutil::env_lock();
-        let dir = std::env::temp_dir().join(format!("skein-apiauth-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::tempdir();
         // Pinned rather than set: the home this points at is deleted at the end of the test, and
         // a variable naming a deleted directory is worse for the next test than one naming nothing.
         let mut env = crate::testutil::env_pins();
@@ -329,7 +328,6 @@ mod tests {
             axum::http::header::COOKIE,
             &format!("{COOKIE}={}", "0".repeat(64)),
         )])));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `skein doctor` prints the cockpit URL, so it reads the token — and reading must not create it.
@@ -337,9 +335,7 @@ mod tests {
     #[test]
     fn looking_at_the_token_does_not_create_one() {
         let _lock = crate::testutil::env_lock();
-        let dir = std::env::temp_dir().join(format!("skein-apiauth-peek-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", &dir);
 
@@ -370,6 +366,5 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "the fleet's API token was {mode:o}");
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
