@@ -2524,24 +2524,24 @@ mod tests {
     /// Blocks the caller until a just-spawned responder thread confirms it is actually about to
     /// `accept()`, not merely that its listener is bound.
     ///
-    /// **SKEIN-1024:** bound-and-listening is not "ready" in the sense a probe with a fixed
-    /// wall-clock budget needs. `TcpListener::bind` already completes the kernel-side `listen()`,
-    /// so a connection can complete its handshake into the backlog before any userspace thread has
-    /// run at all — the probe's own tests here proved that a probe never fails to *connect* this
-    /// way. What it can fail to do, under load, is get an *answer* in time: a brand-new thread has
-    /// no scheduling history, and under enough contention it can sit unscheduled for longer than a
-    /// production probe's own fixed budget (`curl -m 8` for the injection probe) waits — at which
-    /// point the probe gives up and reports `Unanswered("the probe could not reach the proxy at
-    /// all")`, or reads back nothing at all, even though the fake proxy was "there" the whole time.
-    /// Confirmed by holding the thread at the top of its body for longer than that budget: the
-    /// exact failures this ticket names reproduce on demand, with the assertion and error text this
-    /// ticket quotes verbatim.
+    /// **SKEIN-1024:** a narrowing, not the fix. `TcpListener::bind` already completes the
+    /// kernel-side `listen()`, so a probe's connection lands in the backlog whether or not the
+    /// responder thread has run; what this adds is that the probe starts only once the thread
+    /// has been scheduled at least once, so a responder that never ran before the probe's own
+    /// fixed budget (`curl -m 8`) expired is ruled out rather than guessed about. Holding the
+    /// thread past that budget does reproduce the ticket's text, but no load this box could
+    /// produce ever held a thread that long.
     ///
-    /// The fix is not a longer budget — the production timeout is not this test's to move, and a
-    /// longer one would only buy the same race more rope. It is to stop guessing whether the
-    /// responder has been scheduled yet and instead wait for it to say so: the probe starts only
-    /// once the fact is true, which makes the remaining wait a single scheduler wake-up on an
-    /// already-running thread rather than a coin flip on ever being scheduled once at all.
+    /// **What the ticket actually saw** is the race [`finish_responder`] closes: the fixture's
+    /// own deadline, counted from thread start, dropped the listener before a late-starting
+    /// probe connected, so the probe was refused (`000`) and the captured request was empty.
+    /// Planting an 11s delay between this call and the probe reproduced that verbatim against
+    /// a 10s thread-start deadline, and passes now that no deadline exists.
+    ///
+    /// Kept because it is cheap and removes one way for the responder to lose a race it cannot
+    /// see; what makes these tests safe on a loaded box is that the test side has no wall clock
+    /// at all (see [`finish_responder`]). The production timeouts are untouched: they are the
+    /// budget a real proxy gets, and no business of this fixture's.
     fn wait_until_accepting(ready: std::sync::mpsc::Receiver<()>) {
         ready
             .recv()
