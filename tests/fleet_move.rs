@@ -150,6 +150,12 @@ fn scratch() -> Scratch {
                 "kill-server",
             ])
             .status();
+        // And the socket every fleet had before SKEIN-529, which the upgrade tests at the end of
+        // this file start a supervisor on — see `legacy_sock`. Usually finds nothing.
+        let _ = Command::new("tmux")
+            .args(["-S", &legacy_sock(&fleet_root), "kill-server"])
+            .stderr(std::process::Stdio::null())
+            .status();
         std::thread::sleep(Duration::from_millis(250));
     })
 }
@@ -1114,4 +1120,613 @@ fn a_squatter_on_the_cockpits_port_is_not_mistaken_for_the_door() {
     );
 
     drop(squatter);
+}
+
+// ---- bootstrap.sh across the tmux socket move (SKEIN-1020) ---------------------------------------
+//
+// SKEIN-529 moved the cockpit's tmux socket from `.skein/server.tmux` into `.skein/private/`, and
+// `start-door.sh` — which bootstrap.sh writes and runs — then asked only the new path whether the
+// cockpit was running. On a fleet serving since before the move it was told "no" about a cockpit
+// that was running, started a second supervisor beside it, and the first one kept the port and
+// kept serving the build it was started with. The install printed "built <sha>" and "listening on
+// :7878", both true: nothing it said could tell an upgraded fleet from one serving the old build.
+//
+// So these run the real bootstrap.sh, fed on stdin the way `sbx exec -i … bash < bootstrap.sh`
+// feeds it, against a real tmux and the real doorway. Only three things are stood in for: `git`
+// and `cargo`, because a clone and a release build are the network and minutes; and the server
+// behind the door, which is a python stand-in that adopts descriptor 3 as `doorway.rs` does and
+// answers `/api/health` with the build the fake cargo baked into it — so a process started before
+// an install goes on answering with the OLD build, exactly as the real one did.
+//
+// **Everything it touches is inside the scratch root.** The environment is cleared and rebuilt,
+// the fleet root, the volume and `$HOME` are under it, and the port is a free one — never 7878 —
+// because bootstrap.sh's defaults are the live fleet (`tests-can-reach-the-live-fleet`). `sudo` is
+// a stub that fails, so nothing here can escalate either.
+
+/// The cockpit's tmux socket as every fleet had it before SKEIN-529 moved it under `private/`.
+/// Spelled here and in `start-door.sh` and nowhere in skein, because nothing makes a session there
+/// any more: it is a fact about fleets installed before the move, not a place skein uses.
+fn legacy_sock(fleet_root: &Path) -> String {
+    fleet_root
+        .join(".skein/server.tmux")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The token the stand-in server demands, so the install's question is asked the way the real
+/// cockpit requires it — with the fleet's token — rather than of a server that answers anyone.
+const TOKEN: &str = "fixture-token";
+
+/// A stand-in skein-server: adopts the doorway's listener at descriptor 3 — or, run bare with no
+/// `LISTEN_FDS`, binds `$STALE_PORT` itself, as a process no doorway started would — and answers
+/// `/api/health` with `build`, refusing a request without the token as `apiauth::authorised` does.
+/// `@BUILD@` is replaced by the fake cargo at "build" time, which is what makes an old process and
+/// a new file answer differently.
+const SERVER: &str = r#"#!/usr/bin/env python3
+import http.server, json, os, socket
+BUILD = "@BUILD@"
+TOKEN = open(os.path.join(os.environ["SKEIN_HOME"], "api-token")).read().strip()
+class Health(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/api/health" or self.headers.get("Authorization") != "Bearer " + TOKEN:
+            self.send_response(401)
+            self.end_headers()
+            return
+        body = json.dumps({"build": BUILD}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+if os.environ.get("LISTEN_FDS") == "1":
+    server = http.server.HTTPServer(("", 0), Health, bind_and_activate=False)
+    server.socket.close()
+    server.socket = socket.socket(fileno=3)
+else:
+    server = http.server.HTTPServer(("", int(os.environ["STALE_PORT"])), Health)
+server.serve_forever()
+"#;
+
+/// A fleet for bootstrap.sh to install into, built entirely under one scratch root.
+struct Install {
+    root: PathBuf,
+    fleet_root: PathBuf,
+    home: PathBuf,
+    port: u16,
+}
+
+impl Install {
+    fn new(root: &Path) -> Install {
+        use std::os::unix::fs::PermissionsExt;
+        let fleet_root = root.join("boxes");
+        let home = root.join("skein");
+        let bin = root.join("bin");
+        for dir in [&home, &bin, &root.join("container-home")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // The one line this whole fixture exists to keep true, checked rather than trusted.
+        assert!(
+            root.starts_with("/var/tmp/") && !fleet_root.starts_with("/boxes"),
+            "the upgrade fixture is not under its scratch root: {}",
+            root.display()
+        );
+        fs::write(home.join("api-token"), format!("{TOKEN}\n")).unwrap();
+        fs::write(root.join("server.py.in"), SERVER).unwrap();
+        fs::write(root.join("meminfo"), "MemTotal: 4194304 kB\n").unwrap();
+
+        let src = fleet_root.join(".skein/src");
+        let stub = |name: &str, body: String| {
+            let at = bin.join(name);
+            fs::write(&at, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        // `git`: any call leaves a checkout carrying the REAL doorway, and the two questions the
+        // script asks of it are answered with the revision this run is "at".
+        stub(
+            "git",
+            format!(
+                "mkdir -p '{src}/.git' '{src}/src'\n\
+                 cat '{doorway}' > '{src}/src/server-doorway.py'\n\
+                 case \"$*\" in *rev-parse*|*describe*) cat '{rev}' ;; esac\nexit 0",
+                src = src.display(),
+                doorway = concat!(env!("CARGO_MANIFEST_DIR"), "/src/server-doorway.py"),
+                rev = root.join("rev").display(),
+            ),
+        );
+        // `cargo`: "builds" the stand-in server with this run's revision baked in.
+        stub(
+            "cargo",
+            format!(
+                "case \"$*\" in *build*) ;; *) exit 0 ;; esac\n\
+                 mkdir -p '{src}/target/release'\n\
+                 sed \"s/@BUILD@/$(cat '{rev}')/\" '{tmpl}' > '{src}/target/release/skein-server'\n\
+                 printf '#!/bin/sh\\n' > '{src}/target/release/skein'\n\
+                 chmod 755 '{src}/target/release/skein-server' '{src}/target/release/skein'",
+                src = src.display(),
+                rev = root.join("rev").display(),
+                tmpl = root.join("server.py.in").display(),
+            ),
+        );
+        for present in ["cc", "curl", "jq"] {
+            stub(present, "exit 0".into());
+        }
+        stub("nproc", "echo 2".into());
+        stub(
+            "sudo",
+            "echo 'the upgrade fixture ran sudo' >&2; exit 1".into(),
+        );
+        Install {
+            root: root.to_path_buf(),
+            fleet_root,
+            home,
+            port: free_port(),
+        }
+    }
+
+    fn path(&self) -> String {
+        format!(
+            "{}:{}",
+            self.root.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    fn new_sock(&self) -> String {
+        server_tmux_sock_in(self.fleet_root.to_string_lossy().as_ref())
+    }
+
+    fn old_sock(&self) -> String {
+        legacy_sock(&self.fleet_root)
+    }
+
+    fn doorway(&self) -> PathBuf {
+        self.fleet_root.join(".skein/server-doorway.py")
+    }
+
+    /// Run bootstrap.sh at revision `rev`, on stdin, in an environment built from nothing.
+    fn bootstrap(&self, rev: &str, answer_wait: u32) -> (bool, String) {
+        fs::write(self.root.join("rev"), rev).unwrap();
+        let script = fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/bootstrap.sh"))
+            .expect("bootstrap.sh");
+        let out = Command::new("bash")
+            .stdin(script)
+            .env_clear()
+            .env("PATH", self.path())
+            .env("HOME", self.root.join("container-home"))
+            .env("SKEIN_FLEET_ROOT", &self.fleet_root)
+            .env("SKEIN_HOME", &self.home)
+            .env("SKEIN_SERVER_PORT", self.port.to_string())
+            .env("SKEIN_MEMINFO", self.root.join("meminfo"))
+            .env("SKEIN_FLEET_MEMORY", "4g")
+            .env("SKEIN_FLEET_CPUS", "2")
+            .env("SKEIN_SOURCE_URL", "file:///nowhere")
+            .env("SKEIN_BOOTSTRAP_ANSWER_WAIT", answer_wait.to_string())
+            .output()
+            .expect("bootstrap.sh ran");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    fn supervising(&self, sock: &str) -> bool {
+        Command::new("tmux")
+            .args(["-S", sock, "has-session", "-t", "skein-server"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Which sockets have a cockpit supervisor on them, by name — so a failure says which.
+    fn supervisors(&self) -> Vec<&'static str> {
+        let mut on = vec![];
+        if self.supervising(&self.new_sock()) {
+            on.push("private/server.tmux");
+        }
+        if self.supervising(&self.old_sock()) {
+            on.push("server.tmux (pre-move)");
+        }
+        on
+    }
+
+    /// Start a supervisor on the PRE-move socket, as `start-door.sh` did before SKEIN-529 — the
+    /// same loop, the same doorway, the same stamp; only the socket differs, which is the whole
+    /// of what a fleet serving since then has.
+    fn start_pre_move_supervisor(&self) {
+        self.start_supervisor(&self.old_sock());
+    }
+
+    fn start_supervisor(&self, sock: &str) {
+        let skein = self.fleet_root.join(".skein");
+        let supervise = format!(
+            "while [ -f '{d}' ]; do began=$(date +%s); \
+             SKEIN_HOME='{h}' python3 '{d}' '{p}' '{s}' '{st}'; \
+             [ $(($(date +%s) - began)) -lt 5 ] && sleep 2; done",
+            d = self.doorway().display(),
+            h = self.home.display(),
+            p = self.port,
+            s = skein.join("skein-server").display(),
+            st = skein.join("server.door").display(),
+        );
+        let ok = Command::new("tmux")
+            .args([
+                "-S",
+                sock,
+                "new-session",
+                "-d",
+                "-s",
+                "skein-server",
+                &supervise,
+            ])
+            .env_clear()
+            .env("PATH", self.path())
+            .env("HOME", self.root.join("container-home"))
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "could not start a supervisor on {sock}");
+    }
+
+    /// End the tmux server on `sock` and wait until nothing holds the port.
+    fn retire(&self, sock: &str) {
+        let _ = Command::new("tmux")
+            .args(["-S", sock, "kill-server"])
+            .status();
+        for _ in 0..100 {
+            if !connects(self.port) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("the port was still held after the supervisor on {sock} was ended");
+    }
+
+    /// The doorway's pid, off its stamp.
+    fn door_pid(&self) -> Option<u32> {
+        let stamp = fs::read_to_string(self.fleet_root.join(".skein/server.door")).ok()?;
+        stamp.split_whitespace().next()?.parse().ok()
+    }
+
+    /// What `/api/health` on the cockpit's port says its build is — asked with the token, as the
+    /// install asks it.
+    fn answering(&self) -> Option<String> {
+        use std::io::{Read, Write};
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.port));
+        let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        write!(
+            s,
+            "GET /api/health HTTP/1.0\r\nAuthorization: Bearer {TOKEN}\r\n\r\n"
+        )
+        .ok()?;
+        let mut reply = String::new();
+        s.read_to_string(&mut reply).ok()?;
+        let body = reply.split("\r\n\r\n").nth(1)?;
+        let json: serde_json::Value = serde_json::from_str(body).ok()?;
+        json["build"].as_str().map(str::to_string)
+    }
+
+    fn wait_answering(&self, build: &str) -> bool {
+        for _ in 0..150 {
+            if self.answering().as_deref() == Some(build) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// Doorway processes of THIS fleet: `python3 <its doorway> …`, found in `/proc`.
+    fn doorways(&self) -> Vec<u32> {
+        let doorway = self.doorway().to_string_lossy().into_owned();
+        let mut found = vec![];
+        for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(raw) = fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let argv: Vec<String> = raw
+                .split(|b| *b == 0)
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect();
+            if argv.first().is_some_and(|a| {
+                Path::new(a)
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("python"))
+            }) && argv.get(1) == Some(&doorway)
+            {
+                found.push(pid);
+            }
+        }
+        found
+    }
+
+    /// The doorways, once any that are on their way out have gone.
+    fn settled_doorways(&self) -> Vec<u32> {
+        let mut found = self.doorways();
+        for _ in 0..30 {
+            if found.len() <= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            found = self.doorways();
+        }
+        found
+    }
+}
+
+/// The skip every test below shares: a real doorway needs tmux and python3.
+fn cannot_hold_a_door() -> bool {
+    if !have("tmux") || !have("python3") {
+        skip("this machine lacks tmux/python3, so it cannot hold the door");
+        return true;
+    }
+    false
+}
+
+/// **A first install** — nothing running anywhere — ends with one supervisor, on the new socket,
+/// serving the build it installed. The path that already worked, held here so the fix for the
+/// upgrade cannot quietly break it.
+///
+/// What would make it fail: `start-door.sh` choosing the pre-move socket for a new session, or
+/// the closing check refusing a server that is in fact the new build.
+#[test]
+fn bootstrap_on_a_fresh_fleet_starts_one_supervisor_serving_what_it_built() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "a first install did not succeed:\n{said}");
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "a first install did not leave exactly one supervisor, on the new socket:\n{said}"
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("aaaa111"),
+        "the cockpit is not serving the build the install just made:\n{said}"
+    );
+    assert!(
+        said.contains("answers as aaaa111"),
+        "the install did not say which build answered, which is the line that tells an upgraded \
+         fleet from one still serving the old build:\n{said}"
+    );
+}
+
+/// **A normal upgrade** — supervisor already on the new socket — reloads the running doorway in
+/// place: same pid, same listening socket, and the new build answering. The other path that
+/// already worked.
+///
+/// What would make it fail: a `new-session` beside the running one (two supervisors), or a
+/// restart instead of the reload (a new doorway pid, a re-bound socket).
+#[test]
+fn bootstrap_over_a_supervisor_on_the_new_socket_reloads_it_in_place() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+    let pid = fleet
+        .door_pid()
+        .expect("the first install stamped a doorway");
+    let socket = door_socket(pid);
+
+    let (ok, said) = fleet.bootstrap("bbbb222", 20);
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "an upgrade did not leave exactly one supervisor:\n{said}"
+    );
+    assert_eq!(
+        fleet.door_pid(),
+        Some(pid),
+        "the upgrade replaced the doorway instead of reloading it:\n{said}"
+    );
+    assert_eq!(
+        door_socket(pid),
+        socket,
+        "the cockpit's listening socket was closed and re-opened by the upgrade:\n{said}"
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("bbbb222"),
+        "the upgrade left the old build answering:\n{said}"
+    );
+    assert!(ok, "the upgrade did not succeed:\n{said}");
+}
+
+/// **SKEIN-1020 itself**: a fleet serving since before SKEIN-529, its supervisor on
+/// `.skein/server.tmux`. The install must end with exactly one supervisor, serving the new build —
+/// and with no gap on the port (the same doorway, the same socket), and with the pre-move socket
+/// gone, since it is one every box can connect to.
+///
+/// What would make it fail, and did: `start-door.sh` asking only the new path. It then starts a
+/// second supervisor, which is the first assertion; and the old doorway is never reloaded, so the
+/// old build answers, which is the one after.
+#[test]
+fn bootstrap_over_a_supervisor_on_the_pre_move_socket_ends_with_one_serving_the_new_build() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+
+    // Put the running cockpit where a pre-move fleet has it.
+    fleet.retire(&fleet.new_sock());
+    fleet.start_pre_move_supervisor();
+    assert!(
+        fleet.wait_answering("aaaa111"),
+        "the pre-move supervisor never served — the fixture is wrong, not the install"
+    );
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["server.tmux (pre-move)"],
+        "the fixture is not a pre-move fleet"
+    );
+    let pid = fleet.door_pid().expect("the pre-move doorway stamped");
+    let socket = door_socket(pid);
+
+    let (ok, said) = fleet.bootstrap("bbbb222", 20);
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "upgrading a fleet whose supervisor is on the pre-move socket did not end with exactly \
+         one supervisor, on the new socket:\n{said}"
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("bbbb222"),
+        "the pre-move supervisor kept serving the old build after the upgrade:\n{said}"
+    );
+    assert_eq!(
+        fleet.door_pid(),
+        Some(pid),
+        "the pre-move doorway was replaced rather than reloaded, so the port was let go:\n{said}"
+    );
+    assert_eq!(
+        door_socket(pid),
+        socket,
+        "the cockpit's listening socket was closed and re-opened by the migration:\n{said}"
+    );
+    assert_eq!(
+        fleet.settled_doorways().len(),
+        1,
+        "more than one doorway is running for this fleet after the upgrade:\n{said}"
+    );
+    assert!(
+        !Path::new(&fleet.old_sock()).exists(),
+        "the pre-move socket is still there, and every box can connect to it (SKEIN-529):\n{said}"
+    );
+    assert!(ok, "the upgrade did not succeed:\n{said}");
+}
+
+/// **The state the bug leaves behind**: the pre-move supervisor holding the port and serving the
+/// old build, and a second one on the new socket whose doorway loops on "cannot bind". An install
+/// over that keeps the one holding the port — so nothing is let go — ends the other, and serves the
+/// new build.
+///
+/// What would make it fail: keeping both (two supervisors), or ending the one that holds the port
+/// (a new doorway pid).
+#[test]
+fn bootstrap_over_two_supervisors_keeps_the_one_holding_the_port_and_ends_the_other() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+    fleet.retire(&fleet.new_sock());
+    fleet.start_pre_move_supervisor();
+    assert!(
+        fleet.wait_answering("aaaa111"),
+        "the pre-move supervisor never served"
+    );
+    let pid = fleet.door_pid().expect("the pre-move doorway stamped");
+    // What the unfixed install did next: a second supervisor on the new socket.
+    fleet.start_supervisor(&fleet.new_sock());
+    assert_eq!(
+        fleet.supervisors().len(),
+        2,
+        "the fixture does not have two supervisors"
+    );
+
+    let (ok, said) = fleet.bootstrap("bbbb222", 20);
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["private/server.tmux"],
+        "two supervisors did not end as one:\n{said}"
+    );
+    assert_eq!(
+        fleet.door_pid(),
+        Some(pid),
+        "the supervisor holding the port was the one ended, so the port was let go:\n{said}"
+    );
+    assert_eq!(
+        fleet.answering().as_deref(),
+        Some("bbbb222"),
+        "the old build is still answering:\n{said}"
+    );
+    assert_eq!(
+        fleet.settled_doorways().len(),
+        1,
+        "the ended supervisor's doorway is still running:\n{said}"
+    );
+    assert!(ok, "the install did not succeed:\n{said}");
+}
+
+/// **The check that would have told the truth**: when what answers on the port is not the build
+/// just installed, the install says so, fails, and names the pid holding the port — rather than
+/// printing "built <sha>" and "listening" over a cockpit serving something else.
+///
+/// The holder here is a stale server from an older build that no supervisor knows about — the
+/// shape of the stranded fixture doorway that took :7878 on the live fleet (SKEIN-1019).
+///
+/// What would make it fail: trusting the file on disk, i.e. removing the closing check — the
+/// install then reports success, which is the first assertion.
+#[test]
+fn bootstrap_fails_naming_the_holder_when_the_answering_build_is_not_the_one_it_installed() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+
+    // A stale server holding the port: the stand-in, pre-built at an old revision, run bare.
+    let stale = root.join("stale-server");
+    fs::write(&stale, SERVER.replace("@BUILD@", "0ld0000")).unwrap();
+    let child = Command::new("python3")
+        .arg(&stale)
+        .env_clear()
+        .env("PATH", fleet.path())
+        .env("SKEIN_FLEET_ROOT", &fleet.fleet_root)
+        .env("SKEIN_HOME", &fleet.home)
+        .env("STALE_PORT", fleet.port.to_string())
+        .spawn()
+        .expect("the stale server ran");
+    struct Reap(std::process::Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let stale_server = Reap(child);
+    assert!(
+        fleet.wait_answering("0ld0000"),
+        "the stale server never answered — the fixture is wrong, not the install"
+    );
+
+    let (ok, said) = fleet.bootstrap("aaaa111", 3);
+    assert!(
+        !ok,
+        "the install reported success while an older build answered on the cockpit's port:\n{said}"
+    );
+    assert!(
+        said.contains("0ld0000"),
+        "the install did not say which build is answering:\n{said}"
+    );
+    assert!(
+        said.contains(&format!("pid {}", stale_server.0.id())),
+        "the install did not name the process holding the port:\n{said}"
+    );
+    assert!(
+        !said.contains("answers as"),
+        "the install claimed a build answered that did not:\n{said}"
+    );
 }

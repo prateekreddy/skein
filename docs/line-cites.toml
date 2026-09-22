@@ -313,13 +313,13 @@ line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server.rs:5162"]
+line = "async fn login_terminal("
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server.rs:5168"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:5162"]
-line = "async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:5171"]
@@ -1120,23 +1120,23 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"{name}'s anchor pid has been reused by a different process since skein recorded it; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:16452"]
+["src/fleet.rs:16460"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
-["src/fleet.rs:17930"]
+["src/fleet.rs:17938"]
 line = "origin_repair_script(\"web-main\", \"/Users/you/work/web\", \"git@github.com:o/r.git\");"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:19964"]
+["src/fleet.rs:19972"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet.rs:21702"]
+["src/fleet.rs:21710"]
 line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet.rs:21710"]
+["src/fleet.rs:21718"]
 line = "let body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");"
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"fleet.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]

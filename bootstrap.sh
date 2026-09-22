@@ -543,13 +543,97 @@ done"
 mkdir -p "$private"
 chmod 700 "$private"
 
-if tmux -S "$sock" has-session -t skein-server 2>/dev/null; then
+# ---- a supervisor still on the socket every fleet had before SKEIN-529 --------------------------
+#
+# The session used to live at `.skein/server.tmux`, beside `private/` instead of in it. A fleet
+# serving since then still has it there, and asking only the new path whether the cockpit runs
+# answered "no" about a cockpit that was running: this started a SECOND supervisor, whose doorway
+# looped on "cannot bind" while the first kept the port and kept serving the build it was started
+# with (SKEIN-1020). Both are asked now.
+#
+# The old session is MOVED, not restarted: its socket file is renamed into `private/`. The tmux
+# server keeps its listening socket — a rename moves the name, not the socket — so it goes on
+# answering at the new path and nowhere else, and the doorway it supervises is reloaded in place
+# below like any other. Restarting it on the new socket instead would mean letting go of the port
+# for a moment, which is architecture §9.4's squat window; leaving it where it is would keep a tmux
+# socket every box can connect to, which is the fleet-scope command channel SKEIN-529 closed. The
+# rename costs neither.
+legacy_sock="$skein_dir/server.tmux"
+
+supervising() { tmux -S "$1" has-session -t skein-server 2>/dev/null; }
+
+# The doorway the stamp names — counted only when it is alive and IS this doorway, the same three
+# questions `fleet::door_holds_port` asks, because a pid on its own is a number that gets reused.
+stamped_door() {
+  read -r d_pid d_port <"$stamp" 2>/dev/null || return 1
+  [ "$d_port" = "$port" ] || return 1
+  kill -0 "$d_pid" 2>/dev/null || return 1
+  tr '\0' '\n' <"/proc/$d_pid/cmdline" 2>/dev/null | grep -qxF -- "$doorway" || return 1
+  printf '%s\n' "$d_pid"
+}
+
+# Is the doorway $2 the one the session on socket $1 runs? The supervisor loop is the pane's shell
+# and the doorway is its child.
+runs_door() {
+  pane=$(tmux -S "$1" list-panes -t skein-server -F '#{pane_pid}' 2>/dev/null | head -n1)
+  parent=$(awk '/^PPid:/ { print $2 }' "/proc/$2/status" 2>/dev/null)
+  [ -n "$pane" ] && [ "$pane" = "$parent" ]
+}
+
+# End the tmux server on socket $1 and wait for it to be gone. The wait is not politeness: tmux
+# unlinks its socket's path as it exits, and a rename onto that path made before it has finished
+# would be deleted by it.
+retire() {
+  t=$(tmux -S "$1" display-message -p '#{pid}' 2>/dev/null || true)
+  tmux -S "$1" kill-server 2>/dev/null || true
+  n=0
+  while [ -n "$t" ] && kill -0 "$t" 2>/dev/null && [ "$n" -lt 50 ]; do
+    sleep 0.1
+    n=$((n + 1))
+  done
+}
+
+door=$(stamped_door || true)
+on_new=''
+on_old=''
+supervising "$sock" && on_new=yes
+supervising "$legacy_sock" && on_old=yes
+
+# Both at once is what the bug above leaves behind. The one to keep is the one whose doorway holds
+# the port, so ending the other frees nothing; with no stamp to say which, the new socket's.
+if [ -n "$on_new" ] && [ -n "$on_old" ]; then
+  if [ -n "$door" ] && runs_door "$legacy_sock" "$door"; then
+    say "two cockpit supervisors are running; ending the one on $sock, which does not hold :$port"
+    retire "$sock"
+    on_new=''
+  else
+    say "two cockpit supervisors are running; ending the one on $legacy_sock"
+    retire "$legacy_sock"
+    on_old=''
+  fi
+fi
+
+if [ -n "$on_old" ]; then
+  if mv -f "$legacy_sock" "$sock"; then
+    say "moved the running cockpit's tmux socket from $legacy_sock to $sock, where no box can reach it"
+    on_new=yes
+  else
+    say "could not move the cockpit's tmux socket from $legacy_sock into $private, so it keeps"
+    say "running there — a socket every box can connect to (SKEIN-529). Reloading it in place."
+  fi
+fi
+
+if [ -n "$on_new" ] || [ -n "$on_old" ]; then
   say "the cockpit is already running; sending it the reload it uses to swap binaries"
   # SIGUSR1 re-execs the doorway across the SAME descriptor, so the socket is never closed and the
   # port is never free. Killing and restarting here would reopen exactly the window the doorway
   # exists to close (architecture §9.4).
-  pid=$(cut -d' ' -f1 <"$stamp" 2>/dev/null || true)
-  [ -n "${pid:-}" ] && kill -USR1 "$pid" 2>/dev/null || true
+  if [ -n "$door" ]; then
+    kill -USR1 "$door" 2>/dev/null || true
+  else
+    say "no doorway holds :$port by its stamp at $stamp, so there is nothing to reload; the"
+    say "supervisor starts the doorway on disk the next time round its loop"
+  fi
 else
   # A socket file left by a sandbox that stopped is a file with no server behind it. tmux clears
   # its own stale socket on the way to starting a new one, so this is a plain `new-session` and
@@ -617,8 +701,86 @@ mv "$fleet_kit/spec.yaml.new" "$fleet_kit/spec.yaml"
 
 "$skein_dir/start-door.sh"
 
+# ---- the build that answers, which is the only one that counts ----------------------------------
+
+# "The binary on disk is new" is not the question. It was true for the whole of an upgrade whose
+# cockpit went on serving the old build from a process started before the install — the file had
+# been replaced, the process never was, and the page answered 200 throughout (SKEIN-1020). So the
+# install is not called done until the server holding the port SAYS it is this build.
+#
+# The server knows: `build.rs` stamps `git describe --always --dirty`, run in this checkout, and
+# `/api/health` reports it as `build`. The same command here gives the same string for the same
+# tree, so this compares like with like rather than a short sha with a describe.
+#
+# python3 rather than curl: the doorway is python3, so it is present wherever there is a door to
+# ask, and it lets the request refuse a proxy — a sandbox with `$http_proxy` set would otherwise
+# send a question about 127.0.0.1 to the proxy and report what the proxy said.
+expected=$(git -C "$src" describe --always --dirty 2>/dev/null || true)
+answering_build() {
+  SKEIN_ASK_PORT="$port" SKEIN_ASK_TOKEN="$skein_home/api-token" python3 - 2>/dev/null <<'ASK' || true
+import json, os, urllib.request
+req = urllib.request.Request("http://127.0.0.1:%s/api/health" % os.environ["SKEIN_ASK_PORT"])
+try:
+    with open(os.environ["SKEIN_ASK_TOKEN"]) as f:
+        req.add_header("Authorization", "Bearer " + f.read().strip())
+except OSError:
+    pass
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+print(json.load(opener.open(req, timeout=10)).get("build", ""))
+ASK
+}
+
+# Every process holding a listening socket on the cockpit's port: the kernel's own table, then the
+# descriptors that point at it. Only asked on the way to a failure, so its cost does not matter.
+port_holders() {
+  hex=$(printf ':%04X' "$port")
+  for inode in $(awk -v p="$hex" '$4 == "0A" && substr($2, length($2) - 4) == p { print $10 }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null); do
+    find /proc/[0-9]*/fd -lname "socket:\[$inode\]" 2>/dev/null | cut -d/ -f3
+  done | sort -un
+}
+
+# A reload is a re-exec and a server start, so the answer is seconds away rather than immediate.
+# `$SKEIN_BOOTSTRAP_ANSWER_WAIT` is a seam for the tests of the failure below, which would
+# otherwise each spend the whole wait finding out what they already know.
+answer_wait="${SKEIN_BOOTSTRAP_ANSWER_WAIT:-60}"
+waited=0
+answering=''
+while :; do
+  answering=$(answering_build)
+  if [ -n "$expected" ] && [ "$answering" = "$expected" ]; then
+    break
+  fi
+  [ "$waited" -ge "$answer_wait" ] && break
+  sleep 1
+  waited=$((waited + 1))
+done
+
+if [ -z "$expected" ] || [ "$answering" != "$expected" ]; then
+  say "built $revision and installed it at $server, but the cockpit on :$port is not serving it."
+  if [ -n "$answering" ]; then
+    say "What answers on :$port says it is build $answering — a process started before this"
+    say "install still holds the port, so the cockpit is the old build however new the file is."
+  else
+    say "Nothing answered /api/health on :$port with a build within ${answer_wait}s."
+  fi
+  holders=$(port_holders)
+  if [ -n "$holders" ]; then
+    say "Holding :$port:"
+    for p in $holders; do
+      say "    pid $p  $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)"
+    done
+  else
+    say "Nothing this user can see is holding :$port."
+  fi
+  say "The doorway this install started is the tmux session on $sock:"
+  say "    tmux -S $sock capture-pane -p -t skein-server"
+  say "Once whatever holds :$port is stopped, $skein_dir/start-door.sh puts the new build behind it."
+  exit 1
+fi
+
 say "built $revision"
-say "the cockpit is listening on :$port inside the sandbox"
+say "the cockpit is listening on :$port inside the sandbox, and answers as $answering — the build just installed"
 cat >&2 <<EOF
 
 skein: open what the cockpit prints for its token, and the install is done.
