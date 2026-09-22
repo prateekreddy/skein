@@ -47,7 +47,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
-import { finding, ledger } from "./harness/browser.mjs";
+import { erring, finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 
@@ -169,9 +169,10 @@ page.setDefaultTimeout(10000);
 // The locator form of `page.$` / `page.waitForSelector` — what a check keeps when it is going to
 // read from or act on what it found. See `harness/browser.mjs::finding` (SKEIN-716).
 const find = finding(page);
-const noise = [];
-page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
-page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.text()}`); });
+// The page's own errors, with the browser's own complaints about its transport kept apart and
+// reported rather than failing this run — the distinction is structural, not a list of spellings;
+// see `harness/browser.mjs::erring` (SKEIN-998, SKEIN-1010).
+const { errors: noise, sayBlips } = erring(page);
 // Merge asks first, and a dialog Playwright leaves alone is auto-dismissed — which would test the
 // cancel path while reading like the merge path.
 page.on("dialog", d => d.accept());
@@ -1312,6 +1313,7 @@ await check("with several repos and no repo chosen, the panel is not left on scr
 });
 
 await check("no page errors along the way", () => {
+  sayBlips();
   if (noise.length) throw new Error(noise.join("\n"));
 });
 

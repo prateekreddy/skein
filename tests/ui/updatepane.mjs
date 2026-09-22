@@ -10,7 +10,7 @@ import { chromium } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
-import { ledger } from "./harness/browser.mjs";
+import { erring, ledger } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 const API_TOKEN = "t".repeat(64);
@@ -62,9 +62,10 @@ const { srv } = await startServer({
 });
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
-const errors = [];
-page.on("pageerror", e => errors.push(`pageerror: ${e.message}`));
-page.on("console", m => { if (m.type() === "error") errors.push(`console: ${m.text()}`); });
+// The page's own errors, with the browser's own complaints about its transport kept apart and
+// reported rather than failing this run — the distinction is structural, not a list of spellings;
+// see `harness/browser.mjs::erring` (SKEIN-998, SKEIN-1010).
+const { errors, sayBlips } = erring(page, { say: (kind, text) => `${kind}: ${text}` });
 
 await page.goto(`http://127.0.0.1:${door.port}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
 await page.waitForTimeout(1200);
@@ -133,6 +134,7 @@ await page.waitForTimeout(600);
 }
 
 // --- and nothing threw ------------------------------------------------------------------------------
+sayBlips();
 check("the pane raised no page errors", errors, []);
 
 await browser.close();

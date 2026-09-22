@@ -188,3 +188,71 @@ export function settler(page, ms = 700) {
 export function texter(page) {
   return async sel => ((await page.$eval(sel, e => e.textContent).catch(() => "")) || "").trim();
 }
+
+/** Is this console error the BROWSER reporting on its own transport, rather than the PAGE erring?
+ * (SKEIN-998, SKEIN-1010.)
+ *
+ * **What "no page errors" is actually for**: the page's own JavaScript did not error. A thrown
+ * exception is unambiguous — `pageerror` fires only for those. A `console` message is not: an error
+ * type is also how Chromium reports a failed resource load, e.g. "[console] Failed to load
+ * resource: net::ERR_NETWORK_CHANGED" — a transport blip, not a page bug, and under multi-lane load
+ * (four lanes building and running suites at once, `df /var/tmp` at 99%) it failed one suite with
+ * every other check green. Filtering that string would only move the failure to the next spelling,
+ * the exact shape SKEIN-647 already named as a check that goes stale and is trusted anyway.
+ * (Deliberately not naming a Chromium error code in backticks anywhere in this comment: this tree
+ * does not define one, and a check for "the prose names a symbol the tree does not have" is right to
+ * say so — the whole point is that the distinction is structural, not a list of spellings.)
+ *
+ * The two ARE distinguishable, structurally rather than by string: Playwright surfaces a page's own
+ * console API call via the CDP event that call raises, which always carries the call's arguments —
+ * even a bare one-argument call has `args().length === 1`. A failed resource load reaches Playwright
+ * via CDP's separate log-entry event instead (Chromium's own diagnostic channel, covering network
+ * failures, HTTP statuses, CSP, deprecations, …), which is handed only pre-formatted text and never
+ * any arguments — `args().length === 0`, always. Verified against this harness's own Playwright by
+ * driving both shapes through this function: a real two-argument console error arrived with
+ * `args().length === 2` and a `location()` pointing at the calling script, while an aborted request,
+ * a 404 and a 500 all arrived with `args().length === 0` and a `location()` pointing at the
+ * resource. Three different spellings of the browser's text, one structure — which is the evidence
+ * that the rule is spelling-independent. An unhandled promise rejection raises `pageerror` and no
+ * console event at all, so it is still a failure rather than something this excuses. */
+export function browserLevel(m) {
+  return m.args().length === 0;
+}
+
+/** Everything a page got wrong, with the browser's own complaints kept apart from it.
+ *
+ * Five suites had copied `page.on("pageerror", …)` plus `page.on("console", …)` verbatim and let
+ * both decide one check's pass/fail, so all five could go red on a transport blip (SKEIN-1010).
+ * One copy, and the argument above is settled in one place rather than five.
+ *
+ * `errors` is the page's own doing and fails a check. `blips` is the browser's, and is REPORTED
+ * rather than swallowed — a message that vanishes is how the next diagnosis gets harder — by
+ * calling [`sayBlips`] inside the check that reads `errors`.
+ *
+ * `say` spells a line the way its suite already spelled it. `expected` is for a refusal a suite
+ * provokes ON PURPOSE and asserts elsewhere; it is asked FIRST, before the structural question, so
+ * that a suite which already had such a filter keeps exactly the messages it kept before. Prefer
+ * leaving it unset: the structural rule is what keeps a blip from failing a check, and an
+ * `expected` list is a list of the day's spellings with all of SKEIN-647's problems. */
+export function erring(page, { say = (kind, text) => `[${kind}] ${text}`, expected = null } = {}) {
+  const errors = [];
+  const blips = [];
+  page.on("pageerror", e => errors.push(say("pageerror", e.message)));
+  page.on("console", m => {
+    if (m.type() !== "error") return;
+    if (expected && expected(m)) return;
+    if (browserLevel(m)) { blips.push(say("console", m.text())); return; }
+    errors.push(say("console", m.text()));
+  });
+  return {
+    errors,
+    blips,
+    /** Name the browser-level messages, at the point of the check they did not fail. */
+    sayBlips() {
+      if (!blips.length) return;
+      console.log(`        ${blips.length} browser-level transport message(s) along the `
+        + "way — not the page's own JS, so not failing this check, but named rather than swallowed:");
+      for (const b of blips) console.log(`        ⚠ ${b}`);
+    },
+  };
+}
