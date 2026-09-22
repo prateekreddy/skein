@@ -312,6 +312,54 @@ export function openDoor() {
 // last caller went with the cluster). skein no longer keeps a drafted review for a reader to vet
 // and post — the session posts its own to GitHub — so nothing on this page draws one.
 
+// The page's DOM, stubbed down to what a banner touches — shared by `loginban.mjs` and
+// `healthban.mjs`, which drive the SAME lifted function (`loadHealth`) and disagree only about
+// which of the two rows it draws they then read back out.
+//
+// The registry is the whole contract, and it is why this is worth having once rather than twice:
+// `document.body.prepend` files an element under its own id and `element.remove()` takes it away
+// again, so "the row is up" and "the row is gone" are BOTH observable. The second is the half that
+// matters here — `loadHealth`'s `banner?.remove()` had never been reached by anything (SKEIN-1009)
+// — and a stub that only recorded creations could not tell a banner that went away from one that
+// was never drawn. A second spelling of that registry is a second thing to drift, which is the
+// argument `grab` and `esc` above are already made from.
+//
+// Two things the copy in `loginban.mjs` did not carry, because that suite had no use for them and
+// this one does. `tag` remembers what `createElement` was asked for: `#healthban` is a `<button>`
+// on purpose — it is the thing a reader clicks to get to the diagnostics pane — and an element
+// filed under its id looks identical whatever tag it was made from. `where` records `prepend`
+// against `append` for the same reason: the page's comment on that row claims a POSITION, "a row
+// above the app, never a pill over it", because floating it covered the dock's tab bar and blocked
+// exactly the work the warning was interrupting. Neither claim is checkable from the registry
+// alone.
+export function stubDom(ids = []) {
+  const reg = new Map();
+  const where = [];
+  const make = (id, tag = "") => {
+    const classes = new Set();
+    const e = {
+      id, tag, innerHTML: "", textContent: "", title: "", onclick: null,
+      classList: {
+        add: c => classes.add(c), remove: c => classes.delete(c),
+        contains: c => classes.has(c), toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)),
+      },
+    };
+    // `e.id` is read when remove() is CALLED, not now: the page makes an element with no id and
+    // names it on the next statement, so binding the id here would file it under "" and never
+    // find it again.
+    e.remove = () => reg.delete(e.id);
+    return e;
+  };
+  for (const id of ids) reg.set(id, make(id));
+  const file = (how, e) => { where.push([how, e.id]); if (e.id) reg.set(e.id, e); };
+  const document = {
+    getElementById: id => reg.get(id) || null,
+    createElement: tag => make("", tag),
+    body: { prepend: e => file("prepend", e), append: e => file("append", e) },
+  };
+  return { reg, document, where };
+}
+
 // The tiny assert harness both suites share.
 export function harness() {
   let failures = 0;

@@ -12,36 +12,27 @@
 //     the banner repaints from that answer, and the server's last sentence becomes the toast.
 //
 //   node tests/ui/loginban.mjs
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, stubDom } from "./lift.mjs";
 
 const t = harness();
-
-// A stub element deep enough for what the banner and the overlay touch: id, innerHTML, classList,
-// remove. `reg` is the document's registry, so remove() and prepend() are observable.
-function makeEl(id, reg) {
-  const classes = new Set();
-  const e = {
-    id, innerHTML: "", textContent: "", title: "", onclick: null,
-    classList: {
-      add: c => classes.add(c), remove: c => classes.delete(c),
-      contains: c => classes.has(c), toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)),
-    },
-  };
-  e.remove = () => reg.delete(e.id);
-  return e;
-}
 
 // The page's world, stubbed down to what these functions touch. `health` is what /api/health will
 // answer NEXT — mutable, so a test can flip a login live between two polls, exactly as the server
 // would after a successful login.
+//
+// The DOM half is `stubDom` in `lift.mjs` now, because `healthban.mjs` drives the same `loadHealth`
+// against the same registry and a subtle registry written twice is one that drifts.
+//
+// **`renderModelChoices` is stubbed below, and its absence was cutting `loadHealth` in half**
+// (SKEIN-1009). The page calls it on every poll, this world did not define it, and the whole fetch
+// handler ends in a `.catch` that discards — so the ReferenceError was swallowed and every
+// statement after that call was skipped, silently, in every fixture here. The login banner is
+// painted BEFORE it, which is the only reason these checks were green rather than vacuous; the
+// health banner is painted after it, and was therefore unreachable from this world no matter what
+// a fixture answered. The stub is the fix; the lesson is the swallow, since a lifted world one
+// name short does not fail, it goes quiet halfway down the function.
 function world() {
-  const reg = new Map();
-  for (const id of ["loginterm", "lt-host"]) reg.set(id, makeEl(id, reg));
-  const document = {
-    getElementById: id => reg.get(id) || null,
-    createElement: () => makeEl("", reg),
-    body: { prepend: e => { if (e.id) reg.set(e.id, e); } },
-  };
+  const { reg, document } = stubDom(["loginterm", "lt-host"]);
   const state = { health: { ok: true, expired_logins: [] }, healthCalls: 0, toasts: [] };
   const fetch = url => {
     if (url === "/api/health") { state.healthCalls++; return Promise.resolve({ json: () => Promise.resolve(state.health) }); }
@@ -67,6 +58,7 @@ function world() {
     const render = () => {};
     const renderDiagnostics = () => {};
     const openSettings = () => {};
+    const renderModelChoices = () => {};
     const toast = said => state.toasts.push(said);
     ${grab("esc")}
     ${grab("lastHealth")}

@@ -76,7 +76,7 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 26] = [
+const NODE_SUITES: [&str; 27] = [
     "attach",
     "budget",
     // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
@@ -86,6 +86,14 @@ const NODE_SUITES: [&str; 26] = [
     "conversation",
     "foreign",
     "gitgate",
+    // The health banner, which SKEIN-1009 asked for in the browser tier — "the banner is drawn from
+    // a fetch inside `loadHealth`, so it is a browser-tier suite or nothing". It is here instead,
+    // beside `loginban`, which has lifted that same function and driven it against a stubbed fetch
+    // since SKEIN-212. What a browser would add is a real /api/health, and that is exactly the half
+    // no suite can drive: the reports worth asserting are a fleet with a dead registry and a fleet
+    // that then recovers, and nothing can put this machine into either state. Every fixture would
+    // be an intercepted route, which is the stub again at the price of a chromium.
+    "healthban",
     // The harness's own two escape hatches, and the two pins they escape. Here rather than in the
     // browser tier because it drives `skein-server` over HTTP and opens no page — and because the
     // thing it guards, `harness/server.mjs`, is what every suite in BOTH lists starts its server
