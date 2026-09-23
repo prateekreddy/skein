@@ -68,7 +68,7 @@
 
 mod common;
 
-use common::{chromium_ready, skip};
+use common::{chromium_missing, chromium_why_not, skip};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -420,6 +420,32 @@ fn the_cockpit_suites_that_need_no_browser_pass() {
     );
 }
 
+/// **The skip names which half is missing** (SKEIN-616): the package, which a fresh worktree never
+/// has, or the browser, which lives in a cache of its own. One sentence for both sent every agent in
+/// a worktree to install a browser it already had.
+///
+/// **What makes it fail:** answering with one sentence whatever is on disk — the old skip's shape —
+/// fails the first assertion or the second, depending on which sentence it kept.
+#[test]
+fn the_browser_tier_says_whether_the_package_or_the_browser_is_missing() {
+    let dir = std::env::temp_dir().join(format!("skein-why-not-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bare = chromium_why_not(&dir);
+    std::fs::create_dir_all(dir.join("node_modules/playwright")).unwrap();
+    std::fs::write(dir.join("node_modules/playwright/package.json"), "{}").unwrap();
+    let packaged = chromium_why_not(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        bare.contains("npm run setup") && !bare.contains("playwright install chromium"),
+        "with no node_modules, the skip must send the reader to install the package: {bare}"
+    );
+    assert!(
+        packaged.contains("npx playwright install chromium") && !packaged.contains("npm run setup"),
+        "with the package present, the skip must send the reader to install the browser: {packaged}"
+    );
+}
+
 /// The browser tier, reported either way.
 ///
 /// **Passes when chromium is absent, and says so.** Failing would mean nobody can run `cargo test`
@@ -427,13 +453,14 @@ fn the_cockpit_suites_that_need_no_browser_pass() {
 /// This says which of the two happened where the result already is.
 #[test]
 fn the_cockpit_suites_that_drive_a_browser_pass_or_report_that_they_were_skipped() {
-    if !chromium_ready() {
+    if let Some(missing) = chromium_missing() {
         // Deliberately loud in the assertion-free path too: the panic message is the only text
         // `cargo test` shows for free, so the skip goes where a reader will hit it if they ever look
-        // at this test — and `tests/ui/README.md` is one command away.
+        // at this test — and `tests/ui/README.md` is one command away. It names WHICH half is
+        // missing (SKEIN-616): a worktree lacks the package, not the browser, and the two are
+        // installed by different commands.
         return skip(&format!(
-            "Playwright's chromium is not installed, so the browser suites ({}) did not run. \
-             `cd tests/ui && npm run setup` installs it — see tests/ui/README.md.",
+            "the browser suites ({}) did not run: {missing}. See tests/ui/README.md.",
             BROWSER_SUITES.join(", ")
         ));
     }

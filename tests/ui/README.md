@@ -15,6 +15,12 @@ So this test asserts what is **visible**, never what merely exists in the DOM â€
 cd tests/ui && npm run setup     # npm install + playwright's chromium (~150MB, cached in ~/.cache)
 ```
 
+**Once per worktree, too.** `node_modules` is gitignored, so `git worktree add` gives a new checkout
+none, while chromium itself sits in `~/.cache/ms-playwright` and is shared. In a worktree, run
+`npm run setup` there, or link the main checkout's: `ln -s <main>/tests/ui/node_modules
+tests/ui/node_modules`. Without either, the browser tier in `cargo test` is skipped, and its skip line
+says it was the package that was missing rather than the browser (SKEIN-616).
+
 ## Run
 
 ```sh
