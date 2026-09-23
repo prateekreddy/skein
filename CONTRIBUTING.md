@@ -457,6 +457,30 @@ argue with — a prohibition on its own is just something to route around.
    test above is worth little beside `tests/isolation_bwrap/`, which runs actual bwrap and reads
    the resulting paths back.
 
+   **The sabotage itself goes quiet in three ways**, each met in this repository, and an `md5sum`
+   passes all three:
+
+   * **A snapshot older than your own edits restores too little.** `git restore` takes too much;
+     a copy taken before you went on editing takes too little, and restoring from it reverts your
+     own later work without a word. An agent snapshotted `src/fleet.rs`, reworded prose in it to
+     satisfy `prose-check`, then sabotaged and restored — and 13 lines of the rewording were gone
+     (SKEIN-810). The file compiled and the tests passed, because what was lost was words. `git
+     status` caught it: the file read modified when it should have read clean. So **take the
+     snapshot again after every intentional edit**, and after restoring check the file against
+     what you expect, `git diff` or an md5 of the version you meant, not merely against the snapshot.
+   * **A snapshot in `/tmp` can vanish, and then the restore empties the file.** A lane's snapshot
+     directory under `/tmp` was gone minutes after it was written and md5-checked; nothing of the
+     lane's had removed it, and `/tmp` on a fleet box is shared by every lane and the fleet itself.
+     The restore is `cat snapshot > file`, so a missing or recreated snapshot truncates the working
+     file (SKEIN-948). Snapshot into your own session scratchpad, with `cat src > dst` rather than
+     `cp`, which has produced all-NUL copies of the right size on this fleet's shared mounts.
+   * **A changed md5 proves the file changed, not that the change you named applied.** A two-part
+     plant computed its first span with `s.index(…)`, which matched an earlier handler, so the span
+     came back empty and the replacement was a no-op; the second part applied, the md5 moved, the
+     test passed, and the reading was "the lane's claim does not reproduce" — false, about correct
+     work (SKEIN-948). Assert on the artefact, once per part: `grep -c` the text that must now be
+     absent and the text that must now be present, and refuse to run the test if a count is wrong.
+
 4. **Never send a field you did not mean to change.** Read-modify-write, or omit the field —
    placeholder values in a write call are how records get erased. An attempt to clear one work
    item's parent sent `{"parent": null, "name": "…", "description_html": "unchanged"}`, because the
