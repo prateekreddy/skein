@@ -1214,6 +1214,8 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 ///   * the canary: putting `SKEIN_TEST_LEAK_CANARY` on the list, or deleting the filter. A name no
 ///     list would carry is what tells an allow-list from a deny-list of the names noticed so far.
 ///   * the cockpit's three: deleting the filter.
+///   * `FOREIGN_TEST_LEAK_CANARY`: a filter that unsets only `SKEIN_*` names, which passes every
+///     other canary here because they all carry that prefix.
 ///   * the exported function: deleting the launcher's `exec env -u …` that drops names bash cannot
 ///     unset.
 ///   * `SANDBOX_NAME`: a filter that removes everything, which would also take the proxy and the
@@ -1244,6 +1246,10 @@ fn a_box_session_inherits_only_its_allow_list() {
         .set("SKEIN_FLEET_ROOT", root.join("boxes"))
         // What must not arrive: a name nobody would list, and the cockpit's own three.
         .set("SKEIN_TEST_LEAK_CANARY", "skein-test-canary")
+        // And one with no `SKEIN_` prefix: a filter that strips only skein's own names would
+        // pass every other canary here, and a cloud credential in the cockpit's environment is
+        // exactly that shape.
+        .set("FOREIGN_TEST_LEAK_CANARY", "foreign-test-canary")
         .set("SKEIN_LISTEN_INHERITED_ONLY", "1")
         .set("SKEIN_IN_FLEET", "1")
         .set("BASH_FUNC_skein_leak%%", "() {  echo leaked\n}")
@@ -1330,6 +1336,11 @@ fn a_box_session_inherits_only_its_allow_list() {
         "a variable on no list reached the box from the process that started it, so a box still \
          inherits the cockpit's environment rather than the launcher's allow-list: {names:?}"
     );
+    assert!(
+        !names.contains(&"FOREIGN_TEST_LEAK_CANARY"),
+        "a variable with no SKEIN_ prefix and on no list reached the box, so the launcher's filter \
+         strips skein's own names rather than everything off its list: {names:?}"
+    );
     for cockpit in [
         "SKEIN_LISTEN_INHERITED_ONLY",
         "SKEIN_IN_FLEET",
@@ -1347,6 +1358,7 @@ fn a_box_session_inherits_only_its_allow_list() {
     );
     assert!(
         !server_env.iter().any(|n| n == "SKEIN_TEST_LEAK_CANARY"
+            || n == "FOREIGN_TEST_LEAK_CANARY"
             || n.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))),
         "the box's tmux server, which every window in the box is made from, carries the canary, \
          an exported function or another name that is not an identifier from the cockpit's \
@@ -1389,6 +1401,7 @@ fn a_box_session_inherits_only_its_allow_list() {
 /// What would make each assertion fail:
 ///   * the canary and the cockpit's three: deleting the filter in `Place::enter`
 ///     (`keep_only_listed`), or putting the canary on the launcher's list.
+///   * `FOREIGN_TEST_LEAK_CANARY`: a filter that unsets only `SKEIN_*` names.
 ///   * the exported function and the odd name: dropping `"${skein_odd[@]}"` from the `exec env`.
 ///   * `SANDBOX_NAME`: a filter that keeps nothing, or one reading an empty list.
 ///   * `TERM`: dropping it from `CROSSING_ALSO`, which leaves an attach with no terminal to draw on.
@@ -1415,6 +1428,10 @@ fn a_crossing_into_a_box_carries_only_its_allow_list() {
         .set("SKEIN_HOME", root.join("skein"))
         .set("SKEIN_FLEET_ROOT", root.join("boxes"))
         .set("SKEIN_TEST_LEAK_CANARY", "skein-test-canary")
+        // And one with no `SKEIN_` prefix: a filter that strips only skein's own names would
+        // pass every other canary here, and a cloud credential in the cockpit's environment is
+        // exactly that shape.
+        .set("FOREIGN_TEST_LEAK_CANARY", "foreign-test-canary")
         .set("SKEIN_LISTEN_INHERITED_ONLY", "1")
         .set("SKEIN_IN_FLEET", "1")
         .set("BASH_FUNC_skein_leak%%", "() {  echo leaked\n}")
@@ -1511,6 +1528,11 @@ fn a_crossing_into_a_box_carries_only_its_allow_list() {
         !names.contains(&"SKEIN_TEST_LEAK_CANARY") && field("canary") == "0",
         "a variable on no list crossed into the box, so a crossing still carries the cockpit's \
          whole environment rather than the launcher's allow-list: {names:?}"
+    );
+    assert!(
+        !names.contains(&"FOREIGN_TEST_LEAK_CANARY"),
+        "a variable with no SKEIN_ prefix and on no list crossed into the box, so the crossing's \
+         filter strips skein's own names rather than everything off its list: {names:?}"
     );
     for cockpit in [
         "SKEIN_LISTEN_INHERITED_ONLY",
