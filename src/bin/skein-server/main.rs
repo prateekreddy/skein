@@ -96,9 +96,9 @@ fn refuse_unknown_args(args: &[String]) -> Option<String> {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    skein::doorway::keep_from_children();
+/// Everything the server does, on the runtime [`main`] builds once the socket's variables are gone.
+async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
+    // `main` has already withheld the socket from children and cleared its variables.
     // **This is a real skein, whatever `$SKEIN_TEST` says.** `tests/server.rs` and
     // `tests/ui/harness/server.mjs` both spawn this binary, and it inherits the marker from cargo's
     // `[env]` table — correctly, because `config::skein_home` and `util::fleet_root` still have to
@@ -545,7 +545,7 @@ async fn main() {
     // cockpit's port *first* becomes the cockpit, and the browser hands it the fleet's token on the
     // first request (architecture §9.4). A socket opened before any box exists and inherited across
     // restarts is the only thing that closes it, since the token cannot.
-    let listener = match skein::doorway::inherited() {
+    let listener = match skein::doorway::inherited(handed) {
         Ok(Some(handed)) => {
             let bound = handed
                 .local_addr()
@@ -714,6 +714,25 @@ async fn main() {
             }
         }));
     }
+}
+
+/// **A plain `fn`, and the runtime built by hand, so that two things happen while this process has
+/// one thread and no children** (SKEIN-1089): the handed-in socket is withheld from children, and
+/// the two variables that describe it are read and cleared. `#[tokio::main]` built the multi-thread
+/// runtime before the first line of `main`, so by the time the variables were cleared its worker
+/// threads existed, and `heal_fleet`'s tmux and the watchers had already started with both in their
+/// environment. `doorway::from_environment` says why they are cleared at all.
+fn main() {
+    skein::doorway::keep_from_children();
+    let handed = skein::doorway::from_environment();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("skein-server: could not start the async runtime: {e}");
+            std::process::exit(1);
+        });
+    runtime.block_on(serve(handed));
 }
 
 /// After how many consecutive failures to accept a connection the operator is told.
