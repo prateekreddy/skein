@@ -498,8 +498,8 @@ fn every_mjs(dir: &Path) -> Vec<String> {
 ///
 /// Note which way the mistakes fall. A helper nobody has imported *yet* reads as an unlisted suite
 /// and turns this red — annoying, and the safe direction. The unsafe direction would be treating a
-/// suite as a helper, which is why only specifiers that actually follow `from` are collected rather
-/// than every string in the file that ends in `.mjs`.
+/// suite as a helper, which is why only specifiers that actually follow `from` or open an `import(`
+/// are collected rather than every string in the file that ends in `.mjs`.
 fn imported_by_something(dir: &Path) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for file in every_mjs(dir) {
@@ -507,8 +507,16 @@ fn imported_by_something(dir: &Path) -> std::collections::BTreeSet<String> {
         // The importing file's own directory, which relative specifiers resolve against.
         let from_dir: Vec<&str> = file.split('/').collect();
         let from_dir = &from_dir[..from_dir.len() - 1];
-        for (at, _) in text.match_indices("from ") {
-            let rest = text[at + "from ".len()..].trim_start();
+        // `from "…"` is a static import and `import("…")` a dynamic one. A suite cut into parts runs
+        // them with `await import`, one after the other, because they share one page and each one
+        // inherits the state the one before it left (SKEIN-1117) — so they are helpers as surely as
+        // anything named after a `from`.
+        let starts = text
+            .match_indices("from ")
+            .map(|(at, m)| at + m.len())
+            .chain(text.match_indices("import(").map(|(at, m)| at + m.len()));
+        for start in starts {
+            let rest = text[start..].trim_start();
             let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
                 continue;
             };

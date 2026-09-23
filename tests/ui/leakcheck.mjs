@@ -1737,6 +1737,59 @@ check("a call site in any file of a tests/<name>/ binary is derived, and one in 
   })(),
   [LIBRARY_HIDDEN, HIDDEN, SPLIT_HIDDEN].sort());
 
+// **A browser suite cut into parts is read whole too, and the harness is not read as one**
+// (SKEIN-1117). `tests/ui/<name>.mjs` beside a `tests/ui/<name>/` makes that directory the suite's
+// parts, so a call site in any of them names that suite's fixture; a directory with no `.mjs` of
+// its name beside it is not a suite's. Reading only the flat `tests/ui/*.mjs` is how splitting
+// `review.mjs` would have taken `skein-review-ui` off the list.
+// **What makes it fail:** dropping `suites: true` from the `tests/ui` SOURCES entry — the part's
+// probe disappears; or reading every subdirectory — the stray probe appears.
+const PART_HIDDEN = "skein-partprobe";
+const STRAY_HIDDEN = "skein-strayprobe";
+check("a call site in any part of a tests/ui/<name>/ suite is derived, and one in a directory no suite names is not",
+  (() => {
+    const at = repoDeriving(realRust, realNode);
+    mkdirSync(path.join(at, "tests", "ui", "two"), { recursive: true });
+    mkdirSync(path.join(at, "tests", "ui", "stray"), { recursive: true });
+    writeFileSync(path.join(at, "tests", "ui", "two.mjs"), 'await import("./two/part.mjs");\n');
+    writeFileSync(path.join(at, "tests", "ui", "two", "part.mjs"),
+      `const d = freshFixture(root, ${JSON.stringify(PART_HIDDEN)});\n`);
+    writeFileSync(path.join(at, "tests", "ui", "stray", "part.mjs"),
+      `const d = freshFixture(root, ${JSON.stringify(STRAY_HIDDEN)});\n`);
+    return prefixesOf(at);
+  })(),
+  [LIBRARY_HIDDEN, HIDDEN, PART_HIDDEN].sort());
+
+// **And a suite whose server starts in one of its parts is still a suite the fixture-root check
+// reads** (SKEIN-1117). `review.mjs` imports no `startServer` since the split: `review/setup.mjs`
+// does, from `../harness/server.mjs`, so a `serverSuites` that read only the flat files would drop
+// `review` from the fixture-root check and say nothing — the list it prints is one name shorter and
+// still ends "none of them build a fixture from os.tmpdir()". A part in a directory no suite names
+// is not read, for the rule the prefix check above follows.
+// **What makes it fail:** deleting the `suiteParts` line in `serverSuites` — `two/part.mjs` goes;
+// or reading every subdirectory — `stray/part.mjs` appears.
+check("a suite that starts its server in a part is one the fixture-root check reads, and a stray directory is not",
+  (() => {
+    const at = repoDeriving(realRust, realNode);
+    // Assembled, not spelt out, for the reason `HIDDEN`'s shapes are: `serverSuites` reads this
+    // file too, and the import written whole here would make this file a server suite.
+    const serve = `import { startServer } from ${JSON.stringify("../harness/server.mjs")};\n`;
+    mkdirSync(path.join(at, "tests", "ui", "two"), { recursive: true });
+    mkdirSync(path.join(at, "tests", "ui", "stray"), { recursive: true });
+    writeFileSync(path.join(at, "tests", "ui", "two.mjs"), 'await import("./two/part.mjs");\n');
+    writeFileSync(path.join(at, "tests", "ui", "two", "part.mjs"), serve);
+    writeFileSync(path.join(at, "tests", "ui", "stray", "part.mjs"), serve);
+    // A flat suite beside it, so that losing the part reads as a list one name short — the way it
+    // reads on this tree — rather than as the refusal an empty list gets.
+    writeFileSync(path.join(at, "tests", "ui", "flat.mjs"), serve.replace("../", "./"));
+    try {
+      return under.serverSuites(at);
+    } catch (e) {
+      return `refused: ${e.message}`;
+    }
+  })(),
+  ["flat.mjs", "two/part.mjs"]);
+
 // This repository, which is where it was measured: `…` was prefix number 57 and is now none.
 //
 // **`quotedSomething` is asserted, and a red there is not a false alarm.** It says this tree no
