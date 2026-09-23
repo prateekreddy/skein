@@ -159,7 +159,7 @@ pub mod seam {
     ///
     /// * **A skein spawned by a test harness.** `src/bin/skein.rs` and
     ///   `src/bin/skein-server/main.rs` both say this in `main`. A `skein-server` started by
-    ///   `tests/server.rs` or by `tests/ui/harness/server.mjs` inherits the marker from cargo's
+    ///   `tests/server/` or by `tests/ui/harness/server.mjs` inherits the marker from cargo's
     ///   `[env]` table — correctly, because [`crate::config::skein_home`] and
     ///   [`crate::util::fleet_root`] must still refuse it an unpinned path (SKEIN-685) — but a
     ///   [`Substitute`] is a Rust closure and the test that would write one is on the other side

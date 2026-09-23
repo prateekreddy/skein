@@ -557,7 +557,7 @@ fn a_store_outside_skein_home_is_refused_over_http_and_still_accepted_from_the_c
     // halves use the same one, so what differs between them is the store and nothing else.
     //
     // The clone failing is expected and is not what either half measures: `add_repo` runs
-    // `ensure_store` BEFORE `ensure_mirror` (`src/repos.rs`), so the store is on disk — or refused
+    // `ensure_store` BEFORE `ensure_mirror` (`src/repos/add.rs`), so the store is on disk — or refused
     // — well before the remote is ever reached.
     const SOURCE: &str = "https://127.0.0.1:1/storeguard.git";
 

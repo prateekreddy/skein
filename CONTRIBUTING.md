@@ -489,6 +489,27 @@ argue with — a prohibition on its own is just something to route around.
    unrelated lines of the server binary — an entire module of review routes. The file had not been
    copied first, so recovery cost the rest of that session's work on it.
 
+   **The same snapshot before any gate tool's `--update`.** Several gate files are documents
+   rather than data — the argument written beside each entry is the point of the file — and a
+   flag that regenerates one from the code deletes the argument without a word. `module-check
+   --update` did exactly that: 320 lines of `docs/modules.toml`, the reasoning above every edge,
+   gone in one run (SKEIN-614); `residue-check --update` would have deleted eleven denylist
+   entries that sat above the first table header (SKEIN-596). So before running one, copy the file
+   it names to your scratchpad, and afterwards read the diff line by line before committing
+   anything it wrote. What each one does to what a person wrote, measured by running it:
+
+   | command | rewrites | what a person wrote |
+   |---|---|---|
+   | `module-check.py --update` | `docs/modules.toml` | kept: merges in place, and subtracts only with `--prune`, which prints what it removed |
+   | `source-check.py --update` | `docs/sources.toml` | kept, the same way |
+   | `prose-check.py --update` | `docs/prose-symbols.toml` | each `name = reason` line kept; the section headings and every other comment dropped |
+   | `prose-check.py --update-citations`, `--update-attachment` | one marked section of `docs/prose-debt.toml` each | a row's owning item kept; any comment inside that section dropped |
+   | `residue-check.py --update` | `docs/residue.toml`, and `docs/residue-banned.txt` from the register | reasons kept; every `#` line re-emitted from the tool, so a comment typed into the file is dropped |
+   | `fleet-pin-check.py --update` | `docs/fleet-pins.toml` | reasons kept; header re-emitted, any other comment dropped |
+   | `env-lock-check.py --update` | `docs/env-lock.toml` | **nothing kept** — every reason written blank, every comment gone |
+   | `env-lock-check.py --update-restore`, `--update-trailing` | `docs/env-restore.toml`, `docs/env-trailing.toml` | prunes rows and never adds; the header is re-emitted and what is left re-sorted |
+   | `line-cite-check.py --relocate --write`, `citation-check.py --relocate --write` | the citing documents and their ledger | rewrites the line number or sha inside a sentence, and nothing else in it |
+
 7. **A heredoc eats the `\` that holds a Rust sentence together.** rustfmt will not break a string
    literal, so every long sentence in this tree is written across two source lines with a trailing
    backslash, and rustc drops the backslash, the newline and the next line's indentation:

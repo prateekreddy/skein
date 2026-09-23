@@ -275,7 +275,7 @@ try {
   //
   //    **Both arms, and they differ.** The first is the pin: a suite that says nothing gets a server
   //    that is not the fleet's cockpit. The second is the hatch: a suite that means to say it is one
-  //    still can, which is what `tests/server.rs` relies on to spawn both shapes.
+  //    still can, which is what `tests/server/door.rs` relies on to spawn both shapes.
   //
   //    **And `$SKEIN_IN_BOX` the same way** (SKEIN-1086). SKEIN-972 stopped the doorway's variable
   //    reaching a box, and the launcher now marks a box with this one on purpose, so a server a box

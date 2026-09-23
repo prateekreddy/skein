@@ -500,7 +500,7 @@ The subtle case was the 2s fleet-snapshot tick (`load_views` — `sbx ls` + a pe
 idle**" freeze — mid-stream the output flood hid the gap, but at rest a lone keystroke's
 echo waited out the stall. Every `skein::` call in `src/bin/skein-server/` is on `spawn_blocking`
 for this reason; the regression is guarded by
-`slow_fleet_snapshot_does_not_starve_concurrent_requests` in `tests/server.rs` (pins the
+`slow_fleet_snapshot_does_not_starve_concurrent_requests` in `tests/server/routes.rs` (pins the
 server to one worker, makes `load_views` sleep, and asserts a concurrent request isn't
 blocked). Separately, each accepted connection sets `TCP_NODELAY` (our own accept loop, not
 `axum::serve`) so Nagle's algorithm can't coalesce single-keystroke packets. Both matter:

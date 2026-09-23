@@ -26,7 +26,7 @@ So the two are complements, not duplicates, and neither subsumes the other:
   · the gate covers every test, including the ones whose paths do not reach the guard today.
 
 WHAT COUNTS AS SAYING SOMETHING. Setting the variable, and also REMOVING it: `env_remove`,
-`remove_var` and `EnvPins::unset` are deliberate statements about a variable — `tests/server.rs`
+`remove_var` and `EnvPins::unset` are deliberate statements about a variable — `tests/server/fleet.rs`
 pins `$SKEIN_HOME` and `.env_remove("SKEIN_FLEET_ROOT")` on purpose, to prove the server refuses to
 start without one, and that test is exactly right. The finding is silence, not absence.
 
@@ -77,7 +77,7 @@ LIMITS, stated because a gate's blind spots are the part nobody finds out by run
     `Command` carrying only `$SKEIN_FLEET_ROOT` satisfies this gate while that child is missing a
     home. Per-builder-chain attribution was tried and is not reliable: `tests/git_write_request.rs`
     builds one `Command` across a `let`, a method chain and a `match` arm. The runtime guard is what
-    covers that case — `tests/server.rs::a_server_without_a_fleet_root_refuses_to_start` is the
+    covers that case — `tests/server/fleet.rs::a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none` is the
     proof it does — and pooling is the same granularity `tools/env-lock-check.py` uses.
   · **A pin's VALUE is not checked.** `.env("SKEIN_FLEET_ROOT", "/boxes")` satisfies both this gate
     and the runtime guard while pointing at the live fleet. That is a real and separate hazard, and
@@ -92,7 +92,9 @@ finding fails the build too — a stale exemption is a permission nobody granted
 
     python3 tools/fleet-pin-check.py            check
     python3 tools/fleet-pin-check.py --show     every pinning scope and its verdict
-    python3 tools/fleet-pin-check.py --update    rewrite the exemption list from the code
+    python3 tools/fleet-pin-check.py --update    rewrite the exemption list from the code. It
+                                                 keeps each entry's reason and re-emits the
+                                                 header, so a `#` line typed into the file is lost
 """
 
 import os

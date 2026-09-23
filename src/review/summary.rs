@@ -296,7 +296,7 @@ impl Known {
     /// for thirty-nine stored readings, every one carrying its full brief, its signals and the
     /// whole drafted review — none of which a collapsed row draws. Reproduced locally at 155,167
     /// bytes against 12,055 for the same thirty-nine
-    /// (`tests/server.rs::the_review_queue_payload_can_be_asked_for_rows_instead_of_prose`).
+    /// (`tests/server/requests.rs::the_review_queue_payload_can_be_asked_for_rows_instead_of_prose`).
     ///
     /// The same measurement took 10.42 s, and that part is NOT this: locally the full payload is
     /// serialised in about four milliseconds, and with the queue's micro-cache cold both shapes

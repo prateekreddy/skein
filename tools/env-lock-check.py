@@ -119,7 +119,10 @@ debt: a finding not listed there fails the build, a row that no longer leaks fai
   python3 tools/env-lock-check.py --show           every env-touching test scope and its verdict
   python3 tools/env-lock-check.py --show-restore   every #[test] judged by rule two, and how
   python3 tools/env-lock-check.py --show-trailing  every #[test] judged by rule three, and how
-  python3 tools/env-lock-check.py --update         rewrite the exemption list from the code
+  python3 tools/env-lock-check.py --update         REWRITE docs/env-lock.toml from the code, with
+                                                   EVERY reason blank and every comment gone —
+                                                   it keeps nothing a person wrote. Snapshot the
+                                                   file first and put the reasons back by hand
   python3 tools/env-lock-check.py --update-restore prune docs/env-restore.toml; it never adds
   python3 tools/env-lock-check.py --update-trailing prune docs/env-trailing.toml; it never adds
 """

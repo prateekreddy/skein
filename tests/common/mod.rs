@@ -322,7 +322,7 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     ("isolation_bwrap", &[BWRAP, JQ, PYTHON3]),
     ("mail_provenance", &[JQ, FLOCK]),
     // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
-    // `tests/server.rs` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
+    // `tests/server/` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
     // `tmux new-session` — before the port is bound, so a machine without tmux has been running
     // these twelve tests against a server that silently healed nothing. It is listed now because
     // one of them gates on it and says so.
@@ -810,7 +810,7 @@ pub struct GhRequest {
 /// asked for a single `testutil::fake_github` counted 25 hand-rolled TCP servers
 /// (`grep -rh 'TcpListener::bind' src/prq.rs src/prwork/ src/github.rs | wc -l` → 25, as 10 + 9 + 6), but every
 /// one of those 25 is a `#[cfg(test)] mod tests` inside `src/`, reachable only from unit tests in
-/// that same crate — none of them are in `tests/*.rs`. `tests/review_queue.rs` and `tests/server.rs`
+/// that same crate — none of them are in `tests/*.rs`. `tests/review_queue.rs` and `tests/server/`
 /// had their own pair (`stub_github`, `stub_github_for`), which is the actual count for this
 /// directory: **2**, not 25. This function is what those two now share.
 ///

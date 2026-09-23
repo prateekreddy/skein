@@ -56,7 +56,7 @@ pub fn fleet_private_dir() -> String {
 /// alternative to this parameter is a literal in the fixture, which is the thing that goes stale.
 ///
 /// It was a literal in three fixtures until the socket moved under here, and one of them —
-/// `tests/server.rs::stop_doorway` — kills a tmux server with it. A stale literal there does not
+/// `tests/server/fixture.rs::stop_doorway` — kills a tmux server with it. A stale literal there does not
 /// fail; it silently stops killing anything, and the suite leaks a tmux server, a supervisor shell
 /// and a python per test.
 pub fn fleet_private_dir_in(fleet_root: &str) -> String {

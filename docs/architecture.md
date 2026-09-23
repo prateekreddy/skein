@@ -1065,7 +1065,7 @@ which needs a requirement rather than an inference:
   doorway inside the sandbox, and no box execs the cockpit — so there is nothing a box can set to
   make an honest cockpit refuse to start, and nothing it can unset to make a refusing one serve.
   Test: `the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_it`
-  (`tests/server.rs`).
+  (`tests/server/door.rs`).
 - **the token has a second copy.** It is printed as `?t=…` on stdout at every start, and in-fleet
   stdout lands in a log, a tmux scrollback or a supervisor capture inside the sandbox. Covering the
   file does nothing for that.

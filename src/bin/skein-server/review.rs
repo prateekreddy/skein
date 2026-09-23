@@ -739,7 +739,7 @@ pub(super) async fn api_set_reading(
 /// readings: 153,381 bytes for the full answer, of which a collapsed row draws the line, the
 /// flags and whether a review is drafted. Reproduced locally at 155,167 B against 12,055 B, and
 /// 7.4 ms of server time against 3.3 ms
-/// (`tests/server.rs::the_review_queue_payload_can_be_asked_for_rows_instead_of_prose`, which
+/// (`tests/server/requests.rs::the_review_queue_payload_can_be_asked_for_rows_instead_of_prose`, which
 /// prints both). The prose comes back per row when a row is opened, from
 /// `/review/:n/summary?held=1`.
 ///

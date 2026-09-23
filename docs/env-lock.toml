@@ -19,7 +19,7 @@
 #     (The file is named beside the test here, rather than through a `::` the way the two rows
 #     below do it, because a BINARY has no module path to qualify through: `skein-server` is not
 #     a legal Rust identifier, and the last segment of that path is `server` — which IS a module
-#     of this tree, `tests/server.rs`, and has never held this test. So the `::` spelling sent a
+#     of this tree, `tests/server/main.rs`, and has never held this test. So the `::` spelling sent a
 #     reader to a file where there was nothing to find, which `prose-check`'s module rule reported
 #     the moment `docs/*.toml` became a prose source.)
 #   * `src/knock::the_grace_is_overridable_for_tests_and_sane_without_one` — took the lock. Its old

@@ -198,7 +198,14 @@ CODE_DIRS = ["src", "tests", "cockpit", "warden", "tools"]
 CODE_SUFFIXES = (".rs", ".py", ".mjs", ".js", ".html", ".toml", ".sh", ".json")
 
 # Backticked, and either qualified (`a::b`) or bare. The last segment is what is looked up.
-BACKTICKED = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)`")
+#
+# A leading `$` is allowed and dropped (SKEIN-648): prose names an environment variable the way a
+# shell spells it, and until this the gate read `SKEIN_THING` in backticks and was blind to the
+# same variable written with its `$` — so a retired variable survived in prose exactly when it was
+# spelled the usual way. The `$` is outside the group, so what is looked up is the name the code
+# reads. The span still has to be the WHOLE of the backticks: a path like `$SKEIN_HOME/x` or a
+# `${NAME}` expansion is not a name on its own and stays unread, as `a::b(` does.
+BACKTICKED = re.compile(r"`\$?([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)`")
 
 # A qualified name the prose does NOT put in readable backticks — SKEIN-829, and the shape that
 # caused SKEIN-561. Both dead names there were written bare, in a parenthetical, inside a file this
@@ -403,9 +410,9 @@ def prose_sources():
     genuinely indistinguishable — so it is a limit to know: a lower-case environment variable read
     by git, curl or the sandbox is somebody else's name, and it goes in the first section of
     `docs/prose-symbols.toml` beside the kernel capabilities and the `open(2)` flags, where the
-    upper-case ones already are. SKEIN-648 is the other half of the same shape: an
-    environment variable written `$LIKE_THIS` is not matched by `BACKTICKED` at all, so the gate's
-    treatment of a variable depends on how the sentence spelled it.
+    upper-case ones already are. SKEIN-648 was the other half of the same shape: an
+    environment variable written `$LIKE_THIS` was not matched by `BACKTICKED` at all, so the gate's
+    treatment of a variable depended on how the sentence spelled it. It is matched now, `$` dropped.
 
     Their names are not written here for the reason `without_comments` gives: a docstring is not
     a `#` comment, so it is not cut out of `code_text`, and a name written into this file would
@@ -1666,7 +1673,9 @@ SELF_CHECK_THEN = (
 # the two affixes are not. The concrete changes that make the assertion fail: matching a bare
 # substring again (the truncation stops being a finding), anchoring an affix on the side its name
 # was cut on (both affixes become findings), and reading only `BACKTICKED` (the last two stop being
-# findings — which is the state SKEIN-829 replaced, and the one that let SKEIN-561 happen).
+# findings — which is the state SKEIN-829 replaced, and the one that let SKEIN-561 happen). The
+# eighth sentence names a variable with its `$`, and stops being a finding if `BACKTICKED` stops
+# taking the `$` (SKEIN-648).
 SELF_CHECK_SYMBOL_CODE = "fn a_fixture_gate_that_is_named_in_full_and_then_some() {}\n"
 SELF_CHECK_SYMBOL_PROSE = [
     (
@@ -1681,6 +1690,7 @@ SELF_CHECK_SYMBOL_PROSE = [
             " shape of SKEIN-561's two dead names, in a file the gate did read.",
             "// And `kit::a_fixture_gate_in_a_broken_span(` IS marked up, but the paren sits"
             " inside the span, so the readable-backtick rule cannot take it either.",
+            "// `$A_FIXTURE_VARIABLE_NOBODY_READS` is a variable, spelled the way a shell spells it.",
         ],
     )
 ]
@@ -1754,6 +1764,7 @@ def self_check():
         "a_fixture_gate_that_never_existed": ["fixture.rs:5"],
         "a_fixture_gate_written_bare": ["fixture.rs:6"],
         "a_fixture_gate_in_a_broken_span": ["fixture.rs:7"],
+        "A_FIXTURE_VARIABLE_NOBODY_READS": ["fixture.rs:8"],
     }
     if symbols != want_symbols:
         raise SystemExit(
@@ -1763,7 +1774,8 @@ def self_check():
             "one (it is, if the boundary is applied to the side the name was cut on); and a name "
             "written WITHOUT readable backticks must be a finding (it is not, if the extraction "
             "is `BACKTICKED` alone — the state that let SKEIN-561's two dead names through a "
-            "scan of the very file they lived in).\n"
+            "scan of the very file they lived in); and a variable written `$LIKE_THIS` must be "
+            "one (it is not, if `BACKTICKED` stops taking the `$` — SKEIN-648).\n"
             "  wanted %r\n  got    %r" % (want_symbols, symbols)
         )
     # THE MODULE RULE, against two fixture modules. One name is named under the module that has

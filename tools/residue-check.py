@@ -105,13 +105,27 @@ time.
 
     python3 tools/residue-check.py            # the gate
     python3 tools/residue-check.py --show     # every finding, with file:line
-    python3 tools/residue-check.py --update   # rewrite docs/residue.toml from the tree, and
-                                              # docs/residue-banned.txt from the register
+    python3 tools/residue-check.py --update   # REWRITE docs/residue.toml from the tree, and
+                                              # docs/residue-banned.txt from the register.
+                                              # Every `#` line in residue.toml is re-emitted
+                                              # from `render`: snapshot it and read the diff
     python3 tools/residue-check.py --history refs/remotes/origin/master
                                               # the denylist over everything reachable from a
                                               # ref: blob contents, committed path strings, and
                                               # the whole log. Minutes, not seconds — a flag
                                               # somebody runs before a release, and not in CI
+
+`--update` REGENERATES, AND `module-check.py --update` MERGES — deliberately different (SKEIN-650).
+What a person writes in `docs/residue.toml` is a REASON, and a reason is a TOML value: `render`
+reads every one back and writes it out beside its entry, so an allow-list regenerated from the tree
+loses no argument anybody made. The file's `#` lines are not arguments but this tool's own help, and
+they are owned here — `render` writes the header and the section comments fresh every time. So prose
+typed into a `#` line of that file is deleted by the next `--update`, and prose worth keeping goes
+into `render` instead. `docs/modules.toml` is the other shape: its reasoning IS its comments, one
+block above each edge, which no regeneration could carry, so its `--update` edits the file in place
+and refuses to subtract without `--prune` (SKEIN-614). Merging here would buy nothing a value does
+not already carry, and would make the header two copies that drift. The cost is the one this
+paragraph exists to say out loud: read the diff of any `--update` before committing it.
 """
 
 import hashlib

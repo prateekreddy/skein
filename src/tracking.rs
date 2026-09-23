@@ -2442,7 +2442,7 @@ mod tests {
     ///
     /// The distinction is the whole of SKEIN-632 and it is not theoretical here.
     /// `POST /api/boxes/:name/tracking` carries its own `valid_name` and answers 400, so
-    /// `tests/server.rs`'s `a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home`
+    /// `tests/server/requests.rs`'s `a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home`
     /// stays **green with [`box_tracking_path`]'s guard deleted** — the route answers first and the
     /// library's refusal is never reached. Measured, not reasoned: the guard was replaced with a
     /// bare `Some(..)` and that test still passed. So the route test proves the route, and this one
