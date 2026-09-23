@@ -149,7 +149,7 @@ ENVIRONMENTAL = [
         "installed on a runner",
     ),
     (
-        "tests/server.rs",
+        "tests/server/fleet.rs",
         "an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline",
         "reads /proc/<pid>/cmdline, which is Linux's — the guard asks whether there is a /proc at "
         "all, and the suite is meant to stay runnable where there is not",
