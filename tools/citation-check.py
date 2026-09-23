@@ -150,10 +150,12 @@ evidence, for whoever takes it on. SKEIN-708 is that work."""
 # 129 in `src/web/vendor/xterm.min.js`, and the rest decimal numbers that happen to be valid hex —
 # a gibibyte, a mebibyte, the mount-namespace inode numbers quoted in `src/fleet.rs`. Four of the
 # 141 are genuine, and all four are the same shape: a sha as an argument inside a quoted `git log`
-# recipe, at `CHANGELOG.md:28,175` and `CONTRIBUTING.md:364,368`. So that shape IS a blind spot,
-# it is named here, and it is empty inside the gated scope — every one of the 54 citations in
-# `docs/` is a whole span. Writing the sha in its own span next to the recipe is the way to have a
-# recipe checked.
+# recipe, at `CHANGELOG.md:28,175` and the two `02ad7cfb`-citing recipes under CONTRIBUTING.md's
+# "Commit messages" section (`grep -n '02ad7cfb' CONTRIBUTING.md` finds them; a line number is not
+# given here because this file is outside `docs/`, so nothing re-anchors it when CONTRIBUTING.md
+# grows above it — SKEIN-939). So that shape IS a blind spot, it is named here, and it is empty
+# inside the gated scope — every one of the 54 citations in `docs/` is a whole span. Writing the
+# sha in its own span next to the recipe is the way to have a recipe checked.
 SPAN = re.compile(r"`([^`\n]+)`")
 HEX = re.compile(r"^([0-9a-fA-F]{7,40})$")
 
