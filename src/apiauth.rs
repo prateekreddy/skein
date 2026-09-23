@@ -217,7 +217,7 @@ fn minted() -> Result<crate::secret::Secret, String> {
 /// The failure that made this worth saying out loud, from `secrets` Rule 2's own notes: converting
 /// this without converting the two printers compiles clean and ships a cockpit URL that cannot open
 /// the cockpit, because `{t}` becomes `<secret>` silently.
-/// `a_printed_cockpit_url_carries_a_token_that_opens_the_api` in `tests/server.rs` is the assertion
+/// `a_printed_cockpit_url_carries_a_token_that_opens_the_api` in `tests/server/requests.rs` is the assertion
 /// that would have caught it, and it compares the printed value with the bytes on disk rather than
 /// with a shape.
 pub fn token() -> Result<crate::secret::Secret, String> {
@@ -409,7 +409,7 @@ mod tests {
     /// first (a box's own server takes the switch and serves the API unauthenticated to every other
     /// box); making [`refused_here`] answer `true` unconditionally fails the second (the documented
     /// switch stops working for an owner outside any fleet). The doorway half of the same rule is
-    /// the spawned test in `tests/server.rs`.
+    /// the spawned test in `tests/server/door.rs`.
     #[test]
     fn the_switch_is_refused_inside_a_box_and_honoured_where_neither_marker_is_set() {
         let _env = crate::testutil::env_lock();

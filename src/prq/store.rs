@@ -433,7 +433,7 @@ mod tests {
     /// there — so the guard that has to hold is [`usable_repo_id`], on the two writers a route can
     /// reach with a raw URL segment.
     ///
-    /// Nothing reached it. `tests/server.rs`'s traversal test asks the *route*, whose `load_repos()`
+    /// Nothing reached it. `tests/server/requests.rs`'s traversal test asks the *route*, whose `load_repos()`
     /// lookup answers "no such repo" before the writer is called, so that test stays **green with
     /// this guard deleted** — measured by deleting it, not reasoned. A guard no test can reach is a
     /// guard the next refactor removes silently.

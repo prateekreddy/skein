@@ -1370,7 +1370,7 @@ export function withoutSharedRoots(p, roots) {
  *
  * **[`fixtureRegex`] answers "is this a fixture process" and this one answers "WHICH fixture", and
  * the second question is the one [`fixturesRunning`] needs.** A prefix on its own cannot group a
- * cohort: every test in `tests/server.rs` is `skein-it-` and they are different runs. What makes
+ * cohort: every test in `tests/server/` is `skein-it-` and they are different runs. What makes
  * the name an identity is the tail the call sites do not write — `Scratch::temp` and `mkdtemp`
  * both put a pid or a random suffix on it — so the captured directory name names one run of one
  * test and nothing else.

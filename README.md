@@ -394,7 +394,7 @@ sandbox. This is the developer route, for working on skein itself.
 cargo build --release --workspace   # → target/release/{skein, skein-server, skein-warden}
                              # `--workspace`: a plain `cargo build` makes the first two only, and
                              # the fleet cannot be created or resized without the third
-cargo test --workspace       # units, a black-box run of the real server (tests/server.rs), and the
+cargo test --workspace       # units, a black-box run of the real server (tests/server/), and the
                              # box hook scripts driven as scripts (tests/turn_state_probe.rs)
 node tests/ui/voice.mjs      # what the mouth says + when it stays quiet (no browser needed)
 node tests/ui/tabs.mjs       # do your open tabs survive a reload (no browser needed)

@@ -75,7 +75,7 @@ function addTranscript(projects, id) {
 // which the server ages against, and `report.read_at`, the string the pane renders. Moving one and
 // not the other would leave a file no refresh could have written — and since the whole question
 // below is whether the sentence describes the reading it is beside, a fixture whose two timestamps
-// disagree would be asserting on the bug rather than against it (`tests/server.rs` does the same).
+// disagree would be asserting on the bug rather than against it (`tests/server/usage.rs` does the same).
 function ageStoredReading(home, secondsAgo) {
   const file = path.join(home, "usage.json");
   const stored = JSON.parse(fs.readFileSync(file, "utf8"));

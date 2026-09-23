@@ -1795,7 +1795,7 @@ check("a suite that starts its server in a part is one the fixture-root check re
 // **`quotedSomething` is asserted, and a red there is not a false alarm.** It says this tree no
 // longer quotes a call site anywhere in its prose — at which point this check has nothing left to
 // prove about the real tree and should say so out loud rather than pass. The two comments it stands
-// on are in `tests/server.rs` and `tests/ui/recovery.mjs`, and they are not named here because a
+// on are in `tests/server/fixture.rs` and `tests/ui/recovery.mjs`, and they are not named here because a
 // list of files is the thing `leaks.mjs` exists to not have.
 const derived = (() => {
   try {
