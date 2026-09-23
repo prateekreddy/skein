@@ -405,8 +405,8 @@ mod tests {
     /// An act runs under `sh -c`, and `sh` is found through the process-global `PATH`. So every
     /// test here *reads* a variable other tests in this same process *write*, and two of them write
     /// a `PATH` no shell lives in: `src/sbx.rs` sets `PATH=""` to prove a branch can be read
-    /// without forking `git`, and `src/ai.rs` narrows it to a stub directory to prove `sbx` is
-    /// absent. Either one landing inside this spawn is
+    /// without forking `git`, and `src/ai/unread.rs` narrows it to a stub directory to prove `sbx`
+    /// is absent. Either one landing inside this spawn is
     /// `act-slow could not be started: No such file or directory (os error 2)` — a red test in the
     /// one file the change did not touch, which is what SKEIN-421 cost a stream. Measured before
     /// this guard: 1 failure in 20 `cargo test --lib` runs, in `act-drain`, on an unmodified tree.

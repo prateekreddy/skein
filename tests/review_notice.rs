@@ -1,13 +1,13 @@
 //! **Where the cockpit draws the notice a lost box leaves** (SKEIN-799), and where it must not.
 //!
 //! `src/web/index.html` is 6,000 lines of inline script with no module boundary, so this asserts
-//! against the page's source the way `ai::tests::the_ceiling_sits_in_front_of_both_destinations_
-//! and_not_inside_one` asserts against `ai.rs`'s: by finding the two functions' spans and asking
-//! which one the drawing is inside. That is weaker than driving the real page, and it is the part
-//! of this the browser tier does not currently cover — said plainly rather than left to be
-//! inferred from what is here.
+//! against the page's source the way `ai::call::tests::the_ceiling_sits_in_front_of_both_
+//! destinations_and_not_inside_one` asserts against `src/ai/call.rs`'s: by finding the two
+//! functions' spans and asking which one the drawing is inside. That is weaker than driving the
+//! real page, and it is the part of this the browser tier does not currently cover — said plainly
+//! rather than left to be inferred from what is here.
 //!
-//! Through the same `include_str!` the server serves (`cockpit::INDEX` at `src/cockpit.rs:34`),
+//! Through the same `include_str!` the server serves (`cockpit::INDEX` in `src/cockpit.rs`),
 //! so there is no second copy of the page for this to be right about while the shipped one is
 //! wrong.
 

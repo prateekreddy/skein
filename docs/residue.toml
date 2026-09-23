@@ -85,7 +85,7 @@
 "/Users/me" = "a synthetic checkout path in the tests that prove a local path is not a slug"
 "/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet/create.rs:1304 exists to refuse"
 "/home/me" = "the same, in util.rs's path-shortening tests"
-"/home/somebody" = "a deliberately anonymous home in a repos.rs and a server.rs test"
+"/home/somebody" = "a deliberately anonymous home in a src/repos/source.rs and a server.rs test"
 "/home/x" = "the shortest home that is still a home, in volume.rs and warden_client.rs tests"
 "/home/..." = "an elision inside a doc comment, not a path"
 "/home/.claude" = "the `$HOME/.claude` store, written with the variable already expanded away"
@@ -99,7 +99,7 @@
 "git@github.com" = "the SSH login on every GitHub remote URL — a username, not a mailbox"
 "git@gitlab.com" = "the same login on the GitLab remotes the URL parser recognises"
 "git@gitlab.example.com" = "the same, on a synthetic remote in a `src/fleet/hosts.rs` test"
-"git@thing.git" = "not an address: a malformed SCP-style remote in a repos.rs refusal test"
+"git@thing.git" = "not an address: a malformed SCP-style remote in a src/repos/source.rs refusal test"
 "t@e.com" = "the shortest address that is still one, in a fleet-launch test"
 
 # What a COMMIT MESSAGE or an authorship line may name, on top of everything the tables above

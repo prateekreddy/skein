@@ -526,7 +526,7 @@ pub fn end_group(child: &mut std::process::Child) {
 // the terminal's foreground group, so the terminal stops delivering Ctrl-C to it: one leak closed
 // on the deadline path and another opened on the path where a person is watching. What follows
 // closes the second one rather than writing it down as a trade — the call it is worst for is the
-// one that matters most, `ai.rs`'s model call, which runs for tens of seconds.
+// one that matters most, `src/ai/call.rs`'s model call, which runs for tens of seconds.
 //
 // **Why `main` installs this and not this module.** A signal disposition is a property of a
 // PROCESS, and this file is linked into three kinds of them: `skein`, `skein-server`, and every

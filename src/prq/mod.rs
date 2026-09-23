@@ -107,9 +107,10 @@ mod tests {
         }
         sources.sort();
         for path in sources {
-            // The one legitimate `gh`: seeding the *account token* into sbx so boxes can push. That
-            // path is about `gh`'s own login by definition, it is opt-in, and it is not this — the
-            // queue's dependency was the hidden one.
+            // The one legitimate `gh`: `gh_cli_token`, which asks `gh auth token` for the login
+            // `gh` itself holds, as the last of the credential sources and only when every other
+            // one came up empty. That is about `gh`'s own login by definition, and it is not this —
+            // the queue's dependency was the hidden one.
             if path.ends_with("repos/add.rs") {
                 continue;
             }

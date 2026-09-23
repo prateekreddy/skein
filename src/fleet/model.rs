@@ -188,7 +188,7 @@ pub const REACHED: &str = "SKEIN_IN_SANDBOX";
 /// The environment variables that decide WHICH CREDENTIAL a model call authenticates with, and
 /// which skein removes before making one — but only when it has a login of its own to fall back on.
 ///
-/// **Why.** `src/ai.rs` opens with the contract: *rationed, lazy AI enrichment over the Claude
+/// **Why.** `src/ai/mod.rs` opens with the contract: *rationed, lazy AI enrichment over the Claude
 /// subscription — no API key*. Skein already decides which HOME the call reads its credential from
 /// and which temp directory it writes; leaving the auth source to whatever launched the server is
 /// the same mistake a third time. An `ANTHROPIC_API_KEY` inherited from a shell, a launch agent or
@@ -258,7 +258,7 @@ mod tests {
     /// **The GitHub credential reaches the box call as a `Secret`, not as characters** (SKEIN-536).
     ///
     /// A pin on the type, checked by the compiler: this coercion stops compiling the moment the
-    /// parameter goes back to `Option<&str>`, which is what `ai.rs` would need to `.expose()` the
+    /// parameter goes back to `Option<&str>`, which is what `src/ai/` would need to `.expose()` the
     /// credential again before the call rather than inside `github_export`.
     #[test]
     fn a_model_call_in_a_box_takes_the_github_credential_as_a_secret() {

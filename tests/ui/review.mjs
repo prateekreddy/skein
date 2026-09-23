@@ -191,10 +191,10 @@ async function makeFixture() {
     // `source_tree` beside `source` used to be what kept `ensure_mirror` off the network: the
     // comment here said so, and it stopped being true. Local-path repos were removed, and with them
     // `clone_mirror`'s preference for a checkout — "there is no checkout to prefer any more, and
-    // `source` is a URL by construction" (src/repos.rs). So every run since has tried to clone
-    // `https://github.com/acme/thing.git` for real, failed, and taken eight checks down with it:
-    // the brief, the evidence block, the ownership line and every module note, each blaming the UI
-    // for a repo skein simply could not read.
+    // `source` is a URL by construction" (src/repos/mirror.rs). So every run since has tried to
+    // clone `https://github.com/acme/thing.git` for real, failed, and taken eight checks down with
+    // it: the brief, the evidence block, the ownership line and every module note, each blaming the
+    // UI for a repo skein simply could not read.
     //
     // `makeMirror` below is the replacement, and it works the other way round — the mirror is put
     // where skein looks for it BEFORE skein looks, so `ensure_mirror` finds one and clones nothing.
