@@ -98,37 +98,140 @@ pub struct RuntimeUpdate {
 /// failed, or everything is current. That is deliberate — the bar's job is to speak when there is
 /// something to install, and "skein could not find out" is not something a person can act on.
 pub fn runtime_updates() -> Vec<RuntimeUpdate> {
-    let known = UPDATES.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let due = match known {
-        Some((at, _)) => at.elapsed() >= UPDATE_CHECK_EVERY,
-        None => true,
-    };
-    if due && !CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        std::thread::spawn(|| {
-            remember_updates(look_for_newer_runtimes());
-            CHECKING.store(false, std::sync::atomic::Ordering::SeqCst);
-        });
+    let known = READINGS.known();
+    if READINGS.claim_if_due(std::time::Instant::now()) {
+        std::thread::spawn(|| READINGS.take(std::time::Instant::now, look_for_newer_runtimes));
     }
     known.map(|(_, found)| found).unwrap_or_default()
 }
 
 /// File a reading as the current one, whoever took it.
 ///
-/// Its own function because there are now two callers and they must not drift: the timed check
-/// behind [`runtime_updates`], and [`update_runtimes`] refreshing it the moment an install makes
-/// it wrong. A reading stored by one and not the other is exactly the bug this exists to stop.
+/// Its own function because the callers must not drift: the timed check — behind
+/// [`runtime_updates`] and the server's own loop, [`watch_runtime_updates`] — and
+/// [`update_runtimes`] refreshing it the moment an install makes it wrong. A reading stored by one
+/// and not the other is exactly the bug this exists to stop.
 fn remember_updates(found: Vec<RuntimeUpdate>) {
-    *UPDATES.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), found));
+    READINGS.file(std::time::Instant::now(), found);
 }
 
 /// Six hours. An agent CLI ships a few times a week, and the answer is only ever used to draw a
 /// line in a bar — so this is about being told within a working day, not about being current to the
 /// minute. It is also a network call per fleet, which is the thing to be sparing with.
 const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
-static UPDATES: std::sync::Mutex<Option<(std::time::Instant, Vec<RuntimeUpdate>)>> =
-    std::sync::Mutex::new(None);
-/// Held while a check runs, so ten pollers arriving during one do not each start a thread.
-static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The remembered reading and the flag that says one is being taken — one value rather than two
+/// statics, so the loop's test can hand [`watch_updates`] a store of its own. Two statics were
+/// shared with every other test in the process, and one of those calls [`runtime_updates`] cold,
+/// which starts a real check that files over whatever the loop's test had arranged.
+struct Readings {
+    last: std::sync::Mutex<Option<(std::time::Instant, Vec<RuntimeUpdate>)>>,
+    /// Held while a check runs, so ten pollers arriving during one — or the loop arriving during a
+    /// poller's — do not each start another.
+    checking: std::sync::atomic::AtomicBool,
+}
+
+static READINGS: Readings = Readings::new();
+
+impl Readings {
+    const fn new() -> Readings {
+        Readings {
+            last: std::sync::Mutex::new(None),
+            checking: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn known(&self) -> Option<(std::time::Instant, Vec<RuntimeUpdate>)> {
+        self.last.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Is a reading due at `now`, and if so, is it this caller's to take? **One rule for both ways
+    /// in** — the polled one and the loop — so neither can drift into checking more often than
+    /// [`UPDATE_CHECK_EVERY`]. A `true` must be answered by [`Readings::take`], which is what gives
+    /// the flag back.
+    fn claim_if_due(&self, now: std::time::Instant) -> bool {
+        let due = match self.known() {
+            Some((at, _)) => now.saturating_duration_since(at) >= UPDATE_CHECK_EVERY,
+            None => true,
+        };
+        due && !self
+            .checking
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Take the reading [`Readings::claim_if_due`] said was due, file it at the time it finished,
+    /// and give the flag back. Blocking: `check` is an exec into the sandbox and an npm round trip.
+    fn take(
+        &self,
+        now: impl Fn() -> std::time::Instant,
+        check: impl FnOnce() -> Vec<RuntimeUpdate>,
+    ) {
+        let found = check();
+        self.file(now(), found);
+        self.checking
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn file(&self, at: std::time::Instant, found: Vec<RuntimeUpdate>) {
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some((at, found));
+    }
+}
+
+/// How often the server's loop ASKS whether a reading is due, which is not how often it takes one.
+///
+/// **Not [`UPDATE_CHECK_EVERY`] itself.** A reading is filed when the check finishes, up to two
+/// minutes after the tick that started it, so a loop ticking every six hours would find the last
+/// reading a little under six hours old on every tick, skip it, and leave the check to whoever
+/// polls next — the gap this loop exists to close. Asking once a minute costs a mutex read; the
+/// npm pair still runs once per [`UPDATE_CHECK_EVERY`].
+const UPDATE_LOOK_EVERY: Duration = Duration::from_secs(60);
+
+/// The loop the server runs, so that "every six hours" is true of a fleet nobody is watching
+/// (SKEIN-1068). Never returns. **It only checks; installing stays a person's press**
+/// ([`update_runtimes`]).
+///
+/// Before this the check sat behind [`runtime_updates`] alone, whose only production callers are
+/// the health report and the Update route — so a fleet with no cockpit open never checked at all.
+/// Its own loop for the reason `announce::watch_fleet_disk` gives about itself: `crate::stream`
+/// does no work for a server nobody is watching, and this has to happen anyway.
+pub async fn watch_runtime_updates() {
+    watch_updates(
+        UPDATE_LOOK_EVERY,
+        std::time::Instant::now,
+        look_for_newer_runtimes,
+        &READINGS,
+    )
+    .await
+}
+
+/// [`watch_runtime_updates`] with the period, the clock, the check and the store as arguments — the
+/// seam the loop is tested through, the way `announce::watch_disk` is. Six hours is untestable by
+/// waiting, so the test moves the clock instead. Private, so the choosing stops at this file's edge.
+///
+/// **`spawn_blocking`, not a bare call**: the check is an exec into the sandbox and an npm round
+/// trip, and running it on a runtime thread would stall every cockpit connection the server holds.
+async fn watch_updates<N, C>(every: Duration, now: N, check: C, readings: &'static Readings)
+where
+    N: Fn() -> std::time::Instant + Clone + Send + 'static,
+    C: Fn() -> Vec<RuntimeUpdate> + Clone + Send + 'static,
+{
+    let mut tick = tokio::time::interval(every);
+    loop {
+        tick.tick().await;
+        if !readings.claim_if_due(now()) {
+            continue;
+        }
+        let (now, check) = (now.clone(), check.clone());
+        if let Err(e) = tokio::task::spawn_blocking(move || readings.take(now, check)).await {
+            // A check that panicked never gave the flag back. Give it back here, or no reading
+            // would ever be taken again, by this loop or by anybody polling.
+            readings
+                .checking
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("skein: agent CLI update check did not run: {e}");
+        }
+    }
+}
 
 /// Ask npm what it would install, and the sandbox what it is running. One exec, both answers.
 ///
@@ -449,6 +552,163 @@ mod tests {
         assert!(
             said.len() < 100,
             "the remembered answer is implausible, so this is not reading what it thinks it is"
+        );
+    }
+
+    /// **Six hours pass with nobody polling, and a fresh reading is taken anyway** (SKEIN-1068).
+    ///
+    /// Every other test of the check goes through [`super::runtime_updates`], so all of them pass on
+    /// a skein whose only trigger is a health poll or the Update route — a fleet with no cockpit
+    /// open, never checking. Nothing here calls either: what is under test is the server's own
+    /// loop, [`super::watch_updates`], driven at a 20ms tick against a clock this test moves.
+    ///
+    /// Real time for the tick and a moved clock for the age, for `announce::watch_disk`'s reason:
+    /// `spawn_blocking` leaves the runtime idle while the check is in flight, so a paused tokio
+    /// clock could run the ticks out from under it. The store is the test's own [`super::Readings`],
+    /// because the process-wide one is also written by a cold [`super::runtime_updates`] in the
+    /// test above. `npm` is stubbed at `place::seam`, the one place the real check crosses into the
+    /// sandbox.
+    ///
+    /// The sabotage each assertion was named against:
+    ///
+    /// * *not before it is due* — drop the due test from [`super::Readings::claim_if_due`], so
+    ///   every tick checks.
+    /// * *a fresh reading was taken with nobody polling* — make [`super::watch_updates`]'s body
+    ///   `continue` instead of checking, leaving the polled path as the only way in.
+    /// * *and only one* — stop [`super::Readings::take`] filing what it found, so every tick finds
+    ///   the old reading still due and checks again.
+    /// * *off the runtime's thread* — call `readings.take` directly instead of `spawn_blocking`.
+    #[test]
+    fn the_server_checks_for_newer_agent_clis_every_six_hours_with_nobody_polling() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        assert!(
+            crate::util::fleet_root().starts_with(home.to_str().expect("a utf-8 fixture path")),
+            "the fleet root this test resolves is not the fixture's: {}",
+            crate::util::fleet_root()
+        );
+        // npm stubbed where it is actually reached: the version check is a fleet-scope crossing
+        // (`own_sandbox(..).exec`), and `place::seam` is where a test stands in for one — a `$PATH`
+        // stub would not be, since the crossing runs under a PATH of its own. It does nothing, and
+        // it is not asserted on: the seam is process-wide, and the cold `runtime_updates()` in the
+        // test above takes no lock and crosses from its own thread, so a count here would be that
+        // test's as often as this loop's (it was, in the first gate run).
+        let _npm = crate::place::seam::doing_nothing();
+
+        static STORE: super::Readings = super::Readings::new();
+        let stale = super::RuntimeUpdate {
+            runtime: "claude".into(),
+            have: "1.0.0".into(),
+            latest: "1.0.1".into(),
+        };
+        let fresh = super::RuntimeUpdate {
+            runtime: "claude".into(),
+            have: "1.0.0".into(),
+            latest: "2.0.0".into(),
+        };
+        let t0 = Instant::now();
+        STORE.file(t0, vec![stale.clone()]);
+
+        // The clock the loop reads: the real one at t0, plus however far this test has moved it.
+        let moved = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let moved = Arc::clone(&moved);
+            move || t0 + Duration::from_secs(moved.load(Ordering::SeqCst))
+        };
+        let runtime_thread = std::thread::current().id();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let on_the_runtime_thread = Arc::new(AtomicBool::new(false));
+        let check = {
+            let (checks, on_the_runtime_thread) =
+                (Arc::clone(&checks), Arc::clone(&on_the_runtime_thread));
+            let fresh = fresh.clone();
+            move || {
+                checks.fetch_add(1, Ordering::SeqCst);
+                if std::thread::current().id() == runtime_thread {
+                    on_the_runtime_thread.store(true, Ordering::SeqCst);
+                }
+                vec![fresh.clone()]
+            }
+        };
+
+        let six_hours = 6 * 60 * 60;
+        let (before_due, after_due) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime for this test's body")
+            .block_on(async {
+                let watching = tokio::spawn(super::watch_updates(
+                    Duration::from_millis(20),
+                    clock,
+                    check,
+                    &STORE,
+                ));
+                // A minute short of six hours: ten ticks, and none of them may check.
+                moved.store(six_hours - 60, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let before_due = checks.load(Ordering::SeqCst);
+                // Past six hours. Bounded, so a loop that never checks fails below, not hangs.
+                moved.store(six_hours + 1, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while checks.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                // Ten more ticks on the same clock: the reading just filed is not due again.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                watching.abort();
+                (before_due, checks.load(Ordering::SeqCst))
+            });
+
+        assert_eq!(
+            before_due, 0,
+            "the loop checked a reading that was not yet six hours old — it is spending an npm \
+             round trip per tick rather than one per six hours"
+        );
+        assert!(
+            after_due >= 1,
+            "six hours passed with nobody polling and no reading was taken — the check is still \
+             only reachable through runtime_updates' callers, so an unwatched fleet never checks"
+        );
+        assert_eq!(
+            after_due, 1,
+            "the loop took {after_due} readings for one six-hour crossing, so what it takes is not \
+             what it files as current"
+        );
+        let (at, found) = STORE.known().expect("a reading");
+        assert_eq!(
+            found,
+            vec![fresh],
+            "the fresh reading was not filed as the current one, so the bar still answers from the \
+             stale one"
+        );
+        assert!(
+            at >= t0 + Duration::from_secs(six_hours),
+            "the reading was filed at the wrong time, so its age is not measured from when it was \
+             taken"
+        );
+        assert!(
+            !on_the_runtime_thread.load(Ordering::SeqCst),
+            "the check ran on the runtime's own thread — it is an npm round trip, and every cockpit \
+             connection the server holds would stall on it"
+        );
+    }
+
+    /// Something in the server starts [`super::watch_runtime_updates`]. A source read, and the one
+    /// claim a source read is the right tool for; the test above is what shows the loop ticks.
+    #[test]
+    fn the_server_is_what_runs_the_update_check() {
+        let server = include_str!("../bin/skein-server.rs");
+        assert!(
+            server.contains("tokio::spawn(skein::fleet::watch_runtime_updates())"),
+            "nothing in skein-server.rs starts the update-check loop, so a fleet nobody watches \
+             never checks for a newer agent CLI"
         );
     }
 
