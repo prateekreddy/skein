@@ -885,7 +885,7 @@ impl Place {
     /// "every start path has a trusted PATH" that is true while it exists. skein's own code says as
     /// much where it can see the consequence — [`crate::ai::Unread`] tells a reader that "the server
     /// inherits the PATH of whatever launched it" and to "start the server from a shell that has
-    /// it" (`src/ai.rs:211-216`). Pinning also makes the property local: it is one line here, not a
+    /// it" (`src/ai/unread.rs:85-90`). Pinning also makes the property local: it is one line here, not a
     /// claim about every start path anyone adds later, which is the list that goes stale.
     ///
     /// **Nothing is lost by pinning.** Every program a crossing runs before the hop — `env`,
