@@ -1,0 +1,32 @@
+# Line-coverage floors, read by `tools/coverage-check.py` and enforced by the `coverage` job in
+# `.github/workflows/ci.yml` (SKEIN-508).
+#
+# **A floor is a measurement rounded DOWN, never a target.** The owner's standard: "ratchet from
+# measured, no invented target". Each number below is what a run measured on the day it was
+# written, with the fraction dropped — and it only ever goes UP. The job prints the measured
+# number on every run and says so when it has risen by a whole point or more; raising the floor is
+# then a one-line change here, in a commit a person makes. Lowering one needs a reason written
+# beside it, because a floor that moves down whenever it is in the way records nothing.
+#
+# How each was measured, so it can be measured the same way again:
+
+[rust]
+# `cargo llvm-cov --all --no-fail-fast --no-report`, then `cargo llvm-cov report --workspace` with
+# the flags `tools/coverage-check.py rust` passes (cargo-llvm-cov 0.9.1, at 7db285b). That is the
+# whole `cargo test --all` suite: 42 test binaries — the unit tests of both crates' libraries and
+# binaries, the 36 integration binaries in `tests/` and the one in `warden/tests/` — 0 failed. On
+# a machine with every requirement `tests/common/mod.rs` declares (bwrap able to make a namespace,
+# tmux, node, jq, Playwright's chromium), so nothing skipped for want of a tool. Doctests are not
+# collected (that needs a nightly compiler).
+# Counted: the 126 files under `src/` and `warden/src/`; the harness in `tests/` is not.
+# Measured 87.98% — 56846 of 64614 lines.
+floor = 87
+
+[cockpit]
+# `node --test --experimental-test-coverage --test-coverage-include='cockpit/src/**'` over
+# `cockpit/test/*.test.mjs` (node 22.22.1) at 7db285b: the `cockpit-tests` gate's own run.
+# Counted: the modules those tests import, which today is every file in `cockpit/src` — node
+# reports a module only once something loads it, so a new module with no test is not counted
+# until one imports it.
+# Measured 99.84% — 1281 of 1283 lines.
+floor = 99

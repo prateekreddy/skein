@@ -282,9 +282,10 @@ jobs:
   # compilers doubles the bill to learn one fact. What this job adds is whether the tree compiles —
   # every target, tests included, against the lockfile — on the oldest compiler it says it supports.
   #
-  # Its command lives here and not in `tools/gates.sh`, which is the one exception to that file's
-  # rule and is deliberate for now: a local run would need a second toolchain installed to answer
-  # it, and `gates.sh` has no way yet to say "not answerable on this machine" for a Rust version.
+  # Its command lives here and not in `tools/gates.sh`, which is an exception to that file's rule
+  # (the `coverage` job below is the other) and is deliberate for now: a local run would need a
+  # second toolchain installed to answer it, and `gates.sh` has no way yet to say "not answerable on
+  # this machine" for a Rust version.
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -309,3 +310,61 @@ jobs:
         with:
           key: msrv
       - run: rustc --version && cargo build --locked --all --all-targets
+
+  # **Line coverage, held at a floor that only rises (SKEIN-508).** The floors live in
+  # `docs/coverage-floor.toml`, one per language, each the measured number rounded DOWN; the
+  # comparison, the refusal when nothing was measured, and the "it rose, raise the floor" notice are
+  # all in `tools/coverage-check.py`. The owner's standard for it: "ratchet from measured, no
+  # invented target".
+  #
+  # A job of its own rather than a gate in `tools/gates.sh`, for the reason the `msrv` job is: an
+  # instrumented build of every target is a second full compile and a second full test run, and
+  # putting it in the gate list would put that on every local run of the gates too. Its command is
+  # a tool rather than a line here, so a contributor runs exactly this with
+  # `python3 tools/coverage-check.py rust` — `gate-list-check` counts a tool a workflow step runs as
+  # run, which is what lets this one live outside the list.
+  #
+  # **The setup repeats the `check` job's, deliberately, and adds `tmux`.** A number is only
+  # comparable with the floor if it comes from the same suite the floor was measured on, and that
+  # was a machine where every requirement in `tests/common/mod.rs` was present — bwrap able to make
+  # a namespace, tmux, node, and Playwright's chromium. Leave one out here and its tests skip, the
+  # number drops a point or two, and the job goes red about the runner rather than the change. The
+  # reasons for each step are on the `check` job's copy of it above.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      # A prebuilt binary, installed by the action cargo-llvm-cov's own author publishes; building
+      # it with `cargo install` would cost minutes on every run for the same executable.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: bwrap --dev-bind / / -- /bin/true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+        working-directory: tests/ui
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/ui/package.json') }}
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/ui
+      # Cockpit first: it takes seconds, so a drop there is reported before the long Rust run —
+      # and the Rust run still happens when the cockpit's fails, because one run that reports both
+      # numbers beats two that each report the first.
+      - run: python3 tools/coverage-check.py cockpit
+        id: cockpit
+      - run: python3 tools/coverage-check.py rust
+        if: success() || steps.cockpit.outcome == 'failure'

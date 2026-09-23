@@ -225,10 +225,11 @@ gets used for.
 
 `.github/workflows/ci.yml` invokes those same gates, one step per gate, as `tools/gates.sh run
 <name>` — so that a red X in the UI still names the gate that failed while the command it runs is
-written down only once. Eight of its `- run:` steps are not gates. Six are in the `check` job: four
-prepare the machine, one proves bwrap actually works, and one deepens the clone for the step after
-it. The other two are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds
-every target at it — see "Releases, and what CI covers" below. The step that reports
+written down only once. Fifteen of its `- run:` steps are not gates. Six are in the `check` job:
+four prepare the machine, one proves bwrap actually works, and one deepens the clone for the step
+after it. Two are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds every
+target at it, and seven are the `coverage` job, which holds line coverage at a floor — both under
+"Releases, and what CI covers" below. The step that reports
 what the run skipped used to be a seventh — advisory, and therefore never acted on, which is what
 made `noskip-check` a gate instead (SKEIN-558, SKEIN-881). **The rest are gates that can fail your
 change**, and `tools/gates.sh`
@@ -236,7 +237,7 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 26
+grep -c '^      - run:' .github/workflows/ci.yml     # → 33
 tools/gates.sh --list | wc -l                        # → 19
 ```
 
@@ -621,6 +622,21 @@ with the exceptions in `GATED` (see the README's Build section), but no CI run s
   `Cargo.toml` names. That version was measured, not picked, and the comment beside it says how;
   the job reads it from `Cargo.toml`, so the number exists once. It is a build, not a second run of
   the gates — though `clippy` in the `check` job also reads it, and fails on an API newer than it.
+- the `coverage` job: line coverage, which fails a change that lowers it below the floor.
+
+**The coverage floor.** `tools/coverage-check.py` measures two numbers and compares each with its
+floor in `docs/coverage-floor.toml`: `rust`, the line coverage of `src/` and `warden/src/` over the
+whole `cargo test --all --no-fail-fast` run under `cargo llvm-cov` (library, binaries and every
+integration binary, including the servers they spawn; `tests/` itself and doctests are not
+counted), and `cockpit`, the line coverage of `cockpit/src` from the `cockpit-tests` run under
+node's `--experimental-test-coverage`. Each floor is the number measured when it was set, rounded
+**down** to a whole percent — not a target anybody chose — and it only ever goes up. When a run
+measures a point or more above it, the job says so and names the value; raising it is a one-line
+change to that file in your own commit, never something CI writes. Run it yourself with
+`python3 tools/coverage-check.py cockpit` (seconds) or `python3 tools/coverage-check.py rust`
+(`rustup component add llvm-tools-preview` and `cargo install cargo-llvm-cov --locked` first; it is
+a second full build and test run). It is a job rather than a gate in `tools/gates.sh` for that last
+reason: every local run of the gates would pay for it.
 
 **Cutting a release** is pushing a `v*` tag whose version matches `version` in `Cargo.toml`.
 `.github/workflows/release.yml` then runs the whole of `ci.yml` on the tagged commit — the tag push
