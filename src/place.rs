@@ -572,6 +572,116 @@ pub fn box_path(home: &str) -> String {
     format!("{home}/.local/bin:{BOX_PATH_HEAD}:{FLEET_PATH}")
 }
 
+/// The launcher, embedded for the one thing this module reads out of it: its `inherited_env` list.
+const LAUNCHER: &str = include_str!("box-session.sh");
+
+/// **The names a box receives from the environment of whatever reached into it** — the launcher's
+/// `inherited_env` list, read out of the launcher's own text (SKEIN-1085).
+///
+/// A box's session starts through `src/box-session.sh`, which removes every inherited variable not
+/// on that list (SKEIN-972). A crossing is the other way in: [`Place::enter`] spawns `nsenter` from
+/// skein-server, which carries the server's whole environment into the box's namespace — so the
+/// provisioning script, the attach shell, the pane observer it starts, a model call and every other
+/// crossing used to see `SKEIN_HOME`, `SKEIN_LISTEN_INHERITED_ONLY` and everything else the cockpit
+/// was started with. The contract is the same for both ways in, so the list is the same list.
+///
+/// **Why parsed from the launcher rather than written again here.** The owner's decision on
+/// SKEIN-972 was one written list, each name with its reason; a copy in Rust is two lists that
+/// agree until the day somebody edits one. The alternatives were worse on their own terms: asking
+/// the INSTALLED launcher for its list at crossing time (`box-session.sh --inherited-env`) would make
+/// every crossing depend on a fleet-scope script run first, and on whichever revision a sandbox
+/// happens to carry; a third file both read would have to be installed beside the launcher and
+/// kept in step with it. The launcher is already compiled into this binary (`fleet::kit`), so this
+/// reads the same bytes that get installed, at no cost past the first call.
+///
+/// Parsed strictly: the block from the line `inherited_env=(` to the line `)`, comments dropped,
+/// every remaining word a shell identifier. Anything else panics, and
+/// `the_crossing_list_is_the_launchers_list` reads it in every test run, so a launcher edit that
+/// breaks the shape fails there rather than in a crossing.
+pub fn inherited_env() -> &'static [String] {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| parse_inherited_env(LAUNCHER))
+}
+
+fn parse_inherited_env(script: &str) -> Vec<String> {
+    let mut lines = script.lines().skip_while(|l| l.trim() != "inherited_env=(");
+    assert!(
+        lines.next().is_some(),
+        "src/box-session.sh has no `inherited_env=(` line, so a crossing has no list to keep"
+    );
+    let mut names = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim() == ")" {
+            closed = true;
+            break;
+        }
+        let code = line.split('#').next().unwrap_or("");
+        for word in code.split_whitespace() {
+            assert!(
+                is_identifier(word),
+                "{word:?} in the launcher's inherited_env is not a variable name"
+            );
+            names.push(word.to_string());
+        }
+    }
+    assert!(
+        closed,
+        "the launcher's inherited_env list has no closing `)`"
+    );
+    names
+}
+
+fn is_identifier(word: &str) -> bool {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// What a crossing keeps **beyond** the launcher's list, and why each is not on it.
+///
+/// `TERM` and `COLORTERM` describe a terminal, and a session start has none: the launcher runs
+/// `tmux new-session -d`, and tmux gives every pane its own `TERM`. A crossing can carry one —
+/// [`crate::sandbox::agent_attach_argv`] and `shell_argv` end in `tmux attach-session`, a client
+/// drawing on the terminal a person is looking at, and tmux refuses to attach with no `TERM` at
+/// all. `COLORTERM` is how that client learns the terminal takes 24-bit colour. Neither is a
+/// path, a credential or a switch skein reads. (`LANG`/`LC_*` are not needed for the same client:
+/// every attach passes `tmux -u`.)
+const CROSSING_ALSO: &[&str] = &["TERM", "COLORTERM"];
+
+/// The shell, run in front of the `nsenter` hop, that removes every variable not on
+/// [`inherited_env`] or [`CROSSING_ALSO`] — the launcher's own filter, for a crossing.
+///
+/// In front of the hop and not in [`Place::wrap`] behind it, because behind it a login shell has
+/// already sourced the box's profile, and what a box sets in its own profile is the box's business
+/// (the owner's decision on SKEIN-972). Filtering there would strip it.
+///
+/// Two halves, as in the launcher: `unset` for every exported name, and `env -u` on the `exec` for
+/// the names bash cannot hold as variables (`BASH_FUNC_<name>%%`, anything with a `-`), which bash
+/// passes through to its children untouched. It leaves `skein_odd` for [`Place::enter`]'s `exec`.
+/// Names only ever reach an argv — never a value.
+fn keep_only_listed() -> String {
+    let keep = inherited_env()
+        .iter()
+        .map(String::as_str)
+        .chain(CROSSING_ALSO.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "skein_keep=' {keep} '\n\
+         for skein_n in $(compgen -e); do\n\
+         \x20 case \"$skein_keep\" in *\" $skein_n \"*) ;; *) unset -v \"$skein_n\" 2>/dev/null ;; esac\n\
+         done\n\
+         skein_odd=()\n\
+         while IFS= read -r -d '' skein_e; do\n\
+         \x20 skein_n=\"${{skein_e%%=*}}\"\n\
+         \x20 [[ \"$skein_n\" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || skein_odd+=(-u \"$skein_n\")\n\
+         done </proc/$$/environ\n"
+    )
+}
+
 /// A whole sandbox, addressed as itself — [`Where::SandboxItself`].
 ///
 /// **What every production caller passes is the fleet's own sandbox**, which is how [`crate::fleet`]
@@ -921,12 +1031,23 @@ impl Place {
                 argv.extend(["bash".to_string(), "-c".into(), self.guard(), "bash".into()]);
                 argv
             }
+            // The environment is cut to the launcher's list here, in the process that crosses, so
+            // every builder that enters — exec, write, interactive and raw — gets it from one place
+            // (SKEIN-1085; see [`keep_only_listed`]). `SKEIN_IN_BOX=1` is set on the same `exec`,
+            // deliberately, for the reason the launcher sets it: `apiauth::off_switch_refused`
+            // reads it, and a `skein-server` somebody starts from a crossing's shell is as much in
+            // a box as one started from the session.
             Where::Shared { .. } => {
                 let mut argv = Self::path_pin();
                 argv.extend([
                     "bash".to_string(),
                     "-c".into(),
-                    format!("{}exec {} -- \"$@\"", self.guard(), self.nsenter()),
+                    format!(
+                        "{}{}exec env \"${{skein_odd[@]}}\" SKEIN_IN_BOX=1 {} -- \"$@\"",
+                        self.guard(),
+                        keep_only_listed(),
+                        self.nsenter()
+                    ),
                     "bash".into(),
                 ]);
                 argv
@@ -2341,10 +2462,21 @@ mod tests {
         let checked = crossing
             .find("skein_start=")
             .expect("the anchor is re-read");
-        let entered = crossing.find("exec nsenter").expect("and then entered");
+        let entered = crossing
+            .find("SKEIN_IN_BOX=1 nsenter")
+            .expect("and then entered, marked as in a box");
         assert!(
             checked < entered,
             "the check must precede the crossing: {crossing}"
+        );
+        // And the environment is cut to the launcher's list before the hop, not after it: behind
+        // the hop a login shell has sourced the box's own profile, which is the box's business.
+        let cut = crossing
+            .find("unset -v")
+            .expect("the crossing keeps only the launcher's list (SKEIN-1085)");
+        assert!(
+            cut < entered,
+            "the filter must precede the crossing: {crossing}"
         );
         assert!(
             crossing.contains("!= 'boot-a'") && crossing.contains("!= '900'"),
@@ -2369,7 +2501,7 @@ mod tests {
         // And a streamed copy enters the namespace too, or it would `cat` the wrong /tmp entirely.
         let raw = p.raw_argv(&["cat", "/tmp/artifact"]);
         assert_eq!(&raw[raw.len() - 2..], ["cat", "/tmp/artifact"]);
-        assert!(raw.iter().any(|a| a.contains("exec nsenter")));
+        assert!(raw.iter().any(|a| a.contains("SKEIN_IN_BOX=1 nsenter")));
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2394,7 +2526,7 @@ mod tests {
         assert_eq!(&argv[..2], ["env", &format!("PATH={FLEET_PATH}")]);
         let crossing = argv[4].clone();
         assert!(
-            crossing.contains("exit 78") && !crossing.contains("exec nsenter"),
+            crossing.contains("exit 78") && !crossing.contains("nsenter --user"),
             "an unprovable address must not reach nsenter at all: {crossing}"
         );
         assert!(
@@ -3299,5 +3431,55 @@ mod tests {
         payload_only_on_stdin("write", &seen[0], &it, marker, &body);
 
         drop(_at);
+    }
+
+    /// **The crossing keeps the launcher's list, read the way bash reads it** (SKEIN-1085).
+    ///
+    /// The list a crossing keeps is parsed out of `src/box-session.sh` rather than written twice, so
+    /// what has to hold is that the parse and bash agree about which names are in the array. The
+    /// expected side is bash's own: the block cut out with the `sed` `docs/threat-model.md` prints
+    /// it with, evaluated, and `"${inherited_env[@]}"` printed back.
+    ///
+    /// What would make it fail: a parser that keeps a word from a comment (`# The sandbox's …`), one
+    /// that stops a line early or drops the last line before `)`, or a launcher edit that moves the
+    /// array into a shape this parser does not read — which panics here rather than in a crossing.
+    /// And the cockpit's own variables on the list, which is the other half of SKEIN-972.
+    #[test]
+    fn the_crossing_list_is_the_launchers_list() {
+        let block = std::process::Command::new("sed")
+            .args(["-n", "/^inherited_env=(/,/^)/p"])
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/box-session.sh"))
+            .output()
+            .expect("sed");
+        let block = String::from_utf8_lossy(&block.stdout).into_owned();
+        let bash = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{block}\nprintf '%s\\n' \"${{inherited_env[@]}}\""))
+            .output()
+            .expect("bash");
+        let by_bash: Vec<String> = String::from_utf8_lossy(&bash.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(
+            by_bash.len() > 20 && by_bash.iter().any(|n| n == "HOME"),
+            "bash read no list out of the launcher, so the comparison below would be about \
+             nothing: {by_bash:?}"
+        );
+        assert_eq!(
+            inherited_env(),
+            by_bash.as_slice(),
+            "the names a crossing keeps are not the names the launcher's own array holds"
+        );
+        for cockpit in [
+            "SKEIN_HOME",
+            "SKEIN_LISTEN_INHERITED_ONLY",
+            "SKEIN_IN_FLEET",
+        ] {
+            assert!(
+                !inherited_env().iter().any(|n| n == cockpit) && !CROSSING_ALSO.contains(&cockpit),
+                "{cockpit} is the cockpit's and must not cross into a box"
+            );
+        }
     }
 }
