@@ -314,8 +314,19 @@ mod tests {
         let addr = real.local_addr().unwrap();
         let adopted = unsafe { adopt(real.into_raw_fd()) }.expect("a listening socket is a door");
         assert_eq!(adopted.local_addr().unwrap(), addr);
+        // Read off the descriptor's flags rather than tried with an `accept`: against a listener
+        // that blocks, an `accept` does not fail, it waits for an arrival that never comes, and the
+        // whole `cargo test` run hangs with no name on it (SKEIN-1084). **What makes it fail**:
+        // `F_SETFL` in place of `F_SETFD` in `close_on_exec`, which clears `O_NONBLOCK`.
+        let status =
+            unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&adopted), libc::F_GETFL) };
         assert!(
-            adopted.accept().is_err(),
+            status >= 0,
+            "F_GETFL failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            status & libc::O_NONBLOCK != 0,
             "the adopted listener still blocks, so one arrival would stall the whole server"
         );
     }

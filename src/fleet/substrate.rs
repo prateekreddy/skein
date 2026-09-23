@@ -161,15 +161,26 @@ impl Readings {
 
     /// Take the reading [`Readings::claim_if_due`] said was due, file it at the time it finished,
     /// and give the flag back. Blocking: `check` is an exec into the sandbox and an npm round trip.
+    ///
+    /// **The flag goes back through a drop guard, so it goes back when `check` panics too**
+    /// (SKEIN-1088). Both callers need that and neither can do it for itself the same way: the loop
+    /// sees a panic as a `JoinError`, but [`runtime_updates`] runs this on a bare thread nobody
+    /// joins, so a panic there would hold the flag for the life of the server and no reading would
+    /// ever be taken again, by the loop or by anybody polling.
     fn take(
         &self,
         now: impl Fn() -> std::time::Instant,
         check: impl FnOnce() -> Vec<RuntimeUpdate>,
     ) {
+        struct GiveBack<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for GiveBack<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _give_back = GiveBack(&self.checking);
         let found = check();
         self.file(now(), found);
-        self.checking
-            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn file(&self, at: std::time::Instant, found: Vec<RuntimeUpdate>) {
@@ -222,12 +233,9 @@ where
             continue;
         }
         let (now, check) = (now.clone(), check.clone());
+        // A check that panicked has already given the flag back — [`Readings::take`] does that on
+        // every way out — so all that is left to do here is say so.
         if let Err(e) = tokio::task::spawn_blocking(move || readings.take(now, check)).await {
-            // A check that panicked never gave the flag back. Give it back here, or no reading
-            // would ever be taken again, by this loop or by anybody polling.
-            readings
-                .checking
-                .store(false, std::sync::atomic::Ordering::SeqCst);
             eprintln!("skein: agent CLI update check did not run: {e}");
         }
     }
@@ -697,6 +705,95 @@ mod tests {
             !on_the_runtime_thread.load(Ordering::SeqCst),
             "the check ran on the runtime's own thread — it is an npm round trip, and every cockpit \
              connection the server holds would stall on it"
+        );
+    }
+
+    /// **A check that panics once does not stop the next one** (SKEIN-1088). Both ways in are
+    /// driven: the polled one, which runs [`super::Readings::take`] on a bare thread nobody joins,
+    /// and the server's loop, which runs it under `spawn_blocking`. Each with a store of its own and
+    /// a `check` that panics on its first call and answers on its second.
+    ///
+    /// **What makes it fail**: take the drop guard out of [`super::Readings::take`] and give the
+    /// flag back after filing instead, as it used to. A panic then skips that line, the flag stays
+    /// held, and neither the poll nor the next due tick takes a reading.
+    #[test]
+    fn a_check_that_panics_once_does_not_stop_the_next_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let found = super::RuntimeUpdate {
+            runtime: "claude".into(),
+            have: "1.0.0".into(),
+            latest: "2.0.0".into(),
+        };
+        // Panics the first time it is called and answers every time after.
+        let panics_once = |calls: Arc<AtomicUsize>, found: super::RuntimeUpdate| {
+            move || {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("a planted panic in the update check (SKEIN-1088's test)");
+                }
+                vec![found.clone()]
+            }
+        };
+
+        // The polled way in, the way `runtime_updates` does it: a thread nobody joins but this test.
+        static POLLED: super::Readings = super::Readings::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check = panics_once(Arc::clone(&calls), found.clone());
+        assert!(POLLED.claim_if_due(Instant::now()), "a cold store is due");
+        let first = std::thread::spawn({
+            let check = check.clone();
+            move || POLLED.take(Instant::now, check)
+        })
+        .join();
+        assert!(
+            first.is_err(),
+            "the planted panic did not happen, so this proves nothing"
+        );
+        assert!(
+            POLLED.claim_if_due(Instant::now()),
+            "a check that panicked on a polling thread kept the flag, so no reading will ever be \
+             taken again for the life of the server"
+        );
+        std::thread::spawn(move || POLLED.take(Instant::now, check))
+            .join()
+            .expect("the second check answers");
+        assert_eq!(POLLED.known().map(|(_, f)| f), Some(vec![found.clone()]));
+
+        // The loop: its first due tick panics, and a later tick — still due, since nothing was
+        // filed — takes the reading.
+        static LOOPED: super::Readings = super::Readings::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check = panics_once(Arc::clone(&calls), found.clone());
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime for this test's body")
+            .block_on(async {
+                let watching = tokio::spawn(super::watch_updates(
+                    Duration::from_millis(20),
+                    Instant::now,
+                    check,
+                    &LOOPED,
+                ));
+                // Bounded, so a loop that never checks again fails below rather than hangs.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while LOOPED.known().is_none() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                watching.abort();
+                calls.load(Ordering::SeqCst)
+            });
+        assert!(
+            after >= 1,
+            "the loop never ran the check, so this proves nothing"
+        );
+        assert_eq!(
+            LOOPED.known().map(|(_, f)| f),
+            Some(vec![found]),
+            "the loop's check panicked once and no later tick took a reading ({after} call(s)), so \
+             an unwatched fleet stops checking for newer agent CLIs for good"
         );
     }
 

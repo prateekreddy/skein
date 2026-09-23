@@ -1133,27 +1133,27 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"{name}'s anchor pid has been reused by a different process since skein recorded it; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:787"]
+["src/gitgate.rs:826"]
 line = "if scope != \"repo\" && scope != \"fleet\" {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:911"]
+["src/gitgate.rs:950"]
 line = "\"could not sign the App JWT: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1445"]
+["src/gitgate.rs:1484"]
 line = "return Err(\"no GitHub App configured: Settings → GitHub App ID\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1454"]
+["src/gitgate.rs:1493"]
 line = "\"the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub App ID\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1458"]
+["src/gitgate.rs:1497"]
 line = "return Err(format!(\"the GitHub App key is not at {key}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1546"]
+["src/gitgate.rs:1585"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
 cited_by = ["docs/recovery-survey.md"]
 

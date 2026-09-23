@@ -513,14 +513,23 @@ fn undecided(mut asked: Request) -> Request {
     asked
 }
 
-/// The answer skein recorded for this request, if there is one. An unreadable file reads as none,
-/// which puts the row back in front of its owner with a button on it — the direction a person can
-/// see and fix, rather than a request silently counted as answered.
-fn decision(box_name: &str, id: &str) -> Option<Request> {
-    let path = decision_path(box_name, id)?;
+/// The answer skein recorded for this request — with **"nobody has answered this" kept apart from
+/// "skein cannot tell"**, the distinction [`decide`]'s guard turns on and the one
+/// [`crate::substrate`]'s function of the same name keeps (SKEIN-418). `Ok(None)` is a request
+/// nobody has answered, `Ok(Some(_))` is the answer, and `Err` is a record that is *there* and will
+/// not read.
+fn decision_or_why(box_name: &str, id: &str) -> Result<Option<Request>, String> {
+    let path = decision_path(box_name, id).ok_or_else(|| format!("unusable request id {id:?}"))?;
     crate::util::read_json_or_why::<Request>(&path)
-        .ok()
-        .flatten()
+}
+
+/// The answer skein recorded for this request, if there is one — **for the reader**, [`decided_over`].
+/// An unreadable file reads as none, which puts the row back in front of its owner with a button on
+/// it: the direction a person can see and fix, rather than a request silently counted as answered.
+/// Pressing that button is [`decide`], which asks [`decision_or_why`] and refuses, so the unreadable
+/// file costs a confusing row and never a second answer (SKEIN-1034).
+fn decision(box_name: &str, id: &str) -> Option<Request> {
+    decision_or_why(box_name, id).ok().flatten()
 }
 
 fn write_decision(path: &std::path::Path, req: &Request) -> Result<(), String> {
@@ -574,6 +583,13 @@ fn decision_script(box_name: &str, id: &str, state: &str) -> String {
 ///
 /// So box, repo and expiry all travel from the render. Nothing about the grant comes from a read
 /// that happened after the person decided.
+///
+/// **A request is answered once** (SKEIN-1034), as [`crate::substrate`]'s are. A second answer used
+/// to go straight through: a denial after a grant rewrote the row as denied while the grant it
+/// never touched stayed live and the refresher kept minting its token, and a grant after a grant
+/// quietly re-recorded it with a fresh expiry. Changing one's mind about an approval is
+/// [`revoke`], which acts on the grant itself; a second answer here is refused, and so is one where
+/// skein cannot read whether there was a first.
 pub fn decide(
     sandbox: &str,
     rendered: &Request,
@@ -584,6 +600,29 @@ pub fn decide(
         return Err(format!("refusing to act on this request: {why}"));
     }
     let path = decision_path(&rendered.box_name, &rendered.id).ok_or("unusable request id")?;
+    match decision_or_why(&rendered.box_name, &rendered.id) {
+        Ok(None) => {}
+        Ok(Some(already)) => {
+            return Err(format!(
+                "request {} is already {} — a request is answered once; to take back a grant, \
+                 revoke it",
+                rendered.id, already.state
+            ))
+        }
+        // **A guard is not a store, so it does not get to fall back to a default** — substrate's
+        // reason (SKEIN-418), and the size of the two mistakes is the same here. Refusing an id
+        // nobody answered costs a person one file to move and one press again. Answering one that
+        // was answered either writes a grant over a denial or records a denial over a live grant
+        // that goes on being honoured, and destroys the first answer on the way.
+        Err(why) => {
+            return Err(format!(
+                "refusing to answer {} — skein cannot read the answer it may already have given \
+                 ({why}). A request is answered once, and that file is the only record of whether \
+                 this one was. The file is left alone; fix or move it, then answer again.",
+                rendered.id
+            ))
+        }
+    }
     let state = if approve { "granted" } else { "denied" };
     // The grant first, because it is what skein acts on: an answer recorded as granted with no
     // grant behind it would be a row telling its owner something that is not true.
@@ -3293,6 +3332,77 @@ mod tests {
         assert_eq!(
             shown[0].state, "pending",
             "a copy of a neighbour's id was shown with the neighbour's answer"
+        );
+    }
+
+    /// **A request is answered once, and a second answer changes nothing** (SKEIN-1034).
+    ///
+    /// Granted, then denied: the denial is refused, and the grant, its expiry and the recorded
+    /// answer are byte-for-byte what the first answer left. Then granted again, for the fresh-expiry
+    /// half of the bug. Then a request whose answer is on disk and will not parse: refused too, and
+    /// nothing is granted or written.
+    ///
+    /// **What would make this fail**: drop the guard in [`decide`] (the denial goes through — first
+    /// assertion — and overwrites the record while the grant stays live); or read the guard through
+    /// `.ok().flatten()`, as [`decision`] does, so an unreadable answer passes as none (the last
+    /// three assertions).
+    #[test]
+    fn a_request_is_answered_once_and_a_second_answer_changes_nothing() {
+        let (_lock, _dir, _env) = fresh_fleet();
+        let _crossing = crate::place::seam::doing_nothing();
+        let asked = asked_by("web-main", "20260922-120000-6", "acme/thing", "pending");
+        decide("example-fleet", &asked, true, Some(24)).expect("the first answer");
+        let path = decision_path(&asked.box_name, &asked.id).expect("a nameable request");
+        let (record_before, grants_before) = (std::fs::read(&path).expect("the answer"), grants());
+        assert_eq!(
+            grants_before.len(),
+            1,
+            "the first answer did not grant, so this proves nothing"
+        );
+
+        let denied = decide("example-fleet", &asked, false, None);
+        assert!(
+            denied.as_ref().is_err_and(|e| e.contains("already granted")),
+            "a denial after a grant was accepted ({denied:?}) — the row now reads denied while the \
+             grant stays live and its token keeps being minted"
+        );
+        let again = decide("example-fleet", &asked, true, Some(1));
+        assert!(
+            again.is_err(),
+            "a second grant was accepted, re-recording the grant with an expiry nobody chose last"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the answer"),
+            record_before,
+            "a refused answer still rewrote the recorded one"
+        );
+        assert_eq!(
+            grants(),
+            grants_before,
+            "a refused answer still changed the grant"
+        );
+
+        // An answer on disk that will not parse — the half-written file a crash leaves.
+        let torn = asked_by("web-main", "20260922-120000-7", "acme/thing", "pending");
+        let torn_path = decision_path(&torn.box_name, &torn.id).expect("a nameable request");
+        std::fs::write(&torn_path, b"").expect("plant an unreadable answer");
+        let answered = decide("example-fleet", &torn, true, None);
+        assert!(
+            answered
+                .as_ref()
+                .is_err_and(|e| e.contains("cannot read the answer")),
+            "an answer skein cannot read was taken for none, and the request was answered again: \
+             {answered:?}"
+        );
+        assert_eq!(
+            std::fs::read(&torn_path).expect("the planted file"),
+            b"",
+            "the unreadable answer was written over — it was the only record of the first one"
+        );
+        assert_eq!(
+            grants(),
+            grants_before,
+            "a request whose answer skein could not read was granted anyway"
         );
     }
 }
