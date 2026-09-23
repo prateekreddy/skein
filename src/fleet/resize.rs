@@ -452,8 +452,8 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> 
 /// Which boxes are in `sandbox` — **or why that question could not be answered**.
 ///
 /// [`placed_boxes`] cannot fail. `fs::read_dir(&dir).into_iter().flatten().flatten()`
-/// (src/place.rs:379) turns a `read_dir` **error** into zero entries, and `read_place_record`
-/// (place.rs:394) drops any record that will not parse; both come back as "this sandbox holds no
+/// (src/place/record.rs:272) turns a `read_dir` **error** into zero entries, and `read_place_record`
+/// (place/record.rs:287) drops any record that will not parse; both come back as "this sandbox holds no
 /// boxes", which is also exactly what an empty fleet looks like. That is harmless for a board,
 /// which renders one row fewer, and fatal for [`resize_fleet`], whose stated safety property is
 /// that nothing is destroyed until every box named here is on the host: a box missing from the
@@ -1007,7 +1007,7 @@ mod tests {
     /// `resize_fleet`'s own doc calls the ordering — copy every box out, only then destroy — "the
     /// entire safety property of this function". That property rests entirely on the list being
     /// complete, and the list came from `placed_boxes`, which cannot fail: `read_dir(&dir)
-    /// .into_iter().flatten().flatten()` (src/place.rs:379) turns a read error into zero entries,
+    /// .into_iter().flatten().flatten()` (src/place/record.rs:272) turns a read error into zero entries,
     /// and a record that will not parse is dropped. Both arrive as "no boxes", which is also what
     /// an empty fleet looks like — so a box skein could not enumerate was never archived, and then
     /// `sbx rm -f` took its VM-local checkout and its unpushed work with the sandbox.

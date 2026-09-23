@@ -1277,19 +1277,19 @@ cited_by = ["docs/inventory.md"]
 line = "mod testutil;"
 cited_by = ["docs/modules.toml"]
 
-["src/place.rs:277"]
-line = "/// `CAP_SYS_ADMIN` in its own user namespace, so it can mount over its view of `/proc` and answer"
-cited_by = ["docs/prose-symbols.toml"]
-
-["src/place.rs:435"]
-line = ".filter(|sandbox| !sandbox.is_empty())"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/place.rs:1324"]
+["src/place/argv.rs:330"]
 line = "gone and so is everything else that was running in it — start them again with: skein \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place.rs:1665"]
+["src/place/record.rs:108"]
+line = "/// `CAP_SYS_ADMIN` in its own user namespace, so it can mount over its view of `/proc` and answer"
+cited_by = ["docs/prose-symbols.toml"]
+
+["src/place/record.rs:266"]
+line = ".filter(|sandbox| !sandbox.is_empty())"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/place/run.rs:92"]
 line = "let out = bounded_output(&mut command, \"the crossing\", timeout)?;"
 cited_by = ["docs/recovery-survey.md"]
 

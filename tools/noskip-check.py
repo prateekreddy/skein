@@ -32,8 +32,8 @@ reported and nothing more.
 WHERE A REFUSAL COMES FROM, AND WHY THAT IS NOT A GUESS. `common::skip` and `testutil::skip` are
 `#[track_caller]`, so the panic names the GUARD's own file and line —
 `SKIPPED at src/fleet/resources.rs:<line>: no box cgroups on this machine to sample`. A site
-under `src/` is the `--lib` binary (`common::LIB`), a site in `tests/<name>.rs` is the `<name>`
-binary, and anything else is attributed to nothing and therefore blocks nothing — said out loud
+under `src/` is the `--lib` binary (`common::LIB`), a site in `tests/<name>.rs` — or in any file of
+`tests/<name>/` beside a `main.rs` — is the `<name>` binary, and anything else is attributed to nothing and therefore blocks nothing — said out loud
 rather than assumed.
 
 THE ONE THING THAT IS DECLARED HERE, AND WHY IT HAS TO BE. `REQUIREMENTS` says what TOOLS a binary
@@ -135,7 +135,7 @@ ENVIRONMENTAL = [
         "the same mode-bit fixture, for the request path",
     ),
     (
-        "tests/isolation_bwrap.rs",
+        "tests/isolation_bwrap/homes.rs",
         "the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it",
         "asks whether a real write lands under /usr/local/share/npm-global (write_lands_under, "
         "SKEIN-1021) rather than reading its mode bits, so it correctly skips on a host that mounts "
@@ -572,16 +572,23 @@ RESULT = re.compile(r"(?m)^test result:")
 def attribute(root, path, lib):
     """Which test binary does a guard at `path` belong to? `None` when that cannot be answered.
 
-    `src/**` is the library's binary, `tests/<name>.rs` is `<name>`. A guard in `tests/common/`
-    is compiled into every integration binary and belongs to none of them, so it is attributed to
-    nothing — and a site attributed to nothing blocks nothing.
+    `src/**` is the library's binary, `tests/<name>.rs` is `<name>`, and so is every file of a
+    `tests/<name>/` that holds a `main.rs` — cargo builds that directory as the one `<name>` binary
+    (SKEIN-1109/1110 split two suites that way). A guard in `tests/common/` is compiled into every
+    integration binary and belongs to none of them — it has no `main.rs`, which is the difference —
+    so it is attributed to nothing, and a site attributed to nothing blocks nothing.
     """
     if not os.path.exists(os.path.join(root, path)):
         return None
     if path.startswith("src/"):
         return lib
     m = re.fullmatch(r"tests/([A-Za-z0-9_]+)\.rs", path)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"tests/([A-Za-z0-9_]+)/[A-Za-z0-9_]+\.rs", path)
+    if m and os.path.exists(os.path.join(root, "tests", m.group(1), "main.rs")):
+        return m.group(1)
+    return None
 
 
 def non_verdict_codes(root):
@@ -713,7 +720,8 @@ def main(argv):
         others = sorted(
             os.path.splitext(f)[0]
             for f in os.listdir(os.path.join(root, "tests"))
-            if f.endswith(".rs") and os.path.splitext(f)[0] not in declared
+            if (f.endswith(".rs") or os.path.exists(os.path.join(root, "tests", f, "main.rs")))
+            and os.path.splitext(f)[0] not in declared
         )
         print(f"  and {len(others)} binaries that declare nothing: {', '.join(others)}")
         print()
