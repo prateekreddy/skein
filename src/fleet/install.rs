@@ -171,6 +171,18 @@ pub fn server_tmux_sock_in(fleet_root: &str) -> String {
     format!("{}/server.tmux", fleet_private_dir_in(fleet_root))
 }
 
+/// Where the cockpit's tmux session lived **before SKEIN-529** moved it under `private/`: directly
+/// in `.skein`, which every box can connect to.
+///
+/// Nothing makes a session here any more. It is spelled because a fleet serving since before the
+/// move still HAS its supervisor here until `bootstrap.sh`'s `start-door.sh` renames the socket
+/// into `private/` (SKEIN-1020) — and until then, a skein that asked only [`server_tmux_sock`]
+/// could not stop that cockpit, and would start a second supervisor beside it (SKEIN-1025).
+/// [`start_server`] and [`stop_server`] ask both.
+pub fn pre_move_server_tmux_sock() -> String {
+    format!("{}/server.tmux", skein_dir())
+}
+
 /// The port the cockpit listens on **inside** the sandbox. 7878 because that is the number every
 /// browser bookmark and README already carries; `$SKEIN_SERVER_PORT` overrides it in the same
 /// spirit as `$SKEIN_FLEET_ROOT` — without the seam this path could only be exercised against a
