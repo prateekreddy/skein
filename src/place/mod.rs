@@ -157,14 +157,15 @@ pub mod seam {
     /// The declared exemption from that guard, and it exists because two shapes carry
     /// `$SKEIN_TEST` and cannot install a substitution:
     ///
-    /// * **A skein spawned by a test harness.** `src/bin/skein.rs` and `src/bin/skein-server.rs`
-    ///   both say this in `main`. A `skein-server` started by `tests/server.rs` or by
-    ///   `tests/ui/harness/server.mjs` inherits the marker from cargo's `[env]` table — correctly,
-    ///   because [`crate::config::skein_home`] and [`crate::util::fleet_root`] must still refuse it
-    ///   an unpinned path (SKEIN-685) — but a [`Substitute`] is a Rust closure and the test that
-    ///   would write one is on the other side of a process boundary. What keeps that server inside
-    ///   its fixture is the root it was handed, which is what those two guards are for.
-    /// * **A suite whose subject IS the real command.** `tests/fleet_launch.rs` starts a box in a
+    /// * **A skein spawned by a test harness.** `src/bin/skein.rs` and
+    ///   `src/bin/skein-server/main.rs` both say this in `main`. A `skein-server` started by
+    ///   `tests/server.rs` or by `tests/ui/harness/server.mjs` inherits the marker from cargo's
+    ///   `[env]` table — correctly, because [`crate::config::skein_home`] and
+    ///   [`crate::util::fleet_root`] must still refuse it an unpinned path (SKEIN-685) — but a
+    ///   [`Substitute`] is a Rust closure and the test that would write one is on the other side
+    ///   of a process boundary. What keeps that server inside its fixture is the root it was
+    ///   handed, which is what those two guards are for.
+    /// * **A suite whose subject IS the real command.** `tests/fleet_launch/` starts a box in a
     ///   fixture fleet and asserts it is usable; standing in for the crossing would delete what it
     ///   proves.
     ///

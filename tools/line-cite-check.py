@@ -584,9 +584,19 @@ def own_words(cite, tree, words):
 #
 # They are gone from that document's `where` column now — a row names the sites whose words it
 # quotes as ordinary citations, and gives the command for a family larger than that — and
-# `stray_sites` is what keeps them out. This pattern still reads them for `row_lines`, because
-# §10's prose lists and the reach cells use the same form and that is SKEIN-877's to settle.
+# `stray_sites` is what keeps them out. This pattern still reads them for `row_lines`.
+#
+# **And they are gone from its prose and its other cells since SKEIN-1105**, which found the same
+# form there doing the same damage: of the twelve that continued a `src/web/index.html` citation,
+# ONE was on the line its row described. They had been carried line for line across a file split
+# whose other citations were all relocated, because nothing could see them to relocate. So
+# `stray_sites` reads every line of a gated document now, not only the `where` cell.
 ALSO_AT = re.compile(r"`:(\d+)(?:-\d+)?`")
+
+# An example OF the form, which is not an instance of it: a sentence that shows the reader what a
+# relative address looks like quotes it inside a double-backtick span —
+# ``` `` `src/fake.rs:4` (+ `:10`) `` ``` — and that span is code, not a citation.
+QUOTED_SPAN = re.compile(r"``.*?``")
 
 
 def row_lines(cite):
@@ -614,39 +624,48 @@ def row_lines(cite):
 
 
 def stray_sites(sources):
-    """([(label, line, address)], site cells read) for a relative address in a `where` column.
+    """([(label, line, address)], site cells read) for a relative address anywhere in `docs/`.
 
     THE FORM THIS REFUSES NAMES NO FILE, so nothing resolves it: `prose-check.py`'s reader does
     not see it, the ledger cannot hold an anchor for it, `--relocate` cannot move it, and the
     number in the document is whatever somebody typed. Of the 77 that SKEIN-876 measured in
-    `docs/recovery-survey.md` against the commit that wrote it, 31 had moved, 6 were gone and 14
-    had gone ambiguous — and every gate in this repository was green over all of it. A row names
-    the sites whose words it quotes as ordinary citations now, and gives the command for a family
-    larger than that.
+    `docs/recovery-survey.md`'s `where` column against the commit that wrote it, 31 had moved, 6
+    were gone and 14 had gone ambiguous — and every gate in this repository was green over all of
+    it. Of the twelve SKEIN-1105 checked in the same document's OTHER cells, one was right.
 
-    SCOPED TO THE FIRST CELL OF A CITING TABLE ROW — the `where` column — and deliberately not to
-    prose. §10's exclusion lists write the same form ACROSS A LINE BREAK: `src/repos.rs:310` ends
-    one line and `:1684`, `:1688` open the next, where the nearest full citation on the line is
-    `src/gitgate.rs:683`. Resolving those needs reading order, not a line, so a rule that tried
-    one line at a time would charge two of them to the wrong file — a check reporting on something
-    other than what it names, which is the defect this repository keeps paying for. They are
-    SKEIN-877's. In a site cell the whole claim is on one line and the fix is to spell the path.
+    IT WAS SCOPED TO THE `where` CELL, and that scope was the gap. The argument for it was that
+    §10's exclusion lists write the form ACROSS A LINE BREAK — one line ends with a full citation
+    and the next opens with `:1684`, `:1688` — so a rule resolving one line at a time would charge
+    them to the wrong file. That is an argument against RESOLVING the form, and this rule does not
+    resolve it: it refuses it, and the repair is to spell the path, which needs no reading order.
+    A rule that was silent about 102 addresses in order not to guess about four of them was the
+    trade SKEIN-890 and SKEIN-1105 both named.
 
-    Returns the count of site cells it read as well, because `[]` is what a broken reader returns
-    too (SKEIN-647): `docs/recovery-survey.md` carried 243 of them on 2026-09-12.
+    So every line of a gated document is read, outside fenced blocks, and a relative address in
+    it is a finding wherever it is. What is NOT read is an example of the form: a span in double
+    backticks is how this repository quotes a relative address in order to talk about it
+    (`QUOTED_SPAN`), and that is code, not a claim about a line.
+
+    Returns the count of `where` cells it read as well, because `[]` is what a broken reader
+    returns too (SKEIN-647): `docs/recovery-survey.md` carried 243 of them on 2026-09-12.
     """
     found, read = [], 0
-    for label, body, _ in sources:
+    for label, body, markdown in sources:
         if label == LEDGER_REL or not gated(label):
             continue
+        fenced = False
         for n, line in enumerate(body.split("\n"), 1):
-            if not line.lstrip().startswith("|"):
+            if markdown and line.lstrip().startswith("```"):
+                fenced = not fenced
                 continue
-            cell = line.strip().strip("|").split("|")[0]
-            if not prose.CITATION.search(cell):
+            if fenced:
                 continue
-            read += 1
-            found.extend((label, n, ":" + m.group(1)) for m in ALSO_AT.finditer(cell))
+            if line.lstrip().startswith("|"):
+                cell = line.strip().strip("|").split("|")[0]
+                if prose.CITATION.search(cell):
+                    read += 1
+            text = QUOTED_SPAN.sub("", line)
+            found.extend((label, n, ":" + m.group(1)) for m in ALSO_AT.finditer(text))
     return found, read
 
 
@@ -1964,24 +1983,42 @@ def self_check():
             f"a `where` column whose second site names its file was reported anyway — got {found}"
             f" over {cells} site cell(s)"
         )
-    #     AND ONLY THE FIRST CELL, which this case did not prove until reading the whole row was
-    #     tried and nothing failed: the `reach` and `watchable?` columns carry the same form today
-    #     — §0b writes `` (boundary `:604`) `` — so a rule that read the row rather than the
-    #     column would fire on rows whose `where` column is clean, and those cells are SKEIN-877's
-    #     to settle for the same reading-order reason as the prose.
+    #     AND EVERY OTHER CELL AND ALL THE PROSE TOO (SKEIN-1105). This used to assert the
+    #     opposite — that a `reach` cell and a sentence were out of scope — and that scope is how
+    #     `docs/recovery-survey.md` kept 102 of them, eleven of the twelve it checked on the wrong
+    #     line. The `where` cell count is still only the `where` cells: it is the floor that tells
+    #     "read nothing" from "found nothing", and a sentence is not a site cell.
     later = "| `src/fake.rs:4` | nothing to reconnect | **R** — also at `:10` | y | yes | C |\n"
     found, cells = stray_sites([("docs/fake.md", later, True)])
-    if found or cells != 1:
+    if [a for _, _, a in found] != [":10"] or cells != 1:
         bad.append(
-            f"a relative address OUTSIDE the `where` column was charged to it — got {found} over"
-            f" {cells} site cell(s)"
+            f"a relative address in a `reach` cell was not reported — got {found} over {cells}"
+            " site cell(s)"
         )
-    #     Prose is out of scope on purpose: §10's lists write the same form across a line break,
-    #     where no single line says which file it belongs to (SKEIN-877).
-    in_prose = [("docs/fake.md", "The guards are at `src/fake.rs:4`, `:10` and nowhere else.\n", True)]
+    #     Prose, including the case the old scope was written for: a list that crosses a line
+    #     break, whose second line names no file at all. Refusing needs no reading order.
+    in_prose = [(
+        "docs/fake.md",
+        "The guards are at `src/fake.rs:4`, `:10` and\n`:12`, and nowhere else.\n",
+        True,
+    )]
     found, cells = stray_sites(in_prose)
-    if found or cells:
-        bad.append(f"a relative address in PROSE was reported as a site cell — got {found}, {cells}")
+    if [(n, a) for _, n, a in found] != [(1, ":10"), (2, ":12")] or cells:
+        bad.append(
+            f"a relative address in PROSE was not reported, or was counted as a site cell — got"
+            f" {found}, {cells}"
+        )
+    #     And what is NOT one: the same form quoted as an example, in a double-backtick span, or
+    #     inside a fenced block. Both are how a document shows the form it is talking about.
+    quoted = [(
+        "docs/fake.md",
+        "It wrote them as `` `src/fake.rs:4` (+ `:10`) ``, which names no file.\n"
+        "```\n`src/fake.rs:4`, `:10`\n```\n",
+        True,
+    )]
+    found, cells = stray_sites(quoted)
+    if found:
+        bad.append(f"a relative address QUOTED as an example was reported as one — got {found}")
     #     And a document this gate does not read is not read here either.
     outside = [("src/fake.rs", triple % "`src/fake.rs:4` (+ `:10`)", True)]
     if stray_sites(outside) != ([], 0):
@@ -2603,8 +2640,8 @@ def main(argv):
     # Printed whether or not it found one, for the same reason: a reader cannot otherwise tell
     # "no `where` column names a line by a bare `:N`" from "no `where` column was read".
     sites_read = (
-        f"{site_cells} `where` cell(s) name a citation; {len(strays)} of them name a further line"
-        " by a bare `:N`, which nothing can resolve"
+        f"{site_cells} `where` cell(s) name a citation; {len(strays)} line(s) of prose or table"
+        " anywhere in these documents name a further line by a bare `:N`, which nothing can resolve"
     )
     # Printed whether or not it found one, for the third time and the third reason: a reader
     # cannot otherwise tell "no citation is being judged by another citation's anchor" from "the
@@ -2628,7 +2665,7 @@ def main(argv):
 
     for label, n, addr in strays:
         print(
-            f"{label}:{n}  {addr}  unresolvable-site  a `where` column names a line with no file"
+            f"{label}:{n}  {addr}  unresolvable-site  a line is named with no file"
         )
     by_verdict = {}
     for cite, verdict, detail in findings:
@@ -2671,7 +2708,8 @@ def main(argv):
         "  ambiguous   the cited text is in the file several times, so no repair can be chosen\n"
         "              mechanically. Read the sentence and pick the line.\n"
         "  unresolvable-site\n"
-        "              a `where` column names a second site as `:N` with no path. Nothing\n"
+        "              a line is named as `:N` with no path — in a `where` column, another\n"
+        "              cell or a sentence (SKEIN-1105). Nothing\n"
         "              resolves that — not this gate, not `prose-check.py`, not the ledger, and\n"
         "              `--relocate` cannot move it, so the number stays whatever was typed (66 of\n"
         "              203 were wrong when SKEIN-876 looked). Spell the path: the row names the\n"

@@ -70,7 +70,8 @@ const t = harness();
  * its own does not produce the no-credential case: `$GH_TOKEN` is the first of FOUR sources in
  * `look_for_a_credential` (src/prq/credentials.rs), and it falls through to the stored read token,
  * then any write PAT, then `gh auth token` — asked as `Command::new("gh")`, so from `$PATH`
- * (src/repos/add.rs:174). The fresh `$SKEIN_HOME` empties the two stored ones; this empties the last.
+ * (`gh_cli_token`, src/repos/add.rs). The fresh `$SKEIN_HOME` empties the two stored ones; this
+ * empties the last.
  *
  * Proved rather than assumed, in both directions. Removing this stub does NOT turn check 2 red on a
  * skein box — `gh` here only echoes `$GH_TOKEN` and answers "no oauth token found" once it is empty,

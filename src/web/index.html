@@ -2650,9 +2650,9 @@ function applyView() {
   }
   renderDockbar(); renderTabs(); refreshRowAll();
 }
-// The close code skein's own end sends (src/bin/skein-server.rs) when THERE IS NOTHING HERE TO
-// RECONNECT TO, rather than the connection having gone away. Agreed with that end and with nothing
-// else: 4000-4999 is the range RFC 6455 leaves to an application, and a browser's own close for a
+// The close code skein's own end sends (src/bin/skein-server/terminal.rs) when THERE IS NOTHING
+// HERE TO RECONNECT TO, rather than the connection having gone away. Agreed with that end and with
+// nothing else: 4000-4999 is the range RFC 6455 leaves to an application, and a browser's own close for a
 // socket that died is 1006, never a 4xxx.
 //
 // **It was `CLOSE_CHILD_ENDED`, and the rename is the fix rather than tidying** (SKEIN-702). A
@@ -5093,7 +5093,7 @@ function revFlowChip(pr) {
 // Does skein read this repo's pull requests on its own? The owner's per-repo consent — off until
 // they switch it on, the "read ahead" chip beside the queue (`revReadChip`), `repos::Repo::read_prs`
 // on disk — carried on the workflows payload the pane already fetches for every repo in the queue
-// (`loadWorkflows`, `skein-server.rs:1572`).
+// (`loadWorkflows`, answered by `api_workflows` in `src/bin/skein-server/workflows.rs`).
 //
 // Not answered yet, or the fetch failed, reads as OFF. The server refuses either way
 // (`review::unasked_scope`), so asking would buy nothing but a refusal painted on every row; and
@@ -9519,7 +9519,7 @@ function renderDiagnostics() {
 //     age of what it is showing — `read_at` and `fresh`, and the sentence `usageRead` builds from
 //     the pair of them.
 //
-// `/api/usage` is served by `api_usage` in `src/bin/skein-server.rs` — grep the router for the
+// `/api/usage` is served by `api_usage` in `src/bin/skein-server/health.rs` — grep the router for the
 // path; the line number this gave had drifted eight lines. A route the cockpit asks for and the
 // server does not serve is caught by `tests/ui/usage.mjs` against a running server, and by
 // `cockpit_routes::the_cockpit_never_asks_for_a_route_this_server_does_not_serve` in the source.
@@ -11546,11 +11546,11 @@ function loadHealth() {
     // It used to hold twelve of the fourteen, hand-written, and the two it was short of were the
     // two nobody had decided about: "gh" — which is "curl is installed" and "GitHub can be reached
     // at all" (SKEIN-548, SKEIN-926) — and "ai". Whether a check turns the banner red is decided
-    // in ONE place, `OnBanner` in `src/health.rs`, and the page is not that place: a key missing
-    // from here cannot suppress a banner, it can only produce `ok: false` with nothing in the row
-    // to read, which is the one failure this list has ever had. So it carries all of them, and
-    // `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's own
-    // fields — a new check is on this list or that test fails by name.
+    // in ONE place, `OnBanner` in `src/health/report.rs`, and the page is not that place: a key
+    // missing from here cannot suppress a banner, it can only produce `ok: false` with nothing in
+    // the row to read, which is the one failure this list has ever had. So it carries all of them,
+    // and `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's
+    // own fields — a new check is on this list or that test fails by name.
     //
     // Carrying a check the verdict does not count is deliberate and costs nothing: a check the
     // Rust side marks `NotCounted` gets named here when the banner is already up for some other

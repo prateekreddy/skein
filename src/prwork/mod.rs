@@ -45,7 +45,7 @@ mod testkit;
 // private and the re-exports are globs on purpose: the split moved where the text lives, not what
 // anything outside can reach, and a hand-written list of names is a second place for the two to
 // disagree. `crate::prwork::perform` still resolves, and so does every other item — which is what
-// keeps `src/bin/skein-server.rs`, this module's heaviest caller, out of the diff entirely.
+// keeps `src/bin/skein-server/`, this module's heaviest caller, out of the diff entirely.
 pub use acts::*;
 pub use facts::*;
 pub use perform::*;

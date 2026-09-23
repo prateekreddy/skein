@@ -92,9 +92,9 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 
 // `counted`, as `HealthReport::counted_on_the_wire` sends it today: every check but `ai`, in the
 // report's order (SKEIN-1013). A fixture, not a decision — the page reads this off the report and
-// keeps no list of its own, and `the_report_tells_the_page_which_checks_count` in src/health.rs is
-// what holds the real report to `OnBanner`. An unhealthy report without it is not one the server
-// can send, so `unhealthy` is how every `ok: false` fixture below is written.
+// keeps no list of its own, and `the_report_tells_the_page_which_checks_count` in
+// src/health/report.rs is what holds the real report to `OnBanner`. An unhealthy report without it
+// is not one the server can send, so `unhealthy` is how every `ok: false` fixture below is written.
 const COUNTED = ["registry", "sbx", "git", "gh", "probes", "mailbox", "memory", "disk", "gitgate",
   "token_expiry", "proxy_injection", "warden", "cover"];
 const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
@@ -158,13 +158,13 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
 
 // --- a check the banner does not COUNT cannot raise it, and is still NAMED once it is up ---------
 //
-// The asymmetry from SKEIN-1003/1004, and the subtle one. `src/health.rs` splits every check into
-// `OnBanner::Counted` and `OnBanner::NotCounted(why)`; `ai` is the only `NotCounted` one, because it
-// is the enrichment toggle's own state rather than a verdict. The page's `CHECKED` array carries it
-// anyway, and the comment above that array says why in prose: a key missing from the page's list
-// cannot suppress a row, it can only produce `ok: false` with nothing in the row to read, which is
-// the one failure this list has ever had. So the page takes the VERDICT from the report and takes
-// only the WORDS from its own list. Nothing tested either half.
+// The asymmetry from SKEIN-1003/1004, and the subtle one. `src/health/report.rs` splits every check
+// into `OnBanner::Counted` and `OnBanner::NotCounted(why)`; `ai` is the only `NotCounted` one,
+// because it is the enrichment toggle's own state rather than a verdict. The page's `CHECKED` array
+// carries it anyway, and the comment above that array says why in prose: a key missing from the
+// page's list cannot suppress a row, it can only produce `ok: false` with nothing in the row to
+// read, which is the one failure this list has ever had. So the page takes the VERDICT from the
+// report and takes only the WORDS from its own list. Nothing tested either half.
 {
   const w = world();
   // The report a `NotCounted` fault actually produces: `first_counted_fault` skips it, so `ok`

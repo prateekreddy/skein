@@ -165,7 +165,7 @@ Both halves are readable in the code now, and neither is a line number:
 - `grep -n 'requests/\$box\|for asking in substrate gitgate' src/box-session.sh` — the queue is
   unmasked **per box**, `requests/<box>/` bound writable into that box alone, so a request lands and
   no box can rewrite another's.
-- `grep -n 'fn install' src/substrate.rs` and `grep -n 'rendered' src/gitgate.rs` — the decision is
+- `grep -n 'fn install' src/substrate.rs` and `grep -n 'rendered' src/gitgate/decide.rs` — the decision is
   made on the bytes the cockpit rendered, and `install` reads the host-side artifact through
   `decision_or_why`. Neither consults the queue. `substrate::decided_over` makes the host's decision
   win over the box's copy, so a box that rewrites its request after approval changes neither what is
@@ -241,7 +241,7 @@ That is not eighteen mistakes. It is what one 7,400-line crate root looks like o
 was a call between two functions in one file, and invisible until there were two files.
 
 The `place → fleet` edge that §14.2 named is **gone** (SKEIN-22, and `docs/modules.toml` records
-it): `grep -n 'crate::fleet' src/place.rs` finds only doc-comment links now, which
+it): `grep -rn 'crate::fleet' src/place/` finds only doc-comment links now, which
 `tools/module-check.py` excludes because a doc link is not a call. The knot did not change size —
 `place` is still inside it through `config → runtime → repos → place`, and `fleet` still imports
 `place` (`cat src/fleet/*.rs | grep -c 'crate::place'` → 58). Worth knowing before anyone spends a day on a single edge: in a

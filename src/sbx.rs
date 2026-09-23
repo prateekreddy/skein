@@ -373,7 +373,7 @@ fn branch_at(dir: &std::path::Path) -> Option<String> {
             }
         }
         Err(_) if dot.is_dir() => dot,
-        // No `.git` here. `dir` may still BE a repository — the shape `repos.rs` calls a mirror.
+        // No `.git` here. `dir` may still BE a repository — the shape `src/repos/` calls a mirror.
         Err(_) if dir.join("objects").is_dir() => dir.to_path_buf(),
         Err(_) => return None,
     };
@@ -542,10 +542,10 @@ mod tests {
     /// for the length of the call. `PATH` is process-global; the env lock serialises the tests that
     /// *write* it and does nothing for the ones that read it by *spawning*; so for that window no
     /// test anywhere in this process could find `sh`, `bash` or anything else. That is SKEIN-421 —
-    /// and it was never one module's problem: under a harness holding this narrowing and `ai.rs`'s
-    /// at a 50% duty cycle, `cargo test --lib` failed **10 runs of 10**, with 21 distinct tests
-    /// across `ai`, `diff`, `fleet`, `gitgate`, `place`, `sandbox` and `substrate` red over those
-    /// runs. With both narrowings given a tail: 0 of 10 (SKEIN-428).
+    /// and it was never one module's problem: under a harness holding this narrowing and
+    /// `src/ai/unread.rs`'s at a 50% duty cycle, `cargo test --lib` failed **10 runs of 10**, with
+    /// 21 distinct tests across `ai`, `diff`, `fleet`, `gitgate`, `place`, `sandbox` and
+    /// `substrate` red over those runs. With both narrowings given a tail: 0 of 10 (SKEIN-428).
     ///
     /// The decoy replaces the narrowing and keeps the meaning. It goes first on a `PATH` that still
     /// finds a shell, and it **hands every call on to the real git**, so a test spawning git beside

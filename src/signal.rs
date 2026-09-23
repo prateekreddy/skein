@@ -486,12 +486,12 @@ impl Signal {
             ),
             Signal::FleetLiveness => Cost::free(
                 "one `/proc/<pid>/stat` read per anchored box and one socket connect per box the \
-                 anchors could not decide, src/place.rs `local_liveness` — files and a socket, \
-                 which is what `sources()` already claimed this was",
+                 anchors could not decide, src/place/record.rs `local_liveness` — files and a \
+                 socket, which is what `sources()` already claimed this was",
             ),
             Signal::Registry => Cost::free("one JSON file, src/registry.rs `all_sandboxes`"),
             Signal::BoxPlacement => {
-                Cost::free("one JSON file per box, src/place.rs `placed_boxes`")
+                Cost::free("one JSON file per box, src/place/record.rs `placed_boxes`")
             }
             Signal::BoxScreen => Cost::free("the observer's file, src/signals.rs `read_pane_raw`"),
             Signal::BoxStatusEdge => Cost::free("the hook's file, src/signals.rs `status_edge`"),

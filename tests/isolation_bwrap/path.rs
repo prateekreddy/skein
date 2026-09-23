@@ -25,7 +25,7 @@ use super::*;
 /// **Presence before absence.** The old argv is run first against the same planted binary, and it
 /// must execute it. Without that half, a fixture whose plant never worked — a `$PATH` that does not
 /// include it, a file that is not executable, a shell that reads no profile — would report the
-/// marker absent and pass while proving nothing. This is the shape `tests/isolation_bwrap.rs` was
+/// marker absent and pass while proving nothing. This is the shape `tests/isolation_bwrap/` was
 /// written to avoid twice over.
 #[test]
 fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
@@ -143,7 +143,7 @@ fn a_planted_binary_is_not_what_a_fleet_scope_script_runs() {
 /// **spawner's** PATH and needs no `.profile`: unlike the fleet-scope arm, nothing here goes
 /// through a login shell to reach the plant. The crossing reads that PATH directly.
 ///
-/// **Presence before absence**, the shape `tests/isolation_bwrap.rs` exists to keep: the same argv
+/// **Presence before absence**, the shape `tests/isolation_bwrap/` exists to keep: the same argv
 /// with the pin taken off is run first against the same plant, and it MUST execute it. Without that
 /// half, a plant that was never reachable — an anchor the guard refuses, a `$PATH` that does not
 /// carry it, a file that is not executable — would report the marker absent and pass about nothing.

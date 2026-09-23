@@ -493,7 +493,7 @@ impl Drop for Scratch {
 /// attribute afterwards: the process is alive, the path it names does not exist, and nothing says
 /// which run made it. `tests/ui/harness/leaks.mjs` then reports a process whose fixture is gone and
 /// no reader can tell which suite to go and look at (SKEIN-884). It is a SECOND producer of that
-/// state, independent of whichever binary leaked in the first place — `tests/fleet_launch.rs` fixed
+/// state, independent of whichever binary leaked in the first place — `tests/fleet_launch/` fixed
 /// its own producer and `Scratch` is shared by every binary here.
 ///
 /// **So the directory is kept, and the reason is said out loud**, rather than the processes being
@@ -501,7 +501,7 @@ impl Drop for Scratch {
 /// pid of the run that made it — which is exactly what the deletion was destroying.
 ///
 /// **The line between "a leak" and "a run in flight", which is the part that is easy to get wrong.**
-/// [`processes_under`]'s caller in `tests/fleet_launch.rs` exempts a live DESCENDANT
+/// [`processes_under`]'s caller in `tests/fleet_launch/fixture.rs` exempts a live DESCENDANT
 /// of the test process, because an environment is inherited and killing one of those ends a sibling
 /// test's own child. This sweep exempts **nothing**, and the difference is not an inconsistency: the
 /// question there is *what may be killed* and the question here is *what may be deleted*. Deleting

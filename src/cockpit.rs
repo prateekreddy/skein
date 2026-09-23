@@ -609,7 +609,7 @@ mod tests {
 
     /// **The runtime directory the cover names is the real one** (SKEIN-572).
     ///
-    /// `$SKEIN_RUNTIME_DIR` exists so `tests/isolation_bwrap.rs` can plant a file under the runtime
+    /// `$SKEIN_RUNTIME_DIR` exists so `tests/isolation_bwrap/` can plant a file under the runtime
     /// directory and ask a real namespace whether it is there — which against `/run/user/1000`
     /// would mean writing into the live fleet's own runtime directory, beside running agents' inbox
     /// sockets. A seam like that is only honest while the default is still the path production
@@ -631,7 +631,7 @@ mod tests {
 
     /// **Discovery and transport are never independently switchable** (§9.5 R11, SKEIN-572).
     ///
-    /// The mount test in `tests/isolation_bwrap.rs` is the real one — it runs bwrap and asks the
+    /// The mount test in `tests/isolation_bwrap/` is the real one — it runs bwrap and asks the
     /// kernel. This is the cheap guard beside it, and it asserts the thing that argv can actually
     /// see: that both binds are decided **in one block**, from one variable, rather than 800 lines
     /// apart the way they were when a `--tmpfs` silently severed a channel a comment upstream still
@@ -687,9 +687,9 @@ mod tests {
     /// nothing to say about whether anybody ever reads it, and for the whole of its green life
     /// nobody did — both production callers pipe the launcher's stderr and drop it on success. The
     /// wording is still worth pinning, so the check stays as it is; what changed is that it no
-    /// longer stands alone. Delivery is asserted where delivery happens: `tests/fleet_launch.rs`
+    /// longer stands alone. Delivery is asserted where delivery happens: `tests/fleet_launch/`
     /// starts real boxes under real bwrap and reads the banner back out of the tmux pane and out of
-    /// a real `skein attach`'s stderr, and `tests/isolation_bwrap.rs` reads it back through
+    /// a real `skein attach`'s stderr, and `tests/isolation_bwrap/` reads it back through
     /// `fleet::notices_from_launch`, the parser skein itself uses. If those go, this one is back to
     /// proving that a string exists in a file.
     #[test]

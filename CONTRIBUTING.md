@@ -46,7 +46,7 @@ suite is candid about which checks that costs you rather than pretending otherwi
   EOF
   ```
 
-* **Without `bwrap`, the isolation cover is proved by nothing.** `tests/isolation_bwrap.rs` runs a
+* **Without `bwrap`, the isolation cover is proved by nothing.** `tests/isolation_bwrap/` runs a
   real namespace and reads the paths back; where it cannot make one it skips with a message. That
   skip is right on a laptop and wrong in CI, which is why the workflow installs bubblewrap, turns
   `kernel.apparmor_restrict_unprivileged_userns` off, and then *proves* it with
@@ -454,7 +454,7 @@ argue with — a prohibition on its own is just something to route around.
    happily with a deliberately wrong path added.
 
    Prefer asserting a **property of the real mechanism** over a property of a string. The placement
-   test above is worth little beside `tests/isolation_bwrap.rs`, which runs actual bwrap and reads
+   test above is worth little beside `tests/isolation_bwrap/`, which runs actual bwrap and reads
    the resulting paths back.
 
 4. **Never send a field you did not mean to change.** Read-modify-write, or omit the field —
@@ -498,7 +498,7 @@ argue with — a prohibition on its own is just something to route around.
     conversation, or clear its build output in place"
    ```
 
-   Write that same edit through an **unquoted** heredoc — `cat > src/health.rs <<EOF`, the way an
+   Write that same edit through an **unquoted** heredoc — `cat > src/health/disk.rs <<EOF`, the way an
    agent patches this repository all day — and the shell takes the backslash as *its own* line
    continuation and joins the two lines before the file is ever written. The `\` never arrives. What
    lands is one long line with the continuation line's indentation still inside the literal, and

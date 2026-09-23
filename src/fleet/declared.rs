@@ -71,7 +71,7 @@ pub fn allow_uncovered(name: &str, on: bool) -> Result<(), String> {
 ///
 /// The doc here said "and the box can write it" for a long time and had stopped being true. The
 /// launcher covers the state parent with a tmpfs and binds this directory back `--ro-bind`
-/// (`box-session.sh`, the state cover), and `tests/isolation_bwrap.rs` reads it back from a real
+/// (`box-session.sh`, the state cover), and `tests/isolation_bwrap/` reads it back from a real
 /// namespace as `see` rather than `write`. What the box writes are its conversation and
 /// transcripts, and those reach it through a *different, read-write* mount of the same directories
 /// at `$HOME/.claude/projects` and `$HOME/.codex/sessions` — separate mounts, so read-only here

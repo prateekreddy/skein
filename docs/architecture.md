@@ -943,14 +943,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:1921`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:1929`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:1923`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:1931`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:1896`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:1898`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
@@ -1703,7 +1703,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    registry held six sessions, every one advertising a socket, and exactly one resolved — the box's
    own. R11's argument survives intact, because it was never *"never open this"* but *"do not let
    it become an undeclared channel"*; what changes is that the channel is declared, reasoned about
-   here, and asserted by `tests/isolation_bwrap.rs`, where the cover previously had no test at all.
+   here, and asserted by `tests/isolation_bwrap/`, where the cover previously had no test at all.
    Everything else under the runtime directory stays private per box, which is the second of those
    two tests.
 

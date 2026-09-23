@@ -67,7 +67,7 @@ pub(super) enum AfterMerged {
 /// other refusal is a fact about the setup and will not.
 ///
 /// **Exhaustive, with no wildcard arm**, which is this module's neighbour's discipline and not a
-/// style choice: `ai.rs` matches `Unread` without `_` everywhere and says why — "a new variant
+/// style choice: `src/ai/` matches `Unread` without `_` everywhere and says why — "a new variant
 /// stops this match compiling". A wildcard here would answer `Stop` for a variant nobody had
 /// thought about, and the variant most likely to be added next is another way of saying "this was
 /// too big", which is the one that must answer `Narrow`. The failure would be silent and would

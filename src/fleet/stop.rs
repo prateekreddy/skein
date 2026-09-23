@@ -87,7 +87,7 @@ pub fn namespace_kill(ns_pid: u32, generation: &str, ns_start: u64) -> String {
 /// [`namespace_kill`]'s two guards exist to make impossible, arriving through the identifier
 /// instead of through the pid.
 ///
-/// And with `tests/fleet_launch.rs` running beside it rather than a bare `bwrap`, **2 of 8** —
+/// And with `tests/fleet_launch/` running beside it rather than a bare `bwrap`, **2 of 8** —
 /// where what matched was the whole of the box that test had just built: its
 /// `tmux -S …/boxes/demo-smoke/session.sock`, its `skein-startup.sh`, its `sync-install.sh`, its
 /// `claude plugin marketplace add`, its `ssh git@github.com`. Every one of them in

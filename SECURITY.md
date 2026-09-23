@@ -75,7 +75,7 @@ every mechanism named below exists on the assumption that it will eventually be 
 Anything that lets a box, a page, or a repository skein reads cross a line skein claims to hold:
 
 * **A box reaching another box's files, working tree, credentials or conversation.** Each box gets
-  a `bwrap` namespace inside the shared sandbox; `tests/isolation_bwrap.rs` runs a real namespace
+  a `bwrap` namespace inside the shared sandbox; `tests/isolation_bwrap/` runs a real namespace
   and reads the paths back rather than inspecting arguments.
 * **A box escaping its namespace**, or becoming root in the shared sandbox by any path other than
   the Docker socket described under [Not in scope](#not-in-scope) below.
@@ -165,7 +165,7 @@ Not because they do not matter, but because they are the product rather than a d
   command on the host, against the owner's own keychain — and while that proxy is injecting, a
   request from a box carrying no credential, or carrying a deliberately invalid one, is answered as
   the whole account. skein's answer is not a claim that this cannot happen. It is to **measure it
-  and put it on the cockpit's banner in red** (`proxy_injection` in `src/health.rs`, SKEIN-548,
+  and put it on the cockpit's banner in red** (`proxy_injection` in `src/health/reach.rs`, SKEIN-548,
   SKEIN-927), because a boundary the substrate can reopen without touching a line of this code is
   one somebody has to be told about. The row in [`docs/threat-model.md`](docs/threat-model.md)
   carries the dates it has flipped and the command that answers it today. So a report that a box

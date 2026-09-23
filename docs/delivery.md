@@ -389,7 +389,7 @@ fleet root and the state parent are bound back; bwrap resolves each `--bind` sou
 original filesystem, so those binds still land through the cover. Enumeration was never needed —
 the ancestor is derived from `$SKEIN_FLEET_MOUNTS`, so a volume mounted somewhere new is covered
 the day it appears. Proved rather than argued:
-`tests/isolation_bwrap.rs::a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` builds a
+`tests/isolation_bwrap/cover.rs::a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` builds a
 volume-shaped fleet, runs real bwrap, and reads those three paths back as `gone` while the box's
 own store, state, git token and checkout still answer. The flag is gone with the exposure; a fleet
 that serves is a fleet whose boxes still cannot read its credentials.

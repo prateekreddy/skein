@@ -373,12 +373,38 @@ def functions(text, lo, hi):
     return out
 
 
-def unit_name(path):
-    rel = os.path.relpath(path, ROOT)
+def unit_name(path, root=ROOT):
+    rel = os.path.relpath(path, root)
     return rel[:-3] if rel.endswith(".rs") else rel
 
 
-def scan_file(path, whole_file, module_providers=None):
+def test_binary(path, root=ROOT):
+    """The integration binary cargo builds `path` into — `tests/<name>` — or None if it builds none.
+
+    Cargo makes a test target of every `tests/<name>.rs` AND of every `tests/<name>/main.rs`, and
+    in the second layout every other file under `tests/<name>/` is a module of that one binary,
+    compiled into it and nothing else. `tests/fleet_launch/` and `tests/isolation_bwrap/` have
+    been that layout since SKEIN-1109/1110, and until SKEIN-1114 this gate treated each of their
+    files as a binary of its own: a lone scope in one file took the one-binary exemption while a
+    sibling file of the same process held another, and a helper in `harness.rs` whose callers are
+    in `path.rs` was looked for in `harness.rs` alone.
+
+    A directory with no `main.rs` — `tests/common/` — is not a binary: it is a module each binary
+    that declares `mod common;` compiles its own copy of, which is SKEIN-722's reason it gets no
+    exemption, and that is unchanged.
+    """
+    rel = os.path.relpath(path, root).replace(os.sep, "/")
+    parts = rel.split("/")
+    if parts[0] != "tests" or len(parts) < 2:
+        return None
+    if len(parts) == 2:
+        return f"tests/{parts[1][:-3]}" if parts[1].endswith(".rs") else None
+    if os.path.isfile(os.path.join(root, "tests", parts[1], "main.rs")):
+        return f"tests/{parts[1]}"
+    return None
+
+
+def scan_file(path, whole_file, module_providers=None, root=ROOT):
     """[finding-or-scope dicts] for one file.
 
     `module_providers` is `module_lock_providers` for the file's module; without it, a provider is
@@ -386,7 +412,8 @@ def scan_file(path, whole_file, module_providers=None):
     """
     raw = open(path, encoding="utf-8").read()
     text = uncommented(raw)
-    unit = unit_name(path)
+    unit = unit_name(path, root)
+    binary = test_binary(path, root)
     scopes = []
     for lo, hi in test_regions(text, whole_file):
         fns = functions(text, lo, hi)
@@ -407,6 +434,7 @@ def scan_file(path, whole_file, module_providers=None):
             handed, released = through_provider(own, {k: v for k, v in providers.items() if k != fn["name"]})
             scopes.append({
                 "unit": unit,
+                "binary": binary,
                 "fn": fn["name"],
                 "line": fn["line"],
                 "is_test": any(a.startswith("#[test]") or "::test]" in a or a.startswith("#[tokio::test") for a in fn["attrs"]),
@@ -479,10 +507,18 @@ def callers_of(scope):
     return sorted(locked), sorted(unlocked)
 
 
+def process_of(scope):
+    """What `verdict`'s count is per: the test binary a `tests/` scope is compiled into, else its
+    file. For `tests/<name>.rs` the two are the same thing; for `tests/<name>/` they are not, and
+    counting per file is what let two scopes in one process each read as the only one (SKEIN-1114).
+    """
+    return scope.get("binary") or scope["unit"]
+
+
 def per_file_counts(scopes):
     counts = {}
     for s in scopes:
-        counts[s["unit"]] = counts.get(s["unit"], 0) + 1
+        counts[process_of(s)] = counts.get(process_of(s), 0) + 1
     return counts
 
 
@@ -544,8 +580,9 @@ def rust_files():
 # `review::testkit` reaches exactly the files below — and because widening further would make a
 # by-name search meaningless: `setup` is one function in a module and a dozen in a crate.
 #
-# `tests/*.rs` is deliberately per-file and that is not an exception: cargo builds one binary per
-# integration file, so there each file IS its own crate root and has no siblings to look at.
+# Under `tests/` the module is the BINARY, which is the same rule and not an exception: cargo builds
+# one binary per `tests/<name>.rs`, which has no siblings to look at, and one per `tests/<name>/`
+# holding a `main.rs`, whose every file is a module of that binary (`test_binary`, SKEIN-1114).
 # ---------------------------------------------------------------------------------------------
 
 
@@ -580,21 +617,26 @@ def modules_of():
     return out
 
 
-def collect():
+def collect(sources=None, groups=None, root=ROOT):
     """Every env-touching scope, each carrying the fn table of its whole module.
 
     The table is built exactly as `scan_file` builds its own — `uncommented`, then the fns inside
     each test region — so a caller is judged by the same text as a scope. It is shared between the
     scopes of one module rather than copied: `callers_of` only reads it.
+
+    `sources`, `groups` and `root` default to this tree; `self_check` passes a tree of its own.
     """
-    groups = modules_of()
+    groups = modules_of() if groups is None else groups
+    sources = rust_files() if sources is None else sources
     index, scopes, found, files = {}, [], {}, []
-    for path, whole_file in rust_files():
-        # A `tests/*.rs` file is its own binary, so it is its own module — see the block above.
-        module = groups.get(os.path.abspath(path), os.path.abspath(path))
+    for path, whole_file in sources:
+        # A `tests/` file is a module of the binary it is compiled into — `tests/<name>.rs` alone,
+        # or every file of a `tests/<name>/` with a `main.rs` (SKEIN-1114) — and a file of no
+        # binary, `tests/common/mod.rs`, is its own. See the block above and `test_binary`.
+        module = groups.get(os.path.abspath(path)) or test_binary(path, root) or os.path.abspath(path)
         files.append((path, whole_file, module))
         text = uncommented(open(path, encoding="utf-8").read())
-        unit = unit_name(path)
+        unit = unit_name(path, root)
         for lo, hi in test_regions(text, whole_file):
             fns = functions(text, lo, hi)
             for fn in fns:
@@ -608,32 +650,36 @@ def collect():
                 found.setdefault(module, {})[name] = slot
     providers = module_lock_providers(index, found)
     for path, whole_file, module in files:
-        scopes += [dict(s, module=module) for s in scan_file(path, whole_file, providers.get(module, {}))]
+        scopes += [
+            dict(s, module=module)
+            for s in scan_file(path, whole_file, providers.get(module, {}), root)
+        ]
     for scope in scopes:
         scope["module_fns"] = index[scope["module"]]
     return scopes
 
 
-def own_test_binary(unit):
-    """Is `unit` a `tests/*.rs` file cargo actually compiles as its own integration binary?
+def own_test_binary(scope):
+    """Is `scope` in a file cargo compiles into exactly one integration binary?
 
-    Cargo gives every file *directly* under `tests/` its own process — but a file one directory
-    further down, such as `tests/common/mod.rs`, is not one of those: it is a module reached only
-    through a sibling's `mod common;`, compiled once per binary that declares it, so the "nothing
-    in its process can race it" argument in `verdict` does not hold for it at all (SKEIN-722). The
-    top-level files have no `/` left after the `tests/` prefix; a shared module does.
+    Cargo gives every `tests/<name>.rs` its own process, and every `tests/<name>/main.rs` too, with
+    the rest of `tests/<name>/` compiled into that one (SKEIN-1114, `test_binary`). A file of no
+    binary, such as `tests/common/mod.rs`, is a module reached only through a sibling's
+    `mod common;`, compiled once per binary that declares it, so the "nothing in its process can
+    race it" argument in `verdict` does not hold for it at all (SKEIN-722).
     """
-    return unit.startswith("tests/") and "/" not in unit[len("tests/"):]
+    return bool(scope.get("binary"))
 
 
 def verdict(scope, per_file):
     """(ok, note). `ok` is False when this scope needs an exemption or a fix.
 
-    `per_file` counts the env-touching scopes in the same file, which is what decides the question
-    for `tests/*.rs`: cargo builds **one binary per integration test file**, so those tests share a
-    process with each other and with nothing else. A file whose only env-touching scope is this one
-    has nothing in its process to race against, and demanding a lock there would be a ritual. Two
-    or more in one file is the same hazard as the lib, in a smaller process.
+    `per_file` counts the env-touching scopes in the same PROCESS (`process_of`), which is what
+    decides the question for `tests/`: cargo builds **one binary per integration test**, a file or a
+    directory with a `main.rs`, so those tests share a process with each other and with nothing
+    else. A binary whose only env-touching scope is this one has nothing in its process to race
+    against, and demanding a lock there would be a ritual. Two or more in one binary is the same
+    hazard as the lib, in a smaller process — whichever of its files they are in.
 
     That argument needs `own_test_binary`, not just a `tests/` prefix — see there.
     """
@@ -644,10 +690,10 @@ def verdict(scope, per_file):
         )
     if scope["guard"]:
         return True, "holds the lock"
-    if own_test_binary(scope["unit"]) and per_file == 1:
+    if own_test_binary(scope) and per_file == 1:
         return True, (
             "is the only env-touching scope in its own test binary — cargo gives every "
-            "tests/*.rs its own process, so nothing here can race it"
+            "tests/<name>.rs and tests/<name>/ its own process, so nothing here can race it"
         )
     if scope["is_test"]:
         return False, "sets env vars and never takes `env_lock()`"
@@ -1090,10 +1136,77 @@ def render(bad, sites):
     return "\n".join(out).rstrip() + "\n"
 
 
+SELF_CHECK_TREE = {
+    # One binary in a directory: the helper's only caller is in a sibling file, and the second
+    # scope keeps the count above one so the helper has to be resolved through its callers.
+    "tests/dirbin/main.rs": "mod harness;\nmod path;\n#[test]\nfn other() {\n    let _g = env_lock();\n    std::env::set_var(\"B\", \"1\");\n}\n",
+    "tests/dirbin/harness.rs": "pub fn set_up() {\n    std::env::set_var(\"A\", \"1\");\n}\n",
+    "tests/dirbin/path.rs": "#[test]\nfn caller() {\n    let _g = env_lock();\n    super::harness::set_up();\n}\n",
+    # One binary in a directory with ONE env-touching scope: nothing in its process can race it.
+    "tests/solo/main.rs": "mod one;\n",
+    "tests/solo/one.rs": "#[test]\nfn lone() {\n    std::env::set_var(\"C\", \"1\");\n}\n",
+    # One binary in a directory with an unlocked scope in each of two files: one process, two.
+    "tests/pair/main.rs": "mod a;\nmod b;\n",
+    "tests/pair/a.rs": "#[test]\nfn first() {\n    std::env::set_var(\"D\", \"1\");\n}\n",
+    "tests/pair/b.rs": "#[test]\nfn second() {\n    std::env::set_var(\"E\", \"1\");\n}\n",
+    # A directory with no `main.rs` is no binary: compiled into every binary declaring it (SKEIN-722).
+    "tests/common/mod.rs": "#[test]\nfn shared() {\n    std::env::set_var(\"F\", \"1\");\n}\n",
+    # A flat file is still its own binary.
+    "tests/flat.rs": "#[test]\nfn flat() {\n    std::env::set_var(\"G\", \"1\");\n}\n",
+}
+
+SELF_CHECK_EXPECT = {
+    "tests/dirbin/harness::set_up": True,   # was "no #[test] in its module calls it"
+    "tests/dirbin/main::other": True,
+    "tests/solo/one::lone": True,           # was refused the one-binary exemption
+    "tests/pair/a::first": False,           # a per-file count of one each would exempt both
+    "tests/pair/b::second": False,
+    "tests/common/mod::shared": False,      # SKEIN-722: not a binary of its own
+    "tests/flat::flat": True,
+}
+
+
+def self_check():
+    """Judge a small tree of each `tests/` layout and fail on any verdict it does not expect.
+
+    Each direction of SKEIN-1114 has a case that goes the wrong way under the old per-file rule —
+    the comment beside each expectation says which — and `tests/common/` and `tests/flat.rs` hold
+    the two layouts that must not have moved. Returns the list of problems; empty means sound.
+    """
+    import tempfile
+    problems = []
+    with tempfile.TemporaryDirectory(prefix="env-lock-self-check-") as root:
+        paths = []
+        for rel, body in sorted(SELF_CHECK_TREE.items()):
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            paths.append((path, True))
+        scopes = collect(paths, {}, root)
+        counts = per_file_counts(scopes)
+        got = {key(s): verdict(s, counts[process_of(s)]) for s in scopes}
+    for name, want in SELF_CHECK_EXPECT.items():
+        if name not in got:
+            problems.append(f"{name}: not found as an env-touching scope at all")
+        elif got[name][0] != want:
+            problems.append(f"{name}: judged {'ok' if got[name][0] else 'BAD'} — {got[name][1]}")
+    for name in sorted(set(got) - set(SELF_CHECK_EXPECT)):
+        problems.append(f"{name}: an env-touching scope the self-check did not plant")
+    return problems
+
+
 def main():
+    problems = self_check()
+    if problems:
+        print("env-lock-check: SELF-CHECK FAILED — the gate misjudges a `tests/` layout it was built to "
+              "read, so its verdicts on this tree cannot be trusted:", file=sys.stderr)
+        for p in problems:
+            print(f"  · {p}", file=sys.stderr)
+        return 2
     scopes = collect()
     counts = per_file_counts(scopes)
-    judged = [(s, *verdict(s, counts[s["unit"]])) for s in scopes]
+    judged = [(s, *verdict(s, counts[process_of(s)])) for s in scopes]
     if "--show" in sys.argv:
         for s, ok, note in sorted(judged, key=key.__call__ if False else (lambda t: key(t[0]))):
             print(f"{'ok  ' if ok else 'BAD '} {key(s):<60} {s['touches']:>3} touch(es)  {note}")

@@ -559,11 +559,11 @@ function loadHealth() {
     // It used to hold twelve of the fourteen, hand-written, and the two it was short of were the
     // two nobody had decided about: "gh" — which is "curl is installed" and "GitHub can be reached
     // at all" (SKEIN-548, SKEIN-926) — and "ai". Whether a check turns the banner red is decided
-    // in ONE place, `OnBanner` in `src/health.rs`, and the page is not that place: a key missing
-    // from here cannot suppress a banner, it can only produce `ok: false` with nothing in the row
-    // to read, which is the one failure this list has ever had. So it carries all of them, and
-    // `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's own
-    // fields — a new check is on this list or that test fails by name.
+    // in ONE place, `OnBanner` in `src/health/report.rs`, and the page is not that place: a key
+    // missing from here cannot suppress a banner, it can only produce `ok: false` with nothing in
+    // the row to read, which is the one failure this list has ever had. So it carries all of them,
+    // and `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's
+    // own fields — a new check is on this list or that test fails by name.
     //
     // Carrying a check the verdict does not count is deliberate and costs nothing: a check the
     // Rust side marks `NotCounted` gets named here when the banner is already up for some other

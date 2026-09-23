@@ -1191,7 +1191,7 @@ fn a_missing_argument_says_so_instead_of_aborting_the_shell_it_ran_in() {
 }
 
 // **`a_box_cannot_read_the_fleet_agents_token` lived here and has moved**, to
-// `tests/isolation_bwrap.rs::a_box_cannot_read_what_skein_keeps_under_private`.
+// `tests/isolation_bwrap/private.rs::a_box_cannot_read_what_skein_keeps_under_private`.
 //
 // It drove the launcher's `no-fleet-token` block — an empty file bound over one name — and that
 // mechanism is gone: `box-session.sh` now puts a single `--tmpfs` over `.skein/private/`, which is
@@ -1452,7 +1452,7 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
 /// serves from is exactly such an ancestor, so every box could read `credentials/` off it. Order is
 /// what makes both true at once: the ancestor first, the entitlements bound back through it (bwrap
 /// resolves a bind source against the original filesystem). What a box can actually reach after
-/// that is asserted against a real namespace in `tests/isolation_bwrap.rs`; this one is about the
+/// that is asserted against a real namespace in `tests/isolation_bwrap/`; this one is about the
 /// argument list.
 #[test]
 fn covering_the_mounts_does_not_uncover_the_box() {

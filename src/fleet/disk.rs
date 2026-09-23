@@ -189,7 +189,7 @@ fn tree_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
 
 /// `<fleet root>/.skein` — the one entry in the fleet root that is not a box.
 ///
-/// `bootstrap.sh:34` calls it `skein_dir`, and this is that name, so an install's two halves are
+/// `bootstrap.sh` calls it `skein_dir`, and this is that name, so an install's two halves are
 /// searchable as one thing. Not [`crate::substrate::substrate_dir`], which is the package-request
 /// queue *inside* it.
 pub fn skein_dir() -> String {

@@ -7,7 +7,7 @@
 //! prints is not believed either.
 //!
 //! Checked against the source rather than by running anything. A verb is added to the dispatch in
-//! `src/bin/skein.rs` and a fix line is written in `src/health.rs` or beside it, and the two drift
+//! `src/bin/skein.rs` and a fix line is written in `src/health/` or beside it, and the two drift
 //! silently because nothing joins them. This is the join.
 
 use std::collections::BTreeSet;

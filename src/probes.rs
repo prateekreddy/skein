@@ -1714,8 +1714,8 @@ mod tests {
     /// is `config::default_fleet_sandbox`, the SANDBOX's name, and no box has ever been called
     /// that. All five were written within five minutes of one another on 2026-08-04, one per box,
     /// each `dead:1` with an empty title. That is every box in the shared sandbox falling through
-    /// `${SKEIN_BOX:-${SANDBOX_VM_ID:-...}}` to the sandbox's name at once (`wrap` in src/place.rs
-    /// describes the same event from the launcher's side).
+    /// `${SKEIN_BOX:-${SANDBOX_VM_ID:-...}}` to the sandbox's name at once (`wrap` in
+    /// src/place/argv.rs describes the same event from the launcher's side).
     ///
     /// Two halves, and the test drives both, because each covers what the other cannot:
     ///   · the probe refuses to write when it cannot establish which box it is in — which fixes

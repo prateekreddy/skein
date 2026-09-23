@@ -60,7 +60,7 @@ export function mentionsLabel(signal) {
 // nothing has ever registered, so from `c5ddc46` onward every click on a pull request 404'd and the
 // page reported its own "the change could not be read" (SKEIN-246). The tests that let that survive
 // asserted this string; what asserts it now is the router's own table — `cockpit_routes` in
-// `bin/skein-server.rs` scans this bundle against it, and `the_change_view_asks_a_url_this_router_answers`
+// `bin/skein-server/main.rs` scans this bundle against it, and `the_change_view_asks_a_url_this_router_answers`
 // runs this function and matches its answer.
 export function shapeUrl(row) {
   const r = row || {};

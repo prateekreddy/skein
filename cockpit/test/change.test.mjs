@@ -30,7 +30,7 @@ test("no count and a count of zero are different answers", () => {
 
 // Both URLs are checked against the router's real table by
 // `cockpit::tests::the_change_view_asks_a_url_this_router_answers`, which runs this function and
-// matches its answer against the `.route(…)` entries in `src/bin/skein-server.rs`. What is asserted
+// matches its answer against the `.route(…)` entries in `src/bin/skein-server/main.rs`. What is asserted
 // here is the shape of the transform — the `#` comes off, a missing repo yields no URL — because
 // this file can call the function with inputs the Rust test would have to build a fleet to produce.
 test("a branch and a pull request ask the same question of different routes", () => {

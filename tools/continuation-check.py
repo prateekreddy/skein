@@ -11,7 +11,7 @@ rustc drops the backslash, the newline, and the leading whitespace of the next l
 literal reads with single spaces. Now write that same edit through a shell or Python heredoc — the
 way agents patch this repository all day:
 
-    cat > src/health.rs <<EOF
+    cat > src/health/disk.rs <<EOF
     ... branch and \
      conversation ...
     EOF

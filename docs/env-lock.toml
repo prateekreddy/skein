@@ -12,7 +12,7 @@
 # described in their own reasons as defects left declared only because the files belonged to other
 # agents that round. When those files came free the three were fixed rather than kept:
 #
-#   * `origin_guard_honours_allowlist`, in `src/bin/skein-server.rs` — took the lock. Fixing it
+#   * `origin_guard_honours_allowlist`, in `src/bin/skein-server/door.rs` — took the lock. Fixing it
 #     exposed a larger fault: `env_lock` lived INSIDE `mod review_routes`, so it serialised that
 #     module against itself and not against `mod tests` in the same binary. It is now at file
 #     scope and both modules reach it through `super::`.

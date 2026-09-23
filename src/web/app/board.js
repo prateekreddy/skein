@@ -692,9 +692,9 @@ function applyView() {
   }
   renderDockbar(); renderTabs(); refreshRowAll();
 }
-// The close code skein's own end sends (src/bin/skein-server.rs) when THERE IS NOTHING HERE TO
-// RECONNECT TO, rather than the connection having gone away. Agreed with that end and with nothing
-// else: 4000-4999 is the range RFC 6455 leaves to an application, and a browser's own close for a
+// The close code skein's own end sends (src/bin/skein-server/terminal.rs) when THERE IS NOTHING
+// HERE TO RECONNECT TO, rather than the connection having gone away. Agreed with that end and with
+// nothing else: 4000-4999 is the range RFC 6455 leaves to an application, and a browser's own close for a
 // socket that died is 1006, never a 4xxx.
 //
 // **It was `CLOSE_CHILD_ENDED`, and the rename is the fix rather than tidying** (SKEIN-702). A
