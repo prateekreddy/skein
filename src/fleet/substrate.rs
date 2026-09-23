@@ -98,6 +98,20 @@ pub struct RuntimeUpdate {
 /// failed, or everything is current. That is deliberate — the bar's job is to speak when there is
 /// something to install, and "skein could not find out" is not something a person can act on.
 pub fn runtime_updates() -> Vec<RuntimeUpdate> {
+    // **Refused in a lib test, on the caller's own thread** (SKEIN-1121). Called cold, this starts
+    // the real check on a thread nobody joins, and that thread outlives whatever the calling test
+    // pinned: it crossed through the next test's `place::seam` (SKEIN-1087) and panicked on
+    // `config::skein_home`'s guard inside somebody else's captured output (SKEIN-658). Three
+    // `health_report` tests did it after the first was fixed, so it is refused here rather than
+    // trusted to each caller. A test takes the reading through [`updates_from`], or `health`'s
+    // `report_with`, and hands them a check of its own.
+    #[cfg(test)]
+    panic!(
+        "a lib test called `fleet::runtime_updates`, which starts the real agent-CLI version check \
+         on a detached thread that outlives this test's lock and seam — pass a stand-in to \
+         `updates_from` or `health::report_with` instead (SKEIN-1121)"
+    );
+    #[cfg(not(test))]
     updates_from(&READINGS, look_for_newer_runtimes)
 }
 
@@ -628,9 +642,9 @@ mod tests {
     /// Real time for the tick and a moved clock for the age, for `announce::watch_disk`'s reason:
     /// `spawn_blocking` leaves the runtime idle while the check is in flight, so a paused tokio
     /// clock could run the ticks out from under it. The store is the test's own [`super::Readings`],
-    /// because the process-wide one is also written by the cold [`super::runtime_updates`] inside
-    /// `health::health_report`'s tests. `npm` is stubbed at `place::seam`, the one place the real
-    /// check crosses into the sandbox.
+    /// because the process-wide one was also written by the cold [`super::runtime_updates`] inside
+    /// `health::health_report`'s tests, until SKEIN-1121 refused that call in a lib test. `npm` is
+    /// stubbed at `place::seam`, the one place the real check crosses into the sandbox.
     ///
     /// The sabotage each assertion was named against:
     ///
@@ -661,8 +675,9 @@ mod tests {
         // (`own_sandbox(..).exec`), and `place::seam` is where a test stands in for one — a `$PATH`
         // stub would not be, since the crossing runs under a PATH of its own. It does nothing, and
         // it is not asserted on: the seam is process-wide, and the cold `runtime_updates()` inside
-        // `health::health_report`'s tests crosses from a thread that outlives their lock, so a count
-        // here could be theirs (the test above's was, in the first gate run, until SKEIN-1087).
+        // `health::health_report`'s tests crossed from a thread that outlived their lock, so a count
+        // here could have been theirs (the test above's was, in the first gate run, until
+        // SKEIN-1087) — until SKEIN-1121 refused that call in a lib test.
         let _npm = crate::place::seam::doing_nothing();
 
         static STORE: super::Readings = super::Readings::new();

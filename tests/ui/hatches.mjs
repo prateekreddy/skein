@@ -34,6 +34,7 @@ import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
 import { spawnSync } from "node:child_process";
 import { FIXTURE_AGENT_STUB, FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 import { stub } from "./harness/github.mjs";
 
 const API_TOKEN = "h".repeat(64);
@@ -133,8 +134,6 @@ const common = {
   PATH: `${fx.bin}:${process.env.PATH}`,
 };
 
-const running = [];
-
 async function serverWith(extra) {
   const door = await openDoor();
   const { port } = door;
@@ -146,7 +145,6 @@ async function serverWith(extra) {
     throw e;
   }
   const { srv, log } = started;
-  running.push(srv);
   return { port, log, srv };
 }
 
@@ -413,9 +411,10 @@ try {
   // so the failure has to go INTO the ledger rather than beside it.
   t.check("the harness suite could run at all", String((e && e.message) || e), "it ran");
 } finally {
-  for (const srv of running) srv.kill();
   github.close();
-  fs.rmSync(fx.root, { recursive: true, force: true });
+  // Every server this suite started registered its own kill with `quiesce`, which is what
+  // `stopThenRemove` runs before it looks — not `srv.kill(); rmSync`, which raced (SKEIN-1123).
+  stopThenRemove([fx.root], { record: (name, left) => t.check(name, left, []) });
 }
 
 t.done();

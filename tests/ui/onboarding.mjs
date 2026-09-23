@@ -28,6 +28,7 @@ import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
 import { FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 const API_TOKEN = "t".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
@@ -251,7 +252,7 @@ const door = await openDoor();
 const port = door.port;
 const warden = await startWarden(fx);
 const githost = await startGitHost(fx);
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -742,7 +743,6 @@ await check("no page errors and no 5xx along the way", async () => {
 
 const failed = report({ log });
 await browser.close();
-srv.kill();
 warden.server.close();
 githost.server.close();
 // The boxes this run launched, before the directory holding their sockets goes.
@@ -759,5 +759,5 @@ githost.server.close();
 for (const sock of fs.globSync(path.join(fx.root, "fleet", "*", "session.sock"))) {
   try { spawnSync("tmux", ["-S", sock, "kill-server"], { stdio: "ignore" }); } catch {}
 }
-try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {}
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root]);
+process.exit(failed.length || leftRunning.length ? 1 : 0);

@@ -30,6 +30,7 @@ import { fixtureRoot, freshFixture, openDoor, serverBinary } from "./lift.mjs";
 import { erring, ledger } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 const API_TOKEN = "t".repeat(64);
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -85,7 +86,6 @@ fs.writeFileSync(path.join(root, "sandboxes.json"), "{}");
 
 const { check, value, report } = ledger();
 const browser = await chromium.launch();
-const running = [];
 const logs = [];
 
 /** Open Settings -> Update on `port` and wait for the pane to have read `/api/update` once. */
@@ -123,11 +123,10 @@ try {
     const { port } = door;
     // `python3` by that name, and the doorway by its full path: `fleet::reload_command`'s pattern
     // is `^python[0-9.]* <doorway>( |$)`, which is how the doorway re-execs itself too.
-    const { srv, log } = await startServer({
+    const { log } = await startServer({
       door, token: API_TOKEN, env: envFor(fx, port),
       program: ["python3", doorway, String(port), server, stamp],
     });
-    running.push(srv);
     logs.push(["behind a doorway", log]);
     const doorPid = () => fs.readFileSync(stamp, "utf8").trim().split(/\s+/)[0];
     const doorBefore = doorPid();
@@ -170,7 +169,6 @@ try {
     const door = await openDoor();
     const { port } = door;
     const { srv, log } = await startServer({ door, token: API_TOKEN, env: envFor(fx, port) });
-    running.push(srv);
     logs.push(["no doorway", log]);
     const { page, errors, sayBlips } = await openPane(port);
     await until(page, () => buttonShown(page));
@@ -191,9 +189,9 @@ try {
 }
 
 await browser.close();
-for (const srv of running) srv.kill();
 github.close();
 const failed = report();
 if (failed.length) for (const [which, log] of logs) console.log(`\nserver log (${which}):\n${log()}`);
-else { try { fs.rmSync(root, { recursive: true, force: true }); } catch {} }
-process.exit(failed.length ? 1 : 0);
+// Both servers registered their kill with `quiesce`, which `stopThenRemove` runs first (SKEIN-1123).
+const leftRunning = stopThenRemove([root], { keep: failed.length > 0 });
+process.exit(failed.length || leftRunning.length ? 1 : 0);

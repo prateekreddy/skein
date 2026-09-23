@@ -21,6 +21,7 @@ import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, ledger } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 const API_TOKEN = "t".repeat(64);
 
 // **An invented box name, and it must stay invented.** A real one in the tree is SKEIN-629 and
@@ -93,7 +94,7 @@ const { value, results, report } = ledger();
 const fx = makeFixture();
 addTranscript(fx.projects, "one");
 const door = await openDoor();
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -399,6 +400,5 @@ if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: f
 const failed = report({ log });
 if (failed.length) console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 await browser.close();
-srv.kill();
-if (!failed.length) { try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {} }
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 });
+process.exit(failed.length || leftRunning.length ? 1 : 0);

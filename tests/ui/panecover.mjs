@@ -51,6 +51,7 @@ import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 // The box whose launch fails, and the box whose launch stays up. Two names, so the two panes are two
 // sessions in the page's own `sessions` map and can be probed one after the other.
@@ -287,7 +288,6 @@ if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: f
 const failed = report({ log });
 if (failed.length) console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 await browser.close();
-srv.kill();
-if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });
-else if (!failed.length) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 || !!process.env.SKEIN_KEEP });
+if (!failed.length && process.env.SKEIN_KEEP) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);
+process.exit(failed.length || leftRunning.length ? 1 : 0);

@@ -27,7 +27,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { browser, check, fx, log, noise, page, report, results, sayBlips, settle, srv } from "./review/setup.mjs";
+import { browser, check, fx, log, noise, page, report, results, sayBlips, settle } from "./review/setup.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 await import("./review/queue.mjs");
 await import("./review/keyboard.mjs");
@@ -58,6 +59,5 @@ if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: f
 const failed = report({ log });
 if (failed.length) console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 await browser.close();
-srv.kill();
-if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 || !!process.env.SKEIN_KEEP });
+process.exit(failed.length || leftRunning.length ? 1 : 0);

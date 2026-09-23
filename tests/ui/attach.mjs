@@ -30,6 +30,7 @@ import path from "node:path";
 import { boxlikeNamespace, fixtureRoot, freshFixture, grab, harness, openDoor } from "./lift.mjs";
 import { processes, sighting } from "./harness/leaks.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 const BOX = "attach-box";
 const t = harness();
@@ -267,7 +268,7 @@ const base = `http://127.0.0.1:${port}`;
 // No `token`: this fixture runs with `SKEIN_NO_API_AUTH`, so the readiness poll carries no bearer
 // either. 150 attempts rather than 100 because this suite's server starts a tmux session as it
 // comes up.
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   tries: 150,
   env: {
@@ -550,12 +551,12 @@ try {
   console.error(`\nserver said:\n${log()}`);
   t.check("the attach suite could run at all", String(e.message || e), "it ran");
 } finally {
-  srv.kill();
   fx.boxlike.kill("SIGKILL");
+  // After everything this suite started has stopped, not beside a bare `srv.kill()` (SKEIN-1123).
+  stopThenRemove([fx.root], { record: (name, left) => t.check(name, left, []) });
   // `drop_dest` writes to /tmp/skein-drop-<batch> — the box's /tmp, which on this machine is this
   // machine's. Take away exactly what this run made, named from the path the server returned.
   for (const dir of dropped) if (dir.startsWith("/tmp/skein-drop-")) fs.rmSync(dir, { recursive: true, force: true });
-  fs.rmSync(fx.root, { recursive: true, force: true });
 }
 
 t.done();

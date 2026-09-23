@@ -41,6 +41,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 const API_TOKEN = "c".repeat(64);
 
@@ -77,7 +78,7 @@ fs.chmodSync(sbx, 0o755);
 
 const door = await openDoor();
 const port = door.port;
-const { srv } = await startServer({
+await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -220,8 +221,9 @@ try {
   // A suite that could not run is a failure, not a silence: `t.done()` exits 0 on an empty ledger.
   t.check("the close-code suite could run at all", String((e && e.message) || e), "it ran");
 } finally {
-  srv.kill();
-  fs.rmSync(fx, { recursive: true, force: true });
+  // Not `srv.kill(); rmSync` — the kill does not wait and the server's supervisor is not its child,
+  // so that rm raced a tree still being written (SKEIN-1116, SKEIN-1123).
+  stopThenRemove([fx], { record: (name, left) => t.check(name, left, []) });
 }
 
 t.done();

@@ -39,6 +39,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 
 // Ten, because that is `REV_ASKED_PARALLEL` — the width one pressed stack read opens, and the row of
@@ -130,7 +131,7 @@ const { check, results, report } = ledger({ whole: true });
 const fx = await makeFixture();
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -522,8 +523,7 @@ await check("no page errors along the way", () => {
 const failed = report({ log });
 
 await browser.close();
-srv.kill();
 fx.github.close();
-if (!failed.length) fs.rmSync(fx.root, { recursive: true, force: true });
-else console.log(`fixture kept for inspection: ${fx.root}`);
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 });
+if (failed.length) console.log(`fixture kept for inspection: ${fx.root}`);
+process.exit(failed.length || leftRunning.length ? 1 : 0);

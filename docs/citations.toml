@@ -40,7 +40,7 @@ external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.m
 external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:14 — correct as written; not a commit skein's history will ever carry."
 
 [citations."89cf36b"]
-external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:127 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
+external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:128 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
 
 [citations."0018cff"]
 commit = "0018cffcca5bf5539fce422dd97ec1f7c7e204ed"
