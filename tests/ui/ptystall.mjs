@@ -72,6 +72,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
 import { startServer } from "./harness/server.mjs";
+import { fixtureScopes, quiesce, running } from "./harness/leaks.mjs";
 
 const API_TOKEN = "d".repeat(64);
 
@@ -107,18 +108,15 @@ fs.chmodSync(sbx, 0o755);
 
 const door = await openDoor();
 const port = door.port;
-const { srv } = await startServer({
-  door,
-  token: API_TOKEN,
-  env: {
-    SKEIN_HOME: home,
-    SKEIN_FLEET_ROOT: path.join(fx, "fleet"),
-    SKEIN_REGISTRY: path.join(fx, "sandboxes.json"),
-    SKEIN_LS_CMD: `${sbx} ls --json`,
-    SKEIN_LAUNCH_CMD: LAUNCH_CMD,
-    PATH: `${bin}:${process.env.PATH}`,
-  },
-});
+const serverEnv = {
+  SKEIN_HOME: home,
+  SKEIN_FLEET_ROOT: path.join(fx, "fleet"),
+  SKEIN_REGISTRY: path.join(fx, "sandboxes.json"),
+  SKEIN_LS_CMD: `${sbx} ls --json`,
+  SKEIN_LAUNCH_CMD: LAUNCH_CMD,
+  PATH: `${bin}:${process.env.PATH}`,
+};
+await startServer({ door, token: API_TOKEN, env: serverEnv });
 
 /** One masked client frame. The mask is zeroes, as in `closecode.mjs`: RFC 6455 §5.3 requires the
  * bit and a key, and a key of zeroes is a key — it leaves the payload readable in a trace. */
@@ -260,8 +258,19 @@ try {
 } finally {
   if (stallSock) stallSock.close();
   if (slowSock) slowSock.close();
-  srv.kill();
-  fs.rmSync(fx, { recursive: true, force: true });
+  // Everything that writes into the fixture stops BEFORE the fixture is removed (SKEIN-1116).
+  // `srv.kill()` only sent a signal and did not wait, and the server's supervisor — a detached tmux
+  // at `<fleet>/.skein/private/server.tmux` running the doorway loop and its python — is not the
+  // server's child at all, so it outlived the kill (planting `srv.kill()` back here leaves all
+  // three running). A recursive rm raced processes still writing into the tree, and a directory
+  // that gained an entry between its readdir and its rmdir threw ENOTEMPTY after every check had
+  // passed. `quiesce` kills the server (startServer registered that) and then everything naming
+  // this fixture, SIGKILLing what outlives a SIGTERM, and returns when done.
+  quiesce();
+  const left = running(fixtureScopes(serverEnv)).map(p => p.args);
+  t.check("nothing this suite started is still running when its fixture is removed", left, []);
+  // Kept when something is still running: it is the evidence, and removing it would race again.
+  if (!left.length) fs.rmSync(fx, { recursive: true, force: true });
 }
 
 t.done();
