@@ -522,10 +522,19 @@ do_check() {
   #    `rustcut.py` is the only one: it is the shared Rust reader that four gates import rather
   #    than a gate of its own (`grep -l '^import rustcut' tools/*.py` names them), and it has no
   #    verdict to give — its self-check runs inside every one of those four instead.
+  #
+  #    A tool that a workflow step runs DIRECTLY counts as run too — read out of ci.yml's own
+  #    `- run: python3 tools/<name>.py` lines, not listed. `coverage-check.py` is the one today: it
+  #    runs in the `coverage` job rather than from this list, for the reason given on that job
+  #    (an instrumented build is a second full compile, and this list is every local run's bill).
+  #    That is still a gate something runs, which is all this clause asks; delete its step and the
+  #    tool is reported here like any other orphan (SKEIN-508).
   local not_a_gate="rustcut"
   local on_disk in_list
   on_disk=$(ls tools/*.py 2>/dev/null | sed 's|^tools/||; s|\.py$||' | grep -vxF "$not_a_gate" | sort)
-  in_list=$(gates | grep -o 'tools/[a-z0-9-]*\.py' | sed 's|^tools/||; s|\.py$||' | sort -u)
+  in_list=$({ gates | grep -o 'tools/[a-z0-9-]*\.py'
+              sed -n 's|^ *- run: python3 \(tools/[a-z0-9-]*\.py\).*$|\1|p' "$ci"; } \
+            | sed 's|^tools/||; s|\.py$||' | sort -u)
   if [ "$on_disk" != "$in_list" ]; then
     echo "gates.sh --check: the gates in tools/ and the gates in this list are not the same set." >&2
     diff <(printf '%s\n' "$in_list") <(printf '%s\n' "$on_disk") \
