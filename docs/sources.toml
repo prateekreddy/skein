@@ -86,7 +86,13 @@ reaches = {}
 # behind a one-hour `util::Gate` so an open cockpit does not turn it into a poll, it does not run
 # from a test unless `$SKEIN_PROXY_PROBE_URL` pins it at a listener, and `/rate_limit` is chosen
 # over `/user` because it spends nothing from the anonymous rate-limit pool every box shares.
-reaches = { doorway = 1, fleet = 1, github = 2, health = 2, repos = 1, "warden/serve" = 2, warden_client = 3 }
+#
+# **`github` is 1 from 2** (SKEIN-1093). The second count was `have_curl`, which spawned
+# `curl --version` only to learn whether curl was installed. Under load its five-second deadline
+# ran out on an installed curl, so it answers from PATH now and spawns nothing. That is a probe
+# leaving, not a reach being hidden: the one left is `call_reading_headers`, the client every
+# GitHub request goes through.
+reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/serve" = 2, warden_client = 3 }
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and
