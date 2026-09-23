@@ -160,8 +160,14 @@ try {
     await until(() => !tmux("has-session", "-t", "=skein-update") && !alive(runPid)), true);
   value("the session whose name only begins the same is still running",
     [tmux("has-session", "-t", "=skein-update-decoy"), alive(decoyPid)], [true, true]);
+  // Waited for, not read once (SKEIN-1128): `update::cancel` stops the session FIRST and writes the
+  // marker after (`stop_detached`, then `finish_cancelled`), so the moment the check above sees the
+  // session gone is exactly the moment the marker may not exist yet. Waiting for the file to appear
+  // still fails a cancel that never writes it, or writes anything but `cancelled`.
+  const marker = path.join(fx.home, "update.done");
+  await until(() => fs.existsSync(marker));
   value("the run is recorded as cancelled, not as a failure",
-    fs.existsSync(path.join(fx.home, "update.done")) && fs.readFileSync(path.join(fx.home, "update.done"), "utf8"),
+    fs.existsSync(marker) && fs.readFileSync(marker, "utf8"),
     "cancelled");
   const ended = await until(async () => await shown("#upd-ended"));
   value("the pane says it was cancelled and what to do next", [ended, await textOf("#upd-ended")],
