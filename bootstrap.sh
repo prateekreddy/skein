@@ -28,7 +28,7 @@
 
 set -eu
 
-# Every path skein uses inside the sandbox, derived exactly as `src/fleet.rs` derives them —
+# Every path skein uses inside the sandbox, derived exactly as `src/fleet/paths.rs` derives them —
 # `fleet_root()` and the `.skein` beneath it. A test asserts these agree with the Rust rather than
 # trusting this comment.
 fleet_root="${SKEIN_FLEET_ROOT:-/boxes}"
@@ -42,8 +42,8 @@ stamp="$skein_dir/server.door"
 # `--tmpfs` over it in every ordinary box's namespace. The cockpit's tmux socket is in it rather
 # than beside it because a read-only bind refuses nothing to a socket, so anywhere else in `.skein`
 # is a socket every box may `connect()` to, and a tmux client is a place the server runs a command
-# (SKEIN-529). `fleet::server_tmux_sock` in `src/fleet.rs` is the other spelling; they move together
-# or the fleet gets two tmux servers contending for the cockpit's port.
+# (SKEIN-529). `fleet::server_tmux_sock` in `src/fleet/install.rs` is the other spelling; they move
+# together or the fleet gets two tmux servers contending for the cockpit's port.
 private="$skein_dir/private"
 sock="$private/server.tmux"
 port="${SKEIN_SERVER_PORT:-7878}"
@@ -168,8 +168,8 @@ if [ -n "$need" ]; then
   say "the image is missing$need — installing, once, into the sandbox"
   # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run twice.
   # Outlast it rather than failing the install on a race — the same wait, and for the same measured
-  # reason, as `SUBSTRATE_SCRIPT` in src/fleet.rs. A `fuser` the image does not have simply fails,
-  # which ends the wait, which is the right answer when there is no lock to see.
+  # reason, as `SUBSTRATE_SCRIPT` in src/fleet/substrate.rs. A `fuser` the image does not have
+  # simply fails, which ends the wait, which is the right answer when there is no lock to see.
   waited=0
   while [ "$waited" -lt 120 ] \
     && sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
@@ -934,11 +934,13 @@ is_ours() {
 
 # **Never this run's own ancestors, however much they look like ours.** The Update button runs this
 # file in a tmux pane, and when the cockpit's own server was what started that tmux server, the tmux
-# server inherited the listening socket (skein-server's descriptor 3 is not close-on-exec) and has
-# the server's environment — so it holds :$port and names this install's volume, which is both
-# halves of "provably ours" above. Stopping it ends this run mid-sentence, with no exit status
-# recorded, which is the stranded pane of SKEIN-1032 by another road. Measured on tmux 3.x: a tmux
-# server started by a process holding a listener holds it too; the pane under it does not.
+# server inherited the listening socket — skein-server's descriptor 3 was not close-on-exec before
+# SKEIN-1035; a tmux server an older build started still holds it for as long as it lives, including
+# under the very first Update from that build to a fixed one — and has the server's environment, so
+# it holds :$port and names this install's volume, which is both halves of "provably ours" above.
+# Stopping it ends this run mid-sentence, with no exit status recorded, which is the stranded pane
+# of SKEIN-1032 by another road. Measured on tmux 3.x: a tmux server started by a process holding a
+# listener holds it too; the pane under it does not.
 #
 # `$$` rather than the subshell's own pid because that is what POSIX sh has; the subshell the Update
 # button runs this in is a child of `$$`, holds nothing, and so needs no entry of its own.
