@@ -1377,7 +1377,7 @@ cited_by = ["docs/architecture.md", "docs/parity.md"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
 
-["src/review/cache.rs:1177"]
+["src/review/cache.rs:1346"]
 line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
 cited_by = ["docs/citations.toml"]
 
@@ -1811,15 +1811,15 @@ cited_by = ["docs/review-ux.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:730"]
+["tests/common/mod.rs:737"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:768"]
+["tests/common/mod.rs:775"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:782"]
+["tests/common/mod.rs:789"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 
