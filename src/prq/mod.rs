@@ -110,7 +110,7 @@ mod tests {
             // The one legitimate `gh`: seeding the *account token* into sbx so boxes can push. That
             // path is about `gh`'s own login by definition, it is opt-in, and it is not this — the
             // queue's dependency was the hidden one.
-            if path.ends_with("repos.rs") {
+            if path.ends_with("repos/add.rs") {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap_or_default();

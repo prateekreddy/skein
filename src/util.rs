@@ -401,7 +401,7 @@ fn run_bounded(
         // and not the command — where before it reached both. That was written down here as a
         // trade accepted, on the grounds that a Ctrl-C leaves "a healthy short-lived command in
         // front of the person who typed it". It does not describe the call this path exists for:
-        // `ai.rs:1037` reaches `output_with_timeout_fed` for a model that runs for tens of
+        // `src/ai/call.rs:261` reaches `output_with_timeout_fed` for a model that runs for tens of
         // seconds. So the group is registered below and a `SIGINT` handler forwards to it, and a
         // Ctrl-C now ends this group as surely as a deadline does — see [`forward_interrupts`],
         // which also says what is still left running by a `SIGKILL` at skein.
