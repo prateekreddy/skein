@@ -12,7 +12,7 @@
 //     age of what it is showing — `read_at` and `fresh`, and the sentence `usageRead` builds from
 //     the pair of them.
 //
-// `/api/usage` is served by `api_usage` in `src/bin/skein-server.rs` — grep the router for the
+// `/api/usage` is served by `api_usage` in `src/bin/skein-server/health.rs` — grep the router for the
 // path; the line number this gave had drifted eight lines. A route the cockpit asks for and the
 // server does not serve is caught by `tests/ui/usage.mjs` against a running server, and by
 // `cockpit_routes::the_cockpit_never_asks_for_a_route_this_server_does_not_serve` in the source.

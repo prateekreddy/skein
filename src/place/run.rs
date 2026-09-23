@@ -296,9 +296,9 @@ impl Place {
 /// **Shared by the four sites SKEIN-916 names**, and shared rather than copied because what it
 /// encodes is one rule: a deadline has to end the WORK, and the only way to see the difference is
 /// to watch something that is NOT the direct child. `src/takeover.rs`, `src/github.rs` and the
-/// `write` above all reach it from their own test modules. `src/bin/skein-server.rs` carries its
-/// own copy and says so, because a `#[cfg(test)]` item in this crate's library is not visible from
-/// a binary target — that is a process boundary, not an oversight.
+/// `write` above all reach it from their own test modules. `src/bin/skein-server/upload.rs` carries
+/// its own copy (`mod upload_deadline`) and says so, because a `#[cfg(test)]` item in this crate's
+/// library is not visible from a binary target — that is a process boundary, not an oversight.
 ///
 /// **Why a fractional `sleep` and not a marker file.** The token IS the argument, so it is in the
 /// grandchild's `/proc/<pid>/cmdline` and nowhere else on the machine: "is it still running" is

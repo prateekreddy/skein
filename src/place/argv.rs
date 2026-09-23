@@ -95,17 +95,18 @@ impl Place {
     ///
     /// | what spawns the crossing | how it was started | the PATH it resolves `nsenter` from |
     /// |---|---|---|
-    /// | `skein-server` | `fleet::start_server`, a `Place` at fleet scope (`src/fleet/server.rs:433`) | `FLEET_PATH` — the only pinned one |
+    /// | `skein-server` | `fleet::start_server`, a `Place` at fleet scope (`src/fleet/server.rs`) | `FLEET_PATH` — the only pinned one |
     /// | `skein-server` | sbx's `commands.startup` runs `start-door.sh` at every sandbox start (`src/fleet-kit-spec.yaml:31`) | sbx's, for a uid-1000 `bash -c`. Not skein's to set |
-    /// | `skein-server` | `bootstrap.sh:618` runs `start-door.sh`, having done `export PATH="$CARGO_HOME/bin:$PATH"` (`bootstrap.sh:348`) | a toolchain directory, then whatever ran `bootstrap.sh` |
-    /// | `skein-server` | a person putting the door back: `sbx exec -i <sandbox> /boxes/.skein/start-door.sh` (`bootstrap.sh:478`) | that person's shell's |
+    /// | `skein-server` | `bootstrap.sh` runs `start-door.sh` (the bare `"$skein_dir/start-door.sh"` after the kit's `spec.yaml` is written), having done `export PATH="$CARGO_HOME/bin:$PATH"` (its "the toolchain" section) | a toolchain directory, then whatever ran `bootstrap.sh` |
+    /// | `skein-server` | a person putting the door back: `sbx exec -i <sandbox> /boxes/.skein/start-door.sh` (the comment above `start-door.sh`'s heredoc in `bootstrap.sh`) | that person's shell's |
     /// | `skein-server` | a developer: `./target/release/skein-server` (`README.md:162`) | that developer's shell's |
-    /// | `skein` | **a person typing `skein attach <box>`** — `run_attach` spawns the crossing argv with `Command::new(program)` (`src/bin/skein.rs:1346`) | that person's shell's, `~/.local/bin` at its head |
-    /// | `skein` | spawned by `skein-server`, which copies its whole environment in (`src/bin/skein-server.rs:4411-4413`) | the server's, whatever the rows above left it |
+    /// | `skein` | **a person typing `skein attach <box>`** — `run_attach` spawns the crossing argv with `Command::new(program)` (`src/bin/skein.rs`) | that person's shell's, `~/.local/bin` at its head |
+    /// | `skein` | spawned by `skein-server`, which copies its whole environment in (`terminal_session` in `src/bin/skein-server/terminal.rs`) | the server's, whatever the rows above left it |
     ///
-    /// `start-door.sh` pins nothing (`bootstrap.sh:556`), and the `SIGUSR1` reload re-execs across
-    /// the same environment (`src/server-doorway.py:185-196`), so whatever PATH a fleet's first
-    /// `start-door.sh` had is frozen into every `skein-server` after it, upgrades included.
+    /// `start-door.sh` pins nothing (its heredoc in `bootstrap.sh`, `<<'DOOR'`, never sets `PATH`),
+    /// and the `SIGUSR1` reload re-execs across the same environment (`reexec`,
+    /// `src/server-doorway.py`), so whatever PATH a fleet's first `start-door.sh` had is frozen
+    /// into every `skein-server` after it, upgrades included.
     ///
     /// **The last two rows are why this is pinned rather than written down as safe.** `skein
     /// attach` is a documented command a person runs in their own terminal; there is no wording of
@@ -539,9 +540,9 @@ impl Place {
     ///
     /// **The remaining callers are in `src/bin/`, and a checkpoint cannot help them.** `shell_argv`,
     /// `attach_argv_as`, `initial_attach_argv_as` and `box_write_argv` hand their argv across the
-    /// crate boundary to `skein.rs` and `skein-server.rs`, which spawn it — and both of those
-    /// `main`s open with [`seam::real_crossings`] (`src/bin/skein.rs:22`,
-    /// `src/bin/skein-server.rs:111`), so the refusal is declared away before the argv is built.
+    /// crate boundary to `src/bin/skein.rs` and `src/bin/skein-server/`, which spawn it — and both
+    /// of those `main`s open with [`seam::real_crossings`] (`main` in `src/bin/skein.rs` and in
+    /// `src/bin/skein-server/main.rs`), so the refusal is declared away before the argv is built.
     /// That is not an oversight to close: a spawned skein cannot be handed a closure, which is the
     /// whole reason the exemption exists.
     ///

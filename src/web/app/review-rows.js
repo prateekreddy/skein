@@ -193,7 +193,7 @@ function revFlowChip(pr) {
 // Does skein read this repo's pull requests on its own? The owner's per-repo consent — off until
 // they switch it on, the "read ahead" chip beside the queue (`revReadChip`), `repos::Repo::read_prs`
 // on disk — carried on the workflows payload the pane already fetches for every repo in the queue
-// (`loadWorkflows`, `skein-server.rs:1572`).
+// (`loadWorkflows`, answered by `api_workflows` in `src/bin/skein-server/workflows.rs`).
 //
 // Not answered yet, or the fetch failed, reads as OFF. The server refuses either way
 // (`review::unasked_scope`), so asking would buy nothing but a refusal painted on every row; and
