@@ -170,8 +170,8 @@ fn pr_json(number: u64, title: &str, extra: &str) -> String {
 /// One test at a time, and one scratch home per test, both released when `Env` drops.
 ///
 /// Cargo runs the tests in one integration binary as parallel threads of a **single process**, and
-/// `$SKEIN_HOME` / `$SKEIN_GH_BIN` are process-global. Without the lock every test races: one
-/// test's stubbed `gh` answers another's queries, and the symptom is empty queues and a missing
+/// `$SKEIN_HOME` / `$SKEIN_GITHUB_API` are process-global. Without the lock every test races: one
+/// test's stub GitHub answers another's queries, and the symptom is empty queues and a missing
 /// blind spot rather than an error.
 /// **Field order is the drop order**, and it is load-bearing twice over. The scratch directory has
 /// to go before the lock does: with the lock released first, the next test takes it, makes its own
