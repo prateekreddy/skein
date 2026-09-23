@@ -11,16 +11,34 @@
 // checks rather than assumes; a module that grew a dependency fails the build instead of producing a
 // bundle whose behaviour differs from the modules the tests import.
 //
-//   node cockpit/build.mjs           rewrite the bundle
-//   node cockpit/build.mjs --check   fail if the committed bundle is stale
+// **It also assembles the page, `src/web/index.html`, from `src/web/app/`** — the same arrangement
+// for the same reason. The page was one 12,213-line file, over the ~3,000-line ceiling SKEIN-524
+// sets, and it is still one classic script when it reaches the browser: `src/web/app/shell.html` is
+// the page with each `<!-- include NAME -->` line standing where the file NAME's bytes go, and that
+// shell IS the manifest — the order the parts run in is the order it names them, with nothing
+// else to keep in step. The assembly is plain text substitution and nothing more, so the page the
+// browser receives is byte for byte the page the parts spell, and every gate that reads
+// `src/web/index.html` reads what is served (SKEIN-1104).
+//
+// Both outputs are committed, because the binary embeds them (`src/cockpit.rs`) and `cargo build`
+// does not run node. So edit `src/web/app/`, never `src/web/index.html`, then run this.
+//
+//   node cockpit/build.mjs           rewrite the bundle and the page
+//   node cockpit/build.mjs --check   fail if either committed output is not what its sources build
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = join(here, "src");
 const bundle = join(here, "..", "src", "web", "vendor", "cockpit.js");
+const app = join(here, "..", "src", "web", "app");
+const pageOut = join(here, "..", "src", "web", "index.html");
+
+// A whole line and nothing else, so a directive cannot hide inside a longer comment and a real
+// comment cannot be mistaken for one unless it is spelled exactly like this.
+const INCLUDE = /^<!-- include ([A-Za-z0-9._-]+) -->$/;
 
 export function build() {
   // Sorted, so the same directory always produces the same bytes and a rebuild is not a diff.
@@ -51,19 +69,73 @@ export function build() {
   return parts.join("\n") + "\n";
 }
 
-const built = build();
-if (process.argv.includes("--check")) {
-  const committed = readFileSync(bundle, "utf8");
-  if (committed !== built) {
-    console.error(
-      "cockpit/src has changed and src/web/vendor/cockpit.js has not.\n" +
-        "The binary embeds the bundle and `cargo build` does not run node, so a stale one is a\n" +
-        "cockpit quietly running last week's code. Fix: node cockpit/build.mjs"
-    );
-    process.exit(1);
+// The page: `shell.html` with every include line replaced by the named part, verbatim.
+//
+// Every file in `src/web/app/` must be named by the shell exactly once, and every part must end in a
+// newline. A part nothing includes is code that is not served while it reads as if it were; a part
+// included twice runs twice; and a part without its final newline would glue its last line to the
+// shell's next one. Each of those is refused rather than built.
+export function buildPage() {
+  const shell = readFileSync(join(app, "shell.html"), "utf8");
+  const parts = readdirSync(app).filter(f => f !== "shell.html").sort();
+  const used = new Set();
+  const out = [];
+  const lines = shell.split("\n");
+  // The shell ends in a newline, so the last element is empty and is not a line of its own.
+  if (lines.pop() !== "") throw new Error("src/web/app/shell.html does not end in a newline");
+  for (const line of lines) {
+    const m = INCLUDE.exec(line);
+    if (!m) {
+      out.push(line + "\n");
+      continue;
+    }
+    const name = m[1];
+    if (!parts.includes(name)) throw new Error(`shell.html includes ${name}, and src/web/app has no such file`);
+    if (used.has(name)) throw new Error(`shell.html includes ${name} twice`);
+    used.add(name);
+    const text = readFileSync(join(app, name), "utf8");
+    if (!text.endsWith("\n")) throw new Error(`src/web/app/${name} does not end in a newline`);
+    out.push(text);
   }
-  console.log("the cockpit bundle is what cockpit/src builds");
-} else {
-  writeFileSync(bundle, built);
-  console.log(`wrote ${bundle}`);
+  const unused = parts.filter(p => !used.has(p));
+  if (unused.length) {
+    throw new Error(`src/web/app/ has ${unused.join(", ")}, which shell.html never includes, so it is not served`);
+  }
+  return out.join("");
+}
+
+// Run as a command only. Importing this file for `buildPage` must not rewrite the committed page as
+// a side effect of the import, which is what an unguarded top level did to it once already.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) main();
+
+function main() {
+  const outputs = [
+    [bundle, build(), "cockpit/src has changed and src/web/vendor/cockpit.js has not"],
+    [
+      pageOut,
+      buildPage(),
+      "src/web/index.html is not what src/web/app/ builds — a part was edited without a rebuild, or\n" +
+        "the page was edited by hand. Edit src/web/app/, never src/web/index.html",
+    ],
+  ];
+  if (process.argv.includes("--check")) {
+    let stale = false;
+    for (const [path, built, why] of outputs) {
+      if (readFileSync(path, "utf8") !== built) {
+        console.error(
+          `${why}.\n` +
+            "The binary embeds it and `cargo build` does not run node, so a stale one is a\n" +
+            "cockpit quietly running last week's code. Fix: node cockpit/build.mjs"
+        );
+        stale = true;
+      }
+    }
+    if (stale) process.exit(1);
+    console.log("the cockpit bundle is what cockpit/src builds, and the page is what src/web/app builds");
+  } else {
+    for (const [path, built] of outputs) {
+      writeFileSync(path, built);
+      console.log(`wrote ${path}`);
+    }
+  }
 }

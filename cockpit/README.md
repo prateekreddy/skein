@@ -18,11 +18,18 @@ should either take it as an argument or stay in the page.
 **One bundle, self-contained.** The cockpit is served from a binary to a browser on the same machine
 and has no business fetching from a CDN — the same reason `xterm` and `marked` are vendored.
 
+**It also assembles the page.** `src/web/index.html` is built from `src/web/app/`: `shell.html` is
+the markup, with one `<!-- include NAME -->` line where each part goes — the stylesheet, and the
+page's one classic script cut at its section headers into files under ~3,000 lines each. The shell
+is the manifest: the order it names the parts is the order they run in. Assembly is text
+substitution and nothing else, so the served page is byte for byte what the parts spell. Edit the
+parts; `src/web/index.html` is an output.
+
 ```
-node cockpit/build.mjs      # rewrite src/web/vendor/cockpit.js from cockpit/src
+node cockpit/build.mjs      # rewrite src/web/vendor/cockpit.js and src/web/index.html
 node --test cockpit/test    # the pure functions, in node
 ```
 
-The built bundle is committed, because the binary embeds it and `cargo build` does not run node. A
-Rust test rebuilds it in memory and compares, so a stale bundle is a failing test rather than a
-cockpit that quietly runs last week's code.
+The built bundle and page are committed, because the binary embeds them and `cargo build` does not
+run node. A Rust test rebuilds both in memory and compares, so a stale one is a failing test rather
+than a cockpit that quietly runs last week's code.

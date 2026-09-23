@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>skein</title>
+<link rel="stylesheet" href="/vendor/xterm.css" />
+<style>
+<!-- include cockpit.css -->
+</style>
+</head>
+<body>
+  <div id="app">
+    <div id="left">
+      <div class="wrap">
+        <header>
+          <div class="word"><b>skein</b></div>
+          <div class="counts" id="counts"></div>
+          <div class="fsearch" id="fsearch">
+            <button type="button" class="fsbtn" id="fsbtn" onclick="toggleFilter()" title="Filter boxes (/)" aria-label="Filter boxes" aria-expanded="false"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></button>
+            <input id="ffilter" class="ffilter" type="search" placeholder="name, branch, repo…" aria-label="Filter boxes" title="Filter by name, branch, repo or headline. Type `foreign:` to see sandboxes skein did not create — hidden by default, since they are on the list only because `sbx ls` reports every sandbox on the machine. Type `managed:` to narrow to the boxes skein started itself — those are never hidden, only grouped." autocomplete="off" spellcheck="false" tabindex="-1" />
+          </div>
+          <div class="right">
+            <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
+            <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
+            <span class="hdiv"></span>
+            <button type="button" class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository" aria-label="Add a repository"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>repo</button>
+            <button type="button" class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast" aria-label="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></button>
+            <button type="button" class="kbtn ghost" id="revbtn" onclick="openReview()" title="Review a repo's pull requests" aria-label="Review a repo's pull requests"><svg class="ic" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg></button>
+            <button type="button" class="kbtn ghost" id="gitqbtn" onclick="openGitq()" title="Repo write access" aria-label="Repo write access"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
+            <button type="button" class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes" aria-label="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></button>
+            <button type="button" class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you" aria-label="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
+            <button type="button" class="kbtn ghost" id="voice" title="Say out loud when a box needs you" aria-label="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></button>
+            <button type="button" class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos" aria-label="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+            <button type="button" class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)" aria-label="Command palette (⌘K)">⌘K</button>
+            <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
+          </div>
+        </header>
+        <div class="gauges" id="gauges" onclick="showLoad()" style="cursor:pointer" title="the fleet sandbox's own VM — refreshed every 30s. Click for the same broken down by box (cpu, memory, disk)"></div>
+        <div id="fleet"></div>
+        <footer class="keyhints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
+      </div>
+    </div>
+    <div id="gutter" title="drag to resize"></div>
+    <div id="dock">
+      <div class="tabs" id="tabs"></div>
+      <div class="dockbar" id="dockbar"></div>
+      <div class="dockbody">
+        <div class="termarea" id="termarea"></div>
+        <div class="diffpane" id="diffpane"></div>
+        <div class="sesspane" id="sesspane"></div>
+        <div class="filespane" id="filespane"></div>
+        <div class="txpane" id="txpane"></div>
+        <div class="revpane" id="revpane"></div>
+      </div>
+      <div class="keybar" id="keybar">
+        <button data-k="esc">esc</button>
+        <button data-k="tab">tab</button>
+        <button data-k="ctrl">ctrl</button>
+        <button data-k="c-c">^C</button>
+        <button data-k="up">↑</button>
+        <button data-k="down">↓</button>
+        <button data-k="left">←</button>
+        <button data-k="right">→</button>
+        <button data-k="-">-</button>
+        <button data-k="/">/</button>
+        <button data-k="|">|</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="pal" aria-hidden="true">
+    <div class="pal-card">
+      <input id="pal-input" placeholder="Search boxes and actions…" autocomplete="off" spellcheck="false" />
+      <div class="pal-list" id="pal-list"></div>
+      <div class="pal-foot"><span><kbd>↵</kbd> run</span><span><kbd>↑↓</kbd> move</span><span><kbd>esc</kbd> close</span></div>
+    </div>
+  </div>
+
+  <div id="mbx" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Mailbox</b><span class="sub">cross-box hand-offs · the shared brain</span><span class="x" onclick="closeMailbox()">✕</span></div>
+      <div class="mbx-list" id="mbx-list"></div>
+      <div class="mbx-compose">
+        <div class="row1">
+          <select id="mbx-to"></select>
+          <select id="mbx-kind">
+            <option value="note">note</option>
+            <option value="handoff">handoff</option>
+            <option value="review-request">review-request</option>
+          </select>
+        </div>
+        <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)"></textarea>
+        <div class="row2"><span class="hint" id="mbx-hint"></span><button class="primary" id="mbx-send">Send</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="subq" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><span class="x" onclick="closeSubq()">✕</span></div>
+      <div class="mbx-list" id="subq-list"></div>
+    </div>
+  </div>
+
+  <!-- The fleet's login, repaired from the page: a one-shot interactive login on a server PTY.
+       The coaching line is here as well as on the socket, because the socket's copy scrolls. -->
+  <div id="loginterm" aria-hidden="true">
+    <div class="mbx-card lt-card">
+      <div class="mbx-head"><b>Log in</b><span class="sub" id="lt-coach">type /login inside, then /exit when done</span><span class="x" onclick="closeLoginTerminal()">✕</span></div>
+      <div id="lt-host"></div>
+    </div>
+  </div>
+
+  <div id="gitq" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Repo write access</b><span class="sub">boxes asking to write a repo that is not their own</span><span class="x" onclick="closeGitq()">✕</span></div>
+      <div class="mbx-list" id="gitq-list"></div>
+    </div>
+  </div>
+
+  <div id="newbox" aria-hidden="true">
+    <div class="nb-card">
+      <div class="nb-head"><b>Launch a box</b><span class="x" onclick="closeNewBox()">✕</span></div>
+      <label class="nb-lbl" id="nb-repo-lbl" style="display:none">repo</label>
+      <select id="nb-repo" style="display:none"></select>
+      <label class="nb-lbl">branch name</label>
+      <input id="nb-branch" placeholder="my-feature" autocomplete="off" spellcheck="false" />
+      <label class="nb-lbl">agent</label>
+      <select id="nb-agent"></select>
+      <label class="nb-lbl">work tracking</label>
+      <select id="nb-sync"></select>
+      <label class="nb-lbl">commit as <span style="opacity:.6">(optional — blank uses the default)</span></label>
+      <div class="path-row">
+        <input id="nb-gitname" placeholder="name" autocomplete="off" spellcheck="false" />
+        <input id="nb-gitemail" placeholder="email" autocomplete="off" spellcheck="false" />
+      </div>
+      <label class="nb-lbl">github access</label>
+      <select id="nb-gitscope"></select>
+      <div class="nb-foot"><span class="hint">creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
+    </div>
+  </div>
+
+  <!-- One box's own settings. Everything here is an EXCEPTION to a default; each field says what it
+       would be if left blank, so the panel reads as "what does this box do" rather than a form. -->
+  <div id="boxset" aria-hidden="true">
+    <div class="nb-card" style="max-width:560px">
+      <div class="nb-head"><b id="bs-title">Box settings</b><span class="x" onclick="closeBoxSettings()">✕</span></div>
+      <label class="nb-lbl">work tracking</label>
+      <select id="bs-sync"></select>
+      <label class="nb-lbl">commit as</label>
+      <div class="path-row">
+        <input id="bs-gitname" autocomplete="off" spellcheck="false" />
+        <input id="bs-gitemail" autocomplete="off" spellcheck="false" />
+      </div>
+      <label class="nb-lbl">disk allowance</label>
+      <input id="bs-disk" autocomplete="off" spellcheck="false" />
+      <div class="ar-derived" id="bs-note"></div>
+      <label class="nb-lbl">github access</label>
+      <select id="bs-gitscope"></select>
+      <div class="ar-derived" id="bs-gitscope-note"></div>
+      <label class="nb-lbl">workshop box</label>
+      <select id="bs-priv">
+        <option value="0">No — sees only its own files</option>
+        <option value="1">Yes — sees every box, acts at fleet scope, holds the fleet agent token</option>
+      </select>
+      <div class="ar-derived" id="bs-priv-note"></div>
+      <!-- One-shot actions, not settings: each spends a real round trip, so they are buttons you
+           press rather than fields that save. They live here because the dock had grown a row of
+           them that were mostly irrelevant to the box you were looking at. -->
+      <label class="nb-lbl">actions</label>
+      <div class="bs-actions">
+        <button type="button" class="kbtn ghost" id="bs-wire"></button>
+        <button type="button" class="kbtn ghost" id="bs-take"></button>
+      </div>
+      <div class="nb-foot"><span class="hint">settings apply immediately — the box keeps running</span><button class="primary" id="bs-go">Save</button></div>
+    </div>
+  </div>
+
+  <div id="addrepo" aria-hidden="true">
+    <div class="nb-card" style="max-width:520px">
+      <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
+      <label class="nb-lbl">git URL</label>
+      <div class="path-row">
+        <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   git@github.com:org/repo.git" autocomplete="off" spellcheck="false" />
+        <span class="pathnote" id="ar-src-note"></span>
+      </div>
+      <div class="ar-derived" id="ar-derived"></div>
+      <label class="nb-lbl">default agent</label>
+      <select id="ar-agent"></select>
+      <!-- **No shared-data folder field here** (SKEIN-535). It took an absolute host path and sent
+           it as `store`, and the server scaffolded a whole `.claude` tree wherever it pointed —
+           anywhere on the host, for anyone holding the API token that is printed into every cockpit
+           URL. `POST /api/repos` refuses `store` outright now, so a field offering one would be the
+           SKEIN-588/806 shape again: the dialog offering what the server refuses. Adopting a store
+           you already have is CLI-only and deliberate — `skein add <git-url> --store <path>` runs as
+           the person, on the host, rather than as a request carrying a token that is on screen.
+
+           **The command is printed rather than merely not offered.** Deleting the field removed the
+           only place a person could learn that adopting a store is still possible at all, and a
+           capability that is withdrawn in silence reads as a capability that is gone. The 400 says
+           the same sentence, but only to somebody who has already found a way to send `store`;
+           this says it to the person who was about to look for the field. -->
+      <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds one under <code>~/.skein/repos</code>. To adopt a store you already have, from the host:</div>
+      <pre class="ar-cmd">skein add &lt;git-url&gt; --store &lt;path&gt;</pre>
+
+      <!-- Everything else a repo carries, set here rather than found later on its card. Each of
+           these is applied *after* the clone lands, because they all key on the repo's id and there
+           is no id until the server has picked one. A failure to apply one is reported and never
+           unmakes the repo — the clone is the expensive part and it succeeded. -->
+      <div class="ar-sec">this repository</div>
+      <label class="nb-lbl">write token <span class="ar-opt">optional</span></label>
+      <input id="ar-token" type="password" placeholder="github_pat_… — leave blank if a GitHub App covers it" autocomplete="off" />
+      <div class="ar-derived" id="ar-tokhint">a fine-grained PAT covering only this repo, which its boxes push with. On the App path you need none.</div>
+      <label class="nb-lbl">work tracking</label>
+      <select id="ar-conn"></select>
+      <label class="nb-lbl">Plane project <span class="ar-opt">optional</span></label>
+      <input id="ar-plane" placeholder="https://plane…/projects/&lt;uuid&gt;/issues" autocomplete="off" spellcheck="false" />
+      <label class="nb-lbl">review queue</label>
+      <!-- Off first and selected: a watched repo costs a GitHub request per refresh, and eight of
+           them exhausted the owner's rate limit and emptied the one queue actually being read
+           (SKEIN-270). The cost rides in the option's own words rather than a sentence under the
+           control — this dialog is already as tall as the viewport, and a line added here pushes
+           its own Add button off screen. -->
+      <select id="ar-review"><option value="false" selected>Off — skein never asks GitHub about it</option><option value="true">On — a GitHub request per refresh, per repo</option></select>
+
+      <div class="ar-msg" id="ar-msg" style="display:none"></div>
+      <div class="nb-foot"><span class="hint">clones the remote into <code>~/.skein/repos</code></span><button class="primary" id="ar-go">Add →</button></div>
+    </div>
+  </div>
+
+  <!-- Settings: a two-pane preferences surface. Sections are navigated, not scrolled past, so each
+       pane stays short enough to read; the Shortcuts pane is generated from one table (KEYMAP) so the
+       keys documented here cannot drift from the keys the app binds. -->
+  <div id="settings" aria-hidden="true">
+    <div class="set-shell" tabindex="-1" role="dialog" aria-modal="true" aria-label="Settings">
+      <nav class="set-nav">
+        <div class="set-brand">skein<span>settings</span></div>
+        <button type="button" class="set-navi on" data-pane="repos"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repositories<span class="pill" id="set-repon"></span></button>
+        <button type="button" class="set-navi" data-pane="github"><svg class="ic" viewBox="0 0 24 24"><path d="M9 19c-4 1.5-4-2.5-6-3m12 5v-3.9a3.4 3.4 0 0 0-1-2.6c3-.3 6-1.5 6-6.5a5 5 0 0 0-1.4-3.5 4.7 4.7 0 0 0-.1-3.5s-1.4-.4-4.5 1.7a12 12 0 0 0-6 0C4.4 1.6 3 2 3 2a4.7 4.7 0 0 0-.1 3.5A5 5 0 0 0 1.5 9c0 5 3 6.2 6 6.5a3.4 3.4 0 0 0-1 2.6V22"/></svg>GitHub &amp; keys</button>
+        <button type="button" class="set-navi" data-pane="fleet"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="11" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="14" x2="6.01" y2="14"/></svg>Fleet</button>
+        <!-- Beside Fleet rather than down with Update and Diagnostics. Those two report on skein's
+             own health; this reports on the fleet, and "how big is it" and "what is it costing" are
+             the same question asked twice. -->
+        <button type="button" class="set-navi" data-pane="usage"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="18" y1="20" x2="18" y2="10"/></svg>Usage</button>
+        <button type="button" class="set-navi" data-pane="boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Boxes</button>
+        <button type="button" class="set-navi" data-pane="tracking"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3h6v3H9z"/><path d="M8 12l2.5 2.5L16 9"/></svg>Work tracking<span class="pill" id="set-syncn"></span></button>
+        <button type="button" class="set-navi" data-pane="update"><svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21,3 21,9 15,9"/></svg>Update<span class="pill" id="set-updn"></span></button>
+        <button type="button" class="set-navi" data-pane="diag"><svg class="ic" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Diagnostics<span class="pill" id="set-diagn"></span></button>
+        <button type="button" class="set-navi" data-pane="keys"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>Shortcuts</button>
+        <div class="set-navfoot"><code>~/.skein/config.json</code></div>
+      </nav>
+      <div class="set-main">
+        <header class="set-top">
+          <span class="set-h"><b id="set-htitle">Repositories</b><span id="set-hsub"></span></span>
+          <button type="button" class="set-x" onclick="closeSettings()" title="Close (esc)">✕</button>
+        </header>
+        <div class="set-scroll">
+          <section class="set-pane on" data-pane="repos">
+            <div id="set-repos" class="set-repos"></div>
+            <button type="button" class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add a repository</button>
+          </section>
+          <!-- Every credential a box could hold is configured here, as THREE ANSWERS TO ONE QUESTION —
+               how do boxes get GitHub credentials — and the pane's shape is that claim. An App, a
+               per-repo PAT, or this account's `gh` token: peers, each picked on purpose.
+               They were not peers. The first two had to be configured; the third was simply *on*, so
+               the broadest credential of the three was the one nobody chose, and on a keyring-backed
+               `gh` it announced itself by unlocking the user's keyring at every start before they had
+               said which path they wanted. It is now off until chosen, like the other two.
+               The App is still first and still recommended — one key, every token derived from it —
+               and the other two fold away, because a flat list of token fields reads as a list of
+               tokens to go and obtain. What is folded is not hidden, and it says what it is for.
+               Requests from boxes are deliberately *not* here — those arrive unbidden and want one
+               click, so they stay on the padlock (Repo write access). Setup is a place you go; an
+               approval is a thing that finds you. -->
+          <section class="set-pane" data-pane="github">
+            <div class="set-state" id="set-gitstate">checking…</div>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">On, a box can push only to <b>its own repo</b> and asks in the cockpit for any other. Needs an App or a repository token below; until one exists this changes nothing. <details><summary>what every box holds without it</summary>every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a token scoped to <b>its own repository</b> for writing and a read-only one for the rest, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Until an App or a repository token exists this changes nothing at all, because scoping with no way to issue a token would take pushing away from every box at once rather than narrowing anything. Takes effect at a box's next start; one box can opt out in its own settings.</details></span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
+
+            <div class="set-head">Set it up once<span class="sub">a GitHub App is the whole of it — every token a box gets is minted from this one key</span></div>
+            <div class="set-desc">One credential, and skein derives the rest: a write token scoped to a box's own repository, and a read-only one covering everything you installed the App on — both minted per box, valid an hour, renewed while the box runs. Nothing below is needed on this path.</div>
+            <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
+            <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
+            <div id="gq-probe-rows"></div>
+
+            <details class="set-alt" id="set-gitalt">
+              <summary>Without a GitHub App<span class="sub">store tokens yourself — this is the path that asks for more than one</span></summary>
+              <div class="set-altbody">
+                <div class="set-desc">For a fleet where installing an App is not an option. It costs what the App path avoids: <b>one token per repository</b> you want boxes to push to, kept in step by hand as they expire. Reads then come from public access, or from a second token below.</div>
+                <div class="set-head">Repository tokens<span class="sub">one fine-grained PAT per repo, and one repo per PAT</span></div>
+                <div class="set-desc">Each covers <b>exactly one</b> repository, and that is the whole security argument: a token covering three would hand all three to whichever box receives it, because the helper that chooses between them runs inside the box as the agent's own uid. A helper routes; it cannot contain. A repo's token can also be set on its own card under <b>Repositories</b>.</div>
+                <div id="set-gitcreds" class="set-creds"></div>
+                <div class="set-credadd">
+                  <input id="set-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
+                  <input id="set-c-token" type="password" placeholder="github_pat_… (write to that one repo)" autocomplete="off" />
+                  <div class="set-credrow"><button type="button" class="kbtn primary" onclick="addGitCred()">Store token</button><span class="desc">storing the same repo again replaces its token — that is how you rotate one</span></div>
+                </div>
+                <label class="set-field"><span class="set-title">Read-only token <span class="set-opt">optional</span></span><span class="desc">A fine-grained PAT with <b>contents: read</b>, for reading <b>private</b> repos across the fleet — without running an App, or for repos you would rather not install one on. Not needed on the App path — reads already come from the installation — and not needed for public repos, which boxes reach anonymously. Write-only here: skein stores it 0600 and never serves it back. <b>It is also what the host uses for the review queue</b>, in preference to <code>gh</code>'s own login: set it and <code>gh</code> never needs <code>gh auth login</code>, and never opens your login keyring. <details><summary>why this is separate from the write tokens</summary>a read credential may safely be broad, because the worst a box can do with it is read a repo you own. That is exactly the property a write token must not have, so the two are stored and placed separately rather than one credential doing both jobs at different strengths.</details></span><div class="path-row"><input id="set-readpat" type="password" placeholder="github_pat_… (read)" autocomplete="off" /><button type="button" class="kbtn" onclick="saveReadPat()">Store</button><button type="button" class="kbtn ghost" onclick="clearReadPat()">Forget</button></div></label>
+              </div>
+            </details>
+
+            <details class="set-alt" id="set-ghalt">
+              <summary>Use this account's <code>gh</code> token<span class="sub">the third path — no App, no per-repo tokens, and no narrowing either</span></summary>
+              <div class="set-altbody">
+                <div class="set-desc">The one credential that is <b>not</b> scoped to anything: whatever <code>gh auth token</code> returned, which is <b>your whole GitHub account</b>, sitting in the sandbox-wide secret and reachable by every box. Prefer it only for a fleet whose repos you would hand any box wholesale.<br><br><b>skein can no longer put one there.</b> Seeding was two host-side halves — <code>gh auth token</code> read the host's login, <code>sbx secret set -g</code> wrote the host's keyring — and the machine-global store is deleted, because two fleets on one host shared one token through it. This switch now only says whether boxes are <i>meant</i> to push as the account; whether one actually can depends on a secret seeded before that deletion.</div>
+                <label class="set-row"><span class="set-txt"><span class="set-title">Boxes push as this account</span><span class="desc">says the credential behind an unscoped box is the account-wide <code>github</code> secret, so it can fetch, push and open PRs anywhere it reaches. A scoped box drops it at startup and uses its own token instead. skein does not write that secret any more, so this claims nothing on a fleet that was never seeded — the checklist reports it as unseeded rather than as a credential you have</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
+              </div>
+            </details>
+
+            <div class="set-head">Host SSH key<span class="sub">not a box credential — the host agent sbx forwards</span></div>
+            <div class="set-desc" id="set-sshagent">skein uses your host's SSH agent — run <code>ssh-add</code> on the host. Scoped boxes push over HTTPS instead.</div>
+          </section>
+          <section class="set-pane" data-pane="fleet">
+            <!-- What the numbers below are a share of. They are meaningless without it: 26g is
+                 prudent on one machine and most of the RAM on another, and nothing else on this
+                 screen says which machine this is. -->
+            <div class="set-head">This machine<span class="sub" id="set-hostcap">measuring…</span></div>
+            <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Fleet disk</span><span class="desc">one filesystem shared by every box, <b>20G</b> by default. Memory stopped summing when boxes started sharing a sandbox; disk did not. Fixed when the sandbox is created, so changing it rebuilds.</span><input id="set-fleetdisk" placeholder="20g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Docker shares the fleet disk</span><span class="desc">On, dockerd keeps its data beside the boxes and <b>Fleet disk</b> sizes everything — one number instead of two. Takes effect at the next sandbox. <details><summary>what you give up</summary>a sandbox carries <b>two</b> disks — the one boxes live on, and a second at <code>/var/lib/docker</code> — each fixed at creation with its own ceiling, so the split has to be guessed in advance and guessing wrong means another rebuild. On, dockerd keeps its data beside the boxes and <b>Fleet disk</b> sizes everything: one generous number instead of two exact ones. Off, the two disks are also two firewalls — a runaway <code>docker build</code> fills Docker's and cannot touch the boxes. Takes effect at dockerd's next start, in practice the next sandbox; images and volumes on the old disk stay there untouched and simply stop being visible.</details></span></span><input type="checkbox" id="set-onedisk" class="switch"></label>
+            <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">The hard ceiling for one box (cgroup <code>memory.max</code>). Blank means 70% of fleet memory. <details><summary>what it protects against</summary>the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</details></span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">Where the kernel throttles a box instead of killing it (cgroup <code>memory.high</code>). Blank means 55%. <details><summary>why it must sit below the cap</summary>where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</details></span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
+            <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
+            <!-- Saving every box's work is its own act, and it is the one thing on this pane that
+                 DOES something (SKEIN-680). It sits above the refusal below deliberately: that
+                 note ends by telling somebody what `sbx rm -f` costs and offering this, so the
+                 offer has to be within reach of the sentence that makes it.
+
+                 The owner was twice offered the other shape — skein archives every box first and
+                 then hands over the destroy line — and declined it twice: "provide option to save
+                 work and ask user to save it by clicking the button and when clicked show where it
+                 is saved and so on." So nothing here copies anything until this is pressed, and
+                 the description names what pressing it will do before it does it.
+
+                 The result is per box and stays on screen: a partial save is the case that
+                 matters, and the box that failed is the one whose work is about to be lost. -->
+            <div class="set-field" id="set-save-boxes"><span class="set-title">Save every box's work to the host</span><span class="desc">Copies each box's <b>whole tree</b> out of the sandbox and onto the host — every checkout, everything uncommitted and unpushed, <code>/tmp</code> included — into a file that outlives the sandbox. <b>Nothing is stopped and nothing is destroyed</b>: boxes keep running and agents keep working through it. It takes about as much disk as the boxes are big, and minutes rather than seconds. When it finishes, this says where each box went and the line that puts it back.</span><button id="set-save-go" class="btn" type="button">Save every box's work</button><div class="set-note" id="set-save-out"></div></div>
+            <!-- There is no rebuild button, and there is no condition under which one appears.
+                 It used to be two rows chosen by the deployment `/api/health` reported, with the
+                 destructive one hidden until the report said it was safe. That was the right shape
+                 while a host-driven skein existed to press it.
+
+                 It is not a flag any more: `docs/architecture.md` §7.5 puts fleet lifecycle outside
+                 the fleet PERMANENTLY, because create and destroy both kill skein — create because
+                 the sandbox does not exist yet, destroy because it will not afterwards — and a
+                 resize is a destroy followed by a create. Skein runs inside that sandbox, so the
+                 destroy would succeed, take the machine this page is served from with it, and the
+                 last thing rendered would be `resize failed:` at the moment the irreversible half
+                 worked (SKEIN-467). A button that only fails when pressed would still be a trap,
+                 and this press is not recoverable.
+
+                 So the row below is the whole of what this pane offers, and it is static: the
+                 line to run on the host comes from `/api/fleet/plan`, rendered verbatim so what
+                 somebody is told to type and what skein would have run cannot drift. -->
+            <div class="set-field" id="set-resize-infleet"><span class="set-title">Applying them is a job for the host</span><span class="desc">These numbers are fixed when the sandbox is created, so applying them means destroying it and making it again — and skein is inside it. That is not something this page can offer you: the destroy would work, and there would be nothing left to bring the boxes back. Fleet lifecycle lives on the host.</span><p class="set-note" id="set-resize-line"></p></div>
+            <!-- Why skein cannot say whether the sandbox is there. `/api/fleet/plan` has carried
+                 this sentence all along and nothing rendered it, so the pane said nothing at all
+                 about a fleet it cannot see — which reads as a screen that simply did not load.
+                 Rendered only when there is one: on a host that answers, there is nothing to
+                 say. -->
+            <p class="set-note" id="set-fleetwhy" style="display:none"></p>
+          </section>
+          <!-- What the fleet costs (SKEIN-835). Rendered from `/api/usage` rather than written
+               here, for the same reason the Update pane is: every figure in it is a reading, and a
+               reading has an age. The markup is `usageHtml` in cockpit/src/usage.mjs, which is a
+               pure function of the payload and the clock — so the judgements this pane makes (which
+               caveat shows, whether a reading is called stale, what an empty list says) are tested
+               in node instead of being spelled out inside an innerHTML nobody can import. -->
+          <section class="set-pane" data-pane="usage"><div id="set-usage" class="set-usage"></div></section>
+          <section class="set-pane" data-pane="boxes">
+            <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
+            <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">The share of the fleet's one filesystem a box may take. Blank means unlimited. <details><summary>how it is measured and enforced</summary>how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</details></span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Offer old build output after</span><span class="desc">Days a compiler artefact may go untouched before a full disk offers it back. <b>0 turns the offer off.</b> <details><summary>why this one is a judgement and not a measurement</summary>Everything else skein offers to delete it can <b>prove</b> dead — a directory under <code>.skein</code> that belongs to neither skein nor any live box, or a build directory whose own dependency files name a source tree that is no longer on disk. Cargo's superseded generations cannot be proved dead at all: rebuild a crate under a changed feature set and the old <code>.rlib</code> stays beside the new one for ever, and nothing in either file says which is which — cargo's own fingerprint register does not either, because it keeps one per generation and removes none. The only handle left is how long since something read or wrote the file, and skein admits it <b>here and nowhere else</b> because of what being wrong costs: the artefact is regenerated from source nobody touched, so the price is a <b>slower rebuild and never lost work</b>. It is yours to set because its correctness is local — a fleet whose lanes run for a week is wrong to call five days dead. skein never deletes any of it; it names what it would remove, with the age and the size, and prints the command.</details></span><input id="set-staledays" type="number" min="0" step="1" placeholder="5" autocomplete="off" /></label>
+            <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as. Blank reads it from the repo's host clone, which is usually already right — a box has a private HOME, so it inherits no gitconfig of its own.</span><input id="set-gitname" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="desc">Rationed Haiku calls on your Claude subscription (no API key) summarise boxes with no journal, and hold back a "proceed?" that is really a decision. <details><summary>why it is off by default</summary>spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</details></span></span><input type="checkbox" id="set-ai" class="switch"></label>
+            <p class="set-note" id="set-ainote"></p>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Read pull requests</span><span class="desc">Summarise each PR in the review queue, so most of it can be read from the row. <details><summary>why this one is on</summary>It spends on the opposite terms to AI enrichment above, which is why the defaults differ. Enrichment runs unasked over a board that already tells you what you need. A summary is only ever produced for a PR <b>already in your queue</b>, at most <b>once per head commit</b>, and cached — and without it the queue cannot do the job it exists for, which is to spare you reading thirty pull requests a day yourself. Turning it off is a supported state, not a broken one: every PR then reads <i>not summarised</i> and keeps your full attention. skein only ever lowers a PR's depth by having actually read it.</details></span></span><input type="checkbox" id="set-prai" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Review model</span><span class="desc">Which model reads and reviews pull requests — summaries, questions, drafted comments and the actual review. Empty keeps each call's own default: summaries on the cheap model, everything that writes on the stronger one. <code>$SKEIN_REVIEW_MODEL</code> overrides.</span></span><input type="text" id="set-review-model" list="set-review-models" placeholder="skein's default" spellcheck="false"><datalist id="set-review-models"></datalist></label>
+          </section>
+          <section class="set-pane" data-pane="tracking">
+            <p class="set-note" id="set-syncnote"></p>
+            <div id="set-conns" class="set-conns"></div>
+            <button type="button" class="kbtn" id="set-conn-add"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add a connection</button>
+          </section>
+          <!-- Update: the one pane that is about skein rather than about the fleet. Everything is
+               rendered from `/api/update` rather than written here, because all of it — three
+               revisions, a verdict, the agent CLIs, and a build log that arrives a line at a time —
+               is an answer that changes while you are looking at it. -->
+          <section class="set-pane" data-pane="update"><div id="set-update" class="set-diag"></div></section>
+          <section class="set-pane" data-pane="diag"><div id="set-diag" class="set-diag"></div></section>
+          <section class="set-pane" data-pane="keys"><div id="set-keys" class="set-keys"></div></section>
+        </div>
+        <footer class="set-foot">
+          <span class="set-dirty" id="set-dirty">unsaved changes</span>
+          <span class="hint" id="set-hint"><code>$SKEIN_*</code> env vars override these</span>
+          <button type="button" class="kbtn" onclick="closeSettings()">Cancel</button>
+          <button type="button" class="primary" id="set-go">Save</button>
+        </footer>
+      </div>
+    </div>
+  </div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/marked.js"></script>
+<!-- The cockpit's pure functions: GROUPS, groupOf, NEEDS_YOU, owedIn, labelOf, matchesFilter,
+     boardRows, wantsForeign, withoutForeignTerm, fmtGB, fmtGb, and — for the review pane's top
+     level — authored, threads, authorBlock, moveOf, moveWhy, approvalsLine, andList. Built from
+     `cockpit/src` and tested in node — see cockpit/README.md. They live there and not here because
+     a function that cannot be imported cannot be tested except by reimplementing it, and a
+     reimplementation agrees with the code right up until one of them changes. -->
+<script src="/vendor/cockpit.js"></script>
+<script>
+<!-- include board.js -->
+<!-- include review.js -->
+<!-- include review-rows.js -->
+<!-- include review-keys.js -->
+<!-- include box.js -->
+<!-- include voice.js -->
+<!-- include panels.js -->
+<!-- include settings.js -->
+<!-- include boot.js -->
+</script>
+</body>
+</html>

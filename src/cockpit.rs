@@ -31,6 +31,9 @@
 
 /// The cockpit page. One owner, so the server and the tests below cannot disagree about which
 /// bytes are the page.
+///
+/// Assembled from `src/web/app/` by `cockpit/build.mjs` and committed, like [`BUNDLE`]: edit the
+/// parts, not this file, and `the_cockpit_bundle_is_not_stale` fails when the two disagree.
 pub const INDEX: &str = include_str!("web/index.html");
 
 /// The new board (§11), served at `/v2` beside the old one.
@@ -891,7 +894,8 @@ mod tests {
         );
     }
 
-    /// The committed bundle is what `cockpit/src` builds.
+    /// The committed bundle is what `cockpit/src` builds, and the committed page is what
+    /// `src/web/app` builds.
     ///
     /// `cargo build` does not run node, so the bundle is committed — and a committed build artefact
     /// is one that can go stale silently, which here means a cockpit quietly running last week's
