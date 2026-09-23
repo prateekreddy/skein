@@ -1300,13 +1300,8 @@ pub(crate) fn claude_in_turn(
         // the way every reading happened before §11. So a missing placement falls through to the
         // two below rather than being reported, and a box that ANSWERS is the answer, whatever it
         // said: `from_sandbox` already tells "the CLI refused" apart from "the script never ran".
-        // `expose()` at the two sandbox seams below, and nowhere else on this path. `fleet`'s two
-        // model-call entry points still take `Option<&str>`, so the credential becomes bare
-        // characters for the length of the call and is a `Secret` on either side of it. That is the
-        // last `&str` left on the GitHub credential's path out of this crate (SKEIN-519); it stays
-        // until `src/fleet.rs` takes a `&Secret`, which is where the argument then has to be made
-        // about `github_export` writing the same value to a file.
-        let exposed = github.map(|t| t.expose());
+        // The credential crosses into `fleet` still a `Secret` (SKEIN-536). Its bytes are exposed
+        // in one place, `fleet::github_export`, at the moment they are written into the box.
         if let Machine::Box(name) = machine {
             match crate::fleet::model_call_in_box(
                 name,
@@ -1315,7 +1310,7 @@ pub(crate) fn claude_in_turn(
                 prompt,
                 timeout,
                 turn.args(),
-                exposed,
+                github,
             ) {
                 Ok(ran) => return from_sandbox(ran, &bin, turn).map(Answered::as_addressed),
                 Err(why) => {

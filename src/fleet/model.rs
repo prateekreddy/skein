@@ -110,7 +110,7 @@ pub fn model_call_in_box(
     prompt: &str,
     timeout: Duration,
     turn: Vec<&str>,
-    github: Option<&str>,
+    github: Option<&crate::secret::Secret>,
 ) -> Result<Ran, String> {
     let place = crate::place::place_of(name)
         .ok_or_else(|| format!("{name} has no placement record, so skein cannot reach it"))?;
@@ -254,6 +254,20 @@ pub fn model_scratch_export() -> String {
 mod tests {
     use super::*;
     use crate::fleet::testkit::*;
+
+    /// **The GitHub credential reaches the box call as a `Secret`, not as characters** (SKEIN-536).
+    ///
+    /// A pin on the type, checked by the compiler: this coercion stops compiling the moment the
+    /// parameter goes back to `Option<&str>`, which is what `ai.rs` would need to `.expose()` the
+    /// credential again before the call rather than inside `github_export`.
+    #[test]
+    fn a_model_call_in_a_box_takes_the_github_credential_as_a_secret() {
+        type Github<'a> = Option<&'a crate::secret::Secret>;
+        type BoxCall =
+            fn(&str, &str, &str, &str, Duration, Vec<&str>, Github) -> Result<Ran, String>;
+        let _: BoxCall = model_call_in_box;
+        let _: fn(&Place, Option<&crate::secret::Secret>) -> GithubCredential = github_export;
+    }
 
     /// **Both destinations take the credential away again**, and neither may quietly stop.
     ///
