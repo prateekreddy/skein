@@ -99,7 +99,7 @@ fn refuse_unknown_args(args: &[String]) -> Option<String> {
 /// Everything the server does, on the runtime [`main`] builds once the socket's variables are gone.
 async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // `main` has already withheld the socket from children and cleared its variables.
-    // **This is a real skein, whatever `$SKEIN_TEST` says.** `tests/server.rs` and
+    // **This is a real skein, whatever `$SKEIN_TEST` says.** `tests/server/` and
     // `tests/ui/harness/server.mjs` both spawn this binary, and it inherits the marker from cargo's
     // `[env]` table — correctly, because `config::skein_home` and `util::fleet_root` still have to
     // refuse it an unpinned path, which is the whole of SKEIN-685. What it cannot do is install a
