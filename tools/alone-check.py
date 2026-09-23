@@ -55,6 +55,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -168,15 +169,63 @@ def passing_together(binary):
     return passed or None
 
 
-def guard_line(output):
+# libtest's header for a panic: `thread '<name>' (<tid>) panicked at <file:line:col>:`, the message
+# on the lines after it. The thread id in brackets is newer than some toolchains, so it is optional.
+PANIC = re.compile(r"^thread '(?P<thread>[^']*)'(?: \(\d+\))? panicked at (?P<at>.*)$")
+GUARD = "$SKEIN_HOME is unset in a test process"
+GUARDED = "it resolved `config::skein_home` with nothing pinned (SKEIN-626)"
+
+
+def panics(output):
+    """[(thread, header, message lines)] for every panic in `output`, in the order printed."""
+    lines = output.splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        m = PANIC.match(line.strip())
+        if not m:
+            continue
+        body = []
+        for after in lines[i + 1 :]:
+            if not after.strip() or PANIC.match(after.strip()) or after.startswith("note: run with"):
+                break
+            body.append(after.strip())
+        found.append((m.group("thread"), line.strip(), body))
+    return found
+
+
+def guard_line(output, name=None):
     """The one line worth quoting from a failure, if it names a reason we recognise.
 
-    The guard's own sentence is checked against the WHOLE output rather than line by line: libtest
-    prints `panicked at src/config.rs:49:5:` and the message on the lines after it, so a per-line
-    scan finds the location first and reports a file:line where the reason was already available.
+    **The test's own panic first — the one on the thread libtest named after the test** (SKEIN-1122).
+    A thread the test spawned inherits libtest's output capture, so its panic is printed with the
+    test's output whenever the test fails, for whatever reason. This used to return the SKEIN-626
+    sentence whenever it appeared ANYWHERE in the output, and that is how SKEIN-658 was misread: a
+    500ms timing assertion failed under load, a detached version-check thread had hit the guard
+    beside it, and the guard was quoted as the reason. The guard is still the reason when it is on
+    the test's own thread, and a guard on another thread is mentioned, as the second thing it is.
+
+    The message is read from the lines AFTER the header: libtest prints `panicked at
+    src/config.rs:49:5:` and the message below it, so a per-line scan for the sentence would find
+    the location first and report a file:line where the reason was already available.
+
+    With no panic on the test's own thread — a test that exited, or a name that is not a thread's —
+    it falls back to what it did before: the guard if it is anywhere, else the first panic line.
     """
-    if "$SKEIN_HOME is unset in a test process" in output:
-        return "it resolved `config::skein_home` with nothing pinned (SKEIN-626)"
+    found = panics(output)
+    own = [p for p in found if name is not None and p[0] == name]
+    if own:
+        _, header, body = own[0]
+        if any(GUARD in line for line in body):
+            return GUARDED
+        said = header + (" " + body[0] if body else "")
+        if any(GUARD in line for thread, _, lines in found if thread != name for line in lines):
+            said += (
+                "\n             (a thread it spawned hit the SKEIN-626 guard as well — printed "
+                "with this test's output, and not why it failed)"
+            )
+        return said
+    if GUARD in output:
+        return GUARDED
     for line in output.splitlines():
         if "panicked at" in line:
             return line.strip()
@@ -187,12 +236,33 @@ SELF_CHECK = r"""#!/usr/bin/env python3
 # A stand-in for the lib test binary, in libtest's own `--list` / `--exact` spelling.
 import os, sys
 if "--list" in sys.argv:
-    for n in ("hermetic", "leaky", "marked"):
+    for n in ("hermetic", "leaky", "marked", "guarded"):
         print("%s: test" % n)
     sys.exit(0)
 which = sys.argv[sys.argv.index("--exact") + 1]
 if which == "leaky":
     sys.exit(1)                    # the planted alone-failure the gate must name
+if which == "guarded":
+    # A test failing its OWN assertion while a thread it spawned hit the SKEIN-626 guard, in
+    # libtest's spelling (rustc 1.98): the helper's panic is printed first, with this test's output.
+    print('''running 1 test
+test guarded ... FAILED
+
+failures:
+
+---- guarded stdout ----
+
+thread '<unnamed>' (1572613) panicked at src/config.rs:49:5:
+$SKEIN_HOME is unset in a test process — pin it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'guarded' (1572612) panicked at src/fleet/substrate.rs:600:9:
+the update offer took 612ms to answer
+
+failures:
+    guarded
+''')
+    sys.exit(101)
 if which == "marked":
     # Fails unless the gate set the marker AND took the ambient pins away. The runner exports both
     # before calling, so a gate that merely inherited its environment fails here.
@@ -210,8 +280,9 @@ def self_check(loud=False):
     A gate nobody has watched fail is the thing this repository keeps getting bitten by — the
     browser tier skipped on every green CI run in its history, and the leaked-process check answers
     `0` while nine-hour-old servers run, because its pattern does not match their names. So the
-    machinery here is exercised against a binary whose answers are known: three tests, one that
-    fails alone and one that fails unless the environment was scrubbed.
+    machinery here is exercised against a binary whose answers are known: four tests, one that
+    fails alone, one that fails unless the environment was scrubbed, and one that fails its own
+    assertion beside a helper thread's guard panic (SKEIN-1122).
     """
     tmp = tempfile.mkdtemp(prefix="alone-check-self-")
     try:
@@ -231,7 +302,7 @@ def self_check(loud=False):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-        assert listed == ["hermetic", "leaky", "marked"], (
+        assert listed == ["hermetic", "leaky", "marked", "guarded"], (
             "alone-check self-check: --list was misread (%r)" % (listed,)
         )
         assert "leaky" in failed, (
@@ -246,10 +317,24 @@ def self_check(loud=False):
         assert "hermetic" not in failed, (
             "alone-check self-check: a passing test was reported as failing"
         )
+        # The planted SKEIN-658 shape: the reason is the test's own assertion, whatever a thread
+        # it spawned said first (SKEIN-1122).
+        said = guard_line(failed.get("guarded", ""), "guarded")
+        assert said.startswith("thread 'guarded'") and "took 612ms" in said, (
+            "alone-check self-check: a test that failed its own assertion was reported as %r — "
+            "a helper thread's panic was quoted as the reason, which is how SKEIN-658 was misread"
+            % said
+        )
+        # And the guard is still the reason when it is on the test's own thread.
+        own = "thread 'guarded' (7) panicked at src/config.rs:49:5:\n%s — pin it\n" % GUARD
+        assert guard_line(own, "guarded") == GUARDED, (
+            "alone-check self-check: the SKEIN-626 guard on the test's own thread was not named"
+        )
         if loud:
             print(
-                "self-check: 3 fabricated tests, the planted alone-failure `leaky` was named, "
-                "`marked` proves %s is set and %s are stripped from every child"
+                "self-check: 4 fabricated tests, the planted alone-failure `leaky` was named, "
+                "`marked` proves %s is set and %s are stripped from every child, and `guarded` "
+                "is reported with its own assertion rather than a helper thread's guard"
                 % (MARKER, "/".join(SCRUBBED))
             )
     finally:
@@ -287,7 +372,7 @@ def main():
         (leaning if together and name in together else broken).append(name)
 
     for name in leaning:
-        why = guard_line(failed[name])
+        why = guard_line(failed[name], name)
         print("alone-check: `%s` passes in the suite and fails alone" % name)
         if why:
             print("             %s" % why)
