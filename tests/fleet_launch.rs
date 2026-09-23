@@ -1576,6 +1576,222 @@ fn a_crossing_into_a_box_carries_only_its_allow_list() {
     );
 }
 
+/// `session_script`'s `KEY='value'` assignment for `key`, replaced by `KEY=value`.
+///
+/// Asserted to have found it, so a renamed or re-quoted assignment fails here, by name, rather than
+/// leaving the launch on whatever the fixture's config chose and every assertion after it about a
+/// box of the other kind.
+fn with_launch_env(script: &str, key: &str, value: &str) -> String {
+    let at = script
+        .find(&format!("{key}="))
+        .unwrap_or_else(|| panic!("session_script no longer sets {key}: {script}"));
+    let end = at
+        + script[at..]
+            .find(' ')
+            .expect("an assignment followed by more");
+    format!("{}{key}={value}{}", &script[..at], &script[end..])
+}
+
+/// **A crossing into a scoped box carries that box's own `GH_TOKEN` or none, never the fleet's; a
+/// `fleet`-scoped box's crossing still carries the fleet's** (SKEIN-1095).
+///
+/// The launcher replaces `GH_TOKEN` for a scoped box with its own-repo token, or removes it, and
+/// drops `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` for a box with a login of its own. A crossing is
+/// spawned by skein-server, whose environment has the fleet's token; this is that crossing, for
+/// real, into three real boxes started from this process's environment:
+///
+///   * `scoped`: `SKEIN_GIT_SCOPE=repo`, an own-repo token planted where the launcher reads it, and
+///     a Claude login in the box's private home.
+///   * `bare`: scoped, with no own-repo token placed.
+///   * `fleet`: what the fixture's config gives, which is `fleet` (it can issue no write tokens).
+///
+/// What would make each assertion fail:
+///   * the session's `gh`: the launcher no longer swapping the token. It is the baseline the
+///     crossing's `gh` is held to, so without it that assertion proves nothing.
+///   * the crossing's `gh` for `scoped` and `bare`: deleting `as_the_session_holds` from
+///     `Place::enter`, which carries skein-server's `skein-test-fleet-token` in.
+///   * the API keys against the session, and `scoped`'s `anthropic` being `none`: `GH_TOKEN`
+///     alone taken from the session, the API keys left as skein-server's.
+///   * `openai` kept: the API keys unset unconditionally rather than as the session holds them.
+///   * the crossing's `gh` for `fleet`: the decided names unset and never taken back, or
+///     `GH_TOKEN` dropped for every box, which is the change the owner would notice.
+///
+/// Only `skein-test-` values exist in this environment, so the reports carry values.
+#[test]
+fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so it cannot host a box",
+        );
+    }
+    let root = scratch_named("ghscope");
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        .set("GH_TOKEN", "skein-test-fleet-token")
+        .set("ANTHROPIC_API_KEY", "skein-test-proxy-key")
+        .set("OPENAI_API_KEY", "skein-test-proxy-key");
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    let report = "printf 'gh %s\\nanthropic %s\\nopenai %s\\n' \"${GH_TOKEN-none}\" \
+                  \"${ANTHROPIC_API_KEY-none}\" \"${OPENAI_API_KEY-none}\"";
+    let mut seen = Vec::new();
+    for (case, name) in [
+        ("scoped", "ghscope-main"),
+        ("bare", "ghbare-main"),
+        ("fleet", "ghfleet-main"),
+    ] {
+        let mut script = session_script(
+            name,
+            "skein-agent",
+            &format!(
+                "{{ {report}; }} > /tmp/s.tmp && mv /tmp/s.tmp /tmp/session.report; exec sleep 300"
+            ),
+        );
+        assert!(
+            script.contains("SKEIN_GIT_SCOPE='fleet'"),
+            "this fixture was expected to give a box the fleet scope, so `fleet` below would not \
+             be a fleet-scoped box: {script}"
+        );
+        if case != "fleet" {
+            script = with_launch_env(&script, "SKEIN_GIT_SCOPE", "repo");
+            script = with_launch_env(&script, "SKEIN_BOX_REPO", "example/thing");
+        }
+        if case == "scoped" {
+            let tokens = PathBuf::from(box_state(name)).join("git-tokens");
+            fs::create_dir_all(&tokens).unwrap();
+            fs::write(tokens.join("example%2Fthing"), "skein-test-box-token").unwrap();
+            let claude = PathBuf::from(box_root(name)).join("home/.claude");
+            fs::create_dir_all(&claude).unwrap();
+            fs::write(
+                claude.join(".credentials.json"),
+                r#"{"claudeAiOauth":{"accessToken":"skein-test-access","refreshToken":"skein-test-refresh"}}"#,
+            )
+            .unwrap();
+        }
+        let launched = own_sandbox(FLEET)
+            .exec(&script, Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("start the {case} box: {e}"));
+        let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+        let ns_start = sh(&format!(
+            "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
+        ))
+        .parse::<u64>()
+        .expect("the anchor's start time");
+        record_place(
+            name,
+            &PlaceRecord {
+                sandbox: FLEET.into(),
+                ns_pid: anchor,
+                home: sandbox_home.display().to_string(),
+                tree: "/".into(),
+                sock: box_sock(name),
+                generation: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .expect("a boot id")
+                    .trim()
+                    .to_string(),
+                ns_start,
+                ..Default::default()
+            },
+        )
+        .expect("place the box");
+        let crossed = place_of(name)
+            .expect("placed")
+            .exec(report, Duration::from_secs(30));
+        let session_path = PathBuf::from(format!("{}/tmp/session.report", box_root(name)));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !session_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let session = fs::read_to_string(&session_path).unwrap_or_default();
+        let limits =
+            fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+        forget_place(name);
+        let _ = Command::new("tmux")
+            .args(["-S", &box_sock(name), "kill-server"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        anchor_gone(anchor);
+        if limits.starts_with("capped ") {
+            let _ = Command::new("sudo")
+                .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+                .status();
+        }
+        seen.push((case, session, crossed.map_err(|e| e.to_string())));
+    }
+
+    let field = |text: &str, key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key} ")))
+            .unwrap_or("")
+            .to_string()
+    };
+    for (case, session, crossed) in &seen {
+        let crossed = crossed
+            .as_ref()
+            .unwrap_or_else(|e| panic!("the crossing into the {case} box did not run: {e}"));
+        // The GitHub token each kind of box is given, pinned: this is the property itself.
+        let gh = match *case {
+            "scoped" => "skein-test-box-token",
+            "bare" => "none",
+            _ => "skein-test-fleet-token",
+        };
+        assert_eq!(
+            field(session, "gh"),
+            gh,
+            "the {case} box's own session does not hold the GH_TOKEN the launcher gives that kind \
+             of box, so the crossing assertions below have no baseline: {session:?}"
+        );
+        assert_eq!(
+            field(crossed, "gh"),
+            gh,
+            "a crossing into the {case} box carries a GH_TOKEN other than the one its session \
+             holds: skein-test-fleet-token into a scoped box is SKEIN-1095, and none into the \
+             fleet box is that box losing the token it is meant to keep: {crossed:?}"
+        );
+        // The API keys follow the session, whatever it was given. Which boxes have a login is
+        // not this test's to pin: the launcher seeds a login from one box's home into another's,
+        // so the `scoped` box's login can reach the two started after it.
+        for (key, name) in [
+            ("anthropic", "ANTHROPIC_API_KEY"),
+            ("openai", "OPENAI_API_KEY"),
+        ] {
+            assert_eq!(
+                field(crossed, key),
+                field(session, key),
+                "a crossing into the {case} box carries a {name} other than the one its session \
+                 holds: crossing {crossed:?}, session {session:?}"
+            );
+        }
+        // And one of each, pinned, so the comparison above cannot pass with both sides the same
+        // for the wrong reason: dropped where the box has a login, kept where no box has one.
+        if *case == "scoped" {
+            assert_eq!(
+                field(crossed, "anthropic"),
+                "none",
+                "the scoped box has a Claude login, and a crossing into it still carries the \
+                 placeholder ANTHROPIC_API_KEY its session was not given: {crossed:?}"
+            );
+        }
+        assert_eq!(
+            field(crossed, "openai"),
+            "skein-test-proxy-key",
+            "no box here has a Codex login, and a crossing into the {case} box lost the \
+             OPENAI_API_KEY its session was given: {crossed:?}"
+        );
+    }
+}
+
 /// The whole of `start_box`, rather than its pieces called in the right order by hand.
 ///
 /// The test above assembles the launch itself — install, clone, session — and that is precisely why

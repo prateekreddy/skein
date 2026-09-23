@@ -1285,11 +1285,11 @@ cited_by = ["docs/prose-symbols.toml"]
 line = ".filter(|sandbox| !sandbox.is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place.rs:1206"]
+["src/place.rs:1324"]
 line = "gone and so is everything else that was running in it — start them again with: skein \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place.rs:1547"]
+["src/place.rs:1665"]
 line = "let out = bounded_output(&mut command, \"the crossing\", timeout)?;"
 cited_by = ["docs/recovery-survey.md"]
 
