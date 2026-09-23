@@ -87,18 +87,26 @@ pub(super) fn forget_credential_script(file: &str) -> String {
 /// leaves the credential readable at the process umask for as long as the write takes;
 /// [`crate::secret::write`] makes the same point about the nine hand-rolled writers it replaced.
 /// That function cannot be the one used here — it writes to a path on the filesystem *this* process
-/// is standing on, and this write crosses into a sandbox or a box — so it is the rule that is
-/// shared and not the code, spelled in the language the write is actually made in.
+/// is standing on, and this write crosses into a box — so it is the rule that is shared and not the
+/// code, spelled in the language the write is actually made in. (SKEIN-536 asked for this write to
+/// go through `secret::write`; it cannot without moving the file out of the box's namespace, which
+/// is the ISO-2 regression [`box_credential_paths`] describes.)
+///
+/// **Takes the [`crate::secret::Secret`], and is the one place on the model-call path that exposes
+/// it** — at the moment its bytes go on the crossing's stdin, and not before.
 ///
 /// **Best-effort, and silent about it.** A write that fails returns no export line, so the call goes
 /// ahead with a session that cannot reach GitHub — which is what every reading did before this
 /// existed. It must never be the reason a pull request goes unread.
-pub(super) fn github_export(at: &Place, github: Option<&str>) -> GithubCredential {
+pub(super) fn github_export(
+    at: &Place,
+    github: Option<&crate::secret::Secret>,
+) -> GithubCredential {
     let nothing = GithubCredential {
         export: String::new(),
         path: None,
     };
-    let Some(token) = github.filter(|t| !t.trim().is_empty()) else {
+    let Some(token) = github.map(|t| t.expose()).filter(|t| !t.trim().is_empty()) else {
         return nothing;
     };
     let (dir, file) = box_credential_paths(&review_call_id());
