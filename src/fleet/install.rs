@@ -1027,7 +1027,7 @@ mod tests {
         // chmod on a directory we own — an unprivileged process can already do.
         stub(
             "sudo",
-            &sudo_stub(&format!(
+            &non_interactive_sudo_stub(&format!(
                 "case \"$1\" in mkdir) chmod u+w {locked} ;; esac",
                 locked = locked.display(),
             )),
@@ -1077,9 +1077,10 @@ mod tests {
              it ran:\n{ran}"
         );
         assert!(
-            ran.contains(&format!("sudo mkdir -p {}", root.display())),
-            "the fleet root was not created with sudo, so it was made some other way that will not \
-             work at the filesystem root:\nit ran:\n{ran}"
+            ran.contains(&format!("sudo -n mkdir -p {}", root.display())),
+            "the fleet root was not created with `sudo -n`, so it was made some other way that \
+             will not work at the filesystem root, or by a sudo that can wait on a password prompt \
+             nobody sees (SKEIN-1038):\nit ran:\n{ran}"
         );
         assert!(
             root.join(".skein/src").is_dir() && root.join(".skein/toolchain").is_dir(),
@@ -1213,7 +1214,7 @@ mod tests {
                 src = root.join(".skein/src").display(),
             ),
         );
-        stub("sudo", &log, &sudo_stub(""));
+        stub("sudo", &log, &non_interactive_sudo_stub(""));
         // What apt really does, in one line of it: the package arrives and `cc` is on the PATH. The
         // script asks the PATH and not apt, so a stub that recorded and installed nothing would be
         // testing the wrong claim — and would fail, correctly.
@@ -1336,7 +1337,7 @@ mod tests {
                 src = root.join(".skein/src").display(),
             ),
         );
-        stub("sudo", &log, &sudo_stub(""));
+        stub("sudo", &log, &non_interactive_sudo_stub(""));
         stub("apt-get", &log, "exit 0");
 
         let out = run(&root, true);
@@ -1674,7 +1675,7 @@ mod tests {
                 src = root.join(".skein/src").display(),
             ),
         );
-        stub("sudo", &log, &sudo_stub(""));
+        stub("sudo", &log, &non_interactive_sudo_stub(""));
         stub("apt-get", &log, "exit 0");
         for present in ["cc", "curl", "python3", "tmux", "jq"] {
             stub(present, &log, "exit 0");

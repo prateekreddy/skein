@@ -706,6 +706,19 @@ pub(crate) fn sudo_stub(before: &str) -> String {
     format!("{}\n{before}\nexec \"$@\"", sudo_drops_its_own_options!())
 }
 
+/// [`sudo_stub`], but **refusing any call that did not pass `-n`** — the stand-in for a sudo that
+/// would stop and ask for a password (SKEIN-1038). A test running a script that must never wait on
+/// a prompt installs this, so a `sudo` that loses its `-n` fails the test instead of passing on a
+/// machine whose sudo happens not to ask.
+pub(crate) fn non_interactive_sudo_stub(before: &str) -> String {
+    format!(
+        "n=; for a in \"$@\"; do case \"$a\" in -n) n=1 ;; -*) ;; *) break ;; esac; done\n\
+         [ -n \"$n\" ] || {{ echo \"sudo: a password is required (the stand-in refuses a sudo \
+         without -n: $*)\" >&2; exit 1; }}\n{}",
+        sudo_stub(before)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

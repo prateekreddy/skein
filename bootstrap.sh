@@ -160,10 +160,14 @@ export CARGO_NET_RETRY=3
 # all — is made without sudo, and a box is a user namespace where sudo cannot work. `mkdir -p` on an
 # existing directory succeeds, so the second `-w` is what keeps an unwritable-but-present root
 # falling through to sudo rather than being called done.
+#
+# Every sudo in this file is `sudo -n` (SKEIN-1038): the cockpit's Update button runs this file
+# where nobody can type a password, so a sudo that wants one must refuse at once rather than wait
+# at a prompt nobody sees. `set -e` then ends the install on sudo's own "a password is required".
 if [ ! -w "$fleet_root" ] && ! { mkdir -p "$fleet_root" 2>/dev/null && [ -w "$fleet_root" ]; }; then
   say "creating the fleet root $fleet_root, which needs sudo inside the sandbox"
-  sudo mkdir -p "$fleet_root"
-  sudo chown "$(id -u):$(id -g)" "$fleet_root"
+  sudo -n mkdir -p "$fleet_root"
+  sudo -n chown "$(id -u):$(id -g)" "$fleet_root"
   chmod 755 "$fleet_root"
 fi
 
@@ -210,7 +214,7 @@ if [ -n "$need" ]; then
   # simply fails, which ends the wait, which is the right answer when there is no lock to see.
   waited=0
   while [ "$waited" -lt 120 ] \
-    && sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    && sudo -n fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
     sleep 3
     waited=$((waited + 3))
   done
@@ -221,8 +225,8 @@ if [ -n "$need" ]; then
   # And `|| true` on all of it, deliberately: apt's exit status is the wrong judge. What decides is
   # whether the commands are on the PATH afterwards, which is what the check below asks. An install
   # that exits non-zero over an unrelated warning must not end an install that in fact worked.
-  { sudo apt-get update -qq && sudo apt-get install -y -qq $need; } \
-    || { sleep 5; sudo apt-get update -qq && sudo apt-get install -y -qq $need; } \
+  { sudo -n apt-get update -qq && sudo -n apt-get install -y -qq $need; } \
+    || { sleep 5; sudo -n apt-get update -qq && sudo -n apt-get install -y -qq $need; } \
     || true
 fi
 
