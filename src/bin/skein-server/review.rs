@@ -508,7 +508,7 @@ fn shape_response(
 /// of SKEIN-293. The intent travels from the surface rather than being decided here, because
 /// whether a row wants a review of its own is the pane's question and not this route's.
 ///
-/// A redraft is always a forced read — `review::re_read_replacing_the_review` spells that itself,
+/// A redraft is always a forced read — `review::re_read_and_review` spells that itself,
 /// because a cached reading returns from `visit` before anything is drafted and a redraft that
 /// honoured the cache would be a press that does nothing. It is folded into `force` here as well,
 /// for one reason: PRECEDENCE. `held=1` asks this route to read nothing at all, and the marker
@@ -616,7 +616,7 @@ fn read_a_pull_request(
         .ok_or("that PR is not in your queue")?;
     let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
     let summary = if redraft {
-        skein::review::re_read_replacing_the_review(repo, &queue.slug, pr, &identities)
+        skein::review::re_read_and_review(repo, &queue.slug, pr, &identities)
     } else {
         skein::review::summarise(repo, &queue.slug, pr, &identities, force, trigger)
     };
