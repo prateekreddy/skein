@@ -682,6 +682,30 @@ fn refuse_or_say(asked_for_no_skips: bool, where_: &str, why: &str) {
     eprintln!("SKIPPED at {where_}: {why}");
 }
 
+/// The first thing every `sudo` stand-in in this crate's tests does: **drop sudo's OWN options**,
+/// so that what follows reads the command sudo was asked to run and not a flag in front of it.
+///
+/// One definition, because there were six (SKEIN-811). Each stub used to read `$1`/`$@` as if it
+/// began with the command, which is right only for the argv its caller sent on the day it was
+/// written: SKEIN-805 was six tests going red when `-n` was put in front of the launcher's sudo
+/// calls, and four more in `fleet::install` would have done the same the day `bootstrap.sh` did it.
+/// A stub that survives only one spelling of a call makes every future flag look unsafe to add.
+///
+/// A macro rather than a `const` so the `concat!`-built shell functions in `fleet::limits` can
+/// splice it in as well. `while [ $# -gt 0 ]` first, so it is safe under `set -u`.
+macro_rules! sudo_drops_its_own_options {
+    () => {
+        "while [ $# -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; do shift; done;"
+    };
+}
+pub(crate) use sudo_drops_its_own_options;
+
+/// A `sudo` on `$PATH` for a test: drops its own options, runs `before` (a line of shell that may
+/// look at the command in `$1`), then runs the command — what a sudo that grants everything does.
+pub(crate) fn sudo_stub(before: &str) -> String {
+    format!("{}\n{before}\nexec \"$@\"", sudo_drops_its_own_options!())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
