@@ -192,7 +192,7 @@ reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so 
 [exempt."tests/common/mod::put"]
 reason = "not actually its own test binary — tests/common/mod.rs is compiled into ~29 integration binaries via `mod common;`, so the old per-file waiver (before `own_test_binary`, SKEIN-722) was answering a question about a process this file does not have. `put` (tests/common/mod.rs:782) is the sole env-touching write site here; its only callers are `EnvPins::set`/`EnvPins::unset`, reachable only by first calling `env_pins()` (tests/common/mod.rs:730), which is itself in this checker's TOUCH pattern — so every real caller is already being asked for the lock, in the *caller's* binary, where `callers_of`'s same-module radius cannot see it because that caller lives in a different tests/*.rs module entirely"
 
-# `src/bin/skein-server.rs`'s own file-local `EnvPins` (SKEIN-711) is a third copy of the same
+# `src/bin/skein-server/review.rs`'s own file-local `EnvPins` (SKEIN-711) is a third copy of the same
 # shape as `src/testutil.rs::EnvPins` and `tests/common/mod.rs::EnvPins`, for the same reason: this
 # binary cannot reach the library's `#[cfg(test)] mod testutil`, and it is not an integration binary
 # under `tests/` either, so it needed its own. Its `Drop::drop` replaces a
@@ -202,5 +202,5 @@ reason = "not actually its own test binary — tests/common/mod.rs is compiled i
 # local of the test, before ever reaching `env_pins()`/`EnvPins::set`, and a scope drops its locals
 # in reverse declaration order — so the lock outlives every `EnvPins` built under it and this
 # `Drop::drop` always runs while `_env` is still held.
-[exempt."src/bin/skein-server::drop"]
+[exempt."src/bin/skein-server/review::drop"]
 reason = "a third file-local copy of `src/testutil.rs::EnvPins`, for a binary that can reach neither the library's private `testutil` module nor `tests/common/mod.rs` (a different crate target). Not a struct-field guard like the two rows above it — the same ordinary-Rust-drop-order argument as `src/review/testkit::drop`: every call site binds `let _env = super::env_lock();` as the test's first local, before constructing an `EnvPins` (directly, or through `no_github`), and a scope drops locals in reverse declaration order, so `_env` always outlives it and this `Drop::drop` always runs under the lock"

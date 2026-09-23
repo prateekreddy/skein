@@ -882,7 +882,7 @@ mod tests {
     /// producer stops when the last tab closes (`crate::stream`), and the day this exists for is
     /// the day nobody had a tab open.
     ///
-    /// Sabotage: delete the `tokio::spawn` line from `bin/skein-server.rs` and this fails.
+    /// Sabotage: delete the `tokio::spawn` line from `bin/skein-server/main.rs` and this fails.
     ///
     /// **It used to assert `spawn_blocking` here too, and that assertion has moved into the
     /// test below** (SKEIN-738). The loop's body now lives in this module, where a test can run
@@ -893,10 +893,10 @@ mod tests {
     /// the test below is for.
     #[test]
     fn the_server_is_what_runs_the_announcement() {
-        let server = include_str!("bin/skein-server.rs");
+        let server = crate::testutil::server_source();
         assert!(
             server.contains("watch_fleet_disk"),
-            "nothing in skein-server.rs starts the announcement loop, so the fleet fills up in \
+            "nothing in skein-server starts the announcement loop, so the fleet fills up in \
              silence exactly as it did before this module existed"
         );
     }
@@ -915,7 +915,7 @@ mod tests {
     /// the ticks out from under the work they started.
     ///
     /// The runtime is built by hand rather than by `#[tokio::test]` for the reason
-    /// `bin/skein-server.rs`'s `on_a_runtime` gives: [`crate::testutil::env_lock`] returns a guard
+    /// `bin/skein-server/review.rs`'s `on_a_runtime` gives: [`crate::testutil::env_lock`] returns a guard
     /// carrying a `std::sync::MutexGuard`, held for the whole body, and under `#[tokio::test]` it
     /// would be held across await points — the shape `clippy::await_holding_lock` names, and a real
     /// deadlock.

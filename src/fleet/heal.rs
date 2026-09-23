@@ -40,7 +40,7 @@ pub fn heal_fleet() -> Result<(), String> {
     // **In-fleet the question does not arise, and asking it skipped every repair.** `sbx ls` asks
     // about the HOST's machine, which an in-fleet process cannot reach, so `fleet_boxes` returns
     // `None` with a reason (`sbx.rs:92-105`) — and the arm below reads that as "could not see the
-    // fleet" and returns. On every server start (`bin/skein-server.rs:110`) that skipped the
+    // fleet" and returns. On every server start (`bin/skein-server/main.rs:157`) that skipped the
     // launcher, the in-sandbox agent and the docker config, and said so to a terminal nobody reads.
     //
     // Whether the fleet is awake is not something this process has to ask about: it is *running

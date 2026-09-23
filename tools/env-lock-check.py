@@ -306,7 +306,7 @@ def uncommented(text):
     newline-preserving but not length-preserving, is the wrong one here.
 
     The copy that used to live at this line tracked quotes with a boolean flipped on every `"`,
-    one line at a time. A raw string is invisible to that: `src/bin/skein-server.rs:5160` is a
+    one line at a time. A raw string is invisible to that: `src/bin/skein-server/review.rs:985` is a
     `r#"…"…https://…"#` fixture with an EVEN number of quotes before the `//`, so the tracker
     believed it was outside a string, blanked to end of line, and swallowed the closing `"#`. The
     braces unbalanced, `mod review_routes` (5123-5743) closed at 5465, and 278 lines of tests —

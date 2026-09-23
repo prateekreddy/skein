@@ -785,7 +785,7 @@ pub(crate) fn refused_for_conflicts(said: &str) -> bool {
 /// and the id is the one field on it that exists only so this call can be made.
 ///
 /// **Here rather than in the caller**, because this is the only module that may reach GitHub:
-/// [`crate::github::graphql`] is `pub(crate)`, so `src/bin/skein-server.rs` is a different crate
+/// [`crate::github::graphql`] is `pub(crate)`, so `src/bin/skein-server/` is a different crate
 /// and cannot call it, and `review` reaching `github` is an edge `docs/modules.toml` does not
 /// declare — `tools/module-check.py` fails on it. `prq -> github` is declared, so this is where it
 /// goes.

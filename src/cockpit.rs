@@ -315,7 +315,7 @@ mod tests {
     ///    `shapeUrl` and the `:id` in the route load-bearing rather than incidental;
     /// 2. the bundle the browser is served, evaluated in node, `shapeUrl` called on that row;
     /// 3. the answer matched, segment by segment, against the `.route(…)` literals read out of
-    ///    `bin/skein-server.rs`.
+    ///    `bin/skein-server/`.
     ///
     /// Fails if the URL moves on either side: change `shapeUrl` back and no route matches; rename
     /// the route and no route matches; drop the `#`-strip and `/api/repos/web/review/%23412/shape`
@@ -376,7 +376,7 @@ mod tests {
         // because `docs/parity.md` counts this project's routes by grepping for the router's call
         // and a literal here would add to that count (`tests/parity_numbers.rs`).
         let call = concat!(".", "route", "(\"");
-        let server = include_str!("bin/skein-server.rs");
+        let server = crate::testutil::server_source();
         let routes: Vec<&str> = server
             .match_indices(call)
             .filter_map(|(i, _)| {
@@ -439,7 +439,7 @@ mod tests {
     /// sentences `/api/fleet/plan` carries stop being sent or stop being read.
     #[test]
     fn no_deployment_decides_whether_the_fleet_can_be_rebuilt_from_here() {
-        let server = include_str!("bin/skein-server.rs");
+        let server = crate::testutil::server_source();
         // The wire the gate ran on, gone at the source.
         for sent in ["\"deployment\"", "\"in_fleet\"", "\"implies\""] {
             assert!(
@@ -511,7 +511,7 @@ mod tests {
     /// the thing a reader has to check anyway. Describe what went; do not write it out.
     #[test]
     fn no_field_on_the_wire_can_offer_to_create_the_fleet_skein_is_inside() {
-        let server = include_str!("bin/skein-server.rs");
+        let server = crate::testutil::server_source();
         assert!(
             !server.contains("\"exists\": exists"),
             "/api/fleet/plan is reporting `exists` again — the only value it can carry in here is \

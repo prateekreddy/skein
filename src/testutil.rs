@@ -379,7 +379,7 @@ fn nobodys(name: &str, age: std::time::Duration) -> bool {
 ///
 /// Only this crate's own scratch — `skein-test-*` under the temp directory, which nothing but
 /// [`tempdir`] and the server binary's copy of its naming (`scratch_dir` in
-/// `src/bin/skein-server.rs`, which cannot reach this module) creates — and only what is older than
+/// `src/bin/skein-server/main.rs`, which cannot reach this module) creates — and only what is older than
 /// [`STALE`], so a run beside this one is safe.
 fn sweep_stale_runs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -680,6 +680,39 @@ fn refuse_or_say(asked_for_no_skips: bool, where_: &str, why: &str) {
         );
     }
     eprintln!("SKIPPED at {where_}: {why}");
+}
+
+/// The server binary's source, EVERY file of it, for the library tests that read it as text.
+///
+/// It was one file, and they read it with `include_str!`. It is a directory now (SKEIN-1103), and
+/// most of those reads are a `!contains` — a field that must not come back, a second caller that
+/// must not appear — which a read of one of its files would pass over the others. So the directory
+/// is read rather than a list of it, and a read that finds `main.rs` alone refuses rather than let
+/// a `!contains` pass over too little text. `main.rs` first and the rest by name; the binary's own
+/// tests read it the same way, through its own `server_source`.
+pub(crate) fn server_source() -> &'static str {
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| {
+        let dir =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/skein-server"));
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
+            .collect();
+        names.sort_by_key(|n| (n != "main.rs", n.clone()));
+        assert!(
+            names.len() > 1 && names[0] == "main.rs",
+            "read {names:?} out of {} — that is not the server's source, and every source \
+             assertion made over it would be about nothing",
+            dir.display()
+        );
+        names
+            .iter()
+            .map(|n| fs::read_to_string(dir.join(n)).unwrap_or_else(|e| panic!("{n}: {e}")))
+            .collect()
+    })
 }
 
 #[cfg(test)]

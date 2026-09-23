@@ -255,7 +255,7 @@ API, the part you would reach for: `GET /api/{boxes,health,runtimes}`, `GET /api
 `POST /api/boxes/:name/{resume,stop,destroy,repin,upload}`,
 `POST /api/{resume-batch,repos,settings,mailbox}`, `GET /api/boxes/:name/terminal` (WebSocket).
 That is a selection and not the set. Every route is declared in one `Router` in
-`src/bin/skein-server.rs`, so `.route(` in that file is the list, and it is the only version of it
+`src/bin/skein-server/main.rs`, so `.route(` in that file is the list, and it is the only version of it
 that cannot go stale — this paragraph used to name four routes (`ship`, `pr`, `merge`, `pick-path`)
 that went with the box-level PR tools and the path picker, and nothing noticed.
 xterm.js and marked.js are vendored into the binary (served from `/vendor/`), so everything works

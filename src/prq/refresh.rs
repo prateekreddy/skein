@@ -1433,7 +1433,7 @@ mod tests {
     /// and merely past the hundredth (SKEIN-231).
     #[test]
     fn the_only_other_reader_of_this_list_stands_down_when_it_is_partial() {
-        let server = std::fs::read_to_string("src/bin/skein-server.rs").expect("the server");
+        let server = crate::testutil::server_source();
         assert_eq!(
             server.matches("review::prune(").count(),
             1,

@@ -24,7 +24,7 @@ inside a reproduction block is worse than one in prose, because the block is wha
 the prose against.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 98   (NOT '.route("' — that gives 87, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 98   (NOT '.route("' — that gives 87, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 162 unique, 165 occurrences
 grep -c 'function ' src/web/index.html                          # 435
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
@@ -473,7 +473,7 @@ gone rather than guessed at. In the user's terms: **a sandbox you made yourself 
 typed rather than offered.
 
 **`/api/pick-path` and every Browse button — removed, not replaced. Already done, not pending.**
-The route is gone from `src/bin/skein-server.rs` (`grep -c pick-path` → 0) and `src/cockpit.rs`
+The route is gone from `src/bin/skein-server/` (`grep -rc pick-path` → 0 in every file) and `src/cockpit.rs`
 asserts its *absence* from the served page, so §5 no longer lists it as a capability to preserve —
 this section is where it lives now. The native host picker needs a host process with display access,
 which in-fleet skein cannot have. Browse existed mainly to pick a
@@ -748,7 +748,7 @@ comes back only if the server says it again first, as a field on `Summary`.
 
 ### 7.1 The walk against `/v2`
 
-`/v2` ships beside `/` (`src/web/v2.html`, routed in `src/bin/skein-server.rs`), and this is the
+`/v2` ships beside `/` (`src/web/v2.html`, routed in `src/bin/skein-server/main.rs`), and this is the
 record of walking every entry above against it. **It is a record, not a verdict**: the cutover
 happens when every row reads *holds*, and today it does not.
 

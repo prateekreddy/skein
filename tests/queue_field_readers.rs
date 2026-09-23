@@ -283,7 +283,7 @@ fn page_reads(page: &str, field: &str) -> bool {
 /// idempotent — nothing it returns can open a comment — which is what lets [`census`] mask each
 /// page on its own AND [`page_reads`] mask whatever it is handed.
 ///
-/// A copy of the one in `src/bin/skein-server.rs`'s `cockpit_routes` module, and the duplication is
+/// A copy of the one in `src/bin/skein-server/main.rs`'s `cockpit_routes` module, and the duplication is
 /// a compilation boundary rather than an oversight: that module is `#[cfg(test)]` inside a BINARY
 /// target, so it exists in that binary's test build and in no other, and an integration test cannot
 /// see it. The alternatives are worse than one copy — a text scanner in the library's production

@@ -103,7 +103,7 @@ pub enum Tick {
     /// it; this stream is the live channel the page still holds, so it travels here.
     ///
     /// **Sent by the release itself, not by a poll.** The server is the thing that releases the
-    /// permit, so it knows the exact moment — see `PtySlot` in `src/bin/skein-server.rs`, which
+    /// permit, so it knows the exact moment — see `PtySlot` in `src/bin/skein-server/terminal.rs`, which
     /// publishes this from its `Drop` *after* the permit has gone back, so a pane that reconnects on
     /// hearing it finds the slot actually free rather than racing the release that announced it.
     ///
