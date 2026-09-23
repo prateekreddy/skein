@@ -1714,6 +1714,29 @@ check("a name only prose carries is reported as quoted and is not a prefix",
   { prefixes: both.prefixes, quoted: both.quoted },
   { prefixes: [LIBRARY_HIDDEN, HIDDEN].sort(), quoted: [QUOTED] });
 
+// **A test binary cargo builds from a directory is read whole, and a shared module is not**
+// (SKEIN-1109/1110). `tests/<name>/main.rs` makes `tests/<name>/` one binary, so a call site in any
+// file of it names that suite's fixture; `tests/common/` has no `main.rs` and holds the helper,
+// whose prefix is a variable. Reading only the flat `tests/*.rs` is how splitting `fleet_launch`
+// and `isolation_bwrap` into directories would have taken nine prefixes off the list in silence.
+// **What makes it fail:** dropping `binaries: true` from the rust tier's SOURCES entry — the split
+// probe disappears; or reading every subdirectory — the shared probe appears.
+const SPLIT_HIDDEN = "skein-splitprobe";
+const SHARED_HIDDEN = "skein-sharedprobe";
+check("a call site in any file of a tests/<name>/ binary is derived, and one in a shared module is not",
+  (() => {
+    const at = repoDeriving(realRust, realNode);
+    mkdirSync(path.join(at, "tests", "two"), { recursive: true });
+    mkdirSync(path.join(at, "tests", "shared"), { recursive: true });
+    writeFileSync(path.join(at, "tests", "two", "main.rs"), "mod part;\n");
+    writeFileSync(path.join(at, "tests", "two", "part.rs"),
+      `fn t() { let s = Scratch::temp("${SPLIT_HIDDEN}"); }\n`);
+    writeFileSync(path.join(at, "tests", "shared", "mod.rs"),
+      `fn t() { let s = Scratch::temp("${SHARED_HIDDEN}"); }\n`);
+    return prefixesOf(at);
+  })(),
+  [LIBRARY_HIDDEN, HIDDEN, SPLIT_HIDDEN].sort());
+
 // This repository, which is where it was measured: `…` was prefix number 57 and is now none.
 //
 // **`quotedSomething` is asserted, and a red there is not a false alarm.** It says this tree no

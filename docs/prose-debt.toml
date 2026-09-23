@@ -110,15 +110,15 @@
 # @STALE-CITATION
 
 [[stale-citation]]
-file = "src/place.rs"
-line = 1098
+file = "src/place/argv.rs"
+line = 104
 text = "src/bin/skein-server.rs:4411-4413"
 item = "SKEIN-1107"
 reason = "SKEIN-1103 split the server into `src/bin/skein-server/` while this file was held by another lane; SKEIN-1107 names where the cited line went"
 
 [[stale-citation]]
-file = "src/place.rs"
-line = 1538
+file = "src/place/argv.rs"
+line = 544
 text = "src/bin/skein-server.rs:111"
 item = "SKEIN-1107"
 reason = "SKEIN-1103 split the server into `src/bin/skein-server/` while this file was held by another lane; SKEIN-1107 names where the cited line went"

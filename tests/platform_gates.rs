@@ -232,6 +232,12 @@ fn box_side_tests_do_not_run_on_this_platform_because_a_box_is_linux() {
 // ---------------------------------------------------------------------------------------------
 
 /// Every `tests/*.rs`, as (binary name, source).
+///
+/// **And every `tests/<name>/main.rs`, as the one binary cargo builds from it**, with the source of
+/// every `.rs` file in that directory joined — main.rs first — because a guard in a sibling module
+/// is a guard of that binary (SKEIN-1109/1110 split `fleet_launch` and `isolation_bwrap` that way).
+/// A directory without a `main.rs` is not a binary: `tests/common/` is a module every binary
+/// declares, and is read where it is declared rather than here.
 fn integration_sources() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut out = Vec::new();
@@ -239,11 +245,27 @@ fn integration_sources() -> Vec<(String, String)> {
         .expect("tests/ is readable")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .filter(|p| p.extension().is_some_and(|x| x == "rs") || p.join("main.rs").is_file())
         .collect();
     files.sort();
     for file in files {
         let name = file.file_stem().unwrap().to_string_lossy().into_owned();
+        if file.is_dir() {
+            let mut parts: Vec<_> = std::fs::read_dir(&file)
+                .expect("a split test binary's directory is readable")
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+                .collect();
+            parts.sort_by_key(|p| (p.file_name().is_none_or(|n| n != "main.rs"), p.clone()));
+            let joined = parts
+                .iter()
+                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push((name, joined));
+            continue;
+        }
         out.push((name, std::fs::read_to_string(&file).unwrap_or_default()));
     }
     out
@@ -298,9 +320,11 @@ fn noskip_environmental_binaries() -> Vec<String> {
     for (i, _) in block.match_indices("\"tests/") {
         let s = &block[i + 1..];
         let quoted = &s[..s.find('"').expect("a closing quote")];
+        // `tests/<name>.rs`, or any file of a `tests/<name>/` binary — see `integration_sources`.
         if let Some(stem) = quoted
             .strip_prefix("tests/")
             .and_then(|n| n.strip_suffix(".rs"))
+            .map(|n| n.split('/').next().unwrap_or(n))
         {
             if !out.iter().any(|x| x == stem) {
                 out.push(stem.to_string());

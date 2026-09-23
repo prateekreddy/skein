@@ -53,7 +53,7 @@ const STALL_MS = 5000;
 // no names: a fixture that cannot find the directory it must plant in has to say so, because the
 // alternative is a suite that passes while testing nothing.
 function fleetPathDirs() {
-  const src = new URL("../../src/place.rs", import.meta.url);
+  const src = new URL("../../src/place/crossing.rs", import.meta.url);
   const rs = fs.readFileSync(src, "utf8");
   const found = /const FLEET_PATH: &str = "([^"]+)"/.exec(rs);
   if (!found) {

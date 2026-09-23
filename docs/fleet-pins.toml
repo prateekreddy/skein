@@ -44,11 +44,11 @@ reason = """**This test IS one of the two guards this gate derives its coupled s
 missing = ["SKEIN_HOME"]
 reason = """The mirror image of the entry above, for `util::fleet_root`'s half of the pair. It pins `$SKEIN_FLEET_ROOT` to `/tmp/a-fixture-fleet`, removes it, and asserts the refusal names the variable. Permanent, same argument."""
 
-[exempt."tests/isolation_bwrap::a_planted_binary_is_not_what_a_fleet_scope_script_runs"]
+[exempt."tests/isolation_bwrap/path::a_planted_binary_is_not_what_a_fleet_scope_script_runs"]
 missing = ["SKEIN_FLEET_ROOT"]
 reason = """`place::fleet_sandbox` and `Place::exec_argv` resolve no fleet path: `src/place.rs` contains 0 `fleet_root` calls, the byte-identical copy it used to hold having moved to `util`, as that function's own doc comment records. So the absence is latent. Declared rather than fixed because `tests/isolation_bwrap.rs` is held by another lane this round; retire by pinning it there."""
 
-[exempt."tests/isolation_bwrap::a_planted_nsenter_is_not_what_a_crossing_runs"]
+[exempt."tests/isolation_bwrap/path::a_planted_nsenter_is_not_what_a_crossing_runs"]
 missing = ["SKEIN_FLEET_ROOT"]
 reason = """Same file and same reason as the entry above."""
 

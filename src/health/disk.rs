@@ -32,7 +32,7 @@ const DISK_FULL_PCT: u64 = 85;
 /// [`crate::config::load_config`] had already foreclosed the blank-name one (`src/config.rs:459`)
 /// before SKEIN-756 deleted that arm outright. What is left is the measurement itself, and there
 /// are exactly two ways for it to fail — the command did not run (it could not be spawned, it
-/// outlived the 20s deadline, or it exited non-zero: `src/place.rs:1218` and `:1219`) or it ran and
+/// outlived the 20s deadline, or it exited non-zero: `src/place/run.rs:92` and `:93`) or it ran and
 /// printed nothing `fleet::parse_resources` could read (`src/fleet/resources.rs:279`). `Option`
 /// carries no room to tell those apart, so the sentence says it cannot rather than picking one.
 ///

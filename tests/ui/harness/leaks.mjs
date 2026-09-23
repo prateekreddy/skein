@@ -462,6 +462,13 @@ export function quiesce() {
  * `Scratch::at(root, prefix)`, the implementation, whose `prefix` is a variable. Only call sites
  * name a fixture there.
  *
+ * **A test binary is `tests/<name>.rs` OR a `tests/<name>/` holding a `main.rs`** (`binaries`),
+ * and the second is read whole: cargo builds every file of that directory into the one binary,
+ * so its call sites are as much the suite's as a flat file's. Reading only the flat files is how
+ * the split of `fleet_launch` and `isolation_bwrap` into directories (SKEIN-1109/1110) would have
+ * dropped nine prefixes with nothing printed. `tests/common/` has no `main.rs`, which is what keeps
+ * it out.
+ *
  * **`src/` is the opposite case, and it is why there is a third reader rather than a third
  * directory on the first one** (SKEIN-1006). Nothing in the library names a fixture at a call site:
  * `crate::testutil::tempdir()` takes no arguments and the name is a literal in its own body, so the
@@ -474,7 +481,7 @@ export function quiesce() {
  * tier cannot be added without saying what was renamed when it goes quiet — which is the whole of
  * what that message is for. */
 const SOURCES = [
-  { dir: "tests", ext: ".rs", tier: "rust", lang: "rust", read: rustPrefixes,
+  { dir: "tests", ext: ".rs", tier: "rust", lang: "rust", read: rustPrefixes, binaries: true,
     shape: '`Scratch::boxes("…")` / `Scratch::temp("…")`' },
   { dir: "src", ext: ".rs", tier: "library", lang: "rust", read: libraryPrefixes,
     shape: '`fn tempdir()` building `env::temp_dir().join(format!("…"))`' },
@@ -483,6 +490,23 @@ const SOURCES = [
   { dir: "tests/ui/harness", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes,
     shape: '`mkdtempSync(…, "…")` / `freshFixture(…, "…")`' },
 ];
+
+/** The files of every `<dir>/<name>/` that holds a `main.rs` — a test binary cargo builds from a
+ * directory — as `<name>/<file>` paths relative to `dir`. See [`SOURCES`] for why. */
+function binaryParts(dir, names, ext) {
+  const out = [];
+  for (const name of names) {
+    let inner;
+    try {
+      inner = readdirSync(join(dir, name));
+    } catch {
+      continue;
+    }
+    if (!inner.includes("main" + ext)) continue;
+    for (const f of inner.sort()) if (f.endsWith(ext)) out.push(`${name}/${f}`);
+  }
+  return out;
+}
 
 /** `Scratch::boxes("skein-move-it")` and `Scratch::boxes(&format!("skein-fleet-it-{what}"))`.
  *
@@ -706,6 +730,7 @@ export function fixturePrefixes(repo = REPO) {
     } catch {
       throw new Error(`the leak check cannot read ${source.dir}/ — it is looking in ${repo}`);
     }
+    if (source.binaries) names = names.concat(binaryParts(join(repo, source.dir), names, source.ext));
     for (const name of names) {
       if (!name.endsWith(source.ext)) continue;
       // This file is a reader, not a call site: the shapes below are quoted in its own doc comments
