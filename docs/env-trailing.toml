@@ -4,20 +4,20 @@
 # same tool: a finding not listed here fails the build, a row here that no longer applies fails the
 # build too, and `python3 tools/env-lock-check.py --update-trailing` prunes but never adds.
 
-[leaks."src/ai::a_model_call_that_fails_says_which_failure_it_was"]
+[leaks."src/ai/call::a_review_call_carries_the_github_credential_into_the_model"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/ai::a_review_call_carries_the_github_credential_into_the_model"]
-vars = ["SKEIN_HOME"]
-
-[leaks."src/ai::narrate_uses_stubbed_claude_and_respects_kill_switch"]
-vars = ["SKEIN_AI", "SKEIN_CLAUDE_BIN", "SKEIN_HOME", "SKEIN_REGISTRY"]
-
-[leaks."src/ai::the_prompt_travels_on_stdin_and_is_nowhere_in_the_process_list"]
+[leaks."src/ai/call::the_prompt_travels_on_stdin_and_is_nowhere_in_the_process_list"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/ai::what_wants_the_model_names_every_switch_that_does"]
+[leaks."src/ai/narrate::narrate_uses_stubbed_claude_and_respects_kill_switch"]
+vars = ["SKEIN_AI", "SKEIN_CLAUDE_BIN", "SKEIN_HOME", "SKEIN_REGISTRY"]
+
+[leaks."src/ai/switches::what_wants_the_model_names_every_switch_that_does"]
 vars = ["SKEIN_AI", "SKEIN_REVIEW_AI"]
+
+[leaks."src/ai/unread::a_model_call_that_fails_says_which_failure_it_was"]
+vars = ["SKEIN_HOME"]
 
 [leaks."src/bin/skein-server::origin_guard_honours_allowlist"]
 vars = ["SKEIN_ALLOWED_ORIGINS"]

@@ -24,9 +24,9 @@ inside a reproduction block is worse than one in prose, because the block is wha
 the prose against.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 85, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 156 unique, 159 occurrences
-grep -c 'function ' src/web/index.html                          # 430
+grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86, missing every entry whose path is on the line below)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
+grep -c 'function ' src/web/index.html                          # 432
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -360,9 +360,9 @@ Each is a decision, with its cost stated in the user's terms.
 **Adopt-in-place is removed, and nothing replaced it: a repo is a remote.** This entry used to
 describe a replacement — "a local filesystem path is a valid git remote, so a repo with no server
 still works: skein clones it into the mirror and fetches from your path" — and that replacement was
-never built. It is true of git and false of skein. `registrable_source` (`src/repos.rs:855`) requires
+never built. It is true of git and false of skein. `registrable_source` (`src/repos/source.rs:28`) requires
 a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
-everything else before it clones anything (`src/repos.rs:1821`), in the words *"is a path, and skein
+everything else before it clones anything (`src/repos/add.rs:63`), in the words *"is a path, and skein
 registers repos by remote"*.
 
 So the cost is larger than the old entry admitted, and it is stated here rather than in the future
@@ -373,7 +373,7 @@ nothing to fetch from, and would differ from a URL repo in nothing a box could o
 repo has no server needs a server — a bare repo reachable over `ssh://` is enough.
 
 One consequence the old entry listed as "must be built, not assumed" was in fact built: `diff`,
-`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos.rs:1510`)
+`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:271`)
 rather than a working checkout.
 
 **The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein

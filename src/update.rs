@@ -299,6 +299,7 @@ fn settle_with(alive: impl FnOnce() -> Option<bool>) {
     // The shutter is read here rather than in `settle` so that it is part of the decision this
     // function makes, and therefore part of what a test of this function can hold it to.
     if LAUNCHING.load(std::sync::atomic::Ordering::SeqCst)
+        || CANCELLING.load(std::sync::atomic::Ordering::SeqCst)
         || !believed_running()
         || alive() != Some(false)
     {
@@ -341,6 +342,32 @@ pub struct Reading {
     pub done: bool,
     /// It ended by succeeding. Meaningless while `done` is false.
     pub ok: bool,
+    /// It ended because somebody pressed Cancel. Meaningless while `done` is false.
+    pub cancelled: bool,
+    /// Which run this is, for [`cancel`] to be handed back. Empty when there has never been one.
+    pub run: String,
+    /// Whole seconds since the log was last written, while the run is going; 0 once it has ended.
+    pub quiet: u64,
+    /// `quiet` has reached [`QUIET_TOO_LONG`]: the pane says so and offers Cancel.
+    pub stalled: bool,
+}
+
+/// How long since the log last grew, while a run is believed to be going.
+///
+/// The log's mtime rather than its size seen between two polls, because the reader is a page that
+/// may have been open for five seconds or closed for an hour — and the file's own clock is the same
+/// for both. `None` when no run is going, or the log cannot be read.
+fn quiet_for() -> Option<Duration> {
+    if !believed_running() {
+        return None;
+    }
+    let written = std::fs::metadata(log_path()).ok()?.modified().ok()?;
+    // A log dated in the future (a clock stepped back) is not quiet; it is simply not stalled.
+    Some(
+        std::time::SystemTime::now()
+            .duration_since(written)
+            .unwrap_or_default(),
+    )
 }
 
 /// Read the log from `from`, and say whether the run has finished.
@@ -356,11 +383,16 @@ pub fn log_from(sandbox: &str, from: u64) -> Reading {
     let all = std::fs::read(log_path()).unwrap_or_default();
     let from = from.min(all.len() as u64);
     let text = String::from_utf8_lossy(&all[from as usize..]).to_string();
+    let quiet = quiet_for().unwrap_or_default();
     Reading {
         at: all.len() as u64,
         text,
         done: ended.is_some(),
-        ok: ended.is_some_and(|s| s.trim() == "0"),
+        ok: ended.as_deref().is_some_and(|s| s.trim() == "0"),
+        cancelled: ended.as_deref().is_some_and(|s| s.trim() == CANCELLED),
+        run: run_id(),
+        quiet: quiet.as_secs(),
+        stalled: quiet >= QUIET_TOO_LONG,
     }
 }
 
@@ -382,6 +414,7 @@ pub fn running(sandbox: &str) -> bool {
 /// The marker is written by the same shell, after the build, from the build's own exit status —
 /// `$?` and not the tmux session's, which is 0 whenever tmux itself started.
 pub fn start(sandbox: &str) -> Result<(), String> {
+    let _control = CONTROL.lock().unwrap_or_else(|e| e.into_inner());
     if running(sandbox) {
         return Err("an update is already running".to_string());
     }
@@ -427,9 +460,131 @@ fn launch(sandbox: &str, log: &std::path::Path, done: &std::path::Path) -> Resul
     // marker's absence as "in progress", so clearing the log first would make a stale marker
     // describe a run that had not begun.
     let _ = std::fs::remove_file(done);
+    // Named before the log exists, so no reader can see this run's log under the last run's name.
+    let run = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    std::fs::write(run_path(), &run)
+        .map_err(|e| format!("preparing {}: {e}", run_path().display()))?;
     std::fs::write(log, b"").map_err(|e| format!("preparing {}: {e}", log.display()))?;
     let script = run_script(&log.to_string_lossy(), &done.to_string_lossy());
     crate::fleet::detach_named(sandbox, SESSION, &script)
+}
+
+/// Which run the log belongs to: a name [`launch`] writes before anything else, and [`cancel`]
+/// is handed back.
+///
+/// **This is what keeps Cancel from ending somebody else's run.** The pane that offers Cancel is
+/// looking at one run; by the time the press arrives that run may have ended and a second tab may
+/// have started another, which lives in the same session name. A press carrying the name of the run
+/// it was offered for can only ever stop that run.
+fn run_path() -> std::path::PathBuf {
+    skein_home().join("update.run")
+}
+
+/// The run the log belongs to, or empty when none has been started since this was introduced.
+fn run_id() -> String {
+    std::fs::read_to_string(run_path())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// What [`cancel`] writes into the marker in place of an exit status, so the pane can tell a run a
+/// person stopped from one that failed.
+const CANCELLED: &str = "cancelled";
+
+/// How long the log may go unwritten, while a run is going, before the pane says so (SKEIN-1037).
+///
+/// The owner's number, 2026-09-23. It is not a timeout — nothing is stopped when it passes; the pane
+/// says that nothing has been written for this long, shows where the log got to, and offers Cancel.
+/// A cold release build writes a line per crate, so five silent minutes is long for a build and
+/// ordinary for nothing except a single long link, which the pane's wording allows for.
+pub const QUIET_TOO_LONG: Duration = Duration::from_secs(5 * 60);
+
+/// Set while [`cancel`] is between stopping the session and writing the marker.
+///
+/// The same window as [`LAUNCHING`], from the other side: for that instant the session is gone and
+/// the marker is not there yet, which is exactly what [`settle`] reads as a run that died — and it
+/// would write its own "stopped without finishing" over a run a person stopped on purpose.
+static CANCELLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Held by [`start`] and [`cancel`] for their whole length, so a press of one cannot land in the
+/// middle of the other — a cancel that checked the run's name and then killed the session a second
+/// start had just created is the one way it could stop a run it was not offered for.
+static CONTROL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// How a press of Cancel came out, when it reached the run at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cancelled {
+    /// The run was stopped, and the log and the marker say so.
+    Stopped,
+    /// It had already ended by itself — the marker it wrote is left exactly as it wrote it.
+    AlreadyEnded,
+}
+
+/// Stop the run named `run`, and only that run (SKEIN-1037).
+///
+/// **Nothing broader than the one session this module started is touched.** The session is
+/// addressed as `=skein-update` — tmux's exact-match form; a bare `-t skein-update` also matches
+/// any session whose name merely *starts* with that — and what is signalled is that session's own
+/// process group: its pane's process is a session leader, so the build it started and everything
+/// under it share the group, and nothing outside it does. No `pkill`, no pattern.
+///
+/// Refused unless `run` names the run the log belongs to and that run is believed to be going, so a
+/// press that arrives after its run ended, or after another began, stops nothing.
+pub fn cancel(sandbox: &str, run: &str) -> Result<Cancelled, String> {
+    let _control = CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+    if sandbox.is_empty() {
+        return Err("there is no fleet sandbox to stop an update in".to_string());
+    }
+    if !believed_running() || LAUNCHING.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(Cancelled::AlreadyEnded);
+    }
+    // Both empty is allowed and is one run: one started by a skein from before runs were named,
+    // which is still the only run there is.
+    if run != run_id() {
+        return Err(
+            "that update has already ended, and a different one is running now".to_string(),
+        );
+    }
+    CANCELLING.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Through `fleet`, which already owns the session's other two verbs (`detach_named`,
+    // `detached_alive`): which sandbox a command runs in is not this module's business
+    // (docs/modules.toml, `[current.update]`).
+    let out = crate::fleet::stop_detached(sandbox, SESSION);
+    let ended = out.map(|()| finish_cancelled());
+    CANCELLING.store(false, std::sync::atomic::Ordering::SeqCst);
+    ended
+}
+
+/// Write down that the run was cancelled — unless it wrote its own ending first.
+///
+/// The same last-word rule as [`settle_with`]: the build writes its marker strictly before its
+/// session ends, so a marker present now is a run that finished in the instant before the press
+/// reached it, and overwriting it would record a success as a cancel.
+fn finish_cancelled() -> Cancelled {
+    if done_path().exists() {
+        return Cancelled::AlreadyEnded;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "\nskein: you cancelled this update from the Update pane. Its {SESSION} session was \
+             stopped, so nothing after the last line above ran. Press Update skein to start again."
+        );
+    }
+    let _ = std::fs::write(done_path(), CANCELLED);
+    Cancelled::Stopped
 }
 
 /// The shell the run is, as bytes a shell will actually parse.
@@ -775,6 +930,249 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A run whose log has not moved for five minutes reads as stalled — and only such a run**
+    /// (SKEIN-1037).
+    ///
+    /// The pane's "no progress" state is this flag and nothing else, so the flag is what has to be
+    /// right: quiet is measured from the log's own mtime, the line is the owner's five minutes, and
+    /// a run that has ended is never stalled however old its log is.
+    ///
+    /// **What would make each assertion fail**, in order: a threshold of anything under five
+    /// minutes (or `>` against a shorter one) fails the first; anything over it, or reading the
+    /// size between two polls instead of the mtime, fails the second; dropping the
+    /// `believed_running` gate in `quiet_for` fails the third, which is a finished update whose
+    /// pane would offer to cancel it.
+    #[test]
+    fn a_log_quiet_for_five_minutes_while_a_run_is_going_reads_as_stalled_and_only_then() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &*home);
+        std::fs::write(log_path(), b"   Compiling skein v0.1.0\n").unwrap();
+        let _ = std::fs::remove_file(done_path());
+        let aged = |secs: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(log_path())
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(secs))
+                .unwrap();
+        };
+
+        // Literal seconds rather than the constant's, because the five minutes is the owner's
+        // number: a test written in terms of `QUIET_TOO_LONG` passes whatever it is changed to.
+        aged(290);
+        let r = log_from("", 0);
+        assert!(
+            !r.stalled && r.quiet >= 289,
+            "a log written under five minutes ago read as stalled (or its quiet was not measured \
+             from the file): {r:?}"
+        );
+
+        aged(310);
+        let r = log_from("", 0);
+        assert!(
+            r.stalled && r.quiet >= 310,
+            "a log nobody has written to for over five minutes, under a run that has not ended, \
+             did not read as stalled — the pane would say \"updating…\" for as long as it hangs: \
+             {r:?}"
+        );
+
+        std::fs::write(done_path(), b"1").unwrap();
+        aged(3000);
+        let r = log_from("", 0);
+        assert!(
+            r.done && !r.stalled && r.quiet == 0,
+            "a run that has ended read as stalled, so its pane would offer to cancel it: {r:?}"
+        );
+    }
+
+    /// Whether `pid` is a live process — present and not a zombie waiting to be reaped.
+    fn alive(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+            .ok()
+            .and_then(|s| s.rsplit_once(") ").map(|(_, rest)| rest.to_string()))
+            .is_some_and(|rest| !rest.starts_with('Z'))
+    }
+
+    /// Wait up to a few seconds for `f`; signals are delivered asynchronously.
+    fn eventually(f: impl Fn() -> bool) -> bool {
+        for _ in 0..60 {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        f()
+    }
+
+    /// **Cancel stops the run it was offered for, all of it, and nothing else** (SKEIN-1037).
+    ///
+    /// Run through [`cancel`] itself, against a real tmux on a socket of this test's own — the
+    /// execution seam puts `TMUX_TMPDIR` in front of the exact command production sends, and drops
+    /// the `$TMUX` a developer's shell carries, which would otherwise aim it at their own session.
+    ///
+    /// Beside the run: a session whose name merely begins `skein-update`, and a process of the same
+    /// user outside any session. Both must survive.
+    ///
+    /// **What would make each assertion fail:** dropping the `=` from `fleet::stop_detached`'s targets — tmux then
+    /// resolves `skein-update` to `skein-update-decoy` by prefix, and the first assertion fails
+    /// with the decoy stopped; dropping the `kill -TERM` of the process group — `kill-session`
+    /// alone sends SIGHUP, and the child that ignores SIGHUP (as anything under `nohup` does) is
+    /// still running; dropping the run-name check — the wrongly-named press stops the run; and
+    /// dropping the marker write — the pane never learns the run ended and says "updating…".
+    #[test]
+    fn cancel_stops_the_named_run_and_nothing_whose_name_merely_starts_the_same() {
+        use std::process::Command;
+        if Command::new("tmux").arg("-V").output().is_err() {
+            crate::testutil::skip("no tmux here, so there is no session for Cancel to stop");
+            return;
+        }
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &*home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::write(home.join("config.json"), r#"{"fleet_sandbox":"example"}"#).unwrap();
+        let sock_dir = home.join("t");
+        std::fs::create_dir_all(&sock_dir).unwrap();
+        let tmux = |args: &[&str]| {
+            Command::new("tmux")
+                .args(args)
+                .env_remove("TMUX")
+                .env("TMUX_TMPDIR", &sock_dir)
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let dir = sock_dir.to_string_lossy().into_owned();
+        let _stood_in = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            let mut v: Vec<String> = ["env", "-u", "TMUX"].map(String::from).to_vec();
+            v.push(format!("TMUX_TMPDIR={dir}"));
+            v.extend(argv.iter().cloned());
+            Some(v)
+        }));
+        let pid_of = |name: &str| {
+            let at = home.join(name);
+            eventually(|| std::fs::read_to_string(&at).is_ok_and(|s| !s.trim().is_empty()));
+            std::fs::read_to_string(&at).unwrap_or_default()
+        };
+        let believe = |run: &str| {
+            let _ = std::fs::remove_file(done_path());
+            std::fs::write(run_path(), run).unwrap();
+            std::fs::write(log_path(), b"skein: fetching the default branch\n").unwrap();
+        };
+
+        let decoy = home.join("decoy.sh");
+        std::fs::write(
+            &decoy,
+            format!(
+                "echo $$ > '{}'\nexec sleep 300\n",
+                home.join("decoy.pid").display()
+            ),
+        )
+        .unwrap();
+        assert!(tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "skein-update-decoy",
+            &format!("sh '{}'", decoy.display())
+        ]));
+        let decoy_pid = pid_of("decoy.pid");
+        let mut outsider = Command::new("sleep").arg("300").spawn().unwrap();
+        let outsider_pid = outsider.id().to_string();
+
+        // The run's session is not there at all, and only the decoy is: a target that matched by
+        // prefix would find it.
+        believe("run-1");
+        let _ = cancel("example", "run-1");
+        assert!(
+            alive(&decoy_pid) && tmux(&["has-session", "-t", "=skein-update-decoy"]),
+            "Cancel stopped a session that is not the update's — its name only begins the same"
+        );
+
+        // Now the run itself: a pane whose child ignores SIGHUP, as anything under nohup does.
+        believe("run-2");
+        let run = home.join("run.sh");
+        std::fs::write(
+            &run,
+            format!(
+                "sh -c 'trap \"\" HUP; echo $$ > {hup}; exec sleep 300' &\n\
+                 echo $$ > {pane}\n\
+                 wait\n",
+                hup = sh_quote(&home.join("hup.pid").to_string_lossy()),
+                pane = sh_quote(&home.join("pane.pid").to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        assert!(tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "skein-update",
+            &format!("sh '{}'", run.display())
+        ]));
+        let (pane_pid, hup_pid) = (pid_of("pane.pid"), pid_of("hup.pid"));
+        assert!(
+            alive(&pane_pid) && alive(&hup_pid),
+            "the fixture run did not start"
+        );
+
+        assert!(
+            cancel("example", "run-1").is_err(),
+            "a press carrying another run's name was accepted"
+        );
+        assert!(
+            alive(&pane_pid) && tmux(&["has-session", "-t", "=skein-update"]),
+            "a press carrying another run's name stopped this run"
+        );
+
+        assert_eq!(cancel("example", "run-2"), Ok(Cancelled::Stopped));
+        assert!(
+            eventually(|| !alive(&pane_pid) && !tmux(&["has-session", "-t", "=skein-update"])),
+            "the update's session is still there after Cancel"
+        );
+        assert!(
+            eventually(|| !alive(&hup_pid)),
+            "a process the update started is still running after Cancel — it ignored the SIGHUP \
+             that ending the session sends, and nothing else was sent to it"
+        );
+        assert!(
+            alive(&decoy_pid) && tmux(&["has-session", "-t", "=skein-update-decoy"]),
+            "Cancel stopped a session that is not the update's"
+        );
+        assert!(
+            alive(&outsider_pid),
+            "Cancel stopped a process outside the update"
+        );
+        let said = log_from("", 0);
+        assert!(
+            said.done && said.cancelled && !said.ok,
+            "the run was stopped but not recorded as cancelled, so the pane would go on saying \
+             \"updating…\": {said:?}"
+        );
+        assert!(
+            said.text.contains("fetching the default branch")
+                && said.text.contains("you cancelled this update"),
+            "the log lost what the run had said, or does not say it was cancelled: {:?}",
+            said.text
+        );
+
+        // And a run that ended by itself keeps its own last word.
+        believe("run-3");
+        std::fs::write(done_path(), b"0").unwrap();
+        assert_eq!(cancel("example", "run-3"), Ok(Cancelled::AlreadyEnded));
+        assert!(
+            log_from("", 0).ok,
+            "Cancel overwrote the marker of an update that had already succeeded"
+        );
+
+        let _ = outsider.kill();
+        let _ = outsider.wait();
+        tmux(&["kill-server"]);
     }
 
     /// A short revision and a full sha are the same commit, and saying otherwise reports every

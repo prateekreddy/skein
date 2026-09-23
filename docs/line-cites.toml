@@ -338,7 +338,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5512"]
+["src/bin/skein-server.rs:5537"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1309,23 +1309,6 @@ cited_by = ["docs/review-queue.md"]
 line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
 cited_by = ["docs/citations.toml"]
 
-["src/repos.rs:241"]
-line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/repos.rs:299"]
-line = "return Err(format!("
-window = "Err(why) => {\u000breturn Err(format!(\u000b\"{id}'s per-pull-request triggers could not be read ({why}), so this would \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/repos.rs:310"]
-line = "return Err(\"no directory for the trigger overrides\".into());"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/repos.rs:855"]
-line = "pub(crate) fn registrable_source(source: &str) -> bool {"
-cited_by = ["docs/architecture.md", "docs/parity.md"]
-
 ["src/repos.rs:1035"]
 historical = "SKEIN-951 replaced this site: `clone_mirror`'s refusal is `git_refusal` at `src/repos.rs:1347` now. The verdict this row records for it — `n`, raw git stderr — IS the defect that item fixed, so the message here today names the repository, the `github-pats.json` and `github-read-token` skein read looking for a credential, and where to store one, with git's own words quoted after them. The row is the 2026-09-09 measurement of what was there, like `src/bin/skein-server.rs:4253`, and re-pointing it at the new sentence would make the survey claim it found a defect that is not there. Its third site, `src/repos.rs:1367` (`fetch_pull_head`), outlived it by a day and went the same way under SKEIN-954 — declared on its own entry, because the three were settled one at a time."
 cited_by = ["docs/recovery-survey.md"]
@@ -1334,44 +1317,61 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "The other half of the same 2026-09-09 measurement as `src/repos.rs:1035`, and gone the same way: `fetch_mirror`'s refusal is `git_refusal` at `src/repos.rs:1429` now, so the words this row recorded — `fetching {id}: {stderr}` and nothing else — are not in the tree any more."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1324"]
-line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/repos.rs:1367"]
 historical = "The third site of the same 2026-09-09 measurement as `src/repos.rs:1035` and `src/repos.rs:1114`, and the last to go: SKEIN-954 routed `fetch_pull_head` through `fleet_git` and its refusal through `git_refusal` (`src/repos.rs:1492` now), so the words this row recorded — `fetching {refspec} of {id}: {stderr}` and nothing else — are not in the tree any more. What it says today names the repository and the credential files skein read, as its two neighbours do. Declared rather than re-pointed for the same reason as they were: the row is the record of the defect, and moving it onto the fixed sentence would make the survey claim it found one that is not there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1510"]
-line = "/// A repo's files, read out of its **mirror** rather than off somebody's disk."
-cited_by = ["docs/architecture.md", "docs/parity.md"]
-
-["src/repos.rs:1560"]
-line = "return Err(format!("
-window = "if tree.git(&[\"rev-parse\", \"--verify\", \"HEAD\"]).is_none() {\u000breturn Err(format!(\u000b\"the mirror at {} has no readable HEAD — an empty repository, or a mirror that \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/repos.rs:1774"]
+["src/repos/add.rs:16"]
 line = "return Err(format!("
 window = "if !valid_runtime(runtime) {\u000breturn Err(format!(\u000b\"unsupported runtime {runtime:?}; available: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1807"]
+["src/repos/add.rs:49"]
 line = "let store = match store.map(str::trim).filter(|s| !s.is_empty()) {"
 cited_by = ["docs/architecture.md"]
 
-["src/repos.rs:1821"]
+["src/repos/add.rs:63"]
 line = "if !registrable_source(source) {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos.rs:1822"]
+["src/repos/add.rs:64"]
 line = "return Err(format!("
 window = "if !registrable_source(source) {\u000breturn Err(format!(\u000b\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos.rs:1907"]
+["src/repos/add.rs:149"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
+
+["src/repos/list.rs:78"]
+line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/repos/list.rs:136"]
+line = "return Err(format!("
+window = "Err(why) => {\u000breturn Err(format!(\u000b\"{id}'s per-pull-request triggers could not be read ({why}), so this would \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/repos/list.rs:147"]
+line = "return Err(\"no directory for the trigger overrides\".into());"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/repos/mirror.rs:85"]
+line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/repos/mirror.rs:271"]
+line = "/// A repo's files, read out of its **mirror** rather than off somebody's disk."
+cited_by = ["docs/architecture.md", "docs/parity.md"]
+
+["src/repos/mirror.rs:321"]
+line = "return Err(format!("
+window = "if tree.git(&[\"rev-parse\", \"--verify\", \"HEAD\"]).is_none() {\u000breturn Err(format!(\u000b\"the mirror at {} has no readable HEAD — an empty repository, or a mirror that \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/repos/source.rs:28"]
+line = "pub(crate) fn registrable_source(source: &str) -> bool {"
+cited_by = ["docs/architecture.md", "docs/parity.md"]
 
 ["src/review/asking.rs:618"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
@@ -1763,15 +1763,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11740"]
+["src/web/index.html:11820"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11779"]
+["src/web/index.html:11863"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:12007"]
+["src/web/index.html:12091"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 

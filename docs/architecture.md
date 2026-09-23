@@ -471,9 +471,9 @@ names a corpse while the box runs happily.
 clones its checkout from the mirror onto VM-local disk. An earlier revision of this section said the
 opposite of that first sentence — *"a local filesystem path is a valid remote, so a repo with no
 server anywhere still works: skein fetches from your path"* — which is a fact about git and not one
-about skein. `registrable_source` (`src/repos.rs:855`) requires a scheme and accepts `https://`,
+about skein. `registrable_source` (`src/repos/source.rs:28`) requires a scheme and accepts `https://`,
 `http://`, `ssh://` and `git@host:` only; `add_repo` refuses everything else before it clones
-anything (`src/repos.rs:1821`).
+anything (`src/repos/add.rs:63`).
 
 What is lost, precisely: **a repo with no server anywhere cannot be registered at all**, and with it
 goes the visibility of uncommitted work that adopting a checkout in place used to give. You commit
@@ -488,7 +488,7 @@ Two consequences to state rather than discover:
   and refusing the path removes the asymmetry instead of documenting it.
 - **Three host-side features read the working checkout directly** — `diff`, `moduledocs`,
   `codeowners`. They repoint at the mirror. That is a refactor, not a deletion, and it is budgeted
-  in `docs/delivery.md`. Done, through `repos::Tree` (`src/repos.rs:1510`), and one thing had to be
+  in `docs/delivery.md`. Done, through `repos::Tree` (`src/repos/mirror.rs:271`), and one thing had to be
   separated to do it: the files a repo keeps **out of git** are not in any mirror, so what
   `shared-paths.txt` names is surfaced into a box out of the store's own `shared-rw/` by
   `sandbox-bootstrap.sh` rather than read off a checkout. Nothing on the host seeds that directory
@@ -955,8 +955,8 @@ path in it (`src/box-session.sh:1921`) and binds back only the one store this bo
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
   — module notes and a repo pull. Neither exists: the module notes, the diff and CODEOWNERS read the
-  mirror through `repos::Tree` (`src/repos.rs:1510`), and `pull_repo` fetches the mirror and does
-  nothing else (`src/repos.rs:1907`). What has not changed is that skein still runs git **on the
+  mirror through `repos::Tree` (`src/repos/mirror.rs:271`), and `pull_repo` fetches the mirror and does
+  nothing else (`src/repos/add.rs:149`). What has not changed is that skein still runs git **on the
   host** against a tree inside `~/.skein/repos` — the mirror, via `fetch_mirror` — so a box that
   could write that mirror's `config` would still get execution as the host user at the next fetch.
   The cover above is what stops it, which means the cover is load-bearing for more than file
@@ -1389,7 +1389,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 
 2. **The cover is an inversion, derived from the fleet's mount set.** Not from one root: a repo's
    `store` is an **arbitrary host path chosen at repo-add time** — `--store` takes one and keeps it
-   (`src/repos.rs:1807`) — so a rule written over the state root alone never reaches
+   (`src/repos/add.rs:49`) — so a rule written over the state root alone never reaches
    `/home/you/code/thing`. This used to name a second such path, `repo.work`, the host checkout of a
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
