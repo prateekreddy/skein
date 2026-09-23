@@ -86,7 +86,11 @@ const UPLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
 /// set in — but a test shortens it to milliseconds, and "nothing moved for 0s" is a sentence that
 /// says the deadline is broken rather than that it fired.
 fn stall_word() -> String {
-    let d = upload_stall();
+    say_stall(upload_stall())
+}
+
+/// [`stall_word`] for a deadline that was handed in rather than read from the environment.
+fn say_stall(d: Duration) -> String {
     match d.as_secs() {
         0 => format!("{}ms", d.as_millis()),
         n => format!("{n}s"),
@@ -185,30 +189,67 @@ impl Sink {
     }
 
     async fn finish(self) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt as _;
+        self.finish_within(upload_stall()).await
+    }
+
+    /// [`Self::finish`] with the deadline passed in, so a test can wait for one without writing
+    /// `$SKEIN_UPLOAD_STALL_MS` into a process every other test shares.
+    ///
+    /// **It keeps the child until the deadline has been answered** (SKEIN-924). It used to hand the
+    /// child to `wait_with_output`, which consumes it: when `timeout` then dropped that future the
+    /// `Child` went with it and `kill_on_drop` reached the crossing alone, leaving the `cat` under
+    /// it holding the box's end of a file the reader had just been told never arrived. Signalling
+    /// the group from the `Err` arm was not possible either, because by then the child was already
+    /// being reaped in tokio's orphan queue and its pid could be anybody's. So the wait borrows the
+    /// child instead, and the elapsed arm ends the group through [`Self::end_group`] while the
+    /// leader is still unreaped — the same order [`Self::abandon`] keeps.
+    ///
+    /// `stderr` is drained on a task of its own because that is what `wait_with_output` was buying:
+    /// a crossing that writes more than a pipe holds (~64KB) and is never read would block, and a
+    /// blocked child never exits. It is only the verdict's wording, so it is read under a deadline
+    /// of its own and never decides the verdict: a descendant still holding the pipe after the
+    /// crossing exited would otherwise hold the request open on a sentence.
+    async fn finish_within(self, stall: Duration) -> Result<(), String> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         // The verdict below is a moment away or is never coming: the body is already through and
         // `cat` exits on EOF. So it waits the stall budget rather than a whole-transfer one — a
         // write that will not exit used to hold the request with no deadline at all, and the reader
         // saw "uploading…" for as long as that lasted (SKEIN-269).
-        let Sink { child, stdin } = self;
+        let Sink { mut child, stdin } = self;
         let mut stdin = stdin;
         stdin.shutdown().await.ok();
         drop(stdin); // EOF for `cat`
-        let out = match tokio::time::timeout(upload_stall(), child.wait_with_output()).await {
+        let stderr = child.stderr.take();
+        let drain = tokio::spawn(async move {
+            let mut said = Vec::new();
+            if let Some(mut stderr) = stderr {
+                let _ = stderr.read_to_end(&mut said).await;
+            }
+            said
+        });
+        let status = match tokio::time::timeout(stall, child.wait()).await {
             Ok(r) => r.map_err(|e| format!("the write into the box failed: {e}"))?,
             Err(_) => {
+                drain.abort();
+                Self::end_group(&mut child).await;
                 return Err(format!(
                     "the box never confirmed the file — the write did not finish within {}",
-                    stall_word()
-                ))
+                    say_stall(stall)
+                ));
             }
         };
-        if out.status.success() {
+        if status.success() {
+            drain.abort();
             return Ok(());
         }
+        let said = tokio::time::timeout(stall, drain)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
         Err(format!(
             "the write into the box failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&said).trim()
         ))
     }
 
@@ -223,6 +264,12 @@ impl Sink {
     async fn abandon(self) {
         let Sink { mut child, stdin } = self;
         drop(stdin);
+        Self::end_group(&mut child).await;
+    }
+
+    /// End the write's whole process group, then reap its leader. Shared by [`Self::abandon`] and
+    /// [`Self::finish_within`]'s deadline, which are the two ways this side gives up on a write.
+    async fn end_group(child: &mut tokio::process::Child) {
         // `id()` is `Some` only while the child is unreaped, and an unreaped pid cannot have been
         // handed to anybody else — so the group named here is this child's own and can be no
         // stranger's. That is the same invariant `skein::util::end_group`'s SAFETY note states.
@@ -355,8 +402,16 @@ mod upload_deadline {
             Escapee {
                 // A `sleep` duration, and therefore a name in the grandchild's own argv. This
                 // process's pid is in it, so the scan below can match nothing a neighbouring suite
-                // started.
-                token: format!("600.{}", std::process::id()),
+                // started — and a per-fixture serial after it, fixed-width so no token is a prefix
+                // of another, because the tests here are threads of ONE process: with the pid
+                // alone, one test's `Drop` killed the other's grandchildren and turned a failing
+                // assertion green (seen when a second test joined this module, SKEIN-924).
+                token: {
+                    static SERIAL: std::sync::atomic::AtomicU32 =
+                        std::sync::atomic::AtomicU32::new(0);
+                    let n = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    format!("600.{}{n:04}", std::process::id())
+                },
                 pidfile: dir.join("abandoned.grandchild"),
             }
         }
@@ -477,6 +532,39 @@ mod upload_deadline {
 
         let pid = escapee.there();
         runtime.block_on(sink.abandon());
+        escapee.gone(pid);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A write that never confirms is ended whole when the deadline gives up on it** (SKEIN-924).
+    ///
+    /// The same fixture as the abandon test above, driven through [`Sink::finish_within`] instead:
+    /// the script ignores EOF and sleeps on, so the wait for its exit runs out, and what is asserted
+    /// is that the grandchild the script started is THERE before that deadline and GONE after it.
+    ///
+    /// **What makes it fail:** going back to `timeout(stall, child.wait_with_output())`, which
+    /// consumes the child — the elapsed arm then has nothing to signal the group through,
+    /// `kill_on_drop` reaches the shell alone, and `gone` names the backgrounded `sleep`.
+    #[test]
+    fn an_upload_whose_write_never_confirms_takes_its_grandchildren_with_it() {
+        let dir = scratch_dir("dl924-finish");
+        let escapee = Escapee::new(&dir);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime for this test's body");
+        let sink = runtime.block_on(async { Sink::open(&escapee.argv()) });
+        let sink = sink.expect("the write did not start");
+
+        let pid = escapee.there();
+        let said = runtime.block_on(sink.finish_within(Duration::from_millis(300)));
+        let why = said.expect_err("a write that never exits was reported as confirmed");
+        assert!(
+            why.contains("never confirmed"),
+            "the deadline did not say what it gave up on: {why}"
+        );
         escapee.gone(pid);
 
         let _ = std::fs::remove_dir_all(&dir);
