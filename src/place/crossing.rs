@@ -8,7 +8,7 @@
 /// bash's own default for a non-login shell, which is the point: what a fleet-scope script needs
 /// (`sudo`, `git`, `jq`, `python3`, `bwrap`, `apt-get`, `npm`, `cc`, `curl`, `nsenter`) lives in
 /// `/usr/bin`, and the two directories a profile would put ahead of it are writable by every box.
-/// See [`Place::shell`] for the whole of why.
+/// See [`Place::shell`](super::Place::shell) for the whole of why.
 pub(super) const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// The two user-writable directories a BOX's own PATH carries in front of [`FLEET_PATH`].
@@ -39,7 +39,7 @@ pub(super) const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
 /// resolves to" is now a mount rather than a path edit.
 const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 
-/// The PATH a box runs on, built from the `home` in its placement — [`Place::wrap`] exports exactly
+/// The PATH a box runs on, built from the `home` in its placement — `Place::wrap` exports exactly
 /// this, and exports it from here so there is only one of it.
 ///
 /// **A second copy of this string is the bug, not the convenience.** `crate::agentpath` asks whether
@@ -58,7 +58,7 @@ const LAUNCHER: &str = include_str!("../box-session.sh");
 /// `inherited_env` list, read out of the launcher's own text (SKEIN-1085).
 ///
 /// A box's session starts through `src/box-session.sh`, which removes every inherited variable not
-/// on that list (SKEIN-972). A crossing is the other way in: [`Place::enter`] spawns `nsenter` from
+/// on that list (SKEIN-972). A crossing is the other way in: `Place::enter` spawns `nsenter` from
 /// skein-server, which carries the server's whole environment into the box's namespace — so the
 /// provisioning script, the attach shell, the pane observer it starts, a model call and every other
 /// crossing used to see `SKEIN_HOME`, `SKEIN_LISTEN_INHERITED_ONLY` and everything else the cockpit
@@ -133,14 +133,14 @@ const CROSSING_ALSO: &[&str] = &["TERM", "COLORTERM"];
 /// The shell, run in front of the `nsenter` hop, that removes every variable not on
 /// [`inherited_env`] or [`CROSSING_ALSO`] — the launcher's own filter, for a crossing.
 ///
-/// In front of the hop and not in [`Place::wrap`] behind it, because behind it a login shell has
-/// already sourced the box's profile, and what a box sets in its own profile is the box's business
-/// (the owner's decision on SKEIN-972). Filtering there would strip it.
+/// In front of the hop and not in [`Place::wrap`](super::Place::wrap) behind it, because behind it
+/// a login shell has already sourced the box's profile, and what a box sets in its own profile is
+/// the box's business (the owner's decision on SKEIN-972). Filtering there would strip it.
 ///
 /// Two halves, as in the launcher: `unset` for every exported name, and `env -u` on the `exec` for
 /// the names bash cannot hold as variables (`BASH_FUNC_<name>%%`, anything with a `-`), which bash
-/// passes through to its children untouched. It leaves `skein_odd` for [`Place::enter`]'s `exec`.
-/// Names only ever reach an argv — never a value.
+/// passes through to its children untouched. It leaves `skein_odd` for
+/// [`Place::enter`](super::Place::enter)'s `exec`. Names only ever reach an argv — never a value.
 pub(super) fn keep_only_listed() -> String {
     let keep = inherited_env()
         .iter()
@@ -181,8 +181,8 @@ pub(super) fn keep_only_listed() -> String {
 /// `PATH` and `HOME` are refused outright. The launcher REPLACES both rather than unsetting them,
 /// so they are never read here. But if an `unset PATH` were ever added, taking the session's value
 /// would put the box's own `~/.local/bin` in front of the `nsenter` a crossing resolves at fleet
-/// scope, which is ISO-1 (see [`Place::enter`]). [`Place::wrap`] gives both their box values past
-/// the hop, which is the only place they belong.
+/// scope, which is ISO-1 (see `Place::enter`). `Place::wrap` gives both their box values past the
+/// hop, which is the only place they belong.
 pub fn session_decides() -> &'static [String] {
     static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| parse_session_decides(LAUNCHER, inherited_env()))
@@ -237,9 +237,9 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
 /// The answer is already written down, in the one process a crossing already trusts: the anchor.
 /// `ns_pid` is the box's tmux server, started by the launcher's last line with the launcher's final
 /// environment, so `/proc/<ns_pid>/environ` is what the launcher decided for THIS box — scoped or
-/// not, own token or none, login or not. [`Place::guard`] has proved `ns_pid` is that server one
-/// line earlier in the same shell, and `nsenter` is about to open files under the same
-/// `/proc/<ns_pid>/`, so reading one more costs no new trust.
+/// not, own token or none, login or not. [`Place::guard`](super::Place::guard) has proved `ns_pid`
+/// is that server one line earlier in the same shell, and `nsenter` is about to open files under
+/// the same `/proc/<ns_pid>/`, so reading one more costs no new trust.
 ///
 /// # What it does
 ///
