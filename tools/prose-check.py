@@ -312,6 +312,88 @@ def code_text():
     return "\n".join(out)
 
 
+def code_files():
+    """(label, uncommented text) for every file `code_text` reads — the same walk, kept per file."""
+    for d in CODE_DIRS:
+        for base, dirs, files in os.walk(os.path.join(ROOT, d)):
+            dirs[:] = [x for x in dirs if x not in ("node_modules", "target", ".git")]
+            for f in sorted(files):
+                if f.endswith(CODE_SUFFIXES):
+                    path = os.path.join(base, f)
+                    try:
+                        text = open(path, encoding="utf-8").read()
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                    yield os.path.relpath(path, ROOT), without_comments(text, os.path.splitext(f)[1])
+
+
+def code_sites(name, files=None, limit=3):
+    """Where the code has `name` as `code_has` means it: `[(label:line, the line), …]`, at most `limit`.
+
+    Only called on a failure path, to say WHY an entry stopped being needed. The case that asked
+    for it is SKEIN-559: a test naming a test BINARY as a bare string literal, where that binary's
+    name was also a stale symbol in the debt file. `code_text` rightly counts a string as code —
+    an environment variable or a route is only ever a string — so the entry went stale and the
+    gate said "the prose no longer names it", which was false and pointed nowhere near the test.
+    """
+    found = []
+    left = "" if name.startswith("_") else r"\b"
+    right = "" if name.endswith("_") else r"\b"
+    pattern = re.compile(left + re.escape(name) + right)
+    for label, text in (code_files() if files is None else files):
+        for n, line in enumerate(text.split("\n"), 1):
+            if pattern.search(line):
+                found.append((f"{label}:{n}", line.strip()[:100]))
+                if len(found) >= limit:
+                    return found
+    return found
+
+
+def prose_sites(name, sources=None):
+    """Every `label:line` where the prose names `name` as a bare (last-segment) symbol."""
+    return [
+        f"{label}:{n}"
+        for label, lines in (prose_sources() if sources is None else sources)
+        for n, line in enumerate(lines, 1)
+        if any(found.rsplit("::", 1)[-1] == name for found in names_in(line))
+    ]
+
+
+def no_longer_needed(ledger, name, rule, prose_at, code_at):
+    """The finding for a ledger entry rule one no longer reports, saying which of two reasons.
+
+    Either the prose stopped naming it — the case every such entry used to be reported as — or the
+    prose still does and the CODE gained the name. The second needs a different sentence, because
+    it is often a coincidence the gate cannot see through: a string literal that shares the name
+    with a different thing (SKEIN-559).
+    """
+    if not prose_at or not code_at:
+        return (
+            f"prose-check: {ledger} {rule}, and "
+            + ("the prose no longer names it" if not prose_at else "nothing needs it")
+            + "\n"
+            f"             rule: " + (
+                "the debt list only shrinks by being edited — delete the entry in the same "
+                "change that fixed the sentence" if "debt" in ledger else
+                "either the code has it again or no prose names it — an allow-list nobody "
+                "prunes is a permission nobody granted. Drop the entry"
+            )
+        )
+    more = f" (+{len(prose_at) - 4} more)" if len(prose_at) > 4 else ""
+    return (
+        f"prose-check: {ledger} {rule}, and the prose still names it at "
+        f"{', '.join(prose_at[:4])}{more} — but the code now has `{name}`:\n"
+        + "".join(f"               {where}  {line}\n" for where, line in code_at)
+        + f"             rule: every non-comment line is code to this gate, string literals "
+        f"included, because an environment variable or a route is only ever a string. If the "
+        f"code gained `{name}` because the prose became true, delete the entry. If it is a "
+        f"DIFFERENT thing that happens to share the name — a test binary's name written as a "
+        f"bare string literal is the case that found this (SKEIN-559) — spell that one so it is "
+        f"not the bare word (`file!()`, `env!(\"CARGO_BIN_NAME\")`, a `concat!`), and the entry "
+        f"stays honest"
+    )
+
+
 def rust_comment_lines(text):
     """Every line of `text` with everything that is NOT a comment blanked out.
 
@@ -1797,6 +1879,20 @@ def self_check():
             "one (it is not, if `BACKTICKED` stops taking the `$` — SKEIN-648).\n"
             "  wanted %r\n  got    %r" % (want_symbols, symbols)
         )
+    # A LEDGER ENTRY THE CODE MADE UNNECESSARY SAYS SO (SKEIN-559). A fixture test names a binary
+    # as a bare string literal that is also a declared name; the finding must point at the literal,
+    # and a comment naming it must not count as the code having it.
+    binary = "a_fixture_" + "binary_name"
+    literal = [("tests/t.rs", 'fn t() {\n    let b = "' + binary + '";\n}'),
+               ("tests/u.rs", without_comments("// " + binary + "\nfn u() {}", ".rs"))]
+    said = no_longer_needed("docs/prose-debt.toml", binary, "records it as stale",
+                            ["docs/x.md:3"], code_sites(binary, literal))
+    if "tests/t.rs:2" not in said or "tests/u.rs" in said or "no longer names" in said:
+        raise SystemExit(
+            "prose-check: a ledger entry made unnecessary by a string literal in the code is not "
+            "reported as that — it must name the literal's line, not a comment, and must not "
+            "claim the prose stopped naming it (SKEIN-559).\n  got: " + said
+        )
     # THE MEMOISED MATCH IS THE SAME QUESTION (SKEIN-721). Both rules answer `code_has` from a set
     # now, so the set has to agree with it on every shape where they could part: a name after a
     # digit and after a non-ASCII letter (a `findall` token, and no `\b` match), a name before a
@@ -2128,19 +2224,17 @@ def main():
                 f"than no claim — fix the sentence, or declare the name in "
                 f"docs/prose-symbols.toml with why it is not here"
             )
-    for name in sorted(set(bare_spec) - set(found)):
-        problems.append(
-            f"prose-check: docs/prose-symbols.toml exempts `{name}` and nothing needs it\n"
-            f"             rule: either the code has it again or no prose names it — an "
-            f"allow-list nobody prunes is a permission nobody granted. Drop the entry"
-        )
-    for name in sorted(set(bare_stale) - set(found)):
-        problems.append(
-            f"prose-check: docs/prose-debt.toml records `{name}` as stale and the prose no longer "
-            f"names it\n"
-            f"             rule: the debt list only shrinks by being edited — delete the entry in "
-            f"the same change that fixed the sentence"
-        )
+    for ledger, rule, names in (
+        ("docs/prose-symbols.toml", "exempts `%s`", set(bare_spec) - set(found)),
+        ("docs/prose-debt.toml", "records `%s` as stale", set(bare_stale) - set(found)),
+    ):
+        for name in sorted(names):
+            prose_at = prose_sites(name)
+            problems.append(
+                no_longer_needed(
+                    ledger, name, rule % name, prose_at, code_sites(name) if prose_at else []
+                )
+            )
     # The module rule, with the same two lists and the same pruning. The message names the module
     # rather than the symbol, because that is the half the reader followed and lost.
     for name in sorted(qualified):
