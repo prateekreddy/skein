@@ -32,7 +32,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
-import { FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
+import { spawnSync } from "node:child_process";
+import { FIXTURE_AGENT_STUB, FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
 import { stub } from "./harness/github.mjs";
 
 const API_TOKEN = "h".repeat(64);
@@ -52,6 +53,14 @@ process.env.GITHUB_TOKEN = DEV_GITHUB_TOKEN;
 process.env.SKEIN_LISTEN_INHERITED_ONLY = "1";
 // And the marker the box launcher exports into every box (SKEIN-1086), for the same reason.
 process.env.SKEIN_IN_BOX = "1";
+// And the two absences and one presence check 5 and check 6 are about. `$SKEIN_TEST` because cargo
+// sets it on every `cargo test` and `ai::agent_command` refuses the unset agent only when it is
+// there, so by hand this suite would otherwise ask a different question than under cargo — and
+// spawn the real CLI while asking it. `$SKEIN_CLAUDE_BIN` removed because a shell that happened to
+// export one would make check 5 pass without the harness doing anything. `$TMUX` and `$TMUX_PANE`
+// set, at a tmux this suite starts itself, because a runner on GitHub is in no tmux at all.
+process.env.SKEIN_TEST = "1";
+delete process.env.SKEIN_CLAUDE_BIN;
 
 const t = harness();
 
@@ -128,7 +137,14 @@ const running = [];
 async function serverWith(extra) {
   const door = await openDoor();
   const { port } = door;
-  const { srv, log } = await startServer({ door, token: API_TOKEN, env: { ...common, ...extra } });
+  let started;
+  try {
+    started = await startServer({ door, token: API_TOKEN, env: { ...common, ...extra } });
+  } catch (e) {
+    door.close();
+    throw e;
+  }
+  const { srv, log } = started;
   running.push(srv);
   return { port, log, srv };
 }
@@ -282,6 +298,95 @@ try {
         whenTheSuiteSaysItIs: childVar(saidItWasABox.srv, marker) },
       { whenTheSuiteSaysNothing: "unset", whenTheSuiteSaysItIs: "1" },
     );
+  }
+
+  // 5. **The agent CLI a suite's server can reach is a stub, and a suite cannot ask for the real one
+  //    by leaving it empty** (SKEIN-1092). Three arms. The first is the pin, read from the kernel
+  //    like check 3's home. The second is the hatch every suite that asserts on what the agent said
+  //    already uses. The third is the refusal.
+  //
+  //    **And the fourth arm is the reason, observed rather than named**: `/api/health` starts
+  //    `ai::model_choices`' background `claude --help` on a fresh server, which is the call that
+  //    panicked `onboarding.mjs`'s server. With the pin, the stub is what runs — it leaves
+  //    `<stub>.asked` behind — and the server's log carries no refusal. Without it (the line in
+  //    `startServer` deleted), the stub is never asked and the log carries `agent_command`'s
+  //    "$SKEIN_CLAUDE_BIN is unset in a test process", so this arm fails by name either way.
+  {
+    const saidNothing = await serverWith({});
+    const own = path.join(fx.bin, "a-suites-own-agent");
+    const namedItsOwn = await serverWith({ SKEIN_CLAUDE_BIN: own });
+    let emptyRefused = "";
+    try {
+      await serverWith({ SKEIN_CLAUDE_BIN: "" });
+      emptyRefused = "a server was started";
+    } catch (e) {
+      emptyRefused = String(e.message).includes("$SKEIN_CLAUDE_BIN empty") ? "refused" : String(e.message);
+    }
+    const stub = childVar(saidNothing.srv, "SKEIN_CLAUDE_BIN");
+    t.check(
+      "a suite's server is handed a stub agent CLI, a suite may name its own, and an empty one is refused",
+      { whenTheSuiteSaysNothing: path.basename(stub) === FIXTURE_AGENT_STUB && stub.startsWith(fx.root + path.sep),
+        whenTheSuiteNamesItsOwn: childVar(namedItsOwn.srv, "SKEIN_CLAUDE_BIN") === own,
+        whenTheSuiteAsksForNone: emptyRefused },
+      { whenTheSuiteSaysNothing: true, whenTheSuiteNamesItsOwn: true, whenTheSuiteAsksForNone: "refused" },
+    );
+    await ask(saidNothing.port, "/api/health");
+    const asked = `${stub}.asked`;
+    for (let i = 0; i < 50 && !fs.existsSync(asked) && !saidNothing.log().includes("is unset in a test process"); i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    t.check(
+      "the agent call a health report starts reaches the stub, and the server never refuses it",
+      { theStubWasAsked: fs.existsSync(asked), theServerRefusedTheRealOne: saidNothing.log().includes("is unset in a test process") },
+      { theStubWasAsked: true, theServerRefusedTheRealOne: false },
+    );
+  }
+
+  // 6. **A bare `tmux` the server runs reaches the fixture's socket and never the runner's**
+  //    (SKEIN-1091). This suite starts a tmux of its own, holding a session called `skein-update`,
+  //    and points `$TMUX` at it the way a pane in a skein box does. Then it hands a server an
+  //    update that is believed to be running and asks `/api/update`: `update::settle` asks
+  //    `tmux has-session -t skein-update` with no `-S`, so the answer is decided by which tmux that
+  //    bare command reaches. The fixture's socket has no such session and the run is settled as
+  //    ended — `running: false`. With `$TMUX` passed through (delete the strip in `startServer`),
+  //    the runner's tmux answers that the session is there and the run stays `running: true`.
+  //
+  //    The environment is checked too, from `/proc`, so a failure says which half moved.
+  {
+    const theirs = path.join(fx.root, "runners-tmux.sock");
+    const planted = spawnSync("tmux", ["-S", theirs, "new-session", "-d", "-s", "skein-update", "sleep 600"],
+      { env: { ...process.env, TMUX: "" }, stdio: "ignore" });
+    const pid = spawnSync("tmux", ["-S", theirs, "display-message", "-p", "#{pid}"], { encoding: "utf8" }).stdout.trim();
+    process.env.TMUX = `${theirs},${pid},0`;
+    process.env.TMUX_PANE = "%0";
+    try {
+      const home = path.join(fx.root, "home-updating");
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
+      // A sandbox name, because `settle` asks nothing when there is none; the ask runs on this
+      // machine either way (`place::own_sandbox`).
+      fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ fleet_sandbox: "example" }));
+      fs.writeFileSync(path.join(home, "repos.json"), "[]");
+      fs.writeFileSync(path.join(home, "update.run"), "fixture-run");
+      fs.writeFileSync(path.join(home, "update.log"), "skein: fetching\n");
+      const { srv, port } = await serverWith({ SKEIN_HOME: home });
+      const u = await ask(port, "/api/update");
+      const tmpdir = childVar(srv, "TMUX_TMPDIR");
+      t.check(
+        "a bare tmux from the server reaches the fixture's own socket, not the runner's",
+        { plantedTheRunnersTmux: planted.status === 0 && /^\d+$/.test(pid),
+          TMUX: childVar(srv, "TMUX"),
+          TMUX_PANE: childVar(srv, "TMUX_PANE"),
+          TMUX_TMPDIRInsideTheFixture: tmpdir.startsWith(fx.root + path.sep),
+          theRunnersSessionWasSeen: u.running },
+        { plantedTheRunnersTmux: true, TMUX: "unset", TMUX_PANE: "unset", TMUX_TMPDIRInsideTheFixture: true,
+          theRunnersSessionWasSeen: false },
+      );
+    } finally {
+      delete process.env.TMUX;
+      delete process.env.TMUX_PANE;
+      spawnSync("tmux", ["-S", theirs, "kill-server"], { stdio: "ignore" });
+    }
   }
 
   // Two further checks were here, and they are gone rather than retargeted. They asserted a

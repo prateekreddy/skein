@@ -505,12 +505,12 @@ async fn main() {
         // something else: this installs software into the sandbox every box shares, which is not a
         // thing to reach by accident.
         .route("/api/update-agents", post(api_update_agents))
-        // Settings -> Update: a reading that must never block, a press that starts minutes of work,
-        // a log tailed across the restart it causes, and the Cancel a quiet log offers (SKEIN-1037).
+        // Settings -> Update (SKEIN-1037); `restart` POSTs SKEIN-1029's press, GETs the holder.
         .route("/api/update", get(api_update))
         .route("/api/update/start", post(api_update_start))
         .route("/api/update/log", get(api_update_log))
         .route("/api/update/cancel", post(api_update_cancel))
+        .route("/api/update/restart", get(api_holder).post(api_restart))
         .route("/api/login/:runtime/terminal", get(login_terminal))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -5228,6 +5228,34 @@ async fn api_update_cancel(Json(body): Json<UpdateCancel>) -> Json<serde_json::V
 struct UpdateCancel {
     #[serde(default)]
     run: String,
+}
+
+/// "Restart on new build": the doorway's in-place reload, answered before it lands — see
+/// `update::restart`. What the page does next is poll `/api/health` for the new `build`.
+async fn api_restart() -> Json<serde_json::Value> {
+    let sandbox = skein::place::fleet_sandbox();
+    let out = tokio::task::spawn_blocking(move || skein::update::restart(&sandbox)).await;
+    Json(match out {
+        Ok(Ok(holder)) => serde_json::json!({ "ok": true, "holder": holder }),
+        Ok(Err(skein::update::NotRestarted::NothingNewer)) => {
+            serde_json::json!({ "ok": false, "why": "nothing-newer" })
+        }
+        Ok(Err(skein::update::NotRestarted::NoDoorway(holder))) => {
+            serde_json::json!({ "ok": false, "why": "no-doorway", "holder": holder })
+        }
+        Err(e) => serde_json::json!({ "ok": false, "why": "failed", "error": e.to_string() }),
+    })
+}
+
+/// Who holds the cockpit's port, asked by whichever server answers — `GET /api/update/restart`,
+/// read by the page when a restart did not bring the new build up.
+async fn api_holder() -> Json<Option<skein::update::PortHolder>> {
+    let sandbox = skein::place::fleet_sandbox();
+    Json(
+        tokio::task::spawn_blocking(move || skein::update::port_holder(&sandbox))
+            .await
+            .ok(),
+    )
 }
 
 #[cfg(test)]

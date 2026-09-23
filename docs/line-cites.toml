@@ -338,7 +338,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5537"]
+["src/bin/skein-server.rs:5565"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1024,11 +1024,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "/// session; the same call with a short one created it. `MAX_IMSGSIZE` is 16384 and the header eats"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/server.rs:353"]
+["src/fleet/server.rs:362"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:512"]
+["src/fleet/server.rs:537"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1514,7 +1514,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/update.rs:280"]
+["src/update.rs:433"]
 line = "if sandbox.is_empty() || !believed_running() {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1707,71 +1707,71 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9825"]
+["src/web/index.html:9832"]
 line = ".catch(e => toast(e.message));"
 window = "})\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9831"]
+["src/web/index.html:9838"]
 line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:9839"]
+["src/web/index.html:9846"]
 line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10089"]
+["src/web/index.html:10096"]
 line = ".catch(e => toast(`pull failed: ${e.message}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10144"]
+["src/web/index.html:10151"]
 line = ".catch(e => toast(`couldn't save: ${e.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10189"]
+["src/web/index.html:10196"]
 line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:10203"]
+["src/web/index.html:10210"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11406"]
+["src/web/index.html:11413"]
 line = "? `board is ${age}s stale — the server stopped answering`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11442"]
+["src/web/index.html:11449"]
 line = "for (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);"
 window = "render(tick.boxes || []);\u000bfor (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);\u000breturn;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11466"]
+["src/web/index.html:11473"]
 line = "es.addEventListener(\"pty-freed\", () => retryWaiting(\"wait-pty\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11487"]
+["src/web/index.html:11494"]
 line = "es.onerror = () => { document.getElementById(\"live\").classList.remove(\"on\"); document.getElementById(\"livetext\").textContent = \"reconnecting…\"; };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11574"]
+["src/web/index.html:11581"]
 line = "const extra = rest ? ` (+${rest} more)` : \"\";"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11613"]
+["src/web/index.html:11620"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11820"]
+["src/web/index.html:11921"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11863"]
+["src/web/index.html:11964"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:12091"]
+["src/web/index.html:12192"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 

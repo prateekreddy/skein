@@ -84,6 +84,13 @@ pub struct Available {
     pub tracking: String,
     /// The repository being tracked.
     pub url: String,
+    /// What the server binary installed on disk says it is — its `--version` stamp — or empty when
+    /// there is none there, or it would not say (SKEIN-1029).
+    pub installed: String,
+    /// A different build is installed than the one answering, so "Restart on new build" would
+    /// bring it up. Compared as whole stamps: a `-dirty` build and a clean one of the same commit
+    /// are different binaries, and the page confirms the restart by the same exact comparison.
+    pub restartable: bool,
 }
 
 /// Everything the pane needs, with the remote taken from the last reading rather than asked now.
@@ -99,7 +106,10 @@ pub fn available(token: Option<crate::secret::Secret>) -> Available {
         Err(why) => (String::new(), why),
     };
     let known = |a: &str, b: &str| !a.is_empty() && !b.is_empty();
+    let installed = installed_revision();
     Available {
+        restartable: differs(&installed, &running),
+        installed,
         behind: known(&remote, &source) && !same_revision(&remote, &source),
         // The stamp is `git describe --always --dirty`, so it is the source revision with a suffix
         // when the tree was clean. Compared by prefix for that reason, and only when both are known.
@@ -112,6 +122,149 @@ pub fn available(token: Option<crate::secret::Secret>) -> Available {
         tracking: crate::fleet::skein_source_ref(),
         url: crate::fleet::skein_source_url(),
     }
+}
+
+/// The last `--version` read of the installed binary, keyed by what would change its answer.
+type InstalledReading = ((u64, Option<std::time::SystemTime>, u64), String);
+static INSTALLED: std::sync::Mutex<Option<InstalledReading>> = std::sync::Mutex::new(None);
+
+/// The revision the server binary installed at [`crate::fleet::server_path`] reports — the build a
+/// restart would bring up (SKEIN-1029).
+///
+/// **Asked of the binary, once per file.** `/api/update` is polled while the pane is open, and a
+/// polled endpoint is the wrong place to spawn a process (this module's own rule, above). But the
+/// only thing that changes the answer is a new file at that path, and an install renames one into
+/// place — so the length, mtime and inode are the key, a stat is all a poll costs, and the binary
+/// is run once per install. Bounded, because a file at that path is whatever was put there.
+fn installed_revision() -> String {
+    use std::os::unix::fs::MetadataExt;
+    let path = crate::fleet::server_path();
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return String::new();
+    };
+    let key = (meta.len(), meta.modified().ok(), meta.ino());
+    let mut held = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((was, rev)) = held.as_ref() {
+        if *was == key {
+            return rev.clone();
+        }
+    }
+    let said = crate::util::output_with_timeout(
+        std::process::Command::new(&path).arg("--version"),
+        Duration::from_secs(10),
+    )
+    .filter(|out| out.status.success())
+    .map(|out| stamp_of(&String::from_utf8_lossy(&out.stdout)))
+    .unwrap_or_default();
+    *held = Some((key, said.clone()));
+    said
+}
+
+/// The revision out of `skein-server 0.1.0 (<rev>)` — the shape `skein-server --version` prints.
+fn stamp_of(version: &str) -> String {
+    version
+        .trim()
+        .rsplit_once('(')
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// What holds the cockpit's port, as facts for the page to put into words (SKEIN-1029).
+///
+/// Facts rather than a sentence because every sentence the restart puts in front of a person is in
+/// one object in the page (`RESTART_WORDS`), for the owner to read as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PortHolder {
+    /// The cockpit's port inside the sandbox.
+    pub port: u16,
+    /// The doorway holding it, judged by its stamp exactly as [`crate::fleet::door_pid`] judges
+    /// it; `None` when no doorway provably does.
+    pub doorway: Option<u32>,
+    /// The process answering this request, and the build it is.
+    pub server: u32,
+    pub build: String,
+    /// Whether this server is the doorway's child — the only server a reload replaces.
+    pub behind_doorway: bool,
+    /// The reload, as a person would type it.
+    pub reload: String,
+    /// Where the doorway says why a server it started did not come up.
+    pub look: String,
+}
+
+/// Who holds the port right now, asked by the server that is answering.
+pub fn port_holder(sandbox: &str) -> PortHolder {
+    let port = crate::fleet::server_sandbox_port();
+    let doorway = crate::fleet::door_pid(sandbox, port);
+    let parent = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix("PPid:"))
+                .and_then(|p| p.trim().parse::<u32>().ok())
+        });
+    PortHolder {
+        port,
+        behind_doorway: doorway.is_some() && doorway == parent,
+        doorway,
+        server: std::process::id(),
+        build: crate::health::BUILD_REVISION.to_string(),
+        reload: crate::fleet::reload_command(),
+        look: crate::fleet::doorway_pane_command(),
+    }
+}
+
+/// Why a restart was not sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotRestarted {
+    /// The build answering is the one installed: there is nothing newer to bring up.
+    NothingNewer,
+    /// No doorway holds the port, or this server is not the one behind it — so a reload would
+    /// replace nothing that is answering. The holder says what does.
+    NoDoorway(PortHolder),
+}
+
+/// "Restart on new build": the doorway's in-place reload, once the answer to this request is out.
+///
+/// **The reload is the doorway's `SIGUSR1`** ([`crate::fleet::reload_server`]) — the same one an
+/// install sends, which is gapless by design: the doorway ends this server and re-execs itself
+/// across the listening socket it never closes, then starts whatever is installed. So the page
+/// loses its connection for the time a server takes to start and never finds the port free.
+///
+/// **Sent after a beat, on a thread of its own**, because the process it replaces is this one: sent
+/// inline, the doorway's `SIGTERM` can land before the response does, and the page would be told
+/// nothing about a restart that worked. The checks that decide whether to send it are made first
+/// and synchronously, so every refusal still reaches the page.
+///
+/// **Refused unless this server is the doorway's child.** A server started some other way is not
+/// what a reload replaces: the doorway would restart a server nobody is talking to, and this one
+/// would go on answering as the old build — the "did not take" case, known in advance.
+pub fn restart(sandbox: &str) -> Result<PortHolder, NotRestarted> {
+    if !available_restartable() {
+        return Err(NotRestarted::NothingNewer);
+    }
+    let holder = port_holder(sandbox);
+    if !holder.behind_doorway {
+        return Err(NotRestarted::NoDoorway(holder));
+    }
+    let sandbox = sandbox.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        crate::fleet::reload_server(&sandbox);
+    });
+    Ok(holder)
+}
+
+/// [`Available::restartable`] without asking GitHub anything.
+fn available_restartable() -> bool {
+    differs(&installed_revision(), crate::health::BUILD_REVISION)
+}
+
+/// [`Available::restartable`]'s rule: both known, and not the same stamp.
+fn differs(installed: &str, running: &str) -> bool {
+    !installed.is_empty() && !running.is_empty() && installed != running
 }
 
 /// Whether two revisions name the same commit, one of which may be abbreviated.
@@ -660,6 +813,32 @@ fn run_script_with(build: &str, log: &str, done: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The installed build is read out of the line `skein-server --version` prints**
+    /// (SKEIN-1029), and a restart is offered only for a different, known one.
+    ///
+    /// What would make each assertion fail: `stamp_of` taking the package version (`0.1.0`) rather
+    /// than the parenthesised stamp, which is the same for every build and would never offer a
+    /// restart; and `differs` comparing through `same_revision`, which strips `-dirty` and so would
+    /// call a clean build and an edited-tree build of one commit the same binary.
+    #[test]
+    fn a_restart_is_offered_for_a_different_installed_build_and_only_then() {
+        assert_eq!(
+            stamp_of("skein-server 0.1.0 (ceb78a0-dirty)\n"),
+            "ceb78a0-dirty"
+        );
+        assert_eq!(stamp_of("not a version line"), "");
+        assert!(differs("ceb78a0", "463f028"));
+        assert!(
+            differs("ceb78a0-dirty", "ceb78a0"),
+            "an edited-tree build is another binary"
+        );
+        assert!(!differs("ceb78a0", "ceb78a0"));
+        assert!(
+            !differs("", "ceb78a0"),
+            "nothing installed is nothing to restart onto"
+        );
+    }
 
     /// **An update that never started does not report itself as running** — the live failure of
     /// 2026-08-31, in a test.
