@@ -418,27 +418,28 @@ await check("the add-repo dialog offers a remote and only a remote", async () =>
 // So the control is rebuilt out of the two things it was actually standing in for, which is
 // stronger than the field was because neither half depends on a second field continuing to exist:
 //
-//   * `/api/path` is asked directly for the same directory. That is the endpoint the probe calls,
-//     so if it stopped resolving this folder, an empty source note would mean nothing and this says
-//     so instead of passing.
+//   * `/api/path` is asked directly, and must be GONE (SKEIN-947). The owner removed it with the
+//     SSH key field, its last caller, so a silent source field is now the only thing it can be. If
+//     the route came back, a probe could be wired to this field again and an empty note would no
+//     longer prove it was not. So this refuses to judge the field while the route answers.
 //   * `#ar-src-note` is required to EXIST before its emptiness is read. Renaming that id is the
 //     exact way this check would go quietly vacuous, and `textContent` of a missing element is the
 //     same empty string as a silent field.
 await check("the add-repo source field does not probe a typed path", async () => {
   const folder = path.join(fx.root, "home");
-  // The control: the probe's own endpoint, asked for the very directory typed below.
-  const probe = await (await fetch(
+  // The control: the endpoint a probe would call, asked for the very directory typed below.
+  const probe = await fetch(
     `http://127.0.0.1:${port}/api/path?p=${encodeURIComponent(folder)}`,
-    { headers: authHeader() })).json();
-  if (!probe.resolved)
-    throw new Error(`/api/path no longer resolves ${folder} (kind: ${probe.kind}), so an empty \
-source note cannot tell a removed probe from a broken one`);
+    { headers: authHeader() });
+  if (probe.status !== 404)
+    throw new Error(`/api/path answers again (HTTP ${probe.status}), so a path probe could be \
+wired to this field and an empty note would not show it is not`);
   await page.evaluate(() => openAddRepo());
   await settle(400);
   // The note element must be there to be empty. Without this, a renamed id passes forever.
   if (!(await page.$("#ar-src-note")))
     throw new Error("#ar-src-note is gone, so this check was reading the empty string off nothing");
-  // 250ms of debounce in `checkPathLater`, then a round trip to `/api/path` — if it were wired.
+  // Long enough for a debounce and a round trip, if a probe were ever wired here again.
   await page.fill("#ar-src", folder);
   await settle(900);
   const src = (await page.textContent("#ar-src-note")) || "";

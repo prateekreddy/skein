@@ -288,7 +288,7 @@ been derived from:
 | `ensure_fleet_door` | in-sandbox, unprivileged — the doorway that holds the cockpit port across restarts, and the server behind it |
 | `ensure_box_session` | box |
 | `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in`, `ensure_mirror`, `ensure_volume` | filesystem |
-| `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts` | credentials |
+| `ensure_known_hosts`, `ensure_box_known_hosts` | credentials |
 | `heal_fleet` | **sandbox root** (cgroup ceilings, by shelling the launcher's `--ceilings` path) |
 
 Note `ensure_probe_all` deserves its own line in any design: it writes 19 scripts and merges hooks

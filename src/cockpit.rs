@@ -803,35 +803,35 @@ mod tests {
             "the act's outcome is not read, so a failed create looks like a slow one"
         );
 
-        // The path check that replaces Browse, and the three answers it distinguishes.
-        //
-        // **Both boards now**, which is the whole of SKEIN-106. `/v2` never had Browse; `/` had it
-        // on three fields and it needed the HOST's native dialog — a display skein-in-fleet does not
-        // have, on a filesystem it is not standing on. It was already unusable over Tailscale, where
-        // the advice was "keep typing", so typing became the path and this check is what makes
-        // typing bearable.
-        //
-        // **`/v2` no longer has one, and that is a consequence rather than a second decision**
-        // (SKEIN-535). The probe answers a field, and on `/v2` the shared-data folder was the only
-        // field it ever answered — the source field is a remote and was deliberately never wired
-        // (SKEIN-806). Deleting the field left `resolves`/`checkLater` with no caller, so they went
-        // with it. `/` still probes, because the SSH key path is a host path skein really does read.
+        // **Neither board asks the server about a typed path any more** (SKEIN-947). Browse needed
+        // the HOST's native dialog, a display skein in the fleet does not have (SKEIN-106), and the
+        // typed-path check that replaced it answered for whatever filesystem skein-server stands
+        // on. `/v2` lost its last probed field with SKEIN-535. `/` lost its own with SKEIN-947: the
+        // SSH key path named a file on the host that skein in the fleet cannot see, so every answer
+        // was about the wrong machine. The owner removed the field, and the route with it. Settings
+        // now says where the key goes instead, and that sentence is asserted here, because
+        // deleting the field without it would withdraw the capability silently.
         //
         // The `pick-path` half is asserted of BOTH boards, because that one is about Browse rather
         // than about any particular field, and it must not come back on either.
+        for (board, page) in [("/", INDEX), ("/v2", V2)] {
+            assert!(
+                !page.contains("/api/path?"),
+                "{board} asks the server about a typed path again. `/api/path` is gone (SKEIN-947): \
+                 it answered for the sandbox's filesystem, not the host a person types a path for"
+            );
+        }
         assert!(
-            INDEX.contains("/api/path?p="),
-            "/ does not ask what a typed path resolves to"
+            !INDEX.contains("id=\"set-sshkey\""),
+            "the SSH key path field is back on /. skein in the fleet cannot read a key file on the \
+             host, so whatever it is typed into does nothing (SKEIN-947)"
         );
         assert!(
-            INDEX.contains("found.resolved") && INDEX.contains("found.kind"),
-            "/ does not read the path check's answer"
-        );
-        assert!(
-            !V2.contains("/api/path?p="),
-            "/v2 probes a typed path again, but it has no path field to probe — the shared-data \
-             folder went with SKEIN-535 and the source field is a remote (SKEIN-806). If a path \
-             field came back, this assertion is the wrong thing to fix: see parity §7"
+            INDEX.contains("id=\"set-sshagent\"")
+                && INDEX.contains("skein uses your host's SSH agent — run <code>ssh-add</code> on \
+                                   the host. Scoped boxes push over HTTPS instead."),
+            "Settings no longer says where an SSH key goes, which the removed field used to be the \
+             only place to learn (SKEIN-947)"
         );
         for (board, page) in [("/", INDEX), ("/v2", V2)] {
             assert!(

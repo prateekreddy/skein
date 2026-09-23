@@ -768,31 +768,33 @@ fn server_serves_ui_vendor_and_guards_routes() {
         "the queue no longer sends the standing beside the rows: {body}"
     );
 
-    // What replaces Browse (parity §7): a typed path, and an answer that says what was found. A
-    // link is reported as a link rather than as whatever it points at — the whole job of the line
-    // is to say what is actually there.
-    let (st, found) = http_get(&addr, &format!("/api/path?p={}", "/tmp"));
-    assert_eq!(st, 200);
-    assert!(found.contains("\"kind\":\"folder\""), "{found}");
-    // A link is a link. Reporting what it points at would be a screen saying a folder is there when
-    // what is there is a pointer at one — and it is the same rule §9.5 R8 applies wherever skein
-    // looks at a path somebody else can shape.
-    let linkroot = Scratch::temp("skein-linkcheck");
-    let linked = linkroot.join("points-at-tmp");
-    std::os::unix::fs::symlink("/tmp", &linked).unwrap();
-    let (st, through) = http_get(&addr, &format!("/api/path?p={}", linked.display()));
-    assert_eq!(st, 200);
-    assert!(
-        through.contains("\"kind\":\"link\""),
-        "a symbolic link was reported as what it points at: {through}"
+    // **`/api/path` is gone, and not moved** (SKEIN-947). It answered "is there a file, folder or
+    // link here" for any path on the filesystem skein-server stands on, which in the fleet is the
+    // sandbox: the fleet root, `.skein/private/`, `/etc`. Its one caller was a field naming a key
+    // on the host, a machine it could not see. Both went.
+    //
+    // A 404 alone could come from a server that is not answering at all, so the check compares it
+    // with a path that never existed: the same status and no answer about the path. A route left in
+    // place, or a fallback that swallows it, would answer 200 or answer something else. The
+    // settings read beside it proves the same server does answer a real route.
+    let (st, gone) = http_get(&addr, "/api/path?p=/tmp");
+    let (never_st, _) = http_get(&addr, "/api/never-a-route-skein-947?p=/tmp");
+    assert_eq!(
+        st, 404,
+        "/api/path answers again — it resolves paths on the sandbox's filesystem: {gone}"
     );
-    let _ = std::fs::remove_file(&linked);
-
-    let (st, missing) = http_get(&addr, "/api/path?p=/definitely/not/here");
-    assert_eq!(st, 200);
+    assert_eq!(
+        st, never_st,
+        "/api/path is answered differently from a path that never existed: {gone}"
+    );
     assert!(
-        missing.contains("\"resolved\":false") && missing.contains("\"kind\":\"missing\""),
-        "a path that is not there must say so rather than erroring: {missing}"
+        !gone.contains("\"kind\"") && !gone.contains("\"resolved\""),
+        "something still says what is at a path: {gone}"
+    );
+    let (st, _) = http_get(&addr, "/api/settings");
+    assert_eq!(
+        st, 200,
+        "the server beside the 404 is not answering real routes either"
     );
 
     // The new board, beside the old one. `docs/delivery.md` names treating "ground-up surfaces" and

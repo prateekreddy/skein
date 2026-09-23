@@ -1693,21 +1693,11 @@ pub fn remote_warning(repo: &Repo) -> Option<String> {
     if !is_ssh_url(&url) {
         return None;
     }
-    // If a key is configured, skein loads it into the agent (which sbx forwards) — so it's set up;
-    // only note the network-policy caveat. Otherwise spell out the agent requirement + HTTPS fallback.
-    let key_configured = env::var("SKEIN_SSH_KEY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some(load_config().ssh_key).filter(|s| !s.is_empty()))
-        .is_some();
-    if key_configured {
-        return Some(format!(
-            "origin is an SSH remote ({url}). skein loads your configured key into the ssh-agent (sbx forwards it into boxes), so push should work — just ensure the sandbox network policy allows {}. A box scoped to its own repo binds a regular file over that forwarded socket on purpose, so switch such a repo to HTTPS.",
-            host_of(&url).unwrap_or("the git host")
-        ));
-    }
+    // No "a key is configured, so push should work" branch any more (SKEIN-947). It read the
+    // Settings key path, which named a file on the host that skein in the fleet never loaded, so
+    // it promised a push that nothing had set up. The agent is the host's, and so is the fix.
     let mut msg = format!(
-        "origin is an SSH remote ({url}). In-box push uses your host's forwarded SSH agent, so it works only if a key is loaded — set one in Settings (skein will `ssh-add` it), or it must already be in your agent. A box scoped to its own repo has that socket bound over on purpose, so HTTPS is the only path there."
+        "origin is an SSH remote ({url}). In-box push uses your host's forwarded SSH agent, so it works only if a key is loaded there — run `ssh-add` on the host. A box scoped to its own repo has that socket bound over on purpose, so HTTPS is the only path there."
     );
     if let Some(h) = ssh_to_https(&url) {
         msg.push_str(&format!(
@@ -1836,11 +1826,6 @@ pub fn add_repo(
              origin` prints it."
         ));
     }
-    // An SSH URL needs a key in the host agent for the clone the mirror is about to make.
-    if is_ssh_url(source) {
-        let _ = ensure_ssh_key();
-    }
-
     ensure_kit()?;
     ensure_store(&store)?;
 

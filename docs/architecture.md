@@ -473,7 +473,7 @@ opposite of that first sentence — *"a local filesystem path is a valid remote,
 server anywhere still works: skein fetches from your path"* — which is a fact about git and not one
 about skein. `registrable_source` (`src/repos.rs:855`) requires a scheme and accepts `https://`,
 `http://`, `ssh://` and `git@host:` only; `add_repo` refuses everything else before it clones
-anything (`src/repos.rs:1831`).
+anything (`src/repos.rs:1821`).
 
 What is lost, precisely: **a repo with no server anywhere cannot be registered at all**, and with it
 goes the visibility of uncommitted work that adopting a checkout in place used to give. You commit
@@ -956,7 +956,7 @@ path in it (`src/box-session.sh:1822`) and binds back only the one store this bo
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
   — module notes and a repo pull. Neither exists: the module notes, the diff and CODEOWNERS read the
   mirror through `repos::Tree` (`src/repos.rs:1510`), and `pull_repo` fetches the mirror and does
-  nothing else (`src/repos.rs:1922`). What has not changed is that skein still runs git **on the
+  nothing else (`src/repos.rs:1907`). What has not changed is that skein still runs git **on the
   host** against a tree inside `~/.skein/repos` — the mirror, via `fetch_mirror` — so a box that
   could write that mirror's `config` would still get execution as the host user at the next fetch.
   The cover above is what stops it, which means the cover is load-bearing for more than file
@@ -1389,7 +1389,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 
 2. **The cover is an inversion, derived from the fleet's mount set.** Not from one root: a repo's
    `store` is an **arbitrary host path chosen at repo-add time** — `--store` takes one and keeps it
-   (`src/repos.rs:1817`) — so a rule written over the state root alone never reaches
+   (`src/repos.rs:1807`) — so a rule written over the state root alone never reaches
    `/home/you/code/thing`. This used to name a second such path, `repo.work`, the host checkout of a
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
@@ -1806,9 +1806,9 @@ whether skein is beside it or outside it. The launcher's cover above is unaffect
 `SKEIN_GIT_SCOPE=fleet` re-exposes (§9.6) — both act on the socket, which is in the same place.
 
 What does not travel is the key *file*. `~/.ssh/id_ed25519` names a path on the host, and the sandbox
-has its own `~`, so `ensure_ssh_key` cannot load it from inside — it refuses with where to run
-`ssh-add`, rather than failing on the file, which reads as a mistyped path and sends somebody to fix
-a setting instead of running one command where their key already is. Nothing is lost: skein never
+has its own `~`, so skein cannot load it from inside, and it no longer takes a key path at all
+(SKEIN-947). Settings says to run `ssh-add` on the host, the one command that works, where the key
+already is. A key-path setting sent somebody to fix a setting instead. Nothing is lost: skein never
 handles the key on a host either, only the agent socket is forwarded, and a host `ssh-add` reaches an
 in-fleet deployment exactly as it reaches a host-driven one.
 

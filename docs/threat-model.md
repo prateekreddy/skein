@@ -81,13 +81,17 @@ tracker item is the record; this list only points at it.
   itself back at the proxy, or clears `NO_PROXY`, is on whatever the proxy does that day. skein
   cannot change that from inside the sandbox; it can only be the thing that notices, which is the
   whole of what the `proxy_injection` row claims.
+* **SKEIN-947** is no longer listed here because the route is gone. `/api/path` said whether any
+  path on the sandbox's filesystem existed, and what it was, to anyone holding the API token. That
+  covered the fleet root, `.skein/private/` and `/etc`. Its last caller, the SSH key field, named a
+  key on the host that skein in the fleet cannot read. The field, the route, the `ssh_key` setting
+  and `$SKEIN_SSH_KEY` were all deleted, and Settings now says to run `ssh-add` on the host. Test
+  `server_serves_ui_vendor_and_guards_routes` (`tests/server.rs`) asserts that the route answers like a
+  path that never existed.
 * **SKEIN-831**: a fleet that was serving before the socket move keeps the cockpit's tmux socket at
   the old path in the readable half of `.skein`, where a box can `connect()` to it. A tmux client
   can make the server run commands, so that is fleet-scope execution. It lasts until that fleet's
   tmux server restarts.
-* **SKEIN-947**: `/api/path` answers whether any host path exists. It needs the API token, so it
-  is not a box's reach unless the token has leaked, but it answers for the whole host
-  filesystem.
 * **SKEIN-960**: on some live boxes the agent's own config trusts the filesystem root. For a
   working directory outside a git repository, that runs a folder's `.claude/settings.json` hooks
   without asking. skein did not write the entry.

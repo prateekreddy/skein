@@ -362,7 +362,14 @@ await check("settings opens, and its panes switch to fields you can see", async 
   await mustSee('.set-pane[data-pane="repos"].on', "the repos pane it opens on");
   await page.click('.set-navi[data-pane="github"]');
   await settle(300);
-  await mustSee("#set-sshkey", "the SSH key field on the GitHub pane");
+  // The pane says where an SSH key goes, and has no path field (SKEIN-947). skein in the fleet
+  // cannot read a key file on the host, so the field did nothing. `ssh-add` there does the job.
+  await mustSee("#set-sshagent", "the sentence saying where an SSH key goes");
+  const agentSays = (await page.textContent("#set-sshagent")) || "";
+  if (!agentSays.includes("run ssh-add on the host"))
+    throw new Error(`the GitHub pane no longer says to run ssh-add on the host: "${agentSays.trim()}"`);
+  if (await page.$("#set-sshkey"))
+    throw new Error("the SSH key path field is back, and skein in the fleet cannot read what it names");
   await page.keyboard.press("Escape");
 });
 
