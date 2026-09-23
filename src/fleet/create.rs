@@ -264,7 +264,7 @@ pub fn create_env() -> Vec<(String, String)> {
 /// Deduped against the workspace, and against each other: mounting a path twice is not obviously
 /// harmless, and mounting a *parent* of it is what keeps a later repo from needing a recreate.
 ///
-/// And filtered by [`exposes_the_volume`], which is the rule that keeps every credential skein holds
+/// And filtered by [`volume_exposure`], which is the rule that keeps every credential skein holds
 /// out of every box: the two directories under `~/.skein` that boxes are given are mounted, and the
 /// volume itself is not.
 pub fn fleet_mounts() -> Vec<String> {
@@ -286,7 +286,7 @@ pub fn fleet_mounts() -> Vec<String> {
             if path.is_empty() {
                 continue;
             }
-            if exposes_the_volume(&path) {
+            if volume_exposure(&path).is_some() {
                 eprintln!(
                     "skein: {} points {path:?} at skein's own volume, so it is not mounted and \
                      that repo's boxes will not see it — a box given it would read the API token, \
@@ -326,14 +326,89 @@ pub fn fleet_mounts() -> Vec<String> {
 ///
 /// Refusing costs that repo's boxes their store, loudly, at provisioning. Mounting it costs the
 /// fleet every credential it has, silently.
-fn exposes_the_volume(path: &str) -> bool {
+///
+/// **And `skein add --store` asks this same question, at the moment a person can still act on the
+/// answer** (SKEIN-943). It used to accept any absolute path and scaffold a store there, so `--store
+/// ~/.skein/thing` succeeded and every box of that repo then came up with no store, looking healthy.
+/// Two copies of this rule would drift, which is the defect's whole shape, so there is one and both
+/// sides call it; `None` means mountable.
+///
+/// Asked of the path as typed **and** of where it resolves to — `..` taken through the file system
+/// and every symlink followed, as far as the path exists. The textual answer alone let
+/// `~/.skein/repos/../github-pats` through as "under repos", and a symlink outside the volume
+/// pointing into it through as "not under the volume at all"; either is a mount of the credentials.
+pub fn volume_exposure(path: &str) -> Option<VolumeExposure> {
     let home = skein_home().to_string_lossy().into_owned();
+    let shared = [fleet_workspace(), box_state_root()];
+    let resolved = (|| {
+        let shared = [
+            resolve_host_path(&shared[0])?,
+            resolve_host_path(&shared[1])?,
+        ];
+        exposure_among(
+            &resolve_host_path(path)?,
+            &resolve_host_path(&home)?,
+            &shared,
+        )
+    })();
+    resolved.or_else(|| exposure_among(path, &home, &shared))
+}
+
+/// Which way a path would hand a box the volume — the two shapes a refusal has to word differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeExposure {
+    /// The volume root, or a directory holding it: `--store ~` mounts the volume as a side effect.
+    Contains,
+    /// Inside the volume, and under neither of the two directories boxes are given.
+    Inside,
+}
+
+/// The rule itself, over paths already in one form (all textual, or all resolved).
+fn exposure_among(path: &str, home: &str, shared: &[String]) -> Option<VolumeExposure> {
     // The root, or an ancestor of it.
-    if under(&home, path) {
-        return true;
+    if under(home, path) {
+        return Some(VolumeExposure::Contains);
     }
     // Inside it, and not one of the two directories boxes are given.
-    under(path, &home) && !under(path, &fleet_workspace()) && !under(path, &box_state_root())
+    (under(path, home) && !shared.iter().any(|s| under(path, s))).then_some(VolumeExposure::Inside)
+}
+
+/// Where an absolute host path really points: the longest prefix that exists is canonicalised (which
+/// takes `..` through symlinks correctly), and the part that does not exist yet — a store `add` is
+/// about to create — is appended with `.` and `..` applied to it. `None` for a relative path, which
+/// has no one answer and which `ensure_store` refuses anyway.
+fn resolve_host_path(path: &str) -> Option<String> {
+    let mut existing = std::path::PathBuf::from(path);
+    if !existing.is_absolute() {
+        return None;
+    }
+    let mut missing = Vec::new();
+    let base = loop {
+        if let Ok(real) = std::fs::canonicalize(&existing) {
+            break real;
+        }
+        missing.push(
+            existing
+                .components()
+                .next_back()?
+                .as_os_str()
+                .to_os_string(),
+        );
+        if !existing.pop() {
+            return None;
+        }
+    };
+    let mut out = base;
+    for part in missing.iter().rev() {
+        match part.to_str() {
+            Some("..") => {
+                out.pop();
+            }
+            Some(".") => {}
+            _ => out.push(part),
+        }
+    }
+    Some(out.to_string_lossy().into_owned())
 }
 
 /// Is `path` inside `dir` (or `dir` itself)? Textual, because both are host absolute paths skein
@@ -1427,6 +1502,14 @@ mod tests {
             skein_home().join("declared").to_string_lossy().into_owned(),
             parent.to_string_lossy().into_owned(),
             "/".to_string(),
+            // Outside the volume by its spelling, and inside it by a symlink (SKEIN-943).
+            {
+                std::os::unix::fs::symlink(&home, parent.join("link")).unwrap();
+                parent
+                    .join("link/github-pats")
+                    .to_string_lossy()
+                    .into_owned()
+            },
         ];
         crate::repos::save_repos(
             &hostile

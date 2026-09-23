@@ -711,9 +711,10 @@ against a running server, not reasoned. It is authenticated, but the fleet API t
 every cockpit URL, which makes it a privilege question rather than an open door.
 
 The route refuses `store` outright rather than bounding it, and `$SKEIN_HOME` is the wrong bound:
-`fleet::exposes_the_volume` already declines to *mount* a store under `$SKEIN_HOME` unless it is
+`fleet::volume_exposure` already declines to *mount* a store under `$SKEIN_HOME` unless it is
 under `repos/` or `boxes/`, so a bounded route would have registered repos whose boxes silently come
-up with no store (SKEIN-943). Refused rather than ignored, too — serde drops an unknown field, so
+up with no store (SKEIN-943). The CLI asks that same predicate now: `add_repo` refuses a `--store`
+the fleet would not mount, before it writes anything (`src/repos/add.rs`, `store_refusal`). Refused rather than ignored, too — serde drops an unknown field, so
 deleting it from `AddRepoReq` would have let a request naming a store succeed while quietly getting
 skein's own.
 
