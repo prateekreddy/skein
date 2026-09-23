@@ -622,15 +622,8 @@ mod tests {
 
     /// No `tempfile` dependency: this crate's dependency list is part of its argument (see the
     /// crate note), so a directory it makes itself is cheaper than a reason to add one.
-    fn scratch(what: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "skein-warden-{what}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(what: &str) -> crate::Scratch {
+        crate::Scratch::new(&format!("skein-warden-{what}"))
     }
 
     fn forever() -> Duration {

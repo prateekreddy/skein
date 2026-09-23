@@ -538,10 +538,17 @@ pub fn sweep_abandoned(root: &Path) -> Vec<(PathBuf, Vec<(u32, String)>)> {
         // `<something>-<pid>`, or `<something>-<pid>-ThreadId(n)`, which is what the unit-test
         // fixtures in `src/` and `warden/src/` spell (`warden/src/outcome.rs:398`,
         // `src/testutil.rs`). 2,460 of the second shape were on this box, so reading past the
-        // thread id is the difference between sweeping them and leaving them for ever.
+        // thread id is the difference between sweeping them and leaving them for ever. The warden's
+        // `Scratch` spells the thread `t<n>` since SKEIN-557 — parentheses in a path its tests write
+        // into shell scripts — and removes its own directory unless the test panicked; the ones a
+        // panic keeps are still this sweep's to collect once their run is gone.
         let mut parts = name.rsplit('-');
         let last = parts.next().unwrap_or_default();
-        let tail = if last.starts_with("ThreadId(") {
+        let a_thread = last.starts_with("ThreadId(")
+            || last
+                .strip_prefix('t')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let tail = if a_thread {
             parts.next().unwrap_or_default()
         } else {
             last

@@ -179,14 +179,8 @@ impl Log {
 mod tests {
     use super::*;
 
-    fn scratch(what: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "skein-warden-audit-{what}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn scratch(what: &str) -> crate::Scratch {
+        crate::Scratch::fresh(&format!("skein-warden-audit-{what}"))
     }
 
     /// Entries accumulate rather than replace, and the log is readable a line at a time — which is
