@@ -400,9 +400,52 @@ pub(super) fn tried_path(repo_id: &str) -> PathBuf {
 pub(super) fn tried_at(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     fs::read_to_string(path)
         .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|t| serde_json::from_str::<std::collections::BTreeMap<String, Note>>(&t).ok())
         .unwrap_or_default()
+        .into_iter()
+        .map(|(key, note)| (key, note.why().to_string()))
+        .collect()
 }
+
+/// One tried-note on disk: the sentence, and **when it was written** (SKEIN-553).
+///
+/// The time is what the 200-entry bound in [`note_into`] evicts by. It used to evict by KEY order,
+/// and a key is `<pr number>-<sha>` — so a full file dropped the notes on the lowest-numbered pull
+/// requests, which in a long-lived repo are the ones it has had longest open, not the notes nobody
+/// needs any more. A PR number is not a clock; the moment a note was written is.
+///
+/// `Undated` is a note written before the time was kept: the bare sentence, which is what the file
+/// held. It reads exactly as before and counts as the oldest there is, so the first notes a full
+/// file gives up are the ones whose age nobody knows.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub(super) enum Note {
+    Dated {
+        why: String,
+        /// Milliseconds since the epoch.
+        at: u64,
+    },
+    Undated(String),
+}
+
+impl Note {
+    fn why(&self) -> &str {
+        match self {
+            Note::Dated { why, .. } | Note::Undated(why) => why,
+        }
+    }
+
+    fn at(&self) -> u64 {
+        match self {
+            Note::Dated { at, .. } => *at,
+            Note::Undated(_) => 0,
+        }
+    }
+}
+
+/// How many tried-notes a repo keeps. Per head commit, so a busy repo would otherwise grow one entry
+/// per push for ever; the pruning that drops stale summaries has the same job and the same shape.
+pub(super) const TRIED_KEPT: usize = 200;
 
 /// **Is this failure a fact about the SETUP rather than about this commit?**
 ///
@@ -450,40 +493,54 @@ pub(super) fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, St
     all
 }
 
-pub(super) fn note_into(
-    path: &std::path::Path,
-    mut all: std::collections::BTreeMap<String, String>,
-    number: u64,
-    head_sha: &str,
-    why: &str,
-) {
-    all.insert(format!("{number}-{head_sha}"), why.to_string());
-    // Bounded: this is per head commit, so a busy repo would otherwise grow one entry per push for
-    // ever. The pruning that drops stale summaries has the same job and the same shape.
-    if all.len() > 200 {
-        let drop: Vec<_> = all.keys().take(all.len() - 200).cloned().collect();
-        for key in drop {
-            all.remove(&key);
-        }
-    }
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-        if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
-            let _ = write_atomic(path, dir, &bytes);
-        }
-    }
+/// Write one note down, **reading and writing the file under one lock** (SKEIN-553).
+///
+/// It used to read the file, hand the map here, and write it back with nothing held in between, so
+/// two readings finishing together each wrote the file they had read plus their own note — and one
+/// note was lost. The spend ledger beside it had the same shape and was closed by putting the
+/// compare and the write in one [`update_json_lossy`] closure (`review::budget`); this is that.
+///
+/// *Lossy* on purpose, and not the refusal its neighbours use: [`tried_at`]'s comment carries the
+/// argument (SKEIN-359) and `an_unreadable_read_tried_file_is_rebuilt_rather_than_refused` holds
+/// it. `update_json_lossy` keeps that answer — an unreadable file is taken as empty and a parseable
+/// one written back — and adds only the lock.
+///
+/// Setup notes ([`about_the_setup`]) are dropped as the file is rewritten, which is what reading it
+/// through [`read_tried`] used to buy; and past [`TRIED_KEPT`], the OLDEST notes go — see [`Note`].
+pub(super) fn note_into(path: &std::path::Path, number: u64, head_sha: &str, why: &str) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let _ = update_json_lossy(
+        path,
+        |all: &mut std::collections::BTreeMap<String, Note>| {
+            all.retain(|_, note| !about_the_setup(note.why()));
+            all.insert(
+                format!("{number}-{head_sha}"),
+                Note::Dated {
+                    why: why.to_string(),
+                    at,
+                },
+            );
+            if all.len() > TRIED_KEPT {
+                let mut by_age: Vec<(u64, String)> = all
+                    .iter()
+                    .map(|(key, note)| (note.at(), key.clone()))
+                    .collect();
+                by_age.sort();
+                let excess = all.len() - TRIED_KEPT;
+                for (_, key) in by_age.into_iter().take(excess) {
+                    all.remove(&key);
+                }
+            }
+            Ok(())
+        },
+    );
 }
 
 pub(super) fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
-    // Read through `read_tried`, not `tried_at`, so its legacy-note filter still gets its
-    // "dropped from the file on the next write".
-    note_into(
-        &tried_path(repo_id),
-        read_tried(repo_id),
-        number,
-        head_sha,
-        why,
-    )
+    note_into(&tried_path(repo_id), number, head_sha, why)
 }
 #[cfg(test)]
 mod tests {
@@ -1070,6 +1127,118 @@ mod tests {
             Some(slow.as_str()),
             "no tried-note survives the round trip at all, so this test is asserting nothing"
         );
+    }
+
+    /// **A note waits for whoever holds the file, and keeps what they wrote** (SKEIN-553).
+    ///
+    /// The race it closes: two readings finishing together each read the file, add their note and
+    /// write it back, and whichever writes second erases the first. Asserted by BEING the other
+    /// writer — this test takes the file's lock, starts a note on another thread, and while still
+    /// holding the lock writes a note of its own the way a concurrent pass would.
+    ///
+    /// **What makes it fail:** `note_into` reading and writing without the lock (its shape before
+    /// this item). The note then lands while the lock is held — the first assertion — and this
+    /// test's own write then replaces it, so the second finds one note where there were two.
+    #[test]
+    fn a_note_waits_for_whoever_holds_the_file_and_keeps_what_they_wrote() {
+        use crate::ai::Unread;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let slow = Unread::Slow(std::time::Duration::from_secs(900)).say();
+        let path = tried_path("raced");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let (early, writer) = crate::util::with_lock(&lock_beside(&path).unwrap(), || {
+            let (at, why) = (path.clone(), slow.clone());
+            let writer = std::thread::spawn(move || {
+                note_into(&at, 2, "bbbbbbb", &why);
+                let _ = done.send(());
+            });
+            let early = finished
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+            // The other writer's whole read-modify-write, done while it holds the lock.
+            let theirs = serde_json::json!({ "1-aaaaaaa": { "why": slow, "at": 1 } });
+            fs::write(&path, serde_json::to_vec(&theirs).unwrap()).unwrap();
+            Ok((early, writer))
+        })
+        .unwrap();
+        writer.join().expect("the noting thread panicked");
+
+        assert!(
+            !early,
+            "a note was written while another writer held read-tried.json's lock — the \
+             read-modify-write is not under it"
+        );
+        let after = read_tried("raced");
+        assert!(
+            after.contains_key("1-aaaaaaa") && after.contains_key("2-bbbbbbb"),
+            "two notes written together did not both survive: {after:?}"
+        );
+    }
+
+    /// **A full note file gives up its OLDEST notes, not its lowest-numbered pull requests**
+    /// (SKEIN-553).
+    ///
+    /// The fixture makes the two orders disagree on purpose: PR #1's note is the newest and #199's
+    /// the oldest, and one note from before notes were dated sits at #5, whose key sorts before
+    /// most of them.
+    ///
+    /// **What makes it fail:** evicting by key order, which is what the bound did. The first
+    /// eviction then takes `1-sha1` — the note written most recently — and the first assertion
+    /// names it.
+    #[test]
+    fn a_full_note_file_forgets_its_oldest_notes_not_its_oldest_pull_requests() {
+        use crate::ai::Unread;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let slow = Unread::Slow(std::time::Duration::from_secs(900)).say();
+        let path = tried_path("full");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let mut seeded = serde_json::Map::new();
+        for n in 1..TRIED_KEPT as u64 {
+            let at = 1_000 + (TRIED_KEPT as u64 - n);
+            seeded.insert(
+                format!("{n}-sha{n}"),
+                serde_json::json!({ "why": slow, "at": at }),
+            );
+        }
+        seeded.insert("5-undated".into(), serde_json::json!(slow));
+        fs::write(&path, serde_json::to_vec(&seeded).unwrap()).unwrap();
+        assert_eq!(
+            read_tried("full").len(),
+            TRIED_KEPT,
+            "the fixture is not a full file, so nothing below is about eviction"
+        );
+
+        note_tried("full", 500, "new1", &slow);
+        let after = read_tried("full");
+        assert!(
+            after.contains_key("1-sha1"),
+            "the newest note was evicted from a full file because its pull request has the \
+             lowest number: {:?}",
+            after.keys().take(5).collect::<Vec<_>>()
+        );
+        assert!(
+            !after.contains_key("5-undated"),
+            "a note of unknown age outlived dated ones — it must count as the oldest"
+        );
+        assert_eq!(after.len(), TRIED_KEPT);
+
+        note_tried("full", 501, "new2", &slow);
+        let after = read_tried("full");
+        assert!(
+            !after.contains_key("199-sha199") && after.contains_key("1-sha1"),
+            "the second eviction did not take the oldest dated note"
+        );
+        assert!(after.contains_key("500-new1") && after.contains_key("501-new2"));
+        assert_eq!(after.len(), TRIED_KEPT);
     }
 
     /// **An unreadable `read-tried.json` is rebuilt, not refused** (SKEIN-359).

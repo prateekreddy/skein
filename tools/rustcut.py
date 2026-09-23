@@ -170,7 +170,7 @@ def blanked(text):
 
     Built on `skip_token` for the reason the gate that used to own a copy of this is a cautionary
     tale. That copy tracked quotes with a boolean flipped on every `"`, one line at a time, and so
-    could not see a raw string: at `src/bin/skein-server.rs:5160` a fixture of the shape
+    could not see a raw string: at `src/bin/skein-server/review.rs:985` a fixture of the shape
     `r#"…"…https://…"#` has an EVEN number of `"` before the `//`, the tracker believed it was
     outside a string, blanked to end of line, and took the closing `"#` and a `}}]` with it. The
     braces then unbalanced and `mod review_routes` (5123-5743) closed at 5465 — 278 lines of tests
@@ -319,11 +319,26 @@ def units(src, warden=None):
                     if g.endswith(".rs"):
                         paths.append(os.path.join(base, g))
         yield name, paths
+    # A binary is `src/bin/<name>.rs` OR `src/bin/<name>/**/*.rs` (Cargo's `main.rs` layout), by
+    # the same rule as a module above and for the same reason: `src/bin/skein-server.rs` became
+    # `src/bin/skein-server/` (SKEIN-1103), and reading only the flat files dropped the server from
+    # every gate built on this — `module-check` then reported each of its declared edges as one no
+    # code makes, and `source-check` went on passing over whatever it reached.
     binaries = os.path.join(src, "bin")
     if os.path.isdir(binaries):
+        found = {}
         for f in sorted(os.listdir(binaries)):
+            path = os.path.join(binaries, f)
             if f.endswith(".rs"):
-                yield "bin/" + f[:-3], [os.path.join(binaries, f)]
+                found.setdefault(f[:-3], []).insert(0, path)
+            elif os.path.isdir(path):
+                for base, dirs, files in os.walk(path):
+                    dirs.sort()
+                    for g in sorted(files):
+                        if g.endswith(".rs"):
+                            found.setdefault(f, []).append(os.path.join(base, g))
+        for name in sorted(found):
+            yield "bin/" + name, found[name]
     if warden and os.path.isdir(warden):
         for f in sorted(os.listdir(warden)):
             if f.endswith(".rs"):
@@ -847,7 +862,7 @@ def _check_units():
     try:
         src = os.path.join(root, "src")
         os.makedirs(os.path.join(src, "fleet", "deep"))
-        os.makedirs(os.path.join(src, "bin"))
+        os.makedirs(os.path.join(src, "bin", "skein-server"))
         os.makedirs(os.path.join(src, "web"))
         for rel in (
             "flat.rs",
@@ -855,13 +870,20 @@ def _check_units():
             os.path.join("fleet", "mod.rs"),
             os.path.join("fleet", "deep", "heal.rs"),
             os.path.join("bin", "skein.rs"),
+            os.path.join("bin", "skein-server", "main.rs"),
+            os.path.join("bin", "skein-server", "door.rs"),
             os.path.join("web", "index.html"),
         ):
             open(os.path.join(src, rel), "w").write("\n")
         found = dict(units(src))
-        assert sorted(found) == ["bin/skein", "flat", "fleet"], (
+        assert sorted(found) == ["bin/skein", "bin/skein-server", "flat", "fleet"], (
             "rustcut self-check: units() enumerated %s" % sorted(found)
         )
+        # A binary that is a directory is one unit of all its files (SKEIN-1103).
+        assert [os.path.relpath(p, src) for p in found["bin/skein-server"]] == [
+            os.path.join("bin", "skein-server", "door.rs"),
+            os.path.join("bin", "skein-server", "main.rs"),
+        ], "rustcut self-check: `src/bin/skein-server/**` did not fold into unit `bin/skein-server`"
         assert [os.path.relpath(p, src) for p in found["fleet"]] == [
             "fleet.rs",
             os.path.join("fleet", "mod.rs"),

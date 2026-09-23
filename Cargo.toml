@@ -38,7 +38,7 @@ path = "src/bin/skein.rs"
 
 [[bin]]
 name = "skein-server"
-path = "src/bin/skein-server.rs"
+path = "src/bin/skein-server/main.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

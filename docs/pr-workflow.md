@@ -171,7 +171,7 @@ SKEIN-338 they were not equally safe, and the safe one was switched off on the o
 
 | | the train's merge | the merge chip in the cockpit |
 |---|---|---|
-| where | `src/prwork/acts.rs`, `merge_pr` | `src/prq/write.rs`, `merge`, reached from `src/bin/skein-server.rs` |
+| where | `src/prwork/acts.rs`, `merge_pr` | `src/prq/write.rs`, `merge`, reached from `src/bin/skein-server/review.rs` |
 | carries `sha` *(as it stood)* | yes, always | **no** — the body was `{"merge_method": …}` and nothing else |
 | trunk check *(as it stood)* | yes — every act goes through `workflow::instead_of_merging_off_the_trunk` | **no** — the guard was reachable from `workflow.rs` and `prwork.rs` only, and this route was in neither |
 | runs when `$SKEIN_PR_WORKFLOWS` is off | no | yes — and the switch is off on the owner's fleet |

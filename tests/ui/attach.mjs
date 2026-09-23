@@ -34,7 +34,7 @@ import { startServer } from "./harness/server.mjs";
 const BOX = "attach-box";
 const t = harness();
 // What the server is told to treat as "nothing has moved" — `SKEIN_UPLOAD_STALL_MS`, whose default
-// is a minute. See `upload_stall` (src/bin/skein-server.rs).
+// is a minute. See `upload_stall` (src/bin/skein-server/upload.rs).
 const STALL_MS = 5000;
 
 // Where the fixture's stalling box has to be planted, READ OUT of the pin rather than written down

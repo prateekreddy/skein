@@ -2373,7 +2373,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
 fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
     let home = token_home("printed");
     // The URL is printed with the address the socket is actually on, which with a handed socket is
-    // the one this test opened rather than one `$SKEIN_ADDR` asked for (`src/bin/skein-server.rs`,
+    // the one this test opened rather than one `$SKEIN_ADDR` asked for (`src/bin/skein-server/main.rs`,
     // "the address printed below has to be the one a browser can reach"). So the line read below is
     // checked against the port the requests below go to, and not against a number both sides took
     // on trust.

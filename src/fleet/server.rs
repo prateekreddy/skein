@@ -445,12 +445,19 @@ pub fn start_server(sandbox: &str) -> Result<(), String> {
     // this the first `new-session` on a fresh fleet dies with "error creating … (No such file or
     // directory)" and the cockpit's port is never held. `start-door.sh` carries the same two lines
     // for the same reason. `700` because the cover is the mount and the mode is the belt beside it.
+    //
+    // A session on the PRE-move socket is a running cockpit too (SKEIN-1025): a fleet that has not
+    // re-run `bootstrap.sh` since SKEIN-529 still supervises its doorway there, and starting one on
+    // the new socket beside it gives two supervisors contending for one port — SKEIN-1020's state,
+    // reached from Rust. So it is asked, and left alone; moving it is `start-door.sh`'s job.
     let script = format!(
         "mkdir -p {private} && chmod 700 {private}; \
          tmux -S {sock} has-session -t {session} 2>/dev/null && exit 0; \
+         tmux -S {old} has-session -t {session} 2>/dev/null && exit 0; \
          tmux -S {sock} new-session -d -s {session} {inner}",
         private = sh_quote(&fleet_private_dir()),
         sock = sh_quote(&sock),
+        old = sh_quote(&pre_move_server_tmux_sock()),
         session = sh_quote(SERVER_SESSION),
         inner = sh_quote(&inner),
     );
@@ -463,11 +470,18 @@ pub fn start_server(sandbox: &str) -> Result<(), String> {
 /// Stop the doorway and the server it holds. Ending the session ends the supervisor loop, the
 /// doorway and — same process group — the server it forked; the `pkill`s are for anything that
 /// somehow outlived its session, and are allowed to find nothing.
+///
+/// **Both sockets** (SKEIN-1025). On a fleet whose supervisor is still on the pre-move socket
+/// ([`pre_move_server_tmux_sock`]), a kill-session on the new one found nothing, the `pkill` ended
+/// the doorway, and the surviving supervisor loop started it again two seconds later — a stop that
+/// did not stop.
 pub fn stop_server(sandbox: &str) {
     let script = format!(
         "tmux -S {sock} kill-session -t {session} 2>/dev/null; \
+         tmux -S {old} kill-session -t {session} 2>/dev/null; \
          pkill -f {doorway} 2>/dev/null; pkill -f {server} 2>/dev/null; true",
         sock = sh_quote(&server_tmux_sock()),
+        old = sh_quote(&pre_move_server_tmux_sock()),
         session = sh_quote(SERVER_SESSION),
         doorway = sh_quote(&agent_pkill_pattern(&server_doorway_path())),
         server = sh_quote(&format!("^{}( |$)", regex_literal(&server_path()))),

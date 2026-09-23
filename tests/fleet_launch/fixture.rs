@@ -295,6 +295,11 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
     let quiet = root.join(format!("skein-sweep-quiet-{dead}"));
     fs::create_dir_all(haunted.join("boxes")).unwrap();
     fs::create_dir_all(&quiet).unwrap();
+    // And the shape the warden's `Scratch` leaves when a test panics (SKEIN-557): `-t<n>` after the
+    // pid rather than `-ThreadId(n)`. Just as dead, so it must go too — a sweep that cannot read
+    // past that tail would keep every one of them for ever.
+    let kept_by_a_panic = root.join(format!("skein-sweep-kept-{dead}-t7"));
+    fs::create_dir_all(&kept_by_a_panic).unwrap();
 
     // `sleep` with a bounded argument, so that a failure anywhere below cannot leave this test's own
     // orphan running until somebody sweeps the box by hand.
@@ -321,6 +326,7 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
     let kept = common::sweep_abandoned(root);
     let haunted_survived = haunted.exists();
     let quiet_swept = !quiet.exists();
+    let panic_kept_swept = !kept_by_a_panic.exists();
     let _ = ghost.kill();
     let _ = ghost.wait();
 
@@ -343,6 +349,11 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
          nothing passes every other assertion in this test",
         if quiet_was_there { "present" } else { "absent" },
         if quiet_swept { "gone" } else { "still there" }
+    );
+    assert!(
+        panic_kept_swept,
+        "{} names a dead run and was left by the sweep — it does not read a `-t<n>` thread tail",
+        kept_by_a_panic.display()
     );
     assert!(
         haunted_survived,

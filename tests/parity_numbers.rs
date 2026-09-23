@@ -94,7 +94,7 @@ fn check(what: &str, stated: u64, measured: u64, command: &str) {
 #[test]
 fn the_parity_gate_still_reproduces_its_own_counts() {
     let parity = read("docs/parity.md");
-    let server = read("src/bin/skein-server.rs");
+    let server = read("src/bin/skein-server/main.rs");
     let index = read("src/web/index.html");
 
     // `.route(` and not `.route("`, which the document also records — the second misses every
@@ -114,13 +114,13 @@ fn the_parity_gate_still_reproduces_its_own_counts() {
         "routes",
         routes[0],
         server.matches(".route(").count() as u64,
-        "grep -c '\\.route('  src/bin/skein-server.rs",
+        "grep -c '\\.route('  src/bin/skein-server/main.rs",
     );
     check(
         "routes the quoted form finds",
         routes[1],
         server.lines().filter(|l| l.contains(".route(\"")).count() as u64,
-        "grep -c '\\.route(\"'  src/bin/skein-server.rs",
+        "grep -c '\\.route(\"'  src/bin/skein-server/main.rs",
     );
 
     // Unique element ids, and the occurrences beside them: two ids written twice is a bug the page

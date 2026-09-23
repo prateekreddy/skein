@@ -129,7 +129,7 @@ page.on("request", r => {
 // `/api/usage` and no router entry registered it, so opening the pane was answered 404 and the
 // page reported that as its own generic failure.
 // `cockpit_routes::the_cockpit_never_asks_for_a_route_this_server_does_not_serve` in
-// `src/bin/skein-server.rs` is what found it, and it is a SOURCE comparison — it reads the
+// `src/bin/skein-server/main.rs` is what found it, and it is a SOURCE comparison — it reads the
 // router's entries and the pages' URL literals out of the source and matches the strings. This
 // makes the same claim by asking a running server, which is the half a string match cannot make:
 // a path the page builds by concatenation rather than as one literal, or an entry registered onto

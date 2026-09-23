@@ -19,7 +19,7 @@ vars = ["SKEIN_AI", "SKEIN_REVIEW_AI"]
 [leaks."src/ai/unread::a_model_call_that_fails_says_which_failure_it_was"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/bin/skein-server::origin_guard_honours_allowlist"]
+[leaks."src/bin/skein-server/door::origin_guard_honours_allowlist"]
 vars = ["SKEIN_ALLOWED_ORIGINS"]
 
 [leaks."src/board::a_box_skein_started_itself_is_marked_as_skeins_and_not_hidden"]

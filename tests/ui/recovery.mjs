@@ -32,7 +32,7 @@
 // Named before it was written, then done, then restored from a copy checked with `md5sum`:
 //
 //   - "the pane comes back on its own when a terminal closes" — delete the `skein::stream::pty_freed()`
-//     call in `PtySlot::drop` (src/bin/skein-server.rs). The slot still frees; nothing says so; the
+//     call in `PtySlot::drop` (src/bin/skein-server/terminal.rs). The slot still frees; nothing says so; the
 //     pane waits for ever and this times out.
 //   - "…and nobody had to click anything to make it" — have `es.addEventListener("pty-freed", …)`
 //     call nothing. Same red, and the two together separate the two halves of the mechanism.
@@ -66,7 +66,7 @@ const HOLDER = "recovery-holder";
 
 const API_TOKEN = "r".repeat(64);
 
-// `PTY_MAX` in src/bin/skein-server.rs. Spelled here rather than read from the thing under test —
+// `PTY_MAX` in src/bin/skein-server/terminal.rs. Spelled here rather than read from the thing under test —
 // a constant taken out of the code cannot check the code — and asserted below by the fact that the
 // (PTY_MAX + 1)th terminal is the one that is refused.
 const PTY_MAX = 24;

@@ -801,10 +801,10 @@ mod tests {
     /// claim a source read is the right tool for; the test above is what shows the loop ticks.
     #[test]
     fn the_server_is_what_runs_the_update_check() {
-        let server = include_str!("../bin/skein-server.rs");
+        let server = crate::testutil::server_source();
         assert!(
             server.contains("tokio::spawn(skein::fleet::watch_runtime_updates())"),
-            "nothing in skein-server.rs starts the update-check loop, so a fleet nobody watches \
+            "nothing in skein-server starts the update-check loop, so a fleet nobody watches \
              never checks for a newer agent CLI"
         );
     }

@@ -1144,8 +1144,10 @@ fn a_squatter_on_the_cockpits_port_is_not_mistaken_for_the_door() {
 // a stub that fails, so nothing here can escalate either.
 
 /// The cockpit's tmux socket as every fleet had it before SKEIN-529 moved it under `private/`.
-/// Spelled here and in `start-door.sh` and nowhere in skein, because nothing makes a session there
-/// any more: it is a fact about fleets installed before the move, not a place skein uses.
+/// Nothing makes a session there any more: it is a fact about fleets installed before the move.
+/// Spelled here independently of `fleet::pre_move_server_tmux_sock` and `start-door.sh`, the two
+/// places that still ASK it (SKEIN-1020, SKEIN-1025), so a fixture built here is one neither of
+/// them could have agreed with by construction.
 fn legacy_sock(fleet_root: &Path) -> String {
     fleet_root
         .join(".skein/server.tmux")
@@ -1667,6 +1669,74 @@ fn bootstrap_over_two_supervisors_keeps_the_one_holding_the_port_and_ends_the_ot
         "the ended supervisor's doorway is still running:\n{said}"
     );
     assert!(ok, "the install did not succeed:\n{said}");
+}
+
+/// **skein can stop — and does not double — a cockpit whose supervisor is still on the pre-move
+/// socket** (SKEIN-1025).
+///
+/// A fleet serving since before SKEIN-529 keeps its supervisor at `.skein/server.tmux` until
+/// `bootstrap.sh` next runs. The Rust side used to ask only `private/server.tmux`, so on that fleet
+/// `stop_server` killed a session that was not there, `pkill`ed the doorway, and the surviving loop
+/// started it again two seconds later; and `start_server` would have added a second supervisor.
+///
+/// **What makes it fail:** `stop_server` without its kill-session on the pre-move socket — the
+/// supervisor is still listed afterwards, and the port answers again once the loop restarts the
+/// doorway. `start_server` without its has-session there fails the first assertion instead: two
+/// supervisors.
+#[test]
+fn skein_stops_a_cockpit_whose_supervisor_is_still_on_the_pre_move_socket() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (ok, said) = fleet.bootstrap("aaaa111", 20);
+    assert!(ok, "the first install did not succeed:\n{said}");
+    fleet.retire(&fleet.new_sock());
+    fleet.start_pre_move_supervisor();
+    assert!(
+        fleet.wait_answering("aaaa111"),
+        "the pre-move supervisor never served — the fixture is wrong, not skein"
+    );
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["server.tmux (pre-move)"],
+        "the fixture is not a pre-move fleet"
+    );
+
+    // skein pointed at the same fleet the install was, and allowed to run what it runs there.
+    let mut pins = env_pins();
+    pins.set("SKEIN_HOME", &fleet.home);
+    pins.set("SKEIN_FLEET_ROOT", &fleet.fleet_root);
+    pins.set("SKEIN_SERVER_PORT", fleet.port.to_string());
+    let _crossings = skein::place::seam::real_crossings();
+    let sandbox = skein::place::fleet_sandbox();
+
+    start_server(&sandbox).expect("start_server over a running pre-move cockpit");
+    assert_eq!(
+        fleet.supervisors(),
+        vec!["server.tmux (pre-move)"],
+        "start_server started a second supervisor beside the pre-move one, and the two contend for \
+         one port (SKEIN-1020's state)"
+    );
+
+    stop_server(&sandbox);
+    assert_eq!(
+        fleet.supervisors(),
+        Vec::<&str>::new(),
+        "stop_server left a supervisor running, which restarts the doorway it just killed"
+    );
+    // Longer than the supervisor's two-second restart, so a loop that survived has had its turn.
+    let mut answered = false;
+    for _ in 0..30 {
+        answered |= connects(fleet.port);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !answered,
+        "the cockpit's port answered again after stop_server — the stop did not stop"
+    );
 }
 
 /// Field 22 of `/proc/<pid>/stat`, or `None` for a process that is gone or a zombie — the same

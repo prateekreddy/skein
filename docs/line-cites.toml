@@ -61,203 +61,20 @@ cited_by = ["docs/recovery-survey.md"]
 line = "std::env::var(\"SKEIN_NO_API_AUTH\").ok().as_deref(),"
 cited_by = ["docs/threat-model.md"]
 
-["src/bin/skein-server.rs:39"]
-line = "/// Named rather than spelled inside [`PTY_LIMIT`] because the refusal quotes it. A person told"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:128"]
-line = "eprintln!(\"skein-server: {msg}\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:139"]
-line = "eprintln!(\"skein-server: {e}\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:145"]
-line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:151"]
-line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:154"]
-line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:161"]
-line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:168"]
-line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:181"]
-line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:238"]
-line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:276"]
-line = "\"skein: {}\\n {}\","
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein-server.rs:285"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-947 deleted the line along with the ssh_key setting, because skein in the fleet could not load a host key file, so there is no line left to re-point it at. The row stays as the record of what was there."
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:564"]
-line = "eprintln!(\"{}\", skein::doorway::missing());"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:574"]
-line = "eprintln!(\"skein-server: {why}\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:665"]
-line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:671"]
-line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:933"]
-line = "//"
-window = "// says \"nothing needs you\" over a list of things that do.\u000b//\u000b// `waiting` rather than `rows`, because `Standing::NeedsYou` serialises its own `rows` count and"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:975"]
-line = "Err(e) => ("
-window = ".into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:992"]
-line = "return (StatusCode::BAD_REQUEST, \"invalid box name\").into_response();"
-window = "if !skein::util::valid_name(&name) {\u000breturn (StatusCode::BAD_REQUEST, \"invalid box name\").into_response();\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:996"]
-line = "return (StatusCode::BAD_REQUEST, \"a box is created on a branch\").into_response();"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:1022"]
-line = "StatusCode::CONFLICT,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:1085"]
-line = "\"error\": \"no such act — it may have finished longer ago than the warden keeps them\""
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:1102"]
-line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:1298"]
-line = "return (StatusCode::NOT_FOUND, \"no such repo\").into_response();"
-window = "let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {\u000breturn (StatusCode::NOT_FOUND, \"no such repo\").into_response();\u000b};"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:1302"]
-line = "Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),"
-window = "Ok(list) => Json(list).into_response(),\u000bErr(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:1837"]
-line = "Ok(Err(why)) => ("
-window = "// person to different places.\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:2943"]
-line = "\"the health check itself failed: {error}\""
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:2945"]
-line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:3201"]
-line = "///"
-window = "/// Update skein's app settings — MERGED onto what is stored, never replacing it.\u000b///\u000b/// Every field of `Config` has a serde default, so deserializing a partial body into one silently"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:3245"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-947 deleted the line along with the ssh_key setting, because skein in the fleet could not load a host key file, so there is no line left to re-point it at. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:3612"]
-line = "Ok(Err(why)) => ("
-window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:3660"]
-line = "Err(e) => ("
-window = "Ok(p) => Json(p).into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:3761"]
-line = "if sandbox.is_empty() {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:3799"]
-line = "if let Some(why) = skein::fleet::fleet_lifecycle_refusal(\"rebuild\", true) {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:3802"]
-line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein-server.rs:4253"]
 historical = "the sentence this cited is the one SKEIN-702 replaced, and `src/bin/skein-server.rs:4464` keeps the record of the swap: “The old sentence — ‘too many terminals open — close one and retry’ — named”. `docs/recovery-survey.md` cites it twice as what the survey read on 2026-09-09, which is the only record of what was wrong; re-pointing it at the new wording would make the survey claim to have found a defect that was not there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4339"]
-line = "\"too many live boards open — close one and retry\","
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4393"]
-line = "skein::stream::Tick::PtyFreed => \"pty-freed\","
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4452"]
-line = "if !origin_ok(&headers) {"
-window = ") -> Response {\u000bif !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4453"]
-line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
-window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein-server.rs:4469"]
 historical = "`CLOSE_CHILD_ENDED`, which is now `CLOSE_NOTHING_TO_RECONNECT` at the same 4001. `docs/recovery-survey.md` says so in as many words — “Every mention of the old name in this document is historical” — so the citation names the constant as it stood, deliberately."
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4482"]
-line = "mut socket: WebSocket,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4497"]
-line = "refuse(&mut socket, pty_limit_reached(), AFTER_WAIT_PTY).await;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4515"]
-line = "\"skein: handoff brief failed: {e}\\r\\n\""
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4522"]
-line = "\"skein: handoff task failed: {e}\\r\\n\""
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4554"]
-line = "format!(\"skein: {why}{}\", watching_for_box(&name)),"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4564"]
-line = "let _ = socket.send(Message::Text(format!(\"skein: {e}\\r\\n\"))).await;"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:4622"]
@@ -272,28 +89,8 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "SKEIN-702 replaced the four bare pty sentences with one form — `skeins_own_fault` at `src/bin/skein-server.rs:4628`, which says whose fault it is, that nothing in the box is wrong, and that there is no condition to wait on — and its four call sites carry the `what` this row quoted: `opened this terminal and then could not read from it` at `:4815`. So the wording this row records is gone from the tree, and the row is the 2026-09-09 measurement of it, like `src/bin/skein-server.rs:4253`. Re-pointing it at the new sentence would make the survey claim a verdict (`n`, names no next step) that is false of what is there now. The address is the measurement and is meant to stay put; SKEIN-858 is why nothing here reads as drift."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:4645"]
-line = ".send(Message::Text(format!(\"\\r\\nskein: {why}\\r\\n\")))"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein-server.rs:4652"]
 historical = "SKEIN-702 replaced the four bare pty sentences with one form — `skeins_own_fault` at `src/bin/skein-server.rs:4628`, which says whose fault it is, that nothing in the box is wrong, and that there is no condition to wait on — and its four call sites carry the `what` this row quoted: `opened this terminal and then could not write to it` at `:4831`. So the wording this row records is gone from the tree, and the row is the 2026-09-09 measurement of it, like `src/bin/skein-server.rs:4253`. Re-pointing it at the new sentence would make the survey claim a verdict (`n`, names no next step) that is false of what is there now. The address is the measurement and is meant to stay put; SKEIN-858 is why nothing here reads as drift."
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4675"]
-line = "\"skein: too many terminals open — {PTY_MAX} at once is the limit. Close another terminal \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4681"]
-line = "fn watching_for_box(name: &str) -> String {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4703"]
-line = "this terminal by itself: use Try again below. If it keeps failing, {likely}.\\r\\n\""
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:4799"]
-line = "const AFTER_NO_WATCH: &str = \"no-watch\";"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server.rs:4889"]
@@ -304,43 +101,246 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "The row says it in as many words: the only `Err` `login_spawn_argv` could return was `fleet_sandbox().is_empty()`, SKEIN-756 deleted the guard and SKEIN-774 narrowed the signature, so `src/fleet.rs:8731` returns a tuple and there is no arm left for a caller to render. Nothing in the tree prints these four words on this path any more; the row is the record of when it did."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5002"]
-line = "}"
-window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
+["src/bin/skein-server/boxes.rs:20"]
+line = "//"
+window = "// says \"nothing needs you\" over a list of things that do.\u000b//\u000b// `waiting` rather than `rows`, because `Standing::NeedsYou` serialises its own `rows` count and"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5102"]
-line = "async fn login_terminal("
+["src/bin/skein-server/boxes.rs:62"]
+line = "Err(e) => ("
+window = ".into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5108"]
+["src/bin/skein-server/boxes.rs:82"]
+line = "return (StatusCode::BAD_REQUEST, \"invalid box name\").into_response();"
+window = "if !skein::util::valid_name(&name) {\u000breturn (StatusCode::BAD_REQUEST, \"invalid box name\").into_response();\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/boxes.rs:86"]
+line = "return (StatusCode::BAD_REQUEST, \"a box is created on a branch\").into_response();"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/boxes.rs:112"]
+line = "StatusCode::CONFLICT,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/boxes.rs:175"]
+line = "\"error\": \"no such act — it may have finished longer ago than the warden keeps them\""
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/boxes.rs:192"]
+line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/events.rs:25"]
+line = "\"too many live boards open — close one and retry\","
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/events.rs:79"]
+line = "skein::stream::Tick::PtyFreed => \"pty-freed\","
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/fleet.rs:120"]
+line = "Ok(Err(why)) => ("
+window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/fleet.rs:168"]
+line = "Err(e) => ("
+window = "Ok(p) => Json(p).into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/fleet.rs:269"]
+line = "if sandbox.is_empty() {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/fleet.rs:307"]
+line = "if let Some(why) = skein::fleet::fleet_lifecycle_refusal(\"rebuild\", true) {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/fleet.rs:310"]
+line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/health.rs:35"]
+line = "\"the health check itself failed: {error}\""
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/health.rs:37"]
+line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:125"]
+line = "eprintln!(\"skein-server: {msg}\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:136"]
+line = "eprintln!(\"skein-server: {e}\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:142"]
+line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:148"]
+line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:151"]
+line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:158"]
+line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:165"]
+line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:178"]
+line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:235"]
+line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:273"]
+line = "\"skein: {}\\n {}\","
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:561"]
+line = "eprintln!(\"{}\", skein::doorway::missing());"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:571"]
+line = "eprintln!(\"skein-server: {why}\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:662"]
+line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/main.rs:668"]
+line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/repos.rs:44"]
+line = "return (StatusCode::NOT_FOUND, \"no such repo\").into_response();"
+window = "let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {\u000breturn (StatusCode::NOT_FOUND, \"no such repo\").into_response();\u000b};"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/repos.rs:48"]
+line = "Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),"
+window = "Ok(list) => Json(list).into_response(),\u000bErr(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/review.rs:481"]
+line = "Ok(Err(why)) => ("
+window = "// person to different places.\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/review.rs:959"]
+line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
+cited_by = ["docs/prose-symbols.toml"]
+
+["src/bin/skein-server/settings.rs:248"]
+line = "///"
+window = "/// Update skein's app settings — MERGED onto what is stored, never replacing it.\u000b///\u000b/// Every field of `Config` has a serde default, so deserializing a partial body into one silently"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:8"]
+line = "/// Named rather than spelled inside [`PTY_LIMIT`] because the refusal quotes it. A person told"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:47"]
+line = "if !origin_ok(&headers) {"
+window = ") -> Response {\u000bif !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:48"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5111"]
+["src/bin/skein-server/terminal.rs:77"]
+line = "mut socket: WebSocket,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:92"]
+line = "refuse(&mut socket, pty_limit_reached(), AFTER_WAIT_PTY).await;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:110"]
+line = "\"skein: handoff brief failed: {e}\\r\\n\""
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:117"]
+line = "\"skein: handoff task failed: {e}\\r\\n\""
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:149"]
+line = "format!(\"skein: {why}{}\", watching_for_box(&name)),"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:159"]
+line = "let _ = socket.send(Message::Text(format!(\"skein: {e}\\r\\n\"))).await;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:240"]
+line = ".send(Message::Text(format!(\"\\r\\nskein: {why}\\r\\n\")))"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:270"]
+line = "\"skein: too many terminals open — {PTY_MAX} at once is the limit. Close another terminal \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:276"]
+line = "fn watching_for_box(name: &str) -> String {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:298"]
+line = "this terminal by itself: use Try again below. If it keeps failing, {likely}.\\r\\n\""
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:394"]
+line = "const AFTER_NO_WATCH: &str = \"no-watch\";"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:597"]
+line = "}"
+window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:615"]
+line = "pub(super) async fn login_terminal("
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:621"]
+line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
+window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:624"]
 line = "return (StatusCode::BAD_REQUEST, \"unsupported runtime\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5131"]
+["src/bin/skein-server/terminal.rs:644"]
 line = "// the login surface is a modal that closes with its socket, and one that reopened itself over"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5141"]
+["src/bin/skein-server/terminal.rs:654"]
 line = "terminal and press log in again.\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5180"]
+["src/bin/skein-server/terminal.rs:693"]
 line = "vec![format!(\"logged in, but the post-login share failed: {e}\")]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5191"]
+["src/bin/skein-server/terminal.rs:704"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server.rs:5565"]
-line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
-cited_by = ["docs/prose-symbols.toml"]
 
 ["src/bin/skein.rs:44"]
 line = "// half-read, and never a second empty installation filling up beside the real one."
@@ -1028,7 +1028,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:537"]
+["src/fleet/server.rs:551"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1377,7 +1377,7 @@ cited_by = ["docs/architecture.md", "docs/parity.md"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
 
-["src/review/cache.rs:1177"]
+["src/review/cache.rs:1346"]
 line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
 cited_by = ["docs/citations.toml"]
 
@@ -1823,15 +1823,15 @@ cited_by = ["docs/review-ux.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:730"]
+["tests/common/mod.rs:737"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:768"]
+["tests/common/mod.rs:775"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:782"]
+["tests/common/mod.rs:789"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 

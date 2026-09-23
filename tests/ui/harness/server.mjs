@@ -234,7 +234,7 @@ function fixtureTmuxDir(base) {
  * The port arrives as an OPEN listening socket rather than a number — `openDoor` in lift.mjs says
  * why (SKEIN-443). `door.stdio` puts that descriptor at 3 in the child and `door.env` says one was
  * passed; no `SKEIN_ADDR` goes with it, because a server handed a socket reports where the socket is
- * bound instead of binding anywhere of its own (src/bin/skein-server.rs:464).
+ * bound instead of binding anywhere of its own (src/bin/skein-server/main.rs:554).
  *
  * **Everything this run starts is stopped on the way out, and `srv.kill()` was never that**
  * (SKEIN-645). Two gaps, and each one alone is enough to leak:

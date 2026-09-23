@@ -122,13 +122,14 @@ fn every_merge_request_names_the_head_it_was_decided_about() {
 /// part of that arrangement a reader cannot see from either file alone.
 #[test]
 fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
-    let bin = "src/bin/skein-server.rs".to_string();
-    let mut all = sources();
-    all.push((
-        bin,
-        std::fs::read_to_string(root().join("src/bin/skein-server.rs"))
-            .expect("the server binary is readable"),
-    ));
+    // The walk reaches the server binary itself now that it is a directory (SKEIN-1103); it used
+    // to be pushed on by hand as well, which counted each of its lines twice.
+    let all = sources();
+    assert!(
+        all.iter()
+            .any(|(name, _)| name.starts_with("src/bin/skein-server/")),
+        "the source walk no longer reaches the server binary, where the merge a person presses is"
+    );
 
     let mut callers: Vec<(String, usize)> = Vec::new();
     for (name, text) in &all {
@@ -202,8 +203,12 @@ fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
 /// merge).
 #[test]
 fn the_cockpits_merge_takes_its_head_from_the_reader_and_not_from_github() {
-    let text = std::fs::read_to_string(root().join("src/bin/skein-server.rs"))
-        .expect("the server binary is readable");
+    // Every file of the server binary, each whole, so the arm is bounded inside its own file.
+    let text: String = sources()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("src/bin/skein-server/"))
+        .map(|(_, text)| text)
+        .collect();
     let start = text
         .find(r#"(None, "merge") =>"#)
         .expect("the cockpit's merge route has moved — this test no longer guards it");

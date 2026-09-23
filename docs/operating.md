@@ -498,7 +498,7 @@ until it returns.
 The subtle case was the 2s fleet-snapshot tick (`load_views` — `sbx ls` + a per-box `git`,
 1-2s for a busy fleet). Run inline it caused a periodic "typing lags **only when the box is
 idle**" freeze — mid-stream the output flood hid the gap, but at rest a lone keystroke's
-echo waited out the stall. Every `skein::` call in `skein-server.rs` is on `spawn_blocking`
+echo waited out the stall. Every `skein::` call in `src/bin/skein-server/` is on `spawn_blocking`
 for this reason; the regression is guarded by
 `slow_fleet_snapshot_does_not_starve_concurrent_requests` in `tests/server.rs` (pins the
 server to one worker, makes `load_views` sleep, and asserts a concurrent request isn't

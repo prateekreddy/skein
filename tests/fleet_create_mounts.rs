@@ -22,7 +22,7 @@
 //! gap a scan of call arguments leaves: a new function that computes the wrong set into a local.
 //!
 //! Same technique, and the same reason, as `neither_lifecycle_route_reaches_its_work_by_a_path_that_skips_the_check`
-//! in `src/bin/skein-server.rs`.
+//! in `src/bin/skein-server/fleet.rs`.
 
 mod common;
 
@@ -233,7 +233,7 @@ fn every_fleet_create_path_hands_over_the_mount_set_create_line_hands_over() {
          create funnel has been renamed and this scan now recognises nothing, which is green about \
          anything"
     );
-    for expected in ["src/fleet/create.rs", "src/bin/skein-server.rs"] {
+    for expected in ["src/fleet/create.rs", "src/bin/skein-server/fleet.rs"] {
         assert!(
             sites.iter().any(|(file, ..)| file == expected),
             "{expected} chose a mount set for a create when this was written and no longer does; \

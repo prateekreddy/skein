@@ -497,9 +497,7 @@ mod tests {
         // as long as it runs — the worst blast radius of the three sites SKEIN-307 found.
         let _env = crate::env_lock();
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("skein-warden-doer-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::Scratch::new("skein-warden-doer");
         let marker = dir.join("sbx-was-run");
         let fake = dir.join("sbx");
         std::fs::write(
@@ -616,12 +614,7 @@ mod tests {
         // $PATH is process-wide and this test puts a fake `sbx` on it — the lock SKEIN-307 added.
         let _env = crate::env_lock();
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "skein-warden-resolve-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::Scratch::fresh("skein-warden-resolve");
         let (honest, elsewhere) = (dir.join("honest"), dir.join("elsewhere"));
         for (at, says) in [(&honest, "honest"), (&elsewhere, "decoy")] {
             std::fs::create_dir_all(at).unwrap();

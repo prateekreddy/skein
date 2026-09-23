@@ -60,6 +60,109 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A test's own directory under the system temp dir, **removed when the test ends — unless it
+/// panicked**, in which case it is kept and its path printed (SKEIN-557).
+///
+/// Every fixture in this crate used to be a bare `temp_dir().join(..)` that nothing removed: one
+/// directory per test per run, and `/tmp` on the owner's box held more than five thousand
+/// `warden-secret-*` alone. The integration suite's sweep tidied some of them as a side effect,
+/// which works until somebody runs only these tests.
+///
+/// Kept on failure for the rule `tests/common/mod.rs`'s `Scratch` follows: the directory a failing
+/// test leaves is the evidence of what it did, and deleting it on the way out of the panic is a
+/// debugging session lost.
+///
+/// Named `<prefix>-<pid>-t<thread>`, as the fixtures it replaces were near enough, so a name still
+/// says which test left it. **Bind it to a name** — `Scratch::new(..).join(..)` drops the guard at the
+/// end of that statement and removes the directory before the test has used it.
+#[cfg(test)]
+pub(crate) struct Scratch(std::path::PathBuf);
+
+#[cfg(test)]
+impl Scratch {
+    /// A fresh directory, emptied of anything a killed earlier run left under the same name.
+    pub(crate) fn new(prefix: &str) -> Scratch {
+        let dir = Scratch::fresh(prefix);
+        std::fs::create_dir_all(&dir.0).expect("creating a test's scratch directory");
+        dir
+    }
+
+    /// The same, but NOT created — for a test whose subject is what happens where nothing is yet.
+    pub(crate) fn fresh(prefix: &str) -> Scratch {
+        // The thread's number and not its `Debug` form: `ThreadId(7)` puts parentheses in a path
+        // that several of these tests write, unquoted, into a shell script.
+        let thread: String = format!("{:?}", std::thread::current().id())
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-t{thread}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Scratch(dir)
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "skein-warden test: kept {} for the failure above",
+                self.0.display()
+            );
+            return;
+        }
+        // Best-effort, and it must not panic: a test that passed is not made to fail by its
+        // cleanup. Modes first, because a directory a test made unwritable cannot be emptied.
+        reopen(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Make a tree removable again. Symlinks are skipped: `set_permissions` follows one, and the target
+/// need not be inside the tree — `src/testutil.rs`'s `reopen` learned that the expensive way.
+#[cfg(test)]
+fn reopen(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if dir.is_symlink() {
+        return;
+    }
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            reopen(&path);
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl AsRef<std::path::Path> for Scratch {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl AsRef<std::ffi::OsStr> for Scratch {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
+}
+
 /// Where the warden's RECORD lives — the audit log and the outcomes beside it — which is
 /// deliberately **not** where its secret lives.
 ///
@@ -202,5 +305,52 @@ mod tests {
                 None => std::env::remove_var(k),
             }
         }
+    }
+
+    /// **A fixture removes itself when its test passes, and keeps itself when its test panics**
+    /// (SKEIN-557).
+    ///
+    /// Both halves, because each is the other's counterfactual. What makes the first fail: a `Drop`
+    /// that does not remove — every fixture this crate made before this one. What makes the
+    /// second fail: a `Drop` that removes regardless, which is the tidy-looking version that
+    /// deletes a failing test's only evidence. A file is written inside and a subdirectory is left
+    /// at mode 000, so "removed" means removed with contents, not an empty `rmdir` that happened
+    /// to succeed.
+    #[test]
+    fn a_scratch_directory_goes_when_its_test_passes_and_stays_when_it_panics() {
+        use std::os::unix::fs::PermissionsExt;
+        let passed = {
+            let dir = super::Scratch::new("skein-warden-scratch-passes");
+            std::fs::write(dir.join("left"), "by the test").unwrap();
+            let shut = dir.join("shut");
+            std::fs::create_dir(&shut).unwrap();
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+            dir.to_path_buf()
+        };
+        assert!(
+            !passed.exists(),
+            "{} outlived a test that passed — the fixture leaks one directory per run",
+            passed.display()
+        );
+
+        let failed = std::sync::Mutex::new(None);
+        let unwound = std::panic::catch_unwind(|| {
+            let dir = super::Scratch::new("skein-warden-scratch-panics");
+            std::fs::write(dir.join("evidence"), "what the failing test did").unwrap();
+            *failed.lock().unwrap() = Some(dir.to_path_buf());
+            panic!("a test failing, on purpose");
+        });
+        assert!(unwound.is_err());
+        let failed = failed
+            .into_inner()
+            .unwrap()
+            .expect("the panicking half ran");
+        let kept = failed.join("evidence").exists();
+        let _ = std::fs::remove_dir_all(&failed);
+        assert!(
+            kept,
+            "{} was deleted on the way out of a panic — the failing test's evidence went with it",
+            failed.display()
+        );
     }
 }
