@@ -754,7 +754,7 @@ def message_problems(found, spec, banned):
             where = ", ".join(found[rule][what][:4])
             more = f" (+{len(found[rule][what]) - 4} more)" if len(found[rule][what]) > 4 else ""
             said.append(
-                f"residue-check: undeclared {rule} {what!r} in a commit message or authorship "
+                f"residue-check: undeclared {rule} {shown(rule, what)} in a commit message or authorship "
                 f"line\n"
                 f"               at {where}{more}\n"
                 f"               rule: a commit message goes public exactly as a file does, and "
@@ -963,6 +963,35 @@ REGISTER_ABSENT = (
 )
 
 
+def in_ci():
+    """True where this run's output is a build log a stranger can read.
+
+    `CI` is set by every hosted runner this project could land on, GitHub's included, and
+    `GITHUB_ACTIONS` is GitHub's own; either is enough. A person who exports `CI=false` to see a
+    value locally gets it, which is what that spelling means everywhere else.
+    """
+    ci = os.environ.get("CI", "").strip().lower()
+    return (ci not in ("", "0", "false", "no")) or os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def shown(rule, what):
+    """A home, host or address as a report may print it (SKEIN-636).
+
+    Printed in full where a person is reading, because an undeclared one is something to DECLARE
+    and they have to be able to read it. Redacted in CI, where the log is world-readable: an
+    undeclared value is by definition not one of the placeholders, which makes it disproportionately
+    likely to be a real person's home, a real internal host or a real mailbox — the same disclosure
+    the banned rule already refuses to write into a log (SKEIN-630). The digest is there so two
+    findings can still be told apart, and the sentence says how to see the value.
+    """
+    if not in_ci():
+        return repr(what)
+    return (
+        f"<{'an' if rule == 'address' else 'a'} {rule} with sha256 {digest(what).hex()[:16]}…, not printed in CI; run "
+        f"`python3 tools/residue-check.py` in a checkout to read it>"
+    )
+
+
 def problems(found, spec, banned):
     said = []
     for rule in ("host", "home", "address"):
@@ -974,7 +1003,7 @@ def problems(found, spec, banned):
             where = ", ".join(found[rule][what][:4])
             more = f" (+{len(found[rule][what]) - 4} more)" if len(found[rule][what]) > 4 else ""
             said.append(
-                f"residue-check: undeclared {rule} {what!r}\n"
+                f"residue-check: undeclared {rule} {shown(rule, what)}\n"
                 f"               at {where}{more}\n"
                 f"               rule: {RULE_TEXT[rule]} is a decision — declare it in "
                 f"docs/residue.toml [{section}] with whose it is and why this tree names it, "
@@ -1509,6 +1538,32 @@ def self_check():
             "residue-check: SELF-CHECK FAILED — a `#` line typed into docs/residue.toml was not",
             "               seen, and the next `--update` would delete it without a word.",
         )
+    # An undeclared home, host or address is not printed into a CI log, and IS printed to a
+    # person (SKEIN-636). Both directions, on the rule needles above, through `problems` and
+    # `message_problems` — the two places that print one.
+    planted = {r: scan_text(n[r], none).get(r, {}) for r in SECTION}
+    found_ci = {**{r: {} for r in RULES}, **{r: {w: ["x:1"] for w in v} for r, v in planted.items()}}
+    values = [w for v in planted.values() for w in v]
+    saved = {k: os.environ.get(k) for k in ("CI", "GITHUB_ACTIONS")}
+    try:
+        for env, want in (({"CI": "true"}, False), ({"GITHUB_ACTIONS": "true"}, False), ({}, True)):
+            for k in saved:
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            out = "\n".join(problems(found_ci, {}, none) + message_problems(found_ci, {}, none))
+            if len(values) != 3 or any((w in out) != want for w in values):
+                fail(
+                    "residue-check: SELF-CHECK FAILED — with "
+                    f"{env or 'no CI variable'} an undeclared home, host or address was "
+                    f"{'not ' if want else ''}printed.",
+                    "               In CI that is a real value written into a world-readable log;",
+                    "               outside it, a finding nobody can read is one nobody can declare.",
+                )
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
     # ---- the history door ----------------------------------------------------------------------
     #
     # `--history` is a mode nobody runs often, over data nothing else in this file touches, and it
@@ -1693,7 +1748,12 @@ def main():
         for rule in RULES:
             for what in sorted(found[rule]):
                 where = found[rule][what]
-                label = banned.describe(what) if rule in ("banned", "filename") else what
+                # `shown` for the three naming rules, for the reason it gives: `--show` is the
+                # listing somebody pastes into a CI step to debug one, and there it is a log too.
+                label = (
+                    banned.describe(what) if rule in ("banned", "filename")
+                    else shown(rule, what) if rule in SECTION and in_ci() else what
+                )
                 print(f"{rule:8} {label:44} {len(where):4}  {', '.join(where[:3])}")
         # Said whether or not anything was found, and above all when nothing was: the failure this
         # line exists to prevent is a `--show` that read no register, printed no banned finding,
