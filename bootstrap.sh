@@ -105,6 +105,44 @@ export GIT_ASKPASS=
 export GCM_INTERACTIVE=never
 unset SSH_ASKPASS
 
+# ---- nor wait for ever on a network that stopped answering ---------------------------------------
+#
+# Closing the prompts ended one way a run could hang; a remote that accepts the connection and then
+# says nothing was the other (SKEIN-1037). git has no low-speed limit unless it is given one, so a
+# fetch against such a remote sat at "fetching" with the Update button disabled for as long as the
+# connection stayed open. Every network step below now gives up once nothing has arrived for
+# `$stall` seconds, and the log says so:
+#
+#   * git over http(s): under 1000 bytes/s for `$stall` seconds ends the fetch, with git's own
+#     "Operation too slow" line. 1000 rather than 1 because a shallow fetch of this repository is
+#     megabytes, and a link slower than a kilobyte a second would take hours to finish it anyway.
+#     **One case this cannot reach, measured:** an https remote that accepts TCP and never answers
+#     the TLS handshake. That is curl's connect phase, which the low-speed limit does not cover and
+#     for which git has no setting; libcurl's own 300-second connect timeout ends it instead.
+#   * git over ssh: `ConnectTimeout` also bounds the banner exchange (measured: "Connection timed
+#     out during banner exchange" against a listener that never speaks), and `ServerAlive` ends a
+#     session that goes silent mid-transfer after two unanswered probes, so about `2 x $stall`. A
+#     server busy computing a pack still answers the probe, so a slow fetch is not taken for a dead
+#     one.
+#   * the rustup download: `--connect-timeout` and the same low-speed rule, and no `--max-time` —
+#     a total cap would end a slow but working download, which is exactly what this must not do.
+#   * cargo's registry fetch: CARGO_HTTP_TIMEOUT is cargo's connect timeout and low-speed window
+#     at once. cargo already had one (30 seconds, retried 3 times); it is set here so the bound is
+#     this file's rather than a default nobody wrote down, and so one number governs every step.
+#
+# 60 seconds: long enough that a congested link or a remote slow to start a pack is not cut off,
+# short enough that a dead one fails in a minute rather than an evening. `SKEIN_NET_STALL_SECS`
+# changes it — a whole number of seconds, or it is ignored, because it is spliced into
+# `GIT_SSH_COMMAND`, which git hands to a shell.
+stall="${SKEIN_NET_STALL_SECS:-60}"
+case "$stall" in
+  '' | *[!0-9]* | 0*) stall=60 ;;
+esac
+export GIT_HTTP_LOW_SPEED_LIMIT=1000
+export GIT_HTTP_LOW_SPEED_TIME="$stall"
+export CARGO_HTTP_TIMEOUT="$stall"
+export CARGO_NET_RETRY=3
+
 # ---- the fleet root, the one line here that needs sudo -------------------------------------------
 
 # `/boxes` sits at the filesystem root, where the sandbox user cannot mkdir. Without this the whole
@@ -400,8 +438,18 @@ mkdir -p "$src" "$toolchain"
 # a shim with nothing behind it fails it, and every real cargo passes it.
 if ! cargo --version >/dev/null 2>&1; then
   say "installing a Rust toolchain in $toolchain (this is not the sandbox's own, on purpose)"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null
+  # Downloaded whole before any of it runs, rather than piped: a pipe's status is the shell's, so
+  # a download that timed out handed `sh` half a script (or none) and the next thing the log said
+  # was "there is no cargo", with the reason one line up in curl's words and nothing joining the
+  # two. `-S` keeps curl's own reason in the log; the bounds are the block at the top of this file.
+  if ! rustup_sh=$(curl --proto '=https' --tlsv1.2 -sSf --connect-timeout "$stall" \
+    --speed-limit 1000 --speed-time "$stall" https://sh.rustup.rs); then
+    say "the Rust installer could not be downloaded from sh.rustup.rs (curl's reason is the line"
+    say "above), so the build cannot start. Check that this sandbox can reach sh.rustup.rs, then"
+    say "$again."
+    exit 1
+  fi
+  printf '%s\n' "$rustup_sh" | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null
   # bash remembers where it found a command and does not look again while the file is still there.
   # The `cargo` a moment ago was the shim further down the PATH, and rustup has just written a
   # better one into `$CARGO_HOME/bin` — which is *ahead* of it. Without this the shell keeps
@@ -432,7 +480,9 @@ fi
 # command git would have run anyway — `$GIT_SSH_COMMAND`, else `core.sshCommand` — so a key chosen
 # there is kept. `repos::ssh_that_cannot_ask` is the same rule for the fleet's own mirrors.
 ssh_cmd="${GIT_SSH_COMMAND:-$(git config --get core.sshCommand 2>/dev/null || true)}"
-export GIT_SSH_COMMAND="${ssh_cmd:-ssh} -o BatchMode=yes"
+# The two bounds from the top of this file ride on the same command, for the same reason.
+export GIT_SSH_COMMAND="${ssh_cmd:-ssh} -o BatchMode=yes -o ConnectTimeout=$stall \
+-o ServerAliveInterval=$stall -o ServerAliveCountMax=1"
 
 # `owner/name`, and the host, out of a remote URL — `https://host/owner/name.git` and
 # `git@host:owner/name.git` alike. Only ever used to word a message.
@@ -537,6 +587,14 @@ remote_git() {
       say "$what stopped here instead of waiting at an ssh prompt nobody can see."
       say "Give the sandbox a key $host accepts for $slug, or point SKEIN_SOURCE_URL at an https"
       say "remote, then $again."
+      ;;
+    # The bounds at the top of this file, in each program's words: curl's low-speed limit (git over
+    # http), curl's connect timeout, ssh's `ConnectTimeout` and its `ServerAlive` probe.
+    *"Operation too slow"* | *"timed out"* | *"not responding"*)
+      say ""
+      say "$who stopped answering while the $what was fetching $slug, so the $what gave up rather"
+      say "than wait for ever. Nothing was installed. Check that this sandbox can reach $host, then"
+      say "$again."
       ;;
   esac
   exit 1
