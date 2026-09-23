@@ -92,7 +92,9 @@ finding fails the build too — a stale exemption is a permission nobody granted
 
     python3 tools/fleet-pin-check.py            check
     python3 tools/fleet-pin-check.py --show     every pinning scope and its verdict
-    python3 tools/fleet-pin-check.py --update    rewrite the exemption list from the code
+    python3 tools/fleet-pin-check.py --update    rewrite the exemption list from the code. It
+                                                 keeps each entry's reason and re-emits the
+                                                 header, so a `#` line typed into the file is lost
 """
 
 import os
