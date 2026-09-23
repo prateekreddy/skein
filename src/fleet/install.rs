@@ -171,6 +171,18 @@ pub fn server_tmux_sock_in(fleet_root: &str) -> String {
     format!("{}/server.tmux", fleet_private_dir_in(fleet_root))
 }
 
+/// Where the cockpit's tmux session lived **before SKEIN-529** moved it under `private/`: directly
+/// in `.skein`, which every box can connect to.
+///
+/// Nothing makes a session here any more. It is spelled because a fleet serving since before the
+/// move still HAS its supervisor here until `bootstrap.sh`'s `start-door.sh` renames the socket
+/// into `private/` (SKEIN-1020) — and until then, a skein that asked only [`server_tmux_sock`]
+/// could not stop that cockpit, and would start a second supervisor beside it (SKEIN-1025).
+/// [`start_server`] and [`stop_server`] ask both.
+pub fn pre_move_server_tmux_sock() -> String {
+    format!("{}/server.tmux", skein_dir())
+}
+
 /// The port the cockpit listens on **inside** the sandbox. 7878 because that is the number every
 /// browser bookmark and README already carries; `$SKEIN_SERVER_PORT` overrides it in the same
 /// spirit as `$SKEIN_FLEET_ROOT` — without the seam this path could only be exercised against a
@@ -310,6 +322,63 @@ fn build_script_stopping(stop: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::*;
+
+    /// **The `sudo` on these tests' `$PATH` runs the command it was asked to, whatever options come
+    /// in front of it** (SKEIN-811).
+    ///
+    /// The four bootstrap tests below install it, and it used to be `exec "$@"` — right only while
+    /// `bootstrap.sh` put nothing before the command. With `-n` there, `exec -n mkdir …` fails and
+    /// the `case "$1"` the escalation test dispatches on sees `-n` instead of `mkdir`, so both
+    /// shapes are asserted: the command runs, and the line before it saw the command.
+    ///
+    /// **What makes it fail:** `sudo_stub` without `sudo_drops_its_own_options!()` — the `-n` half
+    /// then neither marks nor makes, and the first assertion names the argv.
+    #[test]
+    fn the_sudo_stand_in_runs_the_command_whatever_options_come_first() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempdir();
+        let bin = scratch.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let saw = scratch.join("saw-mkdir");
+        let sudo = bin.join("sudo");
+        std::fs::write(
+            &sudo,
+            format!(
+                "#!/bin/sh\n{}\n",
+                sudo_stub(&format!(
+                    "case \"$1\" in mkdir) echo \"$*\" >> {} ;; esac",
+                    saw.display()
+                ))
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        for (argv, made) in [
+            ("sudo -n mkdir -p made-with-n", "made-with-n"),
+            ("sudo -n -E mkdir -p made-with-two", "made-with-two"),
+            ("sudo mkdir -p made-bare", "made-bare"),
+        ] {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(argv)
+                .current_dir(&scratch)
+                .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
+                .output()
+                .unwrap();
+            let marks = std::fs::read_to_string(&saw).unwrap_or_default();
+            assert!(
+                out.status.success() && scratch.join(made).is_dir(),
+                "`{argv}` did not run its command through the stand-in: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                marks.lines().any(|l| l == format!("mkdir -p {made}")),
+                "the line before the command saw something other than the command for `{argv}`: \
+                 {marks:?}"
+            );
+        }
+    }
 
     /// Nothing the sandbox builds skein with is writable by a box.
     ///
@@ -970,10 +1039,10 @@ mod tests {
         // chmod on a directory we own — an unprivileged process can already do.
         stub(
             "sudo",
-            &format!(
-                "case \"$1\" in mkdir) chmod u+w {locked} ;; esac\nexec \"$@\"",
+            &non_interactive_sudo_stub(&format!(
+                "case \"$1\" in mkdir) chmod u+w {locked} ;; esac",
                 locked = locked.display(),
-            ),
+            )),
         );
         stub(
             "git",
@@ -990,6 +1059,9 @@ mod tests {
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(BOOTSTRAP_SH)
+            // A working directory of its own, so a stub that misread its arguments writes into the
+            // fixture and not the repository (SKEIN-811; `fleet::limits`'s harness has the story).
+            .current_dir(&scratch)
             .env("PATH", format!("{}:{}", bin.display(), env!("PATH")))
             // See `the_image_is_given_everything_the_install_runs_before_it_runs_it`: `$BASH_ENV` is
             // sourced ahead of the script and can put a real cargo in front of the stub.
@@ -1017,9 +1089,10 @@ mod tests {
              it ran:\n{ran}"
         );
         assert!(
-            ran.contains(&format!("sudo mkdir -p {}", root.display())),
-            "the fleet root was not created with sudo, so it was made some other way that will not \
-             work at the filesystem root:\nit ran:\n{ran}"
+            ran.contains(&format!("sudo -n mkdir -p {}", root.display())),
+            "the fleet root was not created with `sudo -n`, so it was made some other way that \
+             will not work at the filesystem root, or by a sudo that can wait on a password prompt \
+             nobody sees (SKEIN-1038):\nit ran:\n{ran}"
         );
         assert!(
             root.join(".skein/src").is_dir() && root.join(".skein/toolchain").is_dir(),
@@ -1098,6 +1171,8 @@ mod tests {
             command
                 .arg("-c")
                 .arg(BOOTSTRAP_SH)
+                // Its own working directory, for the reason at the escalation test's (SKEIN-811).
+                .current_dir(&scratch)
                 .env("PATH", &path)
                 // The built PATH is the whole fixture, and `$BASH_ENV` is sourced by every
                 // non-interactive bash before the first line runs — which is where a developer's
@@ -1151,7 +1226,7 @@ mod tests {
                 src = root.join(".skein/src").display(),
             ),
         );
-        stub("sudo", &log, "exec \"$@\"");
+        stub("sudo", &log, &non_interactive_sudo_stub(""));
         // What apt really does, in one line of it: the package arrives and `cc` is on the PATH. The
         // script asks the PATH and not apt, so a stub that recorded and installed nothing would be
         // testing the wrong claim — and would fail, correctly.
@@ -1274,7 +1349,7 @@ mod tests {
                 src = root.join(".skein/src").display(),
             ),
         );
-        stub("sudo", &log, "exec \"$@\"");
+        stub("sudo", &log, &non_interactive_sudo_stub(""));
         stub("apt-get", &log, "exit 0");
 
         let out = run(&root, true);
@@ -1573,6 +1648,8 @@ mod tests {
             std::process::Command::new("bash")
                 .arg("-c")
                 .arg(BOOTSTRAP_SH)
+                // Its own working directory, for the reason at the escalation test's (SKEIN-811).
+                .current_dir(&scratch)
                 .env("PATH", &path)
                 .env_remove("BASH_ENV")
                 .env_remove("SKEIN_HOME")
@@ -1610,7 +1687,7 @@ mod tests {
                 src = root.join(".skein/src").display(),
             ),
         );
-        stub("sudo", &log, "exec \"$@\"");
+        stub("sudo", &log, &non_interactive_sudo_stub(""));
         stub("apt-get", &log, "exit 0");
         for present in ["cc", "curl", "python3", "tmux", "jq"] {
             stub(present, &log, "exit 0");

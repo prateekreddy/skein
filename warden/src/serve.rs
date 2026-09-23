@@ -845,14 +845,8 @@ mod tests {
     use crate::doer::Unattended;
     use std::io::{Read, Write};
 
-    fn scratch(what: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "skein-warden-serve-{what}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn scratch(what: &str) -> crate::Scratch {
+        crate::Scratch::fresh(&format!("skein-warden-serve-{what}"))
     }
 
     fn warden(dir: &std::path::Path) -> Arc<Warden> {
@@ -1082,7 +1076,10 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
                 .unwrap(),
         );
         assert!(!secret.is_empty());
-        std::thread::spawn(move || warden(&dir).serve(listener));
+        // The path moves into the thread and the guard stays here: `serve` never returns, so a
+        // guard moved in with it would never drop and the directory would outlive the run.
+        let at = dir.to_path_buf();
+        std::thread::spawn(move || warden(&at).serve(listener));
 
         let mut stream = TcpStream::connect(addr).expect("connect");
         stream

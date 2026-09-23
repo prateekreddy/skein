@@ -233,8 +233,7 @@ mod tests {
     /// the defect under any `/bin/sh` rather than only under the one this box happens to have.
     #[test]
     fn a_deadline_ends_what_the_command_started_and_not_only_the_command() {
-        let dir = std::env::temp_dir().join(format!("skein-warden-bounded-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::Scratch::new("skein-warden-bounded");
         let pidfile = dir.join("grandchild.pid");
         let _ = std::fs::remove_file(&pidfile);
         let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());

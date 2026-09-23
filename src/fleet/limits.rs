@@ -843,8 +843,9 @@ mod tests {
 
     /// The `sudo` stand-ins these tests run the launcher's own shell against.
     ///
-    /// Written down once, and both begin by dropping sudo's OWN options, which is the whole reason
-    /// they are here rather than inline at each call. They used to read their arguments purely by
+    /// Written down once, and both begin by dropping sudo's OWN options — the one line every sudo
+    /// stand-in in the crate shares (`testutil::sudo_drops_its_own_options`, SKEIN-811) — which is
+    /// the whole reason they are here rather than inline at each call. They used to read their arguments purely by
     /// position — `shift 4`, and `case "$1" in mkdir)` — which is correct only for the exact argv
     /// the launcher happened to send on the day each was written. SKEIN-555 put `-n` in front of
     /// all twelve `sudo` calls in `box-session.sh`, and both misread it: the first shifted one
@@ -858,21 +859,24 @@ mod tests {
     ///
     /// `while [ $# -gt 0 ]` before the test, so this is still correct under the `set -u` that
     /// `an_unreadable_ceiling_is_skipped_rather_than_fatal` runs it with.
-    const SUDO_WRITES_A_VALUE_TO_A_PATH: &str = "sudo() { \
-                                                 while [ $# -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; \
-                                                 do shift; done; \
-                                                 shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }";
+    const SUDO_WRITES_A_VALUE_TO_A_PATH: &str = concat!(
+        "sudo() { ",
+        crate::testutil::sudo_drops_its_own_options!(),
+        " shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }"
+    );
 
     /// The other shape: dispatches on the command sudo was asked to run, both ways the per-box
     /// cgroup block spells it — `mkdir -p`, and `sh -c` with and without positionals after the
     /// script.
-    const SUDO_DISPATCHES_ON_THE_COMMAND: &str = "sudo() { \
-         while [ $# -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; do shift; done; \
-         case \"$1\" in \
+    const SUDO_DISPATCHES_ON_THE_COMMAND: &str = concat!(
+        "sudo() { ",
+        crate::testutil::sudo_drops_its_own_options!(),
+        " case \"$1\" in \
            mkdir) shift; mkdir \"$@\" ;; \
            sh) shift; if [ \"$#\" = 2 ]; then sh -c \"$2\"; else sh \"$@\"; fi ;; \
            *) \"$@\" ;; \
-         esac; }";
+         esac; }"
+    );
 
     /// Run a block of the launcher's shell, with the fixture as its working directory.
     ///

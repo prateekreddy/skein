@@ -212,15 +212,11 @@ fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "warden-secret-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch(tag: &str) -> crate::Scratch {
+        // `skein-` in front, which the old name lacked: the integration suite's sweep only
+        // collects names that start with it, so the 5,196 `warden-secret-*` directories found in
+        // this box's `/tmp` were not even candidates.
+        crate::Scratch::new(&format!("skein-warden-secret-{tag}"))
     }
 
     #[test]
@@ -255,7 +251,8 @@ mod tests {
     fn a_warden_that_cannot_read_its_own_copy_matches_nothing() {
         // The failure that must not turn into "no checking": an unwritable home means no secret,
         // and a secret nobody has cannot be presented by anybody — including the right caller.
-        let home = scratch("none").join("not-a-directory/deeper");
+        let root = scratch("none");
+        let home = root.join("not-a-directory/deeper");
         std::fs::write(home.parent().unwrap(), "a file where a directory would go").unwrap();
         let secret = Secret::kept_in(&home);
         assert!(secret.missing());
@@ -281,7 +278,8 @@ mod tests {
         std::fs::create_dir_all(&old).unwrap();
         write_private(&old.join("secret"), "the-existing-pairing").unwrap();
 
-        let home = scratch("adopt-new").join("warden");
+        let new_root = scratch("adopt-new");
+        let home = new_root.join("warden");
 
         // Under the explicit override nothing is adopted: a test or dev warden pulling the host's
         // real pairing out of `~/.skein/warden` would be a scratch run deleting a real secret.

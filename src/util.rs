@@ -209,8 +209,8 @@ where
 
 /// [`update_json`], but an unreadable file is taken as `T::default()` and written over.
 ///
-/// **Named, so that choosing it is visible in the diff that chooses it.** There is exactly one
-/// caller — `attempt`'s lease file — and its argument is that the file holds nothing durable: a
+/// **Named, so that choosing it is visible in the diff that chooses it.** Each caller argues it
+/// where it calls (`review`'s spend ledger and tried-notes); `attempt`'s lease file holds nothing durable: a
 /// lease is a claim with a deadline on it, a lease nobody can parse cannot be honoured, and
 /// refusing here would block that one operation for ever on a file no human ever looks at. Anything
 /// whose contents somebody would miss uses [`update_json`] and is told instead.

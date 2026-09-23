@@ -259,8 +259,8 @@ mod tests {
 
     /// **A lease file that will not parse is taken over, not honoured for ever.**
     ///
-    /// One of the two places in skein that ask for [`crate::util::update_json_lossy`] — the other
-    /// is the review budget's day ledger — and the argument for it, asserted rather than left in a
+    /// One of the places in skein that ask for [`crate::util::update_json_lossy`] — the others are
+    /// the review budget's day ledger and tried-notes — and the argument for it, asserted, not left in a
     /// comment (SKEIN-359). Everywhere else an unreadable
     /// file is refused, because what it holds is somebody's grants or credentials. Here it holds a
     /// single claim with a deadline, belonging to a process that may be long dead, and refusing

@@ -60,11 +60,11 @@ pub fn skein_home() -> PathBuf {
 /// Absent on a host, where the fleet root does not exist — so the fallback stays exactly what it
 /// always was for a host-driven skein, which is the only deployment that has ever been right about
 /// `$HOME`.
+///
+/// The root is [`crate::util::fleet_root`]'s, not a private `/boxes` default beside it: that copy
+/// answered the live fleet to an unpinned test, safe only while [`skein_home`] asserts first (SKEIN-694).
 fn volume_marker() -> Option<PathBuf> {
-    let root = env::var("SKEIN_FLEET_ROOT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/boxes".to_string());
+    let root = crate::util::fleet_root();
     let text = fs::read_to_string(PathBuf::from(root).join(".skein/skein-home")).ok()?;
     let path = text.trim();
     (!path.is_empty()).then(|| PathBuf::from(path))
@@ -668,6 +668,43 @@ mod tests {
 
     use super::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
+
+    /// **The volume marker asks `util::fleet_root` where the fleet is, so it inherits its refusal**
+    /// (SKEIN-694).
+    ///
+    /// Called directly rather than through [`skein_home`], because through `skein_home` it cannot be
+    /// observed: an unpinned `$SKEIN_HOME` panics first. That is exactly what made the private copy
+    /// safe and fragile at once — so this asks the function itself, which is what a second caller
+    /// would do.
+    ///
+    /// **What makes it fail:** giving `volume_marker` its own `$SKEIN_FLEET_ROOT`-else-`/boxes`
+    /// again. The unpinned half then gets an answer — whatever the live fleet's marker says, or
+    /// `None` — instead of the refusal, and the second assertion names it. The first half is the
+    /// control: a marker in a pinned fleet root IS read, so the refusal below is not simply a
+    /// function that never answers.
+    #[test]
+    fn the_volume_marker_refuses_an_unpinned_fleet_root_like_every_other_fleet_path() {
+        let _g = env_lock();
+        let root = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_FLEET_ROOT", &root);
+        std::fs::create_dir_all(root.join(".skein")).unwrap();
+        std::fs::write(root.join(".skein/skein-home"), "/the/volume/home\n").unwrap();
+        assert_eq!(
+            volume_marker(),
+            Some(PathBuf::from("/the/volume/home")),
+            "a marker in the pinned fleet root was not read, so the refusal below proves nothing"
+        );
+
+        env.unset("SKEIN_FLEET_ROOT");
+        let answered = std::panic::catch_unwind(volume_marker);
+        assert!(
+            answered.is_err(),
+            "volume_marker answered {answered:?} to a test process with no $SKEIN_FLEET_ROOT — it \
+             has its own copy of the /boxes default again, and on a developer box that reads the \
+             owner's live fleet"
+        );
+    }
 
     /// **The pane and the file cannot disagree about the fleet's name, whatever route wrote it**
     /// (SKEIN-768).

@@ -22,8 +22,14 @@
 [enter]
 reaches = { place = 3 }
 
+# `fleet`'s six `socket` reaches are `tmux -S`, all at sandbox scope and all to the cockpit's own
+# session: four on `private/server.tmux` (one of them the `capture-pane` line handed to a person
+# to type), and two on the pre-SKEIN-529 `.skein/server.tmux`, which
+# `start_server` asks and `stop_server` kills so a fleet not yet re-bootstrapped can still be
+# stopped and is not given a second supervisor (SKEIN-1025). Those two go when no fleet carries
+# the old socket.
 [socket]
-reaches = { fleet = 4, place = 1, sandbox = 1 }
+reaches = { fleet = 6, place = 1, sandbox = 1 }
 
 [file]
 # Empty on purpose, and the emptiness is the claim: every module reads files, so `fs::read` is not
