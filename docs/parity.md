@@ -494,7 +494,7 @@ host's keys — the forward is in the same place whether skein stands beside the
 host path and the sandbox has its own `~`. So skein no longer takes a key path at all (SKEIN-947).
 The Settings field, the `ssh_key` setting and `$SKEIN_SSH_KEY` are gone, because nothing in the
 fleet could load what they named. Settings says instead: *skein uses your host's SSH agent — run
-`ssh-add` on the host and every box can use your keys.* **The parity requirement is that sentence
+`ssh-add` on the host. Scoped boxes push over HTTPS instead.* **The parity requirement is that sentence
 and the forwarded agent, not a replacement transport.**
 
 **Transport reporting.** The first draft listed this as parity *and* deleted the transport. The

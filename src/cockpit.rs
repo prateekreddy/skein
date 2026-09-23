@@ -829,7 +829,7 @@ mod tests {
         assert!(
             INDEX.contains("id=\"set-sshagent\"")
                 && INDEX.contains("skein uses your host's SSH agent — run <code>ssh-add</code> on \
-                                   the host and every box can use your keys."),
+                                   the host. Scoped boxes push over HTTPS instead."),
             "Settings no longer says where an SSH key goes, which the removed field used to be the \
              only place to learn (SKEIN-947)"
         );
