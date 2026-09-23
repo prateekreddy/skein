@@ -1737,6 +1737,29 @@ check("a call site in any file of a tests/<name>/ binary is derived, and one in 
   })(),
   [LIBRARY_HIDDEN, HIDDEN, SPLIT_HIDDEN].sort());
 
+// **A browser suite cut into parts is read whole too, and the harness is not read as one**
+// (SKEIN-1117). `tests/ui/<name>.mjs` beside a `tests/ui/<name>/` makes that directory the suite's
+// parts, so a call site in any of them names that suite's fixture; a directory with no `.mjs` of
+// its name beside it is not a suite's. Reading only the flat `tests/ui/*.mjs` is how splitting
+// `review.mjs` would have taken `skein-review-ui` off the list.
+// **What makes it fail:** dropping `suites: true` from the `tests/ui` SOURCES entry — the part's
+// probe disappears; or reading every subdirectory — the stray probe appears.
+const PART_HIDDEN = "skein-partprobe";
+const STRAY_HIDDEN = "skein-strayprobe";
+check("a call site in any part of a tests/ui/<name>/ suite is derived, and one in a directory no suite names is not",
+  (() => {
+    const at = repoDeriving(realRust, realNode);
+    mkdirSync(path.join(at, "tests", "ui", "two"), { recursive: true });
+    mkdirSync(path.join(at, "tests", "ui", "stray"), { recursive: true });
+    writeFileSync(path.join(at, "tests", "ui", "two.mjs"), 'await import("./two/part.mjs");\n');
+    writeFileSync(path.join(at, "tests", "ui", "two", "part.mjs"),
+      `const d = freshFixture(root, ${JSON.stringify(PART_HIDDEN)});\n`);
+    writeFileSync(path.join(at, "tests", "ui", "stray", "part.mjs"),
+      `const d = freshFixture(root, ${JSON.stringify(STRAY_HIDDEN)});\n`);
+    return prefixesOf(at);
+  })(),
+  [LIBRARY_HIDDEN, HIDDEN, PART_HIDDEN].sort());
+
 // This repository, which is where it was measured: `…` was prefix number 57 and is now none.
 //
 // **`quotedSomething` is asserted, and a red there is not a false alarm.** It says this tree no

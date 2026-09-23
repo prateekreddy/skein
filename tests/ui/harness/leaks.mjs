@@ -469,6 +469,12 @@ export function quiesce() {
  * dropped nine prefixes with nothing printed. `tests/common/` has no `main.rs`, which is what keeps
  * it out.
  *
+ * **A browser suite is `tests/ui/<name>.mjs`, and a `tests/ui/<name>/` beside it is that suite's
+ * parts** (`suites`), read whole for the same reason. `review.mjs` is its entry and its fixture is
+ * named in `review/setup.mjs` (SKEIN-1117), so reading only the flat files would have taken
+ * `skein-review-ui` off the list. `tests/ui/harness/` and `tests/ui/fixtures/` have no `.mjs` of
+ * their name beside them, which is what keeps them out of this rule; the harness has its own entry.
+ *
  * **`src/` is the opposite case, and it is why there is a third reader rather than a third
  * directory on the first one** (SKEIN-1006). Nothing in the library names a fixture at a call site:
  * `crate::testutil::tempdir()` takes no arguments and the name is a literal in its own body, so the
@@ -485,7 +491,7 @@ const SOURCES = [
     shape: '`Scratch::boxes("…")` / `Scratch::temp("…")`' },
   { dir: "src", ext: ".rs", tier: "library", lang: "rust", read: libraryPrefixes,
     shape: '`fn tempdir()` building `env::temp_dir().join(format!("…"))`' },
-  { dir: "tests/ui", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes,
+  { dir: "tests/ui", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes, suites: true,
     shape: '`mkdtempSync(…, "…")` / `freshFixture(…, "…")`' },
   { dir: "tests/ui/harness", ext: ".mjs", tier: "node", lang: "js", read: nodePrefixes,
     shape: '`mkdtempSync(…, "…")` / `freshFixture(…, "…")`' },
@@ -503,6 +509,23 @@ function binaryParts(dir, names, ext) {
       continue;
     }
     if (!inner.includes("main" + ext)) continue;
+    for (const f of inner.sort()) if (f.endsWith(ext)) out.push(`${name}/${f}`);
+  }
+  return out;
+}
+
+/** The files of every `<dir>/<name>/` that has a `<name>.mjs` beside it — a browser suite cut into
+ * parts — as `<name>/<file>` paths relative to `dir`. See [`SOURCES`] for why. */
+export function suiteParts(dir, names, ext) {
+  const out = [];
+  for (const name of names) {
+    if (!names.includes(name + ext)) continue;
+    let inner;
+    try {
+      inner = readdirSync(join(dir, name));
+    } catch {
+      continue;
+    }
     for (const f of inner.sort()) if (f.endsWith(ext)) out.push(`${name}/${f}`);
   }
   return out;
@@ -731,6 +754,7 @@ export function fixturePrefixes(repo = REPO) {
       throw new Error(`the leak check cannot read ${source.dir}/ — it is looking in ${repo}`);
     }
     if (source.binaries) names = names.concat(binaryParts(join(repo, source.dir), names, source.ext));
+    if (source.suites) names = names.concat(suiteParts(join(repo, source.dir), names, source.ext));
     for (const name of names) {
       if (!name.endsWith(source.ext)) continue;
       // This file is a reader, not a call site: the shapes below are quoted in its own doc comments
@@ -796,8 +820,8 @@ export function fixtureRegex(prefixes) {
 //
 // [`serverSuites`] derives WHICH files this applies to, the same way [`fixturePrefixes`] derives
 // prefixes rather than naming them: a suite is anything under `tests/ui/` that imports `startServer`
-// from `./harness/server.mjs`, because that import is what turns a fixture directory into something
-// a box has to read, and it throws when it derives none, for the reason every derive-and-refuse
+// from `./harness/server.mjs` (from `../harness/server.mjs` in a suite's parts), because that
+// import is what turns a fixture directory into something a box has to read, and it throws when it derives none, for the reason every derive-and-refuse
 // function in this file throws on that — a check that scans zero suites reports "clean" forever,
 // indistinguishably from a run that actually looked (SKEIN-647, SKEIN-687, SKEIN-913).
 //
@@ -817,6 +841,9 @@ export function serverSuites(repo = REPO) {
   } catch {
     throw new Error(`the fixture-root check cannot read tests/ui/ — it is looking in ${repo}`);
   }
+  // A suite cut into parts starts its server from one of them, so the parts are read as well — the
+  // same `suites` rule [`fixturePrefixes`] reads call sites by (SKEIN-1117).
+  names = names.concat(suiteParts(join(repo, "tests", "ui"), names, ".mjs"));
   const suites = [];
   for (const name of names) {
     if (!name.endsWith(".mjs")) continue;
@@ -827,7 +854,7 @@ export function serverSuites(repo = REPO) {
     } catch {
       continue;
     }
-    if (/import\s*\{[^}]*\bstartServer\b[^}]*\}\s*from\s*["']\.\/harness\/server\.mjs["']/
+    if (/import\s*\{[^}]*\bstartServer\b[^}]*\}\s*from\s*["']\.\.?\/harness\/server\.mjs["']/
       .test(codeOnly(text, "js"))) {
       suites.push(name);
     }
