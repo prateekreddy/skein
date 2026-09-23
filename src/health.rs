@@ -3088,8 +3088,8 @@ mod tests {
 
         // The property, walked across the boundary rather than asserted beside it: on every
         // reading either half can see, a fault has something to free and a satisfied fleet has
-        // nothing. 60,168 MiB is the sandbox's own figure (`src/fleet.rs`'s parser test), chosen
-        // because 85% of it is not a whole MiB.
+        // nothing. 60,168 MiB is the sandbox's own figure (`src/fleet/resources.rs`'s parser
+        // test), chosen because 85% of it is not a whole MiB.
         let nothing_stranded = || -> Result<Vec<crate::fleet::Stray>, String> { Ok(Vec::new()) };
         for used in [20_000_u64, 51_141, 51_142, 51_143, 51_144, 60_168] {
             let r = fleet(60_168, used);

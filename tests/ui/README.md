@@ -172,8 +172,9 @@ host's own numbers in it, `sbx create` must not have run before the confirm, and
 results must carry the sizes that were on screen — asserted against the recorded `sbx` argv, not
 against the config it was saved to.
 
-Its fixture root is under `target/`, not `$TMPDIR`: a box binds its own `/tmp` and `$HOME` over the
-sandbox's, so `box-session.sh` refuses a fleet root under either.
+Its fixture root follows the rule above — `$SKEIN_UI_FIXTURE_ROOT`, defaulting to
+`/var/tmp/skein-uifix` — and not `target/` since SKEIN-603: a worktree's own `$CARGO_TARGET_DIR` is
+deep enough to blow the 108-byte unix-socket limit on the box's tmux socket path.
 
 ## `tabs.mjs` — do your open tabs survive a reload
 

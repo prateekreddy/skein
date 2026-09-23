@@ -51,7 +51,7 @@ pub fn in_test() -> bool {
 /// **This doc used to argue the guard did not belong here**, on the ground that ~29 tests read the
 /// root only to build a string they never act on and a panic would fail all of them for a hazard
 /// none of them has. That premise did not survive being measured. The readers that never act on the
-/// string are cheap to pin — `src/fleet.rs` alone already pins the variable in 95 places — while
+/// string are cheap to pin — `src/fleet/` alone already pins the variable in dozens of places — while
 /// the ones that do act on it were found by damage, one at a time, six times: five tests installed
 /// uncommitted code onto the owner's live fleet (SKEIN-530), `tests/server.rs` spawned a real
 /// `skein-server` whose `main` runs `heal_fleet` against whatever root it resolves (SKEIN-685), and
@@ -1777,7 +1777,7 @@ mod tests {
     ///
     /// The concrete change that makes this fail is removing `!name.starts_with('.')` from
     /// [`valid_name`] — which is exactly the state this repo shipped in for two releases, while
-    /// two comments in `fleet.rs` asserted the opposite (SKEIN-742).
+    /// two comments in `fleet/disk.rs` asserted the opposite (SKEIN-742).
     ///
     /// The bite is not the collision on its own. `fleet::live_box_names` drops dotted entries, and
     /// `fleet::substrate_strays` subtracts that list from what is under `.skein` to decide what is
