@@ -721,12 +721,16 @@ def absent(code=None, sources=None):
     made STRICTER, so before-and-after on a green gate shows nothing at all.
     """
     code = code_text() if code is None else code
+    # Memoised (SKEIN-721): `code_has` over ~5 MB of code, once per mention, was 70 of this gate's
+    # 91 seconds — a name written in twenty sentences was scanned for twenty times. `has_name`
+    # answers the same question from one pass; see `whole_names` for why it is the same question.
+    code_names = whole_names(code)
     found = {}
     for label, lines in (prose_sources() if sources is None else sources):
         for n, line in enumerate(lines, 1):
             for name in names_in(line):
                 leaf = name.rsplit("::", 1)[-1]
-                if not looks_like_a_symbol(leaf) or code_has(leaf, code):
+                if not looks_like_a_symbol(leaf) or has_name(leaf, code, code_names):
                     continue
                 found.setdefault(leaf, []).append(f"{label}:{n}")
     return found
@@ -748,23 +752,38 @@ NOT_A_MODULE = {"skein", "crate", "self", "super", "tests"}
 # one still reads them.
 NOT_A_MODULE_DIR = {"bin", "node_modules", "target", ".git"}
 
-# Every whole identifier in a text, which is what `code_has` asks about one name at a time. The
-# module rule asks it ~1600 times — once per qualified name against the whole tree, and again
-# against a module — and a regex scan of a megabyte apiece is a minute added to a gate CI runs on
-# every push. One pass builds a set instead. `code_has` remains the definition of the question;
-# `has_name` is that same question memoised, and falls back to it for the one shape a set of
-# tokens cannot express.
+# Every whole identifier in a text, which is what `code_has` asks about one name at a time. Both
+# rules ask it thousands of times — rule one ~4000, once per mention against the whole tree; the
+# module rule ~1600, against the tree and again against a module — and a regex scan of megabytes
+# apiece was 70 of this gate's 91 seconds (SKEIN-721). One pass builds a set instead. `code_has`
+# remains the definition of the question; `has_name` is that same question memoised, and falls
+# back to it for every shape a set of tokens cannot express.
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# NOT `IDENTIFIER.findall`, which is what the module rule used until SKEIN-721 and is a SUPERSET of
+# what `\b<leaf>\b` matches: findall starts a token after a digit, so `9foo` yielded `foo` where
+# `\b` sees no boundary at all — and a superset can only silence a finding. The lookarounds make
+# each match an ASCII identifier with no word character on either side, which is exactly an
+# occurrence `\b<leaf>\b` would accept, and they use the same `\w` `\b` does (Unicode, on a str),
+# so `éfoo` and `fooé` are refused here as they are there. Every occurrence is found: a match
+# cannot run over the start of another, since that start has a non-word character before it.
+WHOLE_IDENTIFIER = re.compile(r"(?<!\w)[A-Za-z_][A-Za-z0-9_]*(?!\w)")
+
+
+def whole_names(text):
+    """Every `leaf` for which `code_has(leaf, text)` holds, for identifier-shaped non-affix leaves."""
+    return set(WHOLE_IDENTIFIER.findall(text))
 
 
 def has_name(leaf, text, names):
-    """`code_has(leaf, text)`, answered from `names` — the whole identifiers of that same text.
+    """`code_has(leaf, text)`, answered from `names = whole_names(text)`.
 
     An affix (`_and_then_some`, `a_fixture_gate_`) is not a whole identifier, and `code_has`
     deliberately drops the boundary on the side the rest of the name was cut off, so those go the
-    slow way. Everything else is exactly `\\b<leaf>\\b`, which matches a token and nothing else.
+    slow way — as does anything that is not an identifier at all, which no token set holds.
+    Everything else is exactly `\\b<leaf>\\b`, which `whole_names` answers for every leaf at once.
     """
-    if leaf.startswith("_") or leaf.endswith("_"):
+    if leaf.startswith("_") or leaf.endswith("_") or not IDENTIFIER.fullmatch(leaf):
         return code_has(leaf, text)
     return leaf in names
 
@@ -839,7 +858,7 @@ def misqualified(code=None, sources=None, modules=None):
     """
     code = code_text() if code is None else code
     modules = module_index() if modules is None else modules
-    code_names = set(IDENTIFIER.findall(code))
+    code_names = whole_names(code)
     module_names = {}
     found = {}
     for label, lines in (prose_sources() if sources is None else sources):
@@ -853,7 +872,7 @@ def misqualified(code=None, sources=None, modules=None):
                 if qualifier in NOT_A_MODULE or qualifier not in modules:
                     continue
                 if qualifier not in module_names:
-                    module_names[qualifier] = set(IDENTIFIER.findall(modules[qualifier]))
+                    module_names[qualifier] = whole_names(modules[qualifier])
                 if has_name(leaf, modules[qualifier], module_names[qualifier]):
                     continue
                 found.setdefault(name, []).append(f"{label}:{n}")
@@ -1778,6 +1797,22 @@ def self_check():
             "one (it is not, if `BACKTICKED` stops taking the `$` — SKEIN-648).\n"
             "  wanted %r\n  got    %r" % (want_symbols, symbols)
         )
+    # THE MEMOISED MATCH IS THE SAME QUESTION (SKEIN-721). Both rules answer `code_has` from a set
+    # now, so the set has to agree with it on every shape where they could part: a name after a
+    # digit and after a non-ASCII letter (a `findall` token, and no `\b` match), a name before a
+    # non-ASCII letter, at either end of the text, inside a longer name, and a name that is only
+    # there as an affix. Built from fragments, for the reason the symbol fixture above gives.
+    tricky = "9" + "alpha x" + "\u00e9" + "beta gamma" + "\u00e9 (delta) epsilon_zeta eta"
+    names = whole_names(tricky)
+    for leaf in ("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "epsilon_zeta", "eta",
+                 "x", "_zeta", "epsilon_", "theta"):
+        if has_name(leaf, tricky, names) != code_has(leaf, tricky):
+            raise SystemExit(
+                "prose-check: the memoised name match disagrees with `code_has` about %r in %r — "
+                "it answers %r where the definition answers %r, so one of the two rules is now "
+                "asking a different question from the other (SKEIN-721)."
+                % (leaf, tricky, has_name(leaf, tricky, names), code_has(leaf, tricky))
+            )
     # THE MODULE RULE, against two fixture modules. One name is named under the module that has
     # not got it, one under the module that defines it, one under a module that re-exports it, and
     # one under a module this fixture tree does not have. Exactly the first is a finding.
