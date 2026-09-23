@@ -947,7 +947,7 @@ pub(super) async fn api_review_act(
 /// above are pure — mixing them would make a pure test's failure depend on an env var somebody
 /// else's test set.
 #[cfg(test)]
-mod review_routes {
+pub(super) mod review_routes {
     use super::*;
 
     /// Drives an async body to completion on a runtime of this test's own, from a SYNC test.
@@ -1038,15 +1038,20 @@ mod review_routes {
     /// `skein-server` is a separate `[[bin]]` that only sees the library's `pub` surface —
     /// `tests/common/mod.rs` carries the same copy for the same reason, for the integration
     /// binaries. Restores from `Drop`, so a test that panics still puts these back, which the
-    /// `for key in [..] { remove_var(key) }` loop this replaces did not survive.
-    struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+    /// `for key in [..] { remove_var(key) }` loop this replaces did not survive. `pub(crate)` so the
+    /// settings routes' tests pin through it too rather than growing a third copy.
+    pub(crate) struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
 
-    fn env_pins() -> EnvPins {
+    pub(crate) fn env_pins() -> EnvPins {
         EnvPins(Vec::new())
     }
 
     impl EnvPins {
-        fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut EnvPins {
+        pub(crate) fn set(
+            &mut self,
+            name: &str,
+            value: impl AsRef<std::ffi::OsStr>,
+        ) -> &mut EnvPins {
             self.0.push((name.into(), std::env::var_os(name)));
             std::env::set_var(name, value);
             self

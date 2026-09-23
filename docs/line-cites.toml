@@ -289,7 +289,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/bin/skein-server/settings.rs:248"]
+["src/bin/skein-server/settings.rs:256"]
 line = "///"
 window = "/// Update skein's app settings — MERGED onto what is stored, never replacing it.\u000b///\u000b/// Every field of `Config` has a serde default, so deserializing a partial body into one silently"
 cited_by = ["docs/recovery-survey.md"]
@@ -1710,36 +1710,37 @@ line = "return Err(format!("
 window = "if !users.is_empty() {\u000breturn Err(format!(\u000b\"{} still {} it — point {} at another connection first\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:660"]
+["src/tracking.rs:683"]
 line = "return Err(format!("
 window = "if base.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:749"]
+["src/tracking.rs:772"]
 line = "return Err(format!("
 window = "if gateway.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:755"]
+["src/tracking.rs:778"]
 line = "return Err(format!("
 window = "if connection_token(&conn.id).is_none() {\u000breturn Err(format!(\u000b\"no Plane token stored for {} — add it in Settings → Work tracking\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:761"]
+["src/tracking.rs:784"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:802"]
+["src/tracking.rs:825"]
 line = "Err(format!("
+window = "let last = report.trim().lines().last().unwrap_or(\"\").trim();\u000bErr(format!(\u000b\"token written, but registration did not confirm{} — the box can still be registered by hand against {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:853"]
+["src/tracking.rs:876"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:949"]
+["src/tracking.rs:972"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 
