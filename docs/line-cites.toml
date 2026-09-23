@@ -41,7 +41,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/parity.md:147"]
+["docs/parity.md:153"]
 line = "stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were"
 cited_by = ["docs/prose-symbols.toml"]
 

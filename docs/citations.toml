@@ -120,6 +120,11 @@ date = "2026-08-20T14:47:34Z"
 external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:14 — correct as written; not a commit skein's history will ever carry."
 sites = ["docs/line-cites.toml", "src/store/sync/UPSTREAM.md"]
 
+[citations."7b39014"]
+commit = "7b3901498f59bf140368af3ab9f90880ede9a149"
+subject = "refactor(fleet,skein,fleet_move): the host stops installing the cockpit, and publishing its port becomes a recipe a person runs (SKEIN-576)"
+date = "2026-09-07T08:33:43Z"
+
 [citations."7b67ae2"]
 commit = "7b67ae2e73085424786280057cc28b3fe1abf79c"
 subject = "fix(box): wiring the tracker cannot hang the box it is wiring"
