@@ -108,7 +108,23 @@ fn until_it_answers(child: &mut Child, addr: &str) {
 /// stand-in `env` records `LISTEN_FDS=1` and the absence assertion names it.
 #[test]
 fn nothing_the_server_starts_inherits_the_socket_activation_variables() {
-    let home = Scratch::temp("skein-start-order-it");
+    // The stand-in keeps every fleet-scope command from running, so nothing should be left to stop.
+    // Stopped anyway on every way out: were `env` ever pinned to an absolute path, the stand-in
+    // would be skipped and `heal_fleet` would start a real supervisor under this fixture — the
+    // presence assertion below says so, and this keeps that failure from also being a leak.
+    let home = Scratch::temp("skein-start-order-it").quiesce_with(|home| {
+        let root = home.join("fleet");
+        let _ = std::fs::remove_file(root.join(".skein").join("server-doorway.py"));
+        let _ = Command::new("tmux")
+            .args([
+                "-S",
+                &skein::fleet::server_tmux_sock_in(root.to_string_lossy().as_ref()),
+                "kill-server",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
     let root = home.join("fleet");
     let shims = home.join("bin");
     let seen = home.join("seen");
