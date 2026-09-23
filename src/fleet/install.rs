@@ -259,6 +259,42 @@ pub fn build_script_for_update() -> String {
     build_script_stopping("")
 }
 
+/// Stop the detached session named `session` and the process group it runs — nothing else — for
+/// the Update pane's Cancel (SKEIN-1037). `Ok` once the session is gone, whether this stopped it or
+/// it had already ended.
+///
+/// **Exact, and only what that session started.** `=session` is tmux's exact-match form: a bare
+/// `-t skein-update` also resolves to any session whose name merely *begins* that way. What is
+/// signalled is the pane's own process group — the pane's process is a session leader, so the run
+/// and everything under it share the group and nothing outside it does — with SIGTERM, before the
+/// session is ended. Ending the session alone sends only SIGHUP, which anything started under
+/// `nohup` ignores. No `pkill`, no pattern. `crate::update`'s `cancel_stops_the_named_run…` test runs these bytes
+/// against a real tmux beside a session whose name begins the same.
+///
+/// Beside the build script rather than beside `detach_named` and `detached_alive` only because
+/// those live in a file another piece of work is changing as this is written; the three are one
+/// family and belong together.
+pub fn stop_detached(sandbox: &str, session: &str) -> Result<(), String> {
+    if !crate::util::valid_name(session) {
+        return Err(format!("invalid session name {session:?}"));
+    }
+    let exact = sh_quote(&format!("={session}"));
+    let pane = sh_quote(&format!("={session}:"));
+    // `display-message` rather than `list-panes`: it answers for exactly one target and fails,
+    // rather than listing nothing, when the target is not there. A pid that is not a number is not
+    // signalled, because `kill -- -` of an empty string would be a different command.
+    let script = format!(
+        "pid=$(tmux display-message -p -t {pane} '#{{pane_pid}}' 2>/dev/null) || exit 0\n\
+         case \"$pid\" in '' | *[!0-9]*) exit 0 ;; esac\n\
+         kill -TERM -- \"-$pid\" 2>/dev/null\n\
+         tmux kill-session -t {exact} 2>/dev/null\n\
+         exit 0\n"
+    );
+    own_sandbox(sandbox)
+        .exec(&script, Duration::from_secs(30))
+        .map(|_| ())
+}
+
 fn build_script_stopping(stop: &str) -> String {
     format!(
         "{exports}\n{stop}{BOOTSTRAP_SH}",

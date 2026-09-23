@@ -11638,6 +11638,9 @@ let updateLogAt = 0;         // bytes of the build log already shown
 let updateTail = null;       // the poll while a build is running
 let updateSaw = "";          // what we have shown, so a reconnect does not repeat it
 let updateAgain = null;      // the re-read while the remote is still in flight
+let updateRun = "";          // which run the log belongs to — Cancel hands it back (SKEIN-1037)
+let updateQuiet = 0;         // seconds the log has gone unwritten, once that counts as no progress
+let updateEnded = "";        // "cancelled" after a Cancel, so the pane can say what to do next
 
 // Whether the pane is on screen. Everything below stops when it is not: this is a settings pane
 // somebody opened, not a board, and a timer still running against a closed dialog is a fetch a
@@ -11715,8 +11718,83 @@ function renderUpdate() {
         onclick="pressUpdateSkein()">${updateState.running ? "updating…" : "Update skein"}</button>
       <span class="dim">fetches, rebuilds in the sandbox, and restarts the cockpit — minutes, and this page will reconnect</span>
     </div>
+    ${updateEnded === "cancelled" && !updateState.running ? `<div class="set-note warn" id="upd-ended">${esc(UPDATE_WORDS.cancelledNote)}</div>` : ""}
+    <div id="upd-stall" class="set-note warn" hidden></div>
     <pre id="upd-log" class="set-log" ${updateState.running || updateSaw ? "" : "hidden"}>${esc(updateSaw)}</pre>
     ${renderRuntimeUpdates(updateState.runtimes || [])}`;
+  renderUpdateStall();
+  // Redrawn from the saved text, so put the reader back at the end — the stall notice points at the
+  // log's last lines, and a redraw that left the scroll at the top would be pointing at the first.
+  const log = document.getElementById("upd-log");
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+// Every sentence the "no progress" state and its Cancel put in front of a person, in one place,
+// because the wording is the owner's to sign off (SKEIN-1037) and a sentence scattered through a
+// template is one nobody can review as a whole. `mins` is whole minutes, never under five.
+const UPDATE_WORDS = {
+  stalled: mins => `No progress: nothing has been written to the update log for ${mins} minutes.`,
+  stalledWhy: "It may be waiting on a network that has stopped answering, or on one long build step. The log's last lines are below.",
+  cancelCost: "Cancel stops this update where it is. If it had not yet installed the new build, the skein you are running is unchanged. Either way you can press Update skein again.",
+  cancelButton: "Cancel update",
+  cancelling: "cancelling…",
+  cancelledToast: "update cancelled — the log shows where it stopped",
+  cancelledNote: "You cancelled the update. The log below shows where it stopped; press Update skein to try again.",
+  cancelFailed: why => `could not cancel the update: ${why}`,
+};
+
+// The "no progress" notice, drawn into its own element so a poll can update it without redrawing
+// the pane — which would throw away the log's scroll position and a Cancel press in flight.
+//
+// Driven by the server's `stalled`, never by a timer here: the server reads the log's own mtime, so
+// a page opened an hour into a hang shows it at once, and a page left open does not decide on its
+// own clock that a run it cannot see has stopped.
+function renderUpdateStall() {
+  const box = document.getElementById("upd-stall");
+  if (!box) return;
+  if (!updateQuiet) { box.hidden = true; box.innerHTML = ""; return; }
+  const mins = Math.max(5, Math.floor(updateQuiet / 60));
+  const line = UPDATE_WORDS.stalled(mins);
+  const said = box.querySelector(".upd-stall-line");
+  // Only the minutes move while it is showing; the button is left alone so a press in flight keeps
+  // its "cancelling…".
+  if (said) { said.textContent = line; box.hidden = false; return; }
+  // Styled inline rather than by a rule in the stylesheet above: a rule there moves every line
+  // below it, and `docs/line-cites.toml` holds dozens of citations into this file.
+  box.innerHTML = `<span class="upd-stall-line">${esc(line)}</span>
+    <span class="dim" style="display:block;margin-top:4px">${esc(UPDATE_WORDS.stalledWhy)}</span>
+    <span class="dim" style="display:block;margin-top:4px">${esc(UPDATE_WORDS.cancelCost)}</span>
+    <button type="button" class="kbtn" id="upd-cancel" style="margin-top:8px" onclick="pressCancelUpdate(this)">${esc(UPDATE_WORDS.cancelButton)}</button>`;
+  box.hidden = false;
+}
+
+// The press. It names the run the pane is showing, so it can only ever stop that one: a run that
+// ended meanwhile, or another started from a second tab, is refused by the server and stopped by
+// nobody. What happens next is read off the log like every other ending, so this only reports a
+// press that did not land.
+async function pressCancelUpdate(btn) {
+  btn.disabled = true;
+  btn.textContent = UPDATE_WORDS.cancelling;
+  let r = null;
+  try {
+    r = await fetch("/api/update/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run: updateRun }),
+    }).then(x => x.json());
+  } catch (e) {
+    r = { ok: false, error: String(e) };
+  }
+  if (!r.ok) {
+    toast(UPDATE_WORDS.cancelFailed(r.error));
+    btn.disabled = false;
+    btn.textContent = UPDATE_WORDS.cancelButton;
+    return;
+  }
+  if (r.ended === "cancelled") updateEnded = "cancelled";
+  // Nothing else to do here: the tail that drew this notice is still polling, and it is what ends
+  // the state, on its next beat, by reading the marker Cancel just wrote. Starting a second tail
+  // would read the same bytes twice into the log.
 }
 
 // The agent CLIs, in the pane instead of the bar. Both versions, because "an update is available"
@@ -11734,7 +11812,9 @@ function renderRuntimeUpdates(updates) {
 async function pressUpdateSkein() {
   const btn = document.getElementById("upd-go");
   if (btn) { btn.disabled = true; btn.textContent = "starting…"; }
-  updateSaw = ""; updateLogAt = 0;
+  updateSaw = ""; updateLogAt = 0; updateEnded = ""; updateQuiet = 0;
+  const ended = document.getElementById("upd-ended");
+  if (ended) ended.remove();
   try {
     const r = await fetch("/api/update/start", { method: "POST" }).then(r => r.json());
     if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
@@ -11774,8 +11854,12 @@ function tailUpdate() {
     } else {
       updateLogAt = r.at;
     }
+    if (r.run) updateRun = r.run;
+    updateQuiet = r.stalled && !r.done ? r.quiet : 0;
+    renderUpdateStall();
     if (r.done) {
       updateTail = null;
+      if (r.cancelled) { updateEnded = "cancelled"; toast(UPDATE_WORDS.cancelledToast); loadUpdate(); return; }
       toast(r.ok ? "skein updated — reloading" : "the update failed; the log says where");
       // Only on success, and after a beat: the new binary has to be the one that answers the
       // reload, and the doorway re-execs every two seconds.

@@ -338,7 +338,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server.rs:5512"]
+["src/bin/skein-server.rs:5537"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1763,15 +1763,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11740"]
+["src/web/index.html:11820"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11779"]
+["src/web/index.html:11863"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:12007"]
+["src/web/index.html:12091"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 

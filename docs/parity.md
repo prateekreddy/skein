@@ -24,9 +24,9 @@ inside a reproduction block is worse than one in prose, because the block is wha
 the prose against.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 96   (NOT '.route("' — that gives 85, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 156 unique, 159 occurrences
-grep -c 'function ' src/web/index.html                          # 430
+grep -c '\.route('  src/bin/skein-server.rs                    # 97   (NOT '.route("' — that gives 86, missing every entry whose path is on the line below)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
+grep -c 'function ' src/web/index.html                          # 432
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```

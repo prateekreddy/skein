@@ -2349,6 +2349,87 @@ fn the_updates_fetch_names_the_file_whose_token_was_refused() {
     );
 }
 
+/// A git remote that accepts every connection and never says a word: no status line, no headers,
+/// no close. Each connection is held open for the life of the test process, because a remote that
+/// hung up would be a different failure — git reports a closed connection at once. Returns the
+/// port and how many connections it has accepted.
+fn silent_remote() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = accepted.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.push(stream);
+        }
+    });
+    (port, accepted)
+}
+
+/// **A fetch against a remote that accepts and never answers ends within a bound, and the log says
+/// why** (SKEIN-1037).
+///
+/// Before this, git had no low-speed limit, so the Update button's fetch against such a remote sat
+/// at "fetching" for as long as the connection stayed open — the pane said "updating…" and the
+/// button stayed disabled until somebody found the tmux session. `SKEIN_NET_STALL_SECS=3` shortens
+/// bootstrap's bound so the suite does not wait out the real minute; it is a skein variable that
+/// only bootstrap.sh reads, so git is bounded here only if bootstrap passes the bound on.
+///
+/// **What would make each assertion fail:** deleting `export GIT_HTTP_LOW_SPEED_TIME` (or `_LIMIT`)
+/// from bootstrap.sh leaves git waiting on the silent socket, the runner kills it at the deadline,
+/// and the first assertion fails with `finished` false. Deleting the `"Operation too slow"` arm of
+/// bootstrap.sh's remote_git leaves git's line alone in the log with no word of what it means or
+/// what to do, and the log assertion fails.
+#[test]
+fn the_updates_fetch_from_a_remote_that_never_answers_ends_with_the_reason_in_the_log() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (port, accepted) = silent_remote();
+    fleet.with_real_git(&format!(
+        "http://127.0.0.1:{port}/skein-test-owner/thing.git"
+    ));
+    let mut env = stated_size();
+    env.push(("SKEIN_NET_STALL_SECS", "3".to_string()));
+
+    let limit = Duration::from_secs(30);
+    let ran = fleet.update("bbbb222", limit, &env);
+    assert!(
+        ran.finished,
+        "the Update button's fetch was still waiting on a remote that never answers after \
+         {limit:?} — the pane would say \"updating…\" for as long as the connection stayed open. \
+         The log:\n{}",
+        ran.log
+    );
+    assert!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the silent remote was never connected to, so nothing here waited on it — the fixture is \
+         wrong, not the update:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        ran.marker.as_deref(),
+        Some("1"),
+        "a fetch that gave up did not end the run as a failed update:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains("Operation too slow")
+            && ran
+                .log
+                .contains("stopped answering while the update was fetching skein-test-owner/thing")
+            && ran.log.contains("press Update skein again"),
+        "the pane's log does not carry git's reason, what it means in the owner's terms, and \
+         what to do next:\n{}",
+        ran.log
+    );
+}
+
 /// **The Update button ends the way bootstrap does: with the new build answering, even over a
 /// doorway that ignored the reload** (SKEIN-1031).
 ///
