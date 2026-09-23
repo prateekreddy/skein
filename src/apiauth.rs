@@ -72,18 +72,20 @@ pub fn switch_set() -> bool {
 /// the server's environment at the exec, beside the listening descriptor, and nothing else in the
 /// tree writes it.
 ///
-/// **What it actually marks, measured rather than assumed.** Not the cockpit alone — the cockpit
-/// *and every process descended from it*, because a box session is started by the cockpit and
-/// inherits its environment. Read out of a box's own shell in this fleet, `env | grep SKEIN_LISTEN`
-/// answers `SKEIN_LISTEN_INHERITED_ONLY=1`, beside the `SKEIN_IN_FLEET=1` the live doorway's
-/// command line still carries. So a `skein-server` started *inside a box* with the switch set is
-/// refused too, and `tests/ui/harness/server.mjs` strips the variable for exactly that reason.
+/// **What it actually marks, measured rather than assumed.** It used to be the cockpit *and every
+/// process descended from it*, because a box session inherited the cockpit's whole environment:
+/// `env | grep SKEIN_LISTEN` in a box answered `SKEIN_LISTEN_INHERITED_ONLY=1`, so a `skein-server`
+/// started *inside a box* with the switch set was refused too. A box session now inherits only the
+/// launcher's allow-list (`inherited_env` in `src/box-session.sh`, SKEIN-972), and this variable is
+/// not on it, so a box started since then does not carry it. A box started before still does until
+/// it restarts, which is why `tests/ui/harness/server.mjs` still strips it. Whether a server a box
+/// starts should still refuse the switch is SKEIN-1086.
 ///
-/// **That extent is right rather than a defect to be narrowed.** The switch's justification is "an
-/// owner who has some other boundary", and §9.4's answer to why there is none in-fleet is the
-/// shared network namespace — which a box is on. A server a box starts with auth off is reachable
-/// from every other box exactly as the cockpit is. What lies outside this is a machine that is not
-/// a skein fleet, and there the switch works exactly as it is documented to.
+/// **The wider extent had a reason, and it still holds.** The switch's justification is "an owner
+/// who has some other boundary", and §9.4's answer to why there is none in-fleet is the shared
+/// network namespace — which a box is on. A server a box starts with auth off is reachable from
+/// every other box exactly as the cockpit is. What lies outside this is a machine that is not a
+/// skein fleet, and there the switch works exactly as it is documented to.
 ///
 /// **A box cannot forge it in either direction, which is the property that matters.** A box setting
 /// this in its own shell changes its own processes and nothing about the cockpit: an environment is

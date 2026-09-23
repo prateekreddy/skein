@@ -645,6 +645,99 @@ if [ "${1-}" = "--ceilings" ]; then
   exit 0
 fi
 
+# --- What a box inherits from whoever started it (SKEIN-972) --------------------------------------
+#
+# This is the ONE list of environment variables a box's session receives from the process that ran
+# this launcher, and every name on it carries its reason. Everything else is removed here, before
+# the launcher reads anything, so no later line can depend on a variable a box does not get.
+#
+# Why a list and not the whole environment. The launcher is run by `skein-server`, which the
+# fleet's doorway execs, and a box used to inherit that whole environment. So every variable the
+# cockpit was started with was part of every box's contract without anybody deciding it was:
+# `SKEIN_HOME` (the cockpit's home, a host path), and `SKEIN_LISTEN_INHERITED_ONLY`, which the
+# doorway sets for the cockpit alone and which `apiauth` gives a meaning (SKEIN-962). A deny-list
+# would name the two that were noticed and pass the next one; this names what a box needs.
+#
+# Unaffected by this, on purpose (the owner's decision on SKEIN-972): what the launcher EXPORTS
+# after this point (SKEIN_BOX, SKEIN_STATE, PATH, SKEIN_GIT_TOKENS, GH_TOKEN, NO_PROXY and the rest),
+# and whatever the box's own login profile sets inside the namespace.
+#
+# Measured, not guessed. The sandbox half is the names in the fleet's own environment on
+# 2026-09-23 — `tmux -S <fleet root>/.skein/private/server.tmux show-environment -g | cut -d= -f1`,
+# the session the cockpit runs in — kept where something in a box uses them. The skein half is
+# every variable this file and the scripts a box runs (`src/probe/`, `src/kit/`,
+# `src/git-credential-skein.sh`) read from their environment. Deliberately NOT here, though that
+# environment has them: SKEIN_HOME, SKEIN_LISTEN_INHERITED_ONLY and SKEIN_IN_FLEET (the cockpit's;
+# nothing in a box reads them); WORKSPACE_DIR (the sandbox's workspace, which is the cockpit's home;
+# nothing in a box reads it); WAYLAND_DISPLAY (its socket is under the `/run` cover, so a box cannot
+# reach it); PWD, OLDPWD, SHLVL and `_` (the shell's own, remade by the shell the box starts); and
+# TMUX and TMUX_TMPDIR (the outer session's, which would point the box's tmux at the wrong server).
+#
+# `tests/fleet_launch.rs::a_box_session_inherits_only_its_allow_list` starts a real box with a
+# canary in the environment and reads the environment back from inside it.
+inherited_env=(
+  # The sandbox user's home and search path. The launcher needs HOME to know what to bind the box's
+  # private home over, and replaces PATH with a fixed one before it runs anything (see the top).
+  HOME PATH
+  # skein -> launcher: set by `fleet::session_script` on this launcher's own command line, in the
+  # environment rather than as positionals so an older launcher ignores them. The launcher unsets
+  # the ones a box has no use for as it reads them.
+  SKEIN_FLEET_LIMITS SKEIN_FLEET_GUARANTEES SKEIN_GIT_SCOPE SKEIN_BOX_REPO SKEIN_BOX_PRIVILEGED
+  SKEIN_MODEL_SCRATCH SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE SKEIN_BOX_PEERS SKEIN_FLEET_NAME
+  # Where the fleet's own files are. Unset in production (it defaults to /boxes); a test fixture
+  # sets it, and then the probes and the request helpers inside its boxes must resolve the
+  # fixture's launcher and queues rather than the live fleet's.
+  SKEIN_FLEET_ROOT
+  # The runtime directory under a name a test can point elsewhere. Unset in production.
+  SKEIN_RUNTIME_DIR
+  # The sandbox's egress: every request a box makes goes out through the sandbox proxy, and these
+  # are how each toolchain is told where it is. Without them a box has no network. The scoped block
+  # further down adds the GitHub hosts to NO_PROXY.
+  HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy NODE_USE_ENV_PROXY JAVA_TOOL_OPTIONS
+  # The CA the proxy signs with, so TLS through it verifies: OpenSSL/curl, Python requests, Node.
+  SSL_CERT_FILE REQUESTS_CA_BUNDLE NODE_EXTRA_CA_CERTS PROXY_CA_CERT_B64
+  # The sandbox's credential proxy: placeholder keys the proxy swaps for the real one, and the mode
+  # it runs each provider in. The runtimes a box starts authenticate through these; the launcher
+  # drops ANTHROPIC_API_KEY/OPENAI_API_KEY further down when the box has a login of its own.
+  ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY MISTRAL_API_KEY NEBIUS_API_KEY OPENROUTER_API_KEY
+  XAI_API_KEY SBX_CRED_ANTHROPIC_MODE SBX_CRED_OPENAI_MODE SBX_CRED_GOOGLE_MODE SBX_CRED_MISTRAL_MODE
+  SBX_CRED_NEBIUS_MODE SBX_CRED_OPENROUTER_MODE SBX_CRED_XAI_MODE
+  # The sandbox's `github` secret. A `fleet`-scoped box keeps it on purpose; a scoped box has it
+  # replaced by its own-repo token or removed, further down.
+  GH_TOKEN
+  # The sandbox's MCP gateway, which the runtimes' MCP servers are reached through.
+  MCP_GATEWAY_URL MCP_SENTINEL_TOKEN_NAME
+  # The forwarded ssh-agent and its gateway. A `fleet`-scoped box keeps both; a scoped box has a
+  # file bound over the socket further down, and the gateway is reachable by owner decision
+  # (SKEIN-929, docs/threat-model.md).
+  SSH_AUTH_SOCK SSH_AUTH_SOCK_GATEWAY
+  # Which sandbox this is. The probes fall back to SANDBOX_VM_ID for an identity outside a fleet.
+  SANDBOX_ID SANDBOX_NAME SANDBOX_VM_ID
+  # The sandbox's layout: npm's global prefix (where the agent CLI is installed, second on every
+  # box's PATH), the file every non-interactive bash sources, and the per-user runtime directory
+  # the peer network's sockets live in.
+  NPM_CONFIG_PREFIX BASH_ENV XDG_RUNTIME_DIR
+)
+# First the names bash cannot hold as variables, because `unset` cannot reach them: an entry whose
+# name is not an identifier — `CARGO_BIN_EXE_skein-server`, or an exported function's
+# `BASH_FUNC_<name>%%` — is passed through to every child untouched. None of them can be on the list,
+# so this launcher starts itself again without them; `env -u` takes a name, never a value, so no
+# value reaches an argv. The second run finds none and goes on.
+odd_env=()
+while IFS= read -r -d '' entry; do
+  name="${entry%%=*}"
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || odd_env+=(-u "$name")
+done </proc/$$/environ
+[ "${#odd_env[@]}" -eq 0 ] || exec env "${odd_env[@]}" "$BASH" "$0" "$@"
+for name in $(compgen -e); do
+  keep=0
+  for want in "${inherited_env[@]}"; do
+    [ "$name" = "$want" ] && { keep=1; break; }
+  done
+  [ "$keep" = 1 ] || unset -v "$name" 2>/dev/null || true
+done
+unset entry name want keep odd_env inherited_env
+
 
 box="${1:?usage: box-session.sh <box> <root> <pidfile> <session> <state> <cmd…>}"
 root="${2:?missing box root}"

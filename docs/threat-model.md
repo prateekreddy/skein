@@ -19,11 +19,11 @@ column says which kind of backing a row has, strongest first:
 
 ## Where a box stands
 
-A box is the sandbox's filesystem (`--dev-bind / /`, `src/box-session.sh:2557`) with a set of
+A box is the sandbox's filesystem (`--dev-bind / /`, `src/box-session.sh:2650`) with a set of
 covers applied, run by `bwrap` as the same uid as every other box. It gets its own
 mount namespace and its own user namespace, and it shares the network, PID and IPC namespaces with
 the whole sandbox: `exec bwrap` asks for no `--unshare-*` flag
-(`sed -n '/^exec bwrap/,/^  --$/p' src/box-session.sh`), and `src/box-session.sh:2507` says why
+(`sed -n '/^exec bwrap/,/^  --$/p' src/box-session.sh`), and `src/box-session.sh:2600` says why
 the PID namespace stays shared. **So the boundary is files, not control**, as architecture §9.2
 says, and the rows below are mostly about files for that reason.
 
@@ -34,34 +34,35 @@ says, and the rows below are mostly about files for that reason.
 | its own checkout | read-write | bwrap test `a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses` |
 | its own repo's store (memory, mailbox, skills) | read-write | same test |
 | its own state directory, including the git token the host minted for it | read-only; its conversation is writable through a separate bind at `$HOME` | same test |
-| another box's checkout, conversation or git tokens | **no** | same test, and `src/box-session.sh:1666`, `src/box-session.sh:1774` |
-| another repo's store, or any other host path the sandbox mounts | **no** | same test; the per-mount cover is `src/box-session.sh:1822` |
+| another box's checkout, conversation or git tokens | **no** | same test, and `src/box-session.sh:1759`, `src/box-session.sh:1867` |
+| another repo's store, or any other host path the sandbox mounts | **no** | same test; the per-mount cover is `src/box-session.sh:1915` |
 | the fleet's credentials on the volume: `credentials/`, `github-pats/`, `api-token`, the warden's secret | **no** | bwrap test `a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` |
-| `.skein/private/`: the fleet agent's token and the review call's GitHub token | **no** | bwrap test `a_box_cannot_read_what_skein_keeps_under_private`; cover at `src/box-session.sh:1709` |
+| `.skein/private/`: the fleet agent's token and the review call's GitHub token | **no** | bwrap test `a_box_cannot_read_what_skein_keeps_under_private`; cover at `src/box-session.sh:1802` |
 | the fleet agent's socket | **no**, `connect()` refused | bwrap test `a_box_cannot_connect_to_the_fleet_agents_socket` |
 | the cockpit's tmux socket, at the path current code puts it | **no**, `connect()` refused; see SKEIN-831 under Open for fleets created earlier | bwrap test `a_box_cannot_connect_to_the_fleets_tmux_socket` |
 | the launcher, the credential helper, skein's source and toolchain under `.skein` | read-only | bwrap test `a_box_can_read_what_skein_was_built_from_and_cannot_write_it` |
 | its own git-write and package request queues | writes its own; reads every other box's; writes no other box's | bwrap test `a_box_can_write_its_own_request_queue_and_no_other_boxs` |
 | the fleet owner's answers to its git-write requests, and the grants they made (`gitgate/<box>/` and `git-grants.json` on the volume) | **no**. So the `state` a box writes into its own request is never what the cockpit shows: a request with no answer on record is shown as waiting, whatever its file says | bwrap test `a_box_cannot_answer_its_own_git_write_request`, which reads the fleet back through `gitgate::list`; `gitgate::decision_path` |
-| `/run/user/<uid>` and `/run/secrets` | **no**, a private tmpfs per box | bwrap test `nothing_but_the_socket_directory_comes_through_the_run_cover` (the first); test `the_launcher_covers_what_run_shares_and_names_what_it_does_not` in `src/cockpit.rs` (both); `src/box-session.sh:1886`, `src/box-session.sh:1887` |
-| **other boxes' agents, by message** | **yes**, on by default, per repo; no approval gate, since `crossSessionInbound` is seeded to `accept` (`src/box-session.sh:1235`) | bwrap test `a_box_is_never_discoverable_on_a_socket_it_cannot_reach`; off is `src/box-session.sh:1950` |
-| **the shared toolchain `~/.local`** | **reads the fleet's copy, writes its own** (SKEIN-963). A copy-on-write overlay per box: the sandbox's `~/.local` is the lower layer, the upper layer is a tmpfs bwrap makes inside the box. So a box sees every tool installed outside it, its own writes are private to it and gone at its next restart, and nothing it writes reaches another box — which matters because `~/.local/bin` is still first on every box's `PATH` (`src/box-session.sh:122`). `~/.local/state` is the exception: bound back from the box's own home, so the work-tracker stamps survive a restart | code: `src/box-session.sh:791`, `src/box-session.sh:1295`, `src/box-session.sh:1312`; bwrap tests `a_binary_one_box_plants_is_not_what_another_box_runs`, `a_box_still_sees_the_shared_toolchain_under_its_private_overlay` |
-| **`/usr/local/share/npm-global`, the npm prefix `claude` actually runs from** | **read-only** (SKEIN-968). It is second on every box's `PATH` and the first thing `which -a claude` answers with, it is owned by uid 1000, and before this every box could write it — Claude Code's own background auto-updater did, from inside whichever box ran it. Updating is skein's now: the in-box updater is stood down by name (`src/box-session.sh:2598`), and `skein update-agents` installs into this prefix rather than root's | code: `src/box-session.sh:1337`; bwrap test `the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it` |
-| **the shared package caches `~/.cargo`, `~/.rustup`, `~/.npm`** | **read-write, and shared with every box**. No entry of `box_path` points into them, so this is not a path another box executes from — but it is why `fleet::skein_toolchain_path` points skein's own build at the fleet root rather than at the sandbox's `~/.cargo` | code: `src/box-session.sh:765`, `src/box-session.sh:1258` |
+| `/run/user/<uid>` and `/run/secrets` | **no**, a private tmpfs per box | bwrap test `nothing_but_the_socket_directory_comes_through_the_run_cover` (the first); test `the_launcher_covers_what_run_shares_and_names_what_it_does_not` in `src/cockpit.rs` (both); `src/box-session.sh:1979`, `src/box-session.sh:1980` |
+| **other boxes' agents, by message** | **yes**, on by default, per repo; no approval gate, since `crossSessionInbound` is seeded to `accept` (`src/box-session.sh:1328`) | bwrap test `a_box_is_never_discoverable_on_a_socket_it_cannot_reach`; off is `src/box-session.sh:2043` |
+| **the shared toolchain `~/.local`** | **reads the fleet's copy, writes its own** (SKEIN-963). A copy-on-write overlay per box: the sandbox's `~/.local` is the lower layer, the upper layer is a tmpfs bwrap makes inside the box. So a box sees every tool installed outside it, its own writes are private to it and gone at its next restart, and nothing it writes reaches another box — which matters because `~/.local/bin` is still first on every box's `PATH` (`src/box-session.sh:122`). `~/.local/state` is the exception: bound back from the box's own home, so the work-tracker stamps survive a restart | code: `src/box-session.sh:884`, `src/box-session.sh:1388`, `src/box-session.sh:1405`; bwrap tests `a_binary_one_box_plants_is_not_what_another_box_runs`, `a_box_still_sees_the_shared_toolchain_under_its_private_overlay` |
+| **`/usr/local/share/npm-global`, the npm prefix `claude` actually runs from** | **read-only** (SKEIN-968). It is second on every box's `PATH` and the first thing `which -a claude` answers with, it is owned by uid 1000, and before this every box could write it — Claude Code's own background auto-updater did, from inside whichever box ran it. Updating is skein's now: the in-box updater is stood down by name (`src/box-session.sh:2691`), and `skein update-agents` installs into this prefix rather than root's | code: `src/box-session.sh:1430`; bwrap test `the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it` |
+| **the shared package caches `~/.cargo`, `~/.rustup`, `~/.npm`** | **read-write, and shared with every box**. No entry of `box_path` points into them, so this is not a path another box executes from — but it is why `fleet::skein_toolchain_path` points skein's own build at the fleet root rather than at the sandbox's `~/.cargo` | code: `src/box-session.sh:858`, `src/box-session.sh:1351` |
 | a binary planted in `~/.local/bin`, run by skein at fleet scope | **no**, fleet-scope scripts and crossings do not resolve through it | tests `a_planted_binary_is_not_what_a_fleet_scope_script_runs`, `a_planted_nsenter_is_not_what_a_crossing_runs` |
 | **the sandbox's Docker daemon, `/run/docker.sock`** | **yes, deliberately.** It gives a root container in the sandbox with any bind mount, which reaches every box's files, the fleet root and the volume. **Every "no" above holds only for a box that does not use it.** | code: `grep -n 'docker.sock' src/box-session.sh` finds only the comment saying it is left open, and `the_launcher_covers_what_run_shares_and_names_what_it_does_not` keeps that comment there; the decision is architecture §9.5 R11 (`docs/architecture.md:1750`) |
 | every TCP port in the sandbox, including the cockpit's API | **yes, it can connect**. The API needs the token, which is in the "no" rows above — and the switch that would remove that requirement is refused rather than honoured for a cockpit under the fleet's doorway (SKEIN-962) | code: no `--unshare-net`; `src/apiauth.rs:56` is the one off-switch; test `the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_it` (`tests/server.rs`) |
-| the host's `ssh-agent` through `$SSH_AUTH_SOCK` | **no**, a regular file is bound over the socket (scoped boxes) | code: `src/box-session.sh:2144`, under `src/box-session.sh:2075` |
+| the host's `ssh-agent` through `$SSH_AUTH_SOCK` | **no**, a regular file is bound over the socket (scoped boxes) | code: `src/box-session.sh:2237`, under `src/box-session.sh:2168` |
 | the host's `ssh-agent` through the gateway on TCP 3129 | **yes**, left reachable by owner decision (SKEIN-929); usable if the host agent holds a key | architecture §9.6 |
 | GitHub, from a scoped box's `git` and `gh` | only with the box's own token: the GitHub hosts go into `NO_PROXY`, so those two tools never reach the proxy and are bounded by the token they present. **This routes the normal path around the proxy; it does not contain anything** — `NO_PROXY` is a variable anything in the box can set again, which the launcher says of itself — so what the proxy would do to a request that *is* on it is the row below | test `a_scoped_box_routes_github_direct_and_a_fleet_box_does_not` (`tests/git_write_request.rs`); live test `tests/github_reach_live.rs`, ignored unless `SKEIN_LIVE_FLEET=1` |
 | **GitHub through the sandbox proxy** instead of around it | **whatever the proxy decides, and skein cannot bound it — so skein measures it and says so.** Measured *not* injecting on 2026-09-21: an invalid credential sent through the proxy is refused, and an accepted request carries the anonymous hourly ceiling. It **was** injecting on 2026-09-06 and again on 2026-09-15, when the same probe came back authenticated as the account. Nothing in this tree changed between those dates; the substrate did, which is why this is a check and not a sentence | the `proxy_injection` health check — `proxy_injection_line` and `probe_proxy_injection_at` in `src/health.rs` — red on the cockpit's banner when the answer is yes (SKEIN-927); tests `only_an_authenticated_acceptance_through_the_proxy_is_injection` and `the_probe_puts_nothing_but_a_marked_non_credential_on_the_wire`. The command is under [Checking this page](#checking-this-page) |
 | the rest of the internet | **yes — every host tried, and not bounded by skein** (SKEIN-926). **Open by decision rather than by oversight**: a box installs from npm, PyPI, crates.io, GitHub and the model APIs, so an allowlist that misses one produces a failure that reads as a broken build rather than as a policy. skein therefore sets no egress policy at all, and a box reaches whatever the host's `sbx` policy allows | measured 2026-09-21 from inside a scoped box with the proxy out of the path — the command is under [Checking this page](#checking-this-page), and all six hosts answered `200`. `grep -rn 'sbx policy' src` finds 9 hits, every one of them advice printed for a person to run on their own host; none sets a policy |
-| the fleet's canonical agent login | cannot replace it; a box's login moves up only when the fleet holds none (`src/box-session.sh:1035`) | code |
+| the fleet's canonical agent login | cannot replace it; a box's login moves up only when the fleet holds none (`src/box-session.sh:1128`) | code |
+| the environment the cockpit was started with | **only the names on the launcher's allow-list** (SKEIN-972); see [What a box inherits](#what-a-box-inherits). The cockpit's own variables, `SKEIN_HOME` and `SKEIN_LISTEN_INHERITED_ONLY` among them, do not reach a box's session | test `a_box_session_inherits_only_its_allow_list` (`tests/fleet_launch.rs`), which starts a real box with a canary in the environment and reads the environment back from inside it |
 
 **Two kinds of box get less of this, and both say so when they start.**
 
 * **The workshop box** (`SKEIN_BOX_PRIVILEGED=1`) skips the whole isolation block
-  (`src/box-session.sh:1619`), so every "no" in the file rows becomes "yes", including the fleet
+  (`src/box-session.sh:1712`), so every "no" in the file rows becomes "yes", including the fleet
   agent's token. It is the one deliberate escape hatch; architecture §9.2 path 3 states its terms.
   bwrap test `the_workshop_box_sees_what_an_ordinary_box_cannot`.
 * **A box with no mount manifest**, because skein matched it to no repository or its launcher
@@ -69,6 +70,39 @@ says, and the rows below are mostly about files for that reason.
   Other boxes' checkouts and state, and `.skein/private/`, are still covered. bwrap test
   `a_box_with_no_mount_manifest_is_uncovered_and_a_matched_box_is_not`; the start-up banner is
   asserted by `an_unmatched_box_announces_that_it_is_uncovered_and_a_covered_box_says_nothing`.
+
+## What a box inherits
+
+A box's session gets environment variables from three places, and only the first is a choice
+skein makes about the cockpit's environment:
+
+1. **The allow-list.** `src/box-session.sh` removes every variable it was started with except the
+   names on one list, `inherited_env`, before it reads anything. Each name has its reason beside it.
+   Print the list with:
+
+   ```sh
+   sed -n '/^inherited_env=(/,/^)/p' src/box-session.sh
+   ```
+
+   In summary it keeps the sandbox's home and `PATH`; the variables skein itself passes the
+   launcher; `SKEIN_FLEET_ROOT`, and one test seam, both unset in production; the sandbox's
+   proxy, CA and credential-proxy variables, without which a box has no network and no model;
+   `GH_TOKEN` and the ssh-agent variables, which a `fleet`-scoped box keeps on purpose and a
+   scoped box has replaced or covered further down the launcher; and the sandbox's name, npm
+   prefix, `BASH_ENV` and runtime directory. A name that is not a shell identifier, including an
+   exported function, is removed too.
+2. **What the launcher exports on purpose** after that point: `SKEIN_BOX`, `SKEIN_STATE`, the box's
+   `PATH`, the scoped-git variables, `CLAUDE_CODE_TMPDIR` and the updater switches. The list does not
+   apply to these.
+3. **What the box's own login profile sets** inside the namespace. That is the box's business, and
+   the list does not apply to it either.
+
+A variable that is on none of these does not reach a box's session. Adding one means adding it to
+the list with its reason. There is no per-box setting for this.
+
+**What the list does not cover.** It is applied when a box's session starts. A process skein runs
+inside a box later, by crossing into the namespace (provisioning, the attach shell, the pane
+observer), still gets the cockpit's environment. SKEIN-1085 tracks that.
 
 ## Open
 
@@ -97,6 +131,12 @@ tracker item is the record; this list only points at it.
   without asking. skein did not write the entry.
 * **SKEIN-964**: architecture §9.4 says a box can signal skein and other boxes through the shared
   PID namespace. The premise is in the code, but no test sends a signal, so it is not a row.
+* **SKEIN-1085**: a process skein starts inside a box by crossing into it, rather than as part of
+  the box's session, still gets the cockpit's whole environment. See
+  [What a box inherits](#what-a-box-inherits).
+* **SKEIN-1086**: `SKEIN_LISTEN_INHERITED_ONLY` no longer reaches a box, so a `skein-server` a box
+  starts by hand honours `$SKEIN_NO_API_AUTH` again. That server shares the cockpit's network
+  namespace, so the reason SKEIN-962 refuses the switch for the cockpit applies to it too.
 
 ## Checking this page
 
