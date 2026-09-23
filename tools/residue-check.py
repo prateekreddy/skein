@@ -121,7 +121,8 @@ reads every one back and writes it out beside its entry, so an allow-list regene
 loses no argument anybody made. The file's `#` lines are not arguments but this tool's own help, and
 they are owned here — `render` writes the header and the section comments fresh every time. So prose
 typed into a `#` line of that file is deleted by the next `--update`, and prose worth keeping goes
-into `render` instead. `docs/modules.toml` is the other shape: its reasoning IS its comments, one
+into `render` instead — which the ordinary check enforces, failing on any `#` line `render` would
+not write back (`comment_drift`, SKEIN-1126), so the file cannot carry prose `--update` deletes. `docs/modules.toml` is the other shape: its reasoning IS its comments, one
 block above each edge, which no regeneration could carry, so its `--update` edits the file in place
 and refuses to subtract without `--prune` (SKEIN-614). Merging here would buy nothing a value does
 not already carry, and would make the header two copies that drift. The cost is the one this
@@ -798,6 +799,18 @@ RULE_TEXT = {
     "address": "every email address in the tree",
 }
 
+# The comment `render` writes above each table. The argument for an entry is its reason, which is
+# a TOML value and survives `--update`; what is here is only what holds for every entry in a table.
+SECTION_NOTE = {
+    "host": [
+        "# A host this tree reaches or names. A synthetic one is still a decision: a single label with no",
+        "# dot cannot be anybody's domain but can be somebody's internal name, and the tailnet's members",
+        "# and non-members are named concretely because `*.ts.net` and the CGNAT range are the origin",
+        "# guard's whole trust boundary.",
+    ],
+    "home": ["# A home directory, which names a person and often a machine."],
+    "address": ["# An email address."],
+}
 
 def load_spec():
     if not os.path.exists(SPEC):
@@ -862,25 +875,32 @@ def render(found, spec):
     out = [
         "# What this tree is allowed to name.",
         "#",
-        "# Read by `tools/residue-check.py`. Every table here is an ALLOW-list: a host, a home",
-        "# directory or an address that is not here fails the build, and an entry here that",
-        "# nothing uses fails it too, because an allow-list nobody prunes is a permission nobody",
-        "# granted.",
+        "# Read by `tools/residue-check.py`. Every table here is an ALLOW-list: a host, a home directory or",
+        "# an address that is not here fails the build, and an entry here that nothing uses fails it too,",
+        "# because an allow-list nobody prunes is a permission nobody granted.",
         "#",
-        "# What this file does NOT hold is the denylist. That register — the literal strings that",
-        "# may never come back, and the sentence saying whose each one was — is the disclosure it",
-        "# was written to prevent, so it lives outside this repository (SKEIN-630) and the tree",
-        "# carries `docs/residue-banned.txt`, hashes of it. The gate enforces from the hashes and",
-        "# needs no register to do it.",
+        "# This file is the register of what is permitted, so `residue-check` is the one gate that does not",
+        "# read it. Scanning it would make every entry cite itself as its own use, and no entry could ever",
+        "# be stale.",
         "#",
-        "# Regenerate the allow-lists with `python3 tools/residue-check.py --update`; it keeps the",
-        "# reasons already written and leaves TODO against anything new, which is the line you are",
-        "# meant to stop and think about.",
+        "# What this file does NOT hold is the denylist. That register — the literal strings that may",
+        "# never come back, and the sentence saying whose each one was — was a `[banned]` table here until",
+        "# 2026-09-07, and it was the disclosure it existed to prevent: every string in it had just been",
+        "# removed from all of this repository's history and was then written back into one published",
+        "# file. So it lives outside the repository (SKEIN-630), and the tree carries",
+        "# `docs/residue-banned.txt`, sha256 of each needle and nothing readable. The gate enforces from",
+        "# those hashes and needs no register to do it, which is how the rule keeps working in CI.",
+        "#",
+        "# Regenerate with `python3 tools/residue-check.py --update`. It keeps every reason already written",
+        "# — a reason is a TOML value — and leaves TODO against anything new, which is the line to stop",
+        "# and think about. Every `#` line, this header included, is written by `render` in that tool and",
+        "# nowhere else, and the gate fails on one that `render` would not write back (SKEIN-1126): prose",
+        "# worth keeping goes into `render`, not here.",
         "",
     ]
     for rule in ("host", "home", "address"):
         section = SECTION[rule]
-        out.append(f"# {RULE_TEXT[rule]}.")
+        out.extend(SECTION_NOTE[rule])
         out.append(f"[{section}]")
         have = old.get(section, {})
         for what in sorted(found[rule]):
@@ -891,21 +911,44 @@ def render(found, spec):
     # the tree currently names, which is right for the tree and wrong here: what a commit message
     # names is whatever is unpushed at the moment `--update` runs, so deriving this table would
     # empty it on the first run after a push and delete decisions somebody made.
-    out.append("# What a COMMIT MESSAGE or an authorship line may name, on top of everything the")
-    out.append("# tables above allow. Not pruned when nothing matches, and not regenerated by")
-    out.append("# `--update`: the set of commits this is checked against is the set not yet")
-    out.append("# pushed, so it empties itself every time somebody pushes.")
+    out.append("# What a COMMIT MESSAGE or an authorship line may name, on top of everything the tables above")
+    out.append("# allow. Not pruned when nothing matches, and not regenerated by `--update`: the set of commits")
+    out.append("# this is checked against is the set not yet pushed, so it empties itself every time somebody")
+    out.append("# pushes, and pruning on that would delete a decision the next commit asks for again.")
     out.append("[messages]")
     for what, reason in sorted(old.get("messages", {}).items()):
         out.append(f"{quoted(what)} = {quoted(reason)}")
     out.append("")
-    out.append("# Credential-shaped strings that are deliberate — a documented example, a fixture.")
-    out.append("# Expected to stay empty: a real credential is rotated, not exempted.")
+    out.append("# Credential-shaped strings that are deliberate — a documented example, a fixture. Expected to")
+    out.append("# stay empty: a real credential is rotated, not exempted.")
     out.append("[exempt]")
     for what, reason in sorted(old.get("exempt", {}).items()):
         out.append(f"{quoted(what)} = {quoted(reason)}")
     out.append("")
     return "\n".join(out)
+
+
+def comment_drift(text, spec):
+    """What `--update` would do to the `#` lines of `text`, or None when it would do nothing.
+
+    Every `#` line of docs/residue.toml is written by `render`, so one typed into the file is
+    deleted by the next `--update` — and the header used to say so while carrying three paragraphs
+    that were not in `render` (SKEIN-1126). Checked on every run, because a notice in the file is
+    exactly what a person typing into it does not read. Only the comments are compared: `render`
+    writes them whatever the tree names, and the tables have rules of their own.
+    """
+    mine = [l for l in text.splitlines() if l.lstrip().startswith("#")]
+    theirs = [
+        l for l in render({r: {} for r in SECTION}, spec).splitlines() if l.lstrip().startswith("#")
+    ]
+    if mine == theirs:
+        return None
+    for n, (a, b) in enumerate(zip(mine, theirs)):
+        if a != b:
+            return f"`#` line {n + 1} is {a!r}, and `render` writes {b!r} there"
+    if len(mine) > len(theirs):
+        return f"{len(mine) - len(theirs)} `#` line(s) past the last one `render` writes, from {mine[len(theirs)]!r}"
+    return f"{len(theirs) - len(mine)} `#` line(s) `render` writes are missing, from {theirs[len(mine)]!r}"
 
 
 # Said whenever a report would have named a banned string and could not. It is a sentence rather
@@ -1444,6 +1487,28 @@ def self_check():
             "               docs/residue-banned.txt's format. Every needle that does not is a",
             "               string nothing is looking for, and the file still looks enforced.",
         )
+    # `--update` on an unchanged tree is a zero diff, and a comment typed into the file is seen
+    # (SKEIN-1126). Round trip: render, read back, render again — byte-identical, or `--update`
+    # rewrites a file nobody changed. Then plant a hand-written `#` line and require the drift.
+    spec_in = {
+        "hosts": {"a.example": "it's a reason with an apostrophe"},
+        "homes": {"/home/you": "the placeholder"},
+        "addresses": {},
+        "messages": {"m.example": "kept though unfound"},
+        "exempt": {},
+    }
+    found_in = {r: {w: ["x:1"] for w in spec_in[SECTION[r]]} for r in SECTION}
+    once = render(found_in, spec_in)
+    if render(found_in, tomllib.loads(once)) != once or comment_drift(once, spec_in):
+        fail(
+            "residue-check: SELF-CHECK FAILED — `--update` does not reproduce its own output, so",
+            "               running it on a tree nobody changed rewrites docs/residue.toml.",
+        )
+    if not comment_drift(once.replace("[homes]", "# typed by hand\n[homes]"), spec_in):
+        fail(
+            "residue-check: SELF-CHECK FAILED — a `#` line typed into docs/residue.toml was not",
+            "               seen, and the next `--update` would delete it without a word.",
+        )
     # ---- the history door ----------------------------------------------------------------------
     #
     # `--history` is a mode nobody runs often, over data nothing else in this file touches, and it
@@ -1712,6 +1777,15 @@ def main():
         return 1
 
     said = problems(found, spec, banned) + message_problems(in_messages, spec, banned)
+    drift = comment_drift(open(SPEC, encoding="utf-8").read(), spec)
+    if drift:
+        said.append(
+            f"residue-check: docs/residue.toml has a comment the next `--update` would not write "
+            f"back — {drift}\n"
+            f"               rule: every `#` line of that file is written by `render` in "
+            f"tools/residue-check.py, so prose typed into the file is deleted by the next "
+            f"`--update`. Move what is worth keeping into `render` (SKEIN-1126)"
+        )
     for p in said:
         print(p)
     # Said on every run, green or red, and this is the point of it: the message scan covers a

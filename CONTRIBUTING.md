@@ -504,7 +504,7 @@ argue with — a prohibition on its own is just something to route around.
    | `source-check.py --update` | `docs/sources.toml` | kept, the same way |
    | `prose-check.py --update` | `docs/prose-symbols.toml` | each `name = reason` line kept; the section headings and every other comment dropped |
    | `prose-check.py --update-citations`, `--update-attachment` | one marked section of `docs/prose-debt.toml` each | a row's owning item kept; any comment inside that section dropped |
-   | `residue-check.py --update` | `docs/residue.toml`, and `docs/residue-banned.txt` from the register | reasons kept; every `#` line re-emitted from the tool, so a comment typed into the file is dropped |
+   | `residue-check.py --update` | `docs/residue.toml`, and `docs/residue-banned.txt` from the register | reasons kept; every `#` line re-emitted from the tool, so a comment typed into the file is dropped — and the plain check fails on one first (SKEIN-1126) |
    | `fleet-pin-check.py --update` | `docs/fleet-pins.toml` | reasons kept; header re-emitted, any other comment dropped |
    | `env-lock-check.py --update` | `docs/env-lock.toml` | kept: merges in place (a new row gets a blank reason and a TODO), never sets `covers`, and subtracts only with `--prune`, which prints what it removed (SKEIN-1125) |
    | `env-lock-check.py --update-restore`, `--update-trailing` | `docs/env-restore.toml`, `docs/env-trailing.toml` | prunes rows and never adds; the header is re-emitted and what is left re-sorted |
