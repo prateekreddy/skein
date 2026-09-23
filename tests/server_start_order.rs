@@ -227,3 +227,54 @@ fn nothing_the_server_starts_inherits_the_socket_activation_variables() {
         );
     }
 }
+
+/// **Nor does a THREAD exist when they are cleared** (SKEIN-1089) — which the test above cannot
+/// see, because a thread started before `from_environment` starts no child and writes no record.
+/// `remove_var` beside another thread that may read the environment is the unsoundness the item
+/// names, and the tokio runtime is where those threads come from.
+///
+/// Read off `main`'s own source, in order: inside `fn main`, `keep_from_children()` and then
+/// `from_environment()` come before the runtime `Builder` and before anything that starts a thread
+/// or a process. **What makes it fail**: building the runtime first and calling
+/// `from_environment()` after it.
+#[test]
+fn main_clears_the_socket_variables_before_it_builds_a_runtime_or_starts_anything() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bin/skein-server/main.rs"
+    ));
+    let start = source
+        .find("\nfn main() {\n")
+        .expect("skein-server has no plain `fn main() {` — is it `#[tokio::main]` again?");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("fn main has no closing brace")];
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("`fn main` no longer calls `{needle}`:\n{body}"))
+    };
+    let keep = at("skein::doorway::keep_from_children()");
+    let clear = at("skein::doorway::from_environment()");
+    let runtime = at("tokio::runtime::Builder");
+    assert!(
+        keep < clear,
+        "`fn main` clears the socket variables before withholding the socket, and \
+         `keep_from_children` reads the variables `from_environment` clears:\n{body}"
+    );
+    assert!(
+        clear < runtime,
+        "`fn main` builds the tokio runtime before `from_environment()` clears LISTEN_FDS and \
+         LISTEN_PID, so `remove_var` runs beside the runtime's worker threads (SKEIN-1089):\n{body}"
+    );
+    for starts in [
+        "std::thread::spawn",
+        "thread::Builder",
+        "Command::new",
+        "tokio::spawn",
+    ] {
+        assert!(
+            body.find(starts).is_none_or(|i| i > clear),
+            "`fn main` reaches `{starts}` before `from_environment()` clears the socket variables \
+             (SKEIN-1089):\n{body}"
+        );
+    }
+}
