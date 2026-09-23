@@ -310,6 +310,20 @@ numbers the ledger can still resolve, and `--record` anchors citations the merge
 `misanchored` is the one that is not: it means no relocation names the row's words, so a person
 reads the row (see the verdict guide the tool prints).
 
+**A green `line-cite-check` says a citation still names the line it was anchored to — not that it
+was the right line to begin with** (SKEIN-949). The anchor records whatever the line held on the
+day the citation was written, so an address that was wrong that day is anchored wrong and relocated
+wrong for ever. `docs/recovery-survey.md` said "`try_acquire` is deliberate" and cited an origin
+check 42 lines above the `try_acquire` call, through every relocation, until an ambiguity made a
+person read it. Where a sentence names a symbol beside a citation, look for the symbol at the line.
+A check that does that for you was measured and not yet built: over the 650 citations in `docs/`
+on 2026-09-23, 56 had a backticked identifier right before them, 22 of those had it nowhere within
+ten lines of the cited one, and of seven read by hand four were wrong addresses and three were
+right (a call cited inside its caller, a doc comment above its item). A gate that is wrong about
+three in seven teaches people to read past it, so the 22 are to be triaged first and the check
+built with a per-row exemption after that (SKEIN-1131) — and the anchor is not to be widened to
+cover it, since stability across churn is the job it does well.
+
 Where a gate is python, it is python because Rust cannot express what it checks. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
