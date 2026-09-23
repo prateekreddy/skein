@@ -1,0 +1,4 @@
+# Built by cockpit/build.mjs from src/web/app/ and cockpit/src/; edit those, then run
+# `node cockpit/build.mjs`. `--check` (the cockpit-bundle gate) fails if these drift.
+src/web/index.html linguist-generated=true
+src/web/vendor/cockpit.js linguist-generated=true

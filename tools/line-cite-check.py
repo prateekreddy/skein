@@ -232,6 +232,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEDGER = os.path.join(ROOT, "docs", "line-cites.toml")
 LEDGER_REL = "docs/line-cites.toml"
 
+# Files ASSEMBLED from a directory, and the directory. `cockpit/build.mjs` builds `src/web/index.html`
+# from `src/web/app/` byte for byte (SKEIN-1104), so the page is on disk and every line of it is a
+# line of one of the parts — but it is the one copy nobody may edit, and a citation into it sends its
+# reader there. So a citation of it is followed into the parts exactly as a split file's is into its
+# directory (`Tree.successors`), and is a finding until it names the part.
+ASSEMBLED = {"src/web/index.html": "src/web/app"}
+
 # The one citation reader every gate shares. `prose-check.py` owns the regex, the fence stripping,
 # the path resolution and the `CITATIONS_AT` pin; a second copy of any of them would be a second
 # thing to drift, which is the failure this whole tool is about. The file name has a hyphen, so it
@@ -765,21 +772,30 @@ class Tree:
             self._at[(sha, rel)] = None if body is None else body.split("\n")
         return self._at[(sha, rel)]
 
+    def listing(self, rel_dir):
+        """Every file under `rel_dir`, relative to the root, sorted. `[]` for no such directory."""
+        found = []
+        for d, _, files in os.walk(os.path.join(ROOT, rel_dir)):
+            found += [os.path.relpath(os.path.join(d, f), ROOT) for f in files]
+        return sorted(found)
+
     def successors(self, rel):
-        """The files `rel` became, if it is a `.rs` file that became a directory; `[]` otherwise.
+        """The files `rel` became, if it is a `.rs` file that became a directory or a file
+        `ASSEMBLED` from one; `[]` otherwise.
 
         The rule is `rustcut.units`': a unit is `src/<name>.rs` or `src/<name>/**/*.rs`, so a cited
         `src/fleet.rs` that is gone while `src/fleet/` holds Rust files was SPLIT, not deleted, and
         its lines are somewhere in there. Only while the file itself is gone — a unit that still
         has its `.rs` is cited by its own path, and nothing needs following.
+
+        An assembled file is followed WHILE IT IS STILL THERE, and that is the difference: it is
+        not gone, it is generated, and what is wrong with citing it is who can act on the citation.
         """
+        if rel in ASSEMBLED:
+            return self.listing(ASSEMBLED[rel])
         if not rel.endswith(".rs") or self.now(rel) is not None:
             return []
-        stem = os.path.join(ROOT, rel[:-3])
-        found = []
-        for d, _, files in os.walk(stem):
-            found += [os.path.relpath(os.path.join(d, f), ROOT) for f in files if f.endswith(".rs")]
-        return sorted(found)
+        return [f for f in self.listing(rel[:-3]) if f.endswith(".rs")]
 
 
 class Cite:
@@ -866,12 +882,14 @@ def scan(sources=None, index=None, everything=False, tree=None):
             if target is None:
                 skipped["ambiguous"] += 1
                 continue
-            heirs = tree.successors(path) if target == "" else []
+            # A split file is gone, so `target` is empty and the path as written is the unit; an
+            # assembled one resolves like any file, and its heirs are asked of what it resolved to.
+            heirs = tree.successors(path if target == "" else target)
             if target == "" and not heirs:
                 skipped["unresolvable"] += 1
                 continue
             if heirs:
-                target = path
+                target = target or path
                 skipped["split"] += 1
             m = re.search(r":(\d+)(?:-(\d+))?$", text)
             last = int(m.group(2)) if m.group(2) else None
@@ -1233,14 +1251,18 @@ def split_verdict(cite, entry, tree, words, landing, crossing, blames, history):
 def moved_path(written, old, new):
     """`written` — the path as the document spells it, `old` or a tail of it — renamed to `new`.
 
-    Only for a split (`Tree.successors`): `new` is `old` without `.rs`, a `/`, and the rest, so
-    the document's own spelling is kept up to the stem and the rest appended — `src/fleet.rs`
-    becomes `src/fleet/login.rs`, and a tail `fleet.rs` becomes `fleet/login.rs`.
+    Only for a split or an assembled file (`Tree.successors`), and `new` must be a file under the
+    directory `old` became or is built from. The document's own spelling is kept: whatever it left
+    off the front of `old` is left off `new` too — `src/fleet.rs` becomes `src/fleet/login.rs` and
+    a tail `fleet.rs` becomes `fleet/login.rs`; `src/web/index.html` becomes
+    `src/web/app/board.js` and a tail `index.html` becomes `app/board.js`.
     """
-    stem = old[:-3]
-    if not (written.endswith(".rs") and new.startswith(stem + "/")):
-        raise ValueError(f"{new} is not a file {old} was split into")
-    return written[:-3] + new[len(stem):]
+    home = ASSEMBLED.get(old) or (old[:-3] if old.endswith(".rs") else None)
+    if home is None or not new.startswith(home + "/"):
+        raise ValueError(f"{new} is not a file {old} was split into or is assembled from")
+    if not (written == old or old.endswith("/" + written)):
+        raise ValueError(f"{written} is not how a document spells {old}")
+    return new[len(old) - len(written):]
 
 
 def renumber(cite, new, target=None):
@@ -2243,6 +2265,60 @@ def self_check():
     found = check([wrong], {"src/fake.rs:1": {"line": norm(SELF_APART[0])}}, split)
     if [v for _, v, _ in found] != ["misanchored"] or "src/fake/one.rs:5" not in found[0][2]:
         bad.append(f"a split citation off its row's words was not `misanchored` — got {found}")
+
+    # 30. A FILE ASSEMBLED FROM A DIRECTORY IS FOLLOWED INTO IT WHILE IT IS STILL ON DISK
+    #     (SKEIN-1104). `src/web/index.html` is built from `src/web/app/` and is identical to the
+    #     parts, so every citation of it is RIGHT about the line — and still sends its reader to the
+    #     one copy they must not edit. The page stays, so nothing about it looks split; this asks
+    #     the real `successors`, `scan`, `moved_path` and `rewrite_line`, with only the disk faked.
+    class FakeBuilt(Tree):
+        def __init__(self, files):
+            super().__init__()
+            self._now = {k: list(v) for k, v in files.items()}
+
+        def now(self, rel):
+            return self._now.get(rel)
+
+        def at(self, sha, rel):
+            return self._now.get(rel)
+
+        def listing(self, rel_dir):
+            return sorted(k for k in self._now if k.startswith(rel_dir + "/"))
+
+    built_parts = {"src/web/app/one.js": SELF_APART[:6], "src/web/app/two.js": SELF_APART[6:]}
+    built = FakeBuilt({"src/web/index.html": SELF_APART, **built_parts})
+    built_row = "| `src/web/index.html:4`, `index.html:10` | the disk is full · nothing to reconnect |"
+    built_ledger = {
+        "src/web/index.html:4": {"line": norm(SELF_APART[3])},
+        "src/web/index.html:10": {"line": norm(SELF_APART[9])},
+    }
+    built_cites, built_skipped = scan(
+        [("docs/fake.md", built_row + "\n", True)],
+        ["docs/fake.md", "src/web/index.html", *built_parts],
+        True,
+        built,
+    )
+    if [(c.key, c.heirs) for c in built_cites] != [
+        ("src/web/index.html:4", sorted(built_parts)), ("src/web/index.html:10", sorted(built_parts))
+    ] or built_skipped["split"] != 2:
+        bad.append(
+            "a citation of the assembled page, which is on disk and right, was not followed into"
+            f" the parts it is built from — got {[(c.key, c.heirs) for c in built_cites]}"
+        )
+    else:
+        found = check(built_cites, dict(built_ledger), built, {"docs/fake.md": {}})
+        want = [("moved", "src/web/app/one.js:4"), ("moved", "src/web/app/two.js:4")]
+        if [(v, d) for _, v, d in found] != want:
+            bad.append(f"a citation of the assembled page did not move to its part — got {found}")
+        else:
+            #     The document keeps its own spelling: a full path gets the part's full path, and
+            #     the tail `index.html` gets the tail `app/two.js`, which still resolves to one file.
+            for cite, detail in relocate(found)[0]:
+                target, new = detail.rsplit(":", 1)
+                out = rewrite_line(f"See `{cite.text}`.", cite, int(new), target)
+                spelled = "src/web/app/one.js:4" if cite.line == 4 else "app/two.js:4"
+                if out != f"See `{spelled}`.":
+                    bad.append(f"the assembled page's citation {cite.text} was rewritten as {out!r}")
 
     # 17. A `historical` declaration exempts the misanchor verdict too — a row that is the record
     #     of what WAS wrong is expected not to find its words in the tree.

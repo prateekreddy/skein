@@ -592,8 +592,9 @@ namespaced per sha and per worktree. Two worktrees sharing one log file is not h
 what SKEIN-903 was, and the verdict a reader quoted named a run they had not made. Quote a footer
 only after `--verify` says the file is one whole run.
 
-If you touched `src/web/index.html`, run the browser suite for what you touched as well; the
-cockpit bundle is embedded in the binary and `cargo build` does not run node, so a stale bundle is
+If you touched the page, run the browser suite for what you touched as well. The page's sources are
+`src/web/app/`, and `node cockpit/build.mjs` assembles them into `src/web/index.html`; both it and
+the cockpit bundle are embedded in the binary and `cargo build` does not run node, so a stale one is
 a cockpit quietly serving last week's code.
 
 For anything larger than a bug fix, **open an issue first**. The design here is argued in four

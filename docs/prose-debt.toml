@@ -102,23 +102,31 @@
 # function instead of a line — `queue` and `counts` and `queues_are_cached` in `src/prq/refresh.rs`,
 # and `build_pr` in `src/prq/node.rs`. The heading stays because the gate writes under it.
 #
-# THREE ROWS SINCE 2026-09-23 (SKEIN-1103). `src/bin/skein-server.rs` became `src/bin/skein-server/`
-# while `src/place.rs` and `src/web/index.html` were held by other lanes, so their three citations of
-# it are recorded here rather than re-pointed; SKEIN-1107 says where each cited line went.
+# FOUR ROWS SINCE 2026-09-23 (SKEIN-1103). `src/bin/skein-server.rs` became `src/bin/skein-server/`
+# while `src/place.rs` and the page sources were held by other lanes, so their citations of it are
+# recorded here rather than re-pointed (one is in a page source and in the `index.html` assembled
+# from it, hence two rows); SKEIN-1107 says where each cited line went.
 #
 # @STALE-CITATION
 
 [[stale-citation]]
 file = "src/place.rs"
-line = 987
+line = 1098
 text = "src/bin/skein-server.rs:4411-4413"
 item = "SKEIN-1107"
 reason = "SKEIN-1103 split the server into `src/bin/skein-server/` while this file was held by another lane; SKEIN-1107 names where the cited line went"
 
 [[stale-citation]]
 file = "src/place.rs"
-line = 1420
+line = 1538
 text = "src/bin/skein-server.rs:111"
+item = "SKEIN-1107"
+reason = "SKEIN-1103 split the server into `src/bin/skein-server/` while this file was held by another lane; SKEIN-1107 names where the cited line went"
+
+[[stale-citation]]
+file = "src/web/app/review-rows.js"
+line = 196
+text = "skein-server.rs:1572"
 item = "SKEIN-1107"
 reason = "SKEIN-1103 split the server into `src/bin/skein-server/` while this file was held by another lane; SKEIN-1107 names where the cited line went"
 
