@@ -17,6 +17,7 @@ import path from "node:path";
 import { boxlikeNamespace, fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, ledger, seeing, settler, texter } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 const BOX = "smoke-box";
 
@@ -188,7 +189,7 @@ const openTab = async mode => { await page.evaluate(m => showBox(BOXNAME, m), mo
 const fx = await makeFixture();
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   token: apiToken(),
   env: {
@@ -1004,7 +1005,6 @@ if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: f
 const failed = report({ log });
 if (failed.length) console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 await browser.close();
-srv.kill();
 // The fixture's tmux server outlives the process that started it, so it has to be killed by name —
 // a stray `sleep 600` per run would otherwise pile up on a developer's machine.
 spawnSync("tmux", ["-S", path.join(fx.root, "fleet", BOX, "session.sock"), "kill-server"], { stdio: "ignore" });
@@ -1012,6 +1012,6 @@ spawnSync("tmux", ["-S", path.join(fx.root, "fleet", BOX, "session.sock"), "kill
 // the suite and is what a leak sweep finds.
 fx.boxlike.kill("SIGKILL");
 // SKEIN_KEEP=1 leaves the fixture behind so you can point a server at it and look at the thing
-if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });
-else if (!failed.length) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 || !!process.env.SKEIN_KEEP });
+if (!failed.length && process.env.SKEIN_KEEP) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);
+process.exit(failed.length || leftRunning.length ? 1 : 0);

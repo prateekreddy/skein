@@ -13,6 +13,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, ledger } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 const API_TOKEN = "t".repeat(64);
 
 // The smallest fixture that serves a settings dialog: a store, a home, and a token. No box, no
@@ -45,7 +46,7 @@ const REMOTE_SHA = "deadbeef".repeat(5);
 const fx = makeFixture();
 const door = await openDoor();
 const github = await createGitHub(REMOTE_SHA);
-const { srv } = await startServer({
+await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -138,8 +139,7 @@ sayBlips();
 check("the pane raised no page errors", errors, []);
 
 await browser.close();
-srv.kill();
 github.close();
-try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {}
-
-process.exit(report().length ? 1 : 0);
+const failed = report();
+const leftRunning = stopThenRemove([fx.root]);
+process.exit(failed.length || leftRunning.length ? 1 : 0);

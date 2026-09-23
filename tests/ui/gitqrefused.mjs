@@ -17,6 +17,7 @@ import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, ledger } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 const API_TOKEN = "t".repeat(64);
 const BOX = "web-main";
 const ID = "r1";
@@ -42,7 +43,7 @@ function makeFixture() {
 
 const fx = makeFixture();
 const door = await openDoor();
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -107,8 +108,7 @@ try {
 }
 
 await browser.close();
-srv.kill();
 const failed = report();
 if (failed.length) console.log(`\nserver log:\n${log()}`);
-else { try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {} }
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 });
+process.exit(failed.length || leftRunning.length ? 1 : 0);

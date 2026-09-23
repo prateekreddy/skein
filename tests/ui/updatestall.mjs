@@ -20,6 +20,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, ledger } from "./harness/browser.mjs";
 import { stub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 const API_TOKEN = "t".repeat(64);
 
 // The run's name, as `update::launch` would have written it. Cancel must hand this back.
@@ -83,7 +84,7 @@ const decoyPid = pidIn("decoy.pid");
 const github = await stub(({ url, send }) =>
   /^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/.test(url) && send(200, { sha: "deadbeef".repeat(5) }));
 const door = await openDoor();
-const { srv, log: serverLog } = await startServer({
+const { log: serverLog } = await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -180,7 +181,6 @@ try {
   value("the pane raised no page errors", errors, []);
 } finally {
   await browser.close();
-  srv.kill();
   github.close();
   // The fixture's tmux server is not the skein-server's child, so killing that does not reach it.
   tmux("kill-server");
@@ -188,5 +188,5 @@ try {
 
 const failed = report();
 if (failed.length) console.log(serverLog().split("\n").slice(-20).join("\n"));
-else try { fs.rmSync(fx.root, { recursive: true, force: true }); } catch {}
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root], { keep: failed.length > 0 });
+process.exit(failed.length || leftRunning.length ? 1 : 0);

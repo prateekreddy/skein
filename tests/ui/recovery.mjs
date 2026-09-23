@@ -51,6 +51,7 @@ import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, settler } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 // The sandbox every placement in this fixture names, and the one the config declares. They have to
 // be the same string or `place::placed_boxes` filters the record out and the box never reaches the
@@ -142,7 +143,7 @@ placeBox(fx.home, CAPPED);   // the cap is what refuses this one, not its absenc
 
 const door = await openDoor();
 const port = door.port;
-const { srv, log } = await startServer({
+const { log } = await startServer({
   door,
   token: API_TOKEN,
   env: {
@@ -164,7 +165,7 @@ const { srv, log } = await startServer({
 const fx2 = makeFixture(freshFixture(fixtureRoot(), "skein-recovery-nosh"));
 const door2 = await openDoor();
 const port2 = door2.port;
-const { srv: srv2, log: log2 } = await startServer({
+const { log: log2 } = await startServer({
   door: door2,
   token: API_TOKEN,
   env: {
@@ -471,10 +472,6 @@ if (results.some(([ok]) => !ok)) await page.screenshot({ path: shot, fullPage: f
 const failed = report({ log: () => `${log()}\n---- the second server, whose PATH resolves no sh ----\n${log2()}` });
 if (failed.length) console.log(`screenshot: ${shot}\nfixtures kept for inspection: ${fx.root} ${fx2.root}`);
 await browser.close();
-srv.kill();
-srv2.kill();
-if (!failed.length && !process.env.SKEIN_KEEP) {
-  fs.rmSync(fx.root, { recursive: true, force: true });
-  fs.rmSync(fx2.root, { recursive: true, force: true });
-} else if (!failed.length) console.log(`fixtures kept (SKEIN_KEEP): ${fx.root} ${fx2.root}`);
-process.exit(failed.length ? 1 : 0);
+const leftRunning = stopThenRemove([fx.root, fx2.root], { keep: failed.length > 0 || !!process.env.SKEIN_KEEP });
+if (!failed.length && process.env.SKEIN_KEEP) console.log(`fixtures kept (SKEIN_KEEP): ${fx.root} ${fx2.root}`);
+process.exit(failed.length || leftRunning.length ? 1 : 0);

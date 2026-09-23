@@ -72,7 +72,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
 import { startServer } from "./harness/server.mjs";
-import { fixtureScopes, quiesce, running } from "./harness/leaks.mjs";
+import { stopThenRemove } from "./harness/teardown.mjs";
 
 const API_TOKEN = "d".repeat(64);
 
@@ -259,18 +259,11 @@ try {
   if (stallSock) stallSock.close();
   if (slowSock) slowSock.close();
   // Everything that writes into the fixture stops BEFORE the fixture is removed (SKEIN-1116).
-  // `srv.kill()` only sent a signal and did not wait, and the server's supervisor — a detached tmux
-  // at `<fleet>/.skein/private/server.tmux` running the doorway loop and its python — is not the
-  // server's child at all, so it outlived the kill (planting `srv.kill()` back here leaves all
-  // three running). A recursive rm raced processes still writing into the tree, and a directory
-  // that gained an entry between its readdir and its rmdir threw ENOTEMPTY after every check had
-  // passed. `quiesce` kills the server (startServer registered that) and then everything naming
-  // this fixture, SIGKILLing what outlives a SIGTERM, and returns when done.
-  quiesce();
-  const left = running(fixtureScopes(serverEnv)).map(p => p.args);
-  t.check("nothing this suite started is still running when its fixture is removed", left, []);
-  // Kept when something is still running: it is the evidence, and removing it would race again.
-  if (!left.length) fs.rmSync(fx, { recursive: true, force: true });
+  // `srv.kill()` only sent a signal and did not wait, and the server's supervisor was not its child,
+  // so a recursive rm raced processes still writing into the tree and threw ENOTEMPTY after every
+  // check had passed. Planting `srv.kill()` back in place of `quiesce()` inside `stopThenRemove`
+  // leaves the tmux, the loop and the python running, and the check it records names all three.
+  stopThenRemove([fx], { record: (name, left) => t.check(name, left, []) });
 }
 
 t.done();

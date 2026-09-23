@@ -2113,7 +2113,7 @@ cited_by = ["docs/env-lock.toml"]
 line = "!body.contains(\"resize_fleet(\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["tests/ui/updatepane.mjs:127"]
+["tests/ui/updatepane.mjs:128"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
