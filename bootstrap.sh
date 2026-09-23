@@ -126,6 +126,14 @@ unset SSH_ASKPASS
 #     one.
 #   * the rustup download: `--connect-timeout` and the same low-speed rule, and no `--max-time` —
 #     a total cap would end a slow but working download, which is exactly what this must not do.
+#   * the toolchain that installer then downloads, which is rustup's own downloader and not curl
+#     (SKEIN-1090): RUSTUP_DOWNLOAD_TIMEOUT. rustup 1.29.0's `src/download/mod.rs` hands it to the
+#     default (reqwest) backend as its read timeout, so it ends a connection that has sent nothing for
+#     that long and never a slow one that is still sending. Unset, rustup's own default is 180
+#     seconds. RUSTUP_USE_CURL is unset because the same file hands the number to the curl backend
+#     as a connect timeout only: measured against a listener that accepts and never answers, that
+#     backend was still waiting after 20 seconds with the timeout at 3, where the default one gave
+#     up at 3 with "operation timed out".
 #   * cargo's registry fetch: CARGO_HTTP_TIMEOUT is cargo's connect timeout and low-speed window
 #     at once. cargo already had one (30 seconds, retried 3 times); it is set here so the bound is
 #     this file's rather than a default nobody wrote down, and so one number governs every step.
@@ -142,6 +150,8 @@ export GIT_HTTP_LOW_SPEED_LIMIT=1000
 export GIT_HTTP_LOW_SPEED_TIME="$stall"
 export CARGO_HTTP_TIMEOUT="$stall"
 export CARGO_NET_RETRY=3
+export RUSTUP_DOWNLOAD_TIMEOUT="$stall"
+unset RUSTUP_USE_CURL
 
 # ---- the fleet root, the one line here that needs sudo -------------------------------------------
 
@@ -453,7 +463,15 @@ if ! cargo --version >/dev/null 2>&1; then
     say "$again."
     exit 1
   fi
-  printf '%s\n' "$rustup_sh" | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null
+  # Checked rather than left to `set -e`, which would end the run here with rustup's own line as the
+  # last word — "operation timed out" and a URL, with nothing saying that it was the toolchain
+  # download, that it was given up on deliberately, or what to do (SKEIN-1090).
+  if ! printf '%s\n' "$rustup_sh" | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null; then
+    say "rustup could not download the Rust toolchain (its reason is the line above; a download"
+    say "that sends nothing for $stall seconds is given up on rather than waited on), so the build"
+    say "cannot start. Check that this sandbox can reach static.rust-lang.org, then $again."
+    exit 1
+  fi
   # bash remembers where it found a command and does not look again while the file is still there.
   # The `cargo` a moment ago was the shim further down the PATH, and rustup has just written a
   # better one into `$CARGO_HOME/bin` — which is *ahead* of it. Without this the shell keeps

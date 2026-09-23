@@ -2500,6 +2500,100 @@ fn the_updates_fetch_from_a_remote_that_never_answers_ends_with_the_reason_in_th
     );
 }
 
+/// **The toolchain rustup downloads during an install ends within a bound when its server stops
+/// answering, and the log says why** (SKEIN-1090).
+///
+/// SKEIN-1037 bounded the curl that fetches the installer; the toolchain that installer then fetches
+/// is rustup's own downloader, which bootstrap did not bound, so rustup's default of 180 seconds a
+/// read — per attempt — was the only thing between a stalled mirror and an Update pane that says
+/// "updating…". This runs the REAL rustup, as `rustup-init`, from bootstrap's own install block: the
+/// stub `curl` answers sh.rustup.rs with a script that execs it with bootstrap's arguments, and
+/// `RUSTUP_DIST_SERVER` is a local listener that accepts and never answers, so nothing leaves this
+/// machine. `RUSTUP_USE_CURL=1` rides in the ambient environment because rustup's curl backend reads
+/// the timeout as a connect timeout only, and that listener has already accepted.
+///
+/// **What would make each assertion fail:** deleting `export RUSTUP_DOWNLOAD_TIMEOUT` from
+/// bootstrap.sh leaves rustup waiting out its own 180 seconds, the runner kills it at the deadline,
+/// and the first assertion fails with `finished` false; so does deleting `unset RUSTUP_USE_CURL`,
+/// which leaves the curl backend waiting with no read bound at all. Putting the install line back
+/// to a bare pipeline under `set -e` ends the run with rustup's line as the last word, and the log
+/// assertion fails.
+#[test]
+fn the_toolchain_download_from_a_server_that_never_answers_ends_with_the_reason_in_the_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    if !have("rustup") {
+        skip("this machine has no rustup, so there is no real toolchain download to bound");
+        return;
+    }
+    let rustup = Command::new("sh")
+        .args(["-c", "command -v rustup"])
+        .output()
+        .expect("sh ran");
+    let rustup = PathBuf::from(String::from_utf8_lossy(&rustup.stdout).trim());
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let bin = root.join("bin");
+    // `rustup-init` is rustup itself, told by its own name which of the two it is.
+    std::os::unix::fs::symlink(&rustup, bin.join("rustup-init")).unwrap();
+    let stub = |name: &str, body: &str| {
+        let at = bin.join(name);
+        fs::write(&at, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // No cargo that runs, so bootstrap goes to install one; and the installer it downloads is a
+    // one-line script that hands bootstrap's own arguments to the real rustup.
+    stub("cargo", "exit 1");
+    stub(
+        "curl",
+        "case \"$*\" in *sh.rustup.rs*) echo 'exec rustup-init \"$@\"' ;; esac\nexit 0",
+    );
+    let (port, accepted) = silent_remote();
+    let mut env = stated_size();
+    env.push(("SKEIN_NET_STALL_SECS", "3".to_string()));
+    env.push(("RUSTUP_DIST_SERVER", format!("http://127.0.0.1:{port}")));
+    env.push((
+        "RUSTUP_UPDATE_ROOT",
+        format!("http://127.0.0.1:{port}/rustup"),
+    ));
+    env.push(("RUSTUP_USE_CURL", "1".to_string()));
+
+    let limit = Duration::from_secs(60);
+    let ran = fleet.update("bbbb222", limit, &env);
+    assert!(
+        ran.finished,
+        "the install's toolchain download was still waiting on a server that never answers after \
+         {limit:?} — the pane would say \"updating…\" for as long as rustup kept waiting. The \
+         log:\n{}",
+        ran.log
+    );
+    assert!(
+        accepted.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the silent server was never connected to, so nothing here waited on it — the fixture is \
+         wrong, not the install:\n{}",
+        ran.log
+    );
+    assert_eq!(
+        ran.marker.as_deref(),
+        Some("1"),
+        "a toolchain download that gave up did not end the run as a failed update:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains("operation timed out")
+            && ran
+                .log
+                .contains("rustup could not download the Rust toolchain")
+            && ran.log.contains("press Update skein again"),
+        "the pane's log does not carry rustup's reason, what it means in the owner's terms, and \
+         what to do next:\n{}",
+        ran.log
+    );
+}
+
 /// **The Update button ends the way bootstrap does: with the new build answering, even over a
 /// doorway that ignored the reload** (SKEIN-1031).
 ///

@@ -314,7 +314,7 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // the onboarding flag that goes with a seeded login (SKEIN-957). It was always needed and was
     // written down nowhere, which is the same gap SKEIN-765 closed for `tmux` in `server`.
     ("fleet_launch", &[BWRAP, TMUX, GIT, PYTHON3]),
-    ("fleet_move", &[TMUX, PYTHON3]),
+    ("fleet_move", &[TMUX, PYTHON3, RUSTUP]),
     // `curl` because the git shim's reachability probe IS a curl call: the two tests that drive the
     // blocked-egress hint guard on it, and without it here a machine with no curl skips them while
     // this list still says the binary needs only jq and git (SKEIN-548).
@@ -880,3 +880,11 @@ fn gh_respond_once(
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(payload.as_bytes());
 }
+
+/// Down here rather than beside the other [`Tool`]s so that nothing citing this file by line moves.
+/// `fleet_move` needs it because bootstrap's toolchain-download bound is asked of the real rustup
+/// (SKEIN-1090): a stand-in would prove only that bootstrap sets a variable, not that rustup reads it.
+pub const RUSTUP: Tool = Tool {
+    name: "rustup",
+    probe: None,
+};
