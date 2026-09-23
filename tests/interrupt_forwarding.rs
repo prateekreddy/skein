@@ -8,7 +8,7 @@
 //! binary, on the production call the decision was taken for.
 //!
 //! **The command under the interrupt is a real one.** `skein doctor` asks whether review summaries
-//! work, which runs the model binary from PATH through `ai.rs:1037` ->
+//! work, which runs the model binary from PATH through `src/ai/call.rs:261` ->
 //! `util::output_with_timeout_fed` -> `run_bounded` with a 30s budget. So the fixture is a `claude`
 //! of this test's own on PATH, and it is a shell that backgrounds its work and waits — the shape
 //! every wrapper skein runs has, and the shape that makes the difference visible: POSIX has a
