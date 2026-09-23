@@ -858,7 +858,7 @@ impl Place {
     /// `src/server-doorway.py`, which copies `dict(os.environ)` through untouched
     /// (`src/server-doorway.py:212-220`), from a `tmux new-session` skein started at fleet scope:
     /// [`crate::fleet::start_server`] does go through `own_sandbox(..).exec(..)`, so that one is
-    /// under `env PATH={FLEET_PATH}` (`src/fleet.rs:892-905`). A tmux session does take its
+    /// under `env PATH={FLEET_PATH}` (`src/fleet/server.rs:422-435`). A tmux session does take its
     /// environment from the **client** that asked for it, so that much survives contact — measured
     /// on tmux 3.6 here, a session created by a client holding a clean PATH got the clean one even
     /// though the tmux server had been started with a planted directory at its head.
@@ -868,7 +868,7 @@ impl Place {
     ///
     /// | what spawns the crossing | how it was started | the PATH it resolves `nsenter` from |
     /// |---|---|---|
-    /// | `skein-server` | `fleet::start_server`, a `Place` at fleet scope (`src/fleet.rs:903`) | `FLEET_PATH` — the only pinned one |
+    /// | `skein-server` | `fleet::start_server`, a `Place` at fleet scope (`src/fleet/server.rs:433`) | `FLEET_PATH` — the only pinned one |
     /// | `skein-server` | sbx's `commands.startup` runs `start-door.sh` at every sandbox start (`src/fleet-kit-spec.yaml:31`) | sbx's, for a uid-1000 `bash -c`. Not skein's to set |
     /// | `skein-server` | `bootstrap.sh:618` runs `start-door.sh`, having done `export PATH="$CARGO_HOME/bin:$PATH"` (`bootstrap.sh:348`) | a toolchain directory, then whatever ran `bootstrap.sh` |
     /// | `skein-server` | a person putting the door back: `sbx exec -i <sandbox> /boxes/.skein/start-door.sh` (`bootstrap.sh:478`) | that person's shell's |
@@ -1118,7 +1118,7 @@ impl Place {
     /// **The tempting fix is to carry the caller's PATH across the hop instead of the pin, and it
     /// is wrong**: it makes what a box resolves depend on who spawned the crossing.
     /// [`crate::fleet::start_server`] starts the server through `own_sandbox(..).exec(..)`
-    /// (`src/fleet.rs:903`), which is itself under `env PATH={FLEET_PATH}` — so on that start path
+    /// (`src/fleet/server.rs:433`), which is itself under `env PATH={FLEET_PATH}` — so on that start path
     /// the caller's PATH *is* `FLEET_PATH`, and carrying it would reproduce this same bug while
     /// looking like a fix. The box's PATH has to be derived from the box.
     ///

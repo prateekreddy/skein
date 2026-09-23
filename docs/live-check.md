@@ -86,7 +86,7 @@ yours to make, and this is the check that skein never asks you to make it onto a
 **Failure means:** the publish was judged by a TCP connect. A squatter accepts a connect exactly as
 the doorway does, and the mapping it would be given is not skein's to take back: `sbx ports
 <sandbox> --unpublish HOST:SANDBOX` exists, and the warden can even carry it (`Act::Unpublish`,
-`src/warden_client.rs`) — but nothing in `fleet.rs` builds one (the argument is carried once, at
+`src/warden_client.rs`) — but nothing in `src/fleet/` builds one (the argument is carried once, at
 `fleet::stop_serving`). Undoing it is a line a person runs.
 
 ---

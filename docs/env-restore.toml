@@ -31,17 +31,17 @@
 # `vars` is the exact set of names the scope leaks. A scope that starts leaking a SECOND variable is
 # a fresh finding even though its row is already here.
 
-[leaks."src/fleet::a_repo_pointed_at_the_volume_is_not_mounted"]
+[leaks."src/fleet/create::a_repo_pointed_at_the_volume_is_not_mounted"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_repo_puts_its_store_in_the_sandbox_and_not_its_checkout"]
+[leaks."src/fleet/create::a_repo_puts_its_store_in_the_sandbox_and_not_its_checkout"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_setting_left_where_a_box_could_have_written_it_is_not_believed"]
+[leaks."src/fleet/declared::a_setting_left_where_a_box_could_have_written_it_is_not_believed"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::the_volume_is_private_except_the_two_directories_a_box_is_given"]
+[leaks."src/fleet/create::the_volume_is_private_except_the_two_directories_a_box_is_given"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::what_skein_decides_about_a_box_is_not_where_the_box_can_write_it"]
+[leaks."src/fleet/declared::what_skein_decides_about_a_box_is_not_where_the_box_can_write_it"]
 vars = ["SKEIN_HOME"]

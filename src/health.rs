@@ -143,7 +143,7 @@ const DISK_FULL_PCT: u64 = 85;
 /// before SKEIN-756 deleted that arm outright. What is left is the measurement itself, and there
 /// are exactly two ways for it to fail — the command did not run (it could not be spawned, it
 /// outlived the 20s deadline, or it exited non-zero: `src/place.rs:1218` and `:1219`) or it ran and
-/// printed nothing `fleet::parse_resources` could read (`src/fleet.rs:4539`). `Option`
+/// printed nothing `fleet::parse_resources` could read (`src/fleet/resources.rs:279`). `Option`
 /// carries no room to tell those apart, so the sentence says it cannot rather than picking one.
 ///
 /// It also says one thing the neighbour in `disk_verdict` cannot: the [`crate::util::Gate`] keeps
@@ -222,7 +222,7 @@ pub struct DiskDemand {
 /// [`DiskDemand`] for the live fleet.
 ///
 /// The [`crate::fleet::fleet_resources`] read costs nothing beside [`disk_health`]'s: it is behind
-/// a thirty-second gate (`src/fleet.rs:4369`), so one tick's verdict and its demand are the same
+/// a thirty-second gate (`src/fleet/resources.rs:219`), so one tick's verdict and its demand are the same
 /// reading rather than two.
 pub(crate) fn disk_demand() -> DiskDemand {
     DiskDemand {

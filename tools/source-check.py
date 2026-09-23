@@ -332,8 +332,8 @@ def render(found):
 #   * a reach spelled in a fixture counted as production — the allow-list gets wider than the code;
 #   * a reach in production code that the cut swallowed — the allow-list looks clean because part
 #     of the crate is invisible. That is WTS-9: `#[cfg(test)] const TMUX_COMMAND_CEILING` at
-#     `src/fleet.rs:992` is brace-less, and cutting to "the next `{`" took `fn detached_script_path`
-#     (`:1012`) with it. That function spells no Source today, so the count was right by luck.
+#     `src/fleet/server.rs:226` is brace-less, and cutting to "the next `{`" took `fn detached_script_path`
+#     (`:245`) with it. That function spells no Source today, so the count was right by luck.
 #
 # The fixture's braces are UNBALANCED on purpose. They used to be `{{}}` — balanced — so the two
 # assertions about them held whether or not the cutter skipped strings at all, which is this

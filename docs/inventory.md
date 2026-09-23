@@ -59,12 +59,12 @@ wherever it moves next.
 | **every box start** | create the box's cgroup, enable `+memory +pids +cpu` on the parent | `box-session.sh`, `ensure_container_cgroup` |
 | **every box start** | enable `+memory +pids` on the box's own cgroup root, then write `memory.max`, `memory.high`, `pids.max` | `box-session.sh`, `merge_login` |
 | **every box start** | move the session into its cgroup (`cgroup.procs`) | `box-session.sh`, `merge_login` |
-| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet.rs`, `apply_box_limits` → `box-session.sh`, `apply_fleet_ceilings` |
-| cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet.rs`, `apply_box_limits` |
-| **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet.rs`, `ensure_substrate` → `substrate::approved_packages` |
-| **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet.rs`, `ensure_fleet_root` |
-| every box start **and** every server start | write `/etc/docker/daemon.json` (ensure *and* heal) | `fleet.rs`, `install_docker_config` |
-| **resize** | `tar` the whole box tree, and restore it | `fleet.rs`, `archive_script` and `restore_script` |
+| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet/limits.rs`, `apply_box_limits` → `box-session.sh`, `apply_fleet_ceilings` |
+| cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet/limits.rs`, `apply_box_limits` |
+| **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet/substrate.rs`, `ensure_substrate` → `substrate::approved_packages` |
+| **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet/create.rs`, `ensure_fleet_root` |
+| every box start **and** every server start | write `/etc/docker/daemon.json` (ensure *and* heal) | `fleet/containers.rs`, `install_docker_config` |
+| **resize** | `tar` the whole box tree, and restore it | `fleet/resize.rs`, `archive_script` and `restore_script` |
 | **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs`, `install_script` |
 | **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs`, `stop_box_inner` |
 | **every box startup** | apt in the startup kit | `kit/skein-startup.sh` |
@@ -102,7 +102,7 @@ The architecture describes resize as carrying "the delta — unpushed commits, i
 patches, untracked files" and claims "that is what today's snapshot already does". It is not.
 
 Real resize is `sudo tar -cf` of the entire `/boxes/<name>` tree and `sudo tar -xf` to restore
-(`grep -n 'fn archive_script\|fn restore_script' src/fleet.rs` — cited by name because the line
+(`grep -n 'fn archive_script\|fn restore_script' src/fleet/resize.rs` — cited by name because the line
 numbers this entry used to give drifted by more than two thousand lines) — a root byte copy
 including `.git`, `node_modules`, `target`, the private HOME and `/tmp`, which is why it demands
 1.2× the box size free before starting.
@@ -244,7 +244,7 @@ The `place → fleet` edge that §14.2 named is **gone** (SKEIN-22, and `docs/mo
 it): `grep -n 'crate::fleet' src/place.rs` finds only doc-comment links now, which
 `tools/module-check.py` excludes because a doc link is not a call. The knot did not change size —
 `place` is still inside it through `config → runtime → repos → place`, and `fleet` still imports
-`place` (`grep -c 'crate::place' src/fleet.rs` → 53). Worth knowing before anyone spends a day on a single edge: in a
+`place` (`cat src/fleet/*.rs | grep -c 'crate::place'` → 58). Worth knowing before anyone spends a day on a single edge: in a
 component this dense, removing one is a local tidy, not a structural change.
 
 ---

@@ -88,6 +88,15 @@ WHAT THIS COVERS
   a recorded anchor            the same commit as the citation and the reviewer sees both.
   a whole file renamed away    `prose-check.py` already fails on this; this gate would see it as
                                an unresolvable path and leaves it there rather than double-report.
+  a file that became a          Followed, which is the one rename with a mechanical answer. A Rust
+  directory                     unit is `src/<name>.rs` OR `src/<name>/**/*.rs` (`rustcut.units`),
+                                so when `src/fleet.rs` is split into `src/fleet/` the anchor is
+                                searched for across every file of the directory, `moved` names the
+                                new FILE as well as the line, and `--relocate --write` rewrites
+                                both (`Tree.successors`, SKEIN-934). Before this, such a citation
+                                fell out of the gate as unresolvable — and because a citation the
+                                scan drops is an entry nothing claims, the next `--record` or
+                                `--relocate --write` PRUNED its anchor: 89 of them for that split.
   a citation that inherited     `inherited`, and it is the failure the ledger's KEY makes
   an anchor another citation    possible: an entry is keyed by ADDRESS ALONE, so a row that comes
   wrote                         to cite an address another row already recorded is judged against
@@ -634,7 +643,7 @@ def stray_sites(sources):
     return found, read
 
 
-def unaccounted(cite, tree, words, landing=None):
+def unaccounted(cite, tree, words, landing=None, crossing=None):
     """{phrase: lines} for the words this citation — and no other address in its row — answers for.
 
     THIS IS THE HALF THE LEDGER CANNOT SEE. An anchor records what the cited line SAID; it says
@@ -671,6 +680,7 @@ def unaccounted(cite, tree, words, landing=None):
     if not sites or lines is None:
         return {}
     landing = {} if landing is None else landing
+    crossing = {} if crossing is None else crossing
     spoken = set()
     for named in row_lines(cite) - {cite.line}:
         other = landing.get(f"{cite.target}:{named}", named)
@@ -679,6 +689,18 @@ def unaccounted(cite, tree, words, landing=None):
             if other <= len(lines)
             else {other}
         )
+    # A SPLIT citation's row still names its other sites by the OLD path, so they are followed
+    # across the split to where they landed; one that landed in THIS file answers for its words
+    # here, exactly as a same-file sibling does above, and one that landed elsewhere, or nowhere
+    # unique, answers for nothing in this file.
+    if cite.was:
+        for m in prose.CITATION.finditer(cite.row):
+            if prose.resolve(m.group(1), [cite.was]) != cite.was:
+                continue
+            key = f"{cite.was}:{m.group(2)}"
+            file, line = crossing.get(key, (None, 0))
+            if file == cite.target and key != cite.was_key:
+                spoken |= message_region(lines, Cite(cite.doc, cite.doc_line, "", file, line))
     left = {run: tuple(n for n in at if n not in spoken) for run, at in sites.items()}
     return {run: at for run, at in left.items() if at}
 
@@ -743,6 +765,22 @@ class Tree:
             self._at[(sha, rel)] = None if body is None else body.split("\n")
         return self._at[(sha, rel)]
 
+    def successors(self, rel):
+        """The files `rel` became, if it is a `.rs` file that became a directory; `[]` otherwise.
+
+        The rule is `rustcut.units`': a unit is `src/<name>.rs` or `src/<name>/**/*.rs`, so a cited
+        `src/fleet.rs` that is gone while `src/fleet/` holds Rust files was SPLIT, not deleted, and
+        its lines are somewhere in there. Only while the file itself is gone — a unit that still
+        has its `.rs` is cited by its own path, and nothing needs following.
+        """
+        if not rel.endswith(".rs") or self.now(rel) is not None:
+            return []
+        stem = os.path.join(ROOT, rel[:-3])
+        found = []
+        for d, _, files in os.walk(stem):
+            found += [os.path.relpath(os.path.join(d, f), ROOT) for f in files if f.endswith(".rs")]
+        return sorted(found)
+
 
 class Cite:
     """One `path:line` citation: where it is written, and what file and line it resolves to."""
@@ -758,6 +796,12 @@ class Cite:
         # where it quotes the code's words, `misanchored` can say whether the cited line holds
         # them. Nothing else in this tool reads the document as prose.
         self.row = row
+        # The files `target` was split into, when it was (`Tree.successors`). Empty for every
+        # citation whose file is still on disk, which is all but a split's.
+        self.heirs = []
+        # Set only on the stand-in `check` builds at a split citation's NEW address: the path the
+        # document still names, so the row's other sites can be followed across the same split.
+        self.was, self.was_key = None, None
 
     @property
     def key(self):
@@ -792,16 +836,21 @@ def gated(label):
     return label.startswith("docs/") and label != LEDGER_REL
 
 
-def scan(sources=None, index=None, everything=False):
+def scan(sources=None, index=None, everything=False, tree=None):
     """([Cite], skipped) over the documents in scope.
 
     `skipped` counts what was deliberately not read: citations in a document that declares a
     `CITATIONS_AT` pin, and citations whose path names several files or none. The first two are
     somebody else's rule and the third is `prose-check.py`'s finding, not this one's.
+
+    A path that names no file but whose `.rs` became a directory is NOT skipped: it is kept, with
+    the files it became as `heirs`, and counted as `split`. Skipping it is what let the ledger
+    prune its anchor (see the docstring's table), so the count is printed beside the others.
     """
     sources = prose.citation_sources() if sources is None else sources
     index = prose.tree_files() if index is None else index
-    out, skipped = [], {"pinned": 0, "ambiguous": 0, "unresolvable": 0}
+    tree = Tree() if tree is None else tree
+    out, skipped = [], {"pinned": 0, "ambiguous": 0, "unresolvable": 0, "split": 0}
     for label, body, markdown in sources:
         if label == LEDGER_REL:
             continue
@@ -817,13 +866,19 @@ def scan(sources=None, index=None, everything=False):
             if target is None:
                 skipped["ambiguous"] += 1
                 continue
-            if target == "":
+            heirs = tree.successors(path) if target == "" else []
+            if target == "" and not heirs:
                 skipped["unresolvable"] += 1
                 continue
+            if heirs:
+                target = path
+                skipped["split"] += 1
             m = re.search(r":(\d+)(?:-(\d+))?$", text)
             last = int(m.group(2)) if m.group(2) else None
             row = rows[doc_line - 1] if doc_line <= len(rows) else ""
-            out.append(Cite(label, doc_line, text, target, int(m.group(1)), last, row))
+            cite = Cite(label, doc_line, text, target, int(m.group(1)), last, row)
+            cite.heirs = heirs
+            out.append(cite)
     return out, skipped
 
 
@@ -954,6 +1009,22 @@ def where_now(anchor_line, anchor_window, lines):
     return [n for n, text in enumerate(lines, 1) if norm(text) == anchor_line]
 
 
+def where_across(anchor_line, anchor_window, files, tree):
+    """[(file, line)] where a recorded anchor sits now across several files, best first.
+
+    `where_now`, asked of a unit rather than a file, and UNIQUE ACROSS ALL OF THEM: a window that
+    matches once in each of two files has not said which one the citation meant, so it falls back
+    to the bare line exactly as `where_now` does within one file.
+    """
+    bodies = [(f, tree.now(f) or []) for f in files]
+    if anchor_window:
+        hits = [(f, n) for f, lines in bodies for n in range(1, len(lines) + 1)
+                if window(lines, n) == anchor_window]
+        if len(hits) == 1:
+            return hits
+    return [(f, n) for f, lines in bodies for n, text in enumerate(lines, 1) if norm(text) == anchor_line]
+
+
 def check(cites, ledger, tree, blames=None, history=True):
     """[(cite, verdict, detail)] for every citation that is not in agreement with the ledger.
 
@@ -1002,11 +1073,17 @@ def check(cites, ledger, tree, blames=None, history=True):
     # addresses and so subtracted nothing at all. Every one of those three was an ordinary
     # `moved`, and each cost a person a hand-derived line number (SKEIN-976). A site that has
     # moved answers for where it has moved TO, and this map is that answer.
-    landing = {}
+    landing, crossing = {}, {}
     for cite in cites:
         entry = ledger.get(cite.key)
         lines = tree.now(cite.target)
         if entry is None or "historical" in entry or cite.key in landing:
+            continue
+        if cite.heirs:
+            # The same map for a split file, which lands in a FILE as well as at a line.
+            hits = where_across(entry["line"], entry.get("window", ""), cite.heirs, tree)
+            if len(hits) == 1:
+                crossing[cite.key] = hits[0]
             continue
         if lines is None or cite.line > len(lines) or norm(lines[cite.line - 1]) == entry["line"]:
             continue
@@ -1020,6 +1097,9 @@ def check(cites, ledger, tree, blames=None, history=True):
         # including `misanchored`, because "the words are not where the row says" is the expected
         # state of a row that is the record of what WAS wrong.
         if entry is not None and "historical" in entry:
+            continue
+        if cite.heirs:
+            findings.append(split_verdict(cite, entry, tree, words, landing, crossing, blames, history))
             continue
         lines = tree.now(cite.target)
         past_end = lines is None or cite.line > len(lines)
@@ -1089,16 +1169,94 @@ def check(cites, ledger, tree, blames=None, history=True):
     return findings
 
 
-def renumber(cite, new):
+def split_verdict(cite, entry, tree, words, landing, crossing, blames, history):
+    """`check`'s verdict for a citation whose file was split into `cite.heirs`.
+
+    The same verdicts as a citation whose file is still there, asked of the unit: `unrecorded`
+    with no anchor; `moved` to `<new file>:<line>` where the anchor is in exactly one place across
+    the files; `ambiguous` where it is in several; `gone` where it is in none. A split citation is
+    always a finding while the document names the old path, because that path does not exist.
+
+    THE SECOND OPINION IS KEPT, not skipped because the file changed. The row's quoted words are
+    looked for in the file the anchor landed in, at the address it landed at — a stand-in citation
+    carries it, with `was` naming the old path so the row's OTHER sites, which name that old path
+    too, can be followed across the split to where they landed (`crossing`) and answer for their
+    own words there (SKEIN-976's lesson, one file over). Where the words are in that file and the
+    landing is not their line, it is `misanchored`, for the reason it is anywhere: following the
+    anchor would cement a citation that was never on its message.
+
+    Where the anchor does not land uniquely there is no single file to ask, so no second opinion:
+    `ambiguous` and `gone` are both a person's already.
+
+    ONE TIE IS BROKEN, BY PROVENANCE AND NOTHING ELSE. A line that was unique in the one file was
+    recorded without a `window`, because there it needed none — and after a split it can have a
+    twin in another file (a `}` of the same shape, a repeated `let body = …`). The neighbours it
+    had are still on record: the old file, at the commit that wrote this citation's document line,
+    which is where `anchor_for` reads the anchor itself. That window is asked across the files and
+    used only when it names one line, and only when that commit's line IS the recorded anchor — the
+    same agreement `inherited` demands before anything moves. Otherwise it stays `ambiguous`.
+    """
+    if entry is None:
+        return (cite, "unrecorded", "")
+    hits = where_across(entry["line"], entry.get("window", ""), cite.heirs, tree)
+    if len(hits) > 1 and history:
+        anchored, _ = anchor_for(cite, tree, blames)
+        if anchored is not None and anchored[0] == entry["line"]:
+            narrowed = where_across(entry["line"], anchored[1], cite.heirs, tree)
+            hits = narrowed if len(narrowed) == 1 else hits
+    if len(hits) > 1:
+        return (cite, "ambiguous", f"{len(hits)} line(s) across {len(cite.heirs)} file(s) hold it")
+    if not hits:
+        return (cite, "gone", entry["line"][:96])
+    new_file, new_line = hits[0]
+    there = at_line(cite, new_line)
+    there.target, there.was, there.was_key = new_file, cite.target, cite.key
+    mine = unaccounted(there, tree, words, landing, crossing)
+    if mine:
+        region = message_region(tree.now(new_file), there)
+        at = sorted({n for lines_of in mine.values() for n in lines_of})
+        if not any(n in region for n in at):
+            run = max(mine, key=len)
+            where = ", ".join(f"{new_file}:{n}" for n in at)
+            return (
+                cite,
+                "misanchored",
+                f"its words are at {where} ({run[:60]!r}), while its anchor moved to"
+                f" {new_file}:{new_line}",
+            )
+    whose = inherited(cite, entry, tree, blames, history)
+    if whose:
+        return (cite, "inherited", whose)
+    return (cite, "moved", f"{new_file}:{new_line}")
+
+
+def moved_path(written, old, new):
+    """`written` — the path as the document spells it, `old` or a tail of it — renamed to `new`.
+
+    Only for a split (`Tree.successors`): `new` is `old` without `.rs`, a `/`, and the rest, so
+    the document's own spelling is kept up to the stem and the rest appended — `src/fleet.rs`
+    becomes `src/fleet/login.rs`, and a tail `fleet.rs` becomes `fleet/login.rs`.
+    """
+    stem = old[:-3]
+    if not (written.endswith(".rs") and new.startswith(stem + "/")):
+        raise ValueError(f"{new} is not a file {old} was split into")
+    return written[:-3] + new[len(stem):]
+
+
+def renumber(cite, new, target=None):
     """`cite.text` with its line number moved to `new`. A RANGE moves both ends by the same
-    amount, so `foo.rs:10-14` shifted to 20 reads `foo.rs:20-24` and not `foo.rs:20`."""
+    amount, so `foo.rs:10-14` shifted to 20 reads `foo.rs:20-24` and not `foo.rs:20`.
+
+    With `target`, the path moves too — a split citation's new file (`moved_path`)."""
     head = cite.text[: cite.text.rindex(":")]
+    if target is not None and target != cite.target:
+        head = moved_path(head, cite.target, target)
     if cite.last is None:
         return f"{head}:{new}"
     return f"{head}:{new}-{cite.last + (new - cite.line)}"
 
 
-def rewrite_line(text, cite, new):
+def rewrite_line(text, cite, new, target=None):
     """`text` with ONE occurrence of `cite.text` renumbered to `new`.
 
     Anchored on the exact citation text, so a line carrying two citations has each replaced once
@@ -1109,7 +1267,7 @@ def rewrite_line(text, cite, new):
     """
     return re.sub(
         r"(?<![A-Za-z0-9_./\\-])" + re.escape(cite.text) + r"(?![0-9])",
-        renumber(cite, new),
+        renumber(cite, new, target),
         text,
         count=1,
     )
@@ -1140,12 +1298,13 @@ def relocate(findings, write=False, root=None, select=None):
         return moves, []
     edits = {}
     for cite, detail in moves:
-        edits.setdefault(cite.doc, []).append((cite, int(detail.rsplit(":", 1)[1])))
+        target, new = detail.rsplit(":", 1)
+        edits.setdefault(cite.doc, []).append((cite, int(new), target))
     for doc, items in edits.items():
         path = os.path.join(ROOT if root is None else root, doc)
         lines = open(path, encoding="utf-8").read().split("\n")
-        for cite, new in items:
-            lines[cite.doc_line - 1] = rewrite_line(lines[cite.doc_line - 1], cite, new)
+        for cite, new, target in items:
+            lines[cite.doc_line - 1] = rewrite_line(lines[cite.doc_line - 1], cite, new, target)
         open(path, "w", encoding="utf-8").write("\n".join(lines))
     return moves, []
 
@@ -1957,6 +2116,134 @@ def self_check():
             f" the other site is subtracted at its OLD address, so 28 is moot — got {stale}"
         )
 
+    # 29. A FILE SPLIT INTO A DIRECTORY IS FOLLOWED, NOT DROPPED (SKEIN-934). `src/fake.rs` is gone
+    #     and `src/fake/` holds its two halves. Before this, the citation left the gate as
+    #     unresolvable — and a citation the scan drops is an entry nothing claims, so the next
+    #     `--record` or `--relocate --write` pruned its anchor: all 89 of `src/fleet.rs`'s, the day
+    #     that file became `src/fleet/`.
+    class FakeUnit(Tree):
+        def __init__(self, files):
+            super().__init__()
+            self._now = {k: list(v) for k, v in files.items()}
+
+        def now(self, rel):
+            return self._now.get(rel)
+
+        def at(self, sha, rel):
+            return self._now.get(rel)
+
+        def successors(self, rel):
+            if not rel.endswith(".rs") or rel in self._now:
+                return []
+            return sorted(k for k in self._now if k.startswith(rel[:-3] + "/") and k.endswith(".rs"))
+
+    halves = {"src/fake/one.rs": ["// one"] + SELF_APART[:6], "src/fake/two.rs": ["// two"] * 2 + SELF_APART[6:]}
+    split = FakeUnit(halves)
+    split_row = (
+        "| `src/fake.rs:4`, `src/fake.rs:10` | the disk is full · nothing to reconnect"
+        " | **R** — a trigger | y | yes | C |"
+    )
+    split_ledger = {
+        "src/fake.rs:4": {"line": norm(SELF_APART[3])},
+        "src/fake.rs:10": {"line": norm(SELF_APART[9])},
+    }
+    #     The scan keeps it, names the files it became, and counts it apart from `unresolvable`.
+    found_cites, split_skipped = scan(
+        [("docs/fake.md", split_row + "\n", True)], ["docs/fake.md", *halves], True, split
+    )
+    if [(c.key, c.heirs) for c in found_cites] != [
+        ("src/fake.rs:4", sorted(halves)), ("src/fake.rs:10", sorted(halves))
+    ] or split_skipped["unresolvable"] or split_skipped["split"] != 2:
+        bad.append(
+            "a citation into a file split into a directory was not kept with the files it became"
+            f" — got {[(c.key, c.heirs) for c in found_cites]}, skipped {split_skipped}"
+        )
+    #     The rest is asked of the citations built here rather than of the scan's, so that each
+    #     part fails on its own account and a broken scan is reported once, above.
+    found_cites = [
+        Cite("docs/fake.md", 1, f"src/fake.rs:{n}", "src/fake.rs", n, row=split_row) for n in (4, 10)
+    ]
+    for cite in found_cites:
+        cite.heirs = split.successors("src/fake.rs")
+    #     `--record` keeps its anchor, which is the destructive half of the failure.
+    kept = dict(split_ledger)
+    _, _, pruned = record(found_cites, kept, split)
+    if pruned:
+        bad.append(f"--record pruned the anchor of a citation into a split file — got {pruned}")
+    #     Each site moves to its own FILE, and both are plain `moved`: the row's other site is
+    #     followed across the split to answer for its own words, or the second message would
+    #     convict the first citation (case 28's lesson, one file over).
+    found = check(found_cites, dict(split_ledger), split, {"docs/fake.md": {}})
+    if [(v, d) for _, v, d in found] != [("moved", "src/fake/one.rs:5"), ("moved", "src/fake/two.rs:6")]:
+        bad.append(
+            "the two sites of a split file did not each move to the file and line their anchor"
+            f" landed on — got {[(v, d) for _, v, d in found]}"
+        )
+    else:
+        moves, _ = relocate(found)
+        fresh, collisions = rekey(dict(split_ledger), found_cites, moves)
+        if collisions or set(fresh) != {"src/fake/one.rs:5", "src/fake/two.rs:6"}:
+            bad.append(f"the ledger was not rekeyed onto the new files — got {sorted(fresh)}")
+        #     And the DOCUMENT names the new file, read back through the gate's own reader.
+        for cite, detail in moves:
+            target, new = detail.rsplit(":", 1)
+            after = prose.citations(rewrite_line(f"See `{cite.text}`.", cite, int(new), target), True)
+            if [f"{t[1]}:{t[2]}" for t in after] != [detail]:
+                bad.append(f"a split citation was rewritten to {after} where the ledger says {detail}")
+    #     Both sites landing in ONE of the files is the case the crossing map is for. The row
+    #     PARAPHRASES its first message ("was", where the code says "is"), so the only words of it
+    #     this file holds are the second message's — and unless the second site is followed across
+    #     the split to answer for them, they convict the first citation of quoting them.
+    together = FakeUnit({"src/fake/one.rs": ["// one"] * 3 + SELF_APART, "src/fake/two.rs": ["fn z() {}"]})
+    loose_row = split_row.replace("the disk is full", "the disk was full")
+    loose = [Cite("docs/fake.md", 1, c.text, c.target, c.line, row=loose_row) for c in found_cites]
+    for cite in loose:
+        cite.heirs = together.successors("src/fake.rs")
+    found = check(loose, dict(split_ledger), together, {"docs/fake.md": {}})
+    if [(v, d) for _, v, d in found] != [("moved", "src/fake/one.rs:7"), ("moved", "src/fake/one.rs:13")]:
+        bad.append(
+            "two sites of one row landing in one file of a split did not both read `moved` — the"
+            f" second message was charged to the first citation: {[(v, d) for _, v, d in found]}"
+        )
+    #     An anchor in BOTH halves is `ambiguous` — uniqueness is across the unit, not per file —
+    #     and one in neither is `gone`. Neither is offered a relocation.
+    both_halves = FakeUnit({**halves, "src/fake/three.rs": [SELF_APART[3]]})
+    only = [c for c in found_cites if c.line == 4]
+    only[0].heirs = both_halves.successors("src/fake.rs")
+    found = check(only, dict(split_ledger), both_halves)
+    if [v for _, v, _ in found] != ["ambiguous"] or relocate(found)[0]:
+        bad.append(f"an anchor in two files of a split was not `ambiguous` — got {found}")
+    neither = FakeUnit({"src/fake/one.rs": SELF_APART[:3], "src/fake/two.rs": SELF_APART[6:]})
+    #     The tie provenance breaks: the line has a twin in another file, the ledger recorded no
+    #     window because it was unique in the one file, and the commit that wrote the citation still
+    #     has the old file — so its neighbours there name one of the two. The same twin with no
+    #     history to read stays `ambiguous`, which is the half that keeps this from being a guess.
+    class Remembers(FakeUnit):
+        def at(self, sha, rel):
+            return SELF_APART if rel == "src/fake.rs" else self._now.get(rel)
+
+    twin = Remembers({**halves, "src/fake/three.rs": ["fn x() {}", SELF_APART[3], "fn y() {}"]})
+    only[0].heirs = twin.successors("src/fake.rs")
+    wrote = {"docs/fake.md": {1: "0" * 39 + "1"}}
+    found = check(only, dict(split_ledger), twin, wrote)
+    if [(v, d) for _, v, d in found] != [("moved", "src/fake/one.rs:5")]:
+        bad.append(f"the old file's neighbours did not break a tie across the split — got {found}")
+    found = check(only, dict(split_ledger), twin, dict(wrote), history=False)
+    if [v for _, v, _ in found] != ["ambiguous"]:
+        bad.append(f"a tie across a split was broken with no history to read — got {found}")
+    only[0].heirs = neither.successors("src/fake.rs")
+    found = check(only, dict(split_ledger), neither)
+    if [v for _, v, _ in found] != ["gone"] or relocate(found)[0]:
+        bad.append(f"an anchor in no file of a split was not `gone` — got {found}")
+    #     And the misanchor rule still speaks across the move: a row quoting words the anchor's
+    #     new file holds at another line is `misanchored`, not relocated onto the wrong one.
+    wrong = Cite("docs/fake.md", 1, "src/fake.rs:1", "src/fake.rs", 1,
+                 row=row_for("src/fake.rs:1", "the disk is full"))
+    wrong.heirs = sorted(halves)
+    found = check([wrong], {"src/fake.rs:1": {"line": norm(SELF_APART[0])}}, split)
+    if [v for _, v, _ in found] != ["misanchored"] or "src/fake/one.rs:5" not in found[0][2]:
+        bad.append(f"a split citation off its row's words was not `misanchored` — got {found}")
+
     # 17. A `historical` declaration exempts the misanchor verdict too — a row that is the record
     #     of what WAS wrong is expected not to find its words in the tree.
     hist_row = {"src/fake.rs:4": {"historical": "the six copies SKEIN-756 deleted"}}
@@ -2227,6 +2514,7 @@ def main(argv):
         f"; {skipped['pinned']} in a document declaring its own commit"
         f", {skipped['ambiguous']} naming several files"
         f", {skipped['unresolvable']} naming none (prose-check's finding)"
+        f", {skipped['split']} naming a file split into a directory, followed into it"
     )
     # What the misanchor rule could speak about, printed whether or not it found anything. A
     # reader cannot otherwise tell "no citation names the wrong line" from "nothing was read".

@@ -524,7 +524,7 @@ pub(crate) fn bwrap_works() -> bool {
 ///
 /// **One caller so far, and the other is filed rather than assumed.**
 /// `place::tests::a_crossing_in_the_fleet_enters_the_box_without_sbx` uses this;
-/// `fleet::tests::a_stop_reaches_what_walked_out_of_the_tmux_tree` is the second fixture of the same
+/// `fleet::stop::tests::a_stop_reaches_what_walked_out_of_the_tmux_tree` is the second fixture of the same
 /// shape and still has the two trailing statements — three processes to strand rather than one, and
 /// its `while :; do sleep 0.5; done` has no minute to run out at all. That is SKEIN-1011, and the
 /// `Vec` below is a `Vec` for it rather than for the single anchor today's caller records.

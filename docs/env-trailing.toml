@@ -61,175 +61,175 @@ vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
 [leaks."src/files::file_api_lists_reads_and_guards_the_workspace"]
 vars = ["SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY"]
 
-[leaks."src/fleet::a_box_cloned_from_the_host_still_pushes_to_the_remote"]
+[leaks."src/fleet/checkout::a_box_cloned_from_the_host_still_pushes_to_the_remote"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::a_box_clones_one_branch_and_can_still_fetch_the_rest"]
+[leaks."src/fleet/paths::a_box_clones_one_branch_and_can_still_fetch_the_rest"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::a_box_is_handed_the_scratch_path_rather_than_left_to_derive_one"]
+[leaks."src/fleet/start::a_box_is_handed_the_scratch_path_rather_than_left_to_derive_one"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_box_is_restarted_but_never_repurposed"]
+[leaks."src/fleet/start::a_box_is_restarted_but_never_repurposed"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_box_is_told_who_it_commits_as_before_it_needs_to_know"]
+[leaks."src/fleet/declared::a_box_is_told_who_it_commits_as_before_it_needs_to_know"]
 vars = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_DIR", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_box_that_was_never_created_says_so_instead_of_looping"]
+[leaks."src/fleet/start::a_box_that_was_never_created_says_so_instead_of_looping"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_boxs_ceiling_protects_the_fleet_and_throttles_before_it_kills"]
+[leaks."src/fleet/limits::a_boxs_ceiling_protects_the_fleet_and_throttles_before_it_kills"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_boxs_disk_allowance_is_its_own_and_changes_without_a_restart"]
+[leaks."src/fleet/declared::a_boxs_disk_allowance_is_its_own_and_changes_without_a_restart"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_boxs_paths_avoid_everything_its_namespace_binds_over"]
+[leaks."src/fleet/paths::a_boxs_paths_avoid_everything_its_namespace_binds_over"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::a_checkout_with_no_placement_record_stops_the_census"]
+[leaks."src/fleet/resize::a_checkout_with_no_placement_record_stops_the_census"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_detached_run_hands_tmux_a_filename_rather_than_a_script"]
+[leaks."src/fleet/server::a_detached_run_hands_tmux_a_filename_rather_than_a_script"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::a_fleet_is_proposed_from_what_the_machine_actually_has"]
+[leaks."src/fleet/create::a_fleet_is_proposed_from_what_the_machine_actually_has"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_fleet_skein_cannot_see_is_not_a_fleet_it_creates"]
+[leaks."src/fleet/create::a_fleet_skein_cannot_see_is_not_a_fleet_it_creates"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_fleet_that_never_placed_a_box_takes_an_empty_census"]
+[leaks."src/fleet/resize::a_fleet_that_never_placed_a_box_takes_an_empty_census"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_live_session_the_record_cannot_address_is_ended_and_relaunched_not_believed"]
+[leaks."src/fleet/declared::a_live_session_the_record_cannot_address_is_ended_and_relaunched_not_believed"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_login_read_that_failed_moves_nothing_and_says_so"]
+[leaks."src/fleet/fleetlogin::a_login_read_that_failed_moves_nothing_and_says_so"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_migrated_boxs_conversation_follows_it_to_the_new_checkout"]
+[leaks."src/fleet/transcript::a_migrated_boxs_conversation_follows_it_to_the_new_checkout"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_model_that_says_the_login_is_dead_is_a_dead_login"]
+[leaks."src/fleet/fleetlogin::a_model_that_says_the_login_is_dead_is_a_dead_login"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_placement_record_that_will_not_parse_fails_the_census_rather_than_shrinking_it"]
+[leaks."src/fleet/resize::a_placement_record_that_will_not_parse_fails_the_census_rather_than_shrinking_it"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_places_directory_that_cannot_be_listed_fails_the_census"]
+[leaks."src/fleet/resize::a_places_directory_that_cannot_be_listed_fails_the_census"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_recorded_start_failure_keeps_the_clause_that_says_what_to_do"]
+[leaks."src/fleet/start::a_recorded_start_failure_keeps_the_clause_that_says_what_to_do"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_refusal_that_could_not_count_the_boxes_says_so_rather_than_saying_none"]
+[leaks."src/fleet/create::a_refusal_that_could_not_count_the_boxes_says_so_rather_than_saying_none"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_repair_that_cannot_ask_sbx_asks_where_it_is_running_instead"]
+[leaks."src/fleet/start::a_repair_that_cannot_ask_sbx_asks_where_it_is_running_instead"]
 vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]
 
-[leaks."src/fleet::a_repo_that_lives_outside_the_workspace_is_still_mounted"]
+[leaks."src/fleet/create::a_repo_that_lives_outside_the_workspace_is_still_mounted"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_repos_store_is_reachable_at_the_same_path_inside_the_fleet_sandbox"]
+[leaks."src/fleet/create::a_repos_store_is_reachable_at_the_same_path_inside_the_fleet_sandbox"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::a_resize_copies_the_whole_box_to_a_place_the_rebuild_cannot_reach"]
+[leaks."src/fleet/paths::a_resize_copies_the_whole_box_to_a_place_the_rebuild_cannot_reach"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::a_review_box_stands_at_the_commit_and_never_on_a_branch"]
+[leaks."src/fleet/checkout::a_review_box_stands_at_the_commit_and_never_on_a_branch"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::after_login_clears_this_processes_refusal_and_says_what_the_share_did"]
+[leaks."src/fleet/fleetlogin::after_login_clears_this_processes_refusal_and_says_what_the_share_did"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::dockers_pool_is_hidden_from_the_box_enumeration_it_sits_beside"]
+[leaks."src/fleet/paths::dockers_pool_is_hidden_from_the_box_enumeration_it_sits_beside"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::every_ceiling_doctor_reads_is_one_the_fleet_actually_sets"]
+[leaks."src/fleet/limits::every_ceiling_doctor_reads_is_one_the_fleet_actually_sets"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::every_claim_on_the_sandbox_together_leaves_it_room_to_answer"]
+[leaks."src/fleet/limits::every_claim_on_the_sandbox_together_leaves_it_room_to_answer"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::host_trust_covers_the_remote_a_box_pushes_to"]
+[leaks."src/fleet/hosts::host_trust_covers_the_remote_a_box_pushes_to"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::making_a_fleet_with_no_warden_says_what_to_type_and_what_declining_costs"]
+[leaks."src/fleet/create::making_a_fleet_with_no_warden_says_what_to_type_and_what_declining_costs"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_WARDEN"]
 
-[leaks."src/fleet::nothing_here_attaches_to_a_boxs_own_tmux_socket"]
+[leaks."src/fleet/start::nothing_here_attaches_to_a_boxs_own_tmux_socket"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::nothing_the_sandbox_builds_skein_with_is_writable_by_a_box"]
+[leaks."src/fleet/install::nothing_the_sandbox_builds_skein_with_is_writable_by_a_box"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::starting_a_box_hands_the_launcher_quoted_arguments"]
+[leaks."src/fleet/start::starting_a_box_hands_the_launcher_quoted_arguments"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_archive_is_not_written_through_a_link_left_at_its_path"]
+[leaks."src/fleet/resize::the_archive_is_not_written_through_a_link_left_at_its_path"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_base_branch_is_whatever_the_remote_actually_has"]
+[leaks."src/fleet/checkout::the_base_branch_is_whatever_the_remote_actually_has"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place"]
+[leaks."src/fleet/install::the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::the_change_start_is_asked_of_the_box_and_survives_not_knowing"]
+[leaks."src/fleet/checkout::the_change_start_is_asked_of_the_box_and_survives_not_knowing"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::the_cockpits_port_is_a_recipe_a_person_runs_and_never_a_command_skein_runs"]
+[leaks."src/fleet/server::the_cockpits_port_is_a_recipe_a_person_runs_and_never_a_command_skein_runs"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_conversation_carried_across_is_the_biggest_one_not_the_busiest_directory"]
+[leaks."src/fleet/transcript::the_conversation_carried_across_is_the_biggest_one_not_the_busiest_directory"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_copy_is_deleted_once_it_is_back_and_never_before"]
+[leaks."src/fleet/resize::the_copy_is_deleted_once_it_is_back_and_never_before"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_copy_runs_as_root_at_both_ends_because_a_box_is_not_all_readable_by_one_user"]
+[leaks."src/fleet/resize::the_copy_runs_as_root_at_both_ends_because_a_box_is_not_all_readable_by_one_user"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_create_line_names_the_volume_and_every_repo_outside_it"]
+[leaks."src/fleet/create::the_create_line_names_the_volume_and_every_repo_outside_it"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::the_create_publishes_the_cockpits_port_and_the_readme_agrees"]
+[leaks."src/fleet/server::the_create_publishes_the_cockpits_port_and_the_readme_agrees"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::the_fleet_sandbox_is_agentless_and_mounts_the_store_parent"]
+[leaks."src/fleet/create::the_fleet_sandbox_is_agentless_and_mounts_the_store_parent"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::the_fleets_disk_size_travels_in_the_environment_not_the_argv"]
+[leaks."src/fleet/create::the_fleets_disk_size_travels_in_the_environment_not_the_argv"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::the_host_and_the_launcher_agree_on_what_a_login_is"]
+[leaks."src/fleet/login::the_host_and_the_launcher_agree_on_what_a_login_is"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::the_installed_launcher_knows_which_launcher_it_is"]
+[leaks."src/fleet/launcher::the_installed_launcher_knows_which_launcher_it_is"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_launcher_is_handed_the_shared_ceilings_as_well_as_the_boxs_own"]
+[leaks."src/fleet/limits::the_launcher_is_handed_the_shared_ceilings_as_well_as_the_boxs_own"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_lifecycle_refusal_prices_the_destroy_in_boxes_and_keeps_the_line"]
+[leaks."src/fleet/create::the_lifecycle_refusal_prices_the_destroy_in_boxes_and_keeps_the_line"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/fleet::the_reason_a_box_never_started_survives_the_terminal_that_was_told_it"]
+[leaks."src/fleet/start::the_reason_a_box_never_started_survives_the_terminal_that_was_told_it"]
 vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]
 
-[leaks."src/fleet::the_refusal_names_what_would_go_and_how_to_proceed_anyway"]
+[leaks."src/fleet/resize::the_refusal_names_what_would_go_and_how_to_proceed_anyway"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/fleet::the_two_elections_agree_on_which_login_is_best"]
+[leaks."src/fleet/login::the_two_elections_agree_on_which_login_is_best"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::the_two_writers_of_the_fleet_kit_agree"]
+[leaks."src/fleet/kit::the_two_writers_of_the_fleet_kit_agree"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/fleet::two_requests_at_once_create_the_fleet_once"]
+[leaks."src/fleet/create::two_requests_at_once_create_the_fleet_once"]
 vars = ["SKEIN_HOME"]
 
 [leaks."src/gitgate::a_box_is_not_told_it_holds_a_token_nothing_ever_seeded"]
