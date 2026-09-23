@@ -126,6 +126,9 @@ unset SSH_ASKPASS
 #     one.
 #   * the rustup download: `--connect-timeout` and the same low-speed rule, and no `--max-time` —
 #     a total cap would end a slow but working download, which is exactly what this must not do.
+#   * the rustup-init binary the installer script downloads, with a curl of ITS own that sets no
+#     bound (SKEIN-1120): the same two, handed to it in a config file through CURL_HOME — see the
+#     install block below for why that reaches it.
 #   * the toolchain that installer then downloads, which is rustup's own downloader and not curl
 #     (SKEIN-1090): RUSTUP_DOWNLOAD_TIMEOUT. rustup 1.29.0's `src/download/mod.rs` hands it to the
 #     default (reqwest) backend as its read timeout, so it ends a connection that has sent nothing for
@@ -463,10 +466,27 @@ if ! cargo --version >/dev/null 2>&1; then
     say "$again."
     exit 1
   fi
+  # The installer's own download is a curl this file does not write (SKEIN-1120). rustup-init.sh
+  # 1.29.0 fetches the rustup-init BINARY in its `downloader()` with `--retry 3 -C -`, `--proto`,
+  # `--tlsv1.2`, `--ciphers`, `--silent --show-error --fail --location` and nothing that bounds a
+  # silence — so a mirror that accepts and then says nothing held a first install there, between
+  # the bounded curl above and the RUSTUP_DOWNLOAD_TIMEOUT at the top. What it does NOT pass is
+  # `-q`, so curl reads a config file first, and CURL_HOME says where: the same two bounds as the
+  # curl above, written where only this invocation looks. Each attempt then ends after `$stall`
+  # seconds of nothing; curl retries a timeout, so a dead mirror costs four attempts and the
+  # script's own backoff, not an evening. It lives in the private toolchain directory, which this
+  # file already made, and is rewritten each time rather than removed — no `mktemp` or `rm` here.
+  # A `~/.curlrc` of the sandbox's own is not read by that one invocation; a proxy is still honoured
+  # through `https_proxy`, which curl reads from the environment and not from the file.
+  curl_home="$toolchain/curl-home"
+  mkdir -p "$curl_home"
+  printf 'connect-timeout = %s\nspeed-limit = 1000\nspeed-time = %s\n' "$stall" "$stall" \
+    > "$curl_home/.curlrc"
   # Checked rather than left to `set -e`, which would end the run here with rustup's own line as the
   # last word — "operation timed out" and a URL, with nothing saying that it was the toolchain
   # download, that it was given up on deliberately, or what to do (SKEIN-1090).
-  if ! printf '%s\n' "$rustup_sh" | sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null; then
+  if ! printf '%s\n' "$rustup_sh" \
+    | CURL_HOME="$curl_home" sh -s -- -y --no-modify-path --default-toolchain stable >/dev/null; then
     say "rustup could not download the Rust toolchain (its reason is the line above; a download"
     say "that sends nothing for $stall seconds is given up on rather than waited on), so the build"
     say "cannot start. Check that this sandbox can reach static.rust-lang.org, then $again."
