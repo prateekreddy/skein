@@ -159,7 +159,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   time. The receipt and undo themselves are untouched and still carry every verdict.
 - **~~Approving with skein's own review~~ — cut, and the rule it was an exception to stands.** One
   control used to post skein's drafted review as the approval body. Skein holds no review to post:
-  the session posts its own to GitHub under the reader's account (`src/review.rs`, `gh pr review`).
+  the session posts its own to GitHub under the reader's account (`src/review/asking.rs`, `gh pr review`).
   Verdicts themselves did not move — approve, request-changes and comment are still on the row
   (`revVerdictHtml`), and the keyboard still refuses `a` on a row that is not open.
 - **CODEOWNERS parsing and ownership attribution**, including the gitignore-anchoring rule and the
