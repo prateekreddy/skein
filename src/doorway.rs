@@ -141,9 +141,11 @@ pub fn close_on_exec(fd: RawFd) -> std::io::Result<()> {
 /// where the port is served, near the end of start-up — after `fleet::heal_fleet` has already
 /// started the fleet's tmux server and the watchers have been spawned. Every process started in
 /// between would inherit the socket whatever `adopt` then did. So this is the first thing `main`
-/// does, and it only reads: the descriptor is validated and taken later, by `inherited`, exactly as
-/// before. A descriptor that is not ours to take (`LISTEN_PID` naming somebody else, or a malformed
-/// count) is left alone here, because `inherited` refuses it with the reason and exits.
+/// does, and it only reads the descriptor's number: it is validated and taken later, by
+/// `inherited`, exactly as before. A descriptor that is not ours to take (`LISTEN_PID` naming
+/// somebody else, or a malformed count) is left alone here, because `inherited` refuses it with the
+/// reason and exits. It must run before [`from_environment`], which is what clears the variables
+/// this reads.
 pub fn keep_from_children() {
     let fds = std::env::var("LISTEN_FDS").ok();
     let pid = std::env::var("LISTEN_PID").ok();
@@ -196,33 +198,45 @@ pub unsafe fn adopt(fd: RawFd) -> Result<std::net::TcpListener, String> {
     ))
 }
 
-/// The socket skein was handed, if it was handed one.
+/// Which descriptor the environment says was handed in — and the two variables that said so,
+/// **cleared from the environment in the same breath** (SKEIN-1089).
+///
+/// Cleared so nothing downstream acts on them a second time. A child skein starts inherits this
+/// environment, and `LISTEN_PID` would no longer match — but a child that ignored it, or one handed
+/// `LISTEN_FDS` with no `LISTEN_PID` at all (the older half of the convention, which [`descriptor`]
+/// accepts), would take its own descriptor 3 for the cockpit's socket.
+///
+/// **It has to run before `skein-server` has a second thread or a first child, and `main` is built
+/// so that it does**: it is called beside [`keep_from_children`], and only then is the async
+/// runtime built. `remove_var` writes process-global state that another thread may be reading, which
+/// is why Rust 2024 marks it `unsafe`; and every process started before it inherits both variables.
+/// When `main` was `#[tokio::main]` the runtime's threads existed before its first line, and
+/// `heal_fleet` (which starts tmux) and the watchers ran before the variables were cleared.
+///
+/// Cleared whatever they said, a refusal included: the refusal is carried in the returned value,
+/// which `main` acts on where it serves the port, and the variables have nothing more to tell anyone.
+pub fn from_environment() -> Result<Option<RawFd>, String> {
+    let fds = std::env::var("LISTEN_FDS").ok();
+    let pid = std::env::var("LISTEN_PID").ok();
+    std::env::remove_var("LISTEN_FDS");
+    std::env::remove_var("LISTEN_PID");
+    descriptor(fds.as_deref(), pid.as_deref(), std::process::id())
+}
+
+/// The socket skein was handed, if it was handed one — `handed` being what [`from_environment`]
+/// read before anything else in the process existed.
 ///
 /// `Ok(None)` means nobody passed one — which [`inherited_only`] decides what to do about, since
 /// that answer is a deployment question and not this function's.
-pub fn inherited() -> Result<Option<std::net::TcpListener>, String> {
-    let fds = std::env::var("LISTEN_FDS").ok();
-    let pid = std::env::var("LISTEN_PID").ok();
-    let Some(fd) = descriptor(fds.as_deref(), pid.as_deref(), std::process::id())? else {
+pub fn inherited(
+    handed: Result<Option<RawFd>, String>,
+) -> Result<Option<std::net::TcpListener>, String> {
+    let Some(fd) = handed? else {
         return Ok(None);
     };
     // SAFETY: the descriptor came in across `exec` from whoever started this process; nothing in
     // skein has opened, duplicated or closed it, and `descriptor` refused everything below `FIRST`.
     let listener = unsafe { adopt(fd) }?;
-    // Cleared so nothing downstream acts on them a second time. A child skein spawns inherits this
-    // environment, and `LISTEN_PID` would no longer match — but a child that ignored it and adopted
-    // fd 3 anyway would be adopting the cockpit's own socket.
-    // `remove_var` mutates process-global state that other threads may be reading, and Rust 2024
-    // marks it `unsafe` for exactly that reason — this wants to run before anything else touches
-    // the environment or forks. It does not, in `skein-server`: `main` is `#[tokio::main]`, so the
-    // multi-thread runtime already exists by its first line, and several `tokio::spawn`s plus
-    // `heal_fleet` (which starts tmux) run before this function is ever called (SKEIN-1040). Every
-    // process started before this line inherits `LISTEN_FDS`/`LISTEN_PID` too, and is harmless only
-    // because its own pid never equals the `LISTEN_PID` it inherited, so `descriptor` refuses it
-    // rather than adopting silently. Clearing the two vars earlier — at the top of a hand-built
-    // `main`, beside `keep_from_children()` — would close that gap instead of relying on it.
-    std::env::remove_var("LISTEN_FDS");
-    std::env::remove_var("LISTEN_PID");
     Ok(Some(listener))
 }
 
