@@ -329,8 +329,8 @@ happened, and a push cannot be unseen. Four of its five
 rules are about *shape* — a host, a home directory, an email address, a credential prefix — each
 with an allow-list in `docs/residue.toml` carrying a reason per entry, so a new host is a line in a
 diff that somebody decided on. **It reads `git ls-files`**, so a file you have written but not
-staged is invisible to it: `git add` first, or it will be green about a tree that does not include
-your change.
+staged is invisible to it: `git add -N` it first (rule 5 below says why not a plain `git add`), or it
+will be green about a tree that does not include your change.
 
 The fifth rule is a literal denylist, and it is the one whose list is **not in this repository**.
 Publishing the strings that were removed from every commit, each with a sentence saying whose it
@@ -503,6 +503,35 @@ argue with — a prohibition on its own is just something to route around.
    The code was right at `HEAD` afterwards and only the authorship was wrong, which is luck rather
    than design. **Stage and commit in one breath**, or use `git add -N`, which lets the gate see a
    new file without its content entering the index.
+
+   **A path on the command line means the working tree, not what you staged** — on a plain commit
+   and on `--amend` alike (SKEIN-671). `git commit -- <path>` and `git commit --amend --only --
+   <path>` both re-read that path from disk, and whatever another author has written into the file
+   goes with it. It happened twice in one repair: a two-line doc fix committed its file whole and
+   carried 65 lines of another agent's unfinished work, and the correction — the right blob put
+   into the index with `git hash-object -w` and `git update-index --cacheinfo`, then `git commit
+   --amend --no-edit --only -- <paths>` — re-read the same four files from disk and produced a
+   commit identical to the one it was fixing, reporting success. Measured in a throwaway repository
+   on git 2.53: with `-- <path>`, with or without `--only`, the amend commits the working-tree file;
+   a bare `git commit --amend --no-edit` commits the index as it stands. So to correct one file in a
+   commit **without touching the working file**, which matters when another agent may be writing it
+   that second: `hash-object -w`, `update-index --cacheinfo`, and a bare `--amend`. And after any
+   commit that names a file somebody else may hold, read `git show --stat` and compare its line
+   count with the lines you changed: `74 ++++` for a three-line edit is how this was caught.
+
+   **And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence
+   is a promise not to rewrite. Twelve commits were rebased here to move one out of the middle of the
+   chain; every sha changed, and several agents had already filed tracker completions citing the old
+   ones, which then named commits that were not on `master`. On the same day an agent told to amend
+   its own commit to add a trailer found two other agents' commits already on top of it, landed in
+   the previous two minutes and not yet cited, and stopped rather than rewrite them — waiting for
+   them to finish would only have moved the damage later, because their shas change whether the
+   rewrite comes before or after they cite them. The commit went without the trailer. So: amend
+   only a commit nothing sits on and nothing has cited; do not rebase unpushed history while
+   other agents are committing to the same branch; and a commit that cannot be pushed stays at the
+   tip from the start rather than being found in the way later. No gate enforces this — the
+   citations it protects are in the tracker, which no gate reads; `citation-check` catches the
+   same breakage only where a sha is cited in `docs/`.
 
 6. **Structural cuts: snapshot, match at the symbol's own indent, check the delta.** Before deleting
    a function or a block: copy the file somewhere of your own first (not git — you will want the
