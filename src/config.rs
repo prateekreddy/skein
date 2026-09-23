@@ -548,7 +548,7 @@ pub fn update_config<T>(f: impl FnOnce(&mut Config) -> Result<T, String>) -> Res
         //
         // **This one is for a closure that READS the name.** `api_fleet_create` returns
         // `config.fleet_sandbox` out of its closure and its caller refuses on an empty one
-        // (`src/bin/skein-server.rs:3552`); with a blank on disk that refusal fired on a fleet whose
+        // (`src/bin/skein-server/fleet.rs:270`); with a blank on disk that refusal fired on a fleet whose
         // every other reader had been handed `skein-fleet`. Repairing before `f` is the only thing
         // that can reach a closure's read — the repair below runs after the closure has already
         // answered.
@@ -712,7 +712,7 @@ mod tests {
     /// Stated as an invariant rather than as the case that found it, because the case was only one
     /// route: `POST /api/settings -d '{"fleet_sandbox":""}'` answered 200 and left `""` in the file
     /// while `GET /api/settings` went on reporting `skein-fleet`, since the GET returns
-    /// `load_config()` (`src/bin/skein-server.rs:2983`), which repairs a blank, and the POST writes
+    /// `load_config()` (`src/bin/skein-server/settings.rs:244`), which repairs a blank, and the POST writes
     /// through `update_config`, which read the raw file and never saw the repair. Asserting that one
     /// POST would leave every other writer free to reintroduce it.
     ///
@@ -831,7 +831,7 @@ mod tests {
     /// caller's closure — too late to be of any use to a closure that reads the field. This is the
     /// other half, and it is a different defect rather than a restatement: `api_fleet_create`
     /// returns `config.fleet_sandbox.trim()` out of its closure and refuses on an empty one
-    /// (`src/bin/skein-server.rs:3552`, `no fleet sandbox is named (fleet_sandbox is empty)`), so
+    /// (`src/bin/skein-server/fleet.rs:270`, `no fleet sandbox is named (fleet_sandbox is empty)`), so
     /// with `""` on disk a create failed on a fleet that every other reader — the pane, the board,
     /// all ~43 `place::fleet_sandbox` callers — had been told was `skein-fleet`. Measured: against a
     /// server with one repair and not the other, that refusal was still reachable on the FIRST such

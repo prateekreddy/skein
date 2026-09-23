@@ -217,7 +217,7 @@ function alive(pid) {
 //
 // **Both binaries, not just the server.** Launching a box is not something `skein-server` does in
 // process: the terminal route runs `sh -c "<skein> start <box> --branch … --attach"` on a PTY
-// (src/bin/skein-server.rs, `terminal_session`), and `sandbox::skein_exe` resolves that `<skein>` as
+// (src/bin/skein-server/terminal.rs, `terminal_session`), and `sandbox::skein_exe` resolves that `<skein>` as
 // the sibling of the running `skein-server`, falling back to the bare name `skein` when there is
 // none. With only `--bin skein-server` built there was no sibling, the bare name was not on `$PATH`,
 // and the PTY died with `skein: not found` — no box, no provisioning, and an EMPTY terminal, because

@@ -53,7 +53,7 @@ const LAUNCH_CMD =
   `(*) exec sleep 300 ;; ` +
   `esac`;
 
-// RFC 6455's private range, agreed with `src/bin/skein-server.rs` and `src/web/index.html` and
+// RFC 6455's private range, agreed with `src/bin/skein-server/terminal.rs` and `src/web/index.html` and
 // spelled here rather than imported because a constant read out of the thing under test is not a
 // check of it.
 const CLOSE_NOTHING_TO_RECONNECT = 4001;

@@ -387,7 +387,7 @@ mod tests {
 
     /// The path reaches the box's shell inside quotes, and nowhere else.
     ///
-    /// `rel` is chosen by whoever opened the Files tab — `skein-server.rs` hands the route's path
+    /// `rel` is chosen by whoever opened the Files tab — `skein-server/boxes.rs` hands the route's path
     /// segment to [`list_box_files`] and [`read_box_file`] verbatim — so it is a value from
     /// outside, spliced into a script that runs in a box.
     #[test]

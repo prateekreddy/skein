@@ -1,0 +1,577 @@
+//! The board's boxes: what needs you and what happened while you were away, creating a box and
+//! watching its act, and the per-box routes — its transcript, diff, files, session and mail, and
+//! the presses that resume, restart, stop or destroy it.
+
+use super::*;
+
+/// Everything that stopped and is waiting on you, most urgent first.
+///
+/// **Not on the two-second tick.** The pull-request half comes from `prq::queue`'s own 60-second
+/// cache, so a surface rendering this often still reaches GitHub once a minute per repo — but it is
+/// a surface's call rather than the board's, which is what keeps `signal::board_tick` honest.
+pub(super) async fn api_queue() -> Json<serde_json::Value> {
+    let rows = tokio::task::spawn_blocking(skein::queue::who_needs_you)
+        .await
+        .unwrap_or_default();
+    // **The standing travels with the rows it was derived from.** `queue::standing` reads the same
+    // list, so a client that asked for one and computed the other would be a second implementation
+    // of the rule — and the two disagree the day the rule changes, in the direction of a board that
+    // says "nothing needs you" over a list of things that do.
+    //
+    // `waiting` rather than `rows`, because `Standing::NeedsYou` serialises its own `rows` count and
+    // two fields of that name in one document is a footgun for whoever reads it next.
+    Json(serde_json::json!({
+        "standing": skein::queue::standing(&rows),
+        "waiting": rows,
+    }))
+}
+
+/// What happened since the board was last acknowledged, and the standing that goes with it.
+///
+/// Answered by the **server**, which is the whole design: a client-side delta computed on tab focus
+/// cannot survive a reload, cannot tell a box that finished while you were away from one that
+/// finished before the tab was opened, and is wrong for every second tab. Three failures that all
+/// look like the feature working.
+pub(super) async fn api_away() -> Json<serde_json::Value> {
+    let (since, moments, rows) = tokio::task::spawn_blocking(|| {
+        let since = skein::stream::last_seen();
+        let moments = skein::stream::since(&since);
+        (since, moments, skein::queue::who_needs_you())
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({
+        "since": since,
+        "moments": moments,
+        "standing": skein::queue::standing(&rows),
+    }))
+}
+
+/// Acknowledge everything up to now.
+///
+/// The timestamp is the server's. A client that supplied its own would be choosing which moments it
+/// is never shown, and a clock a minute fast would silently swallow a minute of them.
+pub(super) async fn api_seen() -> Response {
+    match tokio::task::spawn_blocking(skein::stream::acknowledge).await {
+        Ok(Ok(at)) => Json(serde_json::json!({ "at": at })).into_response(),
+        Ok(Err(why)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Start creating a box, and hand back the act to watch.
+///
+/// **Not a POST that returns 201.** Creating a box is minutes of clone, substrate and provisioning,
+/// and §2.5 is explicit that an Act is streaming and unacknowledged — so what a caller gets is the
+/// identity of something running, which it can watch, poll, or come back to after its stream has
+/// closed. That last one is the property a plain POST would lose and the reason
+/// `fleet::remember_start_failure` had to exist.
+pub(super) async fn api_create_box(
+    Path(name): Path<String>,
+    Json(body): Json<CreateBox>,
+) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let branch = body.branch.trim().to_string();
+    if branch.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a box is created on a branch").into_response();
+    }
+    let agent = body.agent.filter(|a| skein::runtime::valid_runtime(a));
+    let id = skein::act::creating(&name);
+    let boxed = name.clone();
+    // `Attach::No`: the terminal path ends by attaching because a person is already looking at it.
+    // A surface that is not a terminal wants the box made and will attach separately, or not at all
+    // — and an attach with nobody on the other end is a tmux session talking to a closed pipe.
+    let command = tokio::task::spawn_blocking(move || {
+        skein::sandbox::launch_command_as(
+            &name,
+            &branch,
+            agent.as_deref(),
+            skein::sandbox::Attach::No,
+        )
+    })
+    .await
+    .unwrap_or_default();
+    match skein::act::begin(&id, &command) {
+        Ok(look) => {
+            keep_a_launch_that_never_ran(id.clone(), boxed);
+            (StatusCode::ACCEPTED, Json(look)).into_response()
+        }
+        // 409, because the thing that stops a second create is that one is already running — which
+        // is a conflict rather than a bad request, and the message says which act to watch.
+        Err(why) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response(),
+    }
+}
+
+/// Follow a create act to its end, and keep the reason when its command never ran.
+///
+/// **The transcript is not the record.** An act holds what the command said for `act::RETENTION`
+/// and then forgets it, and it is only ever in this server's memory — so a create that died because
+/// `skein` could not be executed leaves nothing behind, and the next surface to ask about the box
+/// reads `starts/<box>.err`, finds nothing, and says no start was attempted (SKEIN-589). The
+/// terminal route keeps the same reason the same way; two launch surfaces that answer differently
+/// about the same failure is what one of these is for.
+fn keep_a_launch_that_never_ran(id: String, name: String) {
+    tokio::spawn(async move {
+        let Some((_, mut rest)) = skein::act::watch(&id) else {
+            return;
+        };
+        // Drained to the end rather than polled: the empty chunk is the act's own "there will be no
+        // more", and a closed channel is the only other thing that cannot be mistaken for a slow act.
+        loop {
+            match rest.recv().await {
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+        let Some(look) = skein::act::look(&id) else {
+            return;
+        };
+        // `-1` is act's word for "killed by a signal", which is not an exit code and not this
+        // failure; `u32::try_from` is what refuses it rather than a second check that could disagree.
+        let skein::act::State::Ended { code } = look.state else {
+            return;
+        };
+        let Ok(code) = u32::try_from(code) else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || {
+            skein::sandbox::remember_launch_never_ran(&name, code)
+        })
+        .await;
+    });
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct CreateBox {
+    branch: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// What an act is doing, and everything it has said. Readable after it has ended, which is the
+/// whole point.
+pub(super) async fn api_act(Path(id): Path<String>) -> Response {
+    match skein::act::look(&id) {
+        Some(look) => Json(look).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no such act — it may have finished longer ago than the warden keeps them"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// Follow an act: what it has already said, then the rest as it arrives.
+///
+/// Both from one call, because taking them separately loses whatever the act said in between — for
+/// a create, the line that mattered.
+pub(super) async fn act_stream(
+    ws: WebSocketUpgrade,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin stream blocked").into_response();
+    }
+    let Some((so_far, rest)) = skein::act::watch(&id) else {
+        return (StatusCode::NOT_FOUND, "no such act").into_response();
+    };
+    ws.on_upgrade(move |mut socket| async move {
+        if !so_far.is_empty() && socket.send(Message::Text(so_far)).await.is_err() {
+            return;
+        }
+        let mut rest = rest;
+        loop {
+            match rest.recv().await {
+                // The empty chunk the act sends when it ends. A closed socket is the only signal a
+                // watcher cannot mistake for a slow act.
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(chunk) => {
+                    if socket.send(Message::Text(chunk)).await.is_err() {
+                        return;
+                    }
+                }
+                // Lagged: this watcher fell behind the buffer. Told, never silently skipped —
+                // §10.1's rule, and the alternative is a transcript with a hole nobody can see.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    let _ = socket
+                        .send(Message::Text(format!(
+                            "\r\n… {missed} lines were dropped because this window fell behind …\r\n"
+                        )))
+                        .await;
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = socket.close().await;
+    })
+}
+
+/// Snapshot of the fleet, on request. `load_views` is blocking, so it runs on the blocking pool and
+/// never inline on an async worker — see `start_producing` for why blocking a worker stalls every
+/// terminal websocket scheduled on it.
+///
+/// Still here after the stream became one producer, and for two reasons: a surface that wants the
+/// picture once should not have to open a stream to get it, and it is what a client re-syncs from
+/// when it is told it has fallen behind.
+pub(super) async fn api_boxes() -> Json<Vec<BoxView>> {
+    let views = tokio::task::spawn_blocking(|| load_views().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    Json(views)
+}
+
+/// Provider-neutral custom footer. Claude renders it natively from stdin; Codex maps its latest
+/// token_count event (the `/status` data source) through the same renderer for the browser terminal.
+pub(super) async fn api_statusline(Path(name): Path<String>) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::probes::agent_statusline(&name)).await {
+        Ok(Ok(line)) => Json(serde_json::json!({ "line": line })).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct TakeoverReq {
+    target: String,
+}
+
+pub(super) async fn api_takeover(
+    Path(name): Path<String>,
+    Json(request): Json<TakeoverReq>,
+) -> Response {
+    if !skein::util::valid_name(&name) || !skein::runtime::valid_runtime(&request.target) {
+        return (StatusCode::BAD_REQUEST, "invalid box or target runtime").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::takeover::replace_box(&name, &request.target))
+        .await
+    {
+        Ok(Ok(replacement)) => Json(replacement).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The box's conversation as its own record has it — survives a reboot, a server restart, a page
+/// reload and the scrollback limit, none of which the rendered terminal does. `?bytes=` is how much
+/// of the tail to read; the cockpit doubles it to page backwards.
+pub(super) async fn api_transcript(
+    Path(name): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let bytes = q
+        .get("bytes")
+        .and_then(|b| b.parse::<u64>().ok())
+        .unwrap_or(256 * 1024);
+    match tokio::task::spawn_blocking(move || skein::transcript::read_transcript(&name, bytes))
+        .await
+    {
+        Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The branch-vs-base patch a box last reported (plain text; empty when none yet).
+pub(super) async fn api_diff(Path(name): Path<String>) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    // Computed inside the box, so it forks a git in a sandbox — off the async runtime, like every
+    // other blocking box call.
+    let view = tokio::task::spawn_blocking(move || skein::diff::box_diff(&name))
+        .await
+        .ok()
+        .flatten();
+    match view {
+        Some(view) => Json(view).into_response(),
+        None => Json(serde_json::json!({
+            "patch": "",
+            "base": "",
+            "source": "none",
+            "note": "no diff yet — start the box, or wait for it to finish a turn",
+        }))
+        .into_response(),
+    }
+}
+
+/// List a directory in a box's host-side workspace (`?path=rel/dir`, default root). Traversal,
+/// absolute paths, and symlink escapes are rejected in the lib (resolve_in_workspace).
+pub(super) async fn api_files(
+    Path(name): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let rel = q.get("path").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || skein::files::list_box_files(&name, &rel))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(listing) => Json(listing).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
+    }
+}
+
+/// Read a file in a box's host-side workspace (`?path=rel/file`). Text-ish types are served as
+/// text/plain (the UI renders markdown itself), images with their own type so <img> works, and
+/// anything else as octet-stream. `X-Truncated: 1` marks a read capped at FILE_READ_CAP.
+pub(super) async fn api_file(
+    Path(name): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let rel = q.get("path").cloned().unwrap_or_default();
+    let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let res = tokio::task::spawn_blocking(move || skein::files::read_box_file(&name, &rel))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    let (bytes, truncated) = match res {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
+    };
+    // **An SVG is a document, not a picture**, and this route serves whatever is in a box's tree.
+    //
+    // It used to answer `image/svg+xml`, which means a `.svg` a box wrote — or one that arrived in a
+    // cloned repo — rendered as markup in the cockpit's own origin as soon as anybody navigated to
+    // this URL, with the session cookie attached to everything it then did. The in-page path was
+    // never the problem: the file viewer draws images with `<img src=…>`, which does not run script
+    // in an SVG. Direct navigation was, and a markdown link reaches it.
+    //
+    // So the inert types are named and everything else is a download. `octet-stream` plus an
+    // attachment disposition is the pair that matters — the type alone still lets a browser sniff,
+    // which is what `nosniff` on every response now also refuses.
+    let ct = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        _ if bytes.contains(&0) => "application/octet-stream", // NUL byte ⇒ not text
+        _ => "text/plain; charset=utf-8",
+    };
+    // `text/plain` is safe to render inline and is most of what this route serves, so only the
+    // genuinely opaque answers are pushed to a download.
+    let inline = ct != "application/octet-stream";
+    let mut response = (
+        [
+            (axum::http::header::CONTENT_TYPE, ct),
+            (
+                axum::http::HeaderName::from_static("x-truncated"),
+                if truncated { "1" } else { "0" },
+            ),
+        ],
+        bytes,
+    )
+        .into_response();
+    if !inline {
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_static("attachment"),
+        );
+    }
+    response
+}
+
+/// The free session digest for a box — "what happened here" assembled from commits, diff,
+/// the agent's journal, and its last reported message. No model tokens spent. 404 if unknown.
+pub(super) async fn api_session(Path(name): Path<String>) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::digest::session_digest(&name)).await {
+        Ok(Some(d)) => Json(d).into_response(),
+        _ => (StatusCode::NOT_FOUND, "no such box").into_response(),
+    }
+}
+
+/// All cross-box messages, newest first.
+pub(super) async fn api_mailbox() -> Json<Vec<skein::mailbox::Message>> {
+    Json(skein::mailbox::load_mailbox())
+}
+
+#[derive(Deserialize)]
+pub(super) struct SendReq {
+    to: String,
+    body: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Post a message into the shared mailbox (from skein). `to` is a vmid or "broadcast".
+pub(super) async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
+    if r.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty body").into_response();
+    }
+    let to = if r.to.trim().is_empty() {
+        "broadcast"
+    } else {
+        r.to.trim()
+    };
+    match skein::mailbox::send_message(to, &r.kind, &r.body) {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct RepinReq {
+    branch: String,
+}
+
+/// Re-pin an existing box's launch spec to a different branch, without relaunching it — for a box
+/// whose agent has moved off its recorded branch (e.g. branch-per-slice work) and keeps getting
+/// checked back onto the stale one every reconnect. Takes effect on the box's next reconnect.
+/// Returns {ok, error?}.
+pub(super) async fn api_repin(
+    Path(name): Path<String>,
+    Json(r): Json<RepinReq>,
+) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let branch = r.branch;
+    let res = tokio::task::spawn_blocking(move || skein::repos::repin_branch(&name, &branch)).await;
+    Json(match res {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct ResumeReq {
+    #[serde(default)]
+    prompt: String,
+}
+
+/// Resume a paused box (the one-click "continue" — step 6). Fire-and-forget: kicks off the box's
+/// agent headless and returns immediately; the inbox follows the box's own hooks. Returns {ok} or
+/// {ok:false, error}. Only ever called from an explicit click; batch use is gated to `proceed` boxes.
+pub(super) async fn api_resume(
+    Path(name): Path<String>,
+    body: Option<Json<ResumeReq>>,
+) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let prompt = body.map(|Json(b)| b.prompt).unwrap_or_default();
+    let r = tokio::task::spawn_blocking(move || skein::sandbox::resume_box(&name, &prompt)).await;
+    Json(match r {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct RestartAgentReq {
+    #[serde(default)]
+    runtime: String,
+}
+
+pub(super) async fn api_restart_agent(
+    Path(name): Path<String>,
+    body: Option<Json<RestartAgentReq>>,
+) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let runtime = body
+        .map(|Json(value)| value.runtime)
+        .filter(|value| !value.trim().is_empty());
+    let result = tokio::task::spawn_blocking(move || {
+        skein::sandbox::restart_agent_session(&name, runtime.as_deref())
+    })
+    .await;
+    Json(match result {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(error)) => serde_json::json!({ "ok": false, "error": error }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }),
+    })
+}
+
+/// Lazy AI narration of a box's last turn — the rationed Haiku fallback for the digest when the box
+/// keeps no journal (step 7). Returns {summary} (null when AI is off / unavailable). Called on demand
+/// only (Session-tab open), cached per turn-end; never per fleet tick.
+pub(super) async fn api_narrate(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(serde_json::json!({ "summary": null }));
+    }
+    let s = tokio::task::spawn_blocking(move || skein::ai::narrate(&name))
+        .await
+        .ok()
+        .flatten();
+    Json(serde_json::json!({ "summary": s }))
+}
+
+#[derive(Deserialize)]
+pub(super) struct BatchReq {
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+/// Batch-resume the boxes paused on a trivial "proceed?" (step 6). With AI on (step 7) each is first
+/// run past the conservative safety gate; genuine decisions are held back. Returns {ok, resumed, held}.
+pub(super) async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json::Value> {
+    let (resumed, held) =
+        tokio::task::spawn_blocking(move || skein::sandbox::resume_batch(&r.names))
+            .await
+            .unwrap_or_default();
+    Json(serde_json::json!({ "ok": true, "resumed": resumed, "held": held }))
+}
+
+/// Stop a box: halt the sandbox (frees compute; resume later via attach). Non-destructive — the box
+/// stays listed and goes stale until resumed. Returns {ok} or {ok:false, error}.
+pub(super) async fn api_stop(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let r = tokio::task::spawn_blocking(move || skein::sandbox::stop_box(&name)).await;
+    Json(match r {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Destroy a box: tear the sandbox down (sbx rm — reclaims its resources) then delist it.
+/// Destructive. Returns {ok} or {ok:false, error}.
+pub(super) async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let r = tokio::task::spawn_blocking(move || skein::sandbox::destroy_box(&name)).await;
+    Json(match r {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}

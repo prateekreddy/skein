@@ -514,7 +514,7 @@ function rustPrefixes(text) {
  * is measured rather than tidy.** Nine other sites build a scratch directory by hand there, and two
  * of them are not fixtures at all (`skein-req-`, `skein-hdr-` in `github.rs` are production request
  * bodies, which a live GitHub call really does create). One is worse than not a fixture:
- * `src/bin/skein-server.rs`'s `home_for` interpolates at the HEAD of its name, so its literal cut
+ * `src/bin/skein-server/review.rs`'s `home_for` interpolates at the HEAD of its name, so its literal cut
  * at the first `{` is the bare stem every other prefix in this repository begins with — and
  * [`fixtureRegex`] built on that stem matches the checkout path of this repository itself, on every
  * process that names it. A reader that swept the directory would have derived it the day it was
