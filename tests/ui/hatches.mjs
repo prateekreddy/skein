@@ -50,6 +50,8 @@ process.env.GITHUB_TOKEN = DEV_GITHUB_TOKEN;
 // here for the credentials' reason: a GitHub runner has never been under a doorway, so a check that
 // trusted the ambient value would assert nothing there while looking green in a box.
 process.env.SKEIN_LISTEN_INHERITED_ONLY = "1";
+// And the marker the box launcher exports into every box (SKEIN-1086), for the same reason.
+process.env.SKEIN_IN_BOX = "1";
 
 const t = harness();
 
@@ -257,14 +259,27 @@ try {
   //    **Both arms, and they differ.** The first is the pin: a suite that says nothing gets a server
   //    that is not the fleet's cockpit. The second is the hatch: a suite that means to say it is one
   //    still can, which is what `tests/server.rs` relies on to spawn both shapes.
+  //
+  //    **And `$SKEIN_IN_BOX` the same way** (SKEIN-1086). SKEIN-972 stopped the doorway's variable
+  //    reaching a box, and the launcher now marks a box with this one on purpose, so a server a box
+  //    starts still refuses the switch. That makes it ambient in a box too, with the same effect on
+  //    a suite, so the harness strips it and this checks both arms of it.
   {
     const saidNothing = await serverWith({});
     const saidItWasTheCockpit = await serverWith({ SKEIN_LISTEN_INHERITED_ONLY: "1" });
+    const saidItWasABox = await serverWith({ SKEIN_IN_BOX: "1" });
     const pin = "SKEIN_LISTEN_INHERITED_ONLY";
+    const marker = "SKEIN_IN_BOX";
     t.check(
       "a suite's server is not told it is the fleet's cockpit, and a suite that means to say so can",
       { whenTheSuiteSaysNothing: childVar(saidNothing.srv, pin),
         whenTheSuiteSaysItIs: childVar(saidItWasTheCockpit.srv, pin) },
+      { whenTheSuiteSaysNothing: "unset", whenTheSuiteSaysItIs: "1" },
+    );
+    t.check(
+      "a suite's server is not told it is inside a box, and a suite that means to say so can",
+      { whenTheSuiteSaysNothing: childVar(saidNothing.srv, marker),
+        whenTheSuiteSaysItIs: childVar(saidItWasABox.srv, marker) },
       { whenTheSuiteSaysNothing: "unset", whenTheSuiteSaysItIs: "1" },
     );
   }

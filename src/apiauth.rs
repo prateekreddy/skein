@@ -72,18 +72,20 @@ pub fn switch_set() -> bool {
 /// the server's environment at the exec, beside the listening descriptor, and nothing else in the
 /// tree writes it.
 ///
-/// **What it actually marks, measured rather than assumed.** Not the cockpit alone — the cockpit
-/// *and every process descended from it*, because a box session is started by the cockpit and
-/// inherits its environment. Read out of a box's own shell in this fleet, `env | grep SKEIN_LISTEN`
-/// answers `SKEIN_LISTEN_INHERITED_ONLY=1`, beside the `SKEIN_IN_FLEET=1` the live doorway's
-/// command line still carries. So a `skein-server` started *inside a box* with the switch set is
-/// refused too, and `tests/ui/harness/server.mjs` strips the variable for exactly that reason.
+/// **What it marks: the cockpit, and nothing a box starts.** It used to reach further, because a box
+/// session inherited the cockpit's whole environment: `env | grep SKEIN_LISTEN` in a box answered
+/// `SKEIN_LISTEN_INHERITED_ONLY=1`, so a `skein-server` started *inside a box* with the switch set
+/// was refused too — by a leak rather than by a decision. A box session now inherits only the
+/// launcher's allow-list (`inherited_env` in `src/box-session.sh`, SKEIN-972), and this variable is
+/// not on it. A box started before that still carries it until it restarts, which is why
+/// `tests/ui/harness/server.mjs` still strips it. The in-box half of the refusal is kept, on purpose
+/// now, by [`inside_a_box`] (SKEIN-1086).
 ///
-/// **That extent is right rather than a defect to be narrowed.** The switch's justification is "an
-/// owner who has some other boundary", and §9.4's answer to why there is none in-fleet is the
-/// shared network namespace — which a box is on. A server a box starts with auth off is reachable
-/// from every other box exactly as the cockpit is. What lies outside this is a machine that is not
-/// a skein fleet, and there the switch works exactly as it is documented to.
+/// **Why a box is refused as well as the cockpit.** The switch's justification is "an owner who has
+/// some other boundary", and §9.4's answer to why there is none in-fleet is the shared network
+/// namespace — which a box is on. A server a box starts with auth off is reachable from every other
+/// box exactly as the cockpit is. What lies outside both is a machine that is not a skein fleet, and
+/// there the switch works exactly as it is documented to.
 ///
 /// **A box cannot forge it in either direction, which is the property that matters.** A box setting
 /// this in its own shell changes its own processes and nothing about the cockpit: an environment is
@@ -98,12 +100,42 @@ fn under_the_fleets_doorway() -> bool {
     crate::doorway::inherited_only()
 }
 
+/// The variable the box launcher exports into every box's session, to say it is one.
+pub const IN_BOX: &str = "SKEIN_IN_BOX";
+
+/// Is this process inside a box — started from a box's session, which `src/box-session.sh` marks
+/// with [`IN_BOX`] on purpose (SKEIN-1086)?
+///
+/// **The deliberate replacement for a leak.** Until SKEIN-972 a server a box started carried the
+/// doorway's [`crate::doorway::INHERITED_ONLY`] by inheritance, and [`under_the_fleets_doorway`]
+/// refused the switch for it by accident. That variable means "exec'd by the doorway, holding its
+/// socket", which a box's server is not, and it also made such a server refuse to bind a port of its
+/// own. The question the refusal actually asks is "is this on the fleet's network namespace", and a
+/// box answers yes for the reason given under [`under_the_fleets_doorway`]. So the launcher says so
+/// in a variable of its own, and this reads it.
+///
+/// **What it can and cannot be made to say.** It cannot reach the cockpit: the doorway execs the
+/// cockpit, not a box, so setting it in a box changes that box's processes only. A box CAN unset it
+/// in its own shell and then start a server with the switch on. That is not a boundary this check
+/// could hold: a box that means to serve something unauthenticated on the shared namespace can do
+/// so with any program at all. What the check stops is the accident — an agent or a person running
+/// the documented switch inside a box and exposing the API to every other box without knowing it.
+fn inside_a_box() -> bool {
+    std::env::var(IN_BOX).is_ok_and(|value| value == "1")
+}
+
+/// Where the switch is refused: under the fleet's doorway, or inside a box.
+fn refused_here() -> bool {
+    under_the_fleets_doorway() || inside_a_box()
+}
+
 /// Is API auth switched off?
 ///
 /// For a fleet whose owner has some other boundary and does not want this one. Deliberately an env
 /// var and not a setting: a setting for it would be reachable through the very API it disarms.
 ///
-/// **Under the fleet's doorway the answer is no, whatever the variable says** (SKEIN-962, and
+/// **Under the fleet's doorway, or inside a box, the answer is no, whatever the variable says**
+/// (SKEIN-962 for the cockpit, SKEIN-1086 for a box; and
 /// architecture §9.4, which has said "in-fleet there is no such boundary, so the switch is refused"
 /// since it was written). The switch is for an owner who has some other boundary; here there is none to
 /// have — every box shares one network namespace with the cockpit's port, and the token is the
@@ -112,16 +144,17 @@ fn under_the_fleets_doorway() -> bool {
 /// branches on, and this staying `false` is the belt beside that brace — anything that reached a
 /// route despite the refusal is still asked for the token rather than waved through.
 pub fn disabled() -> bool {
-    switch_set() && !under_the_fleets_doorway()
+    switch_set() && !refused_here()
 }
 
 /// Is the auth-off switch set where it is refused?
 ///
 /// The cockpit serves [`off_switch_refusal`] and nothing else when this is true, and `skein doctor`
-/// reports the same thing. [`under_the_fleets_doorway`] is what "where" means, and why a box cannot
-/// choose the answer.
+/// reports the same thing. [`under_the_fleets_doorway`] and [`inside_a_box`] are what "where"
+/// means; the first is why a box cannot choose the cockpit's answer, the second what a box's own
+/// server is told.
 pub fn off_switch_refused() -> bool {
-    switch_set() && under_the_fleets_doorway()
+    switch_set() && refused_here()
 }
 
 /// What the cockpit says, and then serves, instead of starting with the switch on.
@@ -130,7 +163,8 @@ pub fn off_switch_refused() -> bool {
 /// because the second sentence is the one that stops this reading as skein being broken.
 pub fn off_switch_refusal() -> &'static str {
     "skein-server: $SKEIN_NO_API_AUTH is set and this server is running under the fleet's doorway \
-     ($SKEIN_LISTEN_INHERITED_ONLY=1), where the switch is refused (architecture §9.4).\n\
+     ($SKEIN_LISTEN_INHERITED_ONLY=1) or inside a box ($SKEIN_IN_BOX=1), where the switch is refused \
+     (architecture §9.4).\n\
      The switch exists for an owner who has some other boundary. Inside the sandbox there is no \
      other boundary to have: every box shares one network namespace with this port, so the fleet's \
      API token is the only thing standing between a box and /api/fleet/git-grants.\n\
@@ -366,5 +400,34 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "the fleet's API token was {mode:o}");
         }
+    }
+
+    /// **The switch is refused inside a box, and honoured where neither marker is set**
+    /// (SKEIN-1086).
+    ///
+    /// What would make each half fail: dropping [`inside_a_box`] from [`refused_here`] fails the
+    /// first (a box's own server takes the switch and serves the API unauthenticated to every other
+    /// box); making [`refused_here`] answer `true` unconditionally fails the second (the documented
+    /// switch stops working for an owner outside any fleet). The doorway half of the same rule is
+    /// the spawned test in `tests/server.rs`.
+    #[test]
+    fn the_switch_is_refused_inside_a_box_and_honoured_where_neither_marker_is_set() {
+        let _env = crate::testutil::env_lock();
+        std::env::set_var("SKEIN_NO_API_AUTH", "1");
+        std::env::remove_var(crate::doorway::INHERITED_ONLY);
+
+        std::env::set_var(IN_BOX, "1");
+        assert!(
+            off_switch_refused() && !disabled(),
+            "a server started inside a box honoured $SKEIN_NO_API_AUTH, so it serves the fleet's \
+             API unauthenticated to every box on the shared network namespace"
+        );
+
+        std::env::remove_var(IN_BOX);
+        assert!(
+            !off_switch_refused() && disabled(),
+            "with neither the doorway's variable nor the box marker set, the documented off-switch \
+             was refused anyway"
+        );
     }
 }

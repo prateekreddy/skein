@@ -1198,6 +1198,184 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     }
 }
 
+/// **A box's session gets the launcher's allow-list of the environment, and nothing else from the
+/// process that started it** (SKEIN-972).
+///
+/// The cockpit starts every box, so whatever the cockpit was started with used to be in every box:
+/// `SKEIN_HOME`, and `SKEIN_LISTEN_INHERITED_ONLY`, which the doorway sets for the cockpit alone.
+/// `src/box-session.sh` now keeps only the names on `inherited_env`, each with its reason.
+///
+/// Driven through the real mechanism: this process's environment stands for the cockpit's, because
+/// `Place::exec` spawns the launcher exactly as `skein-server` does, and the answer is read from a
+/// file the box's own agent wrote from inside its namespace. Asking the running box instead would
+/// be wrong: a crossing enters through `nsenter` with an environment of its own and reports that.
+///
+/// What would make each assertion fail:
+///   * the canary: putting `SKEIN_TEST_LEAK_CANARY` on the list, or deleting the filter. A name no
+///     list would carry is what tells an allow-list from a deny-list of the names noticed so far.
+///   * the cockpit's three: deleting the filter.
+///   * the exported function: deleting the launcher's `exec env -u …` that drops names bash cannot
+///     unset.
+///   * `SANDBOX_NAME`: a filter that removes everything, which would also take the proxy and the
+///     credential placeholders every box needs.
+///   * `SKEIN_BOX`: running the filter after the launcher's own exports rather than before them.
+///   * `SKEIN_IN_BOX`: deleting the launcher's `export SKEIN_IN_BOX=1` (SKEIN-1086).
+///
+/// Only names and two chosen values leave the box: the fixture is kept when a test fails, and the
+/// environment of a developer's box carries real credentials.
+#[test]
+fn a_box_session_inherits_only_its_allow_list() {
+    let _env = env_lock();
+    // The real crossing is the subject, as in the test above.
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so it cannot host a box",
+        );
+    }
+    // Its own name, so its cgroup cannot be another test's, in this binary or in another run.
+    let name = "envlist-main";
+    let root = scratch_named("env");
+    let sandbox_home = sandbox_home_with_agent(&root);
+
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        // What must not arrive: a name nobody would list, and the cockpit's own three.
+        .set("SKEIN_TEST_LEAK_CANARY", "skein-test-canary")
+        .set("SKEIN_LISTEN_INHERITED_ONLY", "1")
+        .set("SKEIN_IN_FLEET", "1")
+        .set("BASH_FUNC_skein_leak%%", "() {  echo leaked\n}")
+        // A name that is not an identifier, which bash can neither hold nor unset.
+        .set("SKEIN_TEST_ODD-NAME", "1")
+        // What must: one of the sandbox's own, which is on the list.
+        .set("SANDBOX_NAME", "skein-test-allowed");
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    // Written to a temporary name and moved, so the poll below never reads half a report. The
+    // canary's value is spelled in two pieces so this command line cannot be what matches it.
+    let agent = "{ printf 'canary %s\\n' \"$(env | grep -c 'skein-test-cana''ry')\"; \
+                 printf 'allowed %s\\n' \"${SANDBOX_NAME-}\"; \
+                 printf 'inbox %s\\n' \"${SKEIN_IN_BOX-}\"; \
+                 if type skein_leak >/dev/null 2>&1; then echo 'fn defined'; else echo 'fn absent'; fi; \
+                 env | cut -d= -f1 | sed 's/^/name /'; } > /tmp/env.tmp && mv /tmp/env.tmp /tmp/env.report; \
+                 exec sleep 300";
+    let launched = own_sandbox(FLEET)
+        .exec(
+            &session_script(name, "skein-agent", agent),
+            Duration::from_secs(60),
+        )
+        .expect("start the box");
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+
+    let report_path = PathBuf::from(format!("{}/tmp/env.report", box_root(name)));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !report_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let report = fs::read_to_string(&report_path).unwrap_or_default();
+    // And the environment of the box's tmux server, which every window and pane in the box is made
+    // from. Needed beside the pane's own report because this box is uncovered, so its pane starts
+    // behind the launcher's `sh -c` banner wrapper — and dash drops a variable whose name is not an
+    // identifier, which an exported function's `BASH_FUNC_<name>%%` is not. A covered box has no
+    // wrapper, so the pane alone would be asking a question this fixture answers by accident.
+    // Names only, for the reason the report is.
+    let server_env: Vec<String> = Command::new("tmux")
+        .args(["-S", &box_sock(name), "show-environment", "-g"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.split_once('=').map(|(n, _)| n.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let limits = fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+    // Ended before asserting, so a failure leaves no box running; `Scratch` would stop it too.
+    let _ = Command::new("tmux")
+        .args(["-S", &box_sock(name), "kill-server"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    anchor_gone(anchor);
+    if limits.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .status();
+    }
+
+    assert!(
+        !report.is_empty(),
+        "the box's agent never wrote its environment, so nothing below would be about a box"
+    );
+    let field = |key: &str| {
+        report
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{key} ")))
+            .unwrap_or("")
+            .to_string()
+    };
+    let names: Vec<&str> = report
+        .lines()
+        .filter_map(|l| l.strip_prefix("name "))
+        .collect();
+    assert!(
+        !names.contains(&"SKEIN_TEST_LEAK_CANARY") && field("canary") == "0",
+        "a variable on no list reached the box from the process that started it, so a box still \
+         inherits the cockpit's environment rather than the launcher's allow-list: {names:?}"
+    );
+    for cockpit in [
+        "SKEIN_LISTEN_INHERITED_ONLY",
+        "SKEIN_IN_FLEET",
+        "SKEIN_HOME",
+    ] {
+        assert!(
+            !names.contains(&cockpit),
+            "{cockpit} is the cockpit's, and it reached the box: {names:?}"
+        );
+    }
+    assert!(
+        server_env.iter().any(|n| n == "HOME"),
+        "the box's tmux server reported no environment, so the two checks below would be about \
+         nothing: {server_env:?}"
+    );
+    assert!(
+        !server_env.iter().any(|n| n == "SKEIN_TEST_LEAK_CANARY"
+            || n.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))),
+        "the box's tmux server, which every window in the box is made from, carries the canary, \
+         an exported function or another name that is not an identifier from the cockpit's \
+         environment: {server_env:?}"
+    );
+    assert_eq!(
+        field("fn"),
+        "absent",
+        "an exported shell function from the cockpit's environment is defined in the box"
+    );
+    assert_eq!(
+        field("allowed"),
+        "skein-test-allowed",
+        "SANDBOX_NAME is on the allow-list and did not arrive, so the filter is removing what a box \
+         needs rather than what it was not given: {names:?}"
+    );
+    assert_eq!(
+        field("inbox"),
+        "1",
+        "the launcher did not mark the session as a box, so a skein-server started in it would \
+         honour $SKEIN_NO_API_AUTH on the fleet's shared network namespace (SKEIN-1086): {names:?}"
+    );
+    assert!(
+        names.contains(&"SKEIN_BOX"),
+        "the launcher exports SKEIN_BOX on purpose and the box does not have it, so the filter ran \
+         over the launcher's own exports: {names:?}"
+    );
+}
+
 /// The whole of `start_box`, rather than its pieces called in the right order by hand.
 ///
 /// The test above assembles the launch itself — install, clone, session — and that is precisely why

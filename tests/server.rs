@@ -202,6 +202,10 @@ fn handed_with(cmd: &mut Command, pin: TheDoorwaysPin) -> (Child, String) {
         TheDoorwaysPin::Set => cmd.env(INHERITED_ONLY, "1"),
         TheDoorwaysPin::Unset => cmd.env_remove(INHERITED_ONLY),
     };
+    // The box launcher's marker goes in both shapes (SKEIN-1086): it also refuses
+    // `$SKEIN_NO_API_AUTH`, and it is ambient when this suite runs inside a box, so leaving it would
+    // make "outside the fleet's doorway" mean "outside the doorway, unless you are in a box".
+    cmd.env_remove(skein::apiauth::IN_BOX);
     // Not `.expect("the server binary spawned")`. The only thing this spawn does between fork and
     // exec is move one descriptor, so a failure here is about that descriptor and nothing else —
     // and the reader needs to be told which one, and which of the two starts was being made. Only
