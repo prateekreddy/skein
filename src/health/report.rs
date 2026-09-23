@@ -374,6 +374,16 @@ pub struct HealthReport {
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
 pub fn health_report() -> HealthReport {
+    report_with(crate::fleet::runtime_updates)
+}
+
+/// [`health_report`] with the runtime-update reading as an argument, the way
+/// `fleet::substrate::updates_from` takes its check — so the tests that build the real report can
+/// stand in for it (SKEIN-1121). Called cold, `fleet::runtime_updates` starts the real version
+/// check on a thread nobody joins, which outlives the test's `env_lock` and `place::seam`: after
+/// the test unpins `$SKEIN_HOME` it panics on `config::skein_home`'s guard, and after the seam guard
+/// drops it crosses through whichever test's stand-in is installed next (SKEIN-1087).
+fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate>) -> HealthReport {
     // **This field is the toggle's own state**, and deliberately stays that way. The page builds
     // `#set-ainote` from it and the settings pane reads "off — …" beside the checkbox, so widening
     // it to mean "anything that wants the model" broke the sentence next to the control it
@@ -794,7 +804,7 @@ pub fn health_report() -> HealthReport {
         cover,
         logins: crate::fleet::signed_in_runtimes(),
         expired_logins: crate::fleet::expired_logins(),
-        runtime_updates: crate::fleet::runtime_updates(),
+        runtime_updates: runtime_updates(),
         models: crate::ai::model_choices(),
         dark_boxes,
         stale_boxes,
@@ -855,7 +865,7 @@ mod tests {
         }])
         .unwrap();
 
-        let report = health_report();
+        let report = report_with(Vec::new);
         let complaints = report.probes.detail.matches(';').count() + 1;
         assert_eq!(
             complaints, 1,
@@ -943,7 +953,7 @@ mod tests {
         // holds either way, which is exactly why the wrong route went unnoticed; the pin on
         // `SKEIN_FLEET_ROOT` is still load-bearing for every other check in the report.
         std::env::set_var("SKEIN_FLEET_ROOT", home.join("no-fleet-here"));
-        let report = health_report();
+        let report = report_with(Vec::new);
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
 
@@ -1013,7 +1023,7 @@ mod tests {
         // `/boxes`, and the disk and liveness checks act on what they find there.
         let fleet = crate::testutil::tempdir();
         std::env::set_var("SKEIN_FLEET_ROOT", &fleet);
-        let report = health_report();
+        let report = report_with(Vec::new);
         // The one test that builds the real report, so the one place that can see `health_report`
         // write `counted` at all: a report that left it at its placeholder would send the page an
         // empty list, and every fault would lose its headline to the stale-session line
