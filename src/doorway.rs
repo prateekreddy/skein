@@ -212,10 +212,15 @@ pub fn inherited() -> Result<Option<std::net::TcpListener>, String> {
     // Cleared so nothing downstream acts on them a second time. A child skein spawns inherits this
     // environment, and `LISTEN_PID` would no longer match — but a child that ignored it and adopted
     // fd 3 anyway would be adopting the cockpit's own socket.
-    // Startup only, before any thread exists — which is what makes these safe. `remove_var` mutates
-    // process-global state that other threads may be reading, and Rust 2024 marks it `unsafe` for
-    // exactly that reason; this runs once, from `main`, before the runtime is built. Moving this
-    // call anywhere later stops being sound, so it says so here rather than in a commit message.
+    // `remove_var` mutates process-global state that other threads may be reading, and Rust 2024
+    // marks it `unsafe` for exactly that reason — this wants to run before anything else touches
+    // the environment or forks. It does not, in `skein-server`: `main` is `#[tokio::main]`, so the
+    // multi-thread runtime already exists by its first line, and several `tokio::spawn`s plus
+    // `heal_fleet` (which starts tmux) run before this function is ever called (SKEIN-1040). Every
+    // process started before this line inherits `LISTEN_FDS`/`LISTEN_PID` too, and is harmless only
+    // because its own pid never equals the `LISTEN_PID` it inherited, so `descriptor` refuses it
+    // rather than adopting silently. Clearing the two vars earlier — at the top of a hand-built
+    // `main`, beside `keep_from_children()` — would close that gap instead of relying on it.
     std::env::remove_var("LISTEN_FDS");
     std::env::remove_var("LISTEN_PID");
     Ok(Some(listener))
