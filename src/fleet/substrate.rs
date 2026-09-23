@@ -629,8 +629,8 @@ mod tests {
     /// `spawn_blocking` leaves the runtime idle while the check is in flight, so a paused tokio
     /// clock could run the ticks out from under it. The store is the test's own [`super::Readings`],
     /// because the process-wide one is also written by the cold [`super::runtime_updates`] inside
-    /// `health::health_report`'s tests. `npm` is stubbed at `place::seam`, the one place the real check crosses into the
-    /// sandbox.
+    /// `health::health_report`'s tests. `npm` is stubbed at `place::seam`, the one place the real
+    /// check crosses into the sandbox.
     ///
     /// The sabotage each assertion was named against:
     ///
