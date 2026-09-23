@@ -1133,136 +1133,136 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"{name}'s anchor pid has been reused by a different process since skein recorded it; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:826"]
-line = "if scope != \"repo\" && scope != \"fleet\" {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/gitgate.rs:950"]
+["src/gitgate/mint.rs:89"]
 line = "\"could not sign the App JWT: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1484"]
+["src/gitgate/mint.rs:127"]
 line = "return Err(\"no GitHub App configured: Settings → GitHub App ID\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1493"]
+["src/gitgate/mint.rs:136"]
 line = "\"the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub App ID\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1497"]
+["src/gitgate/mint.rs:140"]
 line = "return Err(format!(\"the GitHub App key is not at {key}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate.rs:1585"]
+["src/gitgate/mint.rs:228"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/gitgate/scope.rs:70"]
+line = "if scope != \"repo\" && scope != \"fleet\" {"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/handoff.rs:23"]
 line = "pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<PathBuf, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:63"]
+["src/health/check.rs:54"]
 line = "pub fix: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:85"]
+["src/health/check.rs:76"]
 line = "pub fn unsatisfied(detail: impl Into<String>, fix: impl Into<String>) -> HealthCheck {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:94"]
+["src/health/check.rs:85"]
 line = "/// Could not be answered — `detail` says why it could not, not what is wrong."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:155"]
+["src/health/check.rs:155"]
+line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/disk.rs:45"]
 line = "return HealthCheck::unknown(format!("
 window = "let Some(r) = crate::fleet::fleet_resources() else {\u000breturn HealthCheck::unknown(format!(\u000b\"the sandbox has not answered the disk reading since skein started, and which half \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:272"]
+["src/health/disk.rs:162"]
 line = "/// **An `Err` from `strays` is silence, not a sentence.** [`crate::fleet::substrate_strays`]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:301"]
+["src/health/disk.rs:191"]
 line = "return HealthCheck::unknown(match r.stale {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:346"]
+["src/health/disk.rs:236"]
 line = "strays()"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:385"]
+["src/health/disk.rs:275"]
 line = "let check = HealthCheck::unsatisfied(detail, fix);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:457"]
-line = "return HealthCheck::unknown(format!("
-window = "Err(why) => {\u000breturn HealthCheck::unknown(format!(\u000b\"{whose} could not be asked whether anything has taken the model's temp directory \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:472"]
-line = "[owner, mine, path] => HealthCheck::unsatisfied("
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:487"]
-line = "_ => HealthCheck::unknown(format!("
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:880"]
-line = "(Some(boxes), true) => HealthCheck::unknown(format!("
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:958"]
-line = "None => HealthCheck::unsatisfied("
-window = "// unsatisfied arm has always been for: something a person can start.\u000bNone => HealthCheck::unsatisfied(\u000bnote(crate::warden_client::sighting_failure().unwrap_or_else(|| {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:1024"]
-line = "false => HealthCheck::unsatisfied("
-window = "true => HealthCheck::satisfied(\"every running box is under the current isolation\"),\u000bfalse => HealthCheck::unsatisfied(\u000bformat!("
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:1094"]
-line = "Unusable { why, refused } => HealthCheck::unsatisfied("
-cited_by = ["docs/recovery-survey.md"]
-
-["src/health.rs:1630"]
+["src/health/report.rs:418"]
 line = "p if p.killed > 0 => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1665"]
+["src/health/report.rs:453"]
 line = "None => HealthCheck::unsatisfied("
 window = "// box across. Nothing may drive this on its own.\u000bNone => HealthCheck::unsatisfied(\u000b\"no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1702"]
+["src/health/report.rs:490"]
 line = "Err(error) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1713"]
+["src/health/report.rs:501"]
 line = "(false, true) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1715"]
+["src/health/report.rs:503"]
 line = "format!(\"install {name}, or start the server from a shell whose PATH has it\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1734"]
+["src/health/report.rs:522"]
 line = "false => HealthCheck::unsatisfied("
 window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1825"]
+["src/health/report.rs:613"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:1835"]
+["src/health/report.rs:623"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health.rs:2656"]
-line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
+["src/health/sandbox.rs:24"]
+line = "(Some(boxes), true) => HealthCheck::unknown(format!("
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/sandbox.rs:102"]
+line = "None => HealthCheck::unsatisfied("
+window = "// unsatisfied arm has always been for: something a person can start.\u000bNone => HealthCheck::unsatisfied(\u000bnote(crate::warden_client::sighting_failure().unwrap_or_else(|| {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/sandbox.rs:168"]
+line = "false => HealthCheck::unsatisfied("
+window = "true => HealthCheck::satisfied(\"every running box is under the current isolation\"),\u000bfalse => HealthCheck::unsatisfied(\u000bformat!("
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/sandbox.rs:238"]
+line = "Unusable { why, refused } => HealthCheck::unsatisfied("
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/scratch.rs:69"]
+line = "return HealthCheck::unknown(format!("
+window = "Err(why) => {\u000breturn HealthCheck::unknown(format!(\u000b\"{whose} could not be asked whether anything has taken the model's temp directory \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/scratch.rs:84"]
+line = "[owner, mine, path] => HealthCheck::unsatisfied("
+cited_by = ["docs/recovery-survey.md"]
+
+["src/health/scratch.rs:99"]
+line = "_ => HealthCheck::unknown(format!("
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/knock.rs:82"]

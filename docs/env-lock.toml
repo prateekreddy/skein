@@ -158,9 +158,9 @@ reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) ho
 # and was never asked for the lock at all. Ten scopes were in that shape, invisible.
 #
 # **That is fixed (SKEIN-895): `no_warden` is in TOUCH.** All ten are now judged and all ten hold
-# the lock — three of them, in `src/gitgate.rs`, through a `fresh_home()` that returns the guard,
-# which is the second thing SKEIN-895 turned up and the reason `lock_providers` exists in the
-# checker. They were never racy; they were unread.
+# the lock — three of them, in `src/gitgate/credentials.rs`, through a `fresh_home()` that returns
+# the guard, which is the second thing SKEIN-895 turned up and the reason `lock_providers` exists in
+# the checker. They were never racy; they were unread.
 #
 # What is left is this row, and it is about `no_warden` ITSELF, not its callers: the body calls
 # `env_pins()`, so it is an env-touching helper, and no `#[test]` in `src/testutil.rs` calls it.
