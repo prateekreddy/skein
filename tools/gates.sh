@@ -22,6 +22,9 @@
 #   tools/gates.sh --list         print the list as `name|ci|command`
 #   tools/gates.sh --check        the consistency gate: ci.yml and CONTRIBUTING.md name this set
 #   tools/gates.sh --verify <f>   is that file ONE run of this, whole? — see SKEIN-903 below
+#   tools/gates.sh --provision [<worktree>]
+#                                 check out any declared submodule that was never initialised
+#                                 there — the step a full run takes first; see SKEIN-885 below
 #   tools/gates.sh --exit-codes  the codes below as `code|kind|summary`, for anything that has
 #                                 to tell a refusal from a red — see SKEIN-945 below
 #
@@ -242,6 +245,42 @@ resolve_root() {
 # appear or disappear unnoticed.
 worktree_digest() {
   { git status --porcelain; git diff HEAD; } | git hash-object --stdin | cut -c1-12
+}
+
+# **A worktree is provisioned before it is gated, and only in the one way it cannot be wrong
+# (SKEIN-885).** `git worktree add` does not populate submodules, and `git submodule update --init` is
+# per worktree, so every fresh lane and integration worktree went red on `submodule-check` until
+# somebody ran the command its failure message names — seven times in one session. That red is
+# about how the tree was MADE, not about the change being gated.
+#
+# So a full run initialises a submodule that is declared and was never initialised — the leading
+# `-` in `git submodule status` — at the commit the index records, and says it did. Nothing else:
+#
+#   * a submodule already checked out is left alone, wherever it points. The documented upgrade
+#     sits deliberately ahead of the recorded pin, and moving it back would undo that work;
+#   * `submodule-check` still runs and still judges. An init that fails — no network, a URL that
+#     has moved — leaves the tree as it was, and the gate reports it exactly as before;
+#   * `tools/gates.sh run <name>`, which is what CI calls, does not do this. CI checks submodules
+#     out itself, and a gate called by name runs that gate and nothing else.
+#
+# It is not the `$PATH` repair the preflight below refuses to make. That one would leave the shell
+# broken for the next command with the run green; this changes the worktree itself, once, into the
+# state `CONTRIBUTING.md`'s setup already asks for, and every later command in it sees the same.
+provision() {
+  local path init
+  while IFS= read -r line; do
+    case "$line" in
+      -*)
+        path=$(printf '%s' "$line" | awk '{print $2}')
+        if init=$(git submodule update --init -- "$path" 2>&1); then
+          echo "provision: $path was declared and never initialised in this worktree — checked out at the recorded commit"
+        else
+          echo "provision: $path was declared and never initialised, and \`git submodule update --init -- $path\` failed; submodule-check will say so"
+          printf '%s\n' "$init" | sed 's/^/    /'
+        fi
+        ;;
+    esac
+  done < <(git submodule status 2>/dev/null)
 }
 
 field() { # field <line> <n>
@@ -660,6 +699,11 @@ case "${1:-}" in
     do_exit_codes
     exit $?
     ;;
+  --provision)
+    resolve_root "${2:-}"
+    provision
+    exit 0
+    ;;
   --verify)
     # No worktree needed and none resolved: a stream and a receipt are the whole subject, and the
     # tree the run was about may be a worktree that has since gone away.
@@ -1010,6 +1054,9 @@ carried() { # carried <gate name> <log> <free KiB before that gate, may be empty
   carried_note="$mount: $(human_kib "$free") free${before:+, $(human_kib "$before") before this gate} — every artefact this gate names is on disk, so this red is a red"
 }
 
+# Before the tree is recorded, so what it records is the tree the gates will see (SKEIN-885).
+provisioned=$(provision)
+
 # Recorded BEFORE anything runs. Everything printed at the end is about THIS.
 head_before=$(git rev-parse HEAD)
 short_before=$(git rev-parse --short HEAD)
@@ -1124,6 +1171,8 @@ echo "=== gates for $root at $tested === run $run_id"
 # What the preflight above looked for, printed like `tests/ui/harness/leaks.mjs` prints the fixture
 # names it derived: a check whose subject is invisible is a check nobody can tell has gone narrow.
 echo "$run_id preflight: $needed_n interpreter(s) derived from $declared_n declared gate command(s), each one found: $(printf '%s\n' $needed | tr '\n' ' ' | sed 's/ *$//')"
+# What the provisioning did, if anything — a tree this run changed before recording it says so.
+[ -n "$provisioned" ] && printf '%s\n' "$provisioned" | sed "s/^/$run_id /"
 # And the quantity the capacity check is measured in, printed for the same reason: a check whose
 # subject never appears is one nobody can tell has gone narrow (SKEIN-941).
 capacity_now=$(target_fs) || capacity_now=""

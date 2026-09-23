@@ -364,3 +364,118 @@ fn a_pin_taken_in_an_integration_test_goes_back_when_that_test_panics() {
         "a variable pinned twice was restored to the intermediate value, not the original"
     );
 }
+
+/// Run `git` in `dir` with an identity and the file transport allowed, and hand back its stdout —
+/// or fail naming the command, since a fixture that could not be built is not a finding.
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=example",
+            "-c",
+            "user.email=example@example.invalid",
+            "-c",
+            "protocol.file.allow=always",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// **A fresh worktree is provisioned before the gates judge it, and nothing else is touched**
+/// (SKEIN-885).
+///
+/// The gate runner, not a test harness — but the same kind of thing: everything a lane concludes
+/// from a green run trusts it. `git worktree add` leaves every submodule uninitialised, so every
+/// lane's first full run failed `submodule-check` about how the tree was made rather than about
+/// the change. `tools/gates.sh` now initialises exactly those, and this holds both halves in a
+/// throwaway repository: a worktree's never-initialised submodule is checked out, and a submodule
+/// deliberately AHEAD of its pin — the documented upgrade window — is left where it is.
+///
+/// **What makes it fail:** a `provision` that does nothing fails the first assertion; one that runs
+/// `git submodule update --init` over every submodule, initialised or not, moves the ahead-of-pin
+/// checkout back and fails the second.
+#[test]
+fn the_gate_runner_checks_out_a_worktrees_uninitialised_submodule_and_moves_no_other() {
+    let scratch = Scratch::temp("skein-gates-provision");
+    let root = scratch.to_path_buf();
+    let upstream = root.join("upstream");
+    let main = root.join("main");
+    let lane = root.join("lane");
+    for d in [&upstream, &main] {
+        std::fs::create_dir_all(d).unwrap();
+        git_in(d, &["init", "-q"]);
+    }
+    std::fs::write(upstream.join("a"), "one").unwrap();
+    git_in(&upstream, &["add", "a"]);
+    git_in(&upstream, &["commit", "-qm", "one"]);
+    git_in(
+        &main,
+        &[
+            "submodule",
+            "add",
+            "-q",
+            upstream.to_str().unwrap(),
+            "vendored",
+        ],
+    );
+    git_in(&main, &["commit", "-qm", "vendor it"]);
+    git_in(&main, &["worktree", "add", "-q", lane.to_str().unwrap()]);
+    assert!(
+        git_in(&lane, &["submodule", "status"]).starts_with('-'),
+        "the fixture's worktree came with its submodule already checked out, so this proves nothing"
+    );
+
+    // The file transport is refused by default for submodules; the runner inherits git's config
+    // from the environment, so this is how the fixture's own `-c` reaches the git it runs.
+    let gates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/gates.sh");
+    let provision = |at: &std::path::Path| {
+        let out = std::process::Command::new("bash")
+            .arg(&gates)
+            .arg("--provision")
+            .arg(at)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .output()
+            .expect("bash runs the gate runner");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let said = provision(&lane);
+    let status = git_in(&lane, &["submodule", "status"]);
+    assert!(
+        status.starts_with(' ') && said.contains("vendored"),
+        "a fresh worktree's submodule is still not checked out after the runner provisioned it, \
+         so its first gate run fails submodule-check about how it was made: status {status:?}, \
+         the runner said {said:?}"
+    );
+
+    // Ahead of the pin on purpose, as `git submodule update --remote` leaves it mid-upgrade.
+    let checkout = main.join("vendored");
+    std::fs::write(checkout.join("a"), "two").unwrap();
+    git_in(&checkout, &["commit", "-qam", "two"]);
+    let ahead = git_in(&checkout, &["rev-parse", "HEAD"]);
+    let said = provision(&main);
+    assert_eq!(
+        git_in(&checkout, &["rev-parse", "HEAD"]),
+        ahead,
+        "the runner moved a submodule that was already checked out back to its pin — which undoes \
+         the upgrade `src/store/sync/UPSTREAM.md` walks through (it said {said:?})"
+    );
+}
