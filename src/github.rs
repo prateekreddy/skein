@@ -42,7 +42,6 @@
 //! what the second one costs, and [`refuse_while_held`] re-asks the free endpoint before refusing,
 //! so a quota that has visibly come back ends the hold instead of running it out.
 
-use crate::util::output_with_timeout_why;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicU64;
@@ -1405,10 +1404,19 @@ fn complaint(status: u16, body: &str) -> String {
 }
 
 /// `curl` present? Named here so the health report can ask without knowing how this module works.
+///
+/// **Answered from PATH, not by running it** (SKEIN-1093). This used to spawn `curl --version` with
+/// a five-second budget, which asks a different question — "did a process start, run and exit
+/// within five seconds" — and on a machine at load ~14 the answer was no for a curl that was right
+/// there, so the health line said "curl is not installed" and three tests skipped. What every
+/// caller wants to know is whether skein's `Command::new("curl")` will find a program, and that is
+/// the lookup `Command` itself does: the first executable file called `curl` in a PATH directory.
+/// [`crate::util::program_on_path`] is that lookup, and it takes no time the machine can stretch.
+///
+/// A curl that is installed but broken reads as present here. The calls that use it report their
+/// own failure in curl's own words, which is a truer sentence than "not installed".
 pub fn have_curl() -> bool {
-    let mut probe = Command::new("curl");
-    probe.arg("--version");
-    output_with_timeout_why(&mut probe, Duration::from_secs(5)).is_ok()
+    crate::util::program_on_path("curl")
 }
 
 #[cfg(test)]
@@ -2774,6 +2782,55 @@ mod tests {
             !used.exists(),
             "nothing of the call is left behind, yet {} is still there",
             used.display()
+        );
+    }
+
+    /// **An installed curl is found however slow the machine is, and a missing one is not**
+    /// (SKEIN-1093).
+    ///
+    /// The curl on this PATH is a stub that takes thirty seconds to answer anything — a stand-in
+    /// for a machine too loaded to start and finish a process in time, made without loading one —
+    /// and still the program `Command::new("curl")` would run, so the answer has to be yes.
+    ///
+    /// What would make each assertion fail: the old probe (`curl --version` under a five-second
+    /// deadline) makes the first one false after five seconds; a lookup that only asks whether a
+    /// file of that name exists makes the second one true, for a file nothing can execute; and one
+    /// that answers true without looking makes the second true as well.
+    #[test]
+    fn an_installed_curl_is_found_however_slow_it_is_to_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::testutil::env_lock();
+        let slow = crate::testutil::tempdir();
+        let stub = slow.join("curl");
+        // `/bin/sleep` by path: the PATH below holds nothing but this stub, and a bare `sleep` would
+        // exit 127 at once — which the old probe counted as present, so the test would pass for
+        // the wrong reason.
+        std::fs::write(&stub, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let unrunnable = crate::testutil::tempdir();
+        std::fs::write(unrunnable.join("curl"), "not a program\n").unwrap();
+        std::fs::set_permissions(
+            unrunnable.join("curl"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let empty = crate::testutil::tempdir();
+
+        let mut pins = crate::testutil::env_pins();
+        pins.set("PATH", &*slow);
+        assert!(
+            have_curl(),
+            "curl is on PATH and executable, and was reported missing because it was slow"
+        );
+        pins.set("PATH", &*unrunnable);
+        assert!(
+            !have_curl(),
+            "a file called curl that cannot be executed was reported as an installed curl"
+        );
+        pins.set("PATH", &*empty);
+        assert!(
+            !have_curl(),
+            "no curl on PATH, and it was reported as installed"
         );
     }
 }

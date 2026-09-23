@@ -675,6 +675,11 @@ fi
 #
 # `tests/fleet_launch.rs::a_box_session_inherits_only_its_allow_list` starts a real box with a
 # canary in the environment and reads the environment back from inside it.
+#
+# A CROSSING into a box keeps this same list (SKEIN-1085): `place::inherited_env` in
+# `src/place.rs` reads it out of this file's text, so it is one list rather than two. Keep the shape
+# the parse expects: the line `inherited_env=(`, names and `#` comments, then a line of just `)`.
+# `place::tests::the_crossing_list_is_the_launchers_list` fails if the two readings differ.
 inherited_env=(
   # The sandbox user's home and search path. The launcher needs HOME to know what to bind the box's
   # private home over, and replaces PATH with a fixed one before it runs anything (see the top).
