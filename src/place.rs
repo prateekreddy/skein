@@ -682,6 +682,117 @@ fn keep_only_listed() -> String {
     )
 }
 
+/// **The names the launcher decides per box** — every name on [`inherited_env`] that
+/// `src/box-session.sh` goes on to `unset`, read out of the launcher's text (SKEIN-1095).
+///
+/// The allow-list says which names a box may inherit at all. For these the launcher then decides,
+/// box by box, whether the box keeps the inherited value, gets its own, or gets none. `GH_TOKEN`
+/// is the one that matters: a scoped box has the fleet's token removed and its own-repo token put
+/// in its place, and a `fleet`-scoped box keeps the fleet's. `ANTHROPIC_API_KEY` and
+/// `OPENAI_API_KEY` go when the box has a login of its own, and `SSH_AUTH_SOCK` when it is scoped.
+/// The rest are skein's channels to the launcher (`SKEIN_FLEET_LIMITS` and the like), which the
+/// launcher consumes and no box holds.
+///
+/// **Read out of the launcher rather than listed here**, for the reason [`inherited_env`] is: a
+/// list in Rust is a second copy that agrees until somebody adds an `unset` to the launcher. A name
+/// the launcher starts removing is a name a crossing starts taking from the session, with nothing
+/// else to edit. `the_names_the_session_decides_are_the_launchers_unsets` pins what this reads
+/// today.
+///
+/// `PATH` and `HOME` are refused outright. The launcher REPLACES both rather than unsetting them,
+/// so they are never read here. But if an `unset PATH` were ever added, taking the session's value
+/// would put the box's own `~/.local/bin` in front of the `nsenter` a crossing resolves at fleet
+/// scope, which is ISO-1 (see [`Place::enter`]). [`Place::wrap`] gives both their box values past
+/// the hop, which is the only place they belong.
+pub fn session_decides() -> &'static [String] {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| parse_session_decides(LAUNCHER, inherited_env()))
+}
+
+fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in script.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let code = line.split(" #").next().unwrap_or("");
+        let mut words = code.split_whitespace();
+        while let Some(word) = words.next() {
+            if word != "unset" {
+                continue;
+            }
+            for arg in words.by_ref() {
+                let arg = arg.trim_end_matches(';');
+                if arg.is_empty() || arg == "&&" || arg == "||" {
+                    break;
+                }
+                if inherited.iter().any(|n| n == arg) && !names.iter().any(|n| n == arg) {
+                    names.push(arg.to_string());
+                }
+            }
+        }
+    }
+    for pinned in ["PATH", "HOME"] {
+        assert!(
+            !names.iter().any(|n| n == pinned),
+            "src/box-session.sh unsets {pinned}, and a crossing must not take the session's \
+             {pinned} in front of its hop — see `place::session_decides`"
+        );
+    }
+    names
+}
+
+/// The shell, run after [`keep_only_listed`] and in front of the hop, that gives a crossing **the
+/// session's value of every name in [`session_decides`], or none** (SKEIN-1095).
+///
+/// # Why a crossing reads the answer rather than working it out again
+///
+/// The launcher's decision rests on things a crossing does not have. `SKEIN_GIT_SCOPE` and
+/// `SKEIN_BOX_REPO` ride only on the launcher's own command line (`fleet::session_script`). The
+/// own-repo token is read from `$state/git-tokens` at that moment. The login that drops an API key
+/// is a file in the box's PRIVATE home, which the namespace binds over `$HOME`. Working all that out
+/// again here would be a second copy of the rule, and one that disagrees with the session the first
+/// time the switch is flipped under a running box: `gitgate::set_box_scope` takes effect at the
+/// box's next start, and a running box keeps what it was given.
+///
+/// The answer is already written down, in the one process a crossing already trusts: the anchor.
+/// `ns_pid` is the box's tmux server, started by the launcher's last line with the launcher's final
+/// environment, so `/proc/<ns_pid>/environ` is what the launcher decided for THIS box — scoped or
+/// not, own token or none, login or not. [`Place::guard`] has proved `ns_pid` is that server one
+/// line earlier in the same shell, and `nsenter` is about to open files under the same
+/// `/proc/<ns_pid>/`, so reading one more costs no new trust.
+///
+/// # What it does
+///
+/// Each decided name is unset, then exported again from the anchor's environment if and only if
+/// the anchor has it. So a scoped box's crossing carries its own-repo token or no `GH_TOKEN` at
+/// all, never the fleet's; a `fleet`-scoped box's carries the fleet's, which is what its session
+/// holds. An environment that cannot be read leaves every decided name unset. That is the direction
+/// the launcher takes when it is unsure of the scope, and the `nsenter` that follows would fail on
+/// the same permission anyway.
+///
+/// **A box can influence what is read here, and gains nothing by it.** The anchor is the box's own
+/// process, so a box could arrange a different value. What that buys is a crossing that runs inside
+/// that same box with a value the box chose. The only programs that run with it in front of the hop
+/// are `env` and `nsenter`, which read none of these names, and the value is handed to `export` as
+/// one word: never evaluated, never on an argv.
+fn as_the_session_holds(ns_pid: u32) -> String {
+    let names = session_decides();
+    let patterns = names
+        .iter()
+        .map(|n| format!("{n}=*"))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(
+        "unset -v {unset}\n\
+         {{ while IFS= read -r -d '' skein_e; do\n\
+         \x20 case \"$skein_e\" in {patterns}) export \"$skein_e\" ;; esac\n\
+         done; }} 2>/dev/null </proc/{ns_pid}/environ\n\
+         unset skein_e\n",
+        unset = names.join(" "),
+    )
+}
+
 /// A whole sandbox, addressed as itself — [`Where::SandboxItself`].
 ///
 /// **What every production caller passes is the fleet's own sandbox**, which is how [`crate::fleet`]
@@ -1037,15 +1148,22 @@ impl Place {
             // deliberately, for the reason the launcher sets it: `apiauth::off_switch_refused`
             // reads it, and a `skein-server` somebody starts from a crossing's shell is as much in
             // a box as one started from the session.
-            Where::Shared { .. } => {
+            //
+            // The names the launcher decides per box, `GH_TOKEN` above all, are then taken from
+            // the box's own session rather than from skein-server, so a crossing into a scoped box
+            // carries that box's token or none, never the fleet's (SKEIN-1095; see
+            // [`as_the_session_holds`]). After the guard, because it reads the anchor the guard
+            // has just proved.
+            Where::Shared { ns_pid, .. } => {
                 let mut argv = Self::path_pin();
                 argv.extend([
                     "bash".to_string(),
                     "-c".into(),
                     format!(
-                        "{}{}exec env \"${{skein_odd[@]}}\" SKEIN_IN_BOX=1 {} -- \"$@\"",
+                        "{}{}{}exec env \"${{skein_odd[@]}}\" SKEIN_IN_BOX=1 {} -- \"$@\"",
                         self.guard(),
                         keep_only_listed(),
+                        as_the_session_holds(*ns_pid),
                         self.nsenter()
                     ),
                     "bash".into(),
@@ -3481,5 +3599,52 @@ mod tests {
                 "{cockpit} is the cockpit's and must not cross into a box"
             );
         }
+    }
+
+    /// **What a crossing takes from the box's session is what the launcher unsets** (SKEIN-1095).
+    ///
+    /// Pinned by name, so that a launcher edit which changes the set is seen here and read, rather
+    /// than silently changing what every crossing carries. What would make it fail: the parse
+    /// missing the `[ … ] && unset ANTHROPIC_API_KEY` form, or an indented `unset GH_TOKEN`; a parse
+    /// that reads the filter's own `unset -v "$name"` as a name; the launcher dropping its
+    /// `unset GH_TOKEN`, which is the whole of the scoped boundary.
+    #[test]
+    fn the_names_the_session_decides_are_the_launchers_unsets() {
+        let mut got: Vec<&str> = session_decides().iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [
+                "ANTHROPIC_API_KEY",
+                "GH_TOKEN",
+                "OPENAI_API_KEY",
+                "SKEIN_BOX_STORE",
+                "SKEIN_FLEET_LIMITS",
+                "SKEIN_FLEET_MOUNTS",
+                "SKEIN_MODEL_SCRATCH",
+                "SSH_AUTH_SOCK",
+            ],
+            "the names a crossing takes from the box's session are not the inherited names \
+             src/box-session.sh unsets"
+        );
+        let list = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let inherited = list(&["GH_TOKEN", "OPENAI_API_KEY", "PATH", "HOME", "SANDBOX_NAME"]);
+        assert_eq!(
+            parse_session_decides(
+                "# unset SANDBOX_NAME in a comment\n\
+                 [ -s x ] && unset OPENAI_API_KEY\n\
+                 \x20 unset gh_direct GH_TOKEN; unset -v \"$name\"\n",
+                &inherited
+            ),
+            list(&["OPENAI_API_KEY", "GH_TOKEN"]),
+            "the parse reads a comment, misses a guarded or indented unset, or reads a local"
+        );
+        let refused =
+            std::panic::catch_unwind(|| parse_session_decides("unset PATH\n", &inherited));
+        assert!(
+            refused.is_err(),
+            "a launcher that unsets PATH would have the crossing take the box's PATH in front of \
+             its hop, and the parse let it through"
+        );
     }
 }
