@@ -1,0 +1,1542 @@
+  :root {
+    /* surfaces: darkest → lightest */
+    --bg:#0a0c0f; --inset:#06080a; --panel:#13161b; --elevated:#1a1e25; --overlay:#212733;
+    --card:#13161b;                       /* alias of --panel */
+    /* hairlines & borders: subtle → strong */
+    --line:#1f252d; --border:#1a1f26; --border-2:#2a313a; --border-3:#3b434d;
+    /* text: brightest → faintest */
+    --text:#e8edf3; --fg:#e8edf3; --text-2:#b4bec9; --dim:#828d99; --faint:#7b8590;
+    /* accent (periwinkle — the one chromatic identity, used with restraint) */
+    --accent:#7d80f2; --accent-2:#9fa2f8; --accent-bg:rgba(125,128,242,.12);
+    /* state — functional colour only; shared by dot, pill, tab, chip */
+    --attn:#f85149; --waiting:#e3b341; --working:#58a6ff; --done:#3fb950; --idle:#828d99; --stale:#3b434c;
+    --error:#f0883e; /* API failure — a hot amber, distinct from the attn-red "needs you" and yellow "waiting" */
+    --dur-fast:100ms; --dur:150ms; --dur-med:240ms; --ease:cubic-bezier(.2,0,0,1);
+    --radius:10px; --radius-sm:7px;
+    /* type: mono carries identifiers & structural labels (it's terminal-native and the names ARE
+       git strings); grotesk carries prose (headlines, tasks, empty states). */
+    --mono:ui-monospace,"JetBrains Mono","SF Mono","Cascadia Code",Menlo,monospace;
+    --ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; }
+  body { background:radial-gradient(1200px 600px at 70% -10%, #11151b 0%, var(--bg) 60%);
+         color:var(--text); font-family:var(--ui); font-size:14px; line-height:1.4; -webkit-font-smoothing:antialiased; }
+  /* A link, anywhere. This existed only as four scoped rules (#toast, .revmeta, .fcrumb, .fmd), so
+     a link in any other context rendered as browser-default blue-and-underlined on a dark page —
+     the most conspicuous unstyled thing there is. Those four still win where they apply. */
+  a { color:var(--accent-2); text-decoration:none;
+      border-bottom:1px solid color-mix(in srgb,var(--accent-2) 30%,transparent); }
+  a:hover { color:var(--accent); border-bottom-color:var(--accent); }
+
+  /* A column, so the health banner can be a ROW above the app instead of a pill floating over
+     the tab bar — a warning that covers the tabs blocks exactly the work it interrupts. */
+  body { display:flex; flex-direction:column; }
+  #app { display:flex; flex:1 1 auto; min-height:0; overflow:hidden; }
+  #healthban { display:block; width:100%; border:0; cursor:pointer; text-align:left;
+               background:#f0b429; color:#08090b; font:600 12px/1.35 sans-serif; padding:6px 14px;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:none; }
+  /* The merge train's stops: the same kind of ROW as #healthban, but a different message — not
+     "a box is stale" (amber, environment) but "a machine needs your decision" (attn-red, work).
+     Each repo is its own click target, straight into that repo's review queue. */
+  #trainban { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:14px; row-gap:2px;
+              width:100%; flex:none; background:var(--attn); color:#08090b;
+              font:600 12px/1.35 sans-serif; padding:6px 14px; }
+  #trainban .trainlead { flex:none; }
+  #trainban .trainrepo { border:0; background:none; color:inherit; font:inherit; cursor:pointer;
+                         padding:0; text-align:left; max-width:100%; white-space:nowrap;
+                         overflow:hidden; text-overflow:ellipsis;
+                         text-decoration:underline dotted; text-underline-offset:2px; }
+  /* The third kind of ROW: the fleet lost a credential. Not the amber "environment" (#healthban),
+     not the attn-red "a machine needs a decision" (#trainban) — the --error hot amber the palette
+     reserves for API failure, because that is what this is: every model call is being declined. */
+  #loginban { display:flex; flex-wrap:wrap; align-items:center; column-gap:10px; row-gap:2px;
+              width:100%; flex:none; background:var(--error); color:#08090b;
+              font:600 12px/1.35 sans-serif; padding:6px 14px; }
+  #loginban .loginfix { border:1px solid #08090b; background:none; color:inherit; font:inherit;
+                        cursor:pointer; border-radius:999px; padding:1px 10px; flex:none; }
+  #loginban .loginfix:hover { background:rgba(0,0,0,.14); }
+  /* An update is an OFFER, not a fault (SKEIN-405): the login banner's red says "work has stopped",
+     and an old CLI has stopped nothing. Same shape so it sits in the same place, calmer colour so
+     it does not read as an alarm somebody has to clear. */
+  #left { flex:1 1 0; min-width:0; overflow-y:auto; }
+  .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
+  /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
+  body.docked #left { flex:0 0 var(--fleet-w, clamp(260px, 28%, 380px));
+                      container-type:inline-size; overflow-x:hidden; }
+  /* graceful degradation as the sidebar narrows (keyed on the sidebar's own width, not the viewport,
+     so it tracks the drag-resize). Smaller paddings/fonts; the action buttons drop to their own row. */
+  @container (max-width: 340px) {
+    .wrap { padding:12px 9px 30px; }
+    header { gap:8px; margin-bottom:12px; }
+    .word { font-size:15px; }
+    .counts { font-size:11px; gap:7px; }
+    .right { margin-left:0; width:100%; gap:6px; flex-wrap:wrap; }
+  /* The typed path's answer, beside the field rather than under it: it is one word, and a
+     line of its own would make an ordinary state look like a problem. */
+  .pathnote { flex:none; white-space:nowrap; color:var(--dim); font-size:11px; align-self:center; }
+  .pathnote.ok { color:var(--ok, #57d38c); }
+    .kbtn { font-size:10px; padding:3px 7px; height:24px; }
+    body.docked .row { gap:8px; padding:8px 9px; }
+    .sub { gap:7px; font-size:11px; }
+  }
+  @container (max-width: 270px) {
+    .word { font-size:14px; }
+    .live #livetext { display:none; }                 /* keep just the pip when very narrow */
+  }
+  /* draggable gutter between the fleet sidebar and the dock — sets --fleet-w (persisted) */
+  #gutter { display:none; }
+  body.docked #gutter { display:block; flex:0 0 5px; cursor:col-resize; background:var(--border-2);
+                        transition:background var(--dur-fast); }
+  body.docked #gutter:hover, #gutter.drag { background:var(--accent); }
+  body.docked .wrap { margin:0; max-width:none; padding:16px 12px 40px; }
+  body.docked header { flex-wrap:wrap; row-gap:8px; margin-bottom:14px; }
+  body.docked .right { gap:8px; }
+  body.docked .counts { font-size:12px; }
+  /* The fleet's key-hints strip, by its own name — as a bare `footer` this also hid the SETTINGS
+     dialog's footer (its Save and Cancel) whenever a box tab was open, which is nearly always. */
+  body.docked footer.keyhints { display:none; }
+  /* compact rows in the rail: drop the path, age and chevron; tighten padding */
+  body.docked .row { grid-template-columns:16px 1fr auto; gap:10px; padding:9px 11px; }
+  body.docked .row .age, body.docked .row .chev { display:none; }
+  body.docked .row .dir { display:none; }   /* scoped: .dir is a row's path, not any other "dir" */
+  body.docked .ghead { padding:10px 4px 5px; }
+
+  header { display:flex; align-items:center; gap:14px; row-gap:10px; flex-wrap:wrap; margin-bottom:20px; }
+  .word { font-weight:650; letter-spacing:-.01em; font-size:18px; }
+  .word b { color:var(--accent); }
+  .counts { color:var(--dim); font-size:13px; display:flex; gap:10px; flex-wrap:wrap; }
+  .counts .seg { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
+  .counts .n { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+  .counts .pip { width:7px; height:7px; border-radius:50%; }
+  /* Fleet gauges: what the one shared VM is using. Deliberately quiet — this is a thing you glance
+     at on your way to a box, never a thing you act on, so it reads as chrome until a bar goes hot. */
+  .gauges { display:none; flex-direction:column; gap:5px; margin:-8px 0 16px; }
+  .gauges.on { display:flex; }
+  .gauges.stale { opacity:.45; }                       /* last known figures, sandbox not answering */
+  .ga { display:grid; grid-template-columns:34px 1fr auto; align-items:center; gap:8px;
+        font-family:var(--mono); font-size:10px; color:var(--faint); }
+  .ga .gk { text-transform:lowercase; letter-spacing:.02em; }
+  .ga .gv { color:var(--dim); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .ga .gbar { height:4px; border-radius:3px; background:var(--inset);
+              border:1px solid var(--border); overflow:hidden; display:flex; }
+  .ga .gseg { height:100%; transition:width var(--dur-med) ease; }
+  .ga .gseg.boxes { background:var(--accent); }
+  .ga .gseg.docker { background:var(--working); }
+  .ga .gseg.other { background:var(--faint); }
+  .ga.warm .gseg.other, .ga.warm .gseg.boxes { background:var(--waiting); }
+  .ga.hot .gseg.other, .ga.hot .gseg.boxes { background:var(--attn); }
+  .right { margin-left:auto; display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+  /* A control says what it does in one line; the reasoning behind it lives one click away. Written
+     out in full on screen it was ~800 words of 11.5px grey text in a single dialog, which is not
+     read as documentation — it is skipped, taking the one sentence that mattered with it. */
+  .desc details { margin-top:3px; }
+  .desc summary { cursor:pointer; color:var(--dim); width:fit-content; }
+  .desc summary:hover { color:var(--text-2); }
+  .desc details[open] summary { margin-bottom:3px; }
+  /* first run: the three things that stop a fleet starting, each ticked once it is true */
+  .fr { max-width:560px; margin:6vh auto 0; text-align:left; }
+  .fr-head { font-size:15px; font-weight:600; color:var(--text); margin-bottom:14px; }
+  .fr-steps { list-style:none; margin:0 0 16px; padding:0; display:flex; flex-direction:column; gap:11px; }
+  .fr-step { display:flex; gap:10px; align-items:flex-start; }
+  .fr-tick { flex:none; width:18px; height:18px; border-radius:50%; display:grid; place-items:center;
+             font-size:11px; color:var(--dim); border:1px solid var(--border-2); }
+  .fr-step.done .fr-tick { color:var(--done); border-color:var(--done); }
+  .fr-step.done .fr-txt b { color:var(--dim); font-weight:500; }
+  .fr-txt { display:flex; flex-direction:column; gap:3px; font-size:13px; color:var(--text); }
+  .fr-hint { font-size:12px; color:var(--faint); line-height:1.5; }
+  .fr-foot { margin-top:18px; font-size:12px; color:var(--faint); }
+  .kbtn { display:inline-flex; align-items:center; gap:6px; flex:none; white-space:nowrap; line-height:1;
+          font-family:var(--mono); font-size:11px;
+          color:var(--dim); cursor:pointer; background:var(--panel);
+          border:1px solid var(--border-2); border-radius:7px; padding:5px 10px; height:28px;
+          transition:color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast); }
+  .kbtn:hover { color:var(--text); border-color:var(--border-3); }
+  /* one monochrome icon language (inline SVG, inherits currentColor) — no emoji glyphs */
+  .ic { width:13px; height:13px; flex:none; fill:none; stroke:currentColor; stroke-width:2;
+        stroke-linecap:round; stroke-linejoin:round; }
+  .kbtn.ghost .ic { width:15px; height:15px; }
+  .kbtn.go { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,transparent); background:var(--accent-bg); font-weight:600; }
+  .kbtn.go:hover { color:var(--accent); border-color:var(--accent); }
+  /* the one primary action in the rail — everything else stays quiet */
+  .kbtn.primary { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 50%,transparent);
+                  background:var(--accent-bg); font-weight:600; }
+  .kbtn.primary:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 18%,transparent); }
+  /* icon-only quiet buttons (repo, mailbox, alerts, settings, palette) — chrome, not content */
+  .kbtn.ghost { background:transparent; border-color:transparent; padding:0 8px; color:var(--faint); }
+  .kbtn.ghost:hover { background:var(--panel); border-color:var(--border-2); color:var(--text); }
+  /* a hairline grouping the primary create-action from the utility icons */
+  .hdiv { flex:none; align-self:center; width:1px; height:18px; background:var(--border-2); margin:0 3px; }
+  .live { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:12px; }
+  .live .pip { width:7px; height:7px; border-radius:50%; background:var(--stale); transition:background var(--dur); }
+  .live.on .pip { background:var(--done); box-shadow:0 0 8px var(--done); }
+
+  .group { margin-bottom:8px; }
+  .ghead { display:flex; align-items:center; gap:6px; padding:14px 4px 7px; font-size:11px; font-weight:600;
+           letter-spacing:.06em; text-transform:uppercase; color:var(--faint); cursor:pointer; user-select:none; }
+  .ghead:hover { color:var(--dim); }
+  .ghead .gcaret { font-size:9px; color:var(--dim); width:9px; text-align:center; }
+  .ghead .glabel { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
+  .ghead .gc { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .ghead .glabel { font-family:var(--mono); text-transform:none; letter-spacing:0; }
+  /* a managed repo's name is the board's primary wayfinding label — size it up a touch from the
+     state-group headers so the repo you're scanning for stands out. */
+  .group[data-sid^="repo:"] .ghead .glabel { font-size:13px; color:var(--dim); }
+  /* the pinned "needs you" section is the cockpit's focal point — make its header read as primary */
+  .group[data-sid="needs"] .ghead { color:var(--text-2); }
+  .group[data-sid="needs"] .glabel { color:var(--text); }
+  .group[data-sid="needs"] .gc { color:var(--attn); }
+  /* the repo header's right-side controls: sync-to-remote then new-box. gpull carries the auto margin
+     so both sit together at the right edge (gadd-only sections don't exist — both show iff repoId). */
+  .ghead .gpull, .ghead .gadd { color:var(--dim); font-weight:400; text-transform:none; padding:0 4px;
+                 border-radius:5px; }
+  .ghead .gpull { margin-left:auto; }
+  .ghead .gpull:hover { color:var(--accent); background:var(--line); }
+  .ghead .gpull.busy { color:var(--dim); cursor:default; }
+  .ghead .gadd:hover { color:var(--text); background:var(--line); }
+  /* the skein: a faint thread runs down each section behind the cards; the status dots sit on it as
+     beads (visible in the 6px gaps between cards), so the fleet reads as strands you're holding.
+     --thread-x = the dot centre (border-left 2px + padding-left + half the dot column). */
+  .grows { display:flex; flex-direction:column; gap:6px; position:relative; --thread-x:27px; }
+  .grows::before { content:""; position:absolute; left:var(--thread-x); top:7px; bottom:7px; width:1px;
+                   background:color-mix(in srgb,var(--accent) 22%,var(--line)); pointer-events:none; }
+  body.docked .grows { --thread-x:21px; }
+
+  .row { position:relative; z-index:1; display:grid; grid-template-columns:18px 1fr auto auto 16px; align-items:center; gap:14px;
+         padding:12px 16px; background:var(--panel); border:1px solid var(--border-2); border-left:2px solid transparent;
+         border-radius:var(--radius); cursor:pointer; box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+         transition:background var(--dur-fast), border-color var(--dur-fast); }
+  .row:hover { background:var(--elevated); border-color:var(--border-3); }
+  .row:hover .chev { color:var(--text); }
+  .row.sel { border-left-color:var(--accent); background:var(--elevated); }
+  .row.wired { border-left-color:color-mix(in srgb,var(--accent) 60%,transparent); }
+  .row.active { border-left-color:var(--accent); }
+  .row.s-attn { border-color:color-mix(in srgb,var(--attn) 42%,var(--border-2)); }
+  .row.s-error { border-color:color-mix(in srgb,var(--error) 46%,var(--border-2)); }
+  .row.s-waiting { border-color:color-mix(in srgb,var(--waiting) 34%,var(--border-2)); }
+  .chev { color:var(--faint); justify-self:end; transition:color var(--dur-fast); font-size:13px; }
+  .row.wired .chev { color:var(--accent); }
+  .row.streaming .chev { animation:pulse 1s var(--ease) infinite; }
+
+  /* status node. Motion is rationed: only "needs you" pulses (a ring), so movement in the rail
+     always means a box is waiting on you. Everything else is a calm, slightly-glowing dot. */
+  .dot { width:9px; height:9px; border-radius:50%; justify-self:center; position:relative; }
+  .s-attn .dot { background:var(--attn); box-shadow:0 0 0 0 color-mix(in srgb,var(--attn) 70%,transparent);
+                 animation:ring 1.8s var(--ease) infinite; }
+  .s-working .dot { background:var(--working); box-shadow:0 0 7px color-mix(in srgb,var(--working) 60%,transparent); }
+  .s-waiting .dot { background:var(--waiting); box-shadow:0 0 6px color-mix(in srgb,var(--waiting) 50%,transparent); }
+  .s-error .dot { background:var(--error); box-shadow:0 0 9px color-mix(in srgb,var(--error) 70%,transparent); }
+  .s-done .dot { background:var(--done); box-shadow:0 0 6px color-mix(in srgb,var(--done) 45%,transparent); }
+  .s-idle .dot { background:var(--idle); }
+  .s-ended .dot { background:var(--idle); }
+  .s-stale .dot { background:var(--stale); }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+  /* an expanding halo — reads as "calling for attention" without the whole dot blinking */
+  @keyframes ring { 0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--attn) 65%,transparent);}
+                    70%{box-shadow:0 0 0 7px transparent;} 100%{box-shadow:0 0 0 0 transparent;} }
+
+  .main { min-width:0; }
+  .name { font-family:var(--mono); font-size:13px; font-weight:500; letter-spacing:-.01em; color:var(--text);
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .s-stale .name, .s-idle .name, .s-ended .name { color:var(--dim); }
+  .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0;
+         flex-wrap:nowrap; align-items:baseline; }
+  /* the branch yields first: it ellipsizes so the diff badge always stays whole on one line */
+  .branch { font-family:var(--mono); color:var(--accent); opacity:.9; white-space:nowrap;
+            overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
+  .dstat { flex:none; white-space:nowrap; }
+  .hookwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
+  /* Not clickable, unlike .hookwarn: restarting a box throws away whatever its agent was
+     part-way through, so this says what a restart would buy and leaves the decision alone. */
+  .covwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
+  .capwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
+  /* disk chip: only speaks when a box is near or over its share of the fleet's one disk. Silent
+     below the threshold, because a badge that is always there is a badge nobody reads. */
+  .dchip { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10.5px; font-weight:600;
+           padding:0 5px; border-radius:4px; border:1px solid transparent; cursor:pointer; }
+  .dchip.near { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 12%,transparent); }
+  .dchip.over { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  /* the hover card: a box's own resources, without opening anything. Disk is the reason it exists —
+     it is the one the fleet actually runs out of, and it was reachable only through ⌘K. */
+  #rpop { position:fixed; z-index:80; pointer-events:none; opacity:0; transform:translateY(-2px);
+          transition:opacity var(--dur-fast), transform var(--dur-fast);
+          background:var(--overlay); border:1px solid var(--border-3); border-radius:9px;
+          padding:8px 11px; box-shadow:0 14px 40px rgba(0,0,0,.5); min-width:184px; }
+  #rpop.on { opacity:1; transform:none; }
+  #rpop .rp-n { font-family:var(--mono); font-size:11px; color:var(--text); margin-bottom:5px; }
+  #rpop .rp-r { display:flex; justify-content:space-between; gap:14px; font-size:11px; line-height:1.65; }
+  #rpop .rp-r span:first-child { color:var(--faint); }
+  #rpop .rp-r span:last-child { font-family:var(--mono); color:var(--text-2); }
+  #rpop .rp-r.over span:last-child { color:var(--attn); }
+  #rpop .rp-r.near span:last-child { color:var(--waiting); }
+  #rpop .rp-w { font-size:10px; color:var(--faint); margin-top:6px; }
+  /* repo tag: a quiet badge naming the box's repo, shown only when >1 repo is managed */
+  .repotag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--faint);
+             background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; opacity:.85; }
+  /* legacy tag: this box still owns a whole VM, and that reservation is held whether it works or
+     idles. Shown only when a fleet exists to move it into — the shared sandbox is the default, so
+     this marks the exception rather than labelling every row. Amber, not red: nothing is broken. */
+  .vmtag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--waiting);
+           background:color-mix(in srgb,var(--waiting) 12%,transparent); border-radius:4px; padding:0 4px;
+           border:1px solid color-mix(in srgb,var(--waiting) 35%,transparent); }
+  /* the managed tag: skein started this box itself. Cool and quiet rather than amber — this is not
+     a warning, it is whose box it is, and the row is in a section that already says so. */
+  .mgtag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--working);
+           background:color-mix(in srgb,var(--working) 12%,transparent); border-radius:4px; padding:0 4px;
+           border:1px solid color-mix(in srgb,var(--working) 35%,transparent); }
+  /* the scope tag, quieter than `legacy`: it marks a box that is merely wider than the fleet's
+     default, not one holding a whole VM hostage */
+  .scopetag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--dim);
+              background:var(--inset); border-radius:4px; padding:0 4px;
+              border:1px solid var(--border-2); }
+  .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* inbox headline: the gist of what the box last said / is asking — one truncated line */
+  .headline { display:none; color:var(--dim); font-size:12px; margin-top:3px; overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap; min-width:0; align-items:center; gap:7px; }
+  .row.has-head .headline { display:flex; }
+  .headline .htext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  /* peripheral "what it's doing now" — the current task, a quieter sub-line under a distinct ask */
+  .taskline { display:none; color:var(--faint,#5b6470); font-size:11px; margin-top:2px; overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .row.has-task .taskline { display:flex; }
+  .taskline .ttext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .taskline::before { content:"▸ "; color:var(--working); flex:none; }
+  .pchip { flex:none; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+           padding:1px 6px; border-radius:999px; }
+  .pchip.needs-input { color:var(--attn); background:color-mix(in srgb,var(--attn) 16%,transparent); }
+  .pchip.fork { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 16%,transparent); }
+  .pchip.proceed { color:var(--accent); background:var(--accent-bg); }
+  .pchip.k-permission, .pchip.k-trust { color:var(--attn); background:color-mix(in srgb,var(--attn) 16%,transparent); }
+  .pchip.k-question { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 16%,transparent); }
+  .pchip.k-auth { color:var(--error); background:color-mix(in srgb,var(--error) 16%,transparent); }
+
+  /* state word — a quiet right-aligned annotation. The dot is the colour anchor; this just names it.
+     It's hidden on rows that show an actionable pause chip (decision / proceed?) so state isn't
+     printed twice. */
+  .pill { font-family:var(--mono); font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+          padding:0; border:0; background:transparent; color:var(--dim); white-space:nowrap; }
+  .s-attn .pill { color:var(--attn); }
+  .s-error .pill { color:var(--error); }
+  .s-waiting .pill { color:var(--waiting); }
+  .s-working .pill { color:var(--working); }
+  .s-done .pill { color:var(--done); }
+  .s-idle .pill, .s-stale .pill, .s-ended .pill { color:var(--faint); }
+
+  .age { color:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+  .empty { color:var(--dim); padding:52px 16px; text-align:center; border:1px dashed var(--border-2); border-radius:var(--radius); }
+  .empty code { font-family:var(--mono); color:var(--text); }
+  footer { margin-top:24px; color:var(--faint); font-size:12px; }
+  footer .lk { color:var(--dim); cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; }
+  footer .lk:hover { color:var(--text-2); }
+  kbd { font-family:var(--mono); font-size:11px; background:var(--panel); border:1px solid var(--border-2);
+        border-bottom-width:2px; border-radius:5px; padding:1px 6px; color:var(--dim); }
+
+  /* ---- terminal dock (persistent multi-session) ---- */
+  #dock { display:none; flex-direction:column; background:var(--inset); border-left:1px solid var(--border-2); }
+  body.docked #dock { display:flex; flex:1 1 0; min-width:0; }
+  /* dragging files over a fleet row: ring the row it would attach to */
+  #fleet [data-name].dropping { box-shadow:inset 0 0 0 2px var(--accent); border-radius:8px; }
+  /* dragging files over the dock: an inset ring + label, so it's clear the drop lands in *this* box */
+  #dock.dropping { position:relative; }
+  #dock.dropping::after { content:"drop to attach — files or a folder go into this box"; position:absolute; inset:0;
+          z-index:40; display:flex; align-items:center; justify-content:center; pointer-events:none;
+          font-size:13px; color:var(--text); background:color-mix(in srgb, var(--accent) 12%, transparent);
+          box-shadow:inset 0 0 0 2px var(--accent); }
+  .tabs { display:flex; align-items:stretch; gap:0; border-bottom:1px solid var(--border); background:var(--panel);
+          overflow-x:auto; scrollbar-width:thin; }
+  .tab { display:flex; align-items:center; gap:8px; padding:9px 12px; cursor:pointer; white-space:nowrap;
+         color:var(--dim); border-right:1px solid var(--border); border-bottom:2px solid transparent;
+         transition:color var(--dur-fast), background var(--dur-fast); max-width:220px; }
+  .tab:hover { background:var(--elevated); color:var(--text-2); }
+  .tab.on { color:var(--text); background:var(--inset); border-bottom-color:var(--accent); }
+  .tab .td { width:8px; height:8px; border-radius:50%; flex:none; background:var(--stale); }
+  .tab.t-attn .td { background:var(--attn); }
+  .tab.t-waiting .td { background:var(--waiting); }
+  .tab.t-working .td { background:var(--working); }
+  .tab.t-done .td { background:var(--done); }
+  .tab.streaming .td { animation:pulse 1s var(--ease) infinite; box-shadow:0 0 8px currentColor; }
+  .tab .tl { overflow:hidden; text-overflow:ellipsis; font-size:13px; }
+  .tab .tx { color:var(--faint); font-size:13px; padding:0 2px; border-radius:4px; }
+  .tab.dead { opacity:.85; }
+  /* mid-drag: the tab being moved stays visible but recedes, so the gap it opens reads as the target */
+  .tab.dragging { opacity:.4; background:var(--inset); }
+  .tab.dead .tl { color:var(--dim); }
+  .tab .trc { color:var(--accent); font-size:13px; flex:none; line-height:1; }
+  .tab .tk { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--working);
+             border:1px solid color-mix(in srgb,var(--working) 40%,transparent); border-radius:3px; padding:0 3px; margin-left:5px; }
+  .tab .tx:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  .dock-actions { margin-left:auto; display:flex; align-items:center; padding:0 8px; gap:6px; }
+  .dock-actions .da { color:var(--faint); cursor:pointer; font-size:12px; padding:4px 7px; border-radius:6px; }
+  .dock-actions .da:hover { color:var(--text); background:var(--elevated); }
+  /* drilldown header — same button vocabulary as the rail: identity left, focal toggle centre,
+     actions right (grouped by consequence, destroy fenced behind a hairline). */
+  .dockbar { display:flex; align-items:center; gap:8px; padding:7px 12px; border-bottom:1px solid var(--border);
+             background:var(--panel); font-size:13px; }
+  .dockbar .dback { margin-right:1px; }
+  .dockbar .bdot { width:8px; height:8px; border-radius:50%; background:var(--stale); flex:none;
+                   box-shadow:0 0 0 3px color-mix(in srgb,var(--stale) 16%,transparent); }
+  .dockbar.s-attn .bdot   { background:var(--attn);    box-shadow:0 0 0 3px color-mix(in srgb,var(--attn) 24%,transparent); }
+  .dockbar.s-waiting .bdot{ background:var(--waiting); box-shadow:0 0 0 3px color-mix(in srgb,var(--waiting) 20%,transparent); }
+  .dockbar.s-working .bdot{ background:var(--working); box-shadow:0 0 0 3px color-mix(in srgb,var(--working) 20%,transparent); }
+  .dockbar.s-done .bdot   { background:var(--done);    box-shadow:0 0 0 3px color-mix(in srgb,var(--done) 20%,transparent); }
+  .dockbar .nm { font-family:var(--mono); font-size:13px; font-weight:500; color:var(--text);
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:26vw; }
+  .dockbar .br { font-family:var(--mono); font-size:11px; color:var(--accent-2); background:var(--accent-bg);
+                 border-radius:5px; padding:2px 7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:20vw; }
+  .dockbar .dstat { font-family:var(--mono); font-size:12px; color:var(--dim); white-space:nowrap; }
+  /* half-signal marker: this box's turn state is coming from hooks alone. Deliberately quiet — it is
+     a caveat on the state pill, not an alarm about the box. Drawn in CSS rather than set as `◐`,
+     which only renders in the mono face: in the UI's sans font it fell back to a stray glyph. */
+  .hdot { display:inline-block; width:.62em; height:.62em; border-radius:50%; border:1px solid currentColor;
+          background:linear-gradient(90deg, currentColor 50%, transparent 50%); vertical-align:baseline;
+          margin-left:.4em; opacity:.9; }
+  .dockbar .scrw { font-size:11px; font-weight:600; color:var(--dim); background:var(--inset);
+                   border:1px solid var(--border); border-radius:5px; padding:2px 7px; white-space:nowrap;
+                   cursor:help; flex:none; }
+  .dockbar .scrw .hdot { margin:0 .45em 0 0; }
+  .tab .thalf { color:var(--dim); }
+  .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
+  /* the focal control — a calm, centred segmented toggle */
+  .seg-toggle { margin:0 auto; display:flex; gap:2px; background:var(--inset); border:1px solid var(--border);
+                border-radius:var(--radius-sm); padding:2px; flex:none; }
+  .seg-toggle button { background:transparent; border:0; color:var(--dim); font:inherit; font-size:12px; padding:4px 13px;
+                       border-radius:5px; cursor:pointer; transition:background var(--dur-fast), color var(--dur-fast); }
+  .seg-toggle button:hover { color:var(--text-2); }
+  .seg-toggle button.on { background:var(--elevated); color:var(--text); box-shadow:0 1px 2px rgba(0,0,0,.3); }
+  /* right action cluster */
+  .dock-right { display:flex; align-items:center; gap:7px; flex:none; }
+  .dockbar .prlink { font-family:var(--mono); font-size:12px; color:var(--accent-2); text-decoration:none; white-space:nowrap; }
+  .dockbar .prlink:hover { text-decoration:underline; }
+  .dockbar .danger:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent);
+                           border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
+  .dockbar .ck { font-family:var(--mono); font-size:11px; padding:2px 7px; border-radius:999px; white-space:nowrap; }
+  .dockbar .ck.ok { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); }
+  .dockbar .ck.bad { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  .dockbar .ck.pend { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); }
+  #toast { position:fixed; right:18px; bottom:18px; z-index:80; background:var(--overlay); color:var(--text);
+    border:1px solid var(--border-3); border-radius:9px; padding:10px 14px; font-size:13px; box-shadow:0 12px 40px rgba(0,0,0,.5);
+    opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
+  #toast.show { opacity:1; transform:none; pointer-events:auto; }
+  #toast a { color:var(--accent); text-decoration:none; }
+  /* What it heard, shown while it hears it. A voice command that misfires is invisible otherwise —
+     you would only see the effect and have to guess at the cause — so the words are always on
+     screen before they are acted on. Centred and low, out of the way of the board and the tabs. */
+  #vstrip { position:fixed; left:50%; bottom:18px; transform:translate(-50%,8px); z-index:81;
+    background:var(--overlay); border:1px solid var(--border-3); border-radius:999px; padding:9px 18px;
+    font-size:13px; color:var(--dim); box-shadow:0 12px 40px rgba(0,0,0,.5); display:flex; gap:9px;
+    align-items:center; max-width:min(680px,80vw); opacity:0; pointer-events:none;
+    transition:opacity var(--dur), transform var(--dur); }
+  #vstrip.show { opacity:1; transform:translate(-50%,0); }
+  #vstrip .vdot { width:9px; height:9px; border-radius:50%; background:var(--attn); flex:none; }
+  #vstrip.hot .vdot { animation:vpulse 1s ease-in-out infinite; }
+  #vstrip .vtext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #vstrip.heard .vtext { color:var(--text); }
+  @keyframes vpulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
+
+  .dockbody { position:relative; flex:1; min-height:0; }
+  .termarea, .diffpane, .sesspane, .filespane, .txpane, .revpane { position:absolute; inset:0; display:none; }
+  .termarea.on { display:block; }
+  .diffpane.on, .sesspane.on { display:block; overflow:auto; background:var(--inset); }
+  /* Files: tree/list on the left, rendered content on the right — the "never leave skein to read
+     a doc" pane. Same inset background family as diff/session. */
+  .filespane.on { display:flex; background:var(--inset); }
+  /* transcript: a conversation, not a terminal — readable width, newest at the bottom */
+  .txpane.on { display:block; background:var(--inset); }
+  /* Review: a repo's PR queue. A place you sit in and work down, not an overlay you dismiss —
+     which is why it lives in the dock beside diff/session rather than in the modal stack. */
+  .revpane.on { display:block; background:var(--inset); overflow-y:auto; }
+  /* The queue fills a wide screen: title and gist are the columns being scanned, and past ~1500px
+     the 50fr title column stops gaining legibility. */
+  .revwrap { max-width:1500px; margin:0 auto; padding:14px 18px 40px; }
+  .revhead { display:flex; align-items:center; gap:10px; position:sticky; top:0; z-index:2;
+             margin:-14px -18px 12px; padding:11px 18px; background:var(--inset);
+             border-bottom:1px solid var(--line); font:11.5px var(--mono); color:var(--dim); }
+  .revhead select { background:var(--panel); color:var(--text); border:1px solid var(--border-2);
+                    border-radius:var(--radius-sm); padding:4px 7px; font:11.5px var(--mono); }
+  .revhead .revspacer { flex:1; }
+  /* Filter chips: author / reviewer / mentioned — the split you work the queue by. */
+  .revchips { display:flex; gap:5px; }
+  .revchip { background:var(--panel); border:1px solid var(--border-2); color:var(--dim);
+             border-radius:999px; padding:3px 10px; font:11px var(--mono); cursor:pointer; }
+  .revchip.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-2); }
+  /* Two conditions, two treatments, and the difference is permanence (SKEIN-164, §10's colour
+     vocabulary). Both used to be this one orange box.
+
+     A blind spot is STANDING: `gh` has no read:org and will not until somebody runs the command in
+     the sentence. It is stated — a queue that silently under-reports is worse than no queue — but
+     as amber, one line, a left rule and no box: "true, you should know, not an error". Drawing a
+     permanent condition in the alarm's clothes is what teaches the eye to skip the alarm, and the
+     queue's willingness to shout is the best thing about it. */
+  .revblind { border-left:2px solid var(--waiting); padding:2px 0 2px 9px; margin-bottom:12px;
+              font:12px var(--mono); color:var(--text-2); }
+  .revblind > div + div { margin-top:4px; }
+  .revblind .revblindwhat { color:var(--waiting); }
+  /* skein FAILED. The box, the orange, and the weight stay here and only here — this is the thing
+     the shouting was for. */
+  .revfail { border:1px solid var(--error); border-left-width:3px; border-radius:var(--radius-sm);
+             background:rgba(240,136,62,.08); padding:9px 12px; margin-bottom:14px;
+             font:12px var(--mono); color:var(--text-2); }
+  .revfail b { color:var(--error); font-weight:600; display:block; margin-bottom:4px; }
+  .revfail div + div { margin-top:5px; }
+  .revlane { margin-bottom:20px; }
+  .revlane > h4 { margin:0 0 7px; font:11px var(--mono); text-transform:uppercase; letter-spacing:.07em;
+                  color:var(--faint); display:flex; align-items:center; gap:7px; cursor:pointer; }
+  .revlane > h4 .revn { color:var(--dim); }
+  /* THE ROW — grid, not flex: flex let the title take whatever width it wanted and pushed the
+     gist onto a second line (measured live: 6 rows at 62px among 23 at 36px). Five columns at one
+     fixed height is what makes a summary landing INCAPABLE of moving any other row — the click
+     aimed at a row must land on that row, not its displaced neighbour. */
+  .revrow { margin:0; border:0; border-radius:0; background:transparent;
+            border-bottom:1px solid var(--line); }
+  .revrow:first-child { border-top:1px solid var(--line); }
+  .revrow.open { background:var(--panel); }
+  /* The keyboard's selection (SKEIN-151/159): a left accent bar, not a background — the lanes and
+     the open row already speak in backgrounds, and two backgrounds compose into mud. `.step.sel`
+     is the same voice inside an open stack. */
+  .revrow.sel > .revline, .step.sel { box-shadow:inset 2px 0 0 var(--accent);
+    background:color-mix(in srgb,var(--accent) 7%,transparent); }
+  /* A selection handed off BY POSITION (its row left the list) says so once, then stops. */
+  .revrow.flash { animation:revflash .9s ease-out 1; }
+  @keyframes revflash { 0% { background:var(--accent-bg); } 100% { background:transparent; } }
+  /* An act still inside its undo window: the row greys in place, exactly as far as `done` will
+     take it if the window lapses — u brings it back whole. */
+  .revrow.held > .revline { opacity:.55; }
+  .revline { display:grid; grid-template-columns:14px 46px minmax(0,50fr) minmax(0,32fr) auto;
+             align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
+  .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
+  .revnum { font:11px var(--mono); color:var(--faint); text-align:right; }
+  /* `overflow:hidden` is load-bearing, not tidiness. The chips are `flex:none`, so on a crowded row
+     they used to spill OUT of a fixed grid track and land on top of the gist column — measured: the
+     row's read control drawn over "read before the latest commits…", which reads as a live button
+     and is a click that hits the text. A column that cannot contain its contents is not a column. */
+  .tcell { display:flex; align-items:center; gap:6px; min-width:0; overflow:hidden; }
+  .revtitle { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+              font-size:13px; color:var(--text); }
+  /* WHOSE MOVE — replaces the check dot in the row's highest-value position. Exactly one of the
+     four states is lit, and it is the one that is yours: the red dot was true of 25 rows in 29,
+     and a signal that takes one value 86% of the time is a texture, not a signal. */
+  .mv { width:9px; height:9px; border-radius:50%; justify-self:center; }
+  .mv.yours { background:var(--accent); box-shadow:0 0 0 3px var(--accent-bg); }
+  .mv.theirs { background:transparent; border:1px solid var(--border-3); }
+  .mv.blocked { background:transparent; border:1px solid var(--border-3);
+                border-radius:2px; transform:rotate(45deg); width:7px; height:7px; }
+  .mv.done { background:var(--done); opacity:.55; }
+  /* THE GIST COLUMN — never empty, never taller than the row. Both are the point: the first is
+     the module's own invariant (silence must not read as reassurance), the second is what stops
+     28 rows shifting 26px while summaries arrive. The dotted underline is the page's one "stated
+     absence" mark, legible at a glance down a column of real sentences. */
+  .gist { font-size:12px; color:var(--text-2); min-width:0;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .gist.unknown { color:var(--faint); font-style:italic;
+                  text-decoration:underline dotted color-mix(in srgb,var(--faint) 55%,transparent);
+                  text-underline-offset:3px; }
+  /* IN FLIGHT, THIS CELL IS TWO THINGS — the chrome, and the reading being replaced — so it is a
+     flex row, and only it. `.revflight { flex:none }` and `.revflight-was`'s own truncation below
+     were written as though it already were one; an inline span in a block cell can honour neither,
+     so the cell was a single nowrap run cut wherever the gist's own ellipsis landed and those two
+     rules asserted a behaviour the CSS did not produce. Measured in the real 256px column
+     (scratchpad `measure-gist.mjs`, 1000px wrap): the old reading had 124.8px of it, and 94.3px
+     once "skein's own" was there too. `.gist` itself stays a block — every other row in this queue
+     is one run of text and truncates as one, and making them all flex would change all of them. */
+  .gist.reading { color:var(--faint); font-style:italic;
+                  display:flex; align-items:baseline; }
+  /* A READING IN FLIGHT (SKEIN-333). Promoted out of `.gist.reading`'s faint italic, which was
+     written for a placeholder that lasted a moment: this one lasts most of a minute and is the
+     answer to "is anything happening at all", so it carries `--accent` — the page's one meaning
+     for "your move" — and stays upright. `flex:none` so a running counter can never be the thing
+     that wraps a row onto a second line. */
+  .revflight { color:var(--accent-2); font-style:normal; white-space:nowrap; flex:none; }
+  /* Tabular figures: the counter is rewritten in place once a second and proportional digits make
+     the text beside it twitch on every tick. */
+  .revflight-secs { font-variant-numeric:tabular-nums; }
+  .revflight-who { color:var(--faint); margin-left:6px; font-size:11px; }
+  /* The reading being REPLACED, kept visible and plainly subordinate — a reader scanning the list
+     keeps their place, and nobody mistakes it for what skein thinks now. */
+  .revflight-was { color:var(--faint); font-style:italic; margin-left:8px; flex:1 1 auto;
+                    min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  /* Landed while you were elsewhere, and not yet looked at. Filled, unlike `.revwhy`'s bare words:
+     this is a fact about the ROW's freshness rather than a sentence about the pull request, and it
+     has to survive being scanned past at speed. */
+  .revtag.updated { background:color-mix(in srgb,var(--accent) 18%,transparent);
+                    color:var(--accent-2); border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); }
+  .gist.stale { color:var(--faint); }
+  /* THE RAIL — age first because it is the sort key, and a sort key you cannot see is a sort you
+     cannot audit; then size ("can I do this now" is a shape, not an integer), then who. */
+  .rail { display:grid; grid-template-columns:34px 92px 78px; gap:0 10px;
+          font:11px var(--mono); color:var(--dim); align-items:center; }
+  /* `revage`, not the fleet's `age` — tickAges owns that class and rewrites it every second.
+     The 12px and nowrap the global `.age` rule used to contribute are restated here. */
+  .rail .revage { text-align:right; font-variant-numeric:tabular-nums; font-size:12px;
+                  white-space:nowrap; }
+  .rail .revage.old { color:var(--waiting); }
+  .rail .size { text-align:right; font-variant-numeric:tabular-nums; color:var(--faint); }
+  .rail .who { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Chips sit at rank 4 of the emphasis ladder: filled faint, never outlined-and-bright. A chip
+     must be true of a minority of rows AND change what you do — the reviewer chip was true of 22
+     in 29 and is gone; the filter strip above is where that axis lives. */
+  .revtag { font:10px var(--mono); border:0; border-radius:3px; padding:0 5px; flex:none;
+            background:var(--elevated); color:var(--dim); }
+  /* WHY this row needs you, on rows that need you and nowhere else (SKEIN-302). Not a `.revtag`:
+     a chip is a fact ABOUT the pull request and sits at rank 4, and this is the sentence the list
+     is built on — periwinkle, which is `--accent`'s one meaning, "your move". Unfilled, so it
+     reads as words rather than as another badge, and `flex:none` so it can never be the thing that
+     wraps a row onto a second line. */
+  .revwhy { font:10.5px var(--mono); color:var(--accent-2); white-space:nowrap;
+            min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  /* An act GitHub refused (SKEIN-385). `--attn` is what the receipt in the row's own strip already
+     wears for the same fact, so the mark on the line and the sentence inside the row are visibly
+     one thing rather than two unrelated marks. */
+  .revtag.refused { background:color-mix(in srgb,var(--attn) 18%,transparent); color:var(--attn); }
+  .revtag.draft { background:color-mix(in srgb,var(--waiting) 16%,transparent); color:var(--waiting); }
+  .revtag.moved { background:color-mix(in srgb,var(--working) 16%,transparent); color:var(--working); }
+  /* "read it" / "re-read" on the collapsed line (SKEIN-228). Outlined rather than filled, because
+     it is the one ACTION among the row's facts and the difference has to be legible without
+     reading it; sized to the chips so it cannot change a row's height. */
+  .revread { font:10px var(--mono); background:none; border:1px solid var(--border-3);
+             border-radius:3px; padding:0 5px; flex:none; color:var(--faint); cursor:pointer;
+             line-height:15px; }
+  .revread:hover { color:var(--accent-2); border-color:var(--accent); }
+  /* CI, said once at the top when it is most of the queue: 25 red rows is one broken pipeline,
+     not twenty-five decisions. Demoted, not hidden — the expanded row still says its own checks. */
+  .cired { border-left:2px solid var(--attn); padding:3px 10px; margin:2px 0 8px;
+           font-size:12px; color:var(--text-2); }
+  .revsearch { background:var(--inset); border:1px solid var(--border-2); border-radius:var(--radius-sm);
+               color:var(--text); font:12px var(--ui); padding:3px 9px; width:190px; }
+  .revsearch:focus { border-color:var(--accent); outline:none; }
+  .revsearch::placeholder { color:var(--faint); }
+  /* The repo picker: one select (`.revhead select` carries the base look). A long repo id clips
+     rather than pushing the chips off the row. */
+  .revrepo { max-width:230px; }
+  .revrepo option.none { color:var(--faint); }
+  .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
+  .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
+             display:flex; flex-wrap:wrap; gap:4px 14px; }
+  .revmeta a { color:var(--accent-2); }
+  /* No summary is a *state*, not an absence: skein's rule is that AI may only add scrutiny, so a
+     PR it could not summarise stays at full attention and says so plainly. */
+  .revnosum { border:1px dashed var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
+              color:var(--text-2); font-size:12.5px; }
+  /* The day's automatic budget, spent. Amber rather than orange: nothing failed and nothing is
+     wrong — skein stopped spending on its own initiative, and the button beside it is not
+     budgeted at all. Solid, because unlike the other absences this one has a move in it. */
+  .revnosum.budget { border:1px solid var(--border-2); border-left:2px solid var(--waiting); }
+  .revnosum.budget b { color:var(--waiting); font-weight:600; }
+  .revtag.flow { background:var(--accent-bg); color:var(--accent-2); }
+  .revtag.stopped { background:color-mix(in srgb,var(--attn) 14%,transparent); color:var(--attn); }
+  .revflow { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
+    margin-top:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-direction:column; gap:6px; }
+  .revflow-head { display:flex; align-items:center; gap:8px; }
+  .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
+  .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+  /* HELD, which is neither of the two states beside it (SKEIN-279/326). Not `.revflow-stop`'s red:
+     nothing failed and there is nothing to clear. Not amber either — amber on this page is "true,
+     you should know", and it is spoken for by conditions somebody has to act on. A held workflow is
+     one doing exactly what it was configured to do, so it is promoted out of `.dim` (which read as
+     "nothing here") and no further: the sentence is the whole of the treatment. */
+  .revflow-holding { color:var(--text-2); border-left:2px solid var(--border-3);
+                     padding:1px 0 1px 9px; line-height:1.55; }
+  .revflow-off { color:var(--waiting); }
+  /* The merge-train panel, at the top of the workflows pane: the switch, the front, the line. */
+  .revtrain { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
+    margin:0 0 8px; display:flex; flex-direction:column; gap:8px; font-size:12.5px; color:var(--text-2); }
+  .revtrain-state { display:flex; align-items:center; gap:10px; font-weight:600; color:var(--text); }
+  .revtrain-off { color:var(--attn); font-weight:400; }
+  /* Paused is unmistakable: the body dims as one block, and the state line says so in words. */
+  .revtrain.off .revtrain-body { opacity:.45; }
+  .revtrain-body { display:flex; flex-direction:column; gap:8px; }
+  .revtrain-repo h5 { margin:0 0 4px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--faint); font-weight:600; }
+  .revtrain-flow { font-weight:600; margin:2px 0; }
+  .revtrain-now { margin:0 0 2px; }
+  .revtrain-car { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:2px 0 2px 8px;
+    border-left:2px solid transparent; }
+  .revtrain-car.front { border-left-color:var(--accent); }
+  .revtrain-car.stopped .revtrain-doing { color:var(--attn); }
+  .revtrain-pos { flex:0 0 34px; text-align:right; color:var(--faint); font-variant-numeric:tabular-nums; }
+  .revtrain .trainnum { border:0; background:none; color:var(--accent-2); font:inherit; cursor:pointer;
+    text-decoration:underline; padding:0; }
+  .revtrain-doing { color:var(--dim); }
+  .revtrain-log { margin:2px 0 6px 44px; display:flex; flex-direction:column; gap:2px; font:11.5px var(--mono); }
+  .revtrain-log .when { color:var(--faint); display:inline-block; min-width:44px; }
+  .revtrain-log .kind { color:var(--dim); display:inline-block; min-width:110px; }
+  .revtrain-log .stopped .kind { color:var(--attn); }
+  .revtrain-log .cleared .kind { color:var(--done); }
+  /* The editor. Steps are numbered and stacked because their ORDER is their meaning — the first one
+     that applies is the one that happens — so it has to look like a sequence, not like a set. */
+  .revflow-edit { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
+    margin:8px 0; display:flex; flex-direction:column; gap:8px; }
+  .revflow-edit-head { display:flex; align-items:center; gap:8px; }
+  .revflow-edit-head input { flex:0 1 220px; font-weight:600; }
+  .revflow-edit-foot { display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .revstep { display:flex; align-items:flex-start; gap:8px; border-top:1px solid var(--border-2);
+    padding-top:8px; }
+  .revstep-n { flex:0 0 20px; text-align:center; color:var(--faint); font-variant-numeric:tabular-nums;
+    line-height:26px; }
+  .revstep-body { flex:1 1 auto; display:flex; flex-direction:column; gap:5px; }
+  .revstep-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .revstep-lbl { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint);
+    flex:0 0 46px; }
+  .revstep-atom { display:inline-flex; align-items:center; gap:3px; }
+  .revstep-move { display:flex; gap:2px; }
+  .revx { background:none; border:1px solid transparent; color:var(--faint); cursor:pointer;
+    border-radius:var(--radius-sm); padding:1px 5px; font-size:12px; }
+  .revx:hover { color:var(--text-1); border-color:var(--border-3); }
+  .revstale { border:1px solid var(--working); border-radius:var(--radius-sm); padding:8px 10px;
+    margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
+    align-items:center; gap:6px; }
+  .revstale code { color:var(--text-1); }
+  /* A reading built from a remembered queue is a WEAKER claim than a stale one — it says
+     skein cannot tell, not that it knows. Same block, quieter border, so the two are read as
+     the same kind of caution at different strengths rather than as one alarm. */
+  .revstale.blind { border-color:var(--border-3); }
+  /* And a reading that lost its box is the STRONGEST of the three: stale says "this describes an
+     older commit", blind says "skein cannot tell", and this says the reading may not have been of
+     the change at all — it ran with no checkout of it. Amber rather than the blue caution, and
+     never red: the reading did happen and is worth reading, which is why it is drawn beside the
+     brief rather than in place of it. */
+  .revstale.outsidebox { border-color:var(--waiting); }
+  /* SKEIN-162: the pressed control becomes the receipt — success is green where the eye already
+     is, a refusal is red and STAYS until acted on. No toast carries either. */
+  .revreceipt { display:inline-flex; align-items:center; gap:7px; color:var(--done);
+    font-size:12.5px; font-weight:600; }
+  .revreceipt .undoleft { color:var(--faint); font-weight:400;
+    font-variant-numeric:tabular-nums; min-width:2.5ch; }
+  .revreceipt.failed { color:var(--attn); }
+  /* A row acted on this session marks done IN PLACE — green dot, struck title — and does not
+     vanish under you; it leaves on the next natural load. */
+  .revrow.done .revtitle { text-decoration:line-through; text-decoration-color:var(--border-3);
+    color:var(--faint); }
+  .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
+  .revsignals { border:1px solid var(--border-2); border-left:2px solid var(--accent);
+                border-radius:var(--radius-sm); padding:8px 11px; margin-bottom:11px;
+                font:11.5px var(--mono); color:var(--text-2); }
+  .revsignals b { display:block; font-weight:600; color:var(--faint); text-transform:uppercase;
+                  letter-spacing:.06em; font-size:10px; margin-bottom:5px; }
+  .revsignals > div { margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .revsignals .dim { color:var(--faint); }
+  /* WHO STILL OWES AN APPROVAL (SKEIN-306). One line, in the expanded row and nowhere else: an
+     author goes looking for this, and a chip on the collapsed line would be a nag about something
+     that is deliberately not their move. */
+  .revapprovals { font:11.5px var(--mono); color:var(--text-2); margin-bottom:9px;
+                  border-left:2px solid var(--border-3); padding:2px 0 2px 9px; }
+  .revapprovals b { color:var(--faint); font-weight:600; text-transform:uppercase;
+                    letter-spacing:.06em; font-size:10px; margin-right:6px; }
+  .revapprovals .revblindwhat { color:var(--waiting); }
+  .revapprovals code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
+  /* THE CONVERSATION (SKEIN-304), and the asymmetry is visible in the CSS as well as the markup:
+     a thread is ONE LINE — who, when, the way to it — and a PR-level comment is a block with its
+     text in it. They are different objects and must not read as a list of the same thing. */
+  .revconv { margin-bottom:11px; display:flex; flex-direction:column; gap:9px; }
+  .revconv-part > b { display:block; font:600 10px var(--mono); color:var(--faint);
+                      text-transform:uppercase; letter-spacing:.06em; margin-bottom:5px; }
+  .revconv .dim { font:11px var(--mono); color:var(--faint); margin-top:3px; }
+  .revcomment { margin-top:7px; border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                background:var(--panel); padding:7px 10px; }
+  /* The head is the control now (SKEIN-334): the whole line toggles, so it takes a pointer and its
+     caret sits at the front where an outline reader looks for one. The GitHub link inside it stops
+     its own click, or following the link would also collapse the comment you were leaving. */
+  .revcomment-head { cursor:pointer; display:flex; align-items:baseline; gap:8px; font:11px var(--mono);
+                     color:var(--faint); margin-bottom:4px; }
+  .revcomment-head .who { color:var(--text); }
+  .revcomment-head a { color:var(--accent-2); margin-left:auto; }
+  /* `pre-wrap`, because the body is escaped text and never markdown: somebody else's writing off
+     the internet is the one thing on this page `marked.parse` must not be pointed at. Capped and
+     scrollable, so one four-hundred-line comment cannot become the whole expanded row. */
+  .revconv-caret { color:var(--faint); width:9px; flex:none; }
+  /* The stack's own read control and its progress (SKEIN-337). It sits above the steps, inside the
+     expansion, because reading eighteen pull requests is a decision about the STACK and not about
+     whichever step the selection happens to be on. */
+  .stackread { display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+               padding:6px 10px 7px; border-bottom:1px solid var(--line); font-size:12px; }
+  /* One line, and only one: `nowrap` with an ellipsis is what makes a collapsed list a LIST rather
+     than a shorter wall. A comment whose first line is a 2,000-character paragraph — which is the
+     measured case, not a hypothetical — must still occupy exactly one row. */
+  .revcomment-peek { font-size:12px; color:var(--text-2); padding:2px 0 1px;
+                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .revcomment-body { font-size:12.5px; line-height:1.55; color:var(--text);
+                     white-space:pre-wrap; overflow-wrap:anywhere;
+                     max-height:260px; overflow-y:auto; }
+  .revowned { font:11px var(--mono); color:var(--dim); margin-bottom:9px; }
+  .revowned code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
+  .revbrief { font-size:13.5px; line-height:1.6; color:var(--text); }
+  .revbrief h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);
+                 margin:14px 0 5px; font-weight:600; }
+  .revbrief > :first-child { margin-top:0; }
+  .revbrief p { margin:0 0 9px; }
+  .revbrief code { font:12px var(--mono); background:var(--elevated); border-radius:4px; padding:1px 5px; }
+  .revempty { color:var(--faint); font-size:13px; padding:10px 2px; }
+  /* A CLEARED QUEUE is the best moment this product has, so it is drawn like one and then says the
+     honest next thing — usually that another repo has ten (SKEIN-154, §8.5). Quiet: no colour but
+     the count and the one warm mark a repo skein could not read earns. */
+  .revclear { padding:22px 2px 8px; max-width:560px; }
+  .revclear-head { font:20px var(--ui); color:var(--text); margin-bottom:6px; }
+  .revclear-sub { font-size:13px; color:var(--dim); line-height:1.55; margin-bottom:14px; }
+  .revclear-next { border:1px solid var(--line); border-radius:var(--radius-sm); overflow:hidden; }
+  .revclear-row { display:flex; align-items:center; gap:10px; width:100%; text-align:left;
+                  background:none; border:0; border-top:1px solid var(--line); cursor:pointer;
+                  padding:8px 11px; font:12px var(--mono); color:var(--text-2); }
+  .revclear-row:first-child { border-top:0; }
+  .revclear-row:hover { background:var(--elevated); }
+  .revclear-n { font-variant-numeric:tabular-nums; color:var(--text); min-width:2ch; text-align:right; }
+  .revclear-row.bad { cursor:default; color:var(--text-2); }
+  .revclear-row.bad .revclear-n { color:var(--error); }
+  /* A repo skein deliberately did not ASK about. Not a fault, so not the failure's red: it is the
+     absence of a reading, and the dash where a count would be is the whole point (SKEIN-245). */
+  .revclear-row.off { cursor:default; color:var(--text-2); }
+  .revclear-row.off .revclear-n { color:var(--faint); }
+  .revclear-acts { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:-6px 0 14px; }
+  /* A row skein could not draw, and the strip above a pane that could not be built (SKEIN-268).
+     Both wear the failure's red, because both are skein failing rather than GitHub — and a row
+     that says so is the whole difference between one broken row and a blank page. */
+  .revrow.broken { border-left:3px solid var(--error); }
+  .revrow.broken .revtitle { color:var(--error); }
+  .revcrash { margin-bottom:12px; }
+  /* The remembered queue, kept on screen when the live one could not be built: dimmed, because
+     that is how you tell at a glance it is not live without reading anything (§8.4). */
+  .revwrap.notlive .revlane { opacity:.55; }
+  .revmods { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel);
+             padding:10px 12px; margin-bottom:16px; }
+  .revmodsnote { margin:0 0 9px; font-size:12px; line-height:1.55; color:var(--dim); }
+  .revmod { display:flex; align-items:center; gap:9px; padding:4px 0; font:11.5px var(--mono); }
+  .revmod code { color:var(--text-2); }
+  .revmod .dim { color:var(--faint); }
+  /* Three states, one dot: written and current, written and overtaken, never written. Stale is the
+     interesting one — it is amber rather than red because it is not an error, it is a note doing
+     exactly what it was designed to do, which is admit it is out of date. */
+  .revmodstate { width:7px; height:7px; border-radius:50%; flex:none; background:var(--stale); }
+  .revmodstate.fresh { background:var(--done); }
+  .revmodstate.stale { background:var(--waiting); }
+  .revacts { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:11px; }
+  .revacts .revspacer { flex:1; }
+  .revchip.go { border-color:var(--accent); color:var(--accent-2); }
+  .revchip[disabled] { opacity:.5; cursor:default; }
+  .revcompose { margin-top:11px; border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                background:var(--inset); padding:10px 11px; }
+  .revcl { font:11px var(--mono); color:var(--faint); margin-bottom:7px; }
+  .revcompose textarea { width:100%; background:var(--panel); color:var(--text); resize:vertical;
+                         border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                         padding:8px 10px; font:13px var(--ui); line-height:1.5; }
+  .revanswer { margin-top:10px; padding:9px 11px; background:var(--panel); border-radius:var(--radius-sm);
+               border-left:2px solid var(--accent); font-size:13px; line-height:1.6; }
+  .revfold { cursor:pointer; user-select:none; }
+  .revfold:hover .dim { color:var(--text); }
+  /* THE STACK — the rail is drawn, so "fifteen deep" is a length you see, not a count you read. */
+  .revrow.stack > .revline { background:color-mix(in srgb,var(--accent) 5%,transparent); }
+  .stackmark { font:10px var(--mono); color:var(--accent-2); background:var(--accent-bg);
+               border-radius:3px; padding:0 5px; margin-right:2px; flex:none; }
+  .steps     { padding:2px 0 8px; background:var(--inset); border-top:1px solid var(--line); }
+  /* A STEP IS A ROW (SKEIN-352). Its last four columns are the loose row's own — mv, #number,
+     title, gist, rail — behind the two a stack adds, `step N` and the drawn rail. Reported live
+     against the stack read: "when it says 4 ready of 16, there is no marker on any of the PRs
+     which one is done." A step with no gist cell cannot say `not read`, so on the eighteen pull
+     requests that are most of this queue the cell's own invariant — silence must not read as
+     reassurance — did not apply at all, and a count of how many were done could be checked against
+     nothing on screen. */
+  .step      { display:grid;
+               grid-template-columns:44px 20px 46px minmax(0,50fr) minmax(0,32fr) auto;
+               align-items:center; gap:0 9px; padding:3px 10px; min-height:26px; font-size:12.5px;
+               cursor:pointer; }
+  .step .sn  { font:10px var(--mono); color:var(--faint); text-align:right; white-space:nowrap; }
+  /* The node on the drawn rail IS the step's move mark, rather than a second dot beside one: the
+     rail already spends this position on done-and-next (§5.2) and the row spends its own leftmost
+     pixel on whose-move (§4), and two marks a step apart saying almost the same thing is the
+     texture the mv exists to replace. Putting `.mv` here is also what gives `.mv.blocked` — written
+     down in §4 for "a stack step whose base is unreviewed", and until now drawn nowhere — the one
+     place it was ever meant to appear. */
+  .step .node { position:relative; height:26px;
+                display:flex; align-items:center; justify-content:center; }
+  .step .node::before { content:""; position:absolute; left:9px; top:0; bottom:0;
+                        width:1px; background:var(--border-2); }
+  .step:first-of-type .node::before { top:13px; }
+  .step:last-of-type  .node::before { bottom:13px; }
+  /* `position` so the mark paints over the rail line, which is absolutely positioned; `--inset` on
+     the hollow states so the line does not run through the middle of them. Both are what the dot
+     this replaced already did with `background:var(--inset)` on a bordered circle. */
+  .step .node .mv { position:relative; }
+  .step .node .mv.theirs, .step .node .mv.blocked { background:var(--inset); }
+  .step.done .st { color:var(--faint); text-decoration:line-through;
+                   text-decoration-color:var(--border-3); }
+  .step .st      { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                   color:var(--text-2); }
+  .step.next .st { color:var(--text); }
+  /* the step whose own title numbers it out of order — say so, do not silently re-sort */
+  .step .misnamed { font:10px var(--mono); color:var(--waiting); white-space:nowrap; flex:none;
+                    background:color-mix(in srgb,var(--waiting) 14%,transparent);
+                    border-radius:3px; padding:0 5px; }
+  .stackhint { font:11px var(--mono); color:var(--faint); padding:4px 10px 6px 44px; }
+  .revanswer > :first-child { margin-top:0; } .revanswer > :last-child { margin-bottom:0; }
+  .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
+  .txhead { display:flex; align-items:center; gap:10px; position:sticky; top:-14px; z-index:1; margin:-14px -18px 10px;
+            padding:10px 18px; background:var(--inset); border-bottom:1px solid var(--line);
+            font:11.5px var(--mono); color:var(--dim); }
+  .txhead .txmeta { flex:1; color:var(--faint); }
+  .txolder { display:flex; justify-content:center; padding:6px 0 14px; }
+  .txend { font:11px var(--mono); color:var(--faint); }
+  .txmsg { max-width:860px; margin:0 auto 16px; }
+  .txmsg .txwho { display:flex; gap:8px; font:10.5px var(--mono); text-transform:uppercase; letter-spacing:.06em;
+                  color:var(--faint); margin-bottom:4px; }
+  .txmsg .txts { margin-left:auto; opacity:.7; }
+  .txmsg.user .txtext { background:var(--panel); border-left:2px solid var(--accent); border-radius:0 6px 6px 0;
+                        padding:8px 12px; white-space:pre-wrap; word-break:break-word; }
+  .txmsg.assistant .txtext { color:var(--text); }
+  .txmsg.side { opacity:.62; }
+  .txtext { font-size:13.5px; line-height:1.62; }
+  .txtext > :first-child { margin-top:0; } .txtext > :last-child { margin-bottom:0; }
+  .txtext pre { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:9px 11px;
+                overflow-x:auto; font:12px var(--mono); }
+  .txtext code { font:12px var(--mono); }
+  .txtool { display:inline-block; margin:4px 6px 0 0; padding:1px 7px; border-radius:4px; background:var(--panel);
+            border:1px solid var(--line); font:11px var(--mono); color:var(--dim); }
+  .flist { width:260px; flex:none; overflow-y:auto; border-right:1px solid var(--line); padding:8px 0; }
+  .fcrumb { padding:4px 14px 8px; font:12px var(--mono); color:var(--dim); display:flex; flex-wrap:wrap; gap:2px; }
+  .fcrumb a { color:var(--fg); text-decoration:none; } .fcrumb a:hover { text-decoration:underline; }
+  .fsrc { margin-left:auto; font-size:10px; padding:0 5px; border-radius:4px; }
+  .fsrc.host { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); }
+  .fnote { padding:10px 14px; font-size:11.5px; line-height:1.5; color:var(--faint); }
+  .fent { display:flex; align-items:center; gap:8px; padding:3px 14px; font:12.5px var(--mono);
+          color:var(--fg); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .fent:hover { background:var(--row-hover, rgba(255,255,255,.04)); }
+  .fent.on { background:rgba(124,124,240,.12); }
+  .fent .fi { flex:none; width:14px; text-align:center; color:var(--dim); }
+  .fent.fdir { color:var(--working); }
+  .fent .fsz { margin-left:auto; color:var(--faint); font-size:10.5px; }
+  .fview { flex:1; overflow:auto; padding:18px 26px; }
+  .fview img { max-width:100%; }
+  .fview pre.fraw { font:12.5px/1.55 var(--mono); white-space:pre-wrap; word-break:break-word; margin:0; }
+  .ftrunc { margin:0 0 12px; padding:6px 10px; border-radius:6px; background:rgba(227,179,65,.12);
+            color:var(--waiting); font-size:12px; }
+  /* rendered markdown — calm, readable defaults on the dark inset */
+  /* A link or image whose destination skein refused (a `javascript:` or `data:` URL written into
+     markdown by a box, a repo or a model — see `walkTokens`). The text stays, because it is part of
+     a sentence somebody wrote; the destination is gone, and `pointer-events:none` makes that true
+     rather than merely harmless — an empty href is inert but a click on one still reloads the
+     cockpit and loses the page's state. Applies wherever markdown is rendered, not only `.fmd`. */
+  a[href=""], img[src=""] { pointer-events:none; color:var(--faint); text-decoration:line-through; }
+  img[src=""] { display:inline; width:0; height:0; }
+  .fmd { max-width:860px; font:14px/1.65 var(--sans,system-ui); color:var(--fg); }
+  .fmd h1, .fmd h2, .fmd h3, .fmd h4 { line-height:1.3; margin:1.4em 0 .5em; } .fmd h1:first-child { margin-top:0; }
+  .fmd h1 { font-size:1.6em; border-bottom:1px solid var(--line); padding-bottom:.3em; }
+  .fmd h2 { font-size:1.3em; } .fmd h3 { font-size:1.1em; }
+  .fmd p, .fmd ul, .fmd ol { margin:.6em 0; } .fmd li { margin:.25em 0; }
+  .fmd code { font:.9em var(--mono); background:rgba(255,255,255,.07); padding:.15em .35em; border-radius:4px; }
+  .fmd pre { background:#0d1015; border:1px solid var(--line); border-radius:8px; padding:12px 14px; overflow-x:auto; }
+  .fmd pre code { background:none; padding:0; font-size:12.5px; line-height:1.55; }
+  .fmd blockquote { margin:.6em 0; padding:.1em 1em; border-left:3px solid var(--line); color:var(--dim); }
+  .fmd table { border-collapse:collapse; margin:.8em 0; display:block; overflow-x:auto; }
+  .fmd th, .fmd td { border:1px solid var(--line); padding:5px 10px; font-size:13px; }
+  .fmd a { color:var(--working); }
+  .fmd hr { border:none; border-top:1px solid var(--line); margin:1.4em 0; }
+  /* session digest — "what happened here" without reading the terminal */
+  .sess { padding:18px 20px; max-width:860px; font-size:13px; line-height:1.6; }
+  .sess .blk { margin-bottom:20px; }
+  .sess h4 { margin:0 0 8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--faint); }
+  .sess .ask { border-left:3px solid var(--attn); background:color-mix(in srgb,var(--attn) 8%,transparent); padding:10px 12px; border-radius:0 6px 6px 0; white-space:pre-wrap; }
+  .sess .msg { color:var(--fg); white-space:pre-wrap; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .sess .msg.ai { border-left:3px solid var(--accent); }
+  .sess .jrnl { font-family:var(--mono); font-size:12px; white-space:pre-wrap; color:var(--dim); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .sess ul.cmts { margin:0; padding:0; list-style:none; }
+  .sess ul.cmts li { font-family:var(--mono); font-size:12px; color:var(--dim); padding:3px 0; border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent); }
+  .sess ul.cmts li:last-child { border:0; }
+  .sess .note { color:var(--faint); padding:40px; text-align:center; }
+  .sess .meta { color:var(--faint); font-size:12px; margin-top:2px; }
+  .thost { position:absolute; inset:0; padding:8px 10px; display:none; }
+  .thost.on { display:block; }
+  .thost.adapted-status { padding-bottom:36px; }
+  .agent-statusline { display:none; position:absolute; left:10px; right:10px; bottom:5px; height:25px;
+                      overflow:hidden; white-space:pre; border-top:1px solid var(--border-2);
+                      padding-top:5px; color:var(--dim); background:#08090b; font:13px var(--mono); z-index:4; }
+  /* Inline formatting is intentional: flex discards the whitespace-only text nodes between the
+     ANSI-derived spans, collapsing `CTX <bar> 53% ... │ ...` into one unreadable run. */
+  .thost.adapted-status .agent-statusline { display:block; }
+  .agent-statusline .sl-bold { font-weight:700; color:var(--text-2); }
+  .agent-statusline .sl-dim { color:var(--faint); }
+  .agent-statusline .sl-red { color:#f85149; }
+  .agent-statusline .sl-yellow { color:#e3b341; }
+  .agent-statusline .sl-green { color:#3fb950; }
+  /* What a pane says after skein closed it and there is nothing to reconnect to (SKEIN-702).
+     A STRIP THAT SHRINKS THE TERMINAL, never a panel over it — the sentence explaining the refusal
+     is the last thing in that terminal, and covering it is the whole defect this replaces. Same
+     construction as `.agent-statusline` above, and `.recovering`'s padding overrides that one's
+     because a closed pane's statusline is a reading nobody can act on. */
+  .thost.recovering { padding-bottom:46px; }
+  .thost.recovering .agent-statusline { display:none; }
+  .recover { display:none; position:absolute; left:10px; right:10px; bottom:6px; min-height:34px;
+             align-items:center; gap:10px; padding:6px 10px; border:1px solid var(--border-2);
+             border-radius:6px; background:var(--panel); font-size:12px; color:var(--dim); z-index:5; }
+  .thost.recovering .recover { display:flex; }
+  .recover-t { color:var(--text-2); font-weight:600; }
+  .recover-b { flex:1; }
+  .recover-go { border:1px solid var(--border-2); border-radius:5px; background:var(--bg);
+                color:var(--accent); font:inherit; padding:4px 10px; cursor:pointer; }
+  .recover-go:hover { border-color:var(--accent); }
+  /* A pane that IS watching shows the watching rather than a control. A pulse and not a bar that
+     fills: a bar implies a duration, and nothing here knows one. */
+  .recover-w { width:9px; height:9px; border-radius:50%; background:var(--accent); flex:none;
+               animation:recoverpulse 1.6s ease-in-out infinite; }
+  @keyframes recoverpulse { 0%,100% { opacity:.25; } 50% { opacity:1; } }
+  .disco { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+           background:rgba(8,9,11,.82); cursor:pointer; z-index:6; }
+  /* `:not(.ended)` and not an override below it: a launch that ran to completion has nothing to
+     reconnect to, so the panel must never be laid over its last line at all — see `ws.onclose`. */
+  .thost.dead:not(.ended) .disco { display:flex; }
+  .disco-card { text-align:center; padding:14px 22px; border:1px solid var(--border-2);
+                border-radius:8px; background:var(--panel); transition:border-color var(--dur-fast); }
+  .disco:hover .disco-card { border-color:var(--accent); }
+  .disco-t { font-size:13px; font-weight:600; color:var(--text); }
+  .disco-b { font-size:12px; color:var(--accent); margin-top:4px; }
+  /* The one screen a visitor with no token ever sees, so it carries the whole instruction rather
+     than a status. Covers everything: the board behind it is empty for a reason that is not "no
+     boxes", and letting that show through is what made the failure unreadable. */
+  #noauth { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+            background:rgba(8,9,11,.92); padding:24px; overflow:auto; }
+  .noauth-card { max-width:620px; padding:22px 24px; border:1px solid var(--border-2); border-radius:10px;
+                 background:var(--panel); }
+  .noauth-t { font-size:15px; font-weight:600; color:var(--text); }
+  .noauth-b { font-size:12.5px; line-height:1.6; color:var(--dim); margin-top:8px; }
+  .noauth-h { font-size:12.5px; line-height:1.6; color:var(--text-2); margin-top:14px; }
+  .noauth-c { font-family:var(--mono); font-size:12px; color:var(--text); background:var(--bg);
+              border:1px solid var(--line); border-radius:6px; padding:9px 11px; margin-top:6px;
+              overflow-x:auto; white-space:pre; }
+  .diff { font-family:var(--mono); font-size:12.5px; line-height:1.5; padding:8px 0; }
+  .diff .ln { display:block; padding:0 14px; white-space:pre-wrap; word-break:break-word; }
+  .diff .add  { color:#7ee787; background:color-mix(in srgb,var(--done) 10%,transparent); }
+  .diff .del  { color:#ffa198; background:color-mix(in srgb,var(--attn) 10%,transparent); }
+  .diff .hunk { color:var(--accent); background:var(--accent-bg); }
+  .diff .meta { color:var(--dim); }
+  .diff .note { color:var(--faint); padding:40px; text-align:center; }
+  .diff .ln.cmtable { cursor:pointer; }
+  .diff .ln.cmtable:hover { outline:1px solid color-mix(in srgb,var(--accent) 45%,transparent); outline-offset:-1px; }
+  .diff .ln.cmtable:hover::after { content:"💬"; float:right; opacity:.7; padding-right:6px; }
+  /* comment composer + saved comments, inserted between diff lines */
+  .cmt { font-family:var(--ui); margin:4px 10px; border-left:2px solid var(--accent);
+         background:var(--panel); border-radius:0 8px 8px 0; padding:8px 10px; }
+  .cmt textarea { width:100%; resize:vertical; min-height:52px; background:var(--inset); color:var(--text);
+                  border:1px solid var(--border-2); border-radius:6px; padding:7px 9px; font:inherit; font-size:13px; outline:none; }
+  .cmt textarea:focus { border-color:var(--border-3); }
+  .cmt .ca { display:flex; gap:8px; margin-top:7px; align-items:center; }
+  .cmt .ca .ref { color:var(--faint); font-family:var(--mono); font-size:11px; margin-right:auto; }
+  .cmt button { font:inherit; font-size:12px; border-radius:6px; padding:4px 12px; cursor:pointer; border:1px solid var(--border-2); background:var(--elevated); color:var(--text-2); }
+  .cmt button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .cmt.saved { display:flex; gap:10px; align-items:flex-start; }
+  .cmt.saved .body { flex:1; white-space:pre-wrap; font-size:13px; }
+  .cmt.saved .ref { color:var(--faint); font-family:var(--mono); font-size:11px; }
+  .cmt.saved .rm { color:var(--faint); cursor:pointer; padding:0 4px; }
+  .cmt.saved .rm:hover { color:var(--attn); }
+  .dockbar .send { background:var(--accent); border:1px solid var(--accent); color:#fff; font:inherit; font-size:12px;
+                   border-radius:7px; padding:4px 12px; cursor:pointer; }
+  .dockbar .send:hover { background:var(--accent-2); }
+
+  /* command palette */
+  #pal { position:fixed; inset:0; z-index:60; display:none; padding-top:14vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #pal.open { display:flex; justify-content:center; align-items:flex-start; }
+  .pal-card { width:100%; max-width:560px; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
+              overflow:hidden; box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); }
+  @keyframes rise { from { opacity:0; transform:translateY(-6px) scale(.985); } }
+  .pal-card input { width:100%; border:0; outline:0; background:transparent; color:var(--text); font-family:var(--ui);
+                    font-size:15px; padding:15px 16px; }
+  .pal-list { max-height:46vh; overflow-y:auto; border-top:1px solid var(--border); padding:6px; }
+  .pal-sec { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); padding:9px 10px 5px; }
+  .pal-item { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; cursor:pointer; color:var(--text-2); }
+  .pal-item .di { width:8px; height:8px; border-radius:50%; background:var(--stale); flex:none; }
+  .pal-item .lbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pal-item .meta { font-family:var(--mono); font-size:11px; color:var(--faint); }
+  .pal-item.on { background:var(--accent-bg); color:var(--text); }
+  .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
+
+  /* mailbox + new-box overlays */
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
+  /* the login terminal: a one-shot PTY in the modal stack — not the dock, whose sessions persist,
+     reconnect and belong to boxes; this flow ENDS when its socket does */
+  .lt-card { max-width:860px; height:min(70vh, 560px); }
+  #lt-host { flex:1; min-height:0; background:#08090b; border-radius:0 0 12px 12px; padding:8px; }
+  #lt-host .xterm { height:100%; }
+  /* package requests: one row per ask, with the decision on it */
+  .sq-pkgs { font-family:var(--mono); font-size:12px; color:var(--text); word-break:break-all; }
+  .sq-meta { font-size:11px; color:var(--faint); margin-top:3px; }
+  .sq-row { display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .sq-row label { font-size:11px; color:var(--dim); display:flex; align-items:center; gap:5px; cursor:pointer; }
+  .sq-state { font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; padding:2px 6px; border-radius:5px; border:1px solid var(--line); color:var(--dim); }
+  .sq-state.approved { color:#f0d28a; } .sq-state.installed { color:#9ae6b0; }
+  .sq-state.failed, .sq-state.denied { color:#ffb4ae; }
+  .sq-log { font-family:var(--mono); font-size:10px; color:var(--faint); white-space:pre-wrap;
+            max-height:120px; overflow-y:auto; margin-top:7px; padding:7px 9px;
+            background:var(--inset); border:1px solid var(--line); border-radius:7px; }
+  /* the badge that says something is waiting on a decision */
+  #subqbtn { position:relative; }
+  #subqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+    border-radius:7px; background:var(--attn); color:#fff; font-size:9px; line-height:14px; text-align:center; font-family:var(--mono); }
+  /* Same shape as the package-request badge above, deliberately: both mean "something is waiting on
+     you", and a second visual language for the same idea is a second thing to learn. Periwinkle
+     rather than red because a PR waiting is normal work, not an alarm — red is reserved for a count
+     that could not be taken at all. */
+  #revbtn { position:relative; }
+  #revbtn .revbadge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+    border-radius:7px; background:var(--accent); color:#fff; font-size:9px; line-height:14px;
+    text-align:center; font-family:var(--mono); }
+  #revbtn .revbadge.bad { background:var(--attn); }
+  /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
+  .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
+  .bs-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .ar-derived b { color:var(--accent); font-weight:600; }
+  /* The one command this dialog names, for the capability it no longer offers as a field
+     (SKEIN-535). Built from `.noauth-c`, the page's existing "run this instead" block, and pitched
+     a step quieter: 11px and `--text-2` rather than 12px and `--text`, so it reads as a command
+     without outranking the field labels it sits under. */
+  .ar-cmd { font-family:var(--mono); font-size:11px; color:var(--text-2); background:var(--bg);
+            border:1px solid var(--line); border-radius:4px; padding:6px 8px; margin:5px 0 0;
+            overflow-x:auto; white-space:pre; }
+  /* The dialog grew past "paste a URL", so it needs a seam: everything above is how the repo is
+     fetched, everything below is what it carries once it exists. */
+  .ar-sec { margin-top:8px; padding-top:11px; border-top:1px solid var(--line); font-size:11px;
+            color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .ar-opt { text-transform:none; letter-spacing:0; color:var(--faint); border:1px solid var(--line);
+            border-radius:999px; padding:0 6px; margin-left:5px; font-size:10px; }
+  .ar-msg { font-size:12px; line-height:1.5; border-radius:8px; padding:9px 11px; border:1px solid var(--line); }
+  .ar-msg.err  { color:#ffb4ae; background:color-mix(in srgb,var(--attn) 12%,transparent); border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
+  .ar-msg.warn { color:#f0d28a; background:color-mix(in srgb,var(--waiting) 11%,transparent); border-color:color-mix(in srgb,var(--waiting) 32%,transparent); }
+  .ar-msg.ok   { color:#9ae6b0; background:color-mix(in srgb,var(--done) 11%,transparent); border-color:color-mix(in srgb,var(--done) 30%,transparent); }
+  /* an input paired with a native "Browse…" picker button (folder/file paths) */
+  .path-row { display:flex; gap:8px; align-items:stretch; }
+  .path-row input { flex:1; min-width:0; }
+  .path-row .kbtn { flex:none; height:auto; }
+
+  /* ---------- settings: a two-pane preferences surface ---------- */
+  /* Capped at 860×560 while scrolling six screens of content through a 423px window — measured at
+     1440×900, that left 340px unused on each axis and the imbalance was visible as literal
+     whitespace beside a scrollbar. The nav holds six items and needs none of the extra height. */
+  .set-shell { width:min(1100px,94vw); height:min(760px,88vh); display:flex; overflow:hidden;
+    background:var(--panel); border:1px solid var(--border-3); border-radius:14px;
+    box-shadow:0 30px 90px rgba(0,0,0,.66); animation:rise var(--dur-med) var(--ease); }
+  .set-nav { flex:0 0 198px; display:flex; flex-direction:column; gap:2px; padding:14px 10px;
+             background:var(--inset); border-right:1px solid var(--line); }
+  .set-brand { display:flex; flex-direction:column; gap:1px; padding:6px 10px 15px;
+               font-family:var(--mono); font-size:13px; color:var(--text); }
+  .set-brand span { font-family:var(--ui); font-size:10px; color:var(--faint);
+                    text-transform:uppercase; letter-spacing:.14em; }
+  .set-navi { display:flex; align-items:center; gap:9px; width:100%; text-align:left; font:inherit; font-size:13px;
+    color:var(--text-2); background:none; border:0; border-radius:8px; padding:8px 10px; cursor:pointer;
+    transition:background var(--dur-fast), color var(--dur-fast); }
+  .set-navi .ic { width:15px; height:15px; flex:none; opacity:.75; }
+  .set-navi:hover { background:var(--panel); color:var(--text); }
+  .set-navi.on { background:var(--accent-bg); color:var(--text); box-shadow:inset 2px 0 0 var(--accent); }
+  .set-navi.on .ic { opacity:1; color:var(--accent); }
+  .set-navi .pill { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--dim); }
+  .set-navfoot { margin-top:auto; padding:10px; font-size:10px; color:var(--faint); }
+  .set-main { flex:1; min-width:0; display:flex; flex-direction:column; }
+  /* the page-level `header`/`footer` rules carry layout margins; they must not leak into a dialog's
+     own chrome (they were adding 20px under the title bar and 24px above the footer) */
+  .set-top, .set-foot { margin:0; flex-wrap:nowrap; }
+  .set-top { display:flex; align-items:flex-start; gap:12px; padding:17px 22px 13px; border-bottom:1px solid var(--line); }
+  .set-h { display:flex; flex-direction:column; gap:3px; min-width:0; }
+  .set-h b { font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .set-h span { font-size:12px; color:var(--dim); }
+  .set-x { margin-left:auto; flex:none; width:26px; height:26px; border:0; border-radius:7px;
+           background:none; color:var(--dim); font-size:12px; cursor:pointer; }
+  .set-x:hover { background:var(--elevated); color:var(--text); }
+  .set-scroll { flex:1; overflow-y:auto; padding:4px 22px 20px; }
+  .set-pane { display:none; flex-direction:column; }
+  .set-pane.on { display:flex; }
+  /* one row: name + explanation on the left, its control hard-right */
+  .set-row { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:14px 0;
+             border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); cursor:pointer; }
+  .set-row:last-child, .set-field:last-child { border-bottom:0; }
+  .set-txt { display:flex; flex-direction:column; gap:3px; min-width:0; }
+  .set-title { font-size:13px; color:var(--text); }
+  .set-row .desc, .set-field .desc { color:var(--faint); font-size:11.5px; line-height:1.45; }
+  /* The one place a settings description raises its voice: the composition in docs/pr-review.md
+     §13, which a person builds by choosing "approve" and would otherwise never be told about.
+     `--waiting` rather than `--attn`: nothing is broken, and a red line here would read as a fault
+     to be cleared rather than as a consequence that was chosen. */
+  .set-field .desc.warnline { color:var(--text-2); border-left:2px solid var(--waiting);
+      padding:6px 0 6px 9px; background:color-mix(in srgb,var(--waiting) 7%,transparent); }
+  .set-field .desc.warnline b { color:var(--text); }
+  .set-field { display:flex; flex-direction:column; gap:7px; padding:14px 0; cursor:default;
+               border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); }
+  .set-field input, .set-field select { width:100%; }
+  .set-field input { font-family:var(--mono); font-size:12.5px; }
+  .set-field.narrow input, .set-field.narrow select { max-width:300px; }
+  /* A pane long enough to need signposts gets them: a heading breaks it into the steps you take,
+     rather than a single column of rows you have to read in full to find one. */
+  .set-head { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; margin:20px 0 2px;
+              font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--text); }
+  .set-head .sub { font-weight:400; font-size:11px; color:var(--faint); }
+  .set-desc { font-size:11.5px; line-height:1.5; color:var(--faint); padding:6px 0 2px; }
+  /* A second way to do something the pane has already shown you the first way to do. Folded, because
+     four credential fields at one level read as four credentials to obtain — when the App path asks
+     for one and the rest exist for fleets that cannot install it. */
+  .set-alt { margin:18px 0 2px; border:1px solid var(--line); border-radius:8px; background:var(--panel-2, transparent); }
+  .set-alt > summary { cursor:pointer; padding:9px 11px; font-size:12px; font-weight:600; color:var(--text-2); }
+  .set-alt > summary:hover { color:var(--text); }
+  .set-alt > summary .sub { font-weight:400; font-size:11px; color:var(--faint); margin-left:8px; }
+  .set-alt[open] > summary { border-bottom:1px solid var(--line); }
+  .set-alt > .set-altbody { padding:2px 11px 12px; }
+  .set-alt > .set-altbody > .set-head:first-child { margin-top:12px; }
+  /* The pane's own answer to "is this actually on?", which no individual control can give: the
+     switch above can be on while nothing is scoped, and that is the state worth naming. */
+  .set-state { margin:6px 0 2px; padding:9px 11px; border-radius:8px; font-size:11.5px; line-height:1.45;
+               background:var(--panel); border:1px solid var(--line); color:var(--dim); }
+  .set-state.on { border-color:color-mix(in srgb,var(--done) 45%,var(--line)); color:var(--text); }
+  .set-state.warn { border-color:color-mix(in srgb,var(--error) 50%,var(--line)); color:var(--text); }
+  .set-opt { font-size:10.5px; color:var(--faint); border:1px solid var(--line); border-radius:999px;
+             padding:1px 6px; margin-left:6px; vertical-align:1px; }
+  .set-creds { display:flex; flex-direction:column; gap:7px; margin:8px 0 4px; }
+  .set-cred { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 11px;
+              background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  .set-cred .cslug { font-family:var(--mono); font-size:12px; color:var(--text); }
+  .set-cred .cwhy { flex:1; min-width:120px; font-size:11px; color:var(--faint); }
+  .set-credadd { display:flex; flex-direction:column; gap:7px; padding:11px; margin:4px 0 2px;
+                 background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  .set-credadd input { width:100%; font-family:var(--mono); font-size:12.5px; }
+  .set-credrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:6px 0; }
+  .set-credrow .desc { flex:1; min-width:140px; font-size:11px; color:var(--faint); line-height:1.45; }
+  /* repositories: a real list — the id reads as an identifier, the path stays subordinate, and the
+     unregister control only appears on the row you are pointing at */
+  .set-repos { display:flex; flex-direction:column; gap:8px; margin:12px 0 14px; }
+  /* One card per repo: a scannable header (what's configured, at a glance) over labelled fields.
+     Three bare inputs in a row was faster to write and impossible to read — nothing said which was
+     which, and the only way to unregister was a ✕ that appeared on hover next to them. */
+  .rcard { background:var(--card); border:1px solid var(--line); border-radius:9px; }
+  .rcard.open { border-color:var(--border-2); }
+  .rhead { display:flex; align-items:center; gap:10px; width:100%; padding:10px 12px; background:none;
+           border:0; border-radius:9px; cursor:pointer; text-align:left; color:inherit; font:inherit; }
+  .rhead:hover { background:var(--panel); }
+  .rhead:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .rhead .rid { flex:none; font-family:var(--mono); font-size:12.5px; color:var(--accent); }
+  .rhead .rsrc { flex:1; min-width:0; font-family:var(--mono); font-size:11.5px; color:var(--dim);
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rtag { flex:none; font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:4px;
+          border:1px solid var(--line); background:var(--inset); color:var(--faint); max-width:170px;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rtag.own { color:var(--text); border-color:var(--border-2); }   /* set ON this repo, not inherited */
+  .rchev { flex:none; color:var(--faint); font-size:11px; transition:transform .15s ease; }
+  .rcard.open .rchev { transform:rotate(90deg); }
+  .rbody { display:none; padding:2px 14px 14px; }
+  .rcard.open .rbody { display:block; border-top:1px solid var(--line); padding-top:12px; }
+  .rbody .set-field { margin-bottom:13px; }
+  .rbody .set-field input { width:100%; }
+  .rsaved { margin-left:8px; font-size:10.5px; color:var(--done); opacity:0; transition:opacity .2s; }
+  .rsaved.on { opacity:1; }
+  .rfoot { display:flex; justify-content:flex-end; border-top:1px solid var(--line); padding-top:11px; }
+  .set-repos .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
+    border:1px dashed var(--border-2); border-radius:10px; }
+  /* what the diff is measured against — the base ref, and whether the patch is live or the one
+     the box wrote at its last turn end */
+  .dbase { position:sticky; top:0; z-index:1; padding:6px 12px; font-size:11.5px; color:var(--faint);
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  .dbase code { font-family:var(--mono); color:var(--dim); }
+  /* provenance: any value skein did not get straight from the box says where it DID come from */
+  .prov { margin-left:8px; font-weight:400; font-size:10.5px; color:var(--faint); }
+  .dbase.stale { color:var(--waiting); }   /* same yellow the fleet uses for "not current" */
+  /* work tracking: one card per connection — a gateway and the token that mints at it are one
+     thing, so they are one card, and a repo picks a card rather than restating half of it */
+  .set-conns { display:flex; flex-direction:column; gap:8px; margin:4px 0 14px; }
+  .ccard { background:var(--card); border:1px solid var(--line); border-radius:9px; padding:12px 14px 13px; }
+  .chead { display:flex; align-items:center; gap:9px; margin-bottom:2px; }
+  .chead .clabel { flex:1; min-width:0; font-size:12.5px; font-weight:600; background:none; border:0;
+                   color:var(--text); font-family:inherit; padding:2px 0; }
+  .chead .clabel:focus-visible { outline:none; box-shadow:0 -1px 0 0 var(--accent) inset; }
+  .cstate { flex:none; font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:4px;
+            border:1px solid var(--line); background:var(--inset); color:var(--faint); }
+  .cstate.ready { color:var(--done); border-color:color-mix(in srgb,var(--done) 45%,transparent); }
+  .ccard .set-field { padding:11px 0; }
+  .ccard .set-field:last-of-type { border-bottom:0; }
+  .cuse { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line);
+          padding-top:10px; margin-top:2px; font-size:11.5px; color:var(--faint); }
+  .cuse .spacer { flex:1; }
+  .cuse .rtag { max-width:none; }
+  .set-conns .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
+    border:1px dashed var(--border-2); border-radius:10px; }
+  .set-add { display:inline-flex; align-items:center; gap:7px; align-self:flex-start; font:inherit; font-size:12.5px;
+    color:var(--accent); background:var(--accent-bg); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+    border-radius:9px; padding:8px 13px; cursor:pointer; transition:background var(--dur-fast), border-color var(--dur-fast); }
+  .set-add:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 18%,transparent); }
+  /* shortcuts pane — rendered from KEYMAP, so it can't fall out of date */
+  .set-keys { display:flex; flex-direction:column; gap:16px; padding-top:6px; }
+  .set-kgrp > b { display:block; font-size:10px; font-weight:600; letter-spacing:.12em;
+                  text-transform:uppercase; color:var(--faint); margin-bottom:4px; }
+  .set-krow { display:flex; align-items:baseline; gap:16px; padding:5px 0;
+              border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
+  .set-kgrp .set-krow:last-child { border-bottom:0; }
+  .set-krow .kk { flex:0 0 150px; display:flex; flex-wrap:wrap; gap:5px; }
+  .set-krow .kd { color:var(--text-2); font-size:12.5px; }
+  .set-foot { display:flex; align-items:center; gap:12px; padding:13px 22px;
+              background:var(--inset); border-top:1px solid var(--line); }
+  .set-foot .hint { flex:1; color:var(--faint); font-size:11px; }
+  .set-foot .kbtn { font-family:var(--ui); font-size:13px; height:auto; padding:8px 15px; }
+  .set-foot.readonly .kbtn, .set-foot.readonly .primary { display:none; }   /* nothing to save here */
+  .set-dirty { display:none; align-items:center; gap:6px; font-size:11px; color:var(--waiting); }
+  .set-dirty.on { display:inline-flex; }
+  .set-dirty::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--waiting); }
+  #settings button.primary { background:var(--accent); border:1px solid var(--accent); color:#0b0d10; font-weight:600;
+    border-radius:8px; padding:8px 18px; font:inherit; font-size:13px; cursor:pointer; }
+  #settings button.primary:hover { background:var(--accent-2); }
+  @media (max-width: 720px) {   /* narrow: the rail becomes a top strip */
+    .set-shell { flex-direction:column; height:min(88vh,720px); }
+    .set-nav { flex:none; flex-direction:row; gap:4px; overflow-x:auto; padding:8px;
+               border-right:0; border-bottom:1px solid var(--line); }
+    .set-brand, .set-navfoot, .set-navi .pill { display:none; }
+    .set-navi { width:auto; white-space:nowrap; }
+  }
+  /* toggle switch (replaces bare checkboxes) */
+  .switch { appearance:none; -webkit-appearance:none; position:relative; width:34px; height:20px; flex:none; margin:0;
+            background:var(--border-2); border:1px solid var(--border-3); border-radius:999px; cursor:pointer;
+            transition:background var(--dur-fast), border-color var(--dur-fast); }
+  .switch::after { content:""; position:absolute; top:1px; left:1px; width:16px; height:16px; border-radius:50%;
+                   background:var(--text-2); transition:transform var(--dur-fast), background var(--dur-fast); }
+  .switch:checked { background:color-mix(in srgb,var(--accent) 55%,transparent); border-color:var(--accent); }
+  .switch:checked::after { transform:translateX(14px); background:#fff; }
+  .switch:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .set-add { display:inline-flex; align-items:center; gap:6px; align-self:flex-start; margin-top:4px;
+             font:inherit; font-size:12px; color:var(--accent); background:var(--accent-bg);
+             border:1px solid color-mix(in srgb,var(--accent) 40%,transparent); border-radius:7px; padding:5px 10px; cursor:pointer; }
+  .set-add:hover { border-color:var(--accent); }
+  .set-card .nb-foot { padding:12px 18px; border-top:1px solid var(--line); }
+  .mbx-card, .nb-card { width:100%; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
+    box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); display:flex; flex-direction:column; }
+  .mbx-card { max-width:620px; max-height:78vh; }
+  .nb-card { max-width:480px; padding:16px; gap:10px; }
+  .mbx-head, .nb-head { display:flex; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); }
+  .nb-head { padding:0 0 4px; border:0; }
+  .mbx-head .sub { color:var(--faint); font-size:12px; } .mbx-head .x, .nb-head .x { margin-left:auto; color:var(--dim); cursor:pointer; }
+  .mbx-head .x:hover, .nb-head .x:hover { color:var(--text); }
+  .mbx-list { flex:1; overflow-y:auto; padding:8px; min-height:120px; }
+  .msg { padding:10px 12px; border-radius:9px; background:var(--panel); border:1px solid var(--border); margin-bottom:6px; }
+  .msg .mh { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  .msg .who { color:var(--text-2); font-weight:600; } .msg .arrow { color:var(--faint); }
+  .msg .to { color:var(--accent); font-family:var(--mono); }
+  .msg .kind { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--faint); border:1px solid var(--border-2); border-radius:999px; padding:1px 7px; }
+  .msg .mt { margin-left:auto; font-variant-numeric:tabular-nums; }
+  .msg .mb { color:var(--text); font-size:13px; white-space:pre-wrap; word-break:break-word; }
+  .msg .seen { color:var(--faint); font-size:11px; margin-top:3px; }
+  .mbx-list .note { color:var(--faint); text-align:center; padding:36px; }
+  .mbx-compose { border-top:1px solid var(--border); padding:10px 12px; display:flex; flex-direction:column; gap:8px; background:var(--panel); }
+  .mbx-compose .row1 { display:flex; gap:8px; } .mbx-compose .row2 { display:flex; align-items:center; gap:10px; }
+  .mbx-compose .hint { color:var(--faint); font-size:11px; flex:1; }
+  /* Every text control, styled by what it *is* — not by which overlay it happens to sit in.
+     This was three ancestor-scoped selectors (`.nb-card input`, `#settings input`, `.mbx-compose
+     textarea`), so a control in any overlay added afterwards — the padlock panel, add-a-repo, box
+     settings — silently fell back to browser defaults. Same failure as enumerating containments
+     instead of escapes: the list is the bug, because nothing updates it. Exclusions are now named
+     one by one, which is a thing a reader can check.
+     `.xterm textarea` is the terminal's hidden input helper: it is positioned by xterm and must keep
+     its own geometry, and it is never seen. */
+  input:not([type=checkbox]):not([type=radio]), select, textarea:not(.xterm textarea) {
+    background:var(--inset); color:var(--text); border:1px solid var(--border-2);
+    border-radius:7px; padding:7px 9px; font:inherit; font-size:13px; outline:none;
+    transition:border-color var(--dur-fast), box-shadow var(--dur-fast); }
+  input:not([type=checkbox]):not([type=radio]):focus, select:focus, textarea:not(.xterm textarea):focus {
+    border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-bg); }
+  input::placeholder, textarea::placeholder { color:var(--faint); }
+  input:disabled, select:disabled, textarea:disabled { opacity:.5; cursor:not-allowed; }
+  /* the native dropdown arrow is the one control that reads as "unstyled browser widget" */
+  select { appearance:none; -webkit-appearance:none; padding-right:30px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23828d99' stroke-width='2' stroke-linecap='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat:no-repeat; background-position:right 9px center; background-size:13px; }
+  /* one visible focus ring for every interactive control (keyboard users, and it sharpens the feel) */
+  button:focus-visible, .kbtn:focus-visible, .set-navi:focus-visible, .set-add:focus-visible,
+  .switch:focus-visible, .rx:focus-visible, .x:focus-visible {
+    outline:2px solid color-mix(in srgb,var(--accent) 75%,transparent); outline-offset:2px; }
+  .mbx-compose textarea { resize:vertical; min-height:54px; }
+  .mbx-compose select { flex:1; }
+  .nb-lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .nb-foot { display:flex; align-items:center; gap:10px; } .nb-foot .hint { flex:1; color:var(--faint); font-size:11px; }
+  .nb-foot code { font-family:var(--mono); color:var(--text-2); }
+  /* The primary action, wherever it is. Was enumerated per overlay (#settings, #mbx, #newbox), so
+     Add-a-repository's own "Add →" — the one button in that dialog — rendered as a browser default.
+     `.kbtn.primary` keeps its quieter outline treatment for the toolbars, and says so by name. */
+  button.primary:not(.kbtn) { background:var(--accent); border:1px solid var(--accent); color:#0b0d10; font-weight:600;
+    border-radius:7px; padding:7px 16px; font:inherit; font-size:13px; cursor:pointer;
+    transition:background var(--dur-fast); }
+  button.primary:not(.kbtn):hover { background:var(--accent-2); }
+  button.primary:not(.kbtn):disabled { opacity:.55; cursor:default; background:var(--accent); }
+
+  /* on-screen key bar for touch / mobile terminals (the keys a soft keyboard lacks) */
+  .keybar { display:none; gap:6px; padding:7px 8px; background:var(--panel); border-top:1px solid var(--border);
+            overflow-x:auto; scrollbar-width:none; }
+  .keybar::-webkit-scrollbar { display:none; }
+  .keybar button { flex:none; min-width:44px; padding:10px 12px; background:var(--elevated); color:var(--text-2);
+    border:1px solid var(--border-2); border-radius:8px; font-family:var(--mono); font-size:13px; cursor:pointer; }
+  .keybar button:active { background:var(--overlay); }
+  .keybar button.armed { background:var(--accent); border-color:var(--accent); color:#0b0d10; }
+
+  @media (max-width:860px) {
+    /* size the dock to the *visible* viewport so the soft keyboard doesn't hide the prompt */
+    #dock { position:fixed; inset:0; z-index:50; flex:none; border-left:0; height:var(--vvh,100vh); }
+    body.docked #left, body.docked #gutter { display:none; }
+    /* a box is fullscreen; "‹ boxes" returns to the fleet without closing the session */
+    body.docked.show-fleet #left { display:block; position:fixed; inset:0; z-index:60; background:var(--bg); }
+    body.docked.show-fleet #dock { display:none; }
+    body.docked.term-mode .keybar { display:flex; }
+    .dockbar { flex-wrap:wrap; }
+    .seg-toggle { margin:0; order:3; }
+    .dock-right { order:2; margin-left:auto; }
+    .tab { max-width:160px; }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important;
+      transition-duration:.01ms !important; scroll-behavior:auto !important; }
+  }
+  /* live peripheral preview: the bottom line of an open terminal, shown on its fleet row so you
+     can see what other tabs are doing while focused elsewhere */
+  .row.live-head .htext { color:var(--working); font-family:var(--mono); }
+  .row.live-head .headline::before { content:"▸"; color:var(--working); flex:none; }
+  /* away digest — "while you were gone" */
+  #away, #load { position:fixed; inset:0; z-index:120; background:rgba(0,0,0,.45); display:none; align-items:flex-start; justify-content:center; }
+  #away.open, #load.open { display:flex; }
+  /* The load rows share the away card's shell; only the bar is theirs. */
+  .lrow { display:flex; align-items:center; gap:10px; padding:9px 16px; border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent); cursor:pointer; }
+  .lrow:last-child { border-bottom:0; }
+  .lrow:hover { background:var(--inset); }
+  .lrow .nm { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; }
+  .lrow .bar { width:120px; height:6px; border-radius:3px; background:var(--inset); overflow:hidden; flex:none; }
+  .lrow .bar i { display:block; height:100%; background:var(--working); }
+  .lrow.hot .bar i { background:var(--attn); }
+  .lrow .fig { font-family:var(--mono); font-size:11px; color:var(--dim); white-space:nowrap; flex:none; }
+  .lrow .fig b { color:var(--text-2); font-weight:600; }
+
+  .away-card { margin-top:8vh; width:min(560px,92vw); background:var(--panel); border:1px solid var(--border-2); border-radius:14px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .away-head { display:flex; align-items:center; gap:8px; padding:13px 16px; border-bottom:1px solid var(--line); }
+  .away-head b { font-size:14px; } .away-head .sub { color:var(--faint); font-size:12px; } .away-head .x { margin-left:auto; cursor:pointer; color:var(--dim); }
+  .away-list { max-height:60vh; overflow:auto; }
+  .away-row { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent); cursor:pointer; }
+  .away-row:last-child { border-bottom:0; }
+  .away-row:hover { background:var(--inset); }
+  .away-row .ad { width:8px; height:8px; border-radius:50%; flex:none; }
+  .away-row .nm { font-weight:600; white-space:nowrap; }
+  .away-row .tx { color:var(--dim); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
+  .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
+  .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
+  .set-note { margin:6px 0 0; font-size:11.5px; line-height:1.55; color:var(--faint); }
+  .set-note.ready { color:var(--done); }
+  .set-note.gap { color:var(--waiting); }
+  /* Update pane. `behind` is the one that has to read as "go and press something", so it borrows
+     the waiting colour the board already uses for that; `ok` and `bad` reuse done/attention rather
+     than inventing a third vocabulary for the same three states. */
+  .set-note.ok { color:var(--done); }
+  .set-note.behind, .set-note.warn { color:var(--waiting); }
+  .set-note.bad { color:var(--attention, #d66); }
+  .set-revs { border-collapse:collapse; margin:10px 0 4px; font-size:11.5px; }
+  .set-revs th { text-align:left; font-weight:500; color:var(--faint); padding:3px 14px 3px 0; vertical-align:top; }
+  .set-revs td { padding:3px 14px 3px 0; vertical-align:top; }
+  .set-revs code { font-variant-numeric:tabular-nums; }
+  .set-revs .dim { color:var(--faint); }
+  /* The build log. Scrolls inside itself — a page that grew by ten thousand lines of cargo output
+     would take the settings dialog with it. */
+  .set-log { max-height:280px; overflow:auto; margin:10px 0 0; padding:10px 12px; font-size:11px;
+             line-height:1.45; white-space:pre-wrap; word-break:break-word;
+             background:rgba(0,0,0,.18); border-radius:4px; }
+  .set-log[hidden] { display:none; }
+  .set-diag { display:flex; flex-direction:column; gap:1px; }
+  .dg-row { display:grid; grid-template-columns:18px 108px 1fr; gap:10px; align-items:baseline;
+            padding:8px 2px; border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
+  .dg-mark { font-weight:700; color:var(--done); }
+  .dg-row.bad .dg-mark { color:var(--attn); }
+  /* Unknown is not a fault and must not read as one: the waiting colour, which this UI already
+     uses for "something is pending an answer" rather than "something is wrong". */
+  .dg-row.warn .dg-mark { color:var(--waiting); }
+  .dg-fix { margin-top:5px; font-size:12px; color:var(--text-2); user-select:text; }
+  .dg-fix code { font-family:var(--mono); font-size:11.5px; color:var(--text);
+                 background:color-mix(in srgb,var(--line) 45%,transparent); padding:1px 5px;
+                 border-radius:4px; }
+  /* A destructive recipe is printed and never run — the label is what makes that visible rather
+     than a property only the code knows. */
+  .dg-danger { color:var(--attn); font-size:11px; }
+  .dg-name { font-family:var(--mono); font-size:11px; color:var(--text-2); }
+  .dg-detail { font-size:12.5px; color:var(--text); line-height:1.55; user-select:text; }
+  .dg-foot { margin-top:14px; font-size:12px; color:var(--faint); }
+
+  /* Usage — what the fleet costs (SKEIN-835).
+     Borrows the shapes this dialog already has rather than inventing any: the caveat row is the
+     Diagnostics row, the ranked rows are the load overlay's `.lrow`, and the section headings are
+     `.set-head`. The total is the largest thing on the pane and is still only 17px — the panes
+     around it top out at 13px, and a figure four times the body size would be a dashboard tile in
+     a dialog that has none. */
+  .set-usage { display:flex; flex-direction:column; }
+  .ug-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; padding:2px 0 10px;
+             border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
+  .ug-cost { font-family:var(--mono); font-size:17px; font-weight:600; color:var(--text); }
+  /* The age of the reading, beside the figure it qualifies — never under it, and never in a
+     tooltip. A number whose staleness is one hover away is a number people read as live. */
+  .ug-when { font-size:12px; color:var(--dim); }
+  .ug-when.stale { color:var(--waiting); }
+  .ug-refresh { margin-left:auto; }
+  .ug-sub { flex-basis:100%; font-family:var(--mono); font-size:11px; color:var(--faint); }
+  .ug-note { margin-top:10px; font-size:12px; color:var(--error); }
+  .ug-caveat { display:grid; grid-template-columns:18px 1fr; gap:10px; align-items:baseline;
+               margin-top:12px; font-size:12.5px; line-height:1.55; color:var(--text); }
+  .ug-mark { font-weight:700; }
+  .ug-caveat.bad .ug-mark { color:var(--waiting); }
+  .ug-caveat.ok .ug-mark { color:var(--done); }
+  .ug-caveat.ok .ug-ctext { color:var(--faint); }
+  /* The one sentence on this pane that is an argument rather than a reading, so it is set apart
+     from the figures instead of running on from them. */
+  .ug-insight { margin-top:14px; padding:10px 12px; border-left:2px solid var(--accent);
+                background:var(--accent-bg); border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+                font-size:12.5px; line-height:1.6; color:var(--text-2); }
+  .ug-insight b { font-family:var(--mono); color:var(--text); }
+  .ug-h { margin:22px 0 4px; font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--text); }
+  .ug-row { display:grid; grid-template-columns:1fr 120px auto; gap:12px; align-items:center;
+            padding:7px 2px; border-bottom:1px solid color-mix(in srgb,var(--line) 45%,transparent); }
+  .ug-nm { font-family:var(--mono); font-size:12px; color:var(--text);
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ug-bar { height:6px; border-radius:3px; background:var(--inset); overflow:hidden; }
+  .ug-bar i { display:block; height:100%; background:var(--accent); }
+  .ug-fig { font-family:var(--mono); font-size:11px; color:var(--dim); white-space:nowrap; text-align:right; }
+  .ug-fig b { color:var(--text-2); font-weight:600; }
+  .ug-mix { grid-column:1 / -1; font-family:var(--mono); font-size:10.5px; color:var(--faint); }
+  .ug-empty { padding:8px 2px; }
+  /* The only shape on the pane, because it is the only reading here with a direction. */
+  .ug-days { display:flex; align-items:flex-end; gap:2px; height:52px; margin-top:6px;
+             padding:0 2px; border-bottom:1px solid var(--border-2); }
+  /* Capped as well as flexed. Uncapped, a fleet read on its first day draws ONE bar the full width
+     of the pane — a slab that reads as a filled meter rather than as a series with one point in it.
+     24px is above what a 40-day month gets in this dialog (~21px), so the cap only ever binds on a
+     series short enough that filling the width would have been the lie. */
+  .ug-day { flex:1 1 0; min-width:2px; max-width:24px; height:100%; display:flex; align-items:flex-end; }
+  .ug-day i { display:block; width:100%; background:var(--accent-2); opacity:.8; border-radius:1px 1px 0 0; }
+  .ug-day:hover i { opacity:1; background:var(--accent); }
+  .ug-dfoot { margin-top:7px; font-size:11.5px; color:var(--faint); }
+  /* The filter is an icon until it is wanted. A permanently open text box asks a question on every
+     load — "what are you looking for?" — that the answer is almost always "nothing" to, and it took
+     header room from the counts, which are what the header is for. Open on click or `/`, closes again
+     when it is empty and loses focus, and stays open while it holds a filter so what is narrowing the
+     board is never invisible. */
+  .fsearch { flex:none; display:flex; align-items:center; gap:4px; }
+  .fsbtn { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
+           padding:0; color:var(--dim); background:transparent; border:1px solid transparent;
+           border-radius:6px; cursor:pointer; transition:color var(--dur-fast), background var(--dur-fast); }
+  .fsbtn:hover { color:var(--text); background:var(--inset); }
+  .fsearch.on .fsbtn, .fsearch.held .fsbtn { color:var(--text-2); }
+  /* Addressed by id, and that is not stylistic. The general control styling further down —
+     `input:not([type=checkbox]):not([type=radio])` — outranks any class here, because each `:not()`
+     contributes its argument's specificity; a `.ffilter` rule lost its padding and width to it and the
+     collapsed box kept ~20px of header, invisible and still pushing the counts along.
+     `appearance:none` and `min-width:0` are load-bearing for the same collapse: a `type=search` has
+     an intrinsic minimum width of its own. */
+  #ffilter { width:0; min-width:0; appearance:none; -webkit-appearance:none;
+             height:24px; padding:0; font-family:var(--mono); font-size:11px;
+             color:var(--text); background:var(--inset); border:1px solid transparent;
+             border-radius:6px; outline:none; opacity:0; pointer-events:none;
+             transition:width var(--dur-fast), opacity var(--dur-fast), border-color var(--dur-fast); }
+  #ffilter::placeholder { color:var(--faint); }
+  /* `held` — closed-but-filtering is a state that must not exist. If a filter is set the box stays
+     open whether or not it has focus, because a board narrowed by something you cannot see reads as
+     a board that lost boxes. */
+  .fsearch.on #ffilter, .fsearch.held #ffilter {
+    width:190px; padding:0 8px; opacity:1; pointer-events:auto; border-color:var(--border-2); }
+  .fsearch.on #ffilter { border-color:var(--border-3); }
+  .counts .seg.filt { color:var(--waiting); }
+  .pinmore { display:block; width:100%; margin:2px 0 0; padding:7px 16px; text-align:left;
+             font-family:var(--ui); font-size:12px; color:var(--dim); cursor:pointer;
+             background:transparent; border:0; border-top:1px solid var(--line); }
+  .pinmore:hover { color:var(--text); background:var(--panel); }
+  /* Touch only. A finger needs ~44px; a pointer does not, and inflating these on a desktop would
+     cost the header the density the rest of the board is built around. */
+  @media (pointer: coarse) {
+    .kbtn { height:40px; padding:5px 13px; }
+    header .kbtn { min-width:40px; justify-content:center; }
+    .set-navi { min-height:40px; }
+  }

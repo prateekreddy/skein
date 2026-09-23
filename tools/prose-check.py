@@ -421,12 +421,17 @@ def prose_sources():
         if f.endswith(".md"):
             path = os.path.join(docs, f)
             yield os.path.relpath(path, ROOT), open(path, encoding="utf-8").read().split("\n")
-    page = os.path.join(ROOT, "src", "web", "index.html")
-    if os.path.exists(page):
-        lines = open(page, encoding="utf-8").read().split("\n")
+    # The page's SOURCES, not the page: `src/web/index.html` is assembled from `src/web/app/` by
+    # `cockpit/build.mjs` (SKEIN-1104), byte for byte, so its comments are the same comments — but a
+    # finding labelled with the assembled file sends its reader to the one copy that must not be
+    # edited, and at a line number that exists nowhere they could fix it. Reading both would report
+    # every finding twice.
+    app = os.path.join(ROOT, "src", "web", "app")
+    for f in sorted(os.listdir(app)) if os.path.isdir(app) else []:
+        lines = open(os.path.join(app, f), encoding="utf-8").read().split("\n")
         # Only the comments: the page's own source names its own functions constantly, and a
         # function that is defined three lines down is not a claim about anything.
-        yield "src/web/index.html", [l if PAGE_COMMENT.match(l) else "" for l in lines]
+        yield "src/web/app/" + f, [l if PAGE_COMMENT.match(l) else "" for l in lines]
     for label, path in rust_files():
         yield label, rust_comment_lines(open(path, encoding="utf-8").read())
     for label, path in shell_files():

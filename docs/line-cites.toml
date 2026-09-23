@@ -1571,208 +1571,220 @@ cited_by = ["docs/recovery-survey.md"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/web/index.html:78"]
-line = ".wrap { padding:12px 9px 30px; }"
-cited_by = ["docs/review-ux.md"]
-
-["src/web/index.html:2112"]
+["src/web/app/board.js:154"]
 line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2216"]
+["src/web/app/board.js:258"]
 line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2223"]
+["src/web/app/board.js:265"]
 line = "method:\"POST\", headers:{\"Content-Type\":\"application/json\"}, body:JSON.stringify({ runtime })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2227"]
+["src/web/app/board.js:269"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2230"]
+["src/web/app/board.js:272"]
 line = "}).catch(error => toast(`restart failed: ${error.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2673"]
+["src/web/app/board.js:715"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2677"]
+["src/web/app/board.js:719"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2687"]
+["src/web/app/board.js:729"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:2775"]
+["src/web/app/board.js:817"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3376"]
-line = "function openReview(repoId) {"
-cited_by = ["docs/review-ux.md"]
-
-["src/web/index.html:3458"]
-line = "let landed = false;"
+["src/web/app/boot.js:177"]
+line = "if (s && (s.dead || s.ws.readyState > 1)) reconnectSession(boxOf(sid), kindOf(sid));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:3586"]
-line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:3592"]
-line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
-cited_by = ["docs/review-ux.md"]
-
-["src/web/index.html:3675"]
-line = "const n = { draft: 0, conflicted: 0 };"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:3783"]
-line = "<span>${esc(f.repo_id)} — skein could not read this queue: ${esc(f.error)}</span>"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:3790"]
-line = "<span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || \"its review queue is switched off\")}</span>"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:4045"]
-line = "body = `<div class=\"revempty\">asking GitHub…</div>`;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:4053"]
-line = "<div>GitHub said: ${esc(revQueue.error)}</div>"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:4077"]
-line = "}</b>${failed.map(f => `<div>${esc(f.repo_id)} — ${esc(f.error)}</div>`).join(\"\")}</div>`;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:5224"]
-line = "// authority on what is being read (`/api/review/reading`) and the poll will confirm this within"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:5375"]
-line = "unread_because: \"skein could not reach its own summary for this PR: \" + error,"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:6063"]
-line = "? `The brief could not be fetched — ${esc(s.prose_failed)} Close the row and open it again to retry.`"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:6175"]
-line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7421"]
-line = "}).catch(() => toast(\"stop failed\"));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7431"]
-line = "}).catch(() => toast(\"destroy failed\"));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7470"]
-line = "toast(`something went wrong in the page: ${line}`);"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7640"]
-line = "sesspane.innerHTML = `<div class=\"sess\"><div class=\"note\">loading…</div></div>`;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7886"]
-line = ".catch(e => { fv.innerHTML = `<div class=\"note\">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7892"]
-line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">asking the box…</div></div>`;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:7901"]
-line = "}).catch(() => { diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load diff</div></div>`; });"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:8204"]
-line = ".catch(() => toast(\"send failed\"));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:9031"]
-line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:9308"]
-line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:9832"]
-line = ".catch(e => toast(e.message));"
-window = "})\u000b.catch(e => toast(e.message));\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:9838"]
-line = ".catch(e => toast(e.message));"
-window = ".then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })\u000b.catch(e => toast(e.message));\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:9846"]
-line = ".catch(e => toast(e.message));"
-window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => toast(e.message));\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:10096"]
-line = ".catch(e => toast(`pull failed: ${e.message}`))"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:10151"]
-line = ".catch(e => toast(`couldn't save: ${e.message}`));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:10196"]
-line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:10210"]
-line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/index.html:11413"]
+["src/web/app/boot.js:426"]
 line = "? `board is ${age}s stale — the server stopped answering`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11449"]
+["src/web/app/boot.js:462"]
 line = "for (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);"
 window = "render(tick.boxes || []);\u000bfor (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);\u000breturn;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11473"]
+["src/web/app/boot.js:486"]
 line = "es.addEventListener(\"pty-freed\", () => retryWaiting(\"wait-pty\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11494"]
+["src/web/app/boot.js:507"]
 line = "es.onerror = () => { document.getElementById(\"live\").classList.remove(\"on\"); document.getElementById(\"livetext\").textContent = \"reconnecting…\"; };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11581"]
+["src/web/app/boot.js:594"]
 line = "const extra = rest ? ` (+${rest} more)` : \"\";"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11620"]
+["src/web/app/boot.js:633"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11921"]
+["src/web/app/boot.js:934"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:11964"]
+["src/web/app/boot.js:977"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/index.html:12192"]
+["src/web/app/boot.js:1205"]
 line = "setInterval(loadHealth, 15000);"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/boot.js:1213"]
+line = "setInterval(pollSubq, 20000);"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:17"]
+line = "}).catch(() => toast(\"stop failed\"));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:27"]
+line = "}).catch(() => toast(\"destroy failed\"));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:66"]
+line = "toast(`something went wrong in the page: ${line}`);"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:236"]
+line = "sesspane.innerHTML = `<div class=\"sess\"><div class=\"note\">loading…</div></div>`;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:482"]
+line = ".catch(e => { fv.innerHTML = `<div class=\"note\">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:488"]
+line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">asking the box…</div></div>`;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:497"]
+line = "}).catch(() => { diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load diff</div></div>`; });"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/panels.js:286"]
+line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/panels.js:563"]
+line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review-rows.js:324"]
+line = "// authority on what is being read (`/api/review/reading`) and the poll will confirm this within"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review-rows.js:475"]
+line = "unread_because: \"skein could not reach its own summary for this PR: \" + error,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review-rows.js:1163"]
+line = "? `The brief could not be fetched — ${esc(s.prose_failed)} Close the row and open it again to retry.`"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review-rows.js:1275"]
+line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:233"]
+line = "function openReview(repoId) {"
+cited_by = ["docs/review-ux.md"]
+
+["src/web/app/review.js:315"]
+line = "let landed = false;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:443"]
+line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:449"]
+line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
+cited_by = ["docs/review-ux.md"]
+
+["src/web/app/review.js:532"]
+line = "const n = { draft: 0, conflicted: 0 };"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:640"]
+line = "<span>${esc(f.repo_id)} — skein could not read this queue: ${esc(f.error)}</span>"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:647"]
+line = "<span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || \"its review queue is switched off\")}</span>"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:902"]
+line = "body = `<div class=\"revempty\">asking GitHub…</div>`;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:910"]
+line = "<div>GitHub said: ${esc(revQueue.error)}</div>"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:934"]
+line = "}</b>${failed.map(f => `<div>${esc(f.repo_id)} — ${esc(f.error)}</div>`).join(\"\")}</div>`;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:1392"]
+line = "// than left set, or the row would sit on \"…\" for ever with nothing to retry it: opening the"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/review.js:1559"]
+line = "if (d.error) toast(\"the workflow file has a problem — fix it before editing here\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:325"]
+line = ".catch(e => toast(e.message));"
+window = "})\u000b.catch(e => toast(e.message));\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:331"]
+line = ".catch(e => toast(e.message));"
+window = ".then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })\u000b.catch(e => toast(e.message));\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:339"]
+line = ".catch(e => toast(e.message));"
+window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => toast(e.message));\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:589"]
+line = ".catch(e => toast(`pull failed: ${e.message}`))"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:644"]
+line = ".catch(e => toast(`couldn't save: ${e.message}`));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:689"]
+line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:703"]
+line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/voice.js:126"]
+line = ".catch(() => toast(\"send failed\"));"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/v2.html:257"]
@@ -1831,7 +1843,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
-["tools/prose-check.py:1646"]
+["tools/prose-check.py:1651"]
 line = "\"Written long ago. Citations in this document name lines as they stood at `abc1234`.\\n\""
 cited_by = ["docs/citations.toml"]
 
