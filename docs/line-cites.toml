@@ -616,8 +616,36 @@ cited_by = ["docs/recovery-survey.md"]
 line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH\""
 cited_by = ["docs/threat-model.md"]
 
+["src/box-session.sh:858"]
+line = "share_paths=(\".cargo\" \".rustup\" \".npm\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:884"]
+line = "overlay_paths=(\".local\")"
+cited_by = ["docs/threat-model.md"]
+
 ["src/box-session.sh:1128"]
 line = "merge_login \"$mine\" \"$canon\""
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1328"]
+line = "data[\"crossSessionInbound\"] = \"accept\""
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1351"]
+line = "[ -e \"$HOME/$rel\" ] && binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1388"]
+line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1405"]
+line = "binds+=(--bind \"$home/.local/state\" \"$HOME/.local/state\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1430"]
+line = "&& binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:1712"]
@@ -625,8 +653,16 @@ line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
+["src/box-session.sh:1759"]
+line = "binds+=(--tmpfs \"$fleet_root_dir\")"
+cited_by = ["docs/threat-model.md"]
+
 ["src/box-session.sh:1802"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1867"]
+line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:1891"]
