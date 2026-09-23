@@ -821,9 +821,10 @@ export function fixtureRegex(prefixes) {
 // [`serverSuites`] derives WHICH files this applies to, the same way [`fixturePrefixes`] derives
 // prefixes rather than naming them: a suite is anything under `tests/ui/` that imports `startServer`
 // from `./harness/server.mjs` (from `../harness/server.mjs` in a suite's parts), because that
-// import is what turns a fixture directory into something a box has to read, and it throws when it derives none, for the reason every derive-and-refuse
-// function in this file throws on that — a check that scans zero suites reports "clean" forever,
-// indistinguishably from a run that actually looked (SKEIN-647, SKEIN-687, SKEIN-913).
+// import is what turns a fixture directory into something a box has to read, and it throws when it
+// derives none, for the reason every derive-and-refuse function in this file throws on that — a
+// check that scans zero suites reports "clean" forever, indistinguishably from a run that actually
+// looked (SKEIN-647, SKEIN-687, SKEIN-913).
 //
 // **Not every file that calls `os.tmpdir()` under `tests/ui/` is this bug**, which is why the check
 // is scoped to [`serverSuites`] rather than to the whole directory. `leakcheck.mjs` calls it twice —
