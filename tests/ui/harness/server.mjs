@@ -91,7 +91,7 @@ function commonAncestor(a, b) {
  * git config --global user.name …`), and `.bashrc`/`.profile`/`.codex` decide nothing any suite
  * asks about — so seeding them would be asserting that they matter.
  */
-function fixtureHome(env) {
+function fixtureBase(env) {
   const store = env.SKEIN_HOME;
   const fleet = env.SKEIN_FLEET_ROOT;
   const refuse = why => {
@@ -112,6 +112,11 @@ function fixtureHome(env) {
     refuse("SKEIN_FLEET_ROOT and SKEIN_HOME are nested rather than siblings, so there is no " +
       "directory beside both of them to put a home in");
   }
+  return base;
+}
+
+/** [`fixtureBase`]'s home: `server-home` inside the fixture, stamped with the sentinel. */
+function fixtureHome(base) {
   const home = path.join(base, "server-home");
   fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
   fs.writeFileSync(
@@ -120,6 +125,54 @@ function fixtureHome(env) {
       "fixture's home rather than from the home of whoever ran the suite.\n",
   );
   return home;
+}
+
+/**
+ * The file name of the agent CLI every suite's server is handed unless the suite names its own.
+ *
+ * **Unset, `$SKEIN_CLAUDE_BIN` means `claude` off `$PATH`** (SKEIN-1092) — the owner's real CLI on
+ * the owner's real login. `ai::agent_command` refuses that in a test process, and it fired in a
+ * suite: `onboarding.mjs`'s server panicked on a background thread with "$SKEIN_CLAUDE_BIN is unset
+ * in a test process". The call was not a model call at all but `ai::ask_model_choices`, the
+ * `claude --help` that `ai::model_choices` starts behind the caller the first time a health report
+ * is built — so EVERY suite whose page loads `/api/health` reached it, and it looked like a load
+ * flake only because a suite prints its server's log when it fails and at no other time. Run by
+ * hand, with no `$SKEIN_TEST`, the guard does not fire and the real CLI is spawned instead.
+ *
+ * A stub that answers nothing and exits 1, because the only thing any suite that does not name its
+ * own asks of the agent is that it not be the real one: a failed model call is the ordinary "fall
+ * back to the free deterministic path" to every caller in `src/ai/`. Written rather than
+ * `/bin/false` so a server log or `/proc/<pid>/environ` names where it came from, and so it can leave
+ * `<stub>.asked` behind — the one way to see from outside that the server reached it.
+ */
+export const FIXTURE_AGENT_STUB = "agent-stub-from-a-ui-fixture";
+
+/** Write [`FIXTURE_AGENT_STUB`] into the fixture and return its path. */
+function fixtureAgentStub(base) {
+  const stub = path.join(base, FIXTURE_AGENT_STUB);
+  fs.writeFileSync(
+    stub,
+    "#!/bin/sh\n# Written by tests/ui/harness/server.mjs: the agent CLI a suite's server is handed\n" +
+      "# when the suite names none. It runs nothing and says so.\n" +
+      `echo "${FIXTURE_AGENT_STUB}: this suite's server asked the agent CLI; nothing ran" >&2\n` +
+      // What it was asked, beside it: the evidence `hatches.mjs` check 5 reads that it was the
+      // stub the server reached, rather than nothing at all.
+      'echo "$*" >> "$0.asked"\n' +
+      "exit 1\n",
+    { mode: 0o755 },
+  );
+  return stub;
+}
+
+/**
+ * The directory every bare `tmux` a suite's server runs puts its default socket in — the fixture's
+ * own, and short, because a unix socket path cannot exceed 108 bytes and tmux appends
+ * `tmux-<uid>/default` to it (`updatestall.mjs` measured the same limit and chose the same name).
+ */
+function fixtureTmuxDir(base) {
+  const dir = path.join(base, "t");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
 }
 
 /**
@@ -206,8 +259,10 @@ function fixtureHome(env) {
  * and only the removal is conditional. `fixtureScopes` says why the kill cannot reach another
  * agent's run.
  */
-export async function startServer({ door, env = {}, token = "", cwd = REPO, tries = 100 }) {
+export async function startServer({ door, env = {}, token = "", cwd = REPO, tries = 100, program = null }) {
   const { port } = door;
+  // First, so a suite that pinned neither path is refused before anything is written or started.
+  const base = fixtureBase(env);
   // Built rather than spread inline, so the replacement below is visible at the spawn. A suite that
   // wants a different credential passes one in its own `env`, which still wins — this drops only
   // what was inherited from whoever typed the command.
@@ -246,7 +301,32 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // `$SKEIN_NO_API_AUTH`; a suite run by hand in a box would otherwise get exactly that refusal.
   // Before the spread for the same reason as the line above, and `hatches.mjs` check 4 asserts both.
   delete childEnv.SKEIN_IN_BOX;
+  // **The agent CLI is the fixture's stub unless the suite names its own** (SKEIN-1092) — see
+  // [`FIXTURE_AGENT_STUB`] for the call that reached the real one. Before the spread, because a
+  // suite that asserts on what the agent said (`review.mjs`, `actfail.mjs`, `connections.mjs`)
+  // names a stub of its own and has to win; what is ruled out is the AMBIENT absence. The refusal
+  // after the spread is the other half: a suite that says `SKEIN_CLAUDE_BIN: ""` has asked for
+  // exactly the unset state, and gets a sentence rather than a server. `hatches.mjs` checks both.
+  childEnv.SKEIN_CLAUDE_BIN = fixtureAgentStub(base);
+  // **And the runner's tmux goes** (SKEIN-1091). A suite run from a tmux pane — which is every run
+  // in a skein box — carries `$TMUX`, and tmux obeys it over its default socket, so a bare `tmux`
+  // the server runs (`fleet::detached_alive`'s `tmux has-session -t skein-update`, asked by
+  // `update::settle` on every `/api/update`) was a question put to the runner's own tmux server,
+  // and `update::cancel`'s `kill-session` would have been an order to it. `$TMUX_PANE` goes with it
+  // because it names a pane there. `$TMUX_TMPDIR` is pinned at the fixture so the default socket a
+  // bare `tmux` falls back to is one only this suite's server can have made. Before the spread, as
+  // the lines above are: `updatestall.mjs` names a tmux directory of its own and has to win.
+  delete childEnv.TMUX;
+  delete childEnv.TMUX_PANE;
+  childEnv.TMUX_TMPDIR = fixtureTmuxDir(base);
   const spawnEnv = { ...childEnv, ...env };
+  if (!spawnEnv.SKEIN_CLAUDE_BIN) {
+    throw new Error(
+      "startServer will not start a server with $SKEIN_CLAUDE_BIN empty: that is `claude` off $PATH, " +
+        "the real agent CLI on the real login of whoever ran the suite (SKEIN-1092). Name a stub, or " +
+        "say nothing and the harness names one",
+    );
+  }
   // **After the spread, and the credential above is before it on purpose** — the two pins want
   // opposite things from a suite. A suite has a real reason to want no GitHub credential, so that
   // one is overridable and `hatches.mjs` checks the hatch opens. There is no such reason here: the
@@ -259,8 +339,11 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // so a suite that replaced its own `HOME` dies at `browserType.launch: Executable doesn't exist
   // at <fixture>/.cache/ms-playwright/…` — observed, not guessed. The server is the process that
   // starts boxes, so the server is where the home belongs.
-  spawnEnv.HOME = fixtureHome(env);
-  const srv = spawn(serverBinary(), {
+  spawnEnv.HOME = fixtureHome(base);
+  // `program` is an argv to run in the server's place — `restart.mjs` runs the doorway, which then
+  // runs the server — and it gets every pin above, because what it starts inherits them.
+  const [bin, ...args] = program || [serverBinary()];
+  const srv = spawn(bin, args, {
     cwd,
     stdio: door.stdio,
     env: spawnEnv,

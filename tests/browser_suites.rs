@@ -130,9 +130,12 @@ const NODE_SUITES: [&str; 27] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 10] = [
+const BROWSER_SUITES: [&str; 12] = [
     "actfail",
     "connections",
+    // A write request answered twice from the panel: the server's refusal in the toast, and the row
+    // redrawn in its real state (SKEIN-1034).
+    "gitqrefused",
     "onboarding",
     "panecover",
     // What a pane does after skein REFUSES it a terminal: whether the refusal is uncovered, whether
@@ -142,6 +145,10 @@ const BROWSER_SUITES: [&str; 10] = [
     // card is the exact defect — and because the recovery it measures arrives on the page's own
     // `EventSource`.
     "recovery",
+    // "Restart on new build" against a real doorway: an old build running, a new one installed, one
+    // click, and the same page served by the new build; and a server with no doorway, which is
+    // told so rather than sent anything (SKEIN-1029).
+    "restart",
     "review",
     "smoke",
     "updatepane",

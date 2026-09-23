@@ -329,19 +329,28 @@ pub fn ensure_fleet_door(sandbox: &str) -> Result<(), String> {
 /// doorway, which `/proc/<pid>/cmdline` says exactly. A stamp left by a doorway that was killed
 /// names a dead pid and reads as closed, which is the honest answer.
 fn door_holds_port(sandbox: &str, port: u16) -> bool {
+    door_pid(sandbox, port).is_some()
+}
+
+/// [`door_holds_port`], saying WHICH doorway: its pid, read and judged exactly as that describes.
+///
+/// Public for the cockpit's "Restart on new build" (SKEIN-1029), which has to name what holds the
+/// port when a reload does not take — and a pid it re-derived some other way would be a second
+/// answer to the question this function already answers.
+pub fn door_pid(sandbox: &str, port: u16) -> Option<u32> {
     let script = format!(
         "read -r pid held < {stamp} 2>/dev/null || exit 1; \
          [ \"$held\" = {port} ] || exit 1; \
          kill -0 \"$pid\" 2>/dev/null || exit 1; \
          tr '\\0' '\\n' < /proc/\"$pid\"/cmdline | grep -qxF -- {doorway} || exit 1; \
-         echo up",
+         echo \"up $pid\"",
         stamp = sh_quote(&server_door_stamp_path()),
         doorway = sh_quote(&server_doorway_path()),
     );
-    own_sandbox(sandbox)
+    let said = own_sandbox(sandbox)
         .exec(&script, Duration::from_secs(20))
-        .map(|out| out.trim() == "up")
-        .unwrap_or(false)
+        .ok()?;
+    said.trim().strip_prefix("up ")?.parse().ok()
 }
 
 /// Wait, briefly, for the doorway to take the port and say so.
@@ -372,14 +381,30 @@ fn door_settles(sandbox: &str, port: u16) -> bool {
 /// caller must start one. `pkill` exits 0 only when it signalled something, which is what makes
 /// that answer readable rather than guessed at.
 pub fn reload_server(sandbox: &str) -> bool {
-    let script = format!(
-        "pkill -USR1 -f {doorway} 2>/dev/null && echo reloaded",
-        doorway = sh_quote(&agent_pkill_pattern(&server_doorway_path())),
-    );
+    let script = format!("{} 2>/dev/null && echo reloaded", reload_command());
     own_sandbox(sandbox)
         .exec(&script, Duration::from_secs(30))
         .map(|out| out.trim() == "reloaded")
         .unwrap_or(false)
+}
+
+/// The reload [`reload_server`] sends, as a person would type it — so the cockpit can hand over the
+/// exact command when a reload it sent did not take (SKEIN-1029), rather than a paraphrase of it.
+pub fn reload_command() -> String {
+    format!(
+        "pkill -USR1 -f {}",
+        sh_quote(&agent_pkill_pattern(&server_doorway_path()))
+    )
+}
+
+/// What the doorway's pane last said — where a server that will not start says why. The same
+/// command [`cockpit_port_advice`] gives for a door that is not held.
+pub fn doorway_pane_command() -> String {
+    format!(
+        "tmux -S {} capture-pane -p -t {}",
+        server_tmux_sock(),
+        SERVER_SESSION
+    )
 }
 
 /// Start the doorway, which opens the socket and only then runs the server behind it.
@@ -510,13 +535,11 @@ pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation,
     if !door_holds_port(sandbox, port) {
         return Err(format!(
             "the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \
-             it. Either the doorway could not start (check `tmux -S {sock} capture-pane -p -t \
-             {session}` in the sandbox, or that python3 is present), or something else in the \
-             fleet is already on :{port} — which is architecture §9.4's squat, and a mapping \
-             published to it hands the browser and its token to whatever holds it. Nothing takes \
-             that back afterwards.",
-            sock = server_tmux_sock(),
-            session = SERVER_SESSION,
+             it. Either the doorway could not start (check `{look}` in the sandbox, or that \
+             python3 is present), or something else in the fleet is already on :{port} — which \
+             is architecture §9.4's squat, and a mapping published to it hands the browser and its \
+             token to whatever holds it. Nothing takes that back afterwards.",
+            look = doorway_pane_command(),
         ));
     }
     Ok(publish_cockpit_port(sandbox))

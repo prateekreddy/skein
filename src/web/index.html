@@ -9355,8 +9355,15 @@ function decideGitq(key, approve) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, hours, ...shown }),
-  }).then(r => { if (!r.ok) throw 0; loadGitq(); })
-    .catch(() => toast("could not record that decision"));
+  // **A refusal says why, and the row is redrawn either way** (SKEIN-1034). The server answers a
+  // second answer to one request with a sentence — "request r1 is already granted — a request is
+  // answered once; to take back a grant, revoke it" — and that sentence is the only way the person
+  // pressing learns the row they pressed on was stale. The reload is what makes the row show the
+  // real state, so the button that was just refused goes.
+  }).then(r => r.ok ? loadGitq() : r.text().then(why => {
+    toast(why.trim() || "could not record that decision");
+    return loadGitq();
+  })).catch(() => toast("could not record that decision"));
 }
 
 function revokeGitq(box, repo) {
@@ -11641,6 +11648,7 @@ let updateAgain = null;      // the re-read while the remote is still in flight
 let updateRun = "";          // which run the log belongs to — Cancel hands it back (SKEIN-1037)
 let updateQuiet = 0;         // seconds the log has gone unwritten, once that counts as no progress
 let updateEnded = "";        // "cancelled" after a Cancel, so the pane can say what to do next
+let restartSaid = null;      // what "Restart on new build" last said: { tone, text, cmd } (SKEIN-1029)
 
 // Whether the pane is on screen. Everything below stops when it is not: this is a settings pane
 // somebody opened, not a board, and a timer still running against a closed dialog is a fetch a
@@ -11683,6 +11691,7 @@ function updateVerdict(u) {
   if (!u.source) return ["", "no checkout to build from — this skein was not installed by bootstrap"];
   if (!u.remote) return ["", `could not ask GitHub: ${u.why || "no reason recorded"}`];
   if (u.behind) return ["behind", "a newer skein is on GitHub"];
+  if (u.restartable) return ["warn", RESTART_WORDS.verdict];
   if (u.unbuilt) return ["warn", "the running binary is not the checkout beside it — a build that did not finish, or one from an edited tree"];
   return ["ok", "this is the newest skein"];
 }
@@ -11712,7 +11721,9 @@ function renderUpdate() {
       <tr><th>running</th><td>${rev(u.running)}</td><td class="dim">the binary answering this page${u.dirty ? " — built from an edited tree" : ""}</td></tr>
       <tr><th>checkout</th><td>${rev(u.source)}</td><td class="dim">what a rebuild would compile</td></tr>
       <tr><th>github</th><td>${rev(u.remote)}</td><td class="dim">${esc(u.url || "")}${u.tracking ? ` @ ${esc(u.tracking)}` : ""}</td></tr>
+      ${u.installed ? `<tr><th>installed</th><td>${rev(u.installed)}</td><td class="dim">${esc(RESTART_WORDS.installedRow)}</td></tr>` : ""}
     </table>
+    ${renderRestart(u)}
     <div class="set-row">
       <button type="button" class="kbtn" id="upd-go" ${updateState.running ? "disabled" : ""}
         onclick="pressUpdateSkein()">${updateState.running ? "updating…" : "Update skein"}</button>
@@ -11727,6 +11738,96 @@ function renderUpdate() {
   // log's last lines, and a redraw that left the scroll at the top would be pointing at the first.
   const log = document.getElementById("upd-log");
   if (log) log.scrollTop = log.scrollHeight;
+}
+
+// Every sentence "Restart on new build" puts in front of a person, in one place, because the
+// wording is the owner's to sign off (SKEIN-1029). `h` is the server's `PortHolder`
+// (`src/update.rs`): the port, the doorway's pid, the answering server's pid and build.
+const RESTART_WORDS = {
+  verdict: "A newer build is installed than the one answering this page. Restart to run it.",
+  installedRow: "the build on disk, which a restart would run",
+  button: "Restart on new build",
+  offer: "Restarts the cockpit behind the same port. This page reconnects by itself in a few seconds.",
+  restarting: "restarting…",
+  waiting: want => `Restarting on ${want}. Waiting for it to answer…`,
+  nowRunning: build => `Now running ${build}.`,
+  nothingNewer: "Nothing to restart: the build answering this page is already the installed one.",
+  noDoorway: h => h.doorway
+    ? `Not restarted: the doorway (pid ${h.doorway}) holds port ${h.port}, but this server (pid ${h.server}) is not the one behind it, so a reload would replace a different process. Stopping this one takes this page down until something starts the installed build in its place:`
+    : `Not restarted: no skein doorway holds port ${h.port}, so this server (pid ${h.server}) was started some other way and a reload would not replace it. Stopping it takes this page down until something starts the installed build in its place:`,
+  didNotTake: (h, want, secs) => h
+    ? `The restart did not take: after ${secs} seconds this page is still served by ${h.build} (pid ${h.server}), not ${want}. ${h.doorway ? `The doorway (pid ${h.doorway}) holds port ${h.port}.` : `No skein doorway holds port ${h.port}.`} What the doorway says is here:`
+    : `The restart did not take: nothing has answered this page for ${secs} seconds. The doorway should be starting ${want}; what it says is here:`,
+  failed: why => `Could not restart: ${why}`,
+  copy: "Copy",
+  copied: "copied",
+};
+
+// How long a restart is given to answer as the new build before the pane says it did not take. A
+// debug build starts in a second or two; the doorway's own restart delay is two.
+const RESTART_WAIT_MS = 30000;
+
+// The restart control and whatever it last said. Drawn only while there is something to say: a
+// build to restart onto, or the outcome of the last press.
+function renderRestart(u) {
+  const said = restartSaid ? `<div class="set-note ${esc(restartSaid.tone || "")}" id="upd-restart-said">${esc(restartSaid.text)}${
+    restartSaid.cmd ? `<pre class="set-log" id="upd-restart-cmd">${esc(restartSaid.cmd)}</pre><button type="button" class="kbtn" onclick="copyRestartCmd(this)">${esc(RESTART_WORDS.copy)}</button>` : ""}</div>` : "";
+  if (!u.restartable) return said;
+  return `<div class="set-row">
+      <button type="button" class="kbtn primary" id="upd-restart" ${restartSaid && restartSaid.busy ? "disabled" : ""}
+        onclick="pressRestartBuild(this)">${esc(restartSaid && restartSaid.busy ? RESTART_WORDS.restarting : RESTART_WORDS.button)}</button>
+      <span class="dim">${esc(RESTART_WORDS.offer)}</span>
+    </div>${said}`;
+}
+
+function copyRestartCmd(btn) {
+  if (restartSaid && restartSaid.cmd && copyText(restartSaid.cmd)) btn.textContent = RESTART_WORDS.copied;
+}
+
+// The press: ask for the reload, then watch `/api/health`'s `build` until it is the installed one.
+// A poll that fails is the swap itself — the old server has gone and the new one is not up yet —
+// so it is asked again rather than reported.
+async function pressRestartBuild(btn) {
+  const want = (updateState && updateState.skein || {}).installed || "";
+  btn.disabled = true;
+  btn.textContent = RESTART_WORDS.restarting;
+  let r = null;
+  try {
+    r = await fetch("/api/update/restart", { method: "POST" }).then(x => x.json());
+  } catch (e) {
+    r = { ok: false, why: "failed", error: String(e) };
+  }
+  if (!r.ok) {
+    restartSaid = r.why === "no-doorway"
+      ? { tone: "warn", text: RESTART_WORDS.noDoorway(r.holder), cmd: `kill ${r.holder.server}` }
+      : r.why === "nothing-newer"
+        ? { tone: "", text: RESTART_WORDS.nothingNewer }
+        : { tone: "warn", text: RESTART_WORDS.failed(r.error || r.why) };
+    return loadUpdate();
+  }
+  // `busy`, so a redraw while this waits — a poll, the pane reopened — keeps the button pressed.
+  restartSaid = { tone: "", text: RESTART_WORDS.waiting(want), busy: true };
+  renderUpdate();
+  const began = Date.now();
+  while (Date.now() - began < RESTART_WAIT_MS) {
+    await new Promise(res => setTimeout(res, 1000));
+    let build = "";
+    try {
+      build = (await fetch("/api/health", { signal: AbortSignal.timeout(5000) }).then(x => x.json())).build || "";
+    } catch {}
+    if (build && build === want) {
+      restartSaid = { tone: "ok", text: RESTART_WORDS.nowRunning(build) };
+      return loadUpdate();
+    }
+  }
+  let holder = null;
+  try { holder = await fetch("/api/update/restart", { signal: AbortSignal.timeout(5000) }).then(x => x.json()); } catch {}
+  restartSaid = {
+    tone: "warn",
+    text: RESTART_WORDS.didNotTake(holder, want, Math.round(RESTART_WAIT_MS / 1000)),
+    cmd: (holder || r.holder).look,
+  };
+  return loadUpdate();
 }
 
 // Every sentence the "no progress" state and its Cancel put in front of a person, in one place,
