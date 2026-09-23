@@ -135,7 +135,15 @@ await check("a queue that could not be built keeps its rows, dimmed, and offers 
   await mustSee("#revpane .revfail .revchip:has-text('GitHub')", "the setting that would fix it");
   // The 55% is load-bearing: it is how you tell what you are looking at is not live without
   // reading anything.
-  const dim = await page.$eval("#revpane .revlane", e => parseFloat(getComputedStyle(e).opacity));
+  //
+  // Queried and measured in ONE page task, for `rowGeometry`'s reason in row.mjs (SKEIN-751):
+  // `$eval` is a query and then an evaluate, and a reading landing between them re-renders the
+  // pane, so the second half is handed a lane no longer in the document — whose computed opacity is
+  // "", which parsed as NaN and failed this check under load (SKEIN-1030).
+  const dim = await page.evaluate(() => {
+    const lane = document.querySelector("#revpane .revlane");
+    return lane ? parseFloat(getComputedStyle(lane).opacity) : "no lane on screen";
+  });
   if (!(dim < 1)) throw new Error(`the remembered rows are drawn as though they were live: ${dim}`);
   // Put the pane back, so this check costs the ones after it nothing.
   await page.evaluate(() => { openReview(""); loadReview(true); });
