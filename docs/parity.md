@@ -862,7 +862,7 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
   proxy returns refs. **What is still substrate behaviour, not skein's to close**, is a process that
   deliberately routes back through the proxy or out to the host ssh-agent gateway (`github.com:22`
   and `SSH_AUTH_SOCK_GATEWAY=gateway.docker.internal:3129` are both reachable direct — SKEIN-929); a firewall-grade boundary is
-  the sandbox's egress policy (SKEIN-926), which `src/health.rs` reports as a reachability line and
+  the sandbox's egress policy (SKEIN-926), which `src/health/reach.rs` reports as a reachability line and
   the git shim as a `sbx policy allow network` hint when GitHub is blocked outright. SKEIN-548,
   closed for the git/gh path. `tests/github_reach_live.rs` reproduces the boundary against a real
   fleet; it is `#[ignore]` because the sbx proxy is not reproducible under bwrap.

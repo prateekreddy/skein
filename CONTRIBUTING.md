@@ -498,7 +498,7 @@ argue with — a prohibition on its own is just something to route around.
     conversation, or clear its build output in place"
    ```
 
-   Write that same edit through an **unquoted** heredoc — `cat > src/health.rs <<EOF`, the way an
+   Write that same edit through an **unquoted** heredoc — `cat > src/health/disk.rs <<EOF`, the way an
    agent patches this repository all day — and the shell takes the backslash as *its own* line
    continuation and joins the two lines before the file is ever written. The `\` never arrives. What
    lands is one long line with the continuation line's indentation still inside the literal, and

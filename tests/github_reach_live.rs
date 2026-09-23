@@ -8,11 +8,11 @@
 //! measured from inside a box, a garbage `Bearer` came back `200` through the proxy — the fleet
 //! ACCOUNT, unbounded — on 2026-09-06 and again on 2026-09-15, and `401` on 2026-09-21.
 //! `docs/threat-model.md`'s "GitHub through the sandbox proxy" row and the hourly `proxy_injection`
-//! health check (`src/health.rs`, SKEIN-927) carry which of those is true today; this file does not.
-//! Making the boundary real does not depend on which answer that is: the launcher puts the GitHub
-//! hosts in `NO_PROXY` for a scoped box, so its git and gh reach GitHub DIRECT and are bounded by
-//! the token the box actually holds — and GitHub refuses a private repo it was not granted, on an
-//! injecting day and a non-injecting one alike.
+//! health check (`src/health/reach.rs`, SKEIN-927) carry which of those is true today; this file
+//! does not. Making the boundary real does not depend on which answer that is: the launcher puts
+//! the GitHub hosts in `NO_PROXY` for a scoped box, so its git and gh reach GitHub DIRECT and are
+//! bounded by the token the box actually holds — and GitHub refuses a private repo it was not
+//! granted, on an injecting day and a non-injecting one alike.
 //!
 //! So this test needs a live fleet: a box that is genuinely scoped (its environment carries the
 //! `NO_PROXY` the launcher set), and a second private repo the account can see but this box was not

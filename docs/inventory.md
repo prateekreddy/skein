@@ -165,7 +165,7 @@ Both halves are readable in the code now, and neither is a line number:
 - `grep -n 'requests/\$box\|for asking in substrate gitgate' src/box-session.sh` — the queue is
   unmasked **per box**, `requests/<box>/` bound writable into that box alone, so a request lands and
   no box can rewrite another's.
-- `grep -n 'fn install' src/substrate.rs` and `grep -n 'rendered' src/gitgate.rs` — the decision is
+- `grep -n 'fn install' src/substrate.rs` and `grep -n 'rendered' src/gitgate/decide.rs` — the decision is
   made on the bytes the cockpit rendered, and `install` reads the host-side artifact through
   `decision_or_why`. Neither consults the queue. `substrate::decided_over` makes the host's decision
   win over the box's copy, so a box that rewrites its request after approval changes neither what is

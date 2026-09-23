@@ -165,7 +165,7 @@ Not because they do not matter, but because they are the product rather than a d
   command on the host, against the owner's own keychain — and while that proxy is injecting, a
   request from a box carrying no credential, or carrying a deliberately invalid one, is answered as
   the whole account. skein's answer is not a claim that this cannot happen. It is to **measure it
-  and put it on the cockpit's banner in red** (`proxy_injection` in `src/health.rs`, SKEIN-548,
+  and put it on the cockpit's banner in red** (`proxy_injection` in `src/health/reach.rs`, SKEIN-548,
   SKEIN-927), because a boundary the substrate can reopen without touching a line of this code is
   one somebody has to be told about. The row in [`docs/threat-model.md`](docs/threat-model.md)
   carries the dates it has flipped and the command that answers it today. So a report that a box

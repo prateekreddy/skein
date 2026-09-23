@@ -310,7 +310,7 @@ the **X** column. Four shapes of it are in this tree:
 a shortcut.** `fleet::memory_plan` returns `None` when `parse_mib(&load_config().fleet_memory)` does
 — and `load_config` repairs `fleet_sandbox` and nothing else, so `{"fleet_memory":""}` reaches
 `parse_mib`, which answers `None` at its first `chars().last()?`. Two rows one screen apart in
-`src/health.rs`, the same shape, opposite verdicts, and only following the value tells them apart.
+`src/health/report.rs`, the same shape, opposite verdicts, and only following the value tells them apart.
 
 **And the cheap pass is not sufficient, which is why the ones it flagged were then run.** It called
 `src/volume.rs:122` dead on the reasoning that nothing in this tree writes a `VERSION` other than

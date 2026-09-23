@@ -2138,7 +2138,7 @@ unset uncovered
 #
 # Now the sandbox-wide `GH_TOKEN` is a read-only PAT, and write is a per-repository App token the
 # host mints and drops in this box's state directory. `git-credential-skein` picks between them by
-# the repository git is asking about. See `src/gitgate.rs`.
+# the repository git is asking about. See `src/gitgate/`.
 #
 # **Why the credential is not enough on its own, and what the block below does about it (SKEIN-548).**
 # The sandbox routes HTTP through a credential-injecting proxy at `$HTTPS_PROXY` that TERMINATES TLS
@@ -2188,9 +2188,9 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
   # (`CN=Docker Sandboxes Proxy CA`) is still installed, so the 2026-09-06/15 behaviour is dormant
   # machinery, not removed machinery, and can return without anything here changing. Do not read
   # this comment for today's answer: `docs/threat-model.md`'s "GitHub through the sandbox proxy"
-  # row and the hourly `proxy_injection` health check (`src/health.rs`, SKEIN-927) carry it, because
-  # they are re-measured rather than remembered. Everything below (the helper, the own-repo token,
-  # the shim) narrows what a box's token can DO regardless of which answer that is. With sbx
+  # row and the hourly `proxy_injection` health check (`src/health/reach.rs`, SKEIN-927) carry it,
+  # because they are re-measured rather than remembered. Everything below (the helper, the own-repo
+  # token, the shim) narrows what a box's token can DO regardless of which answer that is. With sbx
   # v0.43.0 a client credential the proxy did not issue is no longer forwarded either, so through
   # the proxy this box's own token is dropped anyway — DIRECT is the only path on which this box's
   # own token is ever seen.
