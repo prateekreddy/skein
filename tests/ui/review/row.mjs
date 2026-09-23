@@ -72,13 +72,28 @@ await check("the left mark is whose move, and scarce — not the check dot", asy
   if (!yours.length) throw new Error("nothing on screen is marked as your move");
   if (!theirs.length) throw new Error("every row is lit — a mark true of every row is a texture");
 });
+// SKEIN-1028: this went red once under load and green alone, and the log that said which chip is
+// gone, so the cause is not known. At this point the pane draws four rows, so ANY chip on two of
+// them is "more than a third" — and several chip kinds (`● updated`, a workflow's) are placed by
+// answers that land asynchronously. The failure now carries every row's chips, the page's own
+// demoted set and the size of the queue it computed that from, so the next red names its cause.
+// Read in one page task, so a render landing mid-read cannot hand back a half-replaced pane.
 await check("no chip is true of more than a third of the queue", async () => {
-  const rows = await page.$$eval("#revpane .revrow", els => els.map(e =>
-    [...e.querySelectorAll(".revtag")].map(t => t.textContent.trim().split(" ")[0])));
+  const seen = await page.evaluate(() => ({
+    rows: [...document.querySelectorAll("#revpane .revrow")].map(e => ({
+      n: e.querySelector(".revnum")?.textContent || "?",
+      tags: [...e.querySelectorAll(".revtag")].map(t => t.textContent.trim()),
+    })),
+    common: [...revCommonChips],
+    queued: (revQueue && revQueue.prs || []).length,
+  }));
+  const rows = seen.rows.map(r => r.tags.map(t => t.split(" ")[0]));
   const counts = {};
   for (const tags of rows) for (const t of new Set(tags)) counts[t] = (counts[t] || 0) + 1;
   const mass = Object.entries(counts).filter(([, n]) => n > rows.length / 3);
-  if (mass.length) throw new Error(`chips worn by most of the queue: ${JSON.stringify(mass)} of ${rows.length} rows`);
+  if (mass.length) throw new Error(`chips worn by most of the queue: ${JSON.stringify(mass)} of ${rows.length} rows ` +
+    `— every row: ${JSON.stringify(seen.rows)}; demoted by the page: ${JSON.stringify(seen.common)}; ` +
+    `${seen.queued} in the queue it tallied from`);
 });
 
 // The tripwire marks belong on the collapsed line, because they are the reason to stop scrolling.
