@@ -156,6 +156,30 @@ def sweep(binary, jobs):
     return todo, failed
 
 
+def alone_again(binary, failed):
+    """Split `failed` into (confirmed, crowded) by running each one AGAIN, on its own, serially.
+
+    **The sweep's verdict is "failed while seven other test processes ran beside it", and that is
+    not the claim this gate prints** (SKEIN-1018). The sweep runs one test per process, but `--jobs`
+    of those processes at once — and on a box another lane is also building on, a test that fails
+    under that load was reported as "fails alone", then passed alone four times out of four by
+    hand. A red a reader cannot reproduce teaches them to read past the gate.
+
+    A test that leans on a neighbour in its PROCESS — the class this gate exists for — fails
+    alone every time, so one serial re-run confirms it. One that passes here failed for a reason
+    that is not in-process state (load, or something on the filesystem a concurrent process
+    touched), and it is reported as that, with its first output, rather than counted.
+    """
+    confirmed, crowded = {}, {}
+    for name in sorted(failed):
+        _, ok, output = run_one(binary, name)
+        if ok:
+            crowded[name] = failed[name]
+        else:
+            confirmed[name] = output
+    return confirmed, crowded
+
+
 def passing_together(binary):
     """The names that pass in the ordinary shared-process run — or None if it could not be read."""
     out = subprocess.run(
@@ -236,12 +260,22 @@ SELF_CHECK = r"""#!/usr/bin/env python3
 # A stand-in for the lib test binary, in libtest's own `--list` / `--exact` spelling.
 import os, sys
 if "--list" in sys.argv:
-    for n in ("hermetic", "leaky", "marked", "guarded"):
+    for n in ("hermetic", "leaky", "marked", "guarded", "crowded"):
         print("%s: test" % n)
     sys.exit(0)
 which = sys.argv[sys.argv.index("--exact") + 1]
 if which == "leaky":
     sys.exit(1)                    # the planted alone-failure the gate must name
+if which == "crowded":
+    # Fails its first run and passes every run after: a test that went red beside its neighbours
+    # and is green on its own, which the gate must not call a failure alone (SKEIN-1018).
+    seen = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "crowded-ran")
+    if os.path.exists(seen):
+        sys.exit(0)
+    open(seen, "w").close()
+    print("thread 'crowded' (9) panicked at src/probes.rs:1319:9:")
+    print("a newly enabled plugin never reached an existing box")
+    sys.exit(101)
 if which == "guarded":
     # A test failing its OWN assertion while a thread it spawned hit the SKEIN-626 guard, in
     # libtest's spelling (rustc 1.98): the helper's panic is printed first, with this test's output.
@@ -281,8 +315,9 @@ def self_check(loud=False):
     browser tier skipped on every green CI run in its history, and the leaked-process check answers
     `0` while nine-hour-old servers run, because its pattern does not match their names. So the
     machinery here is exercised against a binary whose answers are known: four tests, one that
-    fails alone, one that fails unless the environment was scrubbed, and one that fails its own
-    assertion beside a helper thread's guard panic (SKEIN-1122).
+    fails alone, one that fails unless the environment was scrubbed, one that fails its own
+    assertion beside a helper thread's guard panic (SKEIN-1122), and one that fails only on its
+    first run, the way a test does beside a loaded neighbour (SKEIN-1018).
     """
     tmp = tempfile.mkdtemp(prefix="alone-check-self-")
     try:
@@ -302,7 +337,8 @@ def self_check(loud=False):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-        assert listed == ["hermetic", "leaky", "marked", "guarded"], (
+        confirmed, crowded = alone_again(fake, failed)
+        assert listed == ["hermetic", "leaky", "marked", "guarded", "crowded"], (
             "alone-check self-check: --list was misread (%r)" % (listed,)
         )
         assert "leaky" in failed, (
@@ -316,6 +352,17 @@ def self_check(loud=False):
         )
         assert "hermetic" not in failed, (
             "alone-check self-check: a passing test was reported as failing"
+        )
+        # The re-run: `leaky` fails alone every time and stays a finding; `crowded` failed once and
+        # passes on its own, so it must be reported as that and not as a failure alone.
+        assert "leaky" in confirmed, (
+            "alone-check self-check: the serial re-run lost the planted alone-failure — a "
+            "confirmation step that clears real findings is this gate unable to fail again"
+        )
+        assert "crowded" in failed and "crowded" in crowded and "crowded" not in confirmed, (
+            "alone-check self-check: a test that failed beside its neighbours and passed on its "
+            "own was reported as failing alone (SKEIN-1018): confirmed=%r crowded=%r"
+            % (sorted(confirmed), sorted(crowded))
         )
         # The planted SKEIN-658 shape: the reason is the test's own assertion, whatever a thread
         # it spawned said first (SKEIN-1122).
@@ -332,9 +379,11 @@ def self_check(loud=False):
         )
         if loud:
             print(
-                "self-check: 4 fabricated tests, the planted alone-failure `leaky` was named, "
-                "`marked` proves %s is set and %s are stripped from every child, and `guarded` "
-                "is reported with its own assertion rather than a helper thread's guard"
+                "self-check: 5 fabricated tests, the planted alone-failure `leaky` was named and "
+                "confirmed on a serial re-run, `marked` proves %s is set and %s are stripped from "
+                "every child, `guarded` is reported with its own assertion rather than a helper "
+                "thread's guard, and `crowded`, red once and green on its own, is not called a "
+                "failure alone"
                 % (MARKER, "/".join(SCRUBBED))
             )
     finally:
@@ -354,13 +403,31 @@ def main():
 
     binary = args.bin or build()
     started = time.time()
-    listed, failed = sweep(binary, jobs=args.jobs)
+    listed, swept = sweep(binary, jobs=args.jobs)
     took = time.time() - started
+    failed, crowded = alone_again(binary, swept)
+
+    for name in sorted(crowded):
+        why = guard_line(crowded[name], name)
+        print(
+            "alone-check: `%s` failed beside the sweep's other processes (--jobs %d) and passed "
+            "when run again on its own — not a failure alone, so not counted here. Whatever it "
+            "shares with a concurrent process is on the filesystem or the box, not in its own "
+            "process." % (name, args.jobs)
+        )
+        if why:
+            print("             the first run said: %s" % why)
+        print()
 
     if not failed:
         print(
-            "every one of the %d lib tests passes alone (%.0fs at --jobs %d)"
-            % (len(listed), took, args.jobs)
+            "every one of the %d lib tests passes alone (%.0fs at --jobs %d%s)"
+            % (
+                len(listed),
+                took,
+                args.jobs,
+                ", %d of them only on a serial re-run" % len(crowded) if crowded else "",
+            )
         )
         return 0
 
