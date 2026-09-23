@@ -342,7 +342,7 @@ fn skein_doctor_checks_the_mount_set_the_fleet_was_created_from() {
 ///
 ///   * `fleet_serve_mounts` composes itself out of `fleet_mounts`;
 ///   * `mount_manifest` tells a box's launcher what to uncover, and a box must **not** see the
-///     volume root — `exposes_the_volume` exists to keep every credential skein holds out of it.
+///     volume root — `volume_exposure` exists to keep every credential skein holds out of it.
 ///
 /// Anything else naming `fleet_mounts` is a third reader, and a third reader is how this bug
 /// happened. Failing here is the request to say which of the two it wants and why.

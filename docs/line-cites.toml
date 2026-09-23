@@ -836,39 +836,39 @@ cited_by = ["docs/architecture.md"]
 line = "for path in [repo.store.clone()] {"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet/create.rs:397"]
+["src/fleet/create.rs:472"]
 line = "\"creating fleet sandbox {sandbox}: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:494"]
+["src/fleet/create.rs:569"]
 line = "cpus,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:630"]
+["src/fleet/create.rs:705"]
 line = "\"skein cannot create {sandbox} from here and will not guess.\\n{}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:658"]
+["src/fleet/create.rs:733"]
 line = "\"the fleet sandbox {sandbox} is already being created — that started {} ago and takes \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:712"]
+["src/fleet/create.rs:787"]
 line = "if fleet_exists(sandbox) != Some(true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:714"]
+["src/fleet/create.rs:789"]
 line = "\"{sandbox} is not the fleet sandbox this skein is running inside, and from in here \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:736"]
+["src/fleet/create.rs:811"]
 line = "\"skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:752"]
+["src/fleet/create.rs:827"]
 line = "\"skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:1229"]
+["src/fleet/create.rs:1304"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
@@ -1339,7 +1339,7 @@ line = "return Err(format!("
 window = "if !registrable_source(source) {\u000breturn Err(format!(\u000b\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/add.rs:149"]
+["src/repos/add.rs:177"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 

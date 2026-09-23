@@ -529,8 +529,16 @@ depends_on = ["mailbox", "repos", "sbx", "util"]
 # filed under THAT repository rather than the first in the file, and `read_pat` for the fleet-wide
 # read-only fallback. No module joins a cycle over it — `repos` and `gitgate` are both already
 # inside the eighteen-module component recorded at the top of this file.
+#
+# `fleet` for one question, SKEIN-943: would the fleet mount this store? `add_repo` asks
+# `fleet::volume_exposure` — the very predicate `fleet_mounts` filters with — before it writes a
+# store, so `skein add --store ~/.skein/thing` is refused while a person can still act on it instead
+# of registering a repo whose boxes silently come up with no store. A copy of the rule in `repos`
+# would have avoided the edge and reintroduced the defect, which was two rules drifting. `fleet` is
+# already in the eighteen-module component with `repos`, so the knot does not grow.
 depends_on = [
   "config",
+  "fleet",
   "gitgate",
   "kit",
   "place",

@@ -956,7 +956,7 @@ path in it (`src/box-session.sh:1921`) and binds back only the one store this bo
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
   — module notes and a repo pull. Neither exists: the module notes, the diff and CODEOWNERS read the
   mirror through `repos::Tree` (`src/repos/mirror.rs:271`), and `pull_repo` fetches the mirror and does
-  nothing else (`src/repos/add.rs:149`). What has not changed is that skein still runs git **on the
+  nothing else (`src/repos/add.rs:177`). What has not changed is that skein still runs git **on the
   host** against a tree inside `~/.skein/repos` — the mirror, via `fetch_mirror` — so a box that
   could write that mirror's `config` would still get execution as the host user at the next fetch.
   The cover above is what stops it, which means the cover is load-bearing for more than file

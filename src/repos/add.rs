@@ -68,6 +68,15 @@ pub fn add_repo(
              origin` prints it."
         ));
     }
+    // **A store the fleet would refuse to mount is refused here, before anything is written** —
+    // the kit, the store, the mirror, `repos.json`. The mounter's rule is the one asked
+    // (`fleet::volume_exposure`), not a copy of it: `add` used to check only that the path was
+    // absolute, so `--store ~/.skein/thing` registered cleanly and every box of the repo came up
+    // with no store and nothing saying so (SKEIN-943). skein's own default is under `repos/`, which
+    // the fleet does mount, so it passes the same question rather than being excused from it.
+    if let Some(why) = store_refusal(&store, &id) {
+        return Err(why);
+    }
     ensure_kit()?;
     ensure_store(&store)?;
 
@@ -138,6 +147,25 @@ pub fn add_repo(
     })
 }
 
+/// Why `add` must refuse this store, if the fleet would decline to mount it — worded for the person
+/// who typed it, with where a store can go instead. `None` when the fleet would mount it.
+fn store_refusal(store: &Path, id: &str) -> Option<String> {
+    let path = store.to_string_lossy();
+    let home = skein_home();
+    let home = home.display();
+    let relation = match crate::fleet::volume_exposure(&path)? {
+        crate::fleet::VolumeExposure::Contains => "contains",
+        crate::fleet::VolumeExposure::Inside => "is inside",
+    };
+    Some(format!(
+        "{path} {relation} skein's own volume ({home}), and skein never mounts that into a box — a \
+         box given it would read the API token, the GitHub credentials and every other box's \
+         state. So this repo's boxes would come up with no store.\n  Give --store a folder \
+         outside {home}, or leave --store out and skein keeps the store at \
+         {home}/repos/{id}/store/.claude."
+    ))
+}
+
 /// Bring a repo up to date: **the mirror, which is the whole of the job.**
 ///
 /// The mirror is what every box clones from, so advancing it is the part that changes what a new box
@@ -201,6 +229,7 @@ mod tests {
     use super::*;
     use crate::repos::testkit::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
+    use crate::util::expand_tilde;
 
     /// **A repo is a remote, and a path is refused rather than resolved.**
     ///
@@ -252,6 +281,116 @@ mod tests {
         assert!(
             !later.contains("registers repos by remote"),
             "a URL was rejected by the path check, so the refusal above proves nothing: {later}"
+        );
+    }
+
+    /// **`--store` is refused at add time when the fleet would refuse to mount it** (SKEIN-943), and
+    /// a refused add writes nothing — no kit, no store, no record.
+    ///
+    /// The four shapes a person can type that land in the volume: a directory of credentials inside
+    /// it, the same spelled through `~` and `..`, a path under `repos/` that `..` walks back out of
+    /// (textually "under repos", really beside the credentials), and a symlink outside the volume
+    /// that points into it. Plus a directory holding the volume, which is worded "contains".
+    ///
+    /// What fails each, planted and watched: deleting the `store_refusal` call in `add_repo` fails
+    /// the exact-message `assert_eq!` on the first case; asking `volume_exposure` only the textual
+    /// question fails the `..`-out-of-repos case's `assert_eq!`, with the clone's error where the
+    /// refusal should be — the add got all the way to the network.
+    #[test]
+    fn a_store_inside_skeins_volume_is_refused_at_add_and_nothing_is_written() {
+        let _g = env_lock();
+        let user = tempdir();
+        let home = user.join(".skein");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home).set("HOME", &user);
+        // Never reached: every case here must be refused before the clone.
+        let source = "https://127.0.0.1:1/thing.git";
+        let shown = home.display().to_string();
+        let refusal = |path: &str, relation: &str| {
+            format!(
+                "{path} {relation} skein's own volume ({shown}), and skein never mounts that into a \
+                 box — a box given it would read the API token, the GitHub credentials and every \
+                 other box's state. So this repo's boxes would come up with no store.\n  Give \
+                 --store a folder outside {shown}, or leave --store out and skein keeps the store \
+                 at {shown}/repos/thing/store/.claude."
+            )
+        };
+
+        let pats = home.join("github-pats").to_string_lossy().into_owned();
+        let why = add_repo(source, Some("thing"), Some("claude"), Some(&pats))
+            .expect_err("a store among the credentials was accepted");
+        assert_eq!(why, refusal(&pats, "is inside"));
+
+        // Through `~` and `..`: shown as expanded, which is the path skein would have used.
+        let typed = "~/.skein/../.skein/github-pats";
+        let why = add_repo(source, Some("thing"), Some("claude"), Some(typed))
+            .expect_err("a store spelled through ~ and .. was accepted");
+        assert_eq!(why, refusal(&expand_tilde(typed), "is inside"));
+
+        // Textually under `repos/`, which the fleet mounts; really beside the credentials.
+        let back_out = format!("{}/repos/../github-pats", home.display());
+        let why = add_repo(source, Some("thing"), Some("claude"), Some(&back_out))
+            .expect_err("a store that .. walks out of repos/ was accepted");
+        assert_eq!(why, refusal(&back_out, "is inside"));
+
+        // A symlink outside the volume, into it.
+        let outside = tempdir();
+        std::os::unix::fs::symlink(&home, outside.join("link")).unwrap();
+        let via_link = outside
+            .join("link/github-pats")
+            .to_string_lossy()
+            .into_owned();
+        let why = add_repo(source, Some("thing"), Some("claude"), Some(&via_link))
+            .expect_err("a store reached through a symlink into the volume was accepted");
+        assert_eq!(why, refusal(&via_link, "is inside"));
+
+        // A directory holding the volume.
+        let above = user.to_string_lossy().into_owned();
+        let why = add_repo(source, Some("thing"), Some("claude"), Some(&above))
+            .expect_err("a store holding the volume was accepted");
+        assert_eq!(why, refusal(&above, "contains"));
+
+        assert!(
+            !home.join("github-pats").exists() && !home.join("kit").exists(),
+            "a refused add scaffolded something anyway"
+        );
+        assert!(load_repos().is_empty(), "a refused add was registered");
+    }
+
+    /// **skein's own default store is under the volume and is NOT refused**, and neither is a store
+    /// the person keeps outside it — the reason `--store` exists.
+    ///
+    /// Both get past the guard and fail later, at the clone of an address that answers nothing, and
+    /// the proof they got past it is that the store was scaffolded: `ensure_store` runs after the
+    /// guard and before the clone. Flipping `exposure_among` to refuse everything under the volume
+    /// (dropping the `repos/`/`boxes/` exception) fails the first assertion here.
+    #[test]
+    fn the_default_store_and_one_outside_the_volume_are_accepted() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let source = "https://127.0.0.1:1/thing.git";
+
+        let why = add_repo(source, Some("thing"), Some("claude"), None)
+            .expect_err("nothing answers at that address, so the clone fails");
+        assert!(
+            !why.contains("skein's own volume") && home.join("repos/thing/store/.claude").is_dir(),
+            "skein's default store was refused, or not scaffolded: {why}"
+        );
+
+        let elsewhere = tempdir().join("shared/.claude");
+        let why = add_repo(
+            source,
+            Some("other"),
+            Some("claude"),
+            Some(&elsewhere.to_string_lossy()),
+        )
+        .expect_err("nothing answers at that address, so the clone fails");
+        assert!(
+            !why.contains("skein's own volume") && elsewhere.is_dir(),
+            "a store outside the volume was refused, or not scaffolded: {why}"
         );
     }
 
