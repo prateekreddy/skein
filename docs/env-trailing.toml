@@ -232,34 +232,34 @@ vars = ["SKEIN_FLEET_ROOT"]
 [leaks."src/fleet/create::two_requests_at_once_create_the_fleet_once"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/gitgate::a_box_is_not_told_it_holds_a_token_nothing_ever_seeded"]
+[leaks."src/gitgate/scope::a_box_is_not_told_it_holds_a_token_nothing_ever_seeded"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/gitgate::a_decision_never_splices_a_value_into_the_script_unquoted"]
+[leaks."src/gitgate/decide::a_decision_never_splices_a_value_into_the_script_unquoted"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/gitgate::a_request_id_cannot_run_a_command_when_the_decision_script_does"]
+[leaks."src/gitgate/decide::a_request_id_cannot_run_a_command_when_the_decision_script_does"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/gitgate::a_request_id_reaches_the_decision_script_only_inside_its_own_quotes"]
+[leaks."src/gitgate/decide::a_request_id_reaches_the_decision_script_only_inside_its_own_quotes"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/gitgate::the_box_a_request_is_from_is_the_directory_it_is_in"]
+[leaks."src/gitgate/decide::the_box_a_request_is_from_is_the_directory_it_is_in"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/gitgate::the_grant_recorded_is_the_one_that_was_shown"]
+[leaks."src/gitgate/decide::the_grant_recorded_is_the_one_that_was_shown"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/health::a_full_disk_names_what_is_stranded_in_the_substrate_rather_than_a_box_called_dot_skein"]
+[leaks."src/health/disk::a_full_disk_names_what_is_stranded_in_the_substrate_rather_than_a_box_called_dot_skein"]
 vars = ["SKEIN_FLEET_ROOT"]
 
-[leaks."src/health::a_repo_with_no_store_is_one_fault_and_not_nine"]
+[leaks."src/health/report::a_repo_with_no_store_is_one_fault_and_not_nine"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/health::every_fault_says_what_would_fix_it"]
+[leaks."src/health/report::every_fault_says_what_would_fix_it"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
-[leaks."src/health::the_wardens_own_variable_set_on_a_client_is_pointed_out"]
+[leaks."src/health/sandbox::the_wardens_own_variable_set_on_a_client_is_pointed_out"]
 vars = ["SKEIN_WARDEN", "SKEIN_WARDEN_PORT"]
 
 [leaks."src/kit::a_box_skips_a_recorded_source_path_that_is_not_there"]

@@ -47,8 +47,8 @@ RULE ONE — the lock. Per test-scope function body (brace-matched):
   · `let _ = env_lock();` is a finding of its own — `_` is not a binding, so the guard is dropped
     on the line it is taken and the test runs unlocked while LOOKING locked. That is worse than no
     lock, because it reads as done;
-  · a guard can also arrive from a same-file helper that takes the lock and RETURNS it, which two
-    `fresh_home()`s here do. `lock_providers` reads that off the RETURN TYPE — an `EnvGuard` can
+  · a guard can also arrive from a helper in the same module that takes the lock and RETURNS it,
+    which two `fresh_home()`s here do. `lock_providers` reads that off the RETURN TYPE — an `EnvGuard` can
     only have come from `env_lock()`, whose struct has private fields and one construction site —
     and remembers which slot of the returned tuple it is, so that
     `let (_, _home, _env) = fresh_home();` stays the finding above rather than becoming a pass.
@@ -124,7 +124,7 @@ debt: a finding not listed there fails the build, a row that no longer leaks fai
   python3 tools/env-lock-check.py --update-trailing prune docs/env-trailing.toml; it never adds
 """
 
-import os, re, sys, tomllib
+import collections, os, re, sys, tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rustcut  # noqa: E402 — the one cutter every gate shares, self-checked at import
@@ -172,7 +172,7 @@ DROPPED = re.compile(r"\blet\s+_\s*=\s*[^;]*?\b(?:env_lock\s*\(\s*\)|ENV_LOCK\s*
 # of its body without ever spelling `env_lock()`, so the two regexes above — which read one body —
 # cannot see it, and would report a locked test as unlocked.
 #
-# This tree has the shape twice and both are called `fresh_home`: `src/gitgate.rs:2430` and
+# This tree has the shape twice and both are called `fresh_home`: `src/gitgate/testkit.rs:14` and
 # `src/prq/store.rs:240`, each returning `(EnvGuard, TempDir, EnvPins)` and each destructured by its
 # callers as `let (_lock, _home, _env) = fresh_home();`. It is the arrangement `src/prq/store.rs`'s
 # own doc comment insists on — the guard FIRST so it drops LAST, after `$SKEIN_HOME` has stopped
@@ -185,13 +185,14 @@ DROPPED = re.compile(r"\blet\s+_\s*=\s*[^;]*?\b(?:env_lock\s*\(\s*\)|ENV_LOCK\s*
 #
 # Reading the RETURN TYPE rather than the body is what makes this textual and still sound:
 # `EnvGuard`'s fields are private and it is constructed in exactly one place, `env_lock()` at
-# src/testutil.rs:33, so a fn that returns one took the lock to get it. Restricted to the same file,
-# which `callers_of` no longer is (SKEIN-904) — and the asymmetry is deliberate rather than left
-# over. `callers_of` widening can only ADD a caller to the set every one of which must be locked, so
-# a name collision there turns into a finding; this reads a name and BELIEVES it, so the same
-# collision would turn into a pass. Both `fresh_home()`s in this tree are called only from the file
-# that defines them, so the narrow radius costs nothing today and the wide one would have to be
-# bought with a real resolver.
+# src/testutil.rs:33, so a fn that returns one took the lock to get it. It was restricted to the
+# same file after `callers_of` stopped being (SKEIN-904), and the asymmetry was deliberate:
+# `callers_of` widening can only ADD a caller to the set every one of which must be locked, so a
+# name collision there turns into a finding, while this reads a name and BELIEVES it, so the same
+# collision would turn into a pass. Splitting `src/gitgate.rs` put its `fresh_home()` in
+# `testkit.rs` and its callers in five files (SKEIN-1100), so the radius is the module now — but
+# only for a name defined ONCE among the module's test fns (`module_lock_providers`). A collision
+# takes the name off the list, and what leaned on it is a finding again rather than a pass.
 RETURNS_GUARD = re.compile(r"\bEnvGuard\b")
 
 
@@ -237,6 +238,27 @@ def lock_providers(text, fns):
         at = [i for i, x in enumerate(slots) if RETURNS_GUARD.search(x)]
         if len(at) == 1:
             out[fn["name"]] = at[0]
+    return out
+
+
+def module_lock_providers(index, found):
+    """{module: {name: slot}} — the lock providers a scope may be judged through, per module.
+
+    **The module, not the file** (SKEIN-1100), for the reason SKEIN-904 gave `callers_of`: a
+    fixture and the `#[test]` that uses it are siblings more often than housemates. When
+    `src/gitgate.rs` became `src/gitgate/`, its `fresh_home()` went to `testkit.rs` and its callers
+    to five files, and three tests that bind its guard read as never taking the lock.
+
+    **But a provider is BELIEVED, not merely suspected**, which is why the file was the radius
+    before: a name spelled twice would turn a wrong guess into a pass. So a name is a provider here
+    only when it is defined exactly ONCE among the module's test fns. A second fn of that name
+    anywhere in the module — a provider or not — takes it off the list, and every scope that leaned
+    on it falls back to "never takes `env_lock()`", which is a finding a person reads.
+    """
+    out = {}
+    for module, provided in found.items():
+        defined = collections.Counter(fn["name"] for fn in index.get(module, []))
+        out[module] = {name: slot for name, slot in provided.items() if defined[name] == 1}
     return out
 
 
@@ -356,15 +378,19 @@ def unit_name(path):
     return rel[:-3] if rel.endswith(".rs") else rel
 
 
-def scan_file(path, whole_file):
-    """[finding-or-scope dicts] for one file."""
+def scan_file(path, whole_file, module_providers=None):
+    """[finding-or-scope dicts] for one file.
+
+    `module_providers` is `module_lock_providers` for the file's module; without it, a provider is
+    looked for in the same test region only, which is all a lone file can say.
+    """
     raw = open(path, encoding="utf-8").read()
     text = uncommented(raw)
     unit = unit_name(path)
     scopes = []
     for lo, hi in test_regions(text, whole_file):
         fns = functions(text, lo, hi)
-        providers = lock_providers(text, fns)
+        providers = lock_providers(text, fns) if module_providers is None else module_providers
         for fn in fns:
             body = text[fn["body_start"]:fn["end"]]
             # Only the part of the body that is not itself a nested fn: a nested fn is its own scope
@@ -562,21 +588,27 @@ def collect():
     scopes of one module rather than copied: `callers_of` only reads it.
     """
     groups = modules_of()
-    index, scopes = {}, []
+    index, scopes, found, files = {}, [], {}, []
     for path, whole_file in rust_files():
         # A `tests/*.rs` file is its own binary, so it is its own module — see the block above.
         module = groups.get(os.path.abspath(path), os.path.abspath(path))
+        files.append((path, whole_file, module))
         text = uncommented(open(path, encoding="utf-8").read())
         unit = unit_name(path)
         for lo, hi in test_regions(text, whole_file):
-            for fn in functions(text, lo, hi):
+            fns = functions(text, lo, hi)
+            for fn in fns:
                 index.setdefault(module, []).append({
                     "name": fn["name"],
                     "attrs": fn["attrs"],
                     "unit": unit,
                     "body": text[fn["body_start"]:fn["end"]],
                 })
-        scopes += [dict(s, module=module) for s in scan_file(path, whole_file=whole_file)]
+            for name, slot in lock_providers(text, fns).items():
+                found.setdefault(module, {})[name] = slot
+    providers = module_lock_providers(index, found)
+    for path, whole_file, module in files:
+        scopes += [dict(s, module=module) for s in scan_file(path, whole_file, providers.get(module, {}))]
     for scope in scopes:
         scope["module_fns"] = index[scope["module"]]
     return scopes
