@@ -92,7 +92,7 @@ pub fn number_in(repo_id: &str, box_name: &str) -> Option<u64> {
 pub fn theirs(repo_id: &str) -> Vec<(String, u64)> {
     // **No `is_empty` guard on the name** (SKEIN-772). One stood here with a note saying it was
     // unreachable and kept anyway, for what is downstream rather than for what reaches it. A guard
-    // on a value that cannot occur protects nothing, and `src/fleet.rs`'s module doc records the
+    // on a value that cannot occur protects nothing, and `src/fleet/mod.rs`'s module doc records the
     // reasoning once for the seventeen siblings SKEIN-756 deleted rather than made explicit: one
     // statement of an invariant is a tripwire, seventeen are a fiction with a maintenance cost.
     // `config::load_config` repairs a blank `fleet_sandbox` (`src/config.rs:459`) before anybody

@@ -1768,7 +1768,7 @@ mod tests {
         assert_eq!(
             theirs,
             mine.to_vec(),
-            "bootstrap.sh and src/fleet.rs disagree about where skein's own files live, so an \
+            "bootstrap.sh and src/fleet/install.rs disagree about where skein's own files live, so an \
              install would put them somewhere skein never looks. stderr:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );

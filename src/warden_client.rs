@@ -1092,7 +1092,7 @@ impl Performed {
     /// (SKEIN-554). The owner's decision is that an approved command still runs when the warden's
     /// log cannot be written, and that the person is told. This carries the fact to where skein
     /// receives the outcome and says nothing itself: neither caller of [`perform`] in
-    /// `src/fleet.rs` reads it yet (`grep -n 'Performed::Warden' src/fleet.rs`), and the wording
+    /// `src/fleet/` reads it yet (`grep -rn 'Performed::Warden' src/fleet/`), and the wording
     /// and where it appears are the owner's to choose.
     pub fn unrecorded(&self) -> &[String] {
         match self {
