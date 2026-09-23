@@ -109,6 +109,50 @@ pub fn descriptor(fds: Option<&str>, pid: Option<&str>, me: u32) -> Result<Optio
     }
 }
 
+/// Mark `fd` close-on-exec, so no process this one starts receives it.
+///
+/// **The descriptor arrives inheritable on purpose, and must stop being so here** (SKEIN-1035).
+/// `src/server-doorway.py` `dup2`s the listener onto descriptor [`FIRST`] because that is the only
+/// way it survives the doorway's `exec` into skein-server — and `CLOEXEC` is the one flag `exec`
+/// consults, so the same bit that carried it across that exec carries it across every later one.
+/// Left alone, every child skein-server starts holds the cockpit's LISTENING socket. Measured: the
+/// tmux server `heal_fleet` starts at boot held it, so with the doorway and the server both gone
+/// the port stays bound by a process that never accepts, and a new doorway cannot bind it.
+///
+/// Setting it in this process does not reach back across the exec that brought the descriptor in:
+/// the doorway's own re-exec across `SIGUSR1` is python's, on the doorway's own copy, which this
+/// never touches.
+pub fn close_on_exec(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: `F_GETFD` and `F_SETFD` read and write one descriptor's flags and nothing else; no
+    // memory is passed, and a descriptor that is not open comes back as `EBADF`, not as harm.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Withhold the handed-in socket from children, **before any child exists**.
+///
+/// Not left to [`inherited`], and the reason is the order of `main`, not taste. `inherited` runs
+/// where the port is served, near the end of start-up — after `fleet::heal_fleet` has already
+/// started the fleet's tmux server and the watchers have been spawned. Every process started in
+/// between would inherit the socket whatever `adopt` then did. So this is the first thing `main`
+/// does, and it only reads: the descriptor is validated and taken later, by `inherited`, exactly as
+/// before. A descriptor that is not ours to take (`LISTEN_PID` naming somebody else, or a malformed
+/// count) is left alone here, because `inherited` refuses it with the reason and exits.
+pub fn keep_from_children() {
+    let fds = std::env::var("LISTEN_FDS").ok();
+    let pid = std::env::var("LISTEN_PID").ok();
+    if let Ok(Some(fd)) = descriptor(fds.as_deref(), pid.as_deref(), std::process::id()) {
+        // An error is `EBADF`: nothing was passed at that number, and `adopt` says so in words.
+        let _ = close_on_exec(fd);
+    }
+}
+
 /// Adopt `fd` as the listening socket, or say why it cannot be one.
 ///
 /// # Safety
@@ -142,6 +186,11 @@ pub unsafe fn adopt(fd: RawFd) -> Result<std::net::TcpListener, String> {
     probe
         .set_nonblocking(true)
         .map_err(|e| format!("descriptor {fd} ({addr}) could not be made non-blocking: {e}"))?;
+    // Once taken, it is this process's and nobody else's — see [`close_on_exec`]. Here as well as in
+    // [`keep_from_children`] so that `adopt` keeps its own promise whoever calls it.
+    close_on_exec(fd).map_err(|e| {
+        format!("descriptor {fd} ({addr}) could not be kept from this process's children: {e}")
+    })?;
     Ok(std::net::TcpListener::from_raw_fd(
         std::os::fd::IntoRawFd::into_raw_fd(probe),
     ))
@@ -263,6 +312,35 @@ mod tests {
         assert!(
             adopted.accept().is_err(),
             "the adopted listener still blocks, so one arrival would stall the whole server"
+        );
+    }
+
+    /// `adopt` takes the descriptor away from every process this one will start (SKEIN-1035).
+    ///
+    /// Arrived at through `dup`, because that is the shape the doorway hands it over in — `dup2`
+    /// onto descriptor 3, which never copies `CLOEXEC` — and because a listener std opened itself is
+    /// close-on-exec already, so asserting on one would pass against an `adopt` that did nothing.
+    /// **What makes it fail**: drop the `close_on_exec` call from `adopt`.
+    #[test]
+    fn an_adopted_socket_is_not_handed_on_to_children() {
+        use std::os::fd::AsRawFd;
+        let cloexec = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+        let real = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let handed = unsafe { libc::dup(real.as_raw_fd()) };
+        assert!(
+            handed >= FIRST,
+            "dup failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            !cloexec(handed),
+            "the descriptor was close-on-exec before `adopt` saw it, so this proves nothing"
+        );
+        let adopted = unsafe { adopt(handed) }.expect("a listening socket is a door");
+        assert!(
+            cloexec(adopted.as_raw_fd()),
+            "descriptor {handed} is still inheritable after `adopt`, so every process the server \
+             starts holds the cockpit's listening socket"
         );
     }
 

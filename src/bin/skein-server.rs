@@ -101,6 +101,7 @@ fn refuse_unknown_args(args: &[String]) -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    skein::doorway::keep_from_children();
     // **This is a real skein, whatever `$SKEIN_TEST` says.** `tests/server.rs` and
     // `tests/ui/harness/server.mjs` both spawn this binary, and it inherits the marker from cargo's
     // `[env]` table — correctly, because `config::skein_home` and `util::fleet_root` still have to
@@ -117,8 +118,7 @@ async fn main() {
     // here is not addressed to any one of them and killing all of their children would be wrong;
     // and it is stopped by whatever supervises it, which sends `SIGTERM`. Leaving the default
     // disposition alone means a `SIGINT` ends the server the way it always has.
-    // Argv check first: before the port bind, and before ensure_probe_all/ensure_kit write anything.
-    // A mistyped invocation should change nothing on disk.
+    // Argv check before the bind and before anything is written: a typo changes nothing on disk.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(msg) = refuse_unknown_args(&args) {
         let help = matches!(args[0].as_str(), "--help" | "-h" | "--version" | "-v");
