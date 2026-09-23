@@ -113,17 +113,36 @@ const GATED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Every `.rs` file under `dir`, at any depth, sorted.
+///
+/// The whole tree, not one level of it: a module that became a directory (`src/fleet/`,
+/// `src/prq/`) keeps its tests in the files beneath it, and a flat read of `src/` drops every one
+/// of them out of the gates in this file while they go on passing.
+fn rust_files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for path in std::fs::read_dir(&dir)
+            .expect("src is readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+        {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
 /// Every `#[cfg(target_os = "linux")] #[test]` in the library, by name.
 fn gated_in_source() -> Vec<String> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
-    let mut files: Vec<_> = std::fs::read_dir(&src)
-        .expect("src is readable")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
-        .collect();
-    files.sort();
+    let files = rust_files_under(&src);
     for file in files {
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
@@ -1003,7 +1022,7 @@ fn every_binary_that_skips_declares_what_this_machine_needs() {
 /// `the_library_skip_exemptions_are_still_true`, so an entry that stops being needed fails this file
 /// rather than sitting here describing a tree that has moved on.
 const UNREFUSABLE: &[(&str, &str, &str)] = &[(
-    "fleet.rs",
+    "fleet/create.rs",
     "creating_a_fleet_is_asked_of_the_warden_and_never_run_here",
     "NOT a skip at all: the `return` is a stub server thread leaving its accept loop when the \
          listener is gone. It is here because the scanner reads `return` and cannot read intent",
@@ -1019,7 +1038,7 @@ struct LibTest {
 
 /// Every `#[test]` in `src/`, with its body — spans found by INDENT, not by counting braces.
 ///
-/// Brace counting is the obvious way and it does not work on this tree. `src/fleet.rs` embeds whole
+/// Brace counting is the obvious way and it does not work on this tree. `src/fleet/` embeds whole
 /// shell scripts in string literals, and a `{` inside one is indistinguishable from a block to any
 /// counter that does not also tokenise Rust's strings, raw strings, char literals and comments — a
 /// counter that tried it here ran one span over 11,000 lines and reported every later test's
@@ -1030,17 +1049,15 @@ struct LibTest {
 /// so it is checked rather than trusted — see `the_library_test_scanner_reads_whole_bodies`.
 fn lib_tests() -> Vec<LibTest> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(&src)
-        .expect("src is readable")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
-        .collect();
-    files.sort();
+    let files = rust_files_under(&src);
 
     let mut found = Vec::new();
     for file in files {
-        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let name = file
+            .strip_prefix(&src)
+            .expect("a file found under src")
+            .to_string_lossy()
+            .into_owned();
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
         let mut i = 0;

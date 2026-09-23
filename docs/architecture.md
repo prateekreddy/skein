@@ -492,7 +492,7 @@ Two consequences to state rather than discover:
   separated to do it: the files a repo keeps **out of git** are not in any mirror, so what
   `shared-paths.txt` names is surfaced into a box out of the store's own `shared-rw/` by
   `sandbox-bootstrap.sh` rather than read off a checkout. Nothing on the host seeds that directory
-  any more — the two calls that did went with local-path repos (`src/fleet.rs:1603`).
+  any more — the two calls that did went with local-path repos (`src/fleet/create.rs:279`).
 
 ---
 
@@ -563,7 +563,7 @@ caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`a
 slower, less faithful, and it is where the fragility lives."* (Cited by name, not by line: the line
 number here drifted twice, by thousands of lines each time, before anybody noticed — and parity's
 own rule is that a citation nobody can follow reads the same as a capability that vanished.
-`grep -n 'fn box_archive' src/fleet.rs`.)
+`grep -n 'fn box_archive' src/fleet/resize.rs`.)
 
 An earlier draft called resize "a composition carrying a small delta … what today's snapshot already
 does". It prescribed a regression and described it as the status quo. **Resize starts from the byte
@@ -937,7 +937,7 @@ moved — so what it says now is narrower than what it said, and the narrowing i
 
 What is mounted was the first half, and this document had it wrong. `fleet_mounts()` mounts
 `~/.skein/repos`, the box-state parent, and **every repo's `store` and nothing else** — the loop is
-literally `for path in [repo.store.clone()]` (`src/fleet.rs:1608`). It used to mount the host's own
+literally `for path in [repo.store.clone()]` (`src/fleet/create.rs:284`). It used to mount the host's own
 working checkout as well, for a repo adopted in place; there are no such repos (§6), and the code
 says in as many words that the tree its user works in "is not in the sandbox at all", which is
 stronger than the read-only bind it replaced.
@@ -1394,7 +1394,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
    written over a root. **Built**: the launcher is *given* the mount set rather than learning it, as
-   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet.rs:5585`), and each box gets back only its
+   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet/start.rs:146`), and each box gets back only its
    own repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that
@@ -1426,7 +1426,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    **A cover applies at box start, so which boxes have it is a per-box fact the fleet must report.**
    The inversion is derived and cannot be forgotten *for a box being started* — and that is the only
    moment it reaches. `install_launcher` rewrites `box-session.sh` in the sandbox at every start and
-   every heal (`src/fleet.rs`; `grep -n 'install_launcher(' src/fleet.rs` finds the definition, one
+   every heal (`src/fleet/launcher.rs`; `grep -n 'install_launcher(' src/fleet/launcher.rs` finds the definition, one
    test and its four callers — `ensure_fleet`, `heal_fleet`, `apply_box_limits` and
    `ensure_box_session`), so the
    copy on disk always describes the **next** box; a box already up keeps the mount namespace it was

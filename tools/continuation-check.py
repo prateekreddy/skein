@@ -34,7 +34,7 @@ The distinction is not the run of spaces — both populations have those. It is 
     to at least 14 spaces, carries at least 72 characters of lead, and sits on a line of 16 words
     or more.
   * deliberate alignment sits after a LABEL, so there is almost nothing in front of it. The widest
-    such lead in this tree is 15 characters (`src/fleet.rs:2484`, a python fixture's `config = {}`),
+    such lead in this tree is 15 characters (`src/fleet/containers.rs:149`, a python fixture's `config = {}`),
     and the wordiest such line holds 8 (`src/workflow/file.rs:213`, a JSON row).
 
 So the rule is three measurements with an order of magnitude between the two populations, not a
@@ -338,7 +338,7 @@ NEAR_MISSES = {
     ),
     fixture_line("let _lead ="): (
         "MIN_LEAD_CHARS", 10,
-        "src/fleet.rs:2484, a python fixture's aligned comment: 10 spaces, 15 characters of lead, "
+        "src/fleet/containers.rs:149, a python fixture's aligned comment: 10 spaces, 15 characters of lead, "
         "15 words",
     ),
     fixture_line("let _words ="): (

@@ -244,7 +244,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   the architecture forbids. The gate is that the operations survive the move, at the warden (§8),
   with skein's side being the surface that asks for them.
 - **Host capacity is no longer measured, and reporting nothing is the requirement.**
-  `fleet::host_capacity()` (`src/fleet.rs`, `pub fn host_capacity`) used to read
+  `fleet::host_capacity()` (`src/fleet/create.rs`, `pub fn host_capacity`) used to read
   `available_parallelism()`, `/proc/meminfo`'s `MemTotal` and `df -Pk /`. Inside the sandbox all
   three answer for the **sandbox**, not the host — `nproc` → 11 and `MemTotal` → 25.8 GiB on this
   box, against a 12-core machine — and `proposed_fleet_size` would then offer 70% of the fleet's own

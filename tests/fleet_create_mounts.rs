@@ -80,7 +80,7 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
 /// sentence about choosing one over the other. Comment *lines* are blanked rather than removed so
 /// that a line number reported by this file still matches the file on disk.
 ///
-/// The cut is the `#[cfg(test)]` that carries a `mod`, not the first one in the file: `src/fleet.rs`
+/// The cut is the `#[cfg(test)]` that carries a `mod`, not the first one in the file: `src/fleet/`
 /// declares test-only *items* — a `const` and two `fn`s — up among the production code, and cutting
 /// at the first would drop everything after it, `create_line` included, which is the one thing this
 /// file derives from.
@@ -176,7 +176,7 @@ fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
 fn blessed(fleet_rs: &str) -> &'static str {
     let at = fleet_rs
         .find("pub fn create_line(")
-        .expect("`create_line` is gone from src/fleet.rs — this whole file derives from it");
+        .expect("`create_line` is gone from src/fleet/create.rs — this whole file derives from it");
     let (_, name) = *mount_sets_named(&fleet_rs[at..])
         .first()
         .expect("`create_line` no longer names a mount set, so there is nothing to derive from");
@@ -200,7 +200,7 @@ fn every_fleet_create_path_hands_over_the_mount_set_create_line_hands_over() {
         src.display()
     );
 
-    let fleet_rs = source("src/fleet.rs");
+    let fleet_rs = source("src/fleet/create.rs");
     let want = blessed(&fleet_rs);
 
     // A create path is a function that BOTH names a mount set and reaches the create funnel. Found
@@ -233,7 +233,7 @@ fn every_fleet_create_path_hands_over_the_mount_set_create_line_hands_over() {
          create funnel has been renamed and this scan now recognises nothing, which is green about \
          anything"
     );
-    for expected in ["src/fleet.rs", "src/bin/skein-server.rs"] {
+    for expected in ["src/fleet/create.rs", "src/bin/skein-server.rs"] {
         assert!(
             sites.iter().any(|(file, ..)| file == expected),
             "{expected} chose a mount set for a create when this was written and no longer does; \
@@ -281,7 +281,7 @@ fn the_mount_set_every_create_path_uses_carries_the_volume_root() {
          needs"
     );
 
-    let fleet_rs = source("src/fleet.rs");
+    let fleet_rs = source("src/fleet/create.rs");
     // Bound to the function `create_line` actually names, so this is an assertion about the SET
     // and not about a spelling: pointing every create path at `fleet_mounts` fails here.
     let mounts = match blessed(&fleet_rs) {
@@ -310,7 +310,7 @@ fn the_mount_set_every_create_path_uses_carries_the_volume_root() {
 /// Would fail if the doctor's loop went back to `fleet_mounts()`.
 #[test]
 fn skein_doctor_checks_the_mount_set_the_fleet_was_created_from() {
-    let fleet_rs = source("src/fleet.rs");
+    let fleet_rs = source("src/fleet/create.rs");
     let want = blessed(&fleet_rs);
 
     let cli = source("src/bin/skein.rs");

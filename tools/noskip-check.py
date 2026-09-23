@@ -106,19 +106,19 @@ USAGE = (
 # make the refusal FAIL on a machine that does have the capability.
 ENVIRONMENTAL = [
     (
-        "src/fleet.rs",
+        "src/fleet/resources.rs",
         "the_load_script_and_its_parser_agree_on_real_cgroups",
         "runs the box-load script against real cgroups, which exist inside a fleet and on no "
         "ordinary runner: the guard asks whether /sys/fs/cgroup/skein is a directory",
     ),
     (
-        "src/fleet.rs",
+        "src/fleet/fleetlogin.rs",
         "the_login_terminal_brings_the_same_scratch_directory_the_model_call_does",
         "a login shell that rewrites PATH never reaches the stub the test plants, and which shell "
         "that is is a property of the machine rather than of this tree",
     ),
     (
-        "src/fleet.rs",
+        "src/fleet/resize.rs",
         "a_places_directory_that_cannot_be_listed_fails_the_census",
         "makes a directory unreadable and asks the census to fail on it — root ignores the mode "
         "bits, so the fixture is not unreadable and the test would prove nothing",

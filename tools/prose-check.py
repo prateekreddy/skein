@@ -185,6 +185,7 @@ DEBT = os.path.join(ROOT, "docs", "prose-debt.toml")
 #
 # The cost, in all four, is that a real citation written in them goes unchecked. Name the symbol
 # instead, which is this rule's advice to every other file too.
+LINE_CITES = os.path.join(ROOT, "docs", "line-cites.toml")
 CITATION_EXEMPT = {
     os.path.abspath(__file__),
     os.path.abspath(DEBT),
@@ -1231,8 +1232,36 @@ def at_commit(commit):
     return index, length_of
 
 
-def bad_citations(index=None, sources=None, lengths=None, at=at_commit, notes=None):
+def historical_citations(path=None):
+    """{`path:line`: {document, ...}} for every citation `docs/line-cites.toml` declares historical.
+
+    A `historical = "<why>"` entry is a person's written reason for a citation that DELIBERATELY
+    names code this tree has not got — the record of a refusal that was deleted, left at the
+    address it was measured at — and `CITATION_EXEMPT` above already says that is exactly what
+    this rule fails on. Such a citation stayed green here only while its FILE happened to exist:
+    the number fell inside some unrelated stretch of it. When `src/fleet.rs` became `src/fleet/`
+    (SKEIN-934), nine of them in `docs/recovery-survey.md` turned red for a reason no edit to the
+    prose could fix, because what they record is still true and still gone.
+
+    Keyed by the address AND the documents the entry names in `cited_by`, so a declaration excuses
+    the citation it was written for and not the same address cited anywhere else.
+    """
+    try:
+        with open(LINE_CITES if path is None else path, "rb") as fh:
+            ledger = tomllib.load(fh)
+    except FileNotFoundError:
+        return {}
+    return {k: set(v.get("cited_by", [])) for k, v in ledger.items() if "historical" in v}
+
+
+def bad_citations(
+    index=None, sources=None, lengths=None, at=at_commit, notes=None, historical=None, excused=None
+):
     """{label: [(line, text, why)]} for every citation that cannot be followed.
+
+    `historical` is `historical_citations()`'s shape and read from the ledger when not given; a
+    citation it declares for this document is not a finding, and is appended to `excused` as
+    `(label, line, text)` so the summary can say how many were excused rather than go quiet.
 
     `index`, `sources`, `lengths` and `at` are injectable so `self_check` can run the whole rule
     against a tree it made up — see `SELF_CHECK_CITATIONS`. `sources` is
@@ -1244,6 +1273,8 @@ def bad_citations(index=None, sources=None, lengths=None, at=at_commit, notes=No
     index = tree_files() if index is None else index
     sources = citation_sources() if sources is None else sources
     lengths = {} if lengths is None else dict(lengths)
+    historical = historical_citations() if historical is None else historical
+    excused = [] if excused is None else excused
 
     def length_of(rel):
         if rel not in lengths:
@@ -1278,6 +1309,15 @@ def bad_citations(index=None, sources=None, lengths=None, at=at_commit, notes=No
         for line, path, cited, text in citations(body, markdown):
             target = resolve(path, here)
             if target is None:  # ambiguous — the citation names no one file. Counted, not failed.
+                continue
+            # The ledger's key is the address as `line-cite-check.py` resolved it — the FIRST line
+            # of a range, where this rule reads the last — and the path as written where it
+            # resolves to nothing, which is the state a historical one is in once its file is gone.
+            first = re.search(r":(\d+)(?:-\d+)?$", text)
+            key = f"{target or path}:{first.group(1) if first else cited}"
+            unfollowable = target == "" or cited > measure(target)
+            if unfollowable and not when and label in historical.get(key, ()):
+                excused.append((label, line, text))
                 continue
             if target == "":
                 found.setdefault(label, []).append((line, text, "no such file" + when))
@@ -1747,7 +1787,7 @@ def self_check():
             "prose-check: the interrupted-doc rule is broken — it fired on an attribute that "
             "merely follows a doc block, which is every derive and every allow in the tree"
         )
-    cited = bad_citations(SELF_CHECK_INDEX, SELF_CHECK_CITATIONS, SELF_CHECK_LENGTHS)
+    cited = bad_citations(SELF_CHECK_INDEX, SELF_CHECK_CITATIONS, SELF_CHECK_LENGTHS, historical={})
     want = {
         "fixture.md": [
             (2, "thing.rs:101", "src/thing.rs has 100 line(s)"),
@@ -1764,6 +1804,28 @@ def self_check():
             % (want, cited)
         )
 
+    # A `historical` DECLARATION EXCUSES THE CITATION IT WAS WRITTEN FOR, and nothing else. The
+    # same fixture with `gone.rs:1` declared for `fixture.md` and `gone2.rs:1` declared for a
+    # DIFFERENT document: the first stops being a finding and is counted as excused, the second
+    # stays a finding. Fails if the ledger is ignored (the first reappears), if a declaration
+    # excuses its address everywhere (the second disappears), or if an excuse is not counted.
+    excused = []
+    declared = bad_citations(
+        SELF_CHECK_INDEX,
+        SELF_CHECK_CITATIONS,
+        SELF_CHECK_LENGTHS,
+        historical={"gone.rs:1": {"fixture.md"}, "gone2.rs:1": {"elsewhere.md"}},
+        excused=excused,
+    )
+    still = {k: [c for c in v if c[1] != "gone.rs:1"] for k, v in want.items()}
+    if declared != still or excused != [("fixture.md", 3, "gone.rs:1")]:
+        raise SystemExit(
+            "prose-check: a citation `docs/line-cites.toml` declares historical for its document "
+            "was not excused exactly — only that one, only there, and counted\n  wanted %r and "
+            "[('fixture.md', 3, 'gone.rs:1')] excused\n  got    %r and %r excused"
+            % (still, declared, excused)
+        )
+
     # THE DATED-REVIEW RULE, both halves, against a made-up past. Read against today's fixture tree
     # `thing.rs:140` and `old.rs:3` are both unfollowable; read against the declared commit both are
     # fine and `gone.rs:1` is STILL a finding. So this fails if the declaration is ignored (the
@@ -1778,6 +1840,7 @@ def self_check():
         SELF_CHECK_LENGTHS,
         at=lambda c: (then_index, then_lengths.get) if c == "abc1234" else None,
         notes=notes,
+        historical={},
     )
     if dated != {"dated.md": [(4, "gone.rs:1", "no such file at abc1234")]}:
         raise SystemExit(
@@ -1792,7 +1855,7 @@ def self_check():
         )
     gone = []
     if bad_citations(SELF_CHECK_INDEX, [SELF_CHECK_DATED], SELF_CHECK_LENGTHS, at=lambda _: None,
-                     notes=gone) != {} or gone != [("dated.md", "abc1234", "absent")]:
+                     notes=gone, historical={}) != {} or gone != [("dated.md", "abc1234", "absent")]:
         raise SystemExit(
             "prose-check: a declared commit this repository has not got must make that document's "
             "citations a SKIP — reported in the summary, never a finding. Falling back to the "
@@ -1924,8 +1987,8 @@ def main():
     qualified = misqualified(code=code, sources=sources)
     attached = doc_attachments()
     interrupted = doc_interruptions()
-    dated = []
-    cited = bad_citations(notes=dated)
+    dated, excused = [], []
+    cited = bad_citations(notes=dated, excused=excused)
 
     if "--show" in sys.argv:
         for name in sorted(found):
@@ -2153,7 +2216,8 @@ def main():
         f"({len(qualified_spec)} declared, {len(qualified_stale)} stale and scheduled, "
         f"{misqualifications} mention(s)); "
         f"every `file:line` citation names a file that exists and a line inside it "
-        f"({rotted} deferred in docs/prose-debt.toml{dated_note(dated)})"
+        f"({rotted} deferred in docs/prose-debt.toml{dated_note(dated)}"
+        f"; {len(excused)} declared historical in docs/line-cites.toml)"
     )
     return 0
 

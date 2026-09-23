@@ -71,7 +71,7 @@
 "e.com" = "the shortest URL that still has a host, used by the link-sanitiser tests"
 "git.example.com" = "a synthetic remote in the cockpit's gitgate suite"
 "gitlab.example.com" = "a synthetic GitLab remote, for the refusal path"
-"plane.example.com" = "the work tracker's placeholder host, used in fleet.rs's tests"
+"plane.example.com" = "the work tracker's placeholder host, used in `src/fleet/create.rs`'s tests"
 "plane.example.net" = "a SECOND placeholder gateway, distinct from the one above: two tracking connections that must not read as one. RFC 2606 reserved, like every other host in this table."
 "plane.host" = "a placeholder host in a tracking.rs test"
 "plane" = "a single-label placeholder for the tracker in two page comments"
@@ -83,7 +83,7 @@
 "/home/you" = "the placeholder this tree's docs and scripts use for a person's home"
 "/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
 "/Users/me" = "a synthetic checkout path in the tests that prove a local path is not a slug"
-"/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet.rs:16460 exists to refuse"
+"/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet/create.rs:1229 exists to refuse"
 "/home/me" = "the same, in util.rs's path-shortening tests"
 "/home/somebody" = "a deliberately anonymous home in a repos.rs and a server.rs test"
 "/home/x" = "the shortest home that is still a home, in volume.rs and warden_client.rs tests"
@@ -98,7 +98,7 @@
 [addresses]
 "git@github.com" = "the SSH login on every GitHub remote URL — a username, not a mailbox"
 "git@gitlab.com" = "the same login on the GitLab remotes the URL parser recognises"
-"git@gitlab.example.com" = "the same, on a synthetic remote in a fleet.rs test"
+"git@gitlab.example.com" = "the same, on a synthetic remote in a `src/fleet/hosts.rs` test"
 "git@thing.git" = "not an address: a malformed SCP-style remote in a repos.rs refusal test"
 "t@e.com" = "the shortest address that is still one, in a fleet-launch test"
 

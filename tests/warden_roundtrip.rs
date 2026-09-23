@@ -277,7 +277,7 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     // test's, not the machine's.
     pins.set("SKEIN_HOME", root.join("skein-home"));
     // And `$SKEIN_FLEET_ROOT` with it. `create_argv` is documented to stay pure of the fleet root
-    // (src/fleet.rs:83-90) and resolves only `fleet_kit_dir` under `$SKEIN_HOME`, so this pin
+    // (src/fleet/kit.rs:39-46) and resolves only `fleet_kit_dir` under `$SKEIN_HOME`, so this pin
     // changes no argv today; unpinned it would be `/boxes`, and the argv this test asserts on is
     // exactly the one that creates a fleet sandbox.
     pins.set("SKEIN_FLEET_ROOT", root.join("boxes"));

@@ -52,7 +52,7 @@ check("the fetch has not even been made yet", T.fetches(), 0);
 // --- and fills in once it has --------------------------------------------------------------------
 // `mem_anon` and `mem_cache`, not one `mem`: the card shows what the box is HOLDING and explains
 // the page cache separately, because a box whose memory looks small and whose charge is large
-// has been reading files. `fleet.rs:2797`.
+// has been reading files. `src/fleet/create.rs:538`.
 T.serve([{ name: "web-main", cores: 2.34, mem_anon: 3221225472, mem_cache: 0, pids: 31 }]);
 await T.loadRows();
 card = T.resourceRows("web-main");

@@ -419,7 +419,7 @@ fn until_none_names(root: &Path, within: Duration) -> Vec<String> {
 ///
 /// **The kill comes first and the script removal last, which is the reverse of what this used to
 /// do** (SKEIN-920). The loop is `while [ -f <root>/.skein/server-doorway.py ]; do … sleep 2; done`
-/// — `supervised` at `src/fleet.rs:307`, built by `start_server` at `src/fleet.rs:872` — so the
+/// — `supervised` at `src/fleet/server.rs:104`, built by `start_server` at `src/fleet/server.rs:402` — so the
 /// script is the loop's own exit condition. Remove it first, as this did, and the loop ends itself
 /// within seconds whether or not anything kills tmux: harmless for a teardown, fatal for
 /// the test that justifies one, because every count taken afterwards is then empty for a
