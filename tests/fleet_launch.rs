@@ -1219,6 +1219,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 ///   * `SANDBOX_NAME`: a filter that removes everything, which would also take the proxy and the
 ///     credential placeholders every box needs.
 ///   * `SKEIN_BOX`: running the filter after the launcher's own exports rather than before them.
+///   * `SKEIN_IN_BOX`: deleting the launcher's `export SKEIN_IN_BOX=1` (SKEIN-1086).
 ///
 /// Only names and two chosen values leave the box: the fixture is kept when a test fails, and the
 /// environment of a developer's box carries real credentials.
@@ -1261,6 +1262,7 @@ fn a_box_session_inherits_only_its_allow_list() {
     // canary's value is spelled in two pieces so this command line cannot be what matches it.
     let agent = "{ printf 'canary %s\\n' \"$(env | grep -c 'skein-test-cana''ry')\"; \
                  printf 'allowed %s\\n' \"${SANDBOX_NAME-}\"; \
+                 printf 'inbox %s\\n' \"${SKEIN_IN_BOX-}\"; \
                  if type skein_leak >/dev/null 2>&1; then echo 'fn defined'; else echo 'fn absent'; fi; \
                  env | cut -d= -f1 | sed 's/^/name /'; } > /tmp/env.tmp && mv /tmp/env.tmp /tmp/env.report; \
                  exec sleep 300";
@@ -1360,6 +1362,12 @@ fn a_box_session_inherits_only_its_allow_list() {
         "skein-test-allowed",
         "SANDBOX_NAME is on the allow-list and did not arrive, so the filter is removing what a box \
          needs rather than what it was not given: {names:?}"
+    );
+    assert_eq!(
+        field("inbox"),
+        "1",
+        "the launcher did not mark the session as a box, so a skein-server started in it would \
+         honour $SKEIN_NO_API_AUTH on the fleet's shared network namespace (SKEIN-1086): {names:?}"
     );
     assert!(
         names.contains(&"SKEIN_BOX"),

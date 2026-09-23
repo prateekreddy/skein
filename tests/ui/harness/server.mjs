@@ -241,6 +241,11 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   // Before the spread, like the warden: what is ruled out is the AMBIENT value, and a suite that
   // means to say it is the fleet's cockpit still can. `hatches.mjs` checks both halves.
   delete childEnv.SKEIN_LISTEN_INHERITED_ONLY;
+  // **And `$SKEIN_IN_BOX`, for the same reason and on purpose this time** (SKEIN-1086). The box
+  // launcher exports it into every box so a `skein-server` a box starts refuses
+  // `$SKEIN_NO_API_AUTH`; a suite run by hand in a box would otherwise get exactly that refusal.
+  // Before the spread for the same reason as the line above, and `hatches.mjs` check 4 asserts both.
+  delete childEnv.SKEIN_IN_BOX;
   const spawnEnv = { ...childEnv, ...env };
   // **After the spread, and the credential above is before it on purpose** — the two pins want
   // opposite things from a suite. A suite has a real reason to want no GitHub credential, so that

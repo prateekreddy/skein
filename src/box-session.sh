@@ -2572,6 +2572,16 @@ export SKEIN_BOX="$box"
 # box-to-box messages go.
 export SKEIN_STATE="$state"
 
+# That this is a box at all, for the one reader that needs to know (SKEIN-1086).
+#
+# `apiauth::off_switch_refused` refuses `$SKEIN_NO_API_AUTH` for a `skein-server` started in here:
+# a box shares the fleet's network namespace, so a server it starts with auth off answers every
+# other box exactly as the cockpit would (architecture §9.4). That used to be decided by the
+# doorway's `SKEIN_LISTEN_INHERITED_ONLY` leaking in with the cockpit's environment, which SKEIN-972
+# stopped. This says it on purpose instead. Not `SKEIN_BOX`: that names which box, is set by the
+# crossings as well, and a test or a tool may reasonably set it outside one.
+export SKEIN_IN_BOX=1
+
 # Where this box's agent keeps its model scratch, instead of letting the CLI derive one from /tmp.
 #
 # Claude Code puts its temp directory at `${os.tmpdir()}/claude-<uid>` and REFUSES to start when
