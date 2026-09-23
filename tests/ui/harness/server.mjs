@@ -141,7 +141,7 @@ function fixtureHome(base) {
  *
  * A stub that answers nothing and exits 1, because the only thing any suite that does not name its
  * own asks of the agent is that it not be the real one: a failed model call is the ordinary "fall
- * back to the free deterministic path" to every caller in `src/ai.rs`. Written rather than
+ * back to the free deterministic path" to every caller in `src/ai/`. Written rather than
  * `/bin/false` so a server log or `/proc/<pid>/environ` names where it came from, and so it can leave
  * `<stub>.asked` behind — the one way to see from outside that the server reached it.
  */
