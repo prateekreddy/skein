@@ -257,7 +257,7 @@ export function serverBinary() {
 // the child without ever being unbound — there is no instant at which a second lane could be given
 // it. `skein-server` already takes a socket it was handed, because in the fleet a box that binds
 // the cockpit's port before skein does BECOMES the cockpit (architecture §9.4): `doorway::inherited`,
-// src/doorway.rs:152. `src/server-doorway.py` is the other producer of the same handover.
+// src/doorway.rs:203. `src/server-doorway.py` is the other producer of the same handover.
 //
 // `LISTEN_FDS` at descriptor 3 is systemd's socket-activation convention, which is why it is spelled
 // this way. `LISTEN_PID` is deliberately absent: it names the process the descriptors are meant for,

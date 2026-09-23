@@ -29,11 +29,15 @@ use std::time::{Duration, Instant};
 /// listener, and the first request after it failed with `Connection refused (os error 111)` — the
 /// failure the item was filed from.
 ///
-/// It survives at the one call site that wants the opposite of a server: an address where *nothing*
+/// It survives at a call site that wants the opposite of a server: an address where *nothing*
 /// answers, so that "no warden is running" is a state the test reaches rather than one it inherits
 /// from whatever the machine happens to be running. Nothing there is racing to bind it, and a
 /// sibling that took the number would still leave that test asserting what our server printed about
 /// the address it tried.
+///
+/// And at one more, which is not a server of this file's own spawning:
+/// `no_process_the_server_starts_holds_the_cockpits_listening_socket` hands its numbers to the real
+/// doorway, which binds for itself and retries `EADDRINUSE` for ten seconds before refusing by name.
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -104,7 +108,7 @@ fn on_the_first_descriptor(fd: RawFd) -> std::io::Result<()> {
 ///
 /// `LISTEN_PID` is removed rather than set: it is the half of the convention that names the process
 /// the descriptors are for, and this side of the fork there is no pid to name. `descriptor` accepts
-/// its absence deliberately (`src/doorway.rs:202`, and
+/// its absence deliberately (`src/doorway.rs:251`, and
 /// `one_descriptor_is_the_one_the_convention_names` asserts it).
 fn handed(cmd: &mut Command) -> (Child, String) {
     handed_with(cmd, TheDoorwaysPin::Set)
@@ -3385,4 +3389,171 @@ fn a_store_outside_skein_home_is_refused_over_http_and_still_accepted_from_the_c
     );
 
     let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// The inode of the socket listening on `port`, from the kernel's own table — `/proc/net/tcp` and
+/// its v6 twin, state `0A`, which is LISTEN. `None` when nothing listens there.
+fn listening_inode(port: u16) -> Option<String> {
+    let local = format!(":{port:04X}");
+    ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .find_map(|table| {
+            let text = std::fs::read_to_string(table).ok()?;
+            text.lines().skip(1).find_map(|row| {
+                let cols: Vec<&str> = row.split_whitespace().collect();
+                (cols.len() > 9 && cols[1].ends_with(&local) && cols[3] == "0A")
+                    .then(|| cols[9].to_string())
+            })
+        })
+}
+
+/// Which of `pid`'s descriptors are the socket `inode` — read from `/proc/<pid>/fd`, and an error
+/// rather than an empty list when that cannot be read, because a process that could not be looked
+/// at is not a process found clean.
+fn holding(pid: u32, inode: &str) -> Result<Vec<String>, String> {
+    let want = format!("socket:[{inode}]");
+    let dir = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .map_err(|e| format!("/proc/{pid}/fd could not be read ({e})"))?;
+    Ok(dir
+        .filter_map(Result::ok)
+        .filter(|fd| std::fs::read_link(fd.path()).is_ok_and(|to| to.as_os_str() == want.as_str()))
+        .map(|fd| fd.file_name().to_string_lossy().into_owned())
+        .collect())
+}
+
+/// The pids whose parent is `parent`, from `/proc/<pid>/stat` — the field after the parenthesised
+/// command, which is read from the LAST `)` because a command name may contain one.
+fn children_of(parent: u32) -> Vec<u32> {
+    let mut kids = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let ppid = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|p| p.parse::<u32>().ok());
+        if ppid == Some(parent) {
+            kids.push(pid);
+        }
+    }
+    kids
+}
+
+/// **No process skein-server starts holds the cockpit's listening socket** (SKEIN-1035).
+///
+/// The real doorway (`src/server-doorway.py`, run from the tree) opens the socket and starts the
+/// real server behind it, handing the listener over on descriptor 3 — inheritable, because that is
+/// the only way it crosses the exec. The server then starts children of its own, and the one used
+/// here is the one every start makes: `heal_fleet` at boot runs `start_server`, whose `tmux
+/// new-session` leaves a tmux server behind for the fixture's fleet. That tmux server is exactly
+/// the process the item measured holding :7878 in a real fleet, and it is long-lived, so reading
+/// its descriptors is not a race against a child that has already exited.
+///
+/// Two ports, neither of them 7878: the doorway's, which this test opens, and
+/// `$SKEIN_SERVER_PORT` for the fleet door `heal_fleet` opens inside the fixture — set so that the
+/// nested doorway can never reach for a real cockpit's port.
+///
+/// **Presence before absence.** The server itself must hold the listener (so the inode was read
+/// right and the handover happened), and the fixture's tmux server must exist and be readable (so
+/// "it holds nothing" is about a process that was there).
+///
+/// **What makes it fail**: drop `close_on_exec` from `doorway::keep_from_children` (or the call to
+/// it at the top of `main`) — the tmux server is started long before `doorway::inherited` adopts
+/// the socket, so the CLOEXEC in `adopt` alone comes too late for it, and this fails naming the
+/// tmux pid and the descriptor that holds the listener.
+#[test]
+fn no_process_the_server_starts_holds_the_cockpits_listening_socket() {
+    if !have("tmux") || !have("python3") {
+        return skip("this machine lacks tmux/python3, so it cannot run the doorway or its fleet");
+    }
+    if !Path::new("/proc/net/tcp").exists() {
+        return skip("no /proc/net/tcp to read the listener's inode from");
+    }
+    let home = token_home("listenfd");
+    let root = fleet_root_in(&home);
+    // `free_port`'s window is harmless here: the doorway retries `EADDRINUSE` for ten seconds, and
+    // a sibling that took the number would make it refuse loudly rather than serve somewhere else.
+    let (door_port, fleet_port) = (free_port(), free_port());
+    let child = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/server-doorway.py"
+        ))
+        .arg(door_port.to_string())
+        .arg(env!("CARGO_BIN_EXE_skein-server"))
+        .arg(home.join("door-stamp"))
+        .env("SKEIN_HOME", home.path())
+        .env("SKEIN_FLEET_ROOT", &root)
+        .env("SKEIN_SERVER_PORT", fleet_port.to_string())
+        .env("SKEIN_WARDEN", "127.0.0.1:1")
+        .env("SKEIN_REGISTRY", "")
+        .env_remove("SKEIN_SHARED")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_PID")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("python3 runs the doorway");
+    let mut door = Kid(child);
+    let door_pid = door.0.id();
+    let addr = format!("127.0.0.1:{door_port}");
+    // `heal_fleet` runs before the server serves, so once it answers the tmux server exists.
+    until_it_answers(&mut door.0, &addr);
+
+    let inode = listening_inode(door_port)
+        .unwrap_or_else(|| panic!("nothing is listening on :{door_port}, and something answered"));
+    let servers = children_of(door_pid);
+    assert!(
+        servers
+            .iter()
+            .any(|&pid| holding(pid, &inode).is_ok_and(|fds| !fds.is_empty())),
+        "no child of the doorway ({door_pid}) holds socket:[{inode}] — so either the inode was \
+         read wrong or the server is not serving the socket it was handed; children: {servers:?}"
+    );
+
+    let tmux: Vec<u32> = naming(&root)
+        .iter()
+        .filter_map(|pid| pid.parse::<u32>().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|c| c.starts_with("tmux"))
+        })
+        .collect();
+    assert!(
+        !tmux.is_empty(),
+        "the server started no tmux server for the fixture's fleet, so there is no child here to \
+         find clean: {:?}",
+        naming(&root)
+    );
+    // Every process naming the fixture's fleet, tmux or not — the supervisor shell and the nested
+    // doorway are the server's descendants too.
+    for pid in naming(&root)
+        .iter()
+        .filter_map(|pid| pid.parse::<u32>().ok())
+    {
+        let fds = match holding(pid, &inode) {
+            Ok(fds) => fds,
+            // A `ps` sample of a process that has exited since; the tmux server cannot be one,
+            // because it is asserted readable below.
+            Err(_) if !tmux.contains(&pid) => continue,
+            Err(why) => panic!("the fixture's tmux server {pid}: {why}"),
+        };
+        assert!(
+            fds.is_empty(),
+            "process {pid} ({}), started by skein-server, holds the cockpit's listening socket \
+             socket:[{inode}] on descriptor(s) {fds:?} — it will keep :{door_port} bound after \
+             the doorway and the server are gone (SKEIN-1035)",
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .unwrap_or_default()
+                .trim()
+        );
+    }
 }
