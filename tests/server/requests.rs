@@ -636,3 +636,58 @@ fn a_store_outside_skein_home_is_refused_over_http_and_still_accepted_from_the_c
 
     let _ = std::fs::remove_dir_all(&outside);
 }
+
+/// **A server that accepts and never answers fails a request helper instead of hanging it**
+/// (SKEIN-817).
+///
+/// Every `http_get` and `http_post` in this suite goes through [`send`], and its read had no
+/// ceiling: a server wedged mid-test, after it had answered once, held the whole binary for ever,
+/// and a hang names nothing. So this stands up exactly that server — a listener whose connections
+/// are accepted and then left alone — and requires the panic the retry path already writes, naming
+/// the request and the socket error, well inside what a hang would be.
+///
+/// **What makes it fail**: take `set_read_timeout` back out of `send_once`. The call below then
+/// blocks in `read_to_end` for as long as the listener lives, and the watchdog panics with the
+/// sentence below instead.
+#[test]
+fn a_server_that_accepts_and_never_answers_fails_the_request_instead_of_hanging_it() {
+    let quiet = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    let addr = quiet.local_addr().unwrap().to_string();
+    // Accepted and held, so the connection is as established as a real server's would be: what is
+    // missing is only the answer.
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in quiet.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let (done, said) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let got = std::panic::catch_unwind(|| {
+            send_within(
+                &addr,
+                "GET /quiet",
+                b"GET /quiet HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+                Duration::from_millis(200),
+            )
+        });
+        let _ = done.send(got.map_err(|p| {
+            p.downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| "a panic with no message".into())
+        }));
+    });
+    // Three tries of 200ms plus 600ms of backoff is under two seconds; thirty is only the point at
+    // which "slow" has become "hung".
+    let outcome = said.recv_timeout(Duration::from_secs(30)).expect(
+        "the request to a server that never answers was still waiting after 30s — it hangs",
+    );
+    let message = match outcome {
+        Ok(got) => panic!("a server that never wrote a byte produced a response: {got:?}"),
+        Err(message) => message,
+    };
+    assert!(
+        message.contains("GET /quiet") && message.contains("failed 3 times"),
+        "the failure does not name the request it was making: {message}"
+    );
+}
