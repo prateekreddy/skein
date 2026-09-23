@@ -241,7 +241,7 @@ That is not eighteen mistakes. It is what one 7,400-line crate root looks like o
 was a call between two functions in one file, and invisible until there were two files.
 
 The `place → fleet` edge that §14.2 named is **gone** (SKEIN-22, and `docs/modules.toml` records
-it): `grep -n 'crate::fleet' src/place.rs` finds only doc-comment links now, which
+it): `grep -rn 'crate::fleet' src/place/` finds only doc-comment links now, which
 `tools/module-check.py` excludes because a doc link is not a call. The knot did not change size —
 `place` is still inside it through `config → runtime → repos → place`, and `fleet` still imports
 `place` (`cat src/fleet/*.rs | grep -c 'crate::place'` → 58). Worth knowing before anyone spends a day on a single edge: in a

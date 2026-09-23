@@ -136,8 +136,8 @@ pub fn server_door_stamp_path() -> String {
 /// nothing at all to a socket, and tmux admits a client whose peer uid matches its own, which every
 /// box's does under one fleet-wide uid. So every box could `connect()` to the session supervising
 /// the cockpit, and tmux honours `MSG_SHELL` and `MSG_EXEC` — `run-shell` at fleet scope, from any
-/// box. `tests/isolation_bwrap.rs::a_box_cannot_connect_to_the_fleets_tmux_socket` is the check,
-/// and it asks the kernel rather than a bind list.
+/// box. `tests/isolation_bwrap/private.rs::a_box_cannot_connect_to_the_fleets_tmux_socket` is the
+/// check, and it asks the kernel rather than a bind list.
 ///
 /// Moving it costs nothing on the skein side, which was true the whole time it did not move: every
 /// caller reaches it at *sandbox* scope, outside every box, where the launcher's tmpfs never

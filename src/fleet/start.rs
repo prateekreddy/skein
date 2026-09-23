@@ -141,7 +141,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
 /// is the host mounts — every other repo's store and work tree, and, on a fleet whose state sits on
 /// a mounted volume, the volume holding `credentials/`, `api-token` and `github-pats/`. That is
 /// narrower than "everything" and much worse than "nothing", and a message that overstates it is
-/// one a reader learns to discount. `tests/isolation_bwrap.rs` asserts both halves against real
+/// one a reader learns to discount. `tests/isolation_bwrap/` asserts both halves against real
 /// bwrap rather than leaving this paragraph to be believed.
 fn mount_manifest(name: &str) -> String {
     if repo_for_box(name).is_none() {
@@ -2097,7 +2097,8 @@ mod tests {
     /// is the private home bwrap binds over the sandbox's, and no shell out here can name it. So
     /// what this pins is that the path is not spelled out a second time in the shell script — the
     /// end-to-end proof that the environment really carries it is
-    /// `tests/fleet_launch.rs::a_box_lives_and_dies_inside_the_fleet_sandbox`, under real bwrap.
+    /// `tests/fleet_launch/lifecycle.rs::a_box_lives_and_dies_inside_the_fleet_sandbox`, under real
+    /// bwrap.
     #[test]
     fn a_box_is_handed_the_scratch_path_rather_than_left_to_derive_one() {
         let _g = env_lock();

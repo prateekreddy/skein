@@ -75,7 +75,7 @@ every mechanism named below exists on the assumption that it will eventually be 
 Anything that lets a box, a page, or a repository skein reads cross a line skein claims to hold:
 
 * **A box reaching another box's files, working tree, credentials or conversation.** Each box gets
-  a `bwrap` namespace inside the shared sandbox; `tests/isolation_bwrap.rs` runs a real namespace
+  a `bwrap` namespace inside the shared sandbox; `tests/isolation_bwrap/` runs a real namespace
   and reads the paths back rather than inspecting arguments.
 * **A box escaping its namespace**, or becoming root in the shared sandbox by any path other than
   the Docker socket described under [Not in scope](#not-in-scope) below.

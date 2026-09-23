@@ -131,7 +131,7 @@ impl Place {
     /// the box's own PATH past the hop and carries the measurement. The two are one property: **in
     /// front of the hop, root-owned directories; past it, the box's.**
     ///
-    /// Asserted by `tests/isolation_bwrap.rs::a_planted_nsenter_is_not_what_a_crossing_runs`.
+    /// Asserted by `tests/isolation_bwrap/path.rs::a_planted_nsenter_is_not_what_a_crossing_runs`.
     pub(super) fn enter(&self) -> Vec<String> {
         match &self.at {
             Where::SandboxItself => vec![],
@@ -357,7 +357,7 @@ impl Place {
     /// carried happened to *contain* `~/.local/bin` — a person's login PATH does, and so does the
     /// PATH a doorway-started `skein-server` inherits. [`Self::path_pin`] changed which wrong value
     /// crosses, from the caller's to [`FLEET_PATH`], and [`FLEET_PATH`] contains no `~/.local/bin`
-    /// at all. That is where `claude` lives, so `tests/fleet_launch.rs` caught it at once: a box
+    /// at all. That is where `claude` lives, so `tests/fleet_launch/` caught it at once: a box
     /// answered `command -v claude` with `/usr/local/bin/claude` — **the substrate's copy, not the
     /// one the fleet installs and shares** — and a sandbox without one would have answered nothing.
     ///
@@ -514,7 +514,7 @@ impl Place {
     /// panic naming the seam and a command nobody meant to run.
     ///
     /// **A test that means it says so** — [`seam::real_crossings`], which `skein`'s and
-    /// `skein-server`'s `main` and `tests/fleet_launch.rs` call, because a spawned skein cannot be
+    /// `skein-server`'s `main` and `tests/fleet_launch/` call, because a spawned skein cannot be
     /// handed a closure and an end-to-end suite's subject is the real command. That is a declared
     /// exemption in the shape of `tests/platform_gates.rs`'s `GATED`: it costs a line in the diff,
     /// where the omission it replaces cost nothing and said nothing.
@@ -559,9 +559,9 @@ impl Place {
     /// above). Four are the builders whose argv leaves the crate for `src/bin/` and the
     /// `skein-server` line that spawns one — `box_write_argv`, `agent_attach_argv`,
     /// `shell_argv`. Two are tests whose subject IS the
-    /// crossing, `tests/fleet_launch.rs`'s shape in miniature: this module's
+    /// crossing, `tests/fleet_launch/`'s shape in miniature: this module's
     /// `a_crossing_in_the_fleet_enters_the_box_without_sbx` runs its argv into a bwrap namespace it
-    /// built itself, and `tests/isolation_bwrap.rs`'s
+    /// built itself, and `tests/isolation_bwrap/`'s
     /// `a_planted_binary_is_not_what_a_fleet_scope_script_runs` runs it with a `$HOME` and `$PATH`
     /// of its own — neither can be stood in for without deleting what it proves.
     ///
@@ -682,7 +682,7 @@ mod tests {
     // hop and the argv starts at the shell. What is pinned is what was always the interesting
     // half: **`env PATH=… bash -c`, never `bash -lc`**. This address is fleet scope, outside every
     // box's mount namespace, and a login shell would source a profile that puts the box-writable
-    // `~/.local/bin` at the head of PATH (ISO-1 — see `Place::shell`, and `tests/isolation_bwrap.rs`,
+    // `~/.local/bin` at the head of PATH (ISO-1 — see `Place::shell`, and `tests/isolation_bwrap/`,
     // which runs a planted binary against it). That property did not depend on the hop, and it is
     // the one somebody could lose without noticing.
     #[test]

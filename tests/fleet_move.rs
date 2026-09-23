@@ -2,7 +2,7 @@
 //! fleet sandbox over stdin, started behind a socket that was opened first, and published — with
 //! the host path untouched, one unset variable away.
 //!
-//! Same shape as `tests/fleet_launch.rs` and for the same reason: no `sbx` exists here, but a
+//! Same shape as `tests/fleet_launch/` and for the same reason: no `sbx` exists here, but a
 //! sandbox is a Linux machine with `tmux` and `python3` — and so is this one — so `sbx exec` can
 //! mean "run it here" and everything except sbx's own behaviour is genuinely exercised: a real
 //! byte-for-byte install through the stdin pipe, a real doorway process holding a real listening
@@ -284,7 +284,7 @@ fn the_server_behind_the_door_inherits_the_doorways_socket() {
 /// It was a stated grant until SKEIN-219 — the launcher skipped covering ancestors of its own
 /// binds, so a volume-mounted fleet was readable from every box, and `--uncovered-volume` was the
 /// only way to take that. The launcher covers ancestors first now, and
-/// `tests/isolation_bwrap.rs::a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` is
+/// `tests/isolation_bwrap/cover.rs::a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` is
 /// where that is proved against a real namespace; here the claim is only about the mount SET.
 #[test]
 fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {

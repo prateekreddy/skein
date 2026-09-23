@@ -333,7 +333,7 @@ impl AsRef<std::ffi::OsStr> for TempDir {
 /// TMPDIR=/tmp/linktmp cargo test --lib
 /// ```
 ///
-/// **`--lib`, not `--workspace`**: `tests/isolation_bwrap.rs` cannot build a namespace through a
+/// **`--lib`, not `--workspace`**: `tests/isolation_bwrap/` cannot build a namespace through a
 /// symlinked temp root, which is an artefact of this trick rather than anything macOS does — a Mac
 /// runs no `bwrap` at all. What this reproduces is path comparison, and it reproduces it exactly.
 pub(crate) fn tempdir() -> TempDir {

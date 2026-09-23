@@ -165,7 +165,7 @@ pub mod seam {
     ///   [`Substitute`] is a Rust closure and the test that would write one is on the other side
     ///   of a process boundary. What keeps that server inside its fixture is the root it was
     ///   handed, which is what those two guards are for.
-    /// * **A suite whose subject IS the real command.** `tests/fleet_launch.rs` starts a box in a
+    /// * **A suite whose subject IS the real command.** `tests/fleet_launch/` starts a box in a
     ///   fixture fleet and asserts it is usable; standing in for the crossing would delete what it
     ///   proves.
     ///

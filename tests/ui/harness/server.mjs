@@ -69,7 +69,7 @@ function commonAncestor(a, b) {
  * `~/.local`, `~/.cargo`, `~/.rustup` and `~/.npm` read-WRITE into the box it starts, binds
  * `~/.claude/sessions` read-write unless `$SKEIN_BOX_PEERS` says otherwise, and reconciles
  * credentials back into `~/.claude/.credentials.json` — all of them the runner's own, in a test
- * (SKEIN-681). `tests/fleet_launch.rs` reached this conclusion first and says it plainest: "`sbx
+ * (SKEIN-681). `tests/fleet_launch/` reached this conclusion first and says it plainest: "`sbx
  * exec` here means 'run it on this machine', so a box placed over the real `$HOME` is a box
  * driving the developer's own home directory".
  *

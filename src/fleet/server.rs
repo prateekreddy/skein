@@ -682,7 +682,7 @@ fn cockpit_settled(port: u16) -> bool {
 /// any mount that was an *ancestor* of its own covers — and the volume root is an ancestor of the
 /// box-state parent, so mounting it handed every box `credentials/`, `api-token`, `github-pats/`
 /// and `tokens/`. The launcher covers ancestors now, ahead of the binds that would otherwise be
-/// thrown away (SKEIN-219, `src/box-session.sh`), and `tests/isolation_bwrap.rs` proves it by
+/// thrown away (SKEIN-219, `src/box-session.sh`), and `tests/isolation_bwrap/` proves it by
 /// running bwrap on a volume-shaped fleet and reading those paths back. So the grant is gone and
 /// the mount is ordinary: nothing here is taken knowingly any more, because nothing is given away.
 pub fn fleet_serve_mounts() -> Vec<String> {

@@ -409,10 +409,10 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
 /// (SKEIN-968). This said `sudo npm install -g` and nothing else for as long as it existed, and
 /// `sudo npm` is npm running as root, whose global prefix is `/usr/local`. Every box's PATH begins
 /// `$HOME/.local/bin:/usr/local/share/npm-global/bin:…` (`box-session.sh`'s `box_path`, and
-/// `BOX_PATH_HEAD` in `src/place.rs` for the crossing), and that npm-global prefix belongs to uid
-/// 1000. Measured on the live fleet, 2026-09-19: `/usr/local/share/npm-global/bin/claude` was
-/// 2.1.278 and the root-owned `/usr/local/bin/claude` this script had been writing was 2.1.272. So
-/// the update installed, correctly reported that it had, and changed nothing any box ran — the
+/// `BOX_PATH_HEAD` in `src/place/crossing.rs` for the crossing), and that npm-global prefix belongs
+/// to uid 1000. Measured on the live fleet, 2026-09-19: `/usr/local/share/npm-global/bin/claude`
+/// was 2.1.278 and the root-owned `/usr/local/bin/claude` this script had been writing was 2.1.272.
+/// So the update installed, correctly reported that it had, and changed nothing any box ran — the
 /// shape of SKEIN-441, one prefix further down.
 ///
 /// Unprivileged when the configured prefix is ours, `sudo` when it is not, because both substrates

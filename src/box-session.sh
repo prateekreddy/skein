@@ -38,7 +38,8 @@
 #   nsenter --user=/proc/<pid>/ns/user --mount=/proc/<pid>/ns/mnt --preserve-credentials -- …
 # Both namespaces must be joined together (mount alone is refused) and credentials preserved (or
 # setgroups fails for an unprivileged caller). Getting either wrong reads as a permissions bug
-# rather than a missing flag, which is why it is written down here and asserted in place.rs.
+# rather than a missing flag, which is why it is written down here and asserted in
+# src/place/argv.rs.
 set -uo pipefail
 
 # --- The PATH this script resolves its own commands against ---------------------------------------
@@ -87,8 +88,8 @@ set -uo pipefail
 # alone it hands every agent session the fixed six, with no `~/.local/bin` in it, which is the very
 # thing the old paragraph said must not happen. The `claude` a box ran would be the substrate's
 # copy rather than the one the fleet installs and shares. It never bit only because the sandbox was
-# carrying an older copy of this file with no `export PATH=` line at all, so the next install of
-# the launcher is what would have exposed it (SKEIN-851). `Place::wrap` in `src/place.rs` reached
+# carrying an older copy of this file with no `export PATH=` line at all, so the next install of the
+# launcher is what would have exposed it (SKEIN-851). `Place::wrap` in `src/place/argv.rs` reached
 # the same conclusion one file over, for a crossing, by the same route (SKEIN-832).
 #
 # `box_path` below is what the session gets instead: the box's own `~/.local/bin`, then the shared
@@ -105,7 +106,7 @@ set -uo pipefail
 #     placement record's `home`, which `fleet::sandbox_home` reads out of this same sandbox's
 #     `$HOME`. Two producers, one value — so a box would resolve one agent when skein enters it and
 #     another when it starts itself if they ever disagreed.
-#     `tests/isolation_bwrap.rs::a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path`
+#     `tests/isolation_bwrap/path.rs::a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path`
 #     measures both and fails on the difference.
 #   * It is exported INSIDE the `bash -lc`, not here and not through `--setenv`. A login shell
 #     sources the profile BEFORE it runs the command string, so an export in that block wins over
@@ -673,13 +674,14 @@ fi
 # reach it); PWD, OLDPWD, SHLVL and `_` (the shell's own, remade by the shell the box starts); and
 # TMUX and TMUX_TMPDIR (the outer session's, which would point the box's tmux at the wrong server).
 #
-# `tests/fleet_launch.rs::a_box_session_inherits_only_its_allow_list` starts a real box with a
-# canary in the environment and reads the environment back from inside it.
+# `tests/fleet_launch/environment.rs::a_box_session_inherits_only_its_allow_list` starts a real box
+# with a canary in the environment and reads the environment back from inside it.
 #
 # A CROSSING into a box keeps this same list (SKEIN-1085): `place::inherited_env` in
-# `src/place.rs` reads it out of this file's text, so it is one list rather than two. Keep the shape
-# the parse expects: the line `inherited_env=(`, names and `#` comments, then a line of just `)`.
-# `place::tests::the_crossing_list_is_the_launchers_list` fails if the two readings differ.
+# `src/place/crossing.rs` reads it out of this file's text, so it is one list rather than two. Keep
+# the shape the parse expects: the line `inherited_env=(`, names and `#` comments, then a line of
+# just `)`. `place::crossing::tests::the_crossing_list_is_the_launchers_list` fails if the two
+# readings differ.
 inherited_env=(
   # The sandbox user's home and search path. The launcher needs HOME to know what to bind the box's
   # private home over, and replaces PATH with a fixed one before it runs anything (see the top).
@@ -1739,7 +1741,7 @@ if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
   # why the loop skips ancestors — and skipping is not covering. The fleet skein-server runs inside
   # is mounted at exactly such an ancestor (delivery §3 4c: the volume holding `credentials/`,
   # `api-token` and `github-pats/`), so from every box on that fleet the fleet's own credentials
-  # were one `cat` away. Measured, not reasoned: `tests/isolation_bwrap.rs` runs bwrap and reads
+  # were one `cat` away. Measured, not reasoned: `tests/isolation_bwrap/` runs bwrap and reads
   # them back.
   #
   # Ordering rather than enumeration, so nothing has to be listed: cover the ancestor HERE, before
@@ -2065,13 +2067,13 @@ unset runtime_dir peer_socks peers
 #
 # **This line used to say "on its own terminal", and that was never true** (SKEIN-846). Both
 # production callers run this script through `Place::exec`, which pipes stderr and reads it only
-# when the launcher EXITS NON-ZERO (`place.rs`, the `!out.status.success()` branch of `bytes`); on
-# the success path every word written here is dropped. Nor is it the box's terminal: that is the
-# tmux pane made under `exec bwrap` at the end of this file, a pty this `echo` happens long before.
-# So what follows is correct in its wording and not yet delivered, and the delivery is SKEIN-846's
-# — it needs the placement and the board, which carry the launcher's STDOUT facts already. Left
-# here rather than deleted, because the words are the part that is hard to get right, and because
-# a failed start does carry them.
+# when the launcher EXITS NON-ZERO (`src/place/run.rs`, the `!out.status.success()` branch of
+# `bytes`); on the success path every word written here is dropped. Nor is it the box's terminal:
+# that is the tmux pane made under `exec bwrap` at the end of this file, a pty this `echo` happens
+# long before. So what follows is correct in its wording and not yet delivered, and the delivery is
+# SKEIN-846's — it needs the placement and the board, which carry the launcher's STDOUT facts
+# already. Left here rather than deleted, because the words are the part that is hard to get right,
+# and because a failed start does carry them.
 #
 # **Three grants, named** (architecture §9.5 R9). The first two were always said; the third and the
 # line after it were not, and both are things somebody turning this on cannot discover by using it.

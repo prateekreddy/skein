@@ -58,7 +58,7 @@ if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; 
 #
 # SKEIN_BOX names the box wherever it was set: the launcher exports it before it starts the box's
 # tmux server (src/box-session.sh), so the agent and every hook it forks inherit it, and every
-# placement hop into a shared box exports it too (`wrap` in src/place.rs).
+# placement hop into a shared box exports it too (`wrap` in src/place/argv.rs).
 #
 # The old chain ran on from there to SANDBOX_VM_ID and then `hostname` unconditionally, and in a
 # shared sandbox BOTH of those name the sandbox — one string for every box in it. Whether that

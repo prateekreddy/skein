@@ -1,6 +1,6 @@
 //! An act settles every remembered answer it makes wrong — the other three gates.
 //!
-//! `tests/fleet_launch.rs` covers the liveness gate for the three box acts. This covers the two
+//! `tests/fleet_launch/` covers the liveness gate for the three box acts. This covers the two
 //! *sandbox* acts and the gate that was invalidated from nowhere in production at all: `sbx ls`.
 //!
 //! **Through `tests/` for the same reason as the others.** `cfg!(test)` is false for the library

@@ -1703,7 +1703,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    registry held six sessions, every one advertising a socket, and exactly one resolved — the box's
    own. R11's argument survives intact, because it was never *"never open this"* but *"do not let
    it become an undeclared channel"*; what changes is that the channel is declared, reasoned about
-   here, and asserted by `tests/isolation_bwrap.rs`, where the cover previously had no test at all.
+   here, and asserted by `tests/isolation_bwrap/`, where the cover previously had no test at all.
    Everything else under the runtime directory stays private per box, which is the second of those
    two tests.
 

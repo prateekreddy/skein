@@ -788,7 +788,7 @@ check("and both are gone from the scan once the processes are",
 // `fx.boxlike.kill()` did for as long as SKEIN-861 was open, and the ordering `stop` exists to get
 // right — it is this run's leak, and now says which fixture it was.
 //
-// It needs a namespace, so it skips where `tests/isolation_bwrap.rs` skips — and says so rather
+// It needs a namespace, so it skips where `tests/isolation_bwrap/` skips — and says so rather
 // than silently, because a skipped check passes and a reader's seeing that it did not run is the
 // only defence. Under `$SKEIN_TESTS_NO_SKIP` it is a failure instead; see [`noSkipAsked`].
 const bwrapWorks = () =>
@@ -831,7 +831,7 @@ if (!bwrapWorks()) {
   const asked = noSkipAsked();
   const said = "bwrap cannot make a namespace here, so the anchor a box-like namespace leaves " +
     "cannot be planted and the checks it carries did not run — the same skip as " +
-    "tests/isolation_bwrap.rs";
+    "tests/isolation_bwrap/";
   if (asked === true) {
     // A run that was told to prove nothing was skipped, having skipped something, is a failure and
     // not a note. The ledger is where that has to land: this suite exits on its count.

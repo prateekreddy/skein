@@ -9,7 +9,7 @@ does not hold is in [`SECURITY.md`](../SECURITY.md).
 be backed is not in the table; it is under [Open](#open), with its tracker item. The evidence
 column says which kind of backing a row has, strongest first:
 
-* **bwrap test**: a test in `tests/isolation_bwrap.rs` that builds a fleet-shaped tree, runs
+* **bwrap test**: a test in `tests/isolation_bwrap/` that builds a fleet-shaped tree, runs
   the launcher's own isolation block under a real `bwrap`, and reads the path back from inside. It
   lifts the block out of `src/box-session.sh` instead of copying it, so a change to the launcher is
   a change to what the test runs. It skips, and says so, on a machine where bwrap cannot make a
@@ -57,7 +57,7 @@ says, and the rows below are mostly about files for that reason.
 | **GitHub through the sandbox proxy** instead of around it | **whatever the proxy decides, and skein cannot bound it — so skein measures it and says so.** Measured *not* injecting on 2026-09-21: an invalid credential sent through the proxy is refused, and an accepted request carries the anonymous hourly ceiling. It **was** injecting on 2026-09-06 and again on 2026-09-15, when the same probe came back authenticated as the account. Nothing in this tree changed between those dates; the substrate did, which is why this is a check and not a sentence | the `proxy_injection` health check — `proxy_injection_line` and `probe_proxy_injection_at` in `src/health/reach.rs` — red on the cockpit's banner when the answer is yes (SKEIN-927); tests `only_an_authenticated_acceptance_through_the_proxy_is_injection` and `the_probe_puts_nothing_but_a_marked_non_credential_on_the_wire`. The command is under [Checking this page](#checking-this-page) |
 | the rest of the internet | **yes — every host tried, and not bounded by skein** (SKEIN-926). **Open by decision rather than by oversight**: a box installs from npm, PyPI, crates.io, GitHub and the model APIs, so an allowlist that misses one produces a failure that reads as a broken build rather than as a policy. skein therefore sets no egress policy at all, and a box reaches whatever the host's `sbx` policy allows | measured 2026-09-21 from inside a scoped box with the proxy out of the path — the command is under [Checking this page](#checking-this-page), and all six hosts answered `200`. `grep -rn 'sbx policy' src` finds 9 hits, every one of them advice printed for a person to run on their own host; none sets a policy |
 | the fleet's canonical agent login | cannot replace it; a box's login moves up only when the fleet holds none (`src/box-session.sh:1133`) | code |
-| the environment the cockpit was started with | **only the names on the launcher's allow-list** (SKEIN-972), whether through the box's session or through a later crossing into it (SKEIN-1085); see [What a box inherits](#what-a-box-inherits). The cockpit's own variables, `SKEIN_HOME` and `SKEIN_LISTEN_INHERITED_ONLY` among them, reach neither. A crossing into a scoped box carries that box's own `GH_TOKEN` or none, never the fleet's, as its session does (SKEIN-1095) | tests `a_box_session_inherits_only_its_allow_list`, `a_crossing_into_a_box_carries_only_its_allow_list` and `a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch.rs`), which start a real box with a canary in the environment and read the environment back from inside it; `the_crossing_list_is_the_launchers_list` and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place.rs`) |
+| the environment the cockpit was started with | **only the names on the launcher's allow-list** (SKEIN-972), whether through the box's session or through a later crossing into it (SKEIN-1085); see [What a box inherits](#what-a-box-inherits). The cockpit's own variables, `SKEIN_HOME` and `SKEIN_LISTEN_INHERITED_ONLY` among them, reach neither. A crossing into a scoped box carries that box's own `GH_TOKEN` or none, never the fleet's, as its session does (SKEIN-1095) | tests `a_box_session_inherits_only_its_allow_list`, `a_crossing_into_a_box_carries_only_its_allow_list` and `a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch/environment.rs`), which start a real box with a canary in the environment and read the environment back from inside it; `the_crossing_list_is_the_launchers_list` and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place/crossing.rs`) |
 
 **Two kinds of box get less of this, and both say so when they start.**
 
@@ -108,7 +108,7 @@ the list with its reason. There is no per-box setting for this.
 **A crossing gets the same list** (SKEIN-1085). A process skein runs inside a box later, by
 crossing into its namespace, is spawned by `skein-server` and used to carry the cockpit's whole
 environment in. That covers provisioning, the attach and shell terminals, the pane observer the
-attach starts, model calls and file reads and writes. `Place::enter` in `src/place.rs` now removes
+attach starts, model calls and file reads and writes. `Place::enter` in `src/place/argv.rs` now removes
 every variable not on the same `inherited_env` list before it `nsenter`s. It reads the list out of
 the launcher's own text, so there is one list. It sets `SKEIN_IN_BOX=1` on the same step. It
 also keeps two names that are not on the list: `TERM` and `COLORTERM`. An attach ends in
@@ -127,8 +127,8 @@ launcher `unset`s. `Place::enter` unsets each one and exports it again from the 
 box's tmux server, the anchor its guard has just checked, only if that process has it. That
 environment is the launcher's final one, so the crossing gets exactly what the session got and
 the rule is not written twice. A `fleet`-scoped box still gets the fleet's token. Tests
-`a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch.rs`) and
-`the_names_the_session_decides_are_the_launchers_unsets` (`src/place.rs`).
+`a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch/environment.rs`)
+and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place/crossing.rs`).
 
 ## Open
 
