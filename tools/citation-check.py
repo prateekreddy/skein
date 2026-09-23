@@ -83,8 +83,9 @@ WHAT THIS DOES NOT COVER, AND WILL NOT
     nothing and removes the entire false-positive class.
   * A repository other than this one. `src/store/sync/UPSTREAM.md` cites the `sync` plugin's own
     history, which is not in this object database and never will be. Such a citation is declared in
-    the ledger with `external = "<why>"` and skipped — keyed on a written reason, not on a list of
-    hashes that would rot.
+    the ledger with `external = "<why>"` and the `sites` it is cited from, and skipped there and
+    only there — keyed on a written reason, not on a list of hashes that would rot. The same sha
+    anywhere else is checked, and a site that stops citing it is reported (SKEIN-933).
   * Anything outside `docs/`. `--all` widens the scan to every tracked file and is a report, not
     a gate; the reason is measured and argued at `SCOPE_NOTE` below.
 
@@ -344,8 +345,21 @@ def render_ledger(entries):
         "# Do not hand-edit an entry to make the gate pass — `--record` writes them from the",
         "# history, and an entry that disagrees with the history is the finding, not the bug.",
         "#",
-        "# `external` marks a sha that belongs to another repository. It carries the reason instead",
-        "# of a subject, and nothing tries to resolve it.",
+        "# `external` marks a sha that will never resolve here, correctly: another repository's",
+        "# commit, or a placeholder in fixture or example text that was never a citation. It carries",
+        "# the reason instead of a subject, and nothing tries to resolve it.",
+        "#",
+        "# An `external` entry exempts its sha only in the files its `sites` lists (SKEIN-933). The",
+        "# same sha written anywhere else is checked like any other citation, so a declaration made",
+        "# for one fixture cannot silently cover a new, real citation somewhere nobody was thinking",
+        "# about. A site that no longer cites the sha is reported rather than pruned — the reason is",
+        "# somebody's writing — so a dead exemption is visible instead of permanent: drop the site,",
+        "# and the entry with its last one. `docs/line-cites.toml` is a site wherever it quotes a",
+        "# cited line verbatim.",
+        "#",
+        "# These entries are also the only ones for a citation outside `docs/`. `--record` scans only",
+        "# `docs/` and never prunes an `external` entry, and `findings()` looks a cited sha up in this",
+        "# whole file whichever file cited it (SKEIN-708).",
         "",
     ]
     for key in sorted(entries):
@@ -353,6 +367,8 @@ def render_ledger(entries):
         lines.append(f'[citations."{key}"]')
         if "external" in entry:
             lines.append(f"external = {_toml_string(entry['external'])}")
+            sites = ", ".join(_toml_string(site) for site in entry.get("sites", []))
+            lines.append(f"sites = [{sites}]")
         else:
             lines.append(f"commit = {_toml_string(entry['commit'])}")
             lines.append(f"subject = {_toml_string(entry['subject'])}")
@@ -387,6 +403,23 @@ def findings(cited, ledger, history):
         # would print 194 demands for entries that a `--record` run would immediately prune.
         ledgered = path.startswith("docs/")
         if entry and "external" in entry:
+            # Scoped to the files it was declared for (SKEIN-933): the exemption used to be keyed
+            # by sha alone, so a declaration made for one fixture covered the same seven hex
+            # digits written as a real citation anywhere else in the tree, silently.
+            if path not in entry.get("sites", []):
+                out.append(
+                    (
+                        where,
+                        f"`{sha}` is declared `external` in {LEDGER_REL} for"
+                        f" {', '.join(entry.get('sites', [])) or 'no file at all'},"
+                        " and cited here too",
+                        "an `external` entry exempts its sha only in the files its `sites` lists,"
+                        " so it cannot cover a citation nobody declared. if this one is the same"
+                        " placeholder or the same other repository's commit, add this file to"
+                        " `sites` and say so in the reason; if it is meant to be a commit here,"
+                        " it is a different citation and must resolve.",
+                    )
+                )
             continue
         matches = history.resolve(sha)
         if not matches:
@@ -456,15 +489,17 @@ def findings(cited, ledger, history):
                     " rebase copy merged back in; reword one of the two subjects.",
                 )
             )
+    out += dead_sites(ledger)
     for key in sorted(set(ledger) - seen):
         if "external" in ledger[key]:
             # An `external` entry is not a relocation mapping for a docs/ citation — it is a
-            # standing exemption keyed by sha, good wherever that sha is cited, docs/ or not
-            # (findings() above skips resolution for it on that basis, regardless of `ledgered`).
+            # standing exemption for a sha in the files its `sites` names, docs/ or not
+            # (findings() above skips resolution there on that basis, regardless of `ledgered`).
             # So "not cited under docs/" is not a defect for one of these: SKEIN-708 declared a
             # handful for citations outside docs/ (fixture placeholders, another repository's own
             # commits), and this scan — docs/-scoped by default — would otherwise flag every one
-            # of them as an orphan on every run.
+            # of them as an orphan on every run. Whether it is still cited where it says is
+            # `dead_sites`'s question, asked of its own files whatever this scan's scope.
             continue
         out.append(
             (
@@ -474,6 +509,44 @@ def findings(cited, ledger, history):
                 " python3 tools/citation-check.py --record",
             )
         )
+    return out
+
+
+def dead_sites(ledger):
+    """Findings for every `external` site that no longer cites its sha, or that names no file.
+
+    Reported, never pruned: the reason is somebody's writing, and `--record` leaves `external`
+    entries alone precisely so that it cannot delete one. Asked of each site directly rather than
+    of the scan, because the gate scans `docs/` and most sites are outside it — without this, an
+    entry outlived its last citation for ever with nothing to say so (SKEIN-933).
+    """
+    out = []
+    for key in sorted(ledger):
+        entry = ledger[key]
+        if "external" not in entry:
+            continue
+        sites = entry.get("sites", [])
+        if not sites:
+            out.append(
+                (
+                    LEDGER_REL,
+                    f"`{key}` is declared `external` with no `sites`",
+                    "an `external` entry names the files it exempts its sha in, so that it cannot"
+                    " cover a citation nobody declared. list them: python3"
+                    " tools/citation-check.py --all shows where the sha is cited.",
+                )
+            )
+            continue
+        for site in sites:
+            if not any(sha == key for _, _, sha, _ in citations([site])):
+                out.append(
+                    (
+                        LEDGER_REL,
+                        f"`{key}` is declared `external` for {site}, which no longer cites it",
+                        "an exemption for a citation that is gone is a licence waiting for the"
+                        " next one. drop the site from `sites`, and the entry with its last one.",
+                    )
+                )
     return out
 
 
@@ -721,7 +794,45 @@ def self_check():
             "                own, which --all would report as a citation for ever. Describe the",
             "                commit instead of spelling it.",
         )
+    self_check_external(history)
     return history
+
+
+def self_check_external(history):
+    """An `external` entry covers the files it names and nothing else, and says when one is gone.
+
+    SKEIN-933: the exemption used to be keyed by sha alone, everywhere, and outlived its last
+    citation for ever. Planted both ways on a sha built at run time — this file may not spell one.
+    Watch it fail by deleting the `sites` test in `findings()`: the first assertion goes red.
+    """
+    import tempfile
+
+    fake = "e" * 7
+    with tempfile.TemporaryDirectory(prefix="citation-self-check-") as root:
+        declared, stranger, dropped = (
+            os.path.join(root, name) for name in ("declared.md", "stranger.md", "dropped.md")
+        )
+        for path, body in ((declared, f"a fixture sha `{fake}`\n"), (stranger, f"see `{fake}`\n"),
+                           (dropped, "nothing cited here any more\n")):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+        ledger = {fake: {"external": "the self-check's own placeholder", "sites": [declared]}}
+        found = findings(citations([declared, stranger]), ledger, history)
+        if [w for w, _, _ in found] != [f"{stranger}:1"]:
+            fail(
+                "citation-check: SELF-CHECK FAILED — an `external` entry declared for one file",
+                "                did not confine itself to it: expected exactly the undeclared",
+                f"                citation to be reported, got {[w for w, _, _ in found]}.",
+                "                A tree-wide exemption covers real citations nobody declared.",
+            )
+        ledger[fake]["sites"] = [declared, dropped]
+        dead = [what for _, what, _ in dead_sites(ledger)]
+        if len(dead) != 1 or dropped not in dead[0]:
+            fail(
+                "citation-check: SELF-CHECK FAILED — an `external` site that no longer cites its",
+                f"                sha was not reported (got {dead}). A dead exemption nobody",
+                "                can see is a permanent one.",
+            )
 
 
 # ---- main ----------------------------------------------------------------------------------

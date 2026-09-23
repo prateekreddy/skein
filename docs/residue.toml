@@ -8,91 +8,79 @@
 # read it. Scanning it would make every entry cite itself as its own use, and no entry could ever
 # be stale.
 #
-# Regenerate the allow-lists with `python3 tools/residue-check.py --update`; it keeps the reasons
-# already written and leaves TODO against anything new, which is the line to stop and think about.
-# It rewrites this header and the section comments below from `render`, so prose worth keeping
-# goes there and not here.
+# What this file does NOT hold is the denylist. That register — the literal strings that may
+# never come back, and the sentence saying whose each one was — was a `[banned]` table here until
+# 2026-09-07, and it was the disclosure it existed to prevent: every string in it had just been
+# removed from all of this repository's history and was then written back into one published
+# file. So it lives outside the repository (SKEIN-630), and the tree carries
+# `docs/residue-banned.txt`, sha256 of each needle and nothing readable. The gate enforces from
+# those hashes and needs no register to do it, which is how the rule keeps working in CI.
 #
-# **The sweep has landed.** Four entries here were once marked SWEEP — declared only so this gate
-# was green about the tree *before* the SKEIN-520 rewrite was replayed. When it landed their last
-# use went, the stale-entry rule turned this file red, and that is exactly what it was for.
-#
-# **WHAT IS NOT HERE ANY MORE, AND WHY (SKEIN-630).** The fifth rule's list — the literal strings
-# that may never come back — was a `[banned]` table in this file until 2026-09-07: thirty-eight
-# identifiers in cleartext, each with a sentence saying whose it was. Every one of them had just
-# been removed from all 806 commits of this repository's history and then written back into one
-# published file, which is a ready-made search-term list to point at an archive branch or at a
-# fork nobody rewrote. The register is the disclosure; the gate is not. So the register moved out
-# of the repository, and what stays is `docs/residue-banned.txt` — sha256 of each needle, and
-# nothing readable. `residue-check` enforces from those hashes and needs no register to do it,
-# which is how the rule keeps working in CI. Its docstring says where the register now lives and
-# how the two are kept in step.
+# Regenerate with `python3 tools/residue-check.py --update`. It keeps every reason already written
+# — a reason is a TOML value — and leaves TODO against anything new, which is the line to stop
+# and think about. Every `#` line, this header included, is written by `render` in that tool and
+# nowhere else, and the gate fails on one that `render` would not write back (SKEIN-1126): prose
+# worth keeping goes into `render`, not here.
 
-# A host this tree reaches or names.
+# A host this tree reaches or names. A synthetic one is still a decision: a single label with no
+# dot cannot be anybody's domain but can be somebody's internal name, and the tailnet's members
+# and non-members are named concretely because `*.ts.net` and the CGNAT range are the origin
+# guard's whole trust boundary.
 [hosts]
-# Loopback and the sandbox's own escape hatch.
-"127.0.0.1" = "the cockpit binds loopback; the address appears in every doc that says so"
-"host.docker.internal" = "how a container reaches the sandbox host — the documented Docker name"
-# GitHub and its neighbours: the code hosts skein actually speaks to, plus the ones its URL
-# parser has to recognise in order to refuse or rewrite them.
-"github.com" = "the code host skein reads and writes, and Cargo.lock's crate registry index"
-"api.github.com" = "GitHub's REST/GraphQL endpoint — the base every API call is built on"
-"raw.githubusercontent.com" = "where bootstrap.sh and the README fetch the installer from"
-"gist.github.com" = "GitHub's own, named here because it is one of the five hosts the sandbox's proxy terminates TLS for: it is in the NO_PROXY set that takes a scoped box off the proxy (SKEIN-548) and in the --noproxy list skein's own curl calls carry"
-"copilot.github.com" = "GitHub's own, and here for the same reason as gist.github.com above — measured to be intercepted by the proxy, so a scoped box must route it direct or its own credential is replaced. api.githubcopilot.com is deliberately NOT in that set: it was measured presenting a real certificate, so it is not one of the intercepted hosts"
-"cli.github.com" = "the `gh` install page, linked from the README's prerequisites"
-"docs.github.com" = "GitHub's own docs, cited by docs/pr-workflow.md for stacked-PR behaviour"
-"github.blog" = "cited once in docs/pr-workflow.md for a behaviour change GitHub announced"
-"gitlab.com" = "not used — recognised, so a GitLab remote is parsed and then refused by name"
-"bitbucket.org" = "same: recognised by the URL parser so the refusal can say which host it is"
-"docs.docker.com" = "Docker's docs, cited where the sandbox's daemon configuration is explained"
-"sh.rustup.rs" = "the rustup installer bootstrap.sh runs when a box has no toolchain"
-"www.w3.org" = "an SVG namespace URI in the page's markup, not a host anything reaches"
-"www.jsdelivr.com" = "the CDN banner inside the vendored xterm bundles; not fetched at runtime"
-"www.apache.org" = "the Apache License 2.0's own header and appendix, in LICENSE-APACHE — part of the licence text, not a host anything reaches"
-# The tailnet. `*.ts.net` and the CGNAT range are the origin guard's whole trust boundary, so
-# the guard's tests have to name concrete members and concrete non-members of both.
-"box.my-tnet.ts.net" = "a made-up tailnet host, in the origin-guard test that must ACCEPT it"
-"box.ts.net.evil.com" = "the look-alike the same test must REFUSE — it only contains ts.net"
-"evil.com" = "the plain refusal case in that test"
+"100.128.0.1" = "just outside the /10, which the guard must refuse"
 "100.64.0.1" = "the bottom of Tailscale's CGNAT /10, which the guard accepts"
 "100.64.0.30" = "an address inside that /10, in the same test — see the note in [banned]"
-"100.128.0.1" = "just outside the /10, which the guard must refuse"
+"127.0.0.1" = "the cockpit binds loopback; the address appears in every doc that says so"
 "192.168.1.10" = "an ordinary LAN address the guard must refuse"
 "8.8.8.8" = "a public address the guard must refuse"
-"proxy.local" = "a host set through SKEIN_ALLOWED_ORIGINS in that test, and accepted"
-"nope.local" = "the host that is not on that allow-list, and refused"
-# Single-label and obviously-synthetic hosts inside fixtures. A label with no dot cannot be
-# anybody's domain, but it can be somebody's internal name, so each is still a decision.
+"api.github.com" = "GitHub's REST/GraphQL endpoint — the base every API call is built on"
+"bitbucket.org" = "same: recognised by the URL parser so the refusal can say which host it is"
+"box.my-tnet.ts.net" = "a made-up tailnet host, in the origin-guard test that must ACCEPT it"
+"box.ts.net.evil.com" = "the look-alike the same test must REFUSE — it only contains ts.net"
 "ci" = "a fake CI check URL in the pull-request fixtures — `https://ci/build/1`"
-"status" = "a fake commit-status target URL in the same fixtures"
-"host" = "the placeholder in the doc comment that shows the SSH-to-HTTPS URL rewrite"
-"elsewhere" = "the off-origin script src in the comment explaining the page's CSP"
+"cli.github.com" = "the `gh` install page, linked from the README's prerequisites"
+"copilot.github.com" = "GitHub's own, and here for the same reason as gist.github.com above — measured to be intercepted by the proxy, so a scoped box must route it direct or its own credential is replaced. api.githubcopilot.com is deliberately NOT in that set: it was measured presenting a real certificate, so it is not one of the intercepted hosts"
+"docs.docker.com" = "Docker's docs, cited where the sandbox's daemon configuration is explained"
+"docs.github.com" = "GitHub's own docs, cited by docs/pr-workflow.md for stacked-PR behaviour"
 "e.com" = "the shortest URL that still has a host, used by the link-sanitiser tests"
+"elsewhere" = "the off-origin script src in the comment explaining the page's CSP"
+"evil.com" = "the plain refusal case in that test"
+"gist.github.com" = "GitHub's own, named here because it is one of the five hosts the sandbox's proxy terminates TLS for: it is in the NO_PROXY set that takes a scoped box off the proxy (SKEIN-548) and in the --noproxy list skein's own curl calls carry"
 "git.example.com" = "a synthetic remote in the cockpit's gitgate suite"
+"github.blog" = "cited once in docs/pr-workflow.md for a behaviour change GitHub announced"
+"github.com" = "the code host skein reads and writes, and Cargo.lock's crate registry index"
+"gitlab.com" = "not used — recognised, so a GitLab remote is parsed and then refused by name"
 "gitlab.example.com" = "a synthetic GitLab remote, for the refusal path"
+"host" = "the placeholder in the doc comment that shows the SSH-to-HTTPS URL rewrite"
+"host.docker.internal" = "how a container reaches the sandbox host — the documented Docker name"
+"nope.local" = "the host that is not on that allow-list, and refused"
+"plane" = "a single-label placeholder for the tracker in two page comments"
 "plane.example.com" = "the work tracker's placeholder host, used in `src/fleet/create.rs`'s tests"
 "plane.example.net" = "a SECOND placeholder gateway, distinct from the one above: two tracking connections that must not read as one. RFC 2606 reserved, like every other host in this table."
 "plane.host" = "a placeholder host in a tracking.rs test"
-"plane" = "a single-label placeholder for the tracker in two page comments"
-# SWEEP — the private work-tracker gateway. Delete these two when the sweep lands.
+"proxy.local" = "a host set through SKEIN_ALLOWED_ORIGINS in that test, and accepted"
+"raw.githubusercontent.com" = "where bootstrap.sh and the README fetch the installer from"
+"sh.rustup.rs" = "the rustup installer bootstrap.sh runs when a box has no toolchain"
+"status" = "a fake commit-status target URL in the same fixtures"
+"www.apache.org" = "the Apache License 2.0's own header and appendix, in LICENSE-APACHE — part of the licence text, not a host anything reaches"
+"www.jsdelivr.com" = "the CDN banner inside the vendored xterm bundles; not fetched at runtime"
+"www.w3.org" = "an SVG namespace URI in the page's markup, not a host anything reaches"
 
 # A home directory, which names a person and often a machine.
 [homes]
-"/home/agent" = "the uid-1000 account every box runs as; the fleet's own fixed path"
-"/home/you" = "the placeholder this tree's docs and scripts use for a person's home"
-"/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
 "/Users/me" = "a synthetic checkout path in the tests that prove a local path is not a slug"
 "/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet/create.rs:1304 exists to refuse"
-"/home/me" = "the same, in util.rs's path-shortening tests"
-"/home/somebody" = "a deliberately anonymous home in a src/repos/source.rs and a server.rs test"
-"/home/x" = "the shortest home that is still a home, in volume.rs and warden_client.rs tests"
+"/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
 "/home/..." = "an elision inside a doc comment, not a path"
 "/home/.claude" = "the `$HOME/.claude` store, written with the variable already expanded away"
 "/home/.config" = "the same, for `$HOME/.config`, in a launch test"
 "/home/.skein" = "the same, for `$HOME/.skein`"
 "/home/.skein-warden" = "the same, for the warden's own state directory"
-# SWEEP — the owner's laptop. Delete both when the sweep lands.
+"/home/agent" = "the uid-1000 account every box runs as; the fleet's own fixed path"
+"/home/me" = "the same, in util.rs's path-shortening tests"
+"/home/somebody" = "a deliberately anonymous home in a src/repos/source.rs and a server.rs test"
+"/home/x" = "the shortest home that is still a home, in volume.rs and warden_client.rs tests"
+"/home/you" = "the placeholder this tree's docs and scripts use for a person's home"
 
 # An email address.
 [addresses]

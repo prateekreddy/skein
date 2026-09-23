@@ -73,9 +73,9 @@ because a by-name search over a whole crate would mean nothing: `setup` is one f
 and a dozen in a crate.
 
 `docs/env-lock.toml` is the exemption list, in the same shape as `docs/sources.toml`: a reviewed
-allow-list, generated from the code with `--update`, where every entry carries a reason. An
-exemption for a site that no longer exists is a finding too — a stale exemption is a permission
-nobody granted.
+allow-list, kept current with `--update` (which merges; see below), where every entry carries a
+reason. An exemption for a site that no longer exists is a finding too — a stale exemption is a
+permission nobody granted.
 
 RULE TWO — the restore (`restore_findings` below, and read its comment for what it deliberately
 does NOT check). Per `#[test]`, with the same-file helpers it reaches folded in: a variable the
@@ -119,10 +119,11 @@ debt: a finding not listed there fails the build, a row that no longer leaks fai
   python3 tools/env-lock-check.py --show           every env-touching test scope and its verdict
   python3 tools/env-lock-check.py --show-restore   every #[test] judged by rule two, and how
   python3 tools/env-lock-check.py --show-trailing  every #[test] judged by rule three, and how
-  python3 tools/env-lock-check.py --update         REWRITE docs/env-lock.toml from the code, with
-                                                   EVERY reason blank and every comment gone —
-                                                   it keeps nothing a person wrote. Snapshot the
-                                                   file first and put the reasons back by hand
+  python3 tools/env-lock-check.py --update         merge the code's findings into docs/env-lock.toml,
+                                                   keeping every reason and comment: a new finding
+                                                   gets a row with a blank reason, a stale row is
+                                                   reported and kept, a moved `covers` is reported
+  python3 tools/env-lock-check.py --update --prune ...and remove the stale rows, printing each one
   python3 tools/env-lock-check.py --update-restore prune docs/env-restore.toml; it never adds
   python3 tools/env-lock-check.py --update-trailing prune docs/env-trailing.toml; it never adds
 """
@@ -1139,6 +1140,151 @@ def render(bad, sites):
     return "\n".join(out).rstrip() + "\n"
 
 
+EXEMPT_HEAD = re.compile(r'^\[exempt\."([^"]+)"\]\s*$')
+
+# Written above a row `--update` invented. TODO is the marker `module-check --update` and
+# `residue-check --update` leave against an entry they could not write a reason for.
+NEW_ROW_NOTE = (
+    "# TODO: no reason written yet. `--update` can write the row; it cannot write the argument for\n"
+    "# it. Say why `%s` cannot take `env_lock()`, then delete these two lines.\n"
+)
+
+
+def split_exempt(text):
+    """(preamble, [(key, block text)]) — every block keeping its own bytes, in the file's order.
+
+    A block owns the run of `#` lines IMMEDIATELY above its header, with no blank line between:
+    that is where this file writes each row's argument. A blank line stops the walk, so the file's
+    own header — separated from the first row by one — stays in the preamble and is never taken
+    with a row that `--prune` removes.
+    """
+    lines = text.splitlines(keepends=True)
+    heads = [i for i, line in enumerate(lines) if EXEMPT_HEAD.match(line.rstrip("\n"))]
+    if not heads:
+        return text, []
+    starts = []
+    for n, head in enumerate(heads):
+        start, floor = head, heads[n - 1] + 1 if n else 0
+        while start > floor and lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        starts.append(start)
+    blocks = []
+    for n, start in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        key_ = EXEMPT_HEAD.match(lines[heads[n]].rstrip("\n")).group(1)
+        blocks.append((key_, "".join(lines[start:end])))
+    return "".join(lines[: starts[0]]), blocks
+
+
+def merge(text, bad, sites, prune=False):
+    """docs/env-lock.toml with the code's findings merged in, and every hand-written byte kept.
+
+    Returns `(text, applied, refused)`. It used to regenerate the file from `render`, writing every
+    reason blank and every comment away — 192 lines of the file's 207 (SKEIN-1125, the defect
+    SKEIN-614 fixed in module-check). Now:
+
+      - a finding with no row gets one, with a blank reason and a TODO above it, so the check
+        stays red until a person has said why;
+      - a row whose key no longer names an unlocked site is REPORTED and kept, because its reason
+        is somebody's writing; `--prune` removes it and prints what it removed;
+      - a `covers` count that no longer matches is reported and never written — the check asks a
+        person to read the reason against every site first, and a tool that set the number would
+        launder exactly the site SKEIN-896 exists to catch.
+    """
+    preamble, blocks = split_exempt(text)
+    out, applied, refused, seen = [preamble], [], [], set()
+    for k, block in blocks:
+        seen.add(k)
+        if k not in bad:
+            if prune:
+                applied.append(
+                    "removed the row for `%s`, which now holds the lock or no longer exists:\n%s"
+                    % (k, "".join("      | %s\n" % l for l in block.strip().splitlines()))
+                )
+            else:
+                refused.append(
+                    "`%s` now holds the lock or no longer exists, and its row is %d line(s) "
+                    "somebody wrote. Read them, then delete the block by hand — or re-run with "
+                    "--prune, which prints what it removes." % (k, len(block.strip().splitlines()))
+                )
+                out.append(block)
+            continue
+        try:
+            covers = tomllib.loads(block).get("exempt", {}).get(k, {}).get("covers", 1)
+        except tomllib.TOMLDecodeError:
+            covers = None
+        if covers is not None and covers != len(sites[k]):
+            refused.append(
+                "`%s` is declared as covering %s site(s) and now covers %d. Not written: read the "
+                "reason against every site, extend it, and set `covers` by hand (SKEIN-896)."
+                % (k, covers, len(sites[k]))
+            )
+        out.append(block)
+    for k in sorted(set(bad) - seen):
+        if not "".join(out).endswith("\n\n"):
+            out.append("\n")
+        row = NEW_ROW_NOTE % k + '[exempt."%s"]\nreason = ""\n' % k
+        if len(sites[k]) > 1:
+            row += "covers = %d\n" % len(sites[k])
+        out.append(row)
+        applied.append("added a row for `%s`, with a TODO where its reason goes" % k)
+    return "".join(out), applied, refused
+
+
+SELF_CHECK_SPEC = '''# The file's own header, which no row owns.
+#
+# It is separated from the first row by a blank line.
+
+# Why `a::kept` cannot take the lock — the argument.
+[exempt."a::kept"]
+reason = "kept, because a person wrote it"
+
+# Why `a::gone` could not, once.
+[exempt."a::gone"]
+reason = "its site has since taken the lock"
+
+# Why `a::two` covers two functions.
+[exempt."a::two"]
+covers = 2
+reason = "two same-named functions"
+'''
+
+
+def self_check_merge():
+    """`--update` keeps every reason and comment a person wrote (SKEIN-1125).
+
+    Named concretely so it can be watched failing: make `merge` return `render(bad, sites)` — the
+    old regenerating `--update` — and the first assertion goes red.
+    """
+    problems = []
+    bad = {"a::kept": "", "a::two": "", "a::new": ""}
+    sites = {"a::kept": [1], "a::two": [2, 3, 4], "a::new": [5]}
+    prose = [l for l in SELF_CHECK_SPEC.splitlines() if l.startswith("#") or l.startswith("reason")]
+    merged, applied, refused = merge(SELF_CHECK_SPEC, bad, sites)
+    lost = [l for l in prose if l not in merged.splitlines()]
+    if lost:
+        problems.append(
+            f"--update lost {len(lost)} of {len(prose)} hand-written line(s), starting with "
+            f"{lost[0]!r} — it is destroying the file it maintains (SKEIN-1125)"
+        )
+    parsed = tomllib.loads(merged).get("exempt", {})
+    if parsed.get("a::new", {}).get("reason", None) != "":
+        problems.append("--update did not add a blank-reason row for a new finding")
+    if parsed.get("a::two", {}).get("covers") != 2:
+        problems.append("--update rewrote a `covers` count a person has to set (SKEIN-896)")
+    if len(refused) != 2:
+        problems.append(f"--update reported {len(refused)} refusal(s), not the stale row and the "
+                        f"moved count")
+    pruned, applied, _ = merge(SELF_CHECK_SPEC, bad, sites, prune=True)
+    if '"a::gone"' in pruned or "could not, once" in pruned:
+        problems.append("--prune left the row, or the argument above it, of a key with no site")
+    if "The file's own header" not in pruned or "the argument." not in pruned:
+        problems.append("--prune took the file header or a neighbouring row's argument with it")
+    if not any("a::gone" in a for a in applied):
+        problems.append("--prune removed a row without printing it")
+    return problems
+
+
 SELF_CHECK_TREE = {
     # One binary in a directory: the helper's only caller is in a sibling file, and the second
     # scope keeps the count above one so the helper has to be resolved through its callers.
@@ -1196,13 +1342,14 @@ def self_check():
             problems.append(f"{name}: judged {'ok' if got[name][0] else 'BAD'} — {got[name][1]}")
     for name in sorted(set(got) - set(SELF_CHECK_EXPECT)):
         problems.append(f"{name}: an env-touching scope the self-check did not plant")
+    problems += self_check_merge()
     return problems
 
 
 def main():
     problems = self_check()
     if problems:
-        print("env-lock-check: SELF-CHECK FAILED — the gate misjudges a `tests/` layout it was built to "
+        print("env-lock-check: SELF-CHECK FAILED — the gate misjudges a case it was built to "
               "read, so its verdicts on this tree cannot be trusted:", file=sys.stderr)
         for p in problems:
             print(f"  · {p}", file=sys.stderr)
@@ -1254,9 +1401,30 @@ def main():
         if not ok:
             sites.setdefault(key(s), []).append(s["line"])
     if "--update" in sys.argv:
-        open(SPEC, "w", encoding="utf-8").write(render(bad, sites))
-        print(f"wrote {os.path.relpath(SPEC, ROOT)} ({len(bad)} entries)")
-        return 0
+        where = os.path.relpath(SPEC, ROOT)
+        if not os.path.exists(SPEC):
+            # The file's first writing, when there is nobody's reasoning to lose.
+            open(SPEC, "w", encoding="utf-8").write(render(bad, sites))
+            print(f"wrote {where} ({len(bad)} entries, every reason blank)")
+            return 0
+        text = open(SPEC, encoding="utf-8").read()
+        merged, applied, refused = merge(text, bad, sites, prune="--prune" in sys.argv)
+        if merged != text:
+            open(SPEC, "w", encoding="utf-8").write(merged)
+        for line in applied:
+            print(f"{where}: {line}")
+        if not applied and not refused:
+            print(f"{where}: already says what the code does; nothing written")
+        for line in refused:
+            print(f"env-lock-check: {line}", file=sys.stderr)
+        if refused:
+            print(
+                f"\n{len(refused)} thing(s) NOT done. `--update` adds; it does not delete or "
+                f"rewrite what somebody wrote (SKEIN-1125). `--update --prune` applies the "
+                f"removals above and prints each one; a `covers` count is only ever set by hand.",
+                file=sys.stderr,
+            )
+        return 1 if refused else 0
 
     if "--update-restore" in sys.argv:
         # Prune, never add — see DEBT_HEAD. A leak that is not already recorded stays a build

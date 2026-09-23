@@ -6,41 +6,21 @@
 # Do not hand-edit an entry to make the gate pass — `--record` writes them from the
 # history, and an entry that disagrees with the history is the finding, not the bug.
 #
-# `external` marks a sha that belongs to another repository. It carries the reason instead
-# of a subject, and nothing tries to resolve it.
+# `external` marks a sha that will never resolve here, correctly: another repository's
+# commit, or a placeholder in fixture or example text that was never a citation. It carries
+# the reason instead of a subject, and nothing tries to resolve it.
 #
-# The seven below are the ONLY entries in this file for a citation outside `docs/` — `--record`
-# only scans `docs/`, so these survive a `--record` run (which prunes anything its scan does not
-# re-see) only because none of them is also cited inside `docs/`; if one ever is, `--record` will
-# drop it here and it has to be re-added by hand. `findings()` looks a cited sha up in this whole
-# file regardless of which file cited it, so `external` reaches these non-`docs/` sites too — the
-# mechanism the checker offers for "this will never resolve, and that is correct" (SKEIN-708).
-# Two are genuinely another repository's commit; five are invented placeholders that were never
-# citations at all. `external` is the only exemption the tool has, so both use it.
-
-[citations."abc1234"]
-external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1405 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1658 (SELF_CHECK_DATED's own worked example). SKEIN-708."
-
-[citations."def5678"]
-external = "the other half of src/prwork/perform.rs:1405's invented pair — see `abc1234`. SKEIN-708."
-
-[citations."9c1de07"]
-external = "invented placeholder in src/review/cache.rs:1346's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
-
-[citations."4f2ab1c"]
-external = "the other half of src/review/cache.rs:1346's invented pair — see `9c1de07`. SKEIN-708."
-
-[citations."d2abd03"]
-external = "acme/testbed's own commit, not skein's — src/review/asking.rs:618 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
-
-[citations."e113f18"]
-external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:7 — correct as written; not a commit skein's history will ever carry."
-
-[citations."6e3f703"]
-external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:14 — correct as written; not a commit skein's history will ever carry."
-
-[citations."89cf36b"]
-external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:128 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
+# An `external` entry exempts its sha only in the files its `sites` lists (SKEIN-933). The
+# same sha written anywhere else is checked like any other citation, so a declaration made
+# for one fixture cannot silently cover a new, real citation somewhere nobody was thinking
+# about. A site that no longer cites the sha is reported rather than pruned — the reason is
+# somebody's writing — so a dead exemption is visible instead of permanent: drop the site,
+# and the entry with its last one. `docs/line-cites.toml` is a site wherever it quotes a
+# cited line verbatim.
+#
+# These entries are also the only ones for a citation outside `docs/`. `--record` scans only
+# `docs/` and never prunes an `external` entry, and `findings()` looks a cited sha up in this
+# whole file whichever file cited it (SKEIN-708).
 
 [citations."0018cff"]
 commit = "0018cffcca5bf5539fce422dd97ec1f7c7e204ed"
@@ -107,6 +87,10 @@ commit = "48d2f7c12fb8946f0a3fa65f04bc057ad015a49b"
 subject = "docs(architecture): one warden count, everywhere"
 date = "2026-08-20T12:29:17Z"
 
+[citations."4f2ab1c"]
+external = "the other half of src/review/cache.rs:1346's invented pair — see `9c1de07`. SKEIN-708."
+sites = ["docs/line-cites.toml", "src/review/cache.rs"]
+
 [citations."509373b"]
 commit = "509373b89fd7bf359e835372275503f3daed4360"
 subject = "fix(place): a placed box is addressed by its record, never by its own name"
@@ -132,6 +116,10 @@ commit = "6a4371bf91fedfbed3f93647f680723b17d1ddf9"
 subject = "fix(anchor): the address of a box comes from skein, not from the box"
 date = "2026-08-20T14:47:34Z"
 
+[citations."6e3f703"]
+external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:14 — correct as written; not a commit skein's history will ever carry."
+sites = ["docs/line-cites.toml", "src/store/sync/UPSTREAM.md"]
+
 [citations."7b67ae2"]
 commit = "7b67ae2e73085424786280057cc28b3fe1abf79c"
 subject = "fix(box): wiring the tracker cannot hang the box it is wiring"
@@ -141,6 +129,10 @@ date = "2026-08-22T15:12:00Z"
 commit = "8790d34d0e68b39aa41b64574b899295cd72978a"
 subject = "feat(warden): a flood cannot buy an approval, or block one"
 date = "2026-08-21T11:39:36Z"
+
+[citations."89cf36b"]
+external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:128 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
+sites = ["docs/line-cites.toml", "tests/ui/updatepane.mjs"]
 
 [citations."8ad1ed2"]
 commit = "8ad1ed2ac34b8e96e33b2edcca066e865f8fb6eb"
@@ -161,6 +153,10 @@ date = "2026-08-21T15:51:53Z"
 commit = "94c3426308d392fbee383534da330ad13aaa9e63"
 subject = "fix(anchor): the check travels with the crossing, on both transports"
 date = "2026-08-20T14:58:42Z"
+
+[citations."9c1de07"]
+external = "invented placeholder in src/review/cache.rs:1346's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
+sites = ["docs/line-cites.toml", "src/review/cache.rs"]
 
 [citations."9c3d7bd"]
 commit = "9c3d7bd3afc4fd0ec6b4344028f28cb7070dfa44"
@@ -187,6 +183,10 @@ commit = "a8edef15818a463297d68be8c6d4b16713f74a4a"
 subject = "refactor: lib.rs declares modules and nothing else"
 date = "2026-08-20T14:06:41Z"
 
+[citations."abc1234"]
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1405 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1759 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+sites = ["docs/line-cites.toml", "src/prwork/perform.rs", "tools/prose-check.py"]
+
 [citations."abc6bbb"]
 commit = "abc6bbb89dd5a4dc51c03a7d02f0d44a46714bbc"
 subject = "feat(ai): a review call acts on GitHub as you, and a broken setup stops refusing a commit for ever"
@@ -212,6 +212,10 @@ commit = "d1c078cad9c1e93bf30b23e5f2aef2678f2f0603"
 subject = "fix(isolation): a box sees its own repo, and nothing the sandbox mounts for anyone else"
 date = "2026-08-20T14:29:30Z"
 
+[citations."d2abd03"]
+external = "acme/testbed's own commit, not skein's — src/review/asking.rs:618 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
+sites = ["docs/line-cites.toml", "src/review/asking.rs"]
+
 [citations."dbe2318"]
 commit = "dbe2318f9f3bdba92b2e1e97f949a50fbd4257c6"
 subject = "refactor: delete four more guards on a fleet name that cannot be blank, and stop a fifth living in a fixture"
@@ -222,10 +226,18 @@ commit = "dda3d3bb4dda6309568b4230a80097a9c064731d"
 subject = "refactor(review): the session posts its own review to GitHub, and skein stops keeping one"
 date = "2026-08-27T14:48:33Z"
 
+[citations."def5678"]
+external = "the other half of src/prwork/perform.rs:1405's invented pair — see `abc1234`. SKEIN-708."
+sites = ["docs/line-cites.toml", "src/prwork/perform.rs"]
+
 [citations."df48daa"]
 commit = "df48daab0ebb91481507882247f9eb6f633e8a51"
 subject = "feat(warden): an operation that timed out can be asked about"
 date = "2026-08-21T10:41:44Z"
+
+[citations."e113f18"]
+external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:7 — correct as written; not a commit skein's history will ever carry."
+sites = ["docs/line-cites.toml", "src/store/sync/UPSTREAM.md"]
 
 [citations."e4186f7"]
 commit = "e4186f78aca5f9c0ce73b6e58f93aaff6a839822"

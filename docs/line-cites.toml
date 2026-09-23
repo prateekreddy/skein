@@ -2117,7 +2117,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
-["tools/prose-check.py:1658"]
+["tools/prose-check.py:1759"]
 line = "\"Written long ago. Citations in this document name lines as they stood at `abc1234`.\\n\""
 cited_by = ["docs/citations.toml"]
 
