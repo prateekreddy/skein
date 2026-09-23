@@ -98,9 +98,21 @@ pub struct RuntimeUpdate {
 /// failed, or everything is current. That is deliberate — the bar's job is to speak when there is
 /// something to install, and "skein could not find out" is not something a person can act on.
 pub fn runtime_updates() -> Vec<RuntimeUpdate> {
-    let known = READINGS.known();
-    if READINGS.claim_if_due(std::time::Instant::now()) {
-        std::thread::spawn(|| READINGS.take(std::time::Instant::now, look_for_newer_runtimes));
+    updates_from(&READINGS, look_for_newer_runtimes)
+}
+
+/// [`runtime_updates`] with the store and the check as arguments, the way [`watch_updates`] takes
+/// them — so its test can stand in for both rather than starting the real check. Called cold, the
+/// real one runs `own_sandbox(..).exec` on a thread nobody joins: it crossed through whichever
+/// test's `place::seam` was installed at that moment (SKEIN-1087), and with nothing pinned it
+/// panicked on `config::skein_home`'s guard inside the calling test's captured output (SKEIN-658).
+fn updates_from<C>(readings: &'static Readings, check: C) -> Vec<RuntimeUpdate>
+where
+    C: FnOnce() -> Vec<RuntimeUpdate> + Send + 'static,
+{
+    let known = readings.known();
+    if readings.claim_if_due(std::time::Instant::now()) {
+        std::thread::spawn(move || readings.take(std::time::Instant::now, check));
     }
     known.map(|(_, found)| found).unwrap_or_default()
 }
@@ -542,24 +554,67 @@ mod tests {
     /// board wait on npm.
     ///
     /// A cold call answers "nothing to say" — which is the honest answer, since nothing has been
-    /// checked — and starts the checking behind the caller. Timed rather than asserted structurally
-    /// because the failure is a wait: an inline `npm view` is seconds, and a second is a hundred
-    /// times this bound. That is not a tight measurement and does not need to be.
+    /// checked — and starts the checking behind the caller.
+    ///
+    /// **Through [`super::updates_from`], with a store and a check of its own.** This called
+    /// [`super::runtime_updates`] and timed it against 500ms, which started the REAL check on a
+    /// detached thread: that thread crossed through whatever `place::seam` another test had
+    /// installed (SKEIN-1087), and alone, with `$SKEIN_HOME` unpinned, it panicked on
+    /// `config::skein_home`'s guard. That panic is captured into this test's output, which is shown
+    /// whenever the test fails — so a main thread descheduled past 500ms under `alone-check --jobs
+    /// 8` was reported as the SKEIN-626 guard firing (SKEIN-658). Now the check waits on a gate this
+    /// test holds, so "answered now" is structural — the answer came back while the check had not
+    /// finished — and no bound on the clock is asserted.
+    ///
+    /// The sabotage each assertion was named against:
+    ///
+    /// * *answered before the check finished* — make [`super::updates_from`] call `readings.take`
+    ///   inline instead of on a thread.
+    /// * *finds out later* — stop [`super::Readings::take`] filing what it found.
     #[test]
     fn asking_whether_a_runtime_is_behind_answers_now_and_finds_out_later() {
-        let began = std::time::Instant::now();
-        let said = super::runtime_updates();
-        let took = began.elapsed();
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        static STORE: super::Readings = super::Readings::new();
+        let found = super::RuntimeUpdate {
+            runtime: "claude".into(),
+            have: "1.0.0".into(),
+            latest: "2.0.0".into(),
+        };
+        let (open, gate) = mpsc::channel::<()>();
+        let finished = Arc::new(AtomicBool::new(false));
+        let check = {
+            let (finished, found) = (Arc::clone(&finished), found.clone());
+            move || {
+                // Bounded, so an inline check fails the assertion below rather than hanging.
+                let _ = gate.recv_timeout(Duration::from_secs(10));
+                finished.store(true, Ordering::SeqCst);
+                vec![found]
+            }
+        };
+
+        let said = super::updates_from(&STORE, check);
         assert!(
-            took < Duration::from_millis(500),
-            "reading the update offer took {took:?} — it is doing the network check inline, and \
-             the whole board is polled through it"
+            !finished.load(Ordering::SeqCst),
+            "the update offer was answered only after the check behind it finished — it is doing \
+             the network check inline, and the whole board is polled through it"
         );
-        // Whatever it found (nothing here — no sandbox), it must be a list rather than a refusal:
-        // "skein could not find out" is not something a person can act on, so it is not said.
         assert!(
-            said.len() < 100,
-            "the remembered answer is implausible, so this is not reading what it thinks it is"
+            said.is_empty(),
+            "a cold store answered {said:?}, so this is not reading what it thinks it is"
+        );
+
+        let _ = open.send(());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while STORE.known().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            super::updates_from(&STORE, Vec::new),
+            vec![found],
+            "the check behind the first call finished and the next caller was not told what it \
+             found"
         );
     }
 
@@ -573,8 +628,8 @@ mod tests {
     /// Real time for the tick and a moved clock for the age, for `announce::watch_disk`'s reason:
     /// `spawn_blocking` leaves the runtime idle while the check is in flight, so a paused tokio
     /// clock could run the ticks out from under it. The store is the test's own [`super::Readings`],
-    /// because the process-wide one is also written by a cold [`super::runtime_updates`] in the
-    /// test above. `npm` is stubbed at `place::seam`, the one place the real check crosses into the
+    /// because the process-wide one is also written by the cold [`super::runtime_updates`] inside
+    /// `health::health_report`'s tests. `npm` is stubbed at `place::seam`, the one place the real check crosses into the
     /// sandbox.
     ///
     /// The sabotage each assertion was named against:
@@ -605,9 +660,9 @@ mod tests {
         // npm stubbed where it is actually reached: the version check is a fleet-scope crossing
         // (`own_sandbox(..).exec`), and `place::seam` is where a test stands in for one — a `$PATH`
         // stub would not be, since the crossing runs under a PATH of its own. It does nothing, and
-        // it is not asserted on: the seam is process-wide, and the cold `runtime_updates()` in the
-        // test above takes no lock and crosses from its own thread, so a count here would be that
-        // test's as often as this loop's (it was, in the first gate run).
+        // it is not asserted on: the seam is process-wide, and the cold `runtime_updates()` inside
+        // `health::health_report`'s tests crosses from a thread that outlives their lock, so a count
+        // here could be theirs (the test above's was, in the first gate run, until SKEIN-1087).
         let _npm = crate::place::seam::doing_nothing();
 
         static STORE: super::Readings = super::Readings::new();
