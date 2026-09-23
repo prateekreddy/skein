@@ -35,7 +35,12 @@ jobs:
       # bubblewrap, so the isolation cover is exercised against a real namespace rather than skipped.
       # The test skips with a message where bwrap cannot make one, which keeps a constrained runner
       # green — and that is exactly the outcome this line exists to stop being the normal one.
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # tmux for the same reason: `tests/common/mod.rs`'s REQUIREMENTS lists it for `lib`,
+      # `fleet_launch`, `fleet_move` and `server`, and whether the runner image carries it was
+      # written down nowhere (SKEIN-1094). Installing it makes the question moot rather than
+      # answered. `the_check_job_installs_every_package_the_coverage_job_does` in
+      # `tests/platform_gates.rs` keeps this line from falling behind the coverage job's again.
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
       # Installing bubblewrap is NOT enough, and believing it was cost 27 days of red master.
       # `ubuntu-24.04` ships `kernel.apparmor_restrict_unprivileged_userns=1`, which refuses the
       # unprivileged user namespace bwrap needs. So bwrap installs, runs, and dies — and a guard

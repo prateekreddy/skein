@@ -1384,3 +1384,74 @@ fn the_library_and_the_suite_ask_for_no_skips_with_the_same_variable() {
         common::NO_SKIP
     );
 }
+
+/// What each job in `.github/workflows/ci.yml` installs with `apt-get install`, by job name.
+///
+/// Read as text rather than parsed as YAML, which this crate has no parser for: a job is a
+/// two-space-indented `name:` under `jobs:`, and a package is a word after `apt-get install` up to
+/// the end of that command.
+fn ci_apt_packages() -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let ci = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+    )
+    .expect("the CI workflow");
+    let mut out = std::collections::BTreeMap::new();
+    let mut job: Option<String> = None;
+    let mut in_jobs = false;
+    for line in ci.lines() {
+        if line.starts_with("jobs:") {
+            in_jobs = true;
+            continue;
+        }
+        if in_jobs && line.starts_with("  ") && !line.starts_with("   ") {
+            let name = line.trim().trim_end_matches(':');
+            if line.trim().ends_with(':') && !name.contains(' ') {
+                job = Some(name.to_string());
+                continue;
+            }
+        }
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let (Some(job), Some(rest)) = (&job, line.split("apt-get install").nth(1)) else {
+            continue;
+        };
+        let packages: &mut std::collections::BTreeSet<String> = out.entry(job.clone()).or_default();
+        for word in rest.split_whitespace() {
+            if word == "&&" || word == "||" || word.starts_with(';') {
+                break;
+            }
+            if !word.starts_with('-') {
+                packages.insert(word.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// **The `check` job installs at least what the `coverage` job does** (SKEIN-1094).
+///
+/// The coverage job installs `bubblewrap tmux` so its number is measured where nothing skipped;
+/// `check` is where `noskip-check` runs, and it installed `bubblewrap` alone — so the tmux-dependent
+/// binaries could skip there on a runner image without tmux, and nothing recorded whether the image
+/// had it. Stated as an inclusion rather than as "tmux is on the line", so the next package the
+/// coverage job needs cannot be added to one job and not the other.
+///
+/// **What makes it fail:** the `check` job's apt line without `tmux`, which is how it was.
+#[test]
+fn the_check_job_installs_every_package_the_coverage_job_does() {
+    let jobs = ci_apt_packages();
+    let coverage = jobs
+        .get("coverage")
+        .filter(|p| !p.is_empty())
+        .expect("the coverage job installs nothing with apt, so this compares nothing");
+    let check = jobs
+        .get("check")
+        .expect("no `check` job installs anything with apt");
+    let missing: Vec<&String> = coverage.difference(check).collect();
+    assert!(
+        missing.is_empty(),
+        "the coverage job installs {missing:?} and the check job does not, so the binaries that need \
+         them can skip where noskip-check runs: check has {check:?}, coverage has {coverage:?}"
+    );
+}
