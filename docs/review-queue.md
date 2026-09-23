@@ -120,7 +120,7 @@ cheap here, and the owner has said so explicitly:
 
 ## The summary is decorative, and it should be an input
 
-`src/review.rs` reads a pull request and produces a verdict — a one-line gist, tripwire flags for
+`src/review/` reads a pull request and produces a verdict — a one-line gist, tripwire flags for
 contract changes, whether it needs explaining. The page renders that text beside the row.
 
 Nothing else uses it. A reading that says "routine dependency bump" does not demote the row. A

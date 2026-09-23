@@ -308,9 +308,9 @@ async fn main() {
     // what it cannot do: tell whether a running server ever delivers anything. In the library the
     // same loop is driven at a period a test chooses, against a fixture fleet, and what is left
     // here is the one claim a source read is the right tool for — that something in the server
-    // starts it at all. The relay above is a few file reads on a five-second timer and needs none
-    // of that care, which is why the two do not look the same.
+    // starts it at all. The relay above, a few file reads every five seconds, needs none of that.
     tokio::spawn(skein::announce::watch_fleet_disk());
+    tokio::spawn(skein::fleet::watch_runtime_updates());
     // Keep every running box's GitHub write token ahead of its expiry.
     //
     // An App installation token lives one hour, so this refreshes on a wide margin rather than close

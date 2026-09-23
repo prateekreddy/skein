@@ -146,7 +146,7 @@ box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH"
 # the older copy is genuinely running something else.
 
 # Which cover these bytes apply, stamped in by `fleet::install_launcher` before the script is
-# written into the sandbox — `launcher_revision()` in fleet.rs derives it from this file.
+# written into the sandbox — `launcher_revision()` in fleet/launcher.rs derives it from this file.
 #
 # It is stamped rather than passed on the command line because the two answer different questions.
 # A value skein handed this script at launch would say what SKEIN was running; what anyone needs to
@@ -168,10 +168,10 @@ launcher_revision="@SKEIN_LAUNCHER_REVISION@"
 # stops responding until it is cycled. A bounded cgroup turns the same overshoot into an OOM inside
 # the guilty one, which kills a build.
 #
-# `docker` arrives here too, but as `max/max` — see `fleet_limits` in fleet.rs for why it is named
-# only in order to be left uncapped. Briefly: that cgroup is not just a box's `docker build`, it
-# also holds the sandbox's own init, socat and dockerd, so a ceiling there throttles or kills the
-# machinery that answers `sbx exec` rather than the workload that overshot.
+# `docker` arrives here too, but as `max/max` — see `fleet_limits` in `fleet/limits.rs` for why it
+# is named only in order to be left uncapped. Briefly: that cgroup is not just a box's `docker
+# build`, it also holds the sandbox's own init, socat and dockerd, so a ceiling there throttles or
+# kills the machinery that answers `sbx exec` rather than the workload that overshot.
 #
 # Written on every box start, not once: dockerd recreates its cgroup when the sandbox cycles, and
 # takes any limit written on it along too.
@@ -1882,10 +1882,11 @@ SKEIN_ANCESTOR_MOUNTS
   #   * every OTHER repo's store — its memory, its mailbox, its skills, its boot records;
   #   * every other repo's work tree on the host;
   #   * its own repo's work tree, at all — not read-write, not read-only. It was bound read-only
-  #     for exactly one thing: the gitignored files `shared-paths.txt` names, which skein copies
-  #     into the store on the host now. Nothing else a box does needs the tree its user works in,
-  #     and a box that cannot see it cannot have `core.fsmonitor` in its `.git/config` executed as
-  #     the host user either.
+  #     for exactly one thing: the gitignored files `shared-paths.txt` names, which
+  #     `sandbox-bootstrap.sh` now surfaces out of the store's own `shared-rw/` instead — nothing on
+  #     the host copies them into the store any more. Nothing else a box does needs the tree its
+  #     user works in, and a box that cannot see it cannot have `core.fsmonitor` in its
+  #     `.git/config` executed as the host user either.
   #
   # Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox
   # predates this and passes nothing, and the two wrong guesses are not symmetric: covering with

@@ -31,9 +31,10 @@ reported and nothing more.
 
 WHERE A REFUSAL COMES FROM, AND WHY THAT IS NOT A GUESS. `common::skip` and `testutil::skip` are
 `#[track_caller]`, so the panic names the GUARD's own file and line —
-`SKIPPED at src/fleet.rs:<line>: no box cgroups on this machine to sample`. A site under `src/` is the
-`--lib` binary (`common::LIB`), a site in `tests/<name>.rs` is the `<name>` binary, and anything
-else is attributed to nothing and therefore blocks nothing — said out loud rather than assumed.
+`SKIPPED at src/fleet/resources.rs:<line>: no box cgroups on this machine to sample`. A site
+under `src/` is the `--lib` binary (`common::LIB`), a site in `tests/<name>.rs` is the `<name>`
+binary, and anything else is attributed to nothing and therefore blocks nothing — said out loud
+rather than assumed.
 
 THE ONE THING THAT IS DECLARED HERE, AND WHY IT HAS TO BE. `REQUIREMENTS` says what TOOLS a binary
 needs, and a handful of guards in this tree ask the machine something a tool name cannot express:

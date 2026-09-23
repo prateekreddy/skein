@@ -65,7 +65,7 @@ is specific to working here:
   the whole result set first.
 - `git add -A` swept a running subagent's seven files into an unrelated commit. **Commit by
   explicit path whenever an agent is working in this tree**, and give parallel agents disjoint
-  files — most open work touches `src/fleet.rs`, which makes it a serialisation point.
+  files — most open work touches `src/fleet/`, which makes it a serialisation point.
 
 ## After a browser run, confirm nothing leaked
 

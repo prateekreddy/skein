@@ -2020,7 +2020,7 @@ mod tests {
     /// against a guest that provably never read a byte. It reproduced at 11 failures in 40 runs
     /// under 16 busy loops on 11 CPUs. Nothing about the test's own clock was wrong: its only
     /// wall-clock assertion allows 20s for a 2s deadline, and the 2s belongs to the test, while
-    /// every production caller of `write` passes 30s or 60s (`src/fleet.rs`, `src/sandbox.rs`).
+    /// every production caller of `write` passes 30s or 60s (`src/fleet/`, `src/sandbox.rs`).
     #[test]
     fn a_write_to_a_box_that_never_reads_it_gives_up_instead_of_hanging() {
         let _g = crate::testutil::env_lock();
@@ -3134,7 +3134,7 @@ mod tests {
     /// **The payload a crossing carries rides its stdin, and is nowhere in that process's own
     /// `/proc/<pid>/cmdline`** (SKEIN-813).
     ///
-    /// The property was stated in three places and asserted in none of them: `fleet.rs`'s "the
+    /// The property was stated in three places and asserted in none of them: `fleet/model.rs`'s "the
     /// payload in `ps` … what was in it is the diff of a pull request, private repositories
     /// included", [`Place::attempt`]'s own "a pipe … is also not `/proc/<pid>/cmdline`", and
     /// SKEIN-706's done-when. What guarded it was that `model_call_script` no longer takes a

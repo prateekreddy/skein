@@ -232,12 +232,14 @@ grep -cE '(innerHTML|textContent) *= *[^;]*(could not|couldn|fail|error|not read
 grep -rcE 'Response::fault\(|Err\(format!' warden/src/*.rs | awk -F: '{s+=$2} END {print s}'   # 41
 grep -cE 'error|failed|refus'        src/board.rs                                     # 7
 grep -rnE 'Err\((format!\(|")'       src/*.rs | wc -l                                 # 200
-grep -n  'eprintln!'                 src/fleet.rs | awk -F: '$1<8589' | wc -l         # 34
+for f in src/fleet/*.rs; do awk '/^#\[cfg\(test\)\]/{exit} /eprintln!/{c++} END{print c+0}' "$f"; done \
+  | awk '{s+=$1} END{print s}'                                                         # 37
 ```
 
-**465 candidate sites.** The 200 split 146 `format!` and 54 literal, and the two patterns are
+**468 candidate sites.** The 200 split 146 `format!` and 54 literal, and the two patterns are
 disjoint. The `src/*.rs` glob is flat, so `src/bin/` is excluded from it automatically and counted
-separately above; `src/fleet.rs`'s test module begins at line 8589, which is what the `awk` bounds.
+separately above; the `awk` bound on the fleet count is each file's own `#[cfg(test)]` line now
+that `src/fleet.rs` is `src/fleet/` (SKEIN-934) — one cut per file rather than one line number.
 
 191 of those 200 are outside `#[cfg(test)]`. They are not all rows: the test applied was *the
 function is `pub`, and its `Err` is either returned to `main` in `src/bin/skein.rs`, which prints

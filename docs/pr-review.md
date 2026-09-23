@@ -99,7 +99,7 @@ The box's fix, adopted verbatim because it is better than the alternative consid
 > `finding.sha == head`, and on mismatch the next step is READ again, not POST.
 
 This is nearly free, because the tree already works this way and for the same reason.
-`review.rs` caches every reading against `(number, head_sha)`, and says so:
+`src/review/cache.rs` caches every reading against `(number, head_sha)`, and says so:
 
 > That key is not an optimisation: it is the same fact that decides whether your review still counts
 > in `crate::prq`, so a PR that gains a commit gets a fresh summary and a fresh place in your queue
@@ -251,7 +251,7 @@ fetched newest-first with `createdAt` and a `totalCount`. The reporting box also
 keeps returning to: the two ask different things of a person. Stale means *re-read a diff*; replied
 means *read a claim and go verify a commit that may live on another branch*.
 
-This is also where `review.rs`'s existing rule lands, and it lands exactly right:
+This is also where `src/review/`'s existing rule lands, and it lands exactly right:
 
 > **AI may only add scrutiny, never remove it.** A PR skein has not actually read stays at full
 > attention and says so. A summary can only ever lower depth by **succeeding**, never by failing
@@ -851,7 +851,7 @@ default."*). It ships off everywhere and is switched on per repo by hand. The ot
 |---|---|
 | `src/workflow/` | the added conditions and actions; `next` itself unchanged |
 | `src/prwork/` | `facts_of` gains the reviewer fields under §7's rules; the sweep gains a reviewer pass |
-| `src/review.rs` | `Read` calls the existing critique; the existing cache is the finding store |
+| `src/review/` | `Read` calls the existing critique; the existing cache is the finding store |
 | `src/prq/write.rs` | `submit_review_with_comments` is the post, unchanged |
 | `workflows.json` | reviewer flows beside author flows, same file, same shape |
 
@@ -873,7 +873,7 @@ thing that decides can be shown to be right."*
    demonstrably alive; 3b changed nothing about what `Read` means, which is why it was a
    substitution behind it rather than a prerequisite for it.
 
-   **3b is for every reading, not only the engine's.** The owner's call, and it is `review.rs`'s own
+   **3b is for every reading, not only the engine's.** The owner's call, and it is `src/review/`'s own
    rule rather than a preference: that module fought hardest against having a second reader, and a
    box for the engine alone would have been exactly that. So the pane's "read it" button opens a box
    too, gated on `read_prs` and not on `auto_review` — a person pressing a button has asked for the
@@ -894,7 +894,7 @@ thing that decides can be shown to be right."*
    is the per-repo set; `workflow::Cond::ChecksOwed` and `Cond::ChecksSettled` are the guard;
    `prwork::audit_now` is the step, and `review::audit_owed` is what it spends.
 
-   **The audit is a turn in the reading's own conversation, not a second reading.** `review.rs`
+   **The audit is a turn in the reading's own conversation, not a second reading.** `src/review/`
    fought hardest against a second reader, and an audit that stood the change up again and asked a
    fresh model would be one — with the added defect of not knowing what the first reader had already
    said. `sweep` had already settled the shape: a `Turn::Resuming` on the same machine, resending

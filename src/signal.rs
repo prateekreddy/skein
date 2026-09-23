@@ -481,7 +481,7 @@ impl Signal {
             // `source::Source::forks` is where that arithmetic lives, and `tests/board_cost.rs`
             // sums it rather than spelling a total.
             Signal::FleetDisk => Cost::free(
-                "one walk of the fleet root, src/fleet.rs `local_disk_usage` — the same single \
+                "one walk of the fleet root, src/fleet/disk.rs `local_disk_usage` — the same single \
                  pass `du -sxm <root>/*/` made, with no process to make it",
             ),
             Signal::FleetLiveness => Cost::free(

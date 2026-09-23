@@ -558,7 +558,7 @@ skein's files or signal it; neither side's relationship to `sudo` changes.
 
 `snapshot_box` — a git bundle plus two patches plus an ignored-file sweep — **has no production
 caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`archive_script` and
-`restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting.
+`restore_script` in `src/fleet/resize.rs`), which is why it demands 1.2× the box size free before starting.
 `box_archive`'s doc comment records the move away from reconstruction: *"the reconstruction is
 slower, less faithful, and it is where the fragility lives."* (Cited by name, not by line: the line
 number here drifted twice, by thousands of lines each time, before anybody noticed — and parity's
@@ -943,14 +943,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:1915`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:1923`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:1916`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:1924`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:1890`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:1891`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*

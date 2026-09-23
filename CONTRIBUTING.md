@@ -160,7 +160,7 @@ three integration binaries were resting on the fallback when the guard went in.
 It read that a guard here would fail ~29 readers who interpolate the root into a string they never
 act on, for a hazard none of them has, and that "nothing will stop you". Something stops you now.
 The premise did not survive being measured: the readers that never act on the string cost one line
-each to pin — `src/fleet.rs` already pinned the variable in 95 places — while the ones that DO act
+each to pin — `src/fleet/` already pinned the variable in dozens of places — while the ones that DO act
 on it were found by damage, six times, one at a time. Five tests installed uncommitted code onto
 the owner's live fleet (SKEIN-530); `tests/server.rs` spawned a real `skein-server` whose
 `heal_fleet` rewrote `/boxes/.skein/box-session.sh`, the launcher every real box starts through,
@@ -352,7 +352,7 @@ at all for `src/fleet.rs`, whose test module opens with a shell fixture full of 
 gate saw none of them:
 
 ```sh
-grep -c 'set_var\|remove_var' src/fleet.rs     # → 183
+grep -rc 'set_var\|remove_var' src/fleet/*.rs | awk -F: '{s+=$2} END{print s}'     # → 234
 ```
 
 ### The gate that is not in CI: every test alone

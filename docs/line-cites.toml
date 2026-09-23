@@ -20,10 +20,6 @@
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:561"]
-line = "`restore_script` in `src/fleet.rs`), which is why it demands 1.2× the box size free before starting."
-cited_by = ["docs/prose-symbols.toml"]
-
 ["docs/architecture.md:1750"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
@@ -620,36 +616,8 @@ cited_by = ["docs/recovery-survey.md"]
 line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:858"]
-line = "share_paths=(\".cargo\" \".rustup\" \".npm\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:884"]
-line = "overlay_paths=(\".local\")"
-cited_by = ["docs/threat-model.md"]
-
 ["src/box-session.sh:1128"]
 line = "merge_login \"$mine\" \"$canon\""
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:1328"]
-line = "data[\"crossSessionInbound\"] = \"accept\""
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:1351"]
-line = "[ -e \"$HOME/$rel\" ] && binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:1388"]
-line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:1405"]
-line = "binds+=(--bind \"$home/.local/state\" \"$HOME/.local/state\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:1430"]
-line = "&& binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:1712"]
@@ -657,59 +625,51 @@ line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1759"]
-line = "binds+=(--tmpfs \"$fleet_root_dir\")"
-cited_by = ["docs/threat-model.md"]
-
 ["src/box-session.sh:1802"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1867"]
-line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:1890"]
+["src/box-session.sh:1891"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1915"]
+["src/box-session.sh:1916"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 
-["src/box-session.sh:1923"]
+["src/box-session.sh:1924"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1979"]
+["src/box-session.sh:1980"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1980"]
+["src/box-session.sh:1981"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2043"]
+["src/box-session.sh:2044"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2168"]
+["src/box-session.sh:2169"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2237"]
+["src/box-session.sh:2238"]
 line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2600"]
+["src/box-session.sh:2601"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2650"]
+["src/box-session.sh:2651"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2691"]
+["src/box-session.sh:2692"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1815,15 +1775,15 @@ cited_by = ["docs/review-ux.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:727"]
+["tests/common/mod.rs:730"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:765"]
+["tests/common/mod.rs:768"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:779"]
+["tests/common/mod.rs:782"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 

@@ -399,9 +399,12 @@ impl Scratch {
     /// `<root>/<prefix>-<pid>`, emptied first so a re-run in the same process starts clean.
     ///
     /// The pid suffix is the convention the sweep below reads, so it is applied here rather than
-    /// spelled at each call site. Prefixes are each file's own and are deliberately unchanged:
-    /// the leaked-process gate greps `ps` for `skein-fleet-it-` and `skein-move-it-`, and renaming
-    /// them would turn that count into a zero that means nothing.
+    /// spelled at each call site. Prefixes are each caller's own, and this function is deliberately
+    /// excluded from `tests/ui/harness/leaks.mjs`'s derivation: it reads the fixture prefixes it
+    /// scans for out of the `Scratch::boxes("…")` / `Scratch::temp("…")` call sites themselves, and
+    /// `prefix` here is a variable rather than a literal, so there is nothing for it to derive at
+    /// this line. Renaming a call site's literal moves what the check matches; it refuses to run
+    /// rather than silently matching zero when it derives nothing at all (SKEIN-647).
     pub fn at(root: impl AsRef<Path>, prefix: &str) -> Scratch {
         let root = root.as_ref().to_path_buf();
         sweep_abandoned(&root);
