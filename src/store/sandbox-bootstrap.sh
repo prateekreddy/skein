@@ -71,7 +71,7 @@ vmid="${vmid//\//-}"
 # `--clone` mode bind-mounts that tree read-only at /run/sandbox/source. A fleet box has no such
 # mount (one sandbox, many repos) and cannot reach the tree at all — and nothing on the host copies
 # the manifest's files into the store for it either: the two calls that did went with local-path
-# repos, and src/fleet.rs records why at the point they were removed ("a repo is a remote now, no
+# repos, and src/fleet/start.rs records why at the point they were removed ("a repo is a remote now, no
 # checkout is reachable from inside the fleet, and the pair had already been reduced to printing a
 # warning that the files had not arrived"). What a fleet box surfaces is whatever its store already
 # holds under shared-rw/. So this is a fallback, and an EMPTY answer is an ordinary state rather
@@ -168,9 +168,10 @@ if [ -f "$manifest" ]; then
     # host checkout. RO stops meaning "edits fail" and starts meaning "edits do not reach the host".
     if [ "$flag" = "rw" ] || [ "$source_is_ro" = "0" ]; then
       rwcopy="$rw_root/$p"
-      # Usually already there: skein seeds the store from the source tree on the host. This copies
-      # only what the host could not — a box whose store predates that, or a runtime skein did not
-      # start — and does nothing at all when there is no source tree to read.
+      # Usually already there from an earlier box on this repo: this is the seed, run from inside
+      # the box against the read-only `$source_tree` bind — nothing on the host seeds `shared-rw/`
+      # any more. Idempotent, so a settled store just skips it, and it does nothing at all when
+      # there is no source tree to read.
       if [ ! -e "$rwcopy" ] && [ -d "$source_tree" ]; then
         mkdir -p "$(dirname "$rwcopy")" 2>/dev/null || true
         [ -e "$source_tree/$p" ] && cp -a "$source_tree/$p" "$rwcopy" 2>/dev/null
