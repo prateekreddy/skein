@@ -312,10 +312,11 @@ fn a_box_cannot_plant_a_hook_or_status_line_its_siblings_claude_runs() {
              siblings' Claude runs was NOT exercised",
         );
     }
-    if !common::have("jq") || !common::have("tmux") || !common::have("git") {
+    // The kit refuses to provision a box without either (its `tools_ok`).
+    if !common::have("jq") || !common::have("tmux") {
         return skip(
-            "no jq, tmux or git here, and the kit refuses to provision a box without the first \
-             two, so whether a box can plant a setting its siblings' Claude runs was NOT exercised",
+            "no jq or no tmux here, and the kit refuses to provision a box without both, so whether \
+             a box can plant a setting its siblings' Claude runs was NOT exercised",
         );
     }
     // A: the plugin's defaults at $1, then the store at $2. One line per attempt.
