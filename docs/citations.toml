@@ -125,11 +125,6 @@ commit = "7b3901498f59bf140368af3ab9f90880ede9a149"
 subject = "refactor(fleet,skein,fleet_move): the host stops installing the cockpit, and publishing its port becomes a recipe a person runs (SKEIN-576)"
 date = "2026-09-07T08:33:43Z"
 
-[citations."7b67ae2"]
-commit = "7b67ae2e73085424786280057cc28b3fe1abf79c"
-subject = "fix(box): wiring the tracker cannot hang the box it is wiring"
-date = "2026-08-22T15:12:00Z"
-
 [citations."8790d34"]
 commit = "8790d34d0e68b39aa41b64574b899295cd72978a"
 subject = "feat(warden): a flood cannot buy an approval, or block one"
@@ -138,11 +133,6 @@ date = "2026-08-21T11:39:36Z"
 [citations."89cf36b"]
 external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:128 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
 sites = ["docs/line-cites.toml", "tests/ui/updatepane.mjs"]
-
-[citations."8ad1ed2"]
-commit = "8ad1ed2ac34b8e96e33b2edcca066e865f8fb6eb"
-subject = "feat(review): a pull request you opened is read, and reviewed on the same call"
-date = "2026-08-25T09:28:11Z"
 
 [citations."8d7206c"]
 commit = "8d7206c614d515aa810490c489324267596469a7"
@@ -162,11 +152,6 @@ date = "2026-08-20T14:58:42Z"
 [citations."9c1de07"]
 external = "invented placeholder in src/review/cache.rs:1357's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/review/cache.rs"]
-
-[citations."9c3d7bd"]
-commit = "9c3d7bd3afc4fd0ec6b4344028f28cb7070dfa44"
-subject = "fix(fleet): a door that lost its stamp is repaired by the next box start"
-date = "2026-08-25T05:19:52Z"
 
 [citations."9d1ddf5"]
 commit = "9d1ddf5839f74b719a4d7622bfc8943cf52685a6"
@@ -201,11 +186,6 @@ date = "2026-08-27T13:13:48Z"
 commit = "bedc3fe4db3479ea290f7438994a11d59cf0ae0a"
 subject = "refactor(repos): a URL repo has a mirror and no checkout, and the field says so"
 date = "2026-08-21T05:09:29Z"
-
-[citations."c7f8bf06"]
-commit = "c7f8bf06a09245f836c78a9ebfad99be373b5e0b"
-subject = "feat(diff): measure against the remote base, inside the box; retire the radar"
-date = "2026-08-03T08:27:28Z"
 
 [citations."cbdf21c"]
 commit = "cbdf21c0a1ae344b72fc6705fecde12a63966050"
@@ -243,11 +223,6 @@ date = "2026-08-21T10:41:44Z"
 [citations."e113f18"]
 external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:7 — correct as written; not a commit skein's history will ever carry."
 sites = ["docs/line-cites.toml", "src/store/sync/UPSTREAM.md"]
-
-[citations."e4186f7"]
-commit = "e4186f78aca5f9c0ce73b6e58f93aaff6a839822"
-subject = "fix(review): the spending limit counts spending, not requests"
-date = "2026-08-23T12:12:13Z"
 
 [citations."e688ad7"]
 commit = "e688ad72f665f40d91f51eb93f7b927c4f0484ac"

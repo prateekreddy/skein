@@ -1,4 +1,4 @@
-// ---- the keyboard's state (SKEIN-151/159, docs/review-ux.md §6) -------------------------------
+// ---- the keyboard's state (SKEIN-151/159, docs/parity.md §3) ----------------------------------
 // Selection is a PR NUMBER — an rk key, never an index (§6 focus rule 1): an index drifts off the
 // row you are looking at every time a summary lands or a lane re-sorts. `revSelAt` remembers where
 // that key sat in nav order at the last render, so a selected row that LEAVES the list can hand
@@ -252,7 +252,7 @@ function revAct(repo, number, kind) {
   revHold(key, p);
 }
 
-// --- SKEIN-162: hold, undo, fire — feedback where the eye is (docs/review-ux.md §7.1) ----------
+// --- SKEIN-162: hold, undo, fire — feedback where the eye is (docs/parity.md §3) ---------------
 
 /// Start (or replace) the undo window for one PR's act. The timer is global, not the reading
 /// view's: closing the reading or moving to another PR during the countdown must NOT silently
@@ -443,7 +443,7 @@ if (typeof revpane !== "undefined" && revpane && revpane.addEventListener) {
   document.addEventListener("selectionchange", () => setTimeout(revRenderFlush, 0));
 }
 
-// ---- the keyboard, dispatched (SKEIN-151/159, docs/review-ux.md §6) ---------------------------
+// ---- the keyboard, dispatched (SKEIN-151/159, docs/parity.md §3) ------------------------------
 //
 // WHICH key means WHAT is shortcutFor's REVIEW table in cockpit/src/keys.mjs — one table, one
 // guard, tested in node; this switch is the only place a review key is acted on. Two of the three
@@ -1039,7 +1039,7 @@ function revStackRunHtml(st) {
 // and stop control — and left the progress exactly where it had always been: `revStackRunHtml`,
 // reached only from `revStackSteps`, which draws only for the stack that is OPEN. Opening is
 // exclusive (`toggleRevStack` sets `revOpen = new Set([key])` and clears `revStackOpenKey`,
-// docs/review-ux.md §2.5), so the owner's sentence was half answered — "the ladder stack was
+// docs/parity.md §3), so the owner's sentence was half answered — "the ladder stack was
 // running read all and when I clicked the read all for other stack, I can't see the read all
 // progress in ladder stack". The run survives now; it was simply off screen while he looked at the
 // other one, and the collapsed row said "you are at step 2 of 18 · review from the bottom" whether
@@ -1091,7 +1091,7 @@ function revStackRow(st) {
 
 // Whose move a STEP is — the row's own question, plus the one only a stack can ask. A step that
 // needs you but sits on a base you have not reviewed cannot be reviewed yet, and `.mv.blocked`
-// (docs/review-ux.md §4) and `REV_MOVE_WORDS.blocked` were both written for exactly that and had
+// (docs/parity.md §3) and `REV_MOVE_WORDS.blocked` were both written for exactly that and had
 // no caller: the one thing that makes a stack dangerous — reviewing step 7 before step 3 — was the
 // one state the mark could not take.
 //
@@ -1162,7 +1162,7 @@ function toggleRevRow(key) {
   // Looking at it IS the acknowledgement (SKEIN-333). Cleared here rather than on a timer, so the
   // mark survives however long the reader is away and goes the moment they arrive.
   revUpdated.delete(key);
-  // Exclusive (docs/review-ux.md §2.5): opening a row closes every other row and any open stack.
+  // Exclusive (docs/parity.md §3): opening a row closes every other row and any open stack.
   revOpen = new Set([key]);
   revStackOpenKey = null;
   revStackStep = null;

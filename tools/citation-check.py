@@ -77,7 +77,7 @@ WHAT THIS DOES NOT COVER, AND WILL NOT
   * A citation that points at a REAL and RECORDED commit which is nevertheless the wrong one for
     the sentence around it. Nothing mechanical can read the sentence. The ledger reduces this to
     "the author and the reviewer looked at it once, on the diff that added it".
-  * A sha written without backticks. `docs/UX-AUDIT.md:259` names Hacker News item 44594584, which
+  * A sha written without backticks. An audit once in `docs/` named Hacker News item 44594584, which
     is eight valid hex digits, and scanning outside backticks would report it forever. Every one of
     the 54 citations in `docs/` today is a whole backtick span, so requiring the backticks costs
     nothing and removes the entire false-positive class.
@@ -142,7 +142,7 @@ evidence, for whoever takes it on. SKEIN-708 is that work."""
 # A CITATION IS A BACKTICK SPAN THAT IS NOTHING BUT THE HASH. Both halves of that were measured
 # rather than assumed, and the second half is the one that earns its keep.
 #
-# The backticks remove an entire false-positive class: `docs/UX-AUDIT.md:259` names Hacker News
+# The backticks remove an entire false-positive class: an audit once in `docs/` named Hacker News
 # item 44594584, which is eight valid hex digits sitting in ordinary prose, and any scan that read
 # bare text would report it for ever.
 #

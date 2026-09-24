@@ -4,7 +4,7 @@
 // bar you pressed → loadReview(true) → 2-4s of network → the whole pane rebuilds → the row still
 // reads "you have not reviewed this". No undo, and a refusal was a toast that disappeared.
 //
-// The contracts, against the real functions lifted out of index.html (docs/review-ux.md §7.1):
+// The contracts, against the real functions lifted out of index.html (docs/parity.md §3):
 //   * pressing a verdict posts NOTHING — the bar collapses in place to `✓ approved · undo · 8s`;
 //   * undo inside the window cancels a request that never left the machine;
 //   * the window's lapse posts exactly once, with the payload assembled at press time;

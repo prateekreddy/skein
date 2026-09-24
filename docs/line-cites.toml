@@ -2003,10 +2003,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:233"]
-line = "function openReview(repoId) {"
-cited_by = ["docs/review-ux.md"]
-
 ["src/web/app/review.js:336"]
 line = "let landed = false;"
 cited_by = ["docs/recovery-survey.md"]
@@ -2014,10 +2010,6 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/web/app/review.js:464"]
 line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
 cited_by = ["docs/recovery-survey.md"]
-
-["src/web/app/review.js:470"]
-line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
-cited_by = ["docs/review-ux.md"]
 
 ["src/web/app/review.js:553"]
 line = "const n = { draft: 0, conflicted: 0 };"
@@ -2141,14 +2133,6 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/web/v2.html:515"]
 line = "said(\"makesaid\", body.error || `it was not accepted (${answer.status})`, \"warm\");"
 cited_by = ["docs/recovery-survey.md"]
-
-["src/web/vendor/cockpit.js:409"]
-line = "// What a key means when nothing owns the focus. `null` is \"not a shortcut\"."
-cited_by = ["docs/review-ux.md"]
-
-["src/web/vendor/cockpit.js:416"]
-line = "Enter: \"open\","
-cited_by = ["docs/review-ux.md"]
 
 ["src/workflow/facts.rs:47"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"

@@ -76,7 +76,7 @@ const KEYMAP = [
     [["l"], "load by box — which one is using the CPU"],
     [["/"], "filter the board by name, branch, repo or headline"],
   ]},
-  // The review pane's map (SKEIN-151/159, docs/review-ux.md §6). The three deliberate absences
+  // The review pane's map (SKEIN-151/159, docs/parity.md §3). The three deliberate absences
   // are LISTED, not omitted: a key sheet that silently lacks `m` reads as a sheet that forgot it.
   { sec:"Review — the queue", items:[
     [["j","k"], "move the selection (inside an open stack, along its steps)"],

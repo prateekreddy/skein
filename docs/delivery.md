@@ -3,11 +3,11 @@
 Companion to `docs/architecture.md`, which is the destination. This is how to get there without
 destroying a working tool on the way.
 
-**`docs/live-check.md` is the other companion**: what no test on a developer's machine can answer,
-because it needs a real sandbox — the door, the cover over the mounted volume, the disk figures, the
-warden's record, and the dry run to read before the merge train is switched on. Everything landed
-here is proven against the fake-sbx harness and against real `bwrap` where the question was a mount;
-that page is the residue, written as commands with what a failure would mean.
+**§7 is what no test on a developer's machine can answer**, because it needs a real sandbox — the
+door, the cover over the mounted volume, the disk figures, the warden's record, and the dry run to
+read before the merge train is switched on. Everything landed here is proven against the fake-sbx
+harness and against real `bwrap` where the question was a mount; §7 is the residue, written as
+commands with what a failure would mean.
 
 **On the commit hashes below.** They are how this plan says a step landed, so they have to resolve:
 `git cat-file -e <hash>` is the check, and it is not enough on its own — an object can survive in a
@@ -685,3 +685,50 @@ skipped-files report.
 - **The warden protocol**: transport, auth, versioning, idempotency keys. The current in-sandbox agent
   already learned this — an agent from before versions existed answers with its name alone, and that
   is protocol 1.
+
+## 7. What only a live fleet can answer
+
+Everything above is proven against the fake-sbx harness, and against real `bwrap` where the
+question is a mount. What is left needs a real sandbox, so it is written as checks a person runs
+once after a rebuild: the command, what a pass looks like, and **what a failure means**, because
+half of these fail in a way that looks like something else. `skein doctor | head -1` first — every
+check is a claim about some build, and twice they have been pinned on the wrong one.
+
+1. **The cockpit's door is open before any box exists.** Inside the sandbox, `ss -ltnp | grep
+   :7878` names `server-doorway.py` on a fleet that has only been created. *Failure means* the port
+   stood free for an interval after create, and the first box to bind it in that interval becomes
+   the cockpit and is handed the fleet token (architecture §9.4) — the one failure here that is a
+   security failure rather than an inconvenience. An upgrade must keep the same socket: re-running
+   `bootstrap.sh` (or `-USR1` to the doorway) leaves its pid and its listening descriptor unchanged,
+   and an open tab reconnects on the same URL. And the door comes back by itself: after `kill -9` of
+   the doorway, the published port refuses for well under a second and then answers. A
+   `skein-server` still holding :7878 with no doorway above it means `PR_SET_PDEATHSIG` did not take
+   in that image; nothing on the port for two seconds or more means the supervisor's delay is not
+   conditional in that shell.
+2. **A squatter is refused, not published to.** Bind :7878 from inside a box, then create a fleet or
+   call `fleet::cockpit_port_advice`: it refuses, names architecture §9.4, and prints no `sbx ports
+   … --publish` line. *Failure means* the check was a TCP connect, which a squatter accepts exactly
+   as the doorway does. skein publishes nothing itself (SKEIN-576), and undoing a mapping is a line a
+   person runs.
+3. **The volume a serving fleet mounts is covered.** From inside any ordinary box (the workshop box
+   is exempt by design), `cat "$SKEIN_HOME/api-token"`, `ls "$SKEIN_HOME/credentials"` and `ls
+   "$SKEIN_HOME/github-pats"` all fail, while the box's own store, checkout and git token still
+   read — check one in the same breath, so a pass means "covered" rather than "broke everything".
+   *Failure means* the fleet predates the cover or the launcher in the sandbox is stale; a box that
+   can read `credentials/` is the fleet. Recreate the fleet, or at least restart every box.
+4. **The disk figure names the filesystem that is full.** `skein doctor | grep -A1 "fleet disk"`
+   names both filesystems with their percentages, and past 85% names what to clear on each. Compare
+   with `du -sxm` over the boxes and `df -Pm /` in the sandbox: a disagreement larger than a box's
+   churn means the in-fleet walk measures something `du` does not.
+5. **The warden's record is off the volume.** On the host, the audit log and outcomes are under
+   `~/.skein-warden/` and the warden directory under `$SKEIN_HOME` holds the secret and nothing else.
+   *Failure means* the record sits where the thing being audited can rewrite it. And skein and the
+   warden each read their own environment: point one at a volume with `SKEIN_HOME` and not the
+   other, and every request is refused for a mismatched secret, which reads as a broken warden
+   rather than as a disagreement — skein then prompts for each privileged command instead.
+6. **Turn state is attributed to its box.** A running box's `<store>/status/<box>.pane.json` carries
+   `"box":"<that box>"`. An observation without one is accepted on purpose, so a box on an older
+   probe does not go dark, but it is not checked either.
+7. **Read the merge train before switching it on.** With `pr_workflows` off, the workflows pane
+   already shows what the train *would* do — the front pull request, its step, everyone behind it,
+   and anything stopped with the reason. Agree with it, then turn it on.

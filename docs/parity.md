@@ -221,6 +221,49 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - Archive; review counts.
 - **Standing module notes**, including the freshness model: each note records the commit its module
   was at, and a stale note is never used.
+- **The review pane's own interaction rules** (SKEIN-151/154/159/162, SKEIN-288). These were
+  argued in a UX review of 23 August 2026 against a fixture of twenty-nine pull requests; the review
+  was a dated working note and has left the repository, and what it settled is here, because the
+  code cites it. Each rule names where it lives.
+  - **The keyboard.** While the review pane has the dock, `REVIEW` in `cockpit/src/keys.mjs` is
+    consulted *instead of* `FLEET`, and a miss does not fall through: a fleet key pressed behind the
+    pane would move a selection the reader cannot see, which is data-loss-shaped with a composer
+    open. `j`/`k` walk rows, `n`/`N` walk rows not yet decided, `→` enters a stack and `←`/`Esc`
+    leave it one level at a time, `↵`/`o` open the row (`rev-open`), `e` sets aside, `u` undoes,
+    `/` searches, and `g h` is the only route to GitHub. `c`, `r`, `]` and `[` addressed hunks and
+    files in the reading view that CKP-7 removed (§7); they stay bound, each answering with a
+    sentence that names the chip or key that took the job (SKEIN-568), because being in `REVIEW` is
+    what keeps them out of `FLEET`.
+  - **Three deliberate absences.** `m` (merge) is unbound: it is the one act this pane cannot undo,
+    so it is a chip behind a confirm that names the head sha (`revAct`, SKEIN-365). `a` is bound
+    and refuses out loud: *no verdict from a surface that is not showing you the change*, and a
+    collapsed row shows none — the verdict chips are drawn in the row's body (`revVerdictHtml`).
+    `o` means "open it here", as it does on the board; leaving the product is `g h`.
+  - **A verdict's feedback lands where the eye is** (SKEIN-162). A press is held for eight seconds
+    by `revPending` and its receipt is painted into the row itself by `revPendingPaint` — not a
+    toast in a far corner. The row is marked in place and does not vanish, because a row vanishing
+    from a list being walked by keyboard loses the reader's place; `u` inside the window cancels it;
+    a verdict GitHub refused stays on screen with its reason rather than disappearing, because a
+    verdict that silently did not land is the worst thing this surface can produce. Set-aside
+    follows the same shape: grey in place, undoable, gone on the next load.
+  - **One open row.** Opening a row closes every other row and any open stack
+    (`src/web/app/review-keys.js`). Unbounded expansion grew the pane's scroll height by three
+    quarters over five opens and survived every refetch.
+  - **The move mark says whose move it is, and nothing else.** Your move is the only lit mark in
+    the column; `.mv.blocked` is a stack step whose base you have not reviewed, found by branch name
+    and not by position; red CI is said once for the repo rather than on twenty-five rows. The age
+    column is shown because it is the sort key — a queue sorted by a field it does not display
+    cannot be audited.
+  - **A queue that could not be refreshed keeps its remembered copy** (SKEIN-154). `loadReview`'s
+    failure path shows the last queue `revSeen` holds, marks it `remembered`, and does not write it
+    back there, because a failure is not an answer; `.revwrap.notlive` dims it, and the dimming is how a
+    reader tells at a glance that it is not live. One repo of several failing never reaches this
+    path: it is a `.revfail` line above the rows the other repos still fill.
+  - **"Clear" is a claim, made only about queues that were read** (SKEIN-154/245). `revClearHtml`
+    draws the calm screen for the your-move lane only when nothing has narrowed it; `revUnasked`
+    decides what the headline may say. A repo whose queue is switched off arrives in
+    `MergedQueue::skipped` and reads *skein did not ask about …*, a repo whose queue failed reads
+    *skein could not read …*, and an unasked repo shows `—` where a count would be, never `0`.
 
 ## 4. Box and fleet management
 

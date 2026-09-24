@@ -1721,7 +1721,7 @@ function rowWorld() {
   // SKEIN-251. This fixture already had the row that proves it — #200, committed 72h ago and
   // touched 30 seconds ago — and asserted only the ORDER, so the divergence was baked in as
   // correct: the row sorted second of three while its age cell read `1m`, above rows reading `4d`.
-  // The one column docs/review-ux.md §4 puts on the row so the order can be AUDITED was the one
+  // The one column docs/parity.md §3 puts on the row so the order can be AUDITED was the one
   // that made it unauditable, and the amber three-day mark was applied to the wrong number too.
   //
   // Asserted through the real `revRail` — the board world stubs `revRow` past it, and the claim is
