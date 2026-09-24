@@ -34,9 +34,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { REPORT_CAP, environOf, fixturePrefixes, fixtureRegex, quiesceOnExit }
+import { REPORT_CAP, environOf, fixturePrefixes, fixtureRegex, processes, quiesceOnExit, sighting }
   from "./harness/leaks.mjs";
-import { boxlikeNamespace, harness } from "./lift.mjs";
+import { boxlikeNamespace, freshFixture, harness } from "./lift.mjs";
 
 const { check, done } = harness();
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -2032,5 +2032,73 @@ const marker = capped.match(/… (\d+) more/);
 check("and it prints the cap exactly, and says how many rows it skipped",
   { rows: rowsOf(capped).length, skipped: marker && Number(marker[1]) },
   { rows: REPORT_CAP, skipped: owned.length - REPORT_CAP });
+
+// --- a SIGKILLed run's supervisor loop, and the next run's `freshFixture` (SKEIN-1133) ---------
+// The owner is a process of its own, so it can be killed the way no handler survives: SIGKILL. It
+// makes its fixture the way `freshFixture` does — `<prefix>-<its pid>-XXXXXX` — and starts in it
+// what `fleet::start_server` starts: a detached tmux server on a socket inside the fixture, holding
+// a `while [ -f <fixture>/.skein/server-doorway.py ]` loop that restarts its child. Killed and
+// reaped, its pid is gone and the loop, being tmux's, is not. The next `freshFixture` over the same
+// root must end the loop and keep the fixture.
+//
+// What makes each check fail: `freshFixture` not calling `endAbandoned` (the loop is still there
+// ten seconds on), and `freshFixture` removing a fixture something was running out of (it is gone).
+// The loop is ended by hand after the measurements, so a red here is not itself a leak. Its child
+// is a thirty-second sleep standing in for the doorway, which does not exit while it holds its
+// socket: with a shorter one, deleting the fixture would end the loop by itself inside the window,
+// and the second check would pass for a `freshFixture` that ended nothing — measured, not argued.
+if (spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0) {
+  console.log("skipped: the SKEIN-1133 sweep check needs tmux, and this machine has none");
+} else {
+  const sweepRoot = mkdtempSync(path.join(os.tmpdir(), "skein-leakcheck-sweep-"));
+  const ownerScript = `d=$(mktemp -d "$1/ui-sweepdead-$$-XXXXXX") || exit 1
+mkdir -p "$d/.skein" && : > "$d/.skein/server-doorway.py" || exit 1
+tmux -S "$d/server.tmux" new-session -d -s skein-server \\
+  "while [ -f '$d/.skein/server-doorway.py' ]; do sleep 30; sleep 0.1; done" || exit 1
+echo "$d"
+exec sleep 400`;
+  const owner = spawn("sh", ["-c", ownerScript, "sh", sweepRoot],
+    { stdio: ["ignore", "pipe", "ignore"] });
+  const exited = new Promise(r => owner.once("exit", r));
+  const dead = await new Promise(resolve => {
+    let out = "";
+    owner.stdout.on("data", chunk => {
+      out += chunk;
+      if (out.includes("\n")) resolve(out.split("\n")[0].trim());
+    });
+    owner.once("exit", () => resolve(out.split("\n")[0].trim()));
+  });
+  quiesceOnExit(dead ? [dead] : []);
+  const sleepMs = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const underIt = () => processes().filter(p => sighting(p, `${dead}/`));
+  const isLoop = p => p.args.includes("while [ -f");
+  const waitFor = (wantLoop, ms) => {
+    const until = Date.now() + ms;
+    for (;;) {
+      const found = underIt();
+      if (found.some(isLoop) === wantLoop || Date.now() >= until) return found;
+      sleepMs(20);
+    }
+  };
+  const before = waitFor(true, 5000);
+  owner.kill("SIGKILL");
+  await exited;
+  const orphaned = waitFor(true, 0);
+  freshFixture(sweepRoot, "ui-sweepdead");
+  const after = waitFor(false, 10000);
+  let kept = false;
+  try { kept = statSync(dead).isDirectory(); } catch {}
+
+  try { rmSync(path.join(dead, ".skein", "server-doorway.py"), { force: true }); } catch {}
+  spawnSync("tmux", ["-S", path.join(dead, "server.tmux"), "kill-server"], { stdio: "ignore" });
+
+  check("a SIGKILLed run's supervisor loop was running before the sweep, and outlived its owner",
+    { before: before.some(isLoop), orphaned: orphaned.some(isLoop) },
+    { before: true, orphaned: true });
+  check("the next freshFixture ends it, and nothing is left running out of the dead fixture",
+    after.map(p => p.args), []);
+  check("and keeps the dead run's fixture as the evidence", kept, true);
+  try { rmSync(sweepRoot, { recursive: true, force: true }); } catch {}
+}
 
 done();

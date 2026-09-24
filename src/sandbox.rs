@@ -488,26 +488,41 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
 
 // ---------- step 7: rationed, lazy AI enrichment (subscription `claude -p`, no API key) ----------
 
+/// What a batch Continue did with each box it was given: every name lands in exactly one list.
+#[derive(Debug, Default, PartialEq)]
+pub struct BatchOutcome {
+    pub resumed: Vec<String>,
+    pub held: Vec<String>,
+    /// Each box that did not continue, with the reason in [`resume_box`]'s own words, or
+    /// "not a box name" for one that is not a valid name at all (SKEIN-1137).
+    pub failed: Vec<(String, String)>,
+}
+
 /// Resume several paused boxes in one gesture (step 6). When AI is enabled (step 7), each box is run
 /// past [`ai_says_hold`] first; any the model flags as a genuine decision are HELD (not auto-resumed)
-/// and returned so the cockpit can route you to them. Returns (resumed, held). With AI off this
-/// resumes every (valid) box — the heuristic already restricted the set to `proceed`.
-pub fn resume_batch(names: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut resumed = Vec::new();
-    let mut held = Vec::new();
+/// and returned so the cockpit can route you to them. With AI off this resumes every (valid) box —
+/// the heuristic already restricted the set to `proceed`.
+///
+/// A box that did not continue is returned with its reason rather than dropped (SKEIN-1137). It used
+/// to keep only the `Ok` names, so the cockpit could say which boxes did not continue but never why,
+/// though `resume_box`'s error already said — down to the log to read.
+pub fn resume_batch(names: &[String]) -> BatchOutcome {
+    let mut out = BatchOutcome::default();
     for name in names {
         if !valid_name(name) {
+            out.failed.push((name.clone(), "not a box name".into()));
             continue;
         }
         if ai_says_hold(name) == Some(true) {
-            held.push(name.clone());
+            out.held.push(name.clone());
             continue;
         }
-        if resume_box(name, "").is_ok() {
-            resumed.push(name.clone());
+        match resume_box(name, "") {
+            Ok(()) => out.resumed.push(name.clone()),
+            Err(why) => out.failed.push((name.clone(), why)),
         }
     }
-    (resumed, held)
+    out
 }
 
 /// The shell command that stops a box, when something has said what one is.
@@ -2432,9 +2447,10 @@ mod tests {
         env::remove_var("SKEIN_REPO");
 
         env::set_var("SKEIN_AI", "on");
-        let (resumed, held) = resume_batch(&["box-route".to_string(), "box-decide".to_string()]);
-        assert_eq!(resumed, vec!["box-route".to_string()]); // ROUTINE → continued
-        assert_eq!(held, vec!["box-decide".to_string()]); // DECISION → held for the human
+        let out = resume_batch(&["box-route".to_string(), "box-decide".to_string()]);
+        assert_eq!(out.resumed, vec!["box-route".to_string()]); // ROUTINE → continued
+        assert_eq!(out.held, vec!["box-decide".to_string()]); // DECISION → held for the human
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
 
         // The resumed row's log is inside the fixture, which is the property that was false: it
         // used to land in the real home, and only the real home. Asserted on the *resumed* row

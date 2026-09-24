@@ -269,11 +269,15 @@ fn quiesce_fixture(root: &Path) {
 /// at all (SKEIN-687). A scanner reading only `cmdline` passes every other assertion here and sees
 /// nothing.
 ///
-/// **The ghost is an ordinary child of this test, and that is deliberate.** [`fixture_processes`]
-/// exempts a live descendant because it is about to SIGKILL what it finds; the sweep exempts nobody
-/// because it is about to DELETE what it finds, and deleting the directory out from under a process
-/// is the same harm whoever owns it. A ghost that daemonized to `ppid=1` would exercise a weaker
-/// claim than this one does.
+/// **The ghost is an ordinary child of this test, and that is deliberate.** The sweep's DELETE
+/// exempts nobody, because deleting the directory out from under a process is the same harm whoever
+/// owns it — so the directory is kept. Its KILL (SKEIN-1133) exempts anything that hangs off a live
+/// process outside the fixture, and this ghost hangs off this test — so the ghost is left running,
+/// and that is asserted too. A ghost that daemonized to `ppid=1` would be ended, which is
+/// [`a_sweep_ends_the_loop_a_sigkilled_run_left_and_keeps_its_fixture`]'s half.
+///
+/// **And a breadcrumb keeps nothing.** A second process names the quiet directory only as `OLDPWD`
+/// — where it has been, not what it uses (SKEIN-990) — and the quiet directory must still go.
 #[test]
 fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it() {
     // A root of this test's own. `sweep_abandoned` memoises per ROOT, so a shared one would answer
@@ -316,6 +320,30 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
         .spawn()
         .expect("a process to haunt the dead run's fixture with");
     let ghost_pid = ghost.id();
+    // Standing somewhere else, with the quiet directory only as the place it `cd`ed from.
+    let mut breadcrumb = Command::new("sleep")
+        .arg("400")
+        .current_dir(root)
+        .env("OLDPWD", &quiet)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a process that has only passed through the quiet directory");
+    // Polled, because until the child has `exec`ed, its `environ` is still the forked copy of this
+    // process's, which carries no such variable.
+    let carries = |pid: u32| {
+        fs::read(format!("/proc/{pid}/environ"))
+            .map(|env| {
+                env.split(|b| *b == 0)
+                    .any(|var| var == format!("OLDPWD={}", quiet.display()).as_bytes())
+            })
+            .unwrap_or(false)
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !carries(breadcrumb.id()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let breadcrumb_carries_it = carries(breadcrumb.id());
 
     // Every observation is taken BEFORE the ghost is ended, and every assertion AFTER — so a failing
     // assertion unwinds past nothing that had to happen. This is the `Scratch` lesson applied to a
@@ -327,8 +355,11 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
     let haunted_survived = haunted.exists();
     let quiet_swept = !quiet.exists();
     let panic_kept_swept = !kept_by_a_panic.exists();
+    let ghost_survived = matches!(ghost.try_wait(), Ok(None));
     let _ = ghost.kill();
     let _ = ghost.wait();
+    let _ = breadcrumb.kill();
+    let _ = breadcrumb.wait();
 
     assert!(
         haunting.iter().any(|(pid, _)| *pid == ghost_pid),
@@ -342,6 +373,19 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
         "something is already running out of {}, so its removal below would prove nothing about \
          the empty case: {beside_it:#?}",
         quiet.display()
+    );
+    assert!(
+        breadcrumb_carries_it,
+        "the breadcrumb process does not carry OLDPWD={}, so the quiet directory's removal below \
+         says nothing about whether a breadcrumb keeps a directory",
+        quiet.display()
+    );
+    assert!(
+        ghost_survived,
+        "the sweep ended pid {ghost_pid}, a child of this LIVE test that only carries the dead \
+         run's path in its environment. What the sweep may end is what hangs off nothing alive \
+         outside the fixture; this one hangs off the test, and a sweep that kills it will kill a \
+         sibling test's child, or a shell somebody opened in a kept fixture to read it"
     );
     assert!(
         quiet_was_there && quiet_swept,
@@ -374,5 +418,125 @@ fn a_sweep_keeps_a_dead_runs_fixture_while_anything_is_still_running_out_of_it()
          that notice with a directory and no orphan to attribute it to: {:#?}",
         haunted.display(),
         kept[0].1
+    );
+}
+
+/// **A run that was SIGKILLed leaves a supervisor loop, and the next sweep ends it and keeps the
+/// fixture** (SKEIN-1133).
+///
+/// The owner here is a process of its own, because the case is one no `Drop` reaches: a test
+/// process killed outright — a gate run killed mid-`test`, a cargo timeout. It makes its fixture
+/// the way `Scratch` does, `<prefix>-<its pid>`, and starts in it what `fleet::start_server`
+/// starts: a detached tmux server on a socket inside the fixture, holding a
+/// `while [ -f <fixture>/.skein/server-doorway.py ]` loop that restarts its child. Then it is
+/// SIGKILLed and reaped, so its pid is out of `/proc` — and the loop, being tmux's and not the
+/// owner's, is still going. That is SKEIN-1019's state.
+///
+/// **Presence, then absence.** The loop is asserted to be running, and to have outlived its owner,
+/// before the sweep is asked to do anything; otherwise an empty count afterwards would be about a
+/// loop that was never there.
+///
+/// **What makes each assertion fail:**
+///
+/// * the loop still running after the sweep: `common::end_abandoned` returning without ending
+///   anything, which is `sweep_abandoned` as SKEIN-900 left it. Every scan in the window finds the
+///   tmux server and the loop, and the assertion names them.
+/// * the fixture kept: `sweep_abandoned` removing the directory once its processes are ended.
+///
+/// Whatever the outcome, the loop is ended by hand after the measurements and before the
+/// assertions, so a failure here does not leave the very leak it is about.
+#[test]
+fn a_sweep_ends_the_loop_a_sigkilled_run_left_and_keeps_its_fixture() {
+    if !have("tmux") {
+        return skip("this machine has no tmux, so it cannot run a fixture's supervisor loop");
+    }
+    let scratch = Scratch::temp("skein-sweep-owner");
+    let root = scratch.path();
+
+    // `$1` is the root; the fixture is named with the owner's own pid, `$$`, which is still its
+    // pid after the `exec`. The loop's child is a thirty-second sleep standing in for the doorway,
+    // which does not exit while it holds its socket — so the loop cannot end by finding its script
+    // gone within the window below, and only a kill can end it there. Bounded, so a failure here
+    // cannot leave it running for ever.
+    let owner_script = r#"d="$1/skein-sweep-owned-$$"
+mkdir -p "$d/.skein" && : > "$d/.skein/server-doorway.py" || exit 1
+tmux -S "$d/server.tmux" new-session -d -s skein-server \
+  "while [ -f '$d/.skein/server-doorway.py' ]; do sleep 30; sleep 0.1; done" || exit 1
+echo "$d"
+exec sleep 400"#;
+    let mut owner = Command::new("sh")
+        .args(["-c", owner_script, "sh"])
+        .arg(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the fixture's owner");
+    let fixture = {
+        use std::io::BufRead;
+        let mut line = String::new();
+        let out = owner.stdout.take().expect("the owner's stdout");
+        std::io::BufReader::new(out)
+            .read_line(&mut line)
+            .expect("the owner says where its fixture is");
+        PathBuf::from(line.trim())
+    };
+    let sock = fixture.join("server.tmux");
+    let is_loop = |argv: &str| argv.contains("while [ -f");
+    let wait_for = |want_loop: bool, within: Duration| {
+        let deadline = Instant::now() + within;
+        loop {
+            let found = common::processes_under(&fixture);
+            let has_loop = found.iter().any(|(_, argv)| is_loop(argv));
+            if has_loop == want_loop || Instant::now() >= deadline {
+                return found;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    let before = wait_for(true, Duration::from_secs(5));
+    let _ = owner.kill(); // SIGKILL: nothing of the owner's runs after this, no `Drop`, no trap
+    let _ = owner.wait();
+    let orphaned = wait_for(true, Duration::from_millis(0));
+    let owner_gone = !Path::new(&format!("/proc/{}", owner.id())).exists();
+
+    let kept = common::sweep_abandoned(root);
+    // Bounded: the sweep's own rounds are three seconds at most, and this is well past them.
+    let after = wait_for(false, Duration::from_secs(10));
+    let fixture_kept = fixture.is_dir();
+
+    // The measurements are taken; end the loop whatever they say, so a failure below is not a leak.
+    let _ = fs::remove_file(fixture.join(".skein/server-doorway.py"));
+    let _ = Command::new("tmux")
+        .arg("-S")
+        .arg(&sock)
+        .arg("kill-server")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    assert!(
+        before.iter().any(|(_, argv)| is_loop(argv)),
+        "the owner's supervisor loop never showed up under {}, so its absence below would prove \
+         nothing: {before:#?}",
+        fixture.display()
+    );
+    assert!(
+        owner_gone && orphaned.iter().any(|(_, argv)| is_loop(argv)),
+        "the loop did not outlive its SIGKILLed owner (owner gone: {owner_gone}), so this is not \
+         the state SKEIN-1019 was in: {orphaned:#?}"
+    );
+    assert!(
+        !after.iter().any(|(_, argv)| is_loop(argv)) && after.is_empty(),
+        "the sweep ran over a fixture whose owner was dead and {} process(es) were still running \
+         out of it ten seconds later — the supervisor loop a SIGKILLed test leaves behind, \
+         restarting its child for as long as nobody deletes the directory: {after:#?}",
+        after.len()
+    );
+    assert!(
+        fixture_kept && kept.iter().any(|(dir, _)| *dir == fixture),
+        "the sweep removed {} — the owner chose to keep a dead run's fixture as its evidence and \
+         end only what it left running (SKEIN-1133). Kept: {kept:#?}",
+        fixture.display()
     );
 }

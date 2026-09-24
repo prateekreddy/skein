@@ -172,7 +172,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/boxes.rs:603"]
+["src/bin/skein-server/boxes.rs:619"]
 line = "\"ok\": false,"
 window = "serde_json::json!({\u000b\"ok\": false,\u000b\"resumed\": resumed,"
 cited_by = ["docs/recovery-survey.md"]
@@ -1642,43 +1642,43 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"resume exited {}{}; see {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:534"]
+["src/sandbox.rs:549"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:551"]
+["src/sandbox.rs:566"]
 line = "// No placement record, and so no box of skein's to stop. The answer is the one"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:560"]
+["src/sandbox.rs:575"]
 line = "return Err(format!(\"stop failed (exit {code}): {}\", err.trim()));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:605"]
+["src/sandbox.rs:620"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:733"]
+["src/sandbox.rs:748"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:759"]
+["src/sandbox.rs:774"]
 line = "// Same as `stop_box`: no placement record means there is no box here to tear down, and the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:766"]
+["src/sandbox.rs:781"]
 line = "return Err(format!(\"teardown failed (exit {code}): {}\", err.trim()));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:985"]
+["src/sandbox.rs:1000"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:999"]
+["src/sandbox.rs:1014"]
 line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2153,15 +2153,15 @@ cited_by = ["docs/review-ux.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:737"]
+["tests/common/mod.rs:944"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:775"]
+["tests/common/mod.rs:982"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:789"]
+["tests/common/mod.rs:996"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 

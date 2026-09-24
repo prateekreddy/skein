@@ -557,12 +557,20 @@ pub(super) async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json
 /// confirmed a list of named boxes. A box that `resume_batch` neither resumed nor held is one it
 /// skipped or failed to resume, and it is named, because "some of them did not" leaves the person
 /// to work out which by opening every one.
+///
+/// **And each one is named with its reason** (SKEIN-1137), in `resume_box`'s own words: "not
+/// running", or the resume log to read. Naming the box without the reason still left the person to
+/// open it and find out, which is the half of the work the sentence exists to save.
 fn batch_answer(
     names: &[String],
-    outcome: Result<(Vec<String>, Vec<String>), String>,
+    outcome: Result<skein::sandbox::BatchOutcome, String>,
 ) -> serde_json::Value {
-    let (resumed, held) = match outcome {
-        Ok(pair) => pair,
+    let skein::sandbox::BatchOutcome {
+        resumed,
+        held,
+        failed,
+    } = match outcome {
+        Ok(out) => out,
         Err(why) => {
             return serde_json::json!({
                 "ok": false,
@@ -577,6 +585,8 @@ fn batch_answer(
             })
         }
     };
+    // Still derived from what was ASKED, not from `failed`: a box the batch dropped without a word
+    // is exactly the case SKEIN-1132 was about, and it must not read as accounted for.
     let not_continued: Vec<&String> = names
         .iter()
         .filter(|n| !resumed.contains(n) && !held.contains(n))
@@ -586,12 +596,18 @@ fn batch_answer(
             "ok": true, "resumed": resumed, "held": held, "not_continued": [],
         });
     }
-    let listed: Vec<&str> = not_continued.iter().map(|n| n.as_str()).collect();
+    let listed: Vec<String> = not_continued
+        .iter()
+        .map(|n| match failed.iter().find(|(name, _)| name == *n) {
+            Some((_, why)) => format!("{n}: {why}"),
+            None => n.to_string(),
+        })
+        .collect();
     let mut error = format!(
-        "{} of {} did not continue: {}",
+        "{} of {} did not continue — {}",
         not_continued.len(),
         names.len(),
-        listed.join(", ")
+        listed.join(" · ")
     );
     if !resumed.is_empty() {
         error.push_str(&format!(" · continuing {}", resumed.len()));
@@ -670,7 +686,14 @@ mod tests {
         );
         assert_eq!(failed["not_continued"], serde_json::json!(asked));
 
-        let partial = batch_answer(&asked, Ok((names(&["alpha"]), names(&["gamma"]))));
+        let partial = batch_answer(
+            &asked,
+            Ok(skein::sandbox::BatchOutcome {
+                resumed: names(&["alpha"]),
+                held: names(&["gamma"]),
+                failed: vec![("beta".into(), "resume exited 1".into())],
+            }),
+        );
         assert_eq!(
             partial["ok"], false,
             "a box that was neither continued nor held read as a success"
@@ -683,7 +706,14 @@ mod tests {
         );
         assert_eq!(partial["held"], serde_json::json!(["gamma"]));
 
-        let whole = batch_answer(&asked, Ok((names(&["alpha", "beta"]), names(&["gamma"]))));
+        let whole = batch_answer(
+            &asked,
+            Ok(skein::sandbox::BatchOutcome {
+                resumed: names(&["alpha", "beta"]),
+                held: names(&["gamma"]),
+                failed: vec![],
+            }),
+        );
         assert_eq!(
             whole["ok"], true,
             "every box continued or held, and the batch was reported as a failure: {whole}"
@@ -691,6 +721,126 @@ mod tests {
         assert!(
             whole.get("error").is_none(),
             "a success carried an error: {whole}"
+        );
+    }
+    /// **Each box that did not continue is followed by its reason, in the owner's shape**
+    /// (SKEIN-1137): `<n> of <m> did not continue — <box>: <reason> · … · continuing N`.
+    ///
+    /// The expected sentence is the owner-approved example, character for character, so a change
+    /// to the separator, the dash or the order of the tails is a change to approved wording and
+    /// fails here first.
+    ///
+    /// **What would make this fail:** formatting `not_continued` by name alone, as before this
+    /// item — the sentence then reads `beta · gamma` and loses both reasons; or joining the
+    /// entries with `, ` as the names used to be.
+    #[test]
+    fn a_box_that_did_not_continue_is_named_with_its_reason() {
+        let asked = names(&["alpha", "beta", "gamma"]);
+        let answer = batch_answer(
+            &asked,
+            Ok(skein::sandbox::BatchOutcome {
+                resumed: names(&["alpha"]),
+                held: vec![],
+                failed: vec![
+                    (
+                        "beta".into(),
+                        "box \"beta\" is not running; attach/start it before resuming".into(),
+                    ),
+                    ("gamma".into(), "not a box name".into()),
+                ],
+            }),
+        );
+        assert_eq!(
+            answer["error"],
+            "2 of 3 did not continue — beta: box \"beta\" is not running; attach/start it before \
+             resuming · gamma: not a box name · continuing 1"
+        );
+        assert_eq!(
+            answer["not_continued"],
+            serde_json::json!(["beta", "gamma"])
+        );
+    }
+
+    /// **A resume that fails inside the batch carries its own reason all the way to the answer the
+    /// page toasts** (SKEIN-1137) — driven through the route, over the real `resume_batch` and
+    /// `resume_box`, with one box's resume sabotaged to exit 3.
+    ///
+    /// Four boxes, one per way a name can end: `thing-up` continues; `thing-sab` is running but its
+    /// resume command exits 3, so its reason is `resume_box`'s "resume exited 3 …; see <log>";
+    /// `thing-down` is stopped, so its reason is "not running"; `../bad` is no box name at all.
+    ///
+    /// **What would make this fail:** `resume_batch` keeping only the `Ok` names again (as it did
+    /// before this item) — `thing-sab` and `thing-down` then reach the sentence bare and the
+    /// `contains` below names which reason went missing; or skipping an invalid name silently,
+    /// which drops `../bad: not a box name`.
+    #[test]
+    fn a_sabotaged_resume_says_why_in_the_batch_answer() {
+        let _env = super::super::env_lock();
+        let home = super::super::scratch_dir("1137");
+        let registry = home.join("sandboxes.json");
+        std::fs::write(
+            &registry,
+            r#"{"thing-up":{"branch":"a","dir":"/d","lastSeen":"","status":"waiting"},
+               "thing-sab":{"branch":"b","dir":"/d","lastSeen":"","status":"waiting"},
+               "thing-down":{"branch":"c","dir":"/d","lastSeen":"","status":"waiting"}}"#,
+        )
+        .unwrap();
+        let mut env = super::super::review::review_routes::env_pins();
+        env.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", &home)
+            .set("SKEIN_REGISTRY", &registry)
+            .set("SKEIN_SHARED", "")
+            .set("SKEIN_REPO", "")
+            .set("SKEIN_AI", "off")
+            .set(
+                "SKEIN_LS_CMD",
+                r#"printf '%s\n' '{"name":"thing-up","agent":"claude","status":"running"}' '{"name":"thing-sab","agent":"claude","status":"running"}' '{"name":"thing-down","agent":"claude","status":"stopped"}'"#,
+            )
+            // The sabotage: this one box's resume exits 3, the others succeed.
+            .set("SKEIN_RESUME_CMD", "test {name} != thing-sab || exit 3");
+        // The library's `sbx ls` gate remembers an answer for a moment outside its own tests, and
+        // this binary is outside them; a sibling's fleet must not stand in for this one.
+        skein::sbx::forget_fleet_boxes();
+
+        let asked = names(&["thing-up", "thing-sab", "thing-down", "../bad"]);
+        let answer = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a tokio runtime for this test's body")
+            .block_on(api_resume_batch(Json(BatchReq {
+                names: asked.clone(),
+            })))
+            .0;
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(
+            answer["resumed"],
+            serde_json::json!(["thing-up"]),
+            "{answer}"
+        );
+        let why = answer["error"].as_str().unwrap_or_default();
+        assert!(
+            why.starts_with("3 of 4 did not continue — "),
+            "the count or the dash is not the approved shape: {why}"
+        );
+        assert!(
+            why.contains("thing-sab: resume exited 3") && why.contains("resume.log"),
+            "the sabotaged resume's own reason, and the log it names, did not reach the answer: \
+             {why}"
+        );
+        assert!(
+            why.contains(
+                "thing-down: box \"thing-down\" is not running; attach/start it before resuming"
+            ),
+            "the stopped box's reason did not reach the answer: {why}"
+        );
+        assert!(
+            why.contains("../bad: not a box name"),
+            "an invalid name was dropped rather than named: {why}"
+        );
+        assert!(
+            why.ends_with(" · continuing 1"),
+            "the continuing tail is gone: {why}"
         );
     }
 }

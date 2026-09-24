@@ -452,6 +452,108 @@ export function quiesce() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// ending what a DEAD run left running
+// ---------------------------------------------------------------------------------------------
+
+/** End what a dead run left running out of `dir`, **and only what can be attributed to it**
+ * (SKEIN-1133). Returns `{ running, ended }`: every process that named `dir` when this was asked,
+ * and the pids it ended. The directory is not touched — the caller decides that.
+ *
+ * [`quiesceOnExit`] stops a run's processes on every way out of it that runs a handler, and a
+ * SIGKILLed node runs none: a suite killed by its timeout leaves `fleet::supervised`'s
+ * `while [ -f <fixture>/…/server-doorway.py ]` loop restarting a python with nothing left to stop
+ * it. `freshFixture` in `lift.mjs` is the next thing that looks at that fixture, so it calls this
+ * for each fixture whose maker is gone. It is `tests/common/mod.rs::end_abandoned` for this tier,
+ * and the rules are the same ones for the same reasons:
+ *
+ *   1. every tmux server whose socket is inside `dir` is told to end — it is the only thing that
+ *      reaches a pane that `exec`ed away every name it had;
+ *   2. then every process that names `dir` — argv, environment without `OLDPWD`, or cwd — is
+ *      SIGKILLed by pid, in rounds, **only when the topmost process of its tree below init also
+ *      names `dir`**, and never this process or one of its ancestors.
+ *
+ * Rule 2's first half is the SKEIN-990 lesson turned round. `ppid == 1` cannot say a run has gone,
+ * because a fixture's tmux is parentless from its first second; that is settled here by the maker's
+ * pid, before this is called. What is asked instead is whether anything ALIVE outside the fixture
+ * still holds the process: a shell somebody opened in a kept fixture to read it, or another lane's
+ * process with this path in an inherited variable, tops out at a terminal or an agent's tmux and is
+ * left alone. And `OLDPWD` is where a process has BEEN — the breadcrumb that took this file red over
+ * another lane's tmux — so it is no grounds for a kill.
+ *
+ * Synchronous, for [`processes`]'s reason. Never a pattern kill. */
+export function endAbandoned(dir) {
+  const needle = dir.replace(/\/+$/, "");
+  const names = text => {
+    for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+      const next = text[at + needle.length];
+      if (next === undefined || !/[\w.-]/.test(next)) return true;
+    }
+    return false;
+  };
+  const cwdOf = pid => {
+    try {
+      return readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      return "";
+    }
+  };
+  const naming = () => processes().filter(p => p.pid !== process.pid && (names(p.args)
+    || (p.envState === "read" && p.envVars.some(v => !v.startsWith("OLDPWD=") && names(v)))
+    || names(cwdOf(p.pid))));
+  const running = naming();
+  if (!running.length) return { running, ended: [] };
+
+  for (const sock of socketsUnder(needle, 6)) {
+    try {
+      execFileSync("tmux", ["-S", sock, "kill-server"], { stdio: "ignore", timeout: 5000 });
+    } catch {
+      /* no server on it, or it would not answer; the scan below is the fallback */
+    }
+  }
+  const mine = new Set(ancestry());
+  const ended = new Set();
+  for (let round = 0; round < 3; round++) {
+    const found = naming();
+    const pids = new Set(found.map(p => p.pid));
+    const doomed = found.filter(p => !mine.has(p.pid) && pids.has(topOf(p.pid)));
+    if (!doomed.length) break;
+    for (const { pid } of doomed) send(pid, "SIGKILL", ended);
+    pause(300);
+  }
+  return { running, ended: [...ended] };
+}
+
+/** The topmost ancestor of `pid` below init, or `null` when the walk cannot finish — which the
+ * caller reads as "do not touch it". */
+function topOf(pid) {
+  let at = pid;
+  for (let i = 0; i < 64; i++) {
+    const parent = parentOf(at);
+    if (parent === null || !Number.isInteger(parent)) return null;
+    if (parent <= 1) return at;
+    at = parent;
+  }
+  return null;
+}
+
+/** Every unix socket under `dir`, to `depth` levels, not following links. */
+function socketsUnder(dir, depth) {
+  const found = [];
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isSocket()) found.push(path);
+    else if (entry.isDirectory() && depth > 0) found.push(...socketsUnder(path, depth - 1));
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------------------------------------
 // the check: names read out of the code that creates the fixtures
 // ---------------------------------------------------------------------------------------------
 
