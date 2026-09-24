@@ -973,6 +973,13 @@ mod tests {
             kit.claude("skein").is_symlink() && kit.claude("settings.local.json").is_file(),
             "the kit put neither of the two things it excludes into .claude"
         );
+        fs::create_dir_all(kit.claude("skills/new")).unwrap();
+        fs::write(kit.claude("skills/new/SKILL.md"), "a new skill\n").unwrap();
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "?? .claude/skills/\n",
+            "a contributor's new skill is hidden, or something of skein's is listed"
+        );
         assert_eq!(
             kit.exclude(),
             [
@@ -981,13 +988,6 @@ mod tests {
                 "/.claude/settings.local.json"
             ],
             "the clone's exclude is not what skein put in .claude"
-        );
-        fs::create_dir_all(kit.claude("skills/new")).unwrap();
-        fs::write(kit.claude("skills/new/SKILL.md"), "a new skill\n").unwrap();
-        assert_eq!(
-            kit.git(&["status", "--porcelain"]),
-            "?? .claude/skills/\n",
-            "a contributor's new skill is hidden, or something of skein's is listed"
         );
     }
 
@@ -1011,22 +1011,27 @@ mod tests {
             kit.store,
             "the kit did not link the store"
         );
-        assert_eq!(kit.exclude(), ["/.claude"]);
         assert_eq!(
             kit.git(&["status", "--porcelain"]),
             "",
             "the store's link is listed"
         );
+        assert_eq!(kit.exclude(), ["/.claude"]);
     }
 
     /// **Every `.claude` or `$HOME` path the guide skein writes into a box names is there, in both
     /// layouts and for both runtimes** (SKEIN-1050).
     ///
     /// The guide is the kit's own output, read back from the runtime's instruction file after the
-    /// kit ran. A path is every backticked token starting `.claude` or `$HOME/`; a bare `name/`
+    /// kit ran. A path is every backticked token starting `.claude`, `$HOME/` or the fleet root
+    /// every box is passed (`${SKEIN_FLEET_ROOT:-/boxes}/`, read as this fixture's); a bare `name/`
     /// after a backticked directory on the same line is read inside it, which is how the guide
     /// named the store's folders until SKEIN-1050 ("under `.claude`: `memory/` …"). Other paths,
     /// such as `docs/decisions/`, are the repository's to have or not, so they are not asked about.
+    ///
+    /// The mailbox it names is the plugin's read-only copy, not the store's `skein/bin/`, which a
+    /// sibling box can rewrite: `plugin_probe_scripts_are_every_script_a_hook_runs` holds the
+    /// guide's script to that, because the guide is one of the plugin's scripts.
     ///
     /// What would make it fail: the guide naming `.claude/mailbox/` or `.claude/memory/` again,
     /// which a repo that ships its own `.claude/` does not have (case 2); a path misspelt, in
@@ -1059,6 +1064,10 @@ mod tests {
                         }
                         let path = if let Some(rest) = token.strip_prefix("$HOME/") {
                             Some(kit.home.join(rest))
+                        } else if let Some(rest) =
+                            token.strip_prefix("${SKEIN_FLEET_ROOT:-/boxes}/")
+                        {
+                            Some(kit.root.join(rest.split(' ').next().unwrap()))
                         } else if token.starts_with(".claude") {
                             let path = token.split(' ').next().unwrap();
                             dir = Some(path);

@@ -479,14 +479,14 @@ echo "status [$(git status --porcelain | tr '\n' ' ')]"
             original,
             "settings-defaults.json, which a sibling's start reads, is not the one skein installed"
         );
+        assert!(
+            ran.is_empty(),
+            "the sibling's Claude runs a setting another box planted: {ran:?}"
+        );
         assert_eq!(
             started.trim(),
             "kit 0\nstatus []",
             "the sibling's start failed, or left its tree dirty"
-        );
-        assert!(
-            ran.is_empty(),
-            "the sibling's Claude runs a setting another box planted: {ran:?}"
         );
         // And B's start worked: skein's own defaults are in its local settings.
         let local: serde_json::Value = serde_json::from_str(
