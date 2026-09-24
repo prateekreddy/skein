@@ -368,8 +368,10 @@ Module: {module}
         module = module,
         body = body,
     );
-    let text = claude_oneshot_with(&prompt, Some("claude-sonnet-5"), Duration::from_secs(240))
-        .ok_or("no note came back — the model call failed or timed out.")?;
+    let text = crate::ai::as_site(crate::ai::Site::ModuleNote, || {
+        claude_oneshot_with(&prompt, Some("claude-sonnet-5"), Duration::from_secs(240))
+    })
+    .ok_or("no note came back — the model call failed or timed out.")?;
     let doc = Doc {
         path: module.to_string(),
         sha,

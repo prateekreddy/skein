@@ -225,3 +225,68 @@ test("a failed request is said in the panel rather than shown as no spend", () =
   assert.match(visible(html), /could not read the fleet&#39;s usage: 404/);
   assert.ok(!html.includes("$0.00"), html);
 });
+
+// ── skein's own reading (SKEIN-1074, SKEIN-1076) ────────────────────────────────────────────────
+// The words below are the owner's, approved under SKEIN-1075, and are asserted verbatim: a string
+// that drifts from the signed-off text fails here rather than shipping.
+const OWN = {
+  cost: 41.2, tokens: 9800000, calls: 212,
+  sites: [
+    { site: "S1", cost: 3.1, tokens: 900000, calls: 150 },
+    { site: "S3", cost: 38.1, tokens: 8900000, calls: 62 },
+  ],
+  readings: { finished: 38, unfinished: 4, cost: 35.72, tokens: 8071200,
+              per_finished: 0.94, tokens_per_finished: 212400 },
+  tracker_connected: false,
+  unlabelled_in_boxes: true,
+};
+
+test("skein's own reading is its own section, above By box", () => {
+  // Fails if the section is dropped, renamed, or drawn below the boxes it must not be mistaken for.
+  const html = visible(usageHtml({ ...READING, own: OWN }, NOW, esc));
+  const own = html.indexOf("skein's own reading</div>");
+  assert.ok(own > 0, "the section heading is not on screen");
+  assert.ok(own < html.indexOf("By box"), "the section is not above By box");
+  assert.match(html, /skein's own reading<\/span>[\s\S]*?\$41\.20<\/b> · 9\.8M tokens · 212 calls/);
+});
+
+test("the breakdown names each call site in the owner's words, most expensive first", () => {
+  // Fails if a code leaks onto the page in place of its words, or the order follows the payload.
+  const html = visible(usageHtml({ ...READING, own: OWN }, NOW, esc));
+  const review = html.indexOf("reviewing a pull request");
+  const summary = html.indexOf("summarising a pull request");
+  assert.ok(review > 0 && summary > review, "S3 (the dearer) is not drawn before S1");
+  assert.doesNotMatch(html, />S[0-9]+</, "a call-site code reached the page as text");
+});
+
+test("the per-reading figure divides by finished readings and says the unfinished are counted in", () => {
+  // Fails if the figure or its parenthesis drift from the approved text.
+  const html = visible(usageHtml({ ...READING, own: OWN }, NOW, esc));
+  assert.match(html, /\$0\.94 per completed pull-request reading · 212\.4K tokens\s+\(38 readings; 4 that did not finish are counted in\)/);
+});
+
+test("with no finished reading there is nothing to divide by, and the page says what went on the rest", () => {
+  // Fails if a zero divisor renders a figure (Infinity, NaN, $0.00) instead of the sentence.
+  const own = { ...OWN, readings: { finished: 0, unfinished: 3, cost: 4.2, tokens: 10, per_finished: null } };
+  const html = visible(usageHtml({ ...READING, own }, NOW, esc));
+  assert.match(html, /no reading finished in this span, so there is nothing to divide by — \$4\.20 went on 3 that did not/);
+  assert.doesNotMatch(html, /per completed pull-request reading/);
+});
+
+test("the tracker figure says why it cannot be given, and old unlabelled calls are said to be under their box", () => {
+  // Fails if either sentence is dropped: a missing per-item line reads as "not measured" and an
+  // unmentioned box share reads as skein costing less than it did.
+  const html = visible(usageHtml({ ...READING, own: OWN }, NOW, esc));
+  assert.match(html, /work tracking is not connected, so skein cannot tell when an item was finished \(Settings → Work tracking\)/);
+  assert.match(html, /calls made before skein labelled its own are counted under the box they ran in/);
+  const clean = visible(usageHtml({ ...READING, own: { ...OWN, unlabelled_in_boxes: false } }, NOW, esc));
+  assert.doesNotMatch(clean, /calls made before skein labelled/);
+});
+
+test("with no call of its own the section says so rather than vanishing", () => {
+  // Fails if an empty section disappears, which reads the same as a page that does not look.
+  const html = visible(usageHtml({ ...READING, own: { calls: 0, sites: [], readings: {} } }, NOW, esc));
+  assert.match(html, /skein made no model calls of its own in this reading/);
+  const old = visible(usageHtml(READING, NOW, esc));
+  assert.match(old, /skein made no model calls of its own in this reading/);
+});

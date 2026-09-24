@@ -103,6 +103,70 @@ export function usageRead(readAt, fresh, nowMs) {
   return { secs, stale: old, text: old ? `${base} — over an hour old` : base };
 }
 
+// ── skein's own reading (SKEIN-1074, SKEIN-1076) ───────────────────────────────────────────────────
+
+// What each of skein's own call sites is called on the page, keyed by the code the payload carries
+// (`crate::ai::Site::code`). The words are the owner's, approved under SKEIN-1075, and they are
+// the only place these codes become text.
+export const OWN_SITES = {
+  S3: "reviewing a pull request",
+  S1: "summarising a pull request",
+  S2: "reading a pull request in detail",
+  S4: "checking the review read every changed file",
+  S5: "answering a check the repository asks for",
+  S6: "answering your question about a pull request",
+  S7: "drafting a review comment",
+  S8: "writing a module note",
+  S9: "summarising what a box just did",
+  S10: "deciding whether a box's question can be continued",
+  S11: "checking the model answers (doctor)",
+};
+
+const plural = (n, one, many) => `${fmtExact(n)} ${Number(n) === 1 ? one : many}`;
+
+// The section, above "By box" where it cannot collide with a box that happens to be called skein.
+//
+// **The per-thing figures cover the same span as the headline total** (the owner's decision on
+// SKEIN-1075): everything this reading counted. The per-item figure is fleet-wide only, and it is
+// never a number today — skein keeps no record of when a tracker item was finished, so it says
+// which of the two reasons applies rather than inventing a divisor.
+export function ownHtml(own, esc) {
+  const e = esc || (s => String(s));
+  const o = own || {};
+  const lines = [];
+  const r = o.readings || {};
+  if (Number(r.finished) > 0) {
+    lines.push(`${usd(r.per_finished)} per completed pull-request reading · ${fmtTok(r.tokens_per_finished)} tokens`
+      + `   (${plural(r.finished, "reading", "readings")}${
+        Number(r.unfinished) > 0 ? `; ${fmtExact(r.unfinished)} that did not finish are counted in` : ""})`);
+  } else if (Number(r.unfinished) > 0) {
+    lines.push(`no reading finished in this span, so there is nothing to divide by — ${usd(r.cost)} went on ${fmtExact(r.unfinished)} that did not`);
+  }
+  lines.push(o.tracker_connected
+    ? "skein does not record when a tracker item was finished, so there is no per-item figure"
+    : "work tracking is not connected, so skein cannot tell when an item was finished (Settings → Work tracking)");
+  if (o.unlabelled_in_boxes) {
+    lines.push("calls made before skein labelled its own are counted under the box they ran in");
+  }
+  const figures = lines.map(l => `<div class="note ug-per">${e(l)}</div>`).join("");
+
+  const sites = (Array.isArray(o.sites) ? o.sites : []).slice().sort((a, b) => b.cost - a.cost);
+  if (!Number(o.calls) && !sites.length) {
+    return `<div class="note ug-empty">skein made no model calls of its own in this reading</div>` + figures;
+  }
+  const top = Math.max(...sites.map(x => x.cost), 0);
+  const fig = x => `<b>${usd(x.cost)}</b> · ${fmtTok(x.tokens)} tokens · ${plural(x.calls, "call", "calls")}`;
+  const row = `<div class="ug-row ug-own">
+      <span class="ug-nm">skein's own reading</span>${bar(o.cost, o.cost)}
+      <span class="ug-fig">${fig(o)}</span>
+    </div>`;
+  const breakdown = sites.map(x => `<div class="ug-row ug-site">
+      <span class="ug-nm">${e(OWN_SITES[x.site] || x.site)}</span>${bar(x.cost, top)}
+      <span class="ug-fig">${fig(x)}</span>
+    </div>`).join("");
+  return row + breakdown + figures;
+}
+
 // ── the panel ─────────────────────────────────────────────────────────────────────────────────────
 
 const bar = (v, max) =>
@@ -223,6 +287,7 @@ export function usageHtml(u, nowMs, esc, note) {
     : "";
 
   return head + hint + unpriced + insight
+    + `<div class="ug-h">skein's own reading</div>` + ownHtml(u.own, e)
     + section("By box", boxRows, "no box reported a reading")
     + section("By month", monthRows, "no month in this reading")
     + section("By model", modelRows, "no model in this reading")

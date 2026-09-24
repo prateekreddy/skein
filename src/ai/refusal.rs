@@ -263,7 +263,8 @@ pub(super) fn remember_refusal(why: &Unread, bin: &str, turn: Turn<'_>) {
     // login that is genuinely broken still refuses a call that names no conversation, and THAT is
     // the one remembered. The memo keeps its whole job — one Keychain dialog rather than one per
     // pull request — and stops covering the one case where it was answering the wrong question.
-    if !matches!(turn, Turn::Alone) {
+    // A labelled call is one of these too: its id is fresh, so it names no conversation to miss.
+    if !matches!(turn, Turn::Alone | Turn::Labelled { .. }) {
         return;
     }
     // A setup problem, not a bad moment. See the type above.

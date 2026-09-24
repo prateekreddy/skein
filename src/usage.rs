@@ -347,6 +347,70 @@ impl Notes {
     }
 }
 
+/// One of skein's own call sites, with what it spent (SKEIN-1074).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SiteRow {
+    /// `S1` … `S11`, [`crate::ai::Site::code`]. The cockpit keys its words on this.
+    pub site: String,
+    pub cost: f64,
+    pub tokens: u64,
+    /// Distinct model calls: a labelled session, or one ledger window of a conversation.
+    pub calls: u64,
+}
+
+/// What skein's pull-request readings cost, and how many there were to divide it by (SKEIN-1076).
+///
+/// `cost` and `tokens` are every S1–S5 call in this reading — the narrow fallback and the readings
+/// that did not finish included — so dividing by `finished` charges an unfinished reading to the
+/// ones that finished, rather than dropping it. The span is the headline total's: everything this
+/// reading counted.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Readings {
+    pub finished: u64,
+    pub unfinished: u64,
+    pub cost: f64,
+    pub tokens: u64,
+    /// `cost / finished`, or `None` when no reading finished and there is nothing to divide by.
+    pub per_finished: Option<f64>,
+    /// `tokens / finished`, rounded, beside it.
+    pub tokens_per_finished: Option<u64>,
+}
+
+impl Readings {
+    /// Divide by the readings that **finished**, never by the attempts: an unfinished reading's
+    /// spend is charged to the ones that did, because a cheaper call that has to be made twice is
+    /// not cheaper (token-spend.md, the owner's answer 1).
+    fn divide(&mut self) {
+        let (per, tokens) = match self.finished {
+            0 => (None, None),
+            n => (
+                Some(self.cost / n as f64),
+                Some((self.tokens as f64 / n as f64).round() as u64),
+            ),
+        };
+        self.per_finished = per;
+        self.tokens_per_finished = tokens;
+    }
+}
+
+/// skein's own model calls, apart from the boxes' work (SKEIN-1074, SKEIN-1076).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OwnSpend {
+    pub cost: f64,
+    pub tokens: u64,
+    pub calls: u64,
+    /// One row per call site that made a call, most expensive first.
+    pub sites: Vec<SiteRow>,
+    pub readings: Readings,
+    /// Whether any work-tracking connection is usable. skein keeps no record of when a tracker
+    /// item was finished either way, so there is no per-item figure; this only decides which of the
+    /// two sentences saying so is true.
+    pub tracker_connected: bool,
+    /// A box holds a session skein derived that the ledger does not know: a call made before skein
+    /// labelled its own, still counted under that box.
+    pub unlabelled_in_boxes: bool,
+}
+
 /// The whole answer, and the only thing that crosses out of this module.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageReport {
@@ -367,6 +431,10 @@ pub struct UsageReport {
     pub daily: Vec<DayRow>,
     pub models: Vec<ModelRow>,
     pub notes: Notes,
+    /// skein's own calls. Their cost is in [`totals`](Self::totals), the months, the models and
+    /// the days, and in no box's row.
+    #[serde(default)]
+    pub own: OwnSpend,
 }
 
 // ─────────────────────────────── parsing ───────────────────────────────
@@ -379,6 +447,9 @@ struct Turn {
     model: String,
     /// `YYYY-MM-DD`, UTC.
     day: String,
+    /// The record's timestamp in epoch milliseconds, which is what places a turn of a pull
+    /// request's conversation inside one call's ledger window.
+    ms: i64,
     tokens: Tokens,
 }
 
@@ -507,11 +578,8 @@ fn parse_line(line: &str, notes: &mut Notes) -> Option<Turn> {
         tokens.cache_write = tokens.cache_write_5m + tokens.cache_write_1h;
     }
 
-    let day = match v
-        .get("timestamp")
-        .and_then(|t| t.as_str())
-        .and_then(utc_day)
-    {
+    let stamp = v.get("timestamp").and_then(|t| t.as_str());
+    let (day, ms) = match stamp.and_then(utc_day).zip(stamp.and_then(epoch_ms)) {
         Some(d) => d,
         None => {
             notes.undated_records += 1;
@@ -524,8 +592,18 @@ fn parse_line(line: &str, notes: &mut Notes) -> Option<Turn> {
         key: dedup_key(message_id, request_id),
         model: model.to_string(),
         day,
+        ms,
         tokens,
     })
+}
+
+/// Epoch milliseconds, from an RFC3339 timestamp.
+fn epoch_ms(ts: &str) -> Option<i64> {
+    Some(
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .ok()?
+            .timestamp_millis(),
+    )
 }
 
 /// `YYYY-MM-DD` in UTC, from an RFC3339 timestamp.
@@ -646,6 +724,11 @@ struct FileDigest {
     len: u64,
     mtime_ns: u128,
     rows: Vec<DigestRow>,
+    /// Each row's timestamp in epoch ms, kept only for a session skein derived — the one kind
+    /// whose records are attributed by when they happened (SKEIN-1074). Empty for every other
+    /// file, which is nearly all of them.
+    #[serde(default)]
+    ts: Vec<i64>,
     notes: Notes,
 }
 
@@ -659,6 +742,9 @@ struct Cache {
     days: Vec<String>,
     /// Keyed by box name, then by the transcript's path.
     files: BTreeMap<String, BTreeMap<String, FileDigest>>,
+    /// The fleet login home's transcripts, by path: where skein's own calls in this process land.
+    #[serde(default)]
+    own_files: BTreeMap<String, FileDigest>,
 }
 
 /// The answer, on its own, in its own file.
@@ -677,7 +763,7 @@ struct Stored {
 
 /// Changing this discards every cached digest. Bump it whenever [`parse_line`] changes what it
 /// counts — a cache half-written by the old rule and half by the new is a number nobody can defend.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// The per-transcript digests. Large, and read only by [`refresh`].
 fn digest_path() -> PathBuf {
@@ -789,12 +875,66 @@ fn box_roots() -> Vec<(String, PathBuf)> {
     out
 }
 
+/// Where skein's own calls in this process leave their transcripts: the fleet login home's
+/// `.claude/projects` (SKEIN-1074).
+///
+/// **Not under any box, which is why these were invisible.** A call spawned here runs with `HOME`
+/// at the fleet's login (`ai::tried`, via `fleet::login_home`), so the CLI files it under that
+/// home, and [`box_roots`] only ever walked `boxes/*/claude-projects`. Read for skein's own
+/// sessions only: anything else in this home is not a box's work and was never counted.
+fn own_root() -> PathBuf {
+    crate::fleet::fleet_home_dir()
+        .join(".claude")
+        .join("projects")
+}
+
+/// The session a transcript belongs to: the file's own name, or the directory a subagent file sits
+/// under — `<slug>/<session>.jsonl` and `<slug>/<session>/subagents/agent-*.jsonl`.
+fn session_of(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let second = rel.components().nth(1)?.as_os_str().to_str()?;
+    Some(second.trim_end_matches(".jsonl").to_string())
+}
+
+/// Which of skein's call sites a turn was, if it was one of skein's own.
+///
+/// A labelled session says so in its id. A turn of a pull request's conversation is placed by the
+/// ledger window its timestamp falls in, and the window's index keeps two calls in one session
+/// apart when they are counted.
+fn own_call(
+    session: Option<&str>,
+    ms: i64,
+    ledger: &crate::ai::OwnLedger,
+) -> Option<(crate::ai::Site, String)> {
+    let session = session?;
+    if let Some(site) = crate::ai::site_of_session(session) {
+        return Some((site, session.to_string()));
+    }
+    let (i, site) = ledger.window_at(session, ms)?;
+    Some((site, format!("{session}#{i}")))
+}
+
+/// One of skein's own turns, and which call it was part of.
+#[derive(Debug, Clone)]
+struct OwnTurn {
+    turn: Turn,
+    site: crate::ai::Site,
+    call: String,
+}
+
+/// Where one transcript's turns go.
+enum Root {
+    Box(String),
+    Own,
+}
+
 /// Re-read the fleet, reusing every transcript whose length and mtime have not moved.
 ///
 /// This is the only function that opens a transcript. See the module's cost table before calling it
 /// from anything a person is waiting on.
 pub fn refresh() -> Result<UsageReport, String> {
     let previous = load_digests().unwrap_or_default();
+    let ledger = crate::ai::own_ledger();
     let mut cache = Cache {
         version: CACHE_VERSION,
         models: previous.models.clone(),
@@ -821,18 +961,33 @@ pub fn refresh() -> Result<UsageReport, String> {
     // of the 182,131 keys on this fleet appear in more than one transcript, because resuming a
     // session copies the records so far into the new file. A per-file tally would count those twice.
     let mut per_box: BTreeMap<String, HashMap<u64, Turn>> = BTreeMap::new();
+    // skein's own turns, wherever they ran, deduplicated the same way across all of them.
+    let mut own: HashMap<u64, OwnTurn> = HashMap::new();
+    let mut unlabelled_in_boxes = false;
 
-    for (name, projects) in box_roots() {
+    let mut roots: Vec<(Root, PathBuf)> = box_roots()
+        .into_iter()
+        .map(|(name, projects)| (Root::Box(name), projects))
+        .collect();
+    roots.push((Root::Own, own_root()));
+
+    for (root, projects) in roots {
         let mut files = Vec::new();
         walk_jsonl(&projects, &mut files, &mut notes);
         let empty = BTreeMap::new();
-        let old = previous.files.get(&name).unwrap_or(&empty);
+        let old = match &root {
+            Root::Box(name) => previous.files.get(name).unwrap_or(&empty),
+            Root::Own => &previous.own_files,
+        };
         let mut digests: BTreeMap<String, FileDigest> = BTreeMap::new();
-        let turns = per_box.entry(name.clone()).or_default();
 
         for (path, len, mtime_ns) in files {
             transcripts += 1;
             bytes += len;
+            let session = session_of(&projects, &path);
+            let derived = session
+                .as_deref()
+                .is_some_and(crate::ai::is_derived_session);
             let key = path.to_string_lossy().into_owned();
             let digest = match old.get(&key) {
                 Some(d) if d.len == len && d.mtime_ns == mtime_ns => d.clone(),
@@ -869,39 +1024,60 @@ pub fn refresh() -> Result<UsageReport, String> {
                         len,
                         mtime_ns,
                         rows,
+                        ts: match derived {
+                            true => parsed.iter().map(|t| t.ms).collect(),
+                            false => Vec::new(),
+                        },
                         notes: file_notes,
                     }
                 }
             };
             notes.add(&digest.notes);
-            for row in &digest.rows {
+            for (i, row) in digest.rows.iter().enumerate() {
                 let Some(model) = cache.models.get(row.1 as usize) else {
                     continue;
                 };
                 let Some(day) = cache.days.get(row.2 as usize) else {
                     continue;
                 };
-                merge_turn(
-                    turns,
-                    Turn {
-                        key: row.0,
-                        model: model.clone(),
-                        day: day.clone(),
-                        tokens: Tokens {
-                            input: row.3,
-                            output: row.4,
-                            cache_read: row.5,
-                            cache_write: row.6,
-                            cache_write_5m: row.7,
-                            cache_write_1h: row.8,
-                        },
+                let turn = Turn {
+                    key: row.0,
+                    model: model.clone(),
+                    day: day.clone(),
+                    ms: digest.ts.get(i).copied().unwrap_or(0),
+                    tokens: Tokens {
+                        input: row.3,
+                        output: row.4,
+                        cache_read: row.5,
+                        cache_write: row.6,
+                        cache_write_5m: row.7,
+                        cache_write_1h: row.8,
                     },
-                    &mut Notes::default(),
-                );
+                };
+                match (own_call(session.as_deref(), turn.ms, &ledger), &root) {
+                    (Some((site, call)), _) => merge_own(&mut own, OwnTurn { turn, site, call }),
+                    (None, Root::Box(name)) => {
+                        // One of skein's own, from before it labelled them: it stays the box's.
+                        unlabelled_in_boxes |= derived;
+                        merge_turn(
+                            per_box.entry(name.clone()).or_default(),
+                            turn,
+                            &mut Notes::default(),
+                        )
+                    }
+                    // Not labelled and not in a box: never counted before, and not a box's work.
+                    (None, Root::Own) => {}
+                }
             }
             digests.insert(key, digest);
         }
-        cache.files.insert(name, digests);
+        match root {
+            Root::Box(name) => {
+                per_box.entry(name.clone()).or_default();
+                cache.files.insert(name, digests);
+            }
+            Root::Own => cache.own_files = digests,
+        }
     }
 
     let now = SystemTime::now();
@@ -909,7 +1085,19 @@ pub fn refresh() -> Result<UsageReport, String> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let report = aggregate(&per_box, notes, transcripts, bytes, read_at_unix);
+    let mut report = aggregate(
+        &per_box,
+        &own.into_values().collect::<Vec<_>>(),
+        notes,
+        transcripts,
+        bytes,
+        read_at_unix,
+    );
+    report.own.readings.finished = ledger.readings_finished;
+    report.own.readings.unfinished = ledger.readings_unfinished;
+    report.own.readings.divide();
+    report.own.tracker_connected = crate::tracking::sync_status().ready;
+    report.own.unlabelled_in_boxes = unlabelled_in_boxes;
     cache.read_at_unix = read_at_unix;
     write_json(digest_path(), &cache)?;
     write_json(
@@ -923,9 +1111,23 @@ pub fn refresh() -> Result<UsageReport, String> {
     Ok(report)
 }
 
+fn merge_own(into: &mut HashMap<u64, OwnTurn>, own: OwnTurn) {
+    match into.get_mut(&own.turn.key) {
+        Some(existing) if own.turn.supersedes(&existing.turn) => *existing = own,
+        Some(_) => {}
+        None => {
+            into.insert(own.turn.key, own);
+        }
+    }
+}
+
 /// Turn the deduplicated turns into the shape that leaves.
+///
+/// skein's own turns are in every total, month, model and day, and in no box's row: the headline
+/// is still the whole bill, and a box is charged only for what it did.
 fn aggregate(
     per_box: &BTreeMap<String, HashMap<u64, Turn>>,
+    own: &[OwnTurn],
     notes: Notes,
     transcripts: usize,
     bytes: u64,
@@ -936,7 +1138,31 @@ fn aggregate(
     let mut by_month: BTreeMap<String, Tokens> = BTreeMap::new();
     let mut by_month_cost: BTreeMap<String, f64> = BTreeMap::new();
     let mut by_day: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut day_cost: BTreeMap<String, f64> = BTreeMap::new();
     let mut boxes: Vec<BoxRow> = Vec::new();
+
+    // Everything a turn contributes that does not depend on whose it was. Returns its cost.
+    let mut count = |turn: &Turn, totals: &mut Totals| -> f64 {
+        let cost = price_of(&turn.model)
+            .map(|p| turn.tokens.cost(&p))
+            .unwrap_or(0.0);
+        let entry = by_model.entry(turn.model.clone()).or_default();
+        entry.0.add(&turn.tokens);
+        entry.1 += 1;
+        let month = turn.day[..7].to_string();
+        by_month.entry(month.clone()).or_default().add(&turn.tokens);
+        *by_month_cost.entry(month).or_default() += cost;
+        *day_cost.entry(turn.day.clone()).or_default() += cost;
+        totals.cost += cost;
+        totals.input += turn.tokens.input;
+        totals.output += turn.tokens.output;
+        totals.cache_read += turn.tokens.cache_read;
+        totals.cache_write += turn.tokens.cache_write;
+        totals.cache_write_5m += turn.tokens.cache_write_5m;
+        totals.cache_write_1h += turn.tokens.cache_write_1h;
+        totals.tokens += turn.tokens.total();
+        cost
+    };
 
     for (name, turns) in per_box {
         let mut row = BoxRow {
@@ -946,18 +1172,11 @@ fn aggregate(
         let mut days: BTreeMap<String, ()> = BTreeMap::new();
         let mut box_tokens = Tokens::default();
         for turn in turns.values() {
-            let price = price_of(&turn.model);
-            let cost = price.map(|p| turn.tokens.cost(&p)).unwrap_or(0.0);
+            let cost = count(turn, &mut totals);
             box_tokens.add(&turn.tokens);
             row.cost += cost;
             *row.models.entry(turn.model.clone()).or_default() += cost;
             days.insert(turn.day.clone(), ());
-            let entry = by_model.entry(turn.model.clone()).or_default();
-            entry.0.add(&turn.tokens);
-            entry.1 += 1;
-            let month = turn.day[..7].to_string();
-            by_month.entry(month.clone()).or_default().add(&turn.tokens);
-            *by_month_cost.entry(month).or_default() += cost;
             *by_day
                 .entry(turn.day.clone())
                 .or_default()
@@ -968,19 +1187,47 @@ fn aggregate(
         row.days = days.len() as u64;
         row.first = days.keys().next().cloned().unwrap_or_default();
         row.last = days.keys().next_back().cloned().unwrap_or_default();
-        totals.cost += row.cost;
-        totals.input += box_tokens.input;
-        totals.output += box_tokens.output;
-        totals.cache_read += box_tokens.cache_read;
-        totals.cache_write += box_tokens.cache_write;
-        totals.cache_write_5m += box_tokens.cache_write_5m;
-        totals.cache_write_1h += box_tokens.cache_write_1h;
-        totals.tokens += box_tokens.total();
         if !turns.is_empty() {
             boxes.push(row);
         }
     }
     boxes.sort_by(|a, b| b.cost.total_cmp(&a.cost));
+
+    let mut mine = OwnSpend::default();
+    let mut sites: BTreeMap<crate::ai::Site, (SiteRow, BTreeMap<&str, ()>)> = BTreeMap::new();
+    let mut calls: BTreeMap<&str, ()> = BTreeMap::new();
+    for o in own {
+        let cost = count(&o.turn, &mut totals);
+        let tokens = o.turn.tokens.total();
+        mine.cost += cost;
+        mine.tokens += tokens;
+        calls.insert(&o.call, ());
+        let (row, site_calls) = sites.entry(o.site).or_insert_with(|| {
+            (
+                SiteRow {
+                    site: o.site.code(),
+                    ..Default::default()
+                },
+                BTreeMap::new(),
+            )
+        });
+        row.cost += cost;
+        row.tokens += tokens;
+        site_calls.insert(&o.call, ());
+        if o.site.is_reading() {
+            mine.readings.cost += cost;
+            mine.readings.tokens += tokens;
+        }
+    }
+    mine.calls = calls.len() as u64;
+    mine.sites = sites
+        .into_values()
+        .map(|(mut row, site_calls)| {
+            row.calls = site_calls.len() as u64;
+            row
+        })
+        .collect();
+    mine.sites.sort_by(|a, b| b.cost.total_cmp(&a.cost));
 
     let mut unpriced = Vec::new();
     let mut models = Vec::new();
@@ -1022,12 +1269,14 @@ fn aggregate(
             cache_write: t.cache_write,
         })
         .collect();
-    let daily = by_day
+    // The day's cost is every turn that day, skein's own included, so it is summed on its own
+    // rather than from `by_box` — which names only boxes, and would drop skein's share.
+    let daily = day_cost
         .into_iter()
-        .map(|(day, by_box)| DayRow {
-            cost: by_box.values().sum(),
+        .map(|(day, cost)| DayRow {
+            by_box: by_day.remove(&day).unwrap_or_default(),
+            cost,
             day,
-            by_box,
         })
         .collect();
 
@@ -1046,6 +1295,7 @@ fn aggregate(
         daily,
         models,
         notes,
+        own: mine,
     }
 }
 
@@ -1294,6 +1544,7 @@ mod tests {
                 key: 1,
                 model: "claude-from-the-future".into(),
                 day: "2026-09-01".into(),
+                ms: 0,
                 tokens: Tokens {
                     input: 1_000_000,
                     ..Default::default()
@@ -1301,7 +1552,7 @@ mod tests {
             },
         );
         per_box.insert("boxy".to_string(), turns);
-        let r = aggregate(&per_box, Notes::default(), 1, 0, 0);
+        let r = aggregate(&per_box, &[], Notes::default(), 1, 0, 0);
         assert_eq!(r.unpriced.len(), 1, "the model must be named");
         assert_eq!(r.unpriced[0].model, "claude-from-the-future");
         assert_eq!(r.unpriced[0].tokens, 1_000_000);
@@ -1361,7 +1612,7 @@ mod tests {
         }
         let mut per_box = BTreeMap::new();
         per_box.insert("boxy".to_string(), map);
-        let report = aggregate(&per_box, notes, 1, body.len() as u64, 0);
+        let report = aggregate(&per_box, &[], notes, 1, body.len() as u64, 0);
         let json = serde_json::to_string(&report).unwrap();
         assert!(
             !json.contains(SECRET),
@@ -1470,5 +1721,220 @@ mod tests {
                  MEASURED disagree about what this costs to run"
             );
         }
+    }
+
+    /// A fixture fleet: `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and an ambient `$HOME`, all pinned
+    /// inside one temp directory, with a login the fleet can use — so a model call spawned here
+    /// runs with `HOME` at the fleet login home, as it does in production.
+    fn own_fixture(env: &mut crate::testutil::EnvPins, dir: &Path) -> PathBuf {
+        let home = dir.join("home");
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        env.set("HOME", dir.join("bare"));
+        let login = home.join("fleet-home/.claude");
+        std::fs::create_dir_all(&login).unwrap();
+        std::fs::write(
+            login.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
+        )
+        .unwrap();
+        home
+    }
+
+    /// A box's own work: one transcript whose session id the CLI drew, so it is the box's.
+    fn box_work(home: &Path, name: &str) {
+        let projects = home
+            .join("boxes")
+            .join(name)
+            .join("claude-projects/a-project");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(
+            projects.join("0b7f7d0e-3c1a-4d2e-9f00-123456789abc.jsonl"),
+            line(
+                "box-msg",
+                "box-req",
+                "claude-opus-5",
+                "2026-09-01T10:00:00Z",
+                (7, 7, 7, 0, 0),
+            ),
+        )
+        .unwrap();
+    }
+
+    /// **skein's own call is counted under its call site and under no box** (SKEIN-1074).
+    ///
+    /// Spawned, not asserted about: a stub `claude` reads the `--session-id` it was handed and
+    /// writes a transcript under that id into `$HOME/.claude/projects`, which is what the real CLI
+    /// does, and the usage reader then has to find it. The stub stamps its record from
+    /// `$EPOCHREALTIME` rather than `date +%N`: this box's `date` prints nanoseconds without their
+    /// leading zeros, so `.049` came out as `.49413299` and landed outside the call's window. A one-shot (S1) and a turn of a pull
+    /// request's conversation (S3) both go through it, because they are labelled two different
+    /// ways — the one by its id, the other by its window in the ledger.
+    ///
+    /// Fails if the fleet login home is not scanned (S1 and S3 both vanish), if the one-shot's id
+    /// stops carrying its site, if a conversation record from before the call is attributed to it,
+    /// or if skein's calls are charged to a box.
+    #[cfg(unix)]
+    #[test]
+    fn skeins_own_call_is_counted_under_its_call_site_and_under_no_box() {
+        use crate::ai::Site;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir: &Path = dir.as_ref();
+        let mut env = crate::testutil::env_pins();
+        let home = own_fixture(&mut env, dir);
+        box_work(&home, "thing");
+
+        let bin = dir.join("claude-that-files-a-transcript");
+        std::fs::write(
+            &bin,
+            r#"#!/usr/bin/env bash
+cat > /dev/null
+while [ $# -gt 0 ]; do case "$1" in --session-id|--resume) id=$2; shift;; esac; shift; done
+mkdir -p "$HOME/.claude/projects/-stub"
+s=${EPOCHREALTIME%.*}; f=${EPOCHREALTIME#*.}
+now=$(date -u -d "@$s" +%Y-%m-%dT%H:%M:%S).${f:0:3}Z
+printf '{"type":"assistant","timestamp":"%s","requestId":"req-%s","message":{"id":"msg-%s","model":"claude-haiku-4-5","usage":{"input_tokens":1000,"output_tokens":100}}}\n' "$now" "$id" "$id" >> "$HOME/.claude/projects/-stub/$id.jsonl"
+echo "$id"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("SKEIN_CLAUDE_BIN", &bin);
+
+        // A conversation already on disk from before skein labelled its calls: one record, long
+        // ago, which no ledger window covers.
+        let conversation = crate::ai::conversation_for("acme", 41);
+        let filed = home.join("fleet-home/.claude/projects/-stub");
+        std::fs::create_dir_all(&filed).unwrap();
+        std::fs::write(
+            filed.join(format!("{conversation}.jsonl")),
+            format!(
+                "{}\n",
+                line(
+                    "old-msg",
+                    "old-req",
+                    "claude-sonnet-5",
+                    "2026-01-01T10:00:00Z",
+                    (5_000, 0, 0, 0, 0)
+                )
+            ),
+        )
+        .unwrap();
+
+        crate::ai::forget_refusal();
+        let said = crate::ai::as_site(Site::Summary, || {
+            crate::ai::claude_oneshot_telling(
+                "x",
+                Some("claude-haiku-4-5"),
+                Duration::from_secs(30),
+            )
+        })
+        .expect("the stub answers");
+        assert_eq!(
+            crate::ai::site_of_session(&said),
+            Some(Site::Summary),
+            "the one-shot's session id does not carry its call site: {said}"
+        );
+        let turned = crate::ai::as_site(Site::Review, || {
+            crate::ai::claude_in_turn(
+                "x",
+                Some("claude-sonnet-5"),
+                Duration::from_secs(30),
+                crate::ai::Turn::Opening {
+                    id: &conversation,
+                    at: dir,
+                },
+                None,
+                crate::ai::Machine::Wherever,
+            )
+        })
+        .expect("the stub answers");
+        assert_eq!(turned.said, conversation);
+
+        let r = refresh().expect("the fixture fleet reads");
+        let site = |code: &str| r.own.sites.iter().find(|s| s.site == code).cloned();
+        let summary = site("S1").expect("the one-shot is not under S1");
+        assert_eq!((summary.tokens, summary.calls), (1_100, 1));
+        let review = site("S3").expect("the conversation turn is not under S3");
+        assert_eq!(
+            (review.tokens, review.calls),
+            (1_100, 1),
+            "the conversation's record from before the call was attributed to it"
+        );
+        assert_eq!(r.own.tokens, 2_200);
+        assert_eq!(r.own.calls, 2);
+        assert_eq!(
+            r.boxes
+                .iter()
+                .map(|b| (b.name.as_str(), b.tokens))
+                .collect::<Vec<_>>(),
+            vec![("thing", 21)],
+            "skein's own calls were charged to a box, or the box lost its own work"
+        );
+        assert_eq!(
+            r.totals.tokens,
+            21 + 2_200,
+            "the headline total is no longer the whole bill"
+        );
+        assert!(!r.own.unlabelled_in_boxes);
+    }
+
+    /// **A conversation turn that ran in a box leaves the box by its ledger window, and nothing
+    /// else of the box goes with it** (SKEIN-1074).
+    ///
+    /// Fails if windows are ignored (the S4 turn stays the box's), if a record outside every window
+    /// is taken from the box, or if the box's older skein session is not said to be counted there.
+    #[test]
+    fn a_turn_in_a_box_leaves_the_box_by_its_window_and_nothing_else_does() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir: &Path = dir.as_ref();
+        let mut env = crate::testutil::env_pins();
+        let home = own_fixture(&mut env, dir);
+        box_work(&home, "thing");
+        let conversation = crate::ai::conversation_for("acme", 7);
+        let projects = home.join("boxes/thing/claude-projects/-work");
+        std::fs::create_dir_all(&projects).unwrap();
+        let during = "2026-09-02T10:00:05.000Z";
+        let before = "2026-09-02T09:00:00.000Z";
+        std::fs::write(
+            projects.join(format!("{conversation}.jsonl")),
+            [
+                line("in", "in", "claude-sonnet-5", during, (300, 0, 0, 0, 0)),
+                line("out", "out", "claude-sonnet-5", before, (40, 0, 0, 0, 0)),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let from = epoch_ms("2026-09-02T10:00:00Z").unwrap();
+        std::fs::write(
+            crate::ai::own_ledger_path(),
+            format!(
+                "{}\n",
+                serde_json::json!({"site": "S4", "session": conversation, "from": from, "to": from + 10_000})
+            ),
+        )
+        .unwrap();
+
+        let r = refresh().expect("the fixture fleet reads");
+        assert_eq!(
+            r.own
+                .sites
+                .iter()
+                .map(|s| (s.site.as_str(), s.tokens))
+                .collect::<Vec<_>>(),
+            vec![("S4", 300)]
+        );
+        assert_eq!(
+            r.boxes.iter().map(|b| b.tokens).collect::<Vec<_>>(),
+            vec![21 + 40],
+            "the box kept the sweep's turn, or lost the record no window covers"
+        );
+        assert!(
+            r.own.unlabelled_in_boxes,
+            "a box holds a skein session from before it was labelled, and the report does not say so"
+        );
     }
 }

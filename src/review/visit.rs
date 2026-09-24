@@ -555,13 +555,19 @@ pub(super) fn spend_a_visit(
     if let Some(because) = reserve_a_read(trigger, &repo.id, &day) {
         return budget_stopped_row(pr, &because);
     }
-    if draft_due {
-        return summarise_and_draft(what, slug, &raw);
-    }
     // Stage 1, and stage 2 when stage 1 earns it. Extracted because this is now reached from TWO
     // places: here, and from the merged call when it runs out of time (`summarise_and_draft`) —
     // and both must be the same reading, not two ladders that drift apart.
-    summarise_in_stages(what, &full, deep_cut)
+    let read = match draft_due {
+        true => summarise_and_draft(what, slug, &raw),
+        false => summarise_in_stages(what, &full, deep_cut),
+    };
+    // **Whether the reading this unit bought finished**, for the dollars per completed reading
+    // (SKEIN-1076). Here and not earlier: this is the one point every model-spending reading
+    // passes after the purchase, so an unread one is charged to the ones that finished rather
+    // than dropped.
+    crate::ai::note_reading(read.depth != Depth::Unread);
+    read
 }
 
 /// One pull request being read, and everything established about it before a model is asked.
@@ -617,11 +623,13 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         here: _,
     } = what;
     let (diff, cut) = truncate(full, STAGE1_BYTES);
-    let raw = match crate::ai::claude_oneshot_telling(
-        &stage1_prompt(pr, owned, described, &diff, cut),
-        review_model(None).as_deref(),
-        Duration::from_secs(60),
-    ) {
+    let raw = match crate::ai::as_site(crate::ai::Site::Summary, || {
+        crate::ai::claude_oneshot_telling(
+            &stage1_prompt(pr, owned, described, &diff, cut),
+            review_model(None).as_deref(),
+            Duration::from_secs(60),
+        )
+    }) {
         Ok(raw) => raw,
         // The reason, not a disjunction. "the model call failed or timed out" was the whole of what
         // this said, for four different problems with four different fixes — and it named the
@@ -689,19 +697,21 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         // The whole diff and a longer budget, because this is the pass whose output you will
         // actually decide from. The stronger model is named here rather than in the env so a pinned
         // `$SKEIN_AI_MODEL` still overrides both stages together.
-        match claude_oneshot_with(
-            &stage2_prompt(
-                pr,
-                &verdict,
-                &summary.yours,
-                signals,
-                described,
-                full,
-                deep_cut,
-            ),
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            Duration::from_secs(180),
-        ) {
+        match crate::ai::as_site(crate::ai::Site::Detail, || {
+            claude_oneshot_with(
+                &stage2_prompt(
+                    pr,
+                    &verdict,
+                    &summary.yours,
+                    signals,
+                    described,
+                    full,
+                    deep_cut,
+                ),
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                Duration::from_secs(180),
+            )
+        }) {
             Some(detail) => summary.detail = detail,
             // Stage 1 said this one deserves explaining and stage 2 could not. Falling back to the
             // one-liner would be the exact inversion of this module's rule: it would present a PR
@@ -793,30 +803,33 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // is written from it, and the call is given the credential the prompt promises. Two answers
     // here would be a prompt telling a model to run `gh` in a session that has no token.
     let credential = acting_credential();
-    let answered = match crate::ai::claude_in_conversation(
-        &merged_prompt(MergedPrompt {
-            pr,
-            slug,
-            owned,
-            signals,
-            described,
-            standing,
-            posting: credential.is_some(),
-            diff: &diff,
-            cut,
-        }),
-        review_model(Some("claude-sonnet-5")).as_deref(),
-        // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
-        // gets the diff itself needs at least the time a reading handed one did — more of it goes
-        // on tool calls — so the budget cannot be allowed to collapse to the floor just because
-        // the bytes moved out of the message. `merged_budget` clamps at [`CRITIQUE_BYTES`], which
-        // is what the truncated length used to be worth, so the handed-a-diff path is unchanged.
-        merged_budget(raw_diff.len()),
-        talk,
-        at,
-        credential.as_ref(),
-        bench.machine(),
-    ) {
+    let answered = match crate::ai::as_site(crate::ai::Site::Review, || {
+        crate::ai::claude_in_conversation(
+            &merged_prompt(MergedPrompt {
+                pr,
+                slug,
+                owned,
+                signals,
+                described,
+                standing,
+                posting: credential.is_some(),
+                diff: &diff,
+                cut,
+            }),
+            review_model(Some("claude-sonnet-5")).as_deref(),
+            // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
+            // gets the diff itself needs at least the time a reading handed one did — more of it
+            // goes on tool calls — so the budget cannot be allowed to collapse to the floor just
+            // because the bytes moved out of the message. `merged_budget` clamps at
+            // [`CRITIQUE_BYTES`], which is what the truncated length used to be worth, so the
+            // handed-a-diff path is unchanged.
+            merged_budget(raw_diff.len()),
+            talk,
+            at,
+            credential.as_ref(),
+            bench.machine(),
+        )
+    }) {
         Ok(answered) => answered,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
         // [`CRITIQUE_BYTES`] diff and is asked for a summary AND a review with line comments over
@@ -967,15 +980,17 @@ Their question: {question}"#,
         checkout = standing_line(standing, "answering"),
         question = question,
     );
-    crate::ai::claude_in_conversation(
-        &prompt,
-        review_model(Some("claude-sonnet-5")).as_deref(),
-        Duration::from_secs(180),
-        talk,
-        at,
-        acting_credential().as_ref(),
-        bench.machine(),
-    )
+    crate::ai::as_site(crate::ai::Site::Ask, || {
+        crate::ai::claude_in_conversation(
+            &prompt,
+            review_model(Some("claude-sonnet-5")).as_deref(),
+            Duration::from_secs(180),
+            talk,
+            at,
+            acting_credential().as_ref(),
+            bench.machine(),
+        )
+    })
     // The answer, and whether it came from outside the box (SKEIN-819): the composer says so above
     // it, in the owner's words, with a way to ask again.
     .map(|a| Composed {
@@ -1037,15 +1052,17 @@ Their notes: {intent}"#,
         checkout = standing_line(standing, "writing"),
         intent = intent,
     );
-    crate::ai::claude_in_conversation(
-        &prompt,
-        review_model(Some("claude-sonnet-5")).as_deref(),
-        Duration::from_secs(180),
-        talk,
-        at,
-        acting_credential().as_ref(),
-        bench.machine(),
-    )
+    crate::ai::as_site(crate::ai::Site::Draft, || {
+        crate::ai::claude_in_conversation(
+            &prompt,
+            review_model(Some("claude-sonnet-5")).as_deref(),
+            Duration::from_secs(180),
+            talk,
+            at,
+            acting_credential().as_ref(),
+            bench.machine(),
+        )
+    })
     // The body, and where it was written (SKEIN-819) — a draft written outside the box goes out
     // under a person's name without the earlier reading behind it, so the composer says so.
     .map(|a| Composed {

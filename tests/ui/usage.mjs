@@ -72,6 +72,26 @@ function addTranscript(projects, id) {
   fs.writeFileSync(path.join(projects, `session-${id}.jsonl`), `${JSON.stringify(record)}\n`);
 }
 
+// One of skein's own model calls, as the fleet login home keeps it (SKEIN-1074). The session id is
+// a labelled one — `5ce10a11-00` and then the call site's byte, here 01, S1 — which is the whole of
+// how the reader knows it is skein's and which question it was.
+function addOwnCall(home) {
+  const dir = path.join(home, "fleet-home", ".claude", "projects", "-work");
+  fs.mkdirSync(dir, { recursive: true });
+  const record = {
+    type: "assistant",
+    timestamp: "2026-09-01T11:00:00Z",
+    requestId: "req-own",
+    message: {
+      id: "msg-own",
+      model: "claude-haiku-4-5",
+      content: [{ type: "text", text: "BODY-SHOULD-NEVER-LEAVE" }],
+      usage: { input_tokens: 1000, output_tokens: 100 },
+    },
+  };
+  fs.writeFileSync(path.join(dir, "5ce10a11-0001-8000-8000-000000000001.jsonl"), `${JSON.stringify(record)}\n`);
+}
+
 // Age the stored reading by writing it, **both copies of the timestamp together**: `read_at_unix`,
 // which the server ages against, and `report.read_at`, the string the pane renders. Moving one and
 // not the other would leave a file no refresh could have written — and since the whole question
@@ -279,6 +299,31 @@ try {
     const sub = await seen("#set-usage .ug-sub");
     value("the figures on screen came from the reading the last press took",
       /3 transcripts/.test(sub.text), true);
+  }
+
+  // ── skein's own reading is its own row, above the boxes (SKEIN-1076) ─────────────────────────────
+  //
+  // One of skein's own calls, filed where a call on the fleet's login files it, under a session id
+  // that carries its call site (S1). Read on the next press, it must show as the "skein's own
+  // reading" row with the call site in the owner's words — ON SCREEN, which is this tier's question —
+  // and above "By box". **What would make this fail:** the reader not walking the fleet login home,
+  // the section not drawn, or drawn below the boxes.
+  {
+    addOwnCall(fx.home);
+    await page.click("#ug-refresh");
+    await until(() => page.evaluate(() => !!(usageReading && usageReading.own && usageReading.own.calls === 1)),
+      "a Refresh press reading skein's own call");
+    const row = await seen("#set-usage .ug-own");
+    value("skein's own reading is a row on screen",
+      !!row && row.height > 0 && /skein's own reading/.test(row.text) && /1 call\b/.test(row.text), true);
+    const site = await seen("#set-usage .ug-site");
+    value("and its call site is named in the owner's words",
+      !!site && site.height > 0 && /summarising a pull request/.test(site.text), true);
+    const order = await page.evaluate(() => {
+      const t = document.getElementById("set-usage").innerText;
+      return t.indexOf("skein's own reading") < t.indexOf("By box");
+    });
+    value("above By box", order, true);
   }
 
   // ── the sentence says the age of the reading it is SHOWING ───────────────────────────────────────

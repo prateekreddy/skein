@@ -426,19 +426,21 @@ pub(super) fn sweep(
     github: Option<&crate::secret::Secret>,
     machine: crate::ai::Machine<'_>,
 ) -> Option<String> {
-    crate::ai::claude_in_turn(
-        SWEEP_PROMPT,
-        review_model(Some("claude-sonnet-5")).as_deref(),
-        Duration::from_secs(SWEEP_SECS),
-        crate::ai::Turn::Resuming { id, at },
-        github,
-        // **The same machine as turn one, and this is where that matters most.** The sweep is a
-        // `Turn::Resuming` — it resends nothing, because the diff and the review are already in
-        // the session — so a sweep that ran anywhere else would find no session, come back empty,
-        // and leave `Summary::swept` false. An approval would then be unreachable for ever, on a
-        // reading that was in fact complete.
-        machine,
-    )
+    crate::ai::as_site(crate::ai::Site::Sweep, || {
+        crate::ai::claude_in_turn(
+            SWEEP_PROMPT,
+            review_model(Some("claude-sonnet-5")).as_deref(),
+            Duration::from_secs(SWEEP_SECS),
+            crate::ai::Turn::Resuming { id, at },
+            github,
+            // **The same machine as turn one, and this is where that matters most.** The sweep is
+            // a `Turn::Resuming` — it resends nothing, because the diff and the review are already
+            // in the session — so a sweep that ran anywhere else would find no session, come back
+            // empty, and leave `Summary::swept` false. An approval would then be unreachable for
+            // ever, on a reading that was in fact complete.
+            machine,
+        )
+    })
     // An empty answer is not an answer. The prompt asks for one line either way, so a turn that
     // exits successfully having printed nothing did not get to the end of it.
     //
@@ -535,17 +537,19 @@ pub fn audit_owed(
     owed: &str,
 ) -> Result<String, String> {
     let bench = conversation_of(repo, number, head_sha, base_ref);
-    let said = crate::ai::claude_in_turn(
-        &audit_prompt(owed),
-        review_model(Some("claude-sonnet-5")).as_deref(),
-        Duration::from_secs(AUDIT_SECS),
-        crate::ai::Turn::Resuming {
-            id: &bench.talk,
-            at: &bench.at,
-        },
-        acting_credential().as_ref(),
-        bench.machine(),
-    )
+    let said = crate::ai::as_site(crate::ai::Site::Audit, || {
+        crate::ai::claude_in_turn(
+            &audit_prompt(owed),
+            review_model(Some("claude-sonnet-5")).as_deref(),
+            Duration::from_secs(AUDIT_SECS),
+            crate::ai::Turn::Resuming {
+                id: &bench.talk,
+                at: &bench.at,
+            },
+            acting_credential().as_ref(),
+            bench.machine(),
+        )
+    })
     // `Unread::say` rather than the variant: this sentence goes into the workflow journal and onto
     // a row, and each variant carries its own cure.
     .map(|a| a.said)

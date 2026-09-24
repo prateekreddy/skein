@@ -7,7 +7,7 @@ use super::*;
 ///
 /// Not the shared project store — that is data the boxes read, and a credential has no business in
 /// it. This is skein's own directory, beside the box state it already keeps there.
-fn fleet_home_dir() -> std::path::PathBuf {
+pub(crate) fn fleet_home_dir() -> std::path::PathBuf {
     skein_home().join("fleet-home")
 }
 

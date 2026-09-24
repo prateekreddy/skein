@@ -57,6 +57,10 @@ pub(crate) enum Turn<'a> {
     Opening { id: &'a str, at: &'a Path },
     /// A later turn of one. The model still has what it was shown; do not send it again.
     Resuming { id: &'a str, at: &'a Path },
+    /// No conversation, like [`Turn::Alone`], but under an id skein chose so the transcript it
+    /// leaves says which call site it was ([`labelled_session`], SKEIN-1074). The id is fresh for
+    /// every call, so there is nothing to find and the directory does not matter.
+    Labelled { id: &'a str },
 }
 
 impl<'a> Turn<'a> {
@@ -64,16 +68,16 @@ impl<'a> Turn<'a> {
     pub(crate) fn args(&self) -> Vec<&'a str> {
         match self {
             Turn::Alone => Vec::new(),
-            Turn::Opening { id, .. } => vec!["--session-id", id],
+            Turn::Opening { id, .. } | Turn::Labelled { id } => vec!["--session-id", id],
             Turn::Resuming { id, .. } => vec!["--resume", id],
         }
     }
 
-    /// Where the call must run for this conversation to be found. `None` only for [`Turn::Alone`],
-    /// which has nothing to find.
+    /// Where the call must run for this conversation to be found. `None` only for [`Turn::Alone`]
+    /// and [`Turn::Labelled`], which have nothing to find.
     pub(crate) fn at(&self) -> Option<&'a Path> {
         match self {
-            Turn::Alone => None,
+            Turn::Alone | Turn::Labelled { .. } => None,
             Turn::Opening { at, .. } | Turn::Resuming { at, .. } => Some(at),
         }
     }
@@ -116,7 +120,7 @@ pub(crate) fn conversation_for(repo_id: &str, number: u64) -> String {
 /// **Proven against `sha256sum` rather than against itself.** An implementation can agree with its
 /// own expectations and disagree with the world — `tracking.rs` says the same thing about the same
 /// hash for the same reason — so the test that guards this shells out and compares.
-fn sha256(msg: &[u8]) -> [u8; 32] {
+pub(super) fn sha256(msg: &[u8]) -> [u8; 32] {
     #[rustfmt::skip]
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

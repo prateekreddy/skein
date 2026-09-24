@@ -50,7 +50,7 @@ pub fn narrate(name: &str) -> Option<String> {
          or is asking. No preamble, no quotes — just the sentence.\n\nAgent message:\n{}",
         text.chars().take(2000).collect::<String>()
     );
-    ai_cached(&key, || claude_oneshot(&prompt))
+    ai_cached(&key, || as_site(Site::Narrate, || claude_oneshot(&prompt)))
 }
 
 /// Conservative AI safety check for batch-resume: given a box the heuristic tagged a trivial
@@ -76,7 +76,7 @@ pub(crate) fn ai_says_hold(name: &str) -> Option<bool> {
          make alone.\n\nMessage:\n{}",
         text.chars().take(2000).collect::<String>()
     );
-    let ans = ai_cached(&key, || claude_oneshot(&prompt))?;
+    let ans = ai_cached(&key, || as_site(Site::HoldGate, || claude_oneshot(&prompt)))?;
     // err toward HOLD: only an explicit ROUTINE clears a box for auto-continue
     Some(!ans.to_uppercase().contains("ROUTINE"))
 }

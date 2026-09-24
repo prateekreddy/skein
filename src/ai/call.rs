@@ -22,11 +22,13 @@ use super::*;
 /// the circuit breaker's memory of an older one.
 pub fn model_reachable() -> Result<(), Unread> {
     forget_refusal();
-    let out = claude_oneshot_telling(
-        "Reply with the single word: ok",
-        None,
-        Duration::from_secs(30),
-    );
+    let out = as_site(Site::Doctor, || {
+        claude_oneshot_telling(
+            "Reply with the single word: ok",
+            None,
+            Duration::from_secs(30),
+        )
+    });
     // A refusal found by `doctor` is not remembered — the *next* real call should try for itself
     // rather than inherit a verdict from a diagnostic.
     forget_refusal();
@@ -501,6 +503,20 @@ pub(crate) fn claude_in_turn(
             limit: PROMPT_CEILING,
         });
     }
+    // **Which of skein's own questions this is, written where the usage reader will find it**
+    // (SKEIN-1074). A call that names no conversation is given a fresh id that carries its call
+    // site; a turn of a pull request's conversation keeps the id it resumes by, and its window goes
+    // in the ledger instead, written by [`CallNoted`] however this function returns. Neither
+    // changes what the model is asked or where it runs. See [`as_site`].
+    let fresh = match (turn, current_site()) {
+        (Turn::Alone, Some(site)) => Some(labelled_session(site)),
+        _ => None,
+    };
+    let turn = match fresh.as_deref() {
+        Some(id) => Turn::Labelled { id },
+        None => turn,
+    };
+    let _noted = CallNoted::begin(turn);
     let (bin, model) = binary_and_model(model);
     // **In the sandbox, where `skein login` put the credential.** Skein authenticated in one place
     // and spent it in another: the `/login` you type happens inside the sandbox, and this spawned

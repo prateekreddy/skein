@@ -874,4 +874,10 @@ depends_on = ["config", "health", "mailbox", "util"]
 # returns counts. Sharing a walker would couple a deliberately two-level walk to a recursive one,
 # and the recursion is the whole difference between counting a third of this fleet's spend and
 # counting all of it — the `subagents/` transcripts sit one level below the conversation.
-depends_on = ["config", "fleet"]
+# `fleet` also for `fleet_home_dir`: skein's own calls in this process are filed under the fleet
+# login home, not under any box (SKEIN-1074).
+# `ai` for which of skein's own call sites a session was — the labelled id and the ledger the model
+# call writes (`ai::site`). The label is decided where the call is made; this module only reads it.
+# `tracking` for one bit: whether any work-tracking connection is usable, which decides which of
+# two sentences says why there is no per-tracker-item figure (SKEIN-1076).
+depends_on = ["ai", "config", "fleet", "tracking"]
