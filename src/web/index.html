@@ -3886,10 +3886,6 @@ function revClearHtml() {
   </div>`;
 }
 
-// Why a PR is in your queue, in the words the filter uses.
-function revReasonLabels(pr) {
-  return (pr.reasons || []).map(r => typeof r === "string" ? r : (r.team ? `team ${r.team}` : "team"));
-}
 // A PR you already decided on, brought back because the branch moved under you. On the collapsed
 // line this is the difference between "you have never seen this" and "you have, and it changed" —
 // and without it the two are indistinguishable at exactly the row you would skip.

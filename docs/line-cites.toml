@@ -2038,35 +2038,35 @@ cited_by = ["docs/recovery-survey.md"]
 line = "<button type=\"button\" class=\"revchip\" onclick=\"openSettings('repos')\">Settings → Repos</button></div>`),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:923"]
+["src/web/app/review.js:919"]
 line = "body = `<div class=\"revempty\">asking GitHub…</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:930"]
+["src/web/app/review.js:926"]
 line = "body += `<div class=\"revfail\"><b>the queue could not be built</b>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:931"]
+["src/web/app/review.js:927"]
 line = "<div>GitHub said: ${esc(revQueue.error)}</div>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:932"]
+["src/web/app/review.js:928"]
 line = "${revQueue.remembered"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:938"]
+["src/web/app/review.js:934"]
 line = "<button type=\"button\" class=\"revchip go\" onclick=\"loadReview(true)\">${revLoading ? \"trying…\" : \"try again\"}</button>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:955"]
+["src/web/app/review.js:951"]
 line = "}</b>${failed.map(f => `<div>${esc(f.repo_id)} — ${esc(f.error)}</div>`).join(\"\")}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:1418"]
+["src/web/app/review.js:1414"]
 line = "// than left set, or the row would sit on \"…\" for ever with nothing to retry it: opening the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:1585"]
+["src/web/app/review.js:1581"]
 line = "if (d.error) toast(\"the workflow file has a problem — fix it before editing here\");"
 cited_by = ["docs/recovery-survey.md"]
 
