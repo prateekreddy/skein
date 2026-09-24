@@ -138,11 +138,9 @@ impl Unread {
                 budget.as_secs()
             ),
             // The owner's approved wording (SKEIN-818). The row puts `Not read — ` in front of it.
-            Unread::BoxSlow(budget) => format!(
-                "its box did not answer within {}, and skein stopped there rather than spend the \
-                 same again reading it outside the box.",
-                briefly(*budget)
-            ),
+            Unread::BoxSlow(budget) => {
+                format!("{BOX_SLOW_HEAD}{}{BOX_SLOW_TAIL}", briefly(*budget))
+            }
             // Both numbers, and the overrun between them: "too large" alone leaves the reader
             // unable to tell a prompt that missed by a hundred bytes from one that missed by four
             // times, and those want different answers.
@@ -173,6 +171,25 @@ impl Unread {
             false => Some(why.to_string()),
         }
     }
+}
+
+/// [`Unread::BoxSlow`]'s sentence, in the two halves either side of the budget — named once, so
+/// [`says_its_box_did_not_answer`] recognises exactly what [`Unread::say`] writes.
+const BOX_SLOW_HEAD: &str = "its box did not answer within ";
+const BOX_SLOW_TAIL: &str =
+    ", and skein stopped there rather than spend the same again reading it outside the box.";
+
+/// **Is this [`Unread::BoxSlow`]'s sentence?** — for a reason that survived only as words.
+///
+/// `review` writes an unattended reading's failure down as the sentence the row shows (the
+/// tried-note, `review::cache::note_tried`), and a later load of that row has the sentence and
+/// nothing else. A box timeout must come back from that note as the row the owner approved — the
+/// sentence and both ways on — and not as the generic "already spent a reading" row (SKEIN-818).
+/// Built from the same two halves `say` formats, so a reworded sentence cannot leave the two
+/// disagreeing.
+pub fn says_its_box_did_not_answer(why: &str) -> bool {
+    let why = why.trim();
+    why.starts_with(BOX_SLOW_HEAD) && why.ends_with(BOX_SLOW_TAIL)
 }
 
 /// A budget as a person would say it on a row: `15m`, `7m 30s`, `45s`.

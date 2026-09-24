@@ -383,6 +383,16 @@ pub(super) fn spend_a_visit(
     // `computed` stays false, so saying this costs the day nothing.
     if trigger == Trigger::Unasked {
         if let Some(why) = read_tried(&repo.id).get(&format!("{}-{}", pr.number, pr.head_sha)) {
+            // **A box that did not answer in time comes back as that row, not this one**
+            // (SKEIN-818). The note is the sentence and nothing else, so the reason is recognised
+            // from it; and the approved row IS the sentence — it already says skein stopped rather
+            // than spend again — so it is not wrapped, and `stopped_at_box` puts both ways on
+            // beside it exactly as a fresh timeout does.
+            if crate::ai::says_its_box_did_not_answer(why) {
+                let mut said = Summary::unread(pr.number, &pr.head_sha, why);
+                said.stopped_at_box = true;
+                return said;
+            }
             return Summary::unread(
                 pr.number,
                 &pr.head_sha,
@@ -1184,6 +1194,75 @@ mod tests {
     ///   * the third is a person pressing "read it", which goes nowhere near the note. A standing
     ///     failure must never make a button do nothing (`ai::forget_refusal`'s rule), and an asked
     ///     read is un-budgeted besides.
+    /// **A box timeout the background pass wrote down comes back as the approved row**
+    /// (SKEIN-818).
+    ///
+    /// An unattended reading that hits `Unread::BoxSlow` leaves a tried-note carrying the row's
+    /// sentence and nothing more, and every later unattended load of the row is answered from that
+    /// note. It used to come back wrapped — "… — skein already spent a reading on this commit…" —
+    /// with no `stopped_at_box`, so the page drew the generic row with one button instead of the
+    /// owner's sentence and both ways on.
+    ///
+    /// **What makes it fail:** the `says_its_box_did_not_answer` branch in `spend_a_visit` removed
+    /// (the row comes back wrapped and without the flag). The control — a note for an ordinary
+    /// timeout — fails if the branch fires for every note.
+    #[test]
+    fn a_box_timeout_the_background_pass_noted_still_offers_both_ways_on() {
+        let _g = crate::testutil::env_lock();
+        let _crossing = crate::place::seam::doing_nothing();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.set("SKEIN_REVIEW_AI", "on");
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "boxslow", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "", "read_prs": true,
+        }))
+        .unwrap();
+        let unasked = |pr: &Pr| {
+            summarise(
+                &repo,
+                "acme/thing",
+                pr,
+                &["me".into()],
+                false,
+                Trigger::Unasked,
+            )
+        };
+
+        let box_slow = crate::ai::Unread::BoxSlow(Duration::from_secs(900)).say();
+        let pr = budget_pr(5, "def");
+        note_tried(&repo.id, pr.number, &pr.head_sha, &box_slow);
+        let row = unasked(&pr);
+        assert!(matches!(row.depth, Depth::Unread), "{row:?}");
+        assert!(
+            row.stopped_at_box,
+            "a box timeout loaded from its note lost `stopped_at_box`, so the row offers one button \
+             instead of the box again or here instead: {row:?}"
+        );
+        assert_eq!(
+            row.unread_because, box_slow,
+            "a box timeout loaded from its note is not the approved sentence"
+        );
+        assert!(!row.computed, "answering from the note spent nothing");
+
+        // The control: any other noted failure keeps the generic row.
+        let slow = crate::ai::Unread::Slow(Duration::from_secs(900)).say();
+        let other = budget_pr(6, "fed");
+        note_tried(&repo.id, other.number, &other.head_sha, &slow);
+        let row = unasked(&other);
+        assert!(
+            !row.stopped_at_box,
+            "an ordinary timeout was offered \"read it here instead\": {row:?}"
+        );
+        assert!(
+            row.unread_because.contains("already spent a reading"),
+            "an ordinary noted failure lost its wrapper: {row:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_model_that_always_fails_is_not_re_bought_on_every_reload() {
