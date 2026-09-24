@@ -556,7 +556,7 @@ fn audience(who: Audience, demand: impl FnOnce() -> DiskDemand) -> Result<Vec<As
 ///
 /// It can also run out of ranking, and that is [`Ask::short_by`]: every box asked for everything it
 /// has, and the fleet still over.
-fn cover(demand: DiskDemand) -> Result<Vec<Ask>, String> {
+pub(crate) fn cover(demand: DiskDemand) -> Result<Vec<Ask>, String> {
     let mut chosen: Vec<(String, u64)> = Vec::new();
     let mut held: u64 = 0;
     for (name, mb) in demand.boxes {

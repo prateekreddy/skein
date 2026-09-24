@@ -309,6 +309,8 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // here is the one claim a source read is the right tool for — that something in the server
     // starts it at all. The relay above, a few file reads every five seconds, needs none of that.
     tokio::spawn(skein::announce::watch_fleet_disk());
+    // Each box's resource signal file, which the box plugin's hooks read (SKEIN-1054).
+    tokio::spawn(skein::resource_signal::watch_box_resources());
     tokio::spawn(skein::fleet::watch_runtime_updates());
     // Keep every running box's GitHub write token ahead of its expiry.
     //
