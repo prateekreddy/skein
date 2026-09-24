@@ -289,7 +289,7 @@ line = "Ok(Err(why)) => ("
 window = "// person to different places.\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/review.rs:959"]
+["src/bin/skein-server/review.rs:998"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1594,15 +1594,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub(crate) fn registrable_source(source: &str) -> bool {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/review/asking.rs:618"]
+["src/review/asking.rs:622"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
 
-["src/review/cache.rs:1346"]
+["src/review/cache.rs:1357"]
 line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
 cited_by = ["docs/citations.toml"]
 
-["src/review/summary.rs:286"]
+["src/review/summary.rs:295"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1977,19 +1977,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review-rows.js:324"]
+["src/web/app/review-rows.js:325"]
 line = "// authority on what is being read (`/api/review/reading`) and the poll will confirm this within"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review-rows.js:475"]
+["src/web/app/review-rows.js:476"]
 line = "unread_because: \"skein could not reach its own summary for this PR: \" + error,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review-rows.js:1163"]
+["src/web/app/review-rows.js:1164"]
 line = "? `The brief could not be fetched — ${esc(s.prose_failed)} Close the row and open it again to retry.`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review-rows.js:1275"]
+["src/web/app/review-rows.js:1282"]
 line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
