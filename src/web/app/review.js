@@ -256,6 +256,21 @@ function openReview(repoId) {
   loadReview();
 }
 
+// **move it aside** (SKEIN-552): rename an unreadable archive or snooze file to
+// `<file>.unreadable-<date>` beside it, then ask for the queue again — the line goes because the
+// file is no longer there to fail, and the set-aside list starts empty.
+function revMoveSetAsideAside(repoId, file) {
+  fetch(`/api/repos/${encodeURIComponent(repoId)}/set-aside/${encodeURIComponent(file)}/move-aside`,
+        { method: "POST" })
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { toast("could not move it aside: " + String(d.error || "").split("\n")[0]); return; }
+      toast(`moved to ${d.moved_to} — your set-aside list starts empty; nothing was deleted`);
+      loadReview(true);
+    })
+    .catch(e => toast("could not move it aside: " + (e.message || e)));
+}
+
 // One list from many queues. Per-repo `fresh`/`as_of` survive the merge — one slow repo must not
 // stale the others — and every blind spot and failure is attributed to the repo it came from,
 // because "a repo failed" hides exactly the information that decides whether you care.
@@ -266,9 +281,15 @@ function revMergeQueues(m) {
   prs.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
   const blind = [];
   for (const qq of m.queues || []) for (const b of qq.blind_spots || []) blind.push(`${qq.repo_id}: ${b}`);
+  // The blind-spot lines that name a set-aside file skein could not read, keyed by the line as it
+  // is drawn, so the line can carry `move it aside` without the page re-parsing a sentence
+  // (SKEIN-552). The server says which line; the page only puts the chip on it.
+  const setAside = new Map();
+  for (const qq of m.queues || []) for (const u of qq.unreadable_set_aside || [])
+    setAside.set(`${qq.repo_id}: ${u.blind_spot}`, { repo_id: qq.repo_id, file: u.file });
   const stale = (m.queues || []).filter(q => q.fresh === false);
   return {
-    ai: m.ai, prs, blind_spots: blind, queues: m.queues || [],
+    ai: m.ai, prs, blind_spots: blind, queues: m.queues || [], set_aside: setAside,
     // A repo whose queue could not be built is NOT folded in with the blind spots (SKEIN-164): a
     // gap inside a queue that is here and a queue that is missing entirely are different
     // conditions, and the pane draws them differently — amber for what stands, orange for what
@@ -940,8 +961,13 @@ function revRenderPane(force) {
     const blind = (revQueue.blind_spots || [])
       .filter(b => !revRepoFilter || b.startsWith(revRepoFilter + ":"));
     if (blind.length) {
-      body += `<div class="revblind">${blind.map(b =>
-        `<div><span class="revblindwhat">incomplete</span> — ${esc(b)}</div>`).join("")}</div>`;
+      body += `<div class="revblind">${blind.map(b => {
+        const u = revQueue.set_aside && revQueue.set_aside.get(b);
+        const chip = u ? ` <button type="button" class="revchip" data-set-aside="${esc(u.file)}"
+          onclick="revMoveSetAsideAside(${esc(JSON.stringify(u.repo_id))}, ${esc(JSON.stringify(u.file))})"
+          title="renames the file beside itself; nothing is deleted">move it aside</button>` : "";
+        return `<div><span class="revblindwhat">incomplete</span> — ${esc(b)}${chip}</div>`;
+      }).join("")}</div>`;
     }
     // 25 red rows is one broken pipeline, not twenty-five decisions: when red is most of the
     // queue it is said once, here, and the row's mark says whose move it is instead. Demoted,

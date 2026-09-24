@@ -44,6 +44,7 @@ mod git;
 mod health;
 mod repos;
 mod review;
+mod set_aside;
 mod settings;
 mod terminal;
 mod update;
@@ -58,6 +59,7 @@ use git::*;
 use health::*;
 use repos::*;
 use review::*;
+use set_aside::*;
 use settings::*;
 use terminal::*;
 use update::*;
@@ -392,6 +394,11 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route(
             "/api/repos/:id/review/:number/snooze",
             post(api_review_snooze),
+        )
+        // SKEIN-552: an unreadable archive or snooze file, renamed out of the way on request.
+        .route(
+            "/api/repos/:id/set-aside/:file/move-aside",
+            post(api_move_set_aside_aside),
         )
         .route(
             "/api/repos/:id/review/:number/summary",

@@ -38,6 +38,7 @@ await import("./review/authoring.mjs");
 await import("./review/edges.mjs");
 await import("./review/merge.mjs");
 await import("./review/hostile.mjs");
+await import("./review/setaside.mjs");
 
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {

@@ -470,7 +470,7 @@ fn a_snoozed_pr_leaves_needs_you_and_returns_when_its_head_moves() {
         "and the row says why: set aside, not archived"
     );
     assert_eq!(
-        skein::prq::snoozed("acme"),
+        skein::prq::snoozed("acme").expect("readable"),
         std::collections::BTreeMap::from([(1u64, "sha1".to_string())]),
         "a snooze on a PR that is no longer open is pruned like the archive is"
     );
@@ -492,7 +492,7 @@ fn a_snoozed_pr_leaves_needs_you_and_returns_when_its_head_moves() {
     );
     assert!(!q.prs[0].snoozed);
     assert!(
-        skein::prq::snoozed("acme").is_empty(),
+        skein::prq::snoozed("acme").expect("readable").is_empty(),
         "the spent entry is dropped, so a revert to the old sha cannot re-hide the row"
     );
 }
@@ -515,7 +515,7 @@ fn the_archive_is_pruned_to_prs_that_are_still_open() {
 
     let _ = skein::prq::queue(&repo("acme"), true).unwrap();
     assert_eq!(
-        skein::prq::archived("acme"),
+        skein::prq::archived("acme").expect("readable"),
         vec![1],
         "the still-open one survives, the closed one is dropped"
     );
@@ -586,12 +586,12 @@ fn a_refresh_that_saw_nothing_keeps_every_set_aside_and_snoozed_pr() {
         "and the queue itself is honest about having gone blind"
     );
     assert_eq!(
-        skein::prq::archived("acme"),
+        skein::prq::archived("acme").expect("readable"),
         vec![500],
         "a refresh that ANSWERED nothing must not read its empty list as `nothing is open`"
     );
     assert_eq!(
-        skein::prq::snoozed("acme"),
+        skein::prq::snoozed("acme").expect("readable"),
         std::collections::BTreeMap::from([(501u64, "deadbeef".to_string())]),
         "and the same for a snooze, which is the owner's decision rather than a cache"
     );
@@ -616,11 +616,11 @@ fn a_queue_that_really_is_empty_still_prunes() {
         "nothing is open, and every search said so"
     );
     assert!(
-        skein::prq::archived("acme").is_empty(),
+        skein::prq::archived("acme").expect("readable").is_empty(),
         "an empty answer is still an answer, so the dead archive entry goes"
     );
     assert!(
-        skein::prq::snoozed("acme").is_empty(),
+        skein::prq::snoozed("acme").expect("readable").is_empty(),
         "and so does the spent snooze"
     );
 }
@@ -649,12 +649,14 @@ fn an_archived_pr_that_only_the_failed_query_would_return_survives() {
         q.blind_spots
     );
     assert_eq!(
-        skein::prq::archived("acme"),
+        skein::prq::archived("acme").expect("readable"),
         vec![7],
         "one dark query is enough: what it would have returned is not known to be closed"
     );
     assert!(
-        skein::prq::snoozed("acme").contains_key(&7),
+        skein::prq::snoozed("acme")
+            .expect("readable")
+            .contains_key(&7),
         "and the snooze on the same pull request survives with it"
     );
 }
@@ -677,7 +679,7 @@ fn a_search_cut_off_at_the_page_does_not_prune_what_it_never_reached() {
     let q = skein::prq::queue(&repo("acme"), true).unwrap();
     assert_eq!(q.prs.len(), 100, "the page itself is served in full");
     assert_eq!(
-        skein::prq::archived("acme"),
+        skein::prq::archived("acme").expect("readable"),
         vec![500],
         "500 may be on page two, and a full page is no evidence that it is closed"
     );

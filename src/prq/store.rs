@@ -5,6 +5,7 @@
 //! opening the tab paints last night's pull requests instead of a blank panel.
 
 use super::*;
+use std::path::Path;
 
 // ───────────────────────────── the archive ─────────────────────────────
 
@@ -42,12 +43,98 @@ fn archive_path(repo_id: &str) -> PathBuf {
     review_dir(repo_id).join("archived.json")
 }
 
-/// PR numbers you have set aside in this repo.
-pub fn archived(repo_id: &str) -> Vec<u64> {
-    fs::read_to_string(archive_path(repo_id))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<u64>>(&t).ok())
-        .unwrap_or_default()
+/// PR numbers you have set aside in this repo — or, for a file that is there and will not read,
+/// `<path>: <why>`.
+///
+/// **An unreadable file is not an empty one** (SKEIN-552). This used to answer `[]` for both, so a
+/// half-written archive rendered as "nothing set aside": every pull request the owner had put away
+/// came back into its lane, and nothing anywhere said a file had failed. The writers were fixed
+/// first (`update_json` refuses rather than writing a default over it); this is the reading half.
+/// A missing file is still `[]`, because nobody having set anything aside is the truth then.
+pub fn archived(repo_id: &str) -> Result<Vec<u64>, String> {
+    read_set_aside(&archive_path(repo_id))
+}
+
+/// What both set-aside readers share: missing is the default, unreadable is `Err("<path>: <why>")`.
+///
+/// Its own wording rather than [`read_json_or_why`]'s, whose `why` already carries "parsing
+/// <path>:" — the sentence this lands in names the path once, beside its cause.
+fn read_set_aside<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The blind-spot sentence for a set-aside file [`archived`] or [`snoozed`] could not read.
+///
+/// The page prefixes `incomplete — <repo>: `, so this is the rest of the owner's approved line
+/// (SKEIN-552, 2026-09-23). `why` is the `<path>: <why>` the reader returned.
+pub(super) fn set_aside_unreadable(why: &str) -> String {
+    format!(
+        "skein could not read the pull requests you set aside ({why}), so they are all back in \
+         their lanes. Fix the file and the next refresh picks it up, or move it aside to start a \
+         fresh list."
+    )
+}
+
+/// Which set-aside file a `move it aside` names: `archived` or `snoozed`, as the route spells it.
+fn set_aside_path(repo_id: &str, file: &str) -> Result<PathBuf, String> {
+    match file {
+        "archived" => Ok(archive_path(repo_id)),
+        "snoozed" => Ok(snooze_path(repo_id)),
+        other => Err(format!(
+            "no set-aside file called {other:?} — it is `archived` or `snoozed`"
+        )),
+    }
+}
+
+/// **Move an unreadable set-aside file out of the way**, to `<file>.unreadable-<date>` beside it,
+/// and answer where it went (SKEIN-552's chip).
+///
+/// A rename and never a delete: the file still holds every decision somebody made, and whoever
+/// wants them back can read them out of it by hand. Under the file's own lock, and only while it
+/// is STILL unreadable — somebody who fixed it by hand between the line rendering and the click
+/// would otherwise have their repaired list moved away, which is the loss this exists to avoid.
+pub fn move_set_aside_aside(repo_id: &str, file: &str) -> Result<PathBuf, String> {
+    usable_repo_id(repo_id)?;
+    let path = set_aside_path(repo_id, file)?;
+    with_lock(&lock_beside(&path)?, || {
+        if !path.exists() {
+            return Err(format!("{} is not there — nothing to move", path.display()));
+        }
+        let still_unreadable = match file {
+            "archived" => read_set_aside::<Vec<u64>>(&path).is_err(),
+            _ => read_set_aside::<BTreeMap<u64, String>>(&path).is_err(),
+        };
+        if !still_unreadable {
+            return Err(format!(
+                "{} reads now, so it was left where it is — refresh and the line goes",
+                path.display()
+            ));
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("unusable file name")?;
+        let now = chrono::Local::now();
+        // The day, and the time as well only when that day's name is already taken — a second
+        // corrupt file on the same day must not replace the first one's evidence.
+        let dated = [
+            now.format("%Y-%m-%d").to_string(),
+            now.format("%Y-%m-%dT%H%M%S").to_string(),
+        ];
+        let to = dated
+            .iter()
+            .map(|d| path.with_file_name(format!("{name}.unreadable-{d}")))
+            .find(|p| !p.exists())
+            .ok_or_else(|| format!("{name} was already moved aside this second — try again"))?;
+        fs::rename(&path, &to)
+            .map_err(|e| format!("moving {} to {}: {e}", path.display(), to.display()))?;
+        Ok(to)
+    })
 }
 
 /// Archive or unarchive one PR. Idempotent in both directions.
@@ -103,11 +190,10 @@ fn snooze_path(repo_id: &str) -> PathBuf {
 /// waiting out, which is exactly the moment the row should return by itself (SKEIN-144). The sha
 /// is what makes that automatic: an entry whose sha no longer matches the open PR's head is
 /// simply ignored, so un-snoozing needs no poller and no act.
-pub fn snoozed(repo_id: &str) -> BTreeMap<u64, String> {
-    fs::read_to_string(snooze_path(repo_id))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+///
+/// An unreadable file is `Err("<path>: <why>")`, for the reason [`archived`] gives.
+pub fn snoozed(repo_id: &str) -> Result<BTreeMap<u64, String>, String> {
+    read_set_aside(&snooze_path(repo_id))
 }
 
 /// Snooze one PR at a head, or (`None`) bring it back by hand. Idempotent, like [`set_archived`]:
@@ -253,18 +339,18 @@ mod tests {
         let (_lock, _home, _pins) = fresh_home();
         set_archived("r", 7, true).unwrap();
         set_archived("r", 7, true).unwrap();
-        assert_eq!(archived("r"), vec![7]);
+        assert_eq!(archived("r").expect("readable"), vec![7]);
         set_archived("r", 7, false).unwrap();
         set_archived("r", 7, false).unwrap();
-        assert!(archived("r").is_empty());
+        assert!(archived("r").expect("readable").is_empty());
     }
 
     #[test]
     fn archives_are_per_repo() {
         let (_lock, _home, _pins) = fresh_home();
         set_archived("one", 4, true).unwrap();
-        assert_eq!(archived("one"), vec![4]);
-        assert!(archived("two").is_empty());
+        assert_eq!(archived("one").expect("readable"), vec![4]);
+        assert!(archived("two").expect("readable").is_empty());
     }
 
     /// **A set-aside made while a refresh is in flight survives that refresh's prune.**
@@ -285,7 +371,7 @@ mod tests {
         set_archived("r", 7, true).unwrap();
 
         // The refresh begins and samples the archive — `queue_within`'s `archived(&repo.id)`.
-        let sampled = archived("r");
+        let sampled = archived("r").expect("readable");
         assert_eq!(sampled, vec![7], "the fixture did not set anything aside");
 
         // Mid-refresh, from the route: a person sets #5 aside.
@@ -295,7 +381,7 @@ mod tests {
         prune_archived("r", &[5], &sampled);
 
         assert_eq!(
-            archived("r"),
+            archived("r").expect("readable"),
             vec![5],
             "the prune wrote back the list it read before the click, so the click never happened"
         );
@@ -310,7 +396,7 @@ mod tests {
     fn a_snooze_made_during_a_refresh_survives_the_prune() {
         let (_lock, _home, _pins) = fresh_home();
         set_snoozed("r", 7, Some("closed7")).unwrap();
-        let sampled = snoozed("r");
+        let sampled = snoozed("r").expect("readable");
 
         set_snoozed("r", 5, Some("live5")).unwrap();
 
@@ -318,7 +404,7 @@ mod tests {
         prune_snoozed("r", &sampled, |n, sha| *n == 5 && sha == "live5");
 
         assert_eq!(
-            snoozed("r"),
+            snoozed("r").expect("readable"),
             BTreeMap::from([(5u64, "live5".to_string())]),
             "the prune wrote back the map it read before the snooze was stored"
         );
@@ -326,7 +412,7 @@ mod tests {
 
     /// **An archive that will not parse is not written over.**
     ///
-    /// [`archived`] reads an unreadable file as `[]`, and the writer used to take that empty list,
+    /// [`archived`] used to read an unreadable file as `[]`, and the writer took that empty list,
     /// add to it and write it back — turning "skein cannot read this" into "there was nothing in
     /// it", which is how a file holding somebody's decisions is destroyed by one click.
     /// [`crate::util::update_json`] refuses instead and names what it would have replaced.
@@ -361,6 +447,81 @@ mod tests {
             half_an_edit,
             "the prune emptied a file it could not read"
         );
+    }
+
+    /// **An unreadable set-aside file is not an empty one** (SKEIN-552), and a missing one is.
+    ///
+    /// **What would make this fail:** [`read_set_aside`] answering `Ok(T::default())` on a parse
+    /// error — the `.ok().and_then(..).unwrap_or_default()` both readers used to be. The first
+    /// `expect_err` then fires.
+    #[test]
+    fn an_unreadable_set_aside_file_is_not_read_as_empty() {
+        let (_lock, _home, _pins) = fresh_home();
+        assert_eq!(archived("r"), Ok(vec![]), "nobody set anything aside yet");
+        assert_eq!(snoozed("r"), Ok(BTreeMap::new()));
+
+        std::fs::create_dir_all(review_dir("r")).unwrap();
+        std::fs::write(archive_path("r"), "[7, 8,").unwrap();
+        std::fs::write(snooze_path("r"), "").unwrap();
+        let why = archived("r").expect_err("a half-written archive read as nothing set aside");
+        assert!(
+            why.starts_with(&format!("{}: ", archive_path("r").display())),
+            "the reason does not name the file somebody must fix: {why}"
+        );
+        let why = snoozed("r").expect_err("an empty snooze file read as nothing snoozed");
+        assert!(why.starts_with(&format!("{}: ", snooze_path("r").display())));
+    }
+
+    /// **`move it aside` renames an unreadable file beside itself, and refuses a readable one.**
+    ///
+    /// **What would make this fail:** [`move_set_aside_aside`] removing the file instead of
+    /// renaming it (the moved-to copy is then missing), or dropping its still-unreadable check (the
+    /// readable snooze file is then moved away — the loss the check is for).
+    #[test]
+    fn move_it_aside_renames_an_unreadable_file_and_leaves_a_readable_one() {
+        let (_lock, _home, _pins) = fresh_home();
+        std::fs::create_dir_all(review_dir("r")).unwrap();
+        std::fs::write(archive_path("r"), "[7, 8,").unwrap();
+
+        let to = move_set_aside_aside("r", "archived").expect("an unreadable archive moves aside");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            to,
+            review_dir("r").join(format!("archived.json.unreadable-{today}")),
+            "not the name the toast promises"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&to).ok().as_deref(),
+            Some("[7, 8,"),
+            "the moved file is not the one that was there — `nothing was deleted` would be false"
+        );
+        assert_eq!(
+            archived("r"),
+            Ok(vec![]),
+            "the list does not start empty after the move"
+        );
+
+        // A second corrupt archive the same day keeps the first one's evidence.
+        std::fs::write(archive_path("r"), "{").unwrap();
+        let again = move_set_aside_aside("r", "archived").expect("a second one moves aside too");
+        assert_ne!(again, to, "the second move replaced the first moved file");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "[7, 8,");
+
+        // Fixed by hand between the line and the click: left exactly where it is.
+        set_snoozed("r", 3, Some("abc")).unwrap();
+        let refused = move_set_aside_aside("r", "snoozed")
+            .expect_err("a readable snooze file was moved away");
+        assert!(refused.contains("reads now"), "{refused}");
+        assert_eq!(
+            snoozed("r"),
+            Ok(BTreeMap::from([(3u64, "abc".to_string())]))
+        );
+
+        assert!(
+            move_set_aside_aside("r", "queue").is_err(),
+            "only the two set-aside files"
+        );
+        assert!(move_set_aside_aside("../x", "archived").is_err());
     }
 
     /// SKEIN-144: set aside *until the head moves*. The snooze names the sha it was taken at, so
@@ -406,24 +567,30 @@ mod tests {
         let (_lock, _home, _pins) = fresh_home();
         set_snoozed("r", 7, Some("abc")).unwrap();
         set_snoozed("r", 7, Some("abc")).unwrap();
-        assert_eq!(snoozed("r"), BTreeMap::from([(7u64, "abc".to_string())]));
+        assert_eq!(
+            snoozed("r").expect("readable"),
+            BTreeMap::from([(7u64, "abc".to_string())])
+        );
 
         // Snoozing again at a newer head re-aims the hold rather than stacking one.
         set_snoozed("r", 7, Some("def")).unwrap();
-        assert_eq!(snoozed("r"), BTreeMap::from([(7u64, "def".to_string())]));
+        assert_eq!(
+            snoozed("r").expect("readable"),
+            BTreeMap::from([(7u64, "def".to_string())])
+        );
 
         set_snoozed("r", 7, None).unwrap();
         set_snoozed("r", 7, None).unwrap();
-        assert!(snoozed("r").is_empty());
+        assert!(snoozed("r").expect("readable").is_empty());
 
         // An empty sha is refused, not stored: build_pr would never match it, so storing it could
         // only ever be dead weight in the file.
         set_snoozed("r", 9, Some("")).unwrap();
-        assert!(snoozed("r").is_empty());
+        assert!(snoozed("r").expect("readable").is_empty());
 
         // Per repo, like the archive.
         set_snoozed("one", 4, Some("s")).unwrap();
-        assert!(snoozed("two").is_empty());
+        assert!(snoozed("two").expect("readable").is_empty());
     }
 
     /// **A repo id that is a path cannot write a holding file outside the review directory.**
@@ -450,7 +617,7 @@ mod tests {
         // The present half, so the refusals below are measured against a write that does happen.
         set_archived("r", 7, true).expect("an ordinary repo id sets a pull request aside");
         set_snoozed("r", 8, Some("abc")).expect("an ordinary repo id snoozes one");
-        assert_eq!(archived("r"), vec![7]);
+        assert_eq!(archived("r").expect("readable"), vec![7]);
         assert!(
             home.join("review/r/archived.json").exists(),
             "the ordinary archive left no file, which would make every refusal below vacuous"

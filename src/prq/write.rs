@@ -1717,6 +1717,7 @@ mod tests {
             ai: false,
             prs: vec![pr],
             blind_spots: Vec::new(),
+            unreadable_set_aside: Vec::new(),
             as_of: String::new(),
             fresh: false,
             whole: true,
