@@ -1766,17 +1766,17 @@ line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:854"]
+["src/tracking.rs:844"]
 line = "Err(format!("
 window = "let last = report.trim().lines().last().unwrap_or(\"\").trim();\u000bErr(format!(\u000b\"token written, but registration did not confirm{} — the box can still be registered by hand against {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:905"]
+["src/tracking.rs:917"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1001"]
+["src/tracking.rs:1002"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 

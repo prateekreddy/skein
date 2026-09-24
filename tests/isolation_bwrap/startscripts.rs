@@ -54,8 +54,10 @@ const START_FILES: [&str; 8] = [
 ///   or tracker string on `.claude/skein/bin/`, the status line on the store's renderer, or the
 ///   Codex installer reading `$store/skein/codex-hooks.json`: B runs A's plant (a marker appears,
 ///   or B's Codex hooks carry A's command);
-/// - a helper the plugin does not install: B's start does not work (the boot report, the guide or
-///   the Codex hooks come up missing).
+/// - a helper dropped from what the plugin installs: the test refuses before anything runs ("the
+///   plugin installs no …");
+/// - a caller naming a file the plugin does not install (the kit's installer misspelt): B's start
+///   does not work (the boot report says `codex_hooks` is `absent`).
 #[test]
 fn a_box_cannot_change_what_its_sibling_runs_as_it_starts() {
     if !bwrap_works() {
@@ -64,13 +66,12 @@ fn a_box_cannot_change_what_its_sibling_runs_as_it_starts() {
              siblings run from skein as they start was NOT exercised",
         );
     }
-    for tool in ["jq", "tmux"] {
-        if !common::have(tool) {
-            return skip(&format!(
-                "no {tool} here, and the kit refuses to provision a box without it, so whether a \
-                 box can change what its siblings run as they start was NOT exercised"
-            ));
-        }
+    // The kit refuses to provision a box without either (its `tools_ok`).
+    if !common::have("jq") || !common::have("tmux") {
+        return skip(
+            "no jq or no tmux here, and the kit refuses to provision a box without both, so whether \
+             a box can change what its siblings run as they start was NOT exercised",
+        );
     }
     // A, trying to overwrite each file in `$1` (the plugin's probe/) and then planting the same in
     // the store at `$2`. Each plant leaves `$2/planted-<name>` behind if anything runs it. One line
@@ -101,6 +102,10 @@ SKEIN_STARTUP_MARKERS="$m" SKEIN_PROVISION=1 SKEIN_BOX=web-two SKEIN_STORE="$sto
   WORKSPACE_DIR="$tree" bash "$root/.skein/skein-startup.sh" </dev/null >"$m/kit.out" 2>&1
 echo "kit $?"
 cd "$tree" || exit 1
+# The screen observer asks tmux whether the agent's session is up, and keeps watching while it is:
+# pointed at a socket of this fixture's own, where there is none, so it cannot find a real
+# `skein-agent` on the machine's default tmux server and go on observing it after the test.
+export SKEIN_TMUX_SOCK="$m/no-server.sock" TMUX_TMPDIR="$m"
 for invocation in "$@"; do
   printf '{}' | SKEIN_BOX=web-two CLAUDE_PROJECT_DIR="$tree" bash -c "$invocation" >/dev/null 2>&1
 done
@@ -110,7 +115,10 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   [ "$(ls "$store" | grep -c '^planted-')" -ge 7 ] && break
   sleep 1
 done
-# The screen observer's single-instance lock, in whatever /tmp this box has.
+# Nothing this start detached outlives the test: wait for the observer and the kit's tracker install
+# to exit, then take the observer's single-instance lock out of whatever /tmp this box has.
+own="^(bash|timeout -k [0-9]+ [0-9]+ bash) $root/\.skein/[^ ]*/(box-pane|sync-install)\.sh"
+for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$own" >/dev/null || break; sleep 1; done
 rm -f /tmp/skein-pane.web-two.lock
 "#;
     let names: Vec<String> = START_FILES.iter().map(|n| n.to_string()).collect();

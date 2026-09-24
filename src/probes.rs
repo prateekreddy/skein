@@ -4,8 +4,9 @@
 //! task without the *repo* providing anything. Neither the hooks nor the scripts they run are in the
 //! store, which every box of the repo can write: both load from skein's read-only plugin — the
 //! wiring since SKEIN-1062 ([`turn_state_hooks`]), the scripts since SKEIN-1144
-//! ([`plugin_install`]). The store still gets copies, for the kit and for an agent that runs
-//! `mailbox.sh` by hand; no hook runs them. See `docs/self-sufficient.md`.
+//! ([`plugin_install`]). So do the helpers a box runs as it starts (SKEIN-1149). The store still
+//! gets copies, for an agent that runs `mailbox.sh` by hand; nothing skein starts runs them. See
+//! `docs/self-sufficient.md`.
 //!
 //! This is still the highest-blast-radius write in the system — it edits a settings file the user
 //! also edits, in every store, on every upgrade, to take skein's past hooks back out and to keep the
@@ -245,7 +246,8 @@ fn probe_revision() -> String {
 /// `<store>/skein/bin/`, and take skein's own hooks back **out** of `<store>/settings.json`
 /// ([`store_settings`]: the repo's own hooks are preserved, re-runs change nothing). The hooks come
 /// from skein's plugin ([`turn_state_hooks`]) and run the plugin's copies of these scripts, not
-/// these (SKEIN-1144); the store's copies are for the kit and the agent's own use.
+/// these (SKEIN-1144), and the kit runs the plugin's too (SKEIN-1149); the store's copies are for
+/// the agent's own use.
 ///
 /// Refreshes *every* store skein reads — each managed repo's plus `store_dir()` — so multi-repo
 /// fleets all report turn-state. Best-effort: errors are collected, not fatal.
@@ -3192,7 +3194,7 @@ mod tests {
                 while let Some(at) = text[from..].find(helper).map(|i| from + i) {
                     from = at + helper.len();
                     let start = text[..at]
-                        .rfind(|c: char| matches!(c, '"' | '\'' | ' ' | '=' | ';' | '\n'))
+                        .rfind(['"', '\'', ' ', '=', ';', '\n'])
                         .map_or(0, |i| i + 1);
                     let named = &text[start..from];
                     let resolved = named

@@ -60,7 +60,9 @@ sbx create --clone --kit "$kit" --name "thing-$1" claude . "$shared"
    `include_str!`); installs them into the box and **additively merges** the
    `UserPromptSubmit`/`Stop`/`Notification`/`PostToolUse` entries into the box's `settings.json`
    (preserving the project's own hooks). Idempotent. (Considered alt: host-side transcript tail —
-   deferred; keeps boxes untouched but is fragile + per-agent.)
+   deferred; keeps boxes untouched but is fragile + per-agent.) *Since superseded:* both runtimes'
+   wiring and every script it runs now load from skein's read-only plugin under `.skein`, not from
+   the store (SKEIN-1062, SKEIN-1144, SKEIN-1149); see Phase 3 below.
 5. **Session digest host-side** — assemble from commits + journal; drop `box-session.sh` dependency.
 6. **Registration owned by skein** — write `{name, branch, dir, started, lastSeen}` on launch/adopt;
    enumerate via `sbx ls`. Stop requiring `sandbox-bootstrap.sh` to register for skein's sake.
@@ -103,7 +105,12 @@ sbx create --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   hook firing needs sbx (host). **Superseded for the wiring by SKEIN-1062:** the hooks now load from
   skein's read-only plugin (`probes::turn_state_hooks`, installed under `.skein` beside the launcher),
   the store's `settings.json` carries none, and `probes::store_settings` retires the entries this
-  phase wrote from every store that still has them. NOTE: a running box only picks
+  phase wrote from every store that still has them. **And for the scripts, by SKEIN-1144 and
+  SKEIN-1149:** no hook command is a store path any more. The hooks run the plugin's own copies under
+  `.skein/plugin*/probe/`, and what a box runs as it starts (the kit's helpers, Codex's hook wiring
+  and installer, the attach shell's and the tracker's helpers, and the status line's renderer) runs
+  from `.skein/plugin-turn-state/probe/`. The store keeps copies under `skein/bin/` that nothing skein
+  starts runs. NOTE: a running box only picks
   up the hooks on its *next* session start — works for newly-created boxes. With this, the registry's
   last job (turn-state) is covered by skein, so `sandboxes.json` can be dropped from skein's reads
   (left as fallback for now). Caveat: `setup-sandbox.sh --sync` would overwrite the store

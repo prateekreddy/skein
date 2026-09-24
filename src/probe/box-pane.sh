@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # skein box-pane.sh — the LEVEL observation of a box's agent screen.
-# SHIPPED AND INSTALLED BY SKEIN (not the repo) — written into <store>/skein/bin/ and started detached
-# by the attach command (see agent_attach_argv in lib.rs). Usage: box-pane.sh <tmux-session>
+# SHIPPED AND INSTALLED BY SKEIN (not the repo) — written into skein's read-only plugin under .skein
+# (and a copy into <store>/skein/bin/) and started detached from the plugin's copy by the attach
+# command (see runtime::pane_observer_start, SKEIN-1149). Usage: box-pane.sh <tmux-session>
 #
 # Why this exists: every other signal skein has is an EDGE (a hook firing on an event). Edge coverage
 # is incomplete — no runtime fires anything when a human answers a permission prompt, dismisses a
