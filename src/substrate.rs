@@ -650,12 +650,36 @@ pub fn install(sandbox: &str, box_name: &str, id: &str) -> Result<Request, Strin
         return Err(format!("request {id} is {}, not approved", req.state));
     }
 
-    let outcome = own_sandbox(sandbox).exec(
+    // `attempt`, not `exec`: `install_script` prints its diagnosis — apt's or npm's own last
+    // lines — to STDOUT on every exit, success or failure alike (it always ends `tail -n 25
+    // "$log"`), exactly the shape [`crate::place::Ran`]'s own doc comment warns `exec`/`bytes`
+    // get wrong: they keep only stderr on a nonzero exit and throw stdout away, so a failure
+    // whose reason is on stdout collapsed to "the crossing exited …" with apt's own line lost
+    // (SKEIN-1143). `attempt` hands back stdout regardless of the exit code, so `state` below is
+    // read from `Ran::code` and the log from `Ran::out`, not from whether the call was `Ok`.
+    let outcome = own_sandbox(sandbox).attempt(
         &install_script(&req.kind, &req.packages),
+        &[],
         Duration::from_secs(900),
     );
     let (state, log) = match &outcome {
-        Ok(out) => ("installed", out.clone()),
+        Ok(ran) if ran.code == 0 => ("installed", String::from_utf8_lossy(&ran.out).into_owned()),
+        // A failure keeps BOTH streams, stdout then stderr: `install_script` puts its diagnosis
+        // on stdout, but nothing here promises a future script — or a hand-run one — never
+        // writes to stderr too, and `install_outcome`'s "last non-empty line" only sees whatever
+        // `log` holds. Whichever stream actually carried the words is what ends up last.
+        Ok(ran) => {
+            let mut log = String::from_utf8_lossy(&ran.out).into_owned();
+            if !ran.err.is_empty() {
+                if !log.is_empty() {
+                    log.push('\n');
+                }
+                log.push_str(&ran.err);
+            }
+            ("failed", log)
+        }
+        // The crossing itself never ran to completion — sandbox unreachable, or it outlived the
+        // deadline — so there is no apt output to read and its own message is what `<why>` gets.
         Err(e) => ("failed", e.clone()),
     };
     let tail: String = log
@@ -694,9 +718,11 @@ pub fn install(sandbox: &str, box_name: &str, id: &str) -> Result<Request, Strin
     if state == "installed" && req.remember {
         record(&req)?;
     }
-    outcome
-        .map(|_| done.clone())
-        .map_err(|e| format!("{e}\n{}", done.log))
+    match outcome {
+        Ok(ran) if ran.code == 0 => Ok(done.clone()),
+        Ok(_) => Err(format!("{}\n{}", install_outcome(state, &tail), done.log)),
+        Err(e) => Err(format!("{e}\n{}", done.log)),
+    }
 }
 
 /// Everything the fleet has been asked for, for the cockpit.
@@ -903,6 +929,77 @@ mod tests {
                 web(format!("package request {bad}, granted")),
                 web(format!(
                     "package request {bad}, not installed: E: Unable to locate package libnss3"
+                )),
+            ]
+        );
+    }
+
+    /// **A failed install carries apt's own reason, the way apt actually emits it, not the
+    /// crossing's exit sentence** (SKEIN-1143).
+    ///
+    /// The test above puts the failing crossing's reason on stderr, which `Place::bytes` already
+    /// handles — that is not the shape a real failure has. `install_script` always ends
+    /// `tail -n 25 "$log"`, printed to the crossing's STDOUT whether apt succeeded or not, so on a
+    /// real failure the reason is on stdout and stderr is empty. Reproduced here without a `>&2`
+    /// anywhere in the stand-in crossing, on a nonzero exit, is exactly that shape.
+    ///
+    /// What would make it fail: reverting `install` to `Place::exec`/`Place::bytes`, which keep
+    /// only stderr on a nonzero exit and throw stdout away — both the recorded decision's `log`
+    /// and the inbox answer would then read "not installed: the crossing exited exit status: 100"
+    /// instead of apt's own line.
+    #[test]
+    fn an_install_reads_apt_s_reason_from_stdout_the_way_apt_actually_emits_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::write(
+            home.join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+
+        let id = "20260924-120000-1";
+        let rendered = Request {
+            id: id.into(),
+            ..req("apt", &["libnss3"])
+        };
+        decide("no-such-sandbox", &rendered, true, false).expect("decided");
+
+        {
+            // No `>&2` anywhere: everything a real `install_script` failure prints lands on
+            // stdout (it merges apt's stdout and stderr into `$log`, then `tail`s that to its
+            // own stdout), and the exit code is apt's, 100 for "no such package".
+            let _crossing = crate::place::seam::install(Box::new(|_argv: &[String]| {
+                Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo 'Reading package lists...'; \
+                     echo 'E: Unable to locate package libnss3'; exit 100"
+                        .into(),
+                ])
+            }));
+            install("skein-fleet", "web-main", id).expect_err("not installed");
+        }
+
+        // The recorded decision — what the cockpit shows — carries apt's own line.
+        let recorded = decision("web-main", id).expect("a decision was recorded");
+        assert_eq!(recorded.state, "failed");
+        assert_eq!(
+            recorded.log.lines().last(),
+            Some("E: Unable to locate package libnss3")
+        );
+        assert!(!recorded.log.contains("the crossing exited"));
+
+        // And so does the box's own inbox answer.
+        let web = |body: String| ("web-main".to_string(), body);
+        assert_eq!(
+            answers_for(&home, id),
+            vec![
+                web(format!("package request {id}, granted")),
+                web(format!(
+                    "package request {id}, not installed: E: Unable to locate package libnss3"
                 )),
             ]
         );
