@@ -88,7 +88,7 @@ subject = "docs(architecture): one warden count, everywhere"
 date = "2026-08-20T12:29:17Z"
 
 [citations."4f2ab1c"]
-external = "the other half of src/review/cache.rs:1357's invented pair — see `9c1de07`. SKEIN-708."
+external = "the other half of src/review/cache.rs:1360's invented pair — see `9c1de07`. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/review/cache.rs"]
 
 [citations."509373b"]
@@ -160,7 +160,7 @@ subject = "fix(anchor): the check travels with the crossing, on both transports"
 date = "2026-08-20T14:58:42Z"
 
 [citations."9c1de07"]
-external = "invented placeholder in src/review/cache.rs:1357's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
+external = "invented placeholder in src/review/cache.rs:1360's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/review/cache.rs"]
 
 [citations."9c3d7bd"]
@@ -218,7 +218,7 @@ subject = "fix(isolation): a box sees its own repo, and nothing the sandbox moun
 date = "2026-08-20T14:29:30Z"
 
 [citations."d2abd03"]
-external = "acme/testbed's own commit, not skein's — src/review/asking.rs:708 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
+external = "acme/testbed's own commit, not skein's — src/review/asking.rs:781 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/review/asking.rs"]
 
 [citations."dbe2318"]

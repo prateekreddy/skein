@@ -691,6 +691,7 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         // there is no box for it to have lost. See `Summary::read_outside_box`.
         read_outside_box: String::new(),
         not_reread: String::new(),
+        not_posted: String::new(),
     };
 
     if expand {
@@ -929,6 +930,9 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
         not_reread: String::new(),
+        // **Why this did not post, when it would have** (SKEIN-516): the reading acts as the App
+        // and there was no App token to act with. Empty whenever it posted or acts as the owner.
+        not_posted: credential.not_posted(),
     };
     // Same rule and same reason as the two-stage path (see the comment there): a summary whose
     // ownership could not be consulted is served but never cached, so a recovered mirror is

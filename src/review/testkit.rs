@@ -587,6 +587,7 @@ pub(super) fn fat(number: u64, head: &str) -> Known {
                 false,
             ),
             not_reread: String::new(),
+            not_posted: String::new(),
             computed: false,
             budget_stopped: false,
             stopped_at_box: false,

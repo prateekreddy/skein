@@ -293,7 +293,7 @@
             <label class="set-field narrow"><span class="set-title">Reviews act as</span><select id="set-review-identity" onchange="renderReviewIdentityNote()"><option value="me">you (your GitHub token)</option><option value="app">the skein GitHub App (team installs)</option></select></label>
             <!-- Owner-approved on SKEIN-516, verbatim. Shown by `renderReviewIdentityNote` from the server's
                  `app_ready`, which is the same `gitgate::app_credentials()` a review's credential is chosen by. -->
-            <p class="set-note warn" id="set-review-identity-note" hidden>Reviews act as the skein App, but no App is set up — nothing will be posted.</p>
+            <p class="set-note warn" id="set-review-identity-note" hidden>Reviews act as the skein App, but no App is set up — nothing will be posted, except in repositories where you stored a token.</p>
             <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
             <div id="gq-probe-rows"></div>
 

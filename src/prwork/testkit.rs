@@ -181,6 +181,7 @@ pub(super) fn a_reading(
         unread_because: String::new(),
         read_outside_box: String::new(),
         not_reread: String::new(),
+        not_posted: String::new(),
         computed: true,
         budget_stopped: false,
         stopped_at_box: false,

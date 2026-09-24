@@ -589,7 +589,7 @@ await check("Reviews act as is one choice on GitHub & keys, defaulting to you, a
   // approved words, and choosing yourself again must take the sentence away. What would make it
   // fail: the note not repainted on change, painted from anything but the server's `app_ready`
   // (which this fixture answers false), or its words drifting.
-  const noApp = "Reviews act as the skein App, but no App is set up — nothing will be posted.";
+  const noApp = "Reviews act as the skein App, but no App is set up — nothing will be posted, except in repositories where you stored a token.";
   if (await page.isVisible("#set-review-identity-note")) throw new Error("the no-App sentence shows while you are chosen");
   await page.selectOption("#set-review-identity", "app");
   const warned = await mustSee("#set-review-identity-note", "the no-App sentence under Reviews act as");

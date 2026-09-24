@@ -192,7 +192,11 @@ pub(super) fn truncate(text: &str, limit: usize) -> (String, bool) {
 /// reach GitHub still reads; it just cannot post what it found, and says so in its own words rather
 /// than failing.
 pub(super) fn acting_credential(slug: &str, number: u64) -> Acting {
-    let (token, whose) = choose_acting(
+    let Choice {
+        token,
+        whose,
+        refused,
+    } = choose_acting(
         crate::config::load_config().reviews_as_app(),
         || crate::gitgate::credential_for(slug).is_some(),
         || crate::gitgate::app_credentials().is_ok(),
@@ -202,7 +206,40 @@ pub(super) fn acting_credential(slug: &str, number: u64) -> Acting {
     Acting {
         token,
         whose,
+        refused,
         subject: format!("{slug}#{number}"),
+    }
+}
+
+/// **Why a review that acts as the App was handed nothing** (SKEIN-516) — the two ways "app" can
+/// fail to reach GitHub, each with the sentence the owner approved for it. Never set for "me": a
+/// review acting as the owner with no token of theirs is the long-standing no-credential reading,
+/// and nothing here was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Refused {
+    /// No App is configured (`gitgate::app_credentials` refused), and the owner stored no token for
+    /// this repository either — so there is nothing to act as.
+    NoApp,
+    /// An App is configured, and GitHub would not mint it a token for this repository.
+    MintFailed,
+}
+
+impl Refused {
+    /// What the review row says instead of posting, verbatim (`Summary::not_posted`).
+    ///
+    /// `NoApp`'s is the unqualified form of the Settings sentence, deliberately: that one covers
+    /// the whole fleet, where a repository with a stored token still posts, and a row that reaches
+    /// here IS a repository without one.
+    pub(super) fn sentence(self) -> &'static str {
+        match self {
+            Refused::NoApp => {
+                "Reviews act as the skein App, but no App is set up — nothing will be posted."
+            }
+            Refused::MintFailed => {
+                "Not posted: GitHub would not give the skein App a token for this repository — \
+                 check the App is installed on it."
+            }
+        }
     }
 }
 
@@ -220,6 +257,7 @@ pub(super) enum Whose {
 pub(super) struct Acting {
     token: Option<crate::secret::Secret>,
     whose: Whose,
+    refused: Option<Refused>,
     subject: String,
 }
 
@@ -232,6 +270,16 @@ impl Acting {
     /// Is there a credential at all — whether the reading may promise to post.
     pub(super) fn is_some(&self) -> bool {
         self.token.is_some()
+    }
+
+    /// Why this review would have posted and cannot, for [`Summary::not_posted`] — empty unless
+    /// the choice was refused.
+    ///
+    /// [`Summary::not_posted`]: super::summary::Summary::not_posted
+    pub(super) fn not_posted(&self) -> String {
+        self.refused
+            .map(|why| why.sentence().to_string())
+            .unwrap_or_default()
     }
 
     /// **Run the model call that is handed this credential.** When it is the owner's own token the
@@ -257,22 +305,47 @@ impl Acting {
 ///   owner's token. Somebody who chose "the App" chose not to act as themselves, and falling back
 ///   to their own token would do exactly that without saying so; the reading goes ahead without a
 ///   credential, which is what a reading with none has always done — it reads, and does not post.
-///   A mint that fails is the same answer, for the same reason.
+///   A mint that fails is the same answer, for the same reason. Each says which it was
+///   ([`Refused`]), because the row has to tell the reader why nothing was posted.
 pub(super) fn choose_acting(
     as_app: bool,
     stored_for_repo: impl FnOnce() -> bool,
     app_ready: impl FnOnce() -> bool,
     mint: impl FnOnce() -> Option<crate::secret::Secret>,
     owners: impl FnOnce() -> Option<crate::secret::Secret>,
-) -> (Option<crate::secret::Secret>, Whose) {
+) -> Choice {
     if !as_app {
-        return (owners(), Whose::Owner);
+        return Choice {
+            token: owners(),
+            whose: Whose::Owner,
+            refused: None,
+        };
     }
     let stored = stored_for_repo();
+    let whose = if stored { Whose::Owner } else { Whose::App };
     if !stored && !app_ready() {
-        return (None, Whose::App);
+        return Choice {
+            token: None,
+            whose,
+            refused: Some(Refused::NoApp),
+        };
     }
-    (mint(), if stored { Whose::Owner } else { Whose::App })
+    let token = mint();
+    let refused = token.is_none().then_some(Refused::MintFailed);
+    Choice {
+        token,
+        whose,
+        refused,
+    }
+}
+
+/// What [`choose_acting`] decided: the token, whose it is, and — when there is none because "app"
+/// could not be acted as — why.
+#[derive(Debug)]
+pub(super) struct Choice {
+    pub(super) token: Option<crate::secret::Secret>,
+    pub(super) whose: Whose,
+    pub(super) refused: Option<Refused>,
 }
 
 /// The paths a PR touches.
@@ -871,8 +944,12 @@ mod tests {
         use std::cell::Cell;
         let pat = || Some(Secret::new("skein-test-owners-pat"));
         let minted = || Some(Secret::new("skein-test-app-installation"));
-        let said =
-            |got: &(Option<Secret>, Whose)| (got.0.as_ref().map(|t| t.expose().to_string()), got.1);
+        let said = |got: &Choice| {
+            (
+                got.token.as_ref().map(|t| t.expose().to_string()),
+                got.whose,
+            )
+        };
 
         // "me", the default: the owner's token, and the App is not asked.
         let asked_app = Cell::new(false);
@@ -950,6 +1027,74 @@ mod tests {
             said(&stored),
             (Some("skein-test-stored".into()), Whose::Owner)
         );
+    }
+
+    /// **A review that acts as the App and gets nothing says which of the two reasons it was, in
+    /// the owner's approved words** (SKEIN-516) — and every other outcome says nothing.
+    ///
+    /// The changes that fail it: `NoApp` and `MintFailed` swapped in `choose_acting` (a fleet with
+    /// no App told to go and check an installation, or the reverse); a refusal set on the `"me"`
+    /// arm or on a review that got its token; either sentence drifting from the approved text.
+    #[test]
+    fn a_review_that_cannot_act_as_the_app_says_why_and_one_that_can_says_nothing() {
+        use crate::secret::Secret;
+        let pat = || Some(Secret::new("skein-test-owners-pat"));
+        let minted = || Some(Secret::new("skein-test-app-installation"));
+        let posting = |refused: Option<Refused>| {
+            Acting {
+                token: None,
+                whose: Whose::App,
+                refused,
+                subject: "example-org/thing#7".into(),
+            }
+            .not_posted()
+        };
+
+        // No App configured, and no token stored for this repository.
+        let no_app = choose_acting(true, || false, || false, minted, pat);
+        assert_eq!(no_app.refused, Some(Refused::NoApp));
+        assert_eq!(
+            posting(no_app.refused),
+            "Reviews act as the skein App, but no App is set up — nothing will be posted."
+        );
+
+        // An App configured, and GitHub would not mint it a token.
+        let mint_failed = choose_acting(true, || false, || true, || None, pat);
+        assert_eq!(mint_failed.refused, Some(Refused::MintFailed));
+        assert_eq!(
+            posting(mint_failed.refused),
+            "Not posted: GitHub would not give the skein App a token for this repository — \
+             check the App is installed on it."
+        );
+
+        // Nothing was refused: a review that got the App's token, a stored token, or acts as the
+        // owner — including the owner with no token at all, which is the old no-credential
+        // reading and not a refusal of anything.
+        for (why, got) in [
+            (
+                "an App token",
+                choose_acting(true, || false, || true, minted, pat),
+            ),
+            (
+                "a stored token",
+                choose_acting(true, || true, || false, pat, pat),
+            ),
+            (
+                "\"me\"",
+                choose_acting(false, || false, || false, minted, pat),
+            ),
+            (
+                "\"me\" with no token",
+                choose_acting(false, || false, || false, minted, || None),
+            ),
+        ] {
+            assert_eq!(got.refused, None, "{why} carried a refusal");
+            assert_eq!(
+                posting(got.refused),
+                "",
+                "{why} would draw a not-posted notice"
+            );
+        }
     }
 
     #[test]
