@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 98   (NOT '.route("' — that gives 87, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 99   (NOT '.route("' — that gives 87, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 162 unique, 165 occurrences
-grep -c 'function ' src/web/index.html                          # 435
+grep -c 'function ' src/web/index.html                          # 441
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -173,6 +173,10 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Contract signals** — a mechanical diff scanner that escalates a PR the model called boring,
   capped and deduplicated, deliberately non-redundant with the AI summary.
 - Review filter chips: all / author / reviewer / mentioned.
+- **An unreadable set-aside file is said, not read as empty** (SKEIN-552). A corrupt `archived.json`
+  or `snoozed.json` puts an amber blind-spot line on the queue naming the file, and a `move it aside`
+  chip renames it to `<file>.unreadable-<date>` beside itself (`prq::move_set_aside_aside`) —
+  never a delete, and only while it still will not read.
 - **Stacks, as trees rather than lines** (`revChains`, SKEIN-147/160/288). Detection is
   `base_ref → head_ref` over the queue the pane already holds — no network, no model — severed at the
   repo's own `trunk` by NAME, so a trunk pull request cannot dissolve every stack rooted on it and a

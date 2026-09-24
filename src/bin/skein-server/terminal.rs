@@ -222,7 +222,7 @@ async fn terminal_session(
     }
 
     let launching = launch.is_some();
-    let code = pump_pty(&mut socket, cmd).await;
+    let code = pump_pty(&mut socket, cmd, AFTER_RETRY).await;
     // The one failure a box start cannot record for itself: `skein` never ran, so nothing inside it
     // wrote `starts/<box>.err`, and the reconnect that follows this PTY closing was told "There is
     // no record of a start having been attempted" — about a launch someone had just pressed a button
@@ -289,13 +289,24 @@ fn watching_for_box(name: &str) -> String {
 /// the reader goes looking through their own box for the cause, which is the most expensive way
 /// there is to make no progress. And `likely` names the thing that can actually be checked.
 ///
-/// It also says that nothing is coming: these four have no condition anywhere that clears them, so
-/// the pane offers "Try again" rather than a spinner, and the sentence agrees with the button.
-fn skeins_own_fault(what: &str, error: &str, likely: &str) -> String {
+/// **What comes next depends on who asked, and `after` is that answer** (SKEIN-883). A box
+/// terminal is closed with [`AFTER_RETRY`], and its pane tries again by itself on a bounded backoff
+/// — each of these four is a condition that can clear on its own (a pty or an fd freeing, a program
+/// appearing on PATH), and `openpty` fails before anything is spawned, so a retry risks nothing. The
+/// login modal is closed with [`AFTER_NO_WATCH`], for the reason [`login_session`] gives: a modal
+/// that reopened itself over whatever somebody had moved on to is worse than the button. The
+/// sentence agrees with whichever the pane is about to do.
+fn skeins_own_fault(what: &str, error: &str, likely: &str, after: &str) -> String {
+    let next = match after {
+        AFTER_RETRY => "This pane tries again by itself for a few minutes.",
+        _ => {
+            "There is no condition here for skein to wait on, so nothing will reopen this \
+             terminal by itself: use Try again below."
+        }
+    };
     format!(
         "skein: {what}: {error}\r\nThis is skein's own failure, not anything you did — nothing in \
-         your box is wrong. There is no condition here for skein to wait on, so nothing will reopen \
-         this terminal by itself: use Try again below. If it keeps failing, {likely}.\r\n"
+         your box is wrong. {next} If it keeps failing, {likely}.\r\n"
     )
 }
 
@@ -390,8 +401,13 @@ const AFTER_WAIT_PTY: &str = "wait-pty";
 /// Refused because skein has no placement for the box. Wait for the box on the board's stream.
 const AFTER_WAIT_BOX: &str = "wait-box";
 
-/// Skein's own failure, with no condition anywhere that clears it. Offer the control.
+/// Skein's own failure, where the pane must not reopen by itself. Offer the control.
 const AFTER_NO_WATCH: &str = "no-watch";
+
+/// Skein's own failure inside [`pump_pty`], for a box terminal (SKEIN-883). Nothing names the moment
+/// it clears, so the pane retries on a bounded backoff — 3s, 10s, 30s, 60s, 120s — and falls back to
+/// the control after the fifth.
+const AFTER_RETRY: &str = "retry";
 
 /// Close a terminal socket the way [`CLOSE_NOTHING_TO_RECONNECT`] describes, and wait to be told the
 /// close was read.
@@ -433,7 +449,10 @@ async fn refuse(socket: &mut WebSocket, sentence: String, after: &str) {
 /// what the login flow wants: a login is a one-shot flow, not a tmux-backed session to resume, so
 /// an abandoned OAuth prompt dies with its browser tab instead of waiting forever for input nobody
 /// can give it.
-async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
+///
+/// `own_fault` is the token its four failures close with: [`AFTER_RETRY`] from a box terminal,
+/// [`AFTER_NO_WATCH`] from the login modal (see [`skeins_own_fault`]).
+async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder, own_fault: &str) -> Option<u32> {
     let pair = match native_pty_system().openpty(PtySize {
         rows: 30,
         cols: 100,
@@ -448,8 +467,9 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
                     "could not open a terminal device",
                     &e.to_string(),
                     "the machine skein is running on has run out of pseudo-terminals",
+                    own_fault,
                 ),
-                AFTER_NO_WATCH,
+                own_fault,
             )
             .await;
             return None;
@@ -465,8 +485,9 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
                     "could not start the program behind this terminal",
                     &e.to_string(),
                     "the program named in the error is missing from where skein is running",
+                    own_fault,
                 ),
-                AFTER_NO_WATCH,
+                own_fault,
             )
             .await;
             return None;
@@ -483,8 +504,9 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
                     "opened this terminal and then could not read from it",
                     &e.to_string(),
                     "skein is out of file descriptors, and restarting the server clears that",
+                    own_fault,
                 ),
-                AFTER_NO_WATCH,
+                own_fault,
             )
             .await;
             return None;
@@ -499,8 +521,9 @@ async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
                     "opened this terminal and then could not write to it",
                     &e.to_string(),
                     "skein is out of file descriptors, and restarting the server clears that",
+                    own_fault,
                 ),
-                AFTER_NO_WATCH,
+                own_fault,
             )
             .await;
             return None;
@@ -684,7 +707,9 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
     for (k, v) in std::env::vars() {
         cmd.env(k, v);
     }
-    match pump_pty(&mut socket, cmd).await {
+    // `AFTER_NO_WATCH` for the pump's own failures too, and not the box terminal's `AFTER_RETRY`: the
+    // cap refusal above says why a login modal must not reopen itself.
+    match pump_pty(&mut socket, cmd, AFTER_NO_WATCH).await {
         Some(0) => {
             let rt = runtime.clone();
             let said = tokio::task::spawn_blocking(move || skein::fleet::after_login(&rt))
@@ -716,4 +741,52 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
     // and a socket dropped on unread bytes is reset rather than closed, which discards the peer's
     // queue: the toast then says "nothing changed" about a login that worked.
     close_saying(&mut socket, AFTER_CHILD_ENDED, "the login flow is over").await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The pump's own failures say what the pane is about to do, and the login modal keeps the
+    /// button** (SKEIN-883).
+    ///
+    /// The box terminal's sentence is the owner's approved one; the login modal's is the one it had,
+    /// because its pane does not retry. And which of the two each caller gets is the argument it
+    /// hands `pump_pty`, read off the source: the call is inside two websocket handlers no unit test
+    /// can drive, and the browser suite (`tests/ui/recovery.mjs`) only reaches the box terminal.
+    ///
+    /// **What would make this fail:** `login_session` handing `pump_pty` `AFTER_RETRY` — the login
+    /// modal would then close as `retry`, a token its page has no strip for — or `skeins_own_fault`
+    /// ignoring `after` and saying the same thing to both.
+    #[test]
+    fn the_box_terminal_retries_and_the_login_modal_keeps_the_button() {
+        let retry = skeins_own_fault("w", "e", "check the thing", AFTER_RETRY);
+        assert!(
+            retry.contains(
+                "nothing in your box is wrong. This pane tries again by itself for a few minutes. \
+                 If it keeps failing, check the thing."
+            ),
+            "{retry}"
+        );
+        let button = skeins_own_fault("w", "e", "check the thing", AFTER_NO_WATCH);
+        assert!(button.contains("use Try again below"), "{button}");
+        assert!(!button.contains("tries again by itself"), "{button}");
+
+        // Everything above this module, so the strings this test searches for are not found in the
+        // test itself.
+        let whole = include_str!("terminal.rs");
+        let src = &whole[..whole
+            .find("#[cfg(test)]\nmod tests")
+            .expect("the test module")];
+        let login = &src[src.find("async fn login_session").expect("login_session")..];
+        assert!(
+            login.contains("pump_pty(&mut socket, cmd, AFTER_NO_WATCH)"),
+            "the login modal's pump failures no longer close as no-watch"
+        );
+        let session = &src[..src.find("async fn login_session").unwrap()];
+        assert!(
+            session.contains("pump_pty(&mut socket, cmd, AFTER_RETRY)"),
+            "the box terminal's pump failures no longer close as retry"
+        );
+    }
 }

@@ -1223,7 +1223,7 @@ mod tests {
             "a queue missing 43 pull requests must not tell anybody it saw them all"
         );
         assert!(
-            archived("search-cut").contains(&4242),
+            archived("search-cut").expect("readable").contains(&4242),
             "a set-aside pull request past the page was deleted because a truncated search did \
              not list it — the same erasure SKEIN-229 fixed for an outage"
         );
@@ -1250,7 +1250,7 @@ mod tests {
             q.blind_spots
         );
         assert!(
-            !archived("search-cut").contains(&4242),
+            !archived("search-cut").expect("readable").contains(&4242),
             "a queue that saw everything still prunes a set-aside PR that is no longer open"
         );
         // Nothing here can prove what the OTHER reader of this list does with it — see

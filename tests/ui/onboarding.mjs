@@ -498,6 +498,17 @@ await check("the add-repo dialog takes a git URL", async () => {
   const derived = (await page.textContent("#ar-derived")) || "";
   if (!derived.includes("my-project"))
     throw new Error(`the dialog never says what the boxes will be called: "${derived.trim()}"`);
+  // The fixture's git host is on loopback, so it is not GitHub — and the dialog says what that costs
+  // before the clone rather than after it, in the owner's approved words (SKEIN-812). Nothing is
+  // sent until the second press.
+  await page.click("#ar-go");
+  await settle(200);
+  const host = new URL(githost.url).hostname;
+  const warned = (await page.textContent("#ar-msg")) || "";
+  const want = `${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`;
+  if (warned !== want) throw new Error(`the first press did not ask about a non-GitHub host: "${warned}"`);
+  const early = await (await fetch(`http://127.0.0.1:${port}/api/repos`, { headers: authHeader() })).json();
+  if (early.length) throw new Error("the warning was shown after the repo had already been added");
   await page.click("#ar-go");
   // The clone is real, and `add_repo` runs it inline before it registers anything.
   await settle(4000);

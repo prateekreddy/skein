@@ -9,7 +9,7 @@ use super::checks::{rollup_state_missing, rollup_total, truncated_rollup};
 use super::credentials::{record_rename, renamed_to};
 use super::node::{build_pr, contexts};
 use super::search::{answered_batch_width, search_prs_all, LABELS_FETCHED, REVIEWS_FETCHED};
-use super::store::{prune_archived, prune_snoozed, remember};
+use super::store::{prune_archived, prune_snoozed, remember, set_aside_unreadable};
 use super::*;
 
 // ───────────────────────────── fetching ─────────────────────────────
@@ -183,8 +183,28 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         ));
     }
 
-    let archived_numbers = archived(&repo.id);
-    let snoozed_shas = snoozed(&repo.id);
+    // **A set-aside file skein could not read is said out loud, not read as empty** (SKEIN-552).
+    // The rows still build from an empty list — the pull requests really are back in their lanes,
+    // and the sentence says so — but the blind spot names the file, and `unreadable_set_aside`
+    // tells the page which line gets the `move it aside` chip. Nothing here writes: both prunes
+    // below are gated on what was read, and an empty read gives them nothing to prune.
+    let mut unreadable_set_aside = Vec::new();
+    let mut unreadable = |file: &str, why: String| {
+        let line = set_aside_unreadable(&why);
+        blind_spots.push(line.clone());
+        unreadable_set_aside.push(UnreadableSetAside {
+            file: file.into(),
+            blind_spot: line,
+        });
+    };
+    let archived_numbers = archived(&repo.id).unwrap_or_else(|why| {
+        unreadable("archived", why);
+        Vec::new()
+    });
+    let snoozed_shas = snoozed(&repo.id).unwrap_or_else(|why| {
+        unreadable("snoozed", why);
+        BTreeMap::new()
+    });
     let mut prs: Vec<Pr> = Vec::new();
     let texts: Vec<String> = searches.iter().map(|(s, _)| s.clone()).collect();
     // Does this refresh know what is open?
@@ -421,6 +441,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         ai: crate::review::summaries_enabled(),
         prs,
         blind_spots,
+        unreadable_set_aside,
         as_of: chrono::Utc::now().to_rfc3339(),
         fresh: true,
         whole: answered,
@@ -1381,12 +1402,12 @@ mod tests {
             blind.blind_spots
         );
         assert!(
-            archived("team-blind").contains(&77),
+            archived("team-blind").expect("readable").contains(&77),
             "a set-aside pull request was deleted because a search that could not be RUN did not \
              list it — the same erasure SKEIN-229 fixed for a search that ran and failed"
         );
         assert!(
-            snoozed("team-blind").contains_key(&77),
+            snoozed("team-blind").expect("readable").contains_key(&77),
             "and the snooze on the same pull request went with it"
         );
         assert!(
@@ -1411,10 +1432,88 @@ mod tests {
             seeing.blind_spots
         );
         assert!(
-            archived("team-blind").is_empty() && snoozed("team-blind").is_empty(),
+            archived("team-blind").expect("readable").is_empty()
+                && snoozed("team-blind").expect("readable").is_empty(),
             "an answered refresh stopped pruning — a queue that says it saw everything must still \
              clear decisions about pull requests that are gone"
         );
+
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// **A set-aside file skein could not read reaches the queue as a blind spot with a chip, and
+    /// not as "nothing set aside"** (SKEIN-552).
+    ///
+    /// Both files corrupt, one refresh that answered in full. The queue must carry the approved
+    /// sentence for each, name each file in `unreadable_set_aside` beside the line it put there,
+    /// and leave both files byte-for-byte alone.
+    ///
+    /// **What would make this fail:** `queue_within` reading `archived(..).unwrap_or_default()`
+    /// again — the pre-SKEIN-552 reading. The queue then has no such blind spot and the first
+    /// assertion names what it had instead.
+    #[test]
+    fn an_unreadable_set_aside_file_is_a_blind_spot_with_a_chip_not_an_empty_list() {
+        let _g = crate::testutil::env_lock();
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        let dir = review_dir("corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (archive, snooze) = (dir.join("archived.json"), dir.join("snoozed.json"));
+        std::fs::write(&archive, "[7, 8,").unwrap();
+        std::fs::write(&snooze, "{\"7\": ").unwrap();
+
+        let five_empty = r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]},"q4":{"nodes":[]}}}"#;
+        let (base, _seen) = batched_github(true, 200, five_empty.to_string());
+        env.set("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/corrupt"), true).expect("the queue answered");
+        let said = |path: &std::path::Path| {
+            q.blind_spots.iter().find(|b| {
+                b.starts_with(&format!(
+                    "skein could not read the pull requests you set aside ({}: ",
+                    path.display()
+                )) && b.ends_with(
+                    "), so they are all back in their lanes. Fix the file and the next refresh \
+                     picks it up, or move it aside to start a fresh list.",
+                )
+            })
+        };
+        let archive_line = said(&archive).unwrap_or_else(|| {
+            panic!(
+                "a corrupt archive read as an empty one — no blind spot names it: {:?}",
+                q.blind_spots
+            )
+        });
+        let snooze_line = said(&snooze).unwrap_or_else(|| {
+            panic!(
+                "a corrupt snooze file read as an empty one — no blind spot names it: {:?}",
+                q.blind_spots
+            )
+        });
+        assert_eq!(
+            q.unreadable_set_aside,
+            vec![
+                UnreadableSetAside {
+                    file: "archived".into(),
+                    blind_spot: archive_line.clone(),
+                },
+                UnreadableSetAside {
+                    file: "snoozed".into(),
+                    blind_spot: snooze_line.clone(),
+                },
+            ],
+            "the page cannot put `move it aside` on a line the queue does not point it at"
+        );
+        assert_eq!(std::fs::read_to_string(&archive).unwrap(), "[7, 8,");
+        assert_eq!(std::fs::read_to_string(&snooze).unwrap(), "{\"7\": ");
 
         forget_host_token();
         forget_renames();

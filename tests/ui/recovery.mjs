@@ -14,9 +14,9 @@
 //     stream (`Tick::PtyFreed`) and the pane reconnects itself. **No click.**
 //   - `wait-box` — a box arriving is already a transition the board carries, so the pane waits for
 //     that and reconnects itself. No click.
-//   - `no-watch` — `pump_pty`'s own four failures, which have no external condition anywhere. These
-//     keep the button, and must SAY they keep it rather than showing a spinner that waits for
-//     nothing.
+//   - `retry` — `pump_pty`'s own four failures in a box terminal (SKEIN-883). Nothing names the moment
+//     they clear, so the pane tries again at 3s, 10s, 30s, 60s and 120s and then offers the button.
+//     The login modal keeps `no-watch` for the same four, and the button.
 //
 // # What is asserted, and why it is pixels
 //
@@ -174,9 +174,15 @@ const { log: log2 } = await startServer({
     SKEIN_REGISTRY: path.join(fx2.root, "sandboxes.json"),
     SKEIN_LS_CMD: `${fx2.sbx} ls --json`,
     SKEIN_LAUNCH_CMD: HOLD_CMD,
+    // Through `sh` as well, so a try the pane makes on its own — which reconnects rather than
+    // re-launching — meets the same spawn failure rather than an `sbx` stub that starts (SKEIN-883).
+    SKEIN_ATTACH_CMD: HOLD_CMD,
     PATH: fx2.bin,
   },
 });
+// Placed, so a reconnect gets past `absent_box_reason` to the spawn — without it every automatic try
+// would be refused as `wait-box` and the backoff below would be measuring the wrong refusal.
+placeBox(fx2.home, "recovery-nospawn");
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
@@ -410,52 +416,113 @@ try {
     if (n !== 0) throw new Error(`${n} clicks landed on the page`);
   });
 
-  // ---------- 3. skein's own failure: nothing to watch, so the button, and it says so ----------
+  // ---------- 3. skein's own failure: tried again on a bounded backoff, then the button ----------
+  //
+  // SKEIN-883. `pump_pty`'s four failures close a box terminal with `retry`, and the pane tries
+  // again by itself at 3s, 10s, 30s, 60s and 120s, then stops and offers the button. The clock is
+  // Playwright's, so four minutes of backoff run in a few seconds and each try can be caught arriving
+  // no earlier than its delay. The sockets are counted off the wire rather than read from the page,
+  // so "it tried" is a connection the server saw and not a counter the code under test keeps.
+  //
+  // How each is made to fail: `scheduleRetry` given `[3000, 3000, 3000, 3000, 3000]` fails "no
+  // earlier than its delay" at the second try; letting it run past the fifth (`n >= 6`) fails "and
+  // stops after the fifth"; the server closing with `no-watch` again fails the first check below.
   console.log("\na terminal skein itself could not open");
   const page2 = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   page2.setDefaultTimeout(8000);
+  await page2.clock.install();
+  const tries = [];
+  // And what the first one was told, off the wire: xterm parses what it is given on a timer, and the
+  // page's timers are held still below, so its buffer is not the witness here.
+  const told = [];
+  page2.on("websocket", w => {
+    if (!w.url().includes("/recovery-nospawn/terminal")) return;
+    tries.push(w.url());
+    if (tries.length === 1) w.on("framereceived", f => { if (typeof f.payload === "string") told.push(f.payload); });
+  });
   await page2.goto(`http://127.0.0.1:${port2}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
   await page2.waitForFunction(() => typeof createSession === "function" && typeof sessions !== "undefined");
   await page2.evaluate(UNWRAP);
+  // From here the page's clock only moves when this says so, so every delay below is measured
+  // exactly. Node-side waits only: a paused clock stops the page's own animation frames, which is
+  // what `waitForFunction` polls on.
+  await page2.clock.pauseAt(await page2.evaluate(() => Date.now() + 10));
+  const nap = ms => new Promise(r => setTimeout(r, ms));
+  const settled = async k => {
+    for (const end = Date.now() + 20000; Date.now() < end; await nap(50)) {
+      if (tries.length === k && await page2.evaluate(() => !!sessions.get(sidOf("recovery-nospawn", "agent"))?.dead)) return true;
+    }
+    return false;
+  };
   await page2.evaluate(() => {
     createSession("recovery-nospawn", "agent", "x", "claude");
     view = { box: "recovery-nospawn", mode: "term", kind: "agent" };
     applyView();
   });
-  await page2.waitForFunction(() => !!sessions.get(sidOf("recovery-nospawn", "agent"))?.dead, null, { timeout: 20000 });
-  await page2.waitForTimeout(400);
-  const broke = await page2.evaluate(() => {
+  if (!await settled(1)) throw new Error("the terminal skein could not open never came back refused");
+  const pane = () => page2.evaluate(() => {
     const s = sessions.get(sidOf("recovery-nospawn", "agent"));
-    const buf = s.term.buffer.active, lines = [];
-    for (let i = 0; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+    const buf = s.term.buffer.active;
     const recover = s.host.querySelector(".recover");
     const disco = s.host.querySelector(".disco");
     return {
       waitFor: s.waitFor || "",
+      dead: !!s.dead,
       said: window.__unwrapped(buf),
-      strip: recover ? recover.textContent.replace(/\s+/g, " ").trim() : "",
+      strip: recover ? [...recover.children].filter(e => e.tagName !== "BUTTON")
+        .map(e => e.textContent).filter(Boolean).join(" / ") : "",
       stripShown: recover ? getComputedStyle(recover).display !== "none" : false,
       button: !!recover?.querySelector(".recover-go"),
-      watching: !!recover?.querySelector(".recover-w"),
       discoDisplay: disco ? getComputedStyle(disco).display : "no overlay in the pane at all",
     };
   });
+  const broke = await pane();
 
-  await check("skein's own failure says it is skein's, and names what can be checked", () => {
-    if (!/could not start the program behind this terminal/.test(broke.said)) {
-      throw new Error(`the pane holds ${JSON.stringify(broke.said.slice(0, 300))}`);
+  await check("skein's own failure says it is skein's, that the pane tries again, and names what can be checked", () => {
+    const said = told.join("");
+    if (!/could not start the program behind this terminal/.test(said)) {
+      throw new Error(`the socket said ${JSON.stringify(said.slice(0, 300))}`);
     }
-    if (!/not anything you did/.test(broke.said)) throw new Error("the refusal leaves the reader hunting for their own mistake");
-    if (!/If it keeps failing/.test(broke.said)) throw new Error("the refusal names nothing that can be checked");
+    if (!/not anything you did — nothing in your box is wrong\. This pane tries again by itself for a few minutes\. If it keeps failing, the program named in the error is missing from where skein is running\./.test(said))
+      throw new Error(`the sentence is not the approved one: ${JSON.stringify(said.slice(0, 400))}`);
   });
 
-  await check("a pane that is watching nothing offers the control and says why", () => {
-    if (broke.waitFor !== "no-watch") throw new Error(`the close reason's first word is ${JSON.stringify(broke.waitFor)}`);
+  await check("a pane skein could not open says it is trying again, and offers no button", () => {
+    if (broke.waitFor !== "retry") throw new Error(`the close reason's first word is ${JSON.stringify(broke.waitFor)}`);
     if (!broke.stripShown) throw new Error("the pane says nothing about what happens next");
-    if (!broke.button) throw new Error(`no control on a pane nothing will reopen: "${broke.strip}"`);
-    if (broke.watching) throw new Error("the pane shows a spinner for a condition that does not exist");
-    if (!/no condition to wait for/.test(broke.strip)) throw new Error(`the strip reads "${broke.strip}"`);
+    if (broke.button) throw new Error(`a pane that tries again on its own is also asking to be clicked: "${broke.strip}"`);
+    const want = "skein could not open this terminal — trying again / It retries on its own: next try in 3s (1 of 5). Nothing in your box is wrong.";
+    if (broke.strip !== want) throw new Error(`the strip reads "${broke.strip}"`);
     if (broke.discoDisplay !== "none") throw new Error(`the reconnect panel is up as well: ${broke.discoDisplay}`);
+  });
+
+  const schedule = [3000, 10000, 30000, 60000, 120000];
+  await check("each automatic try comes no earlier than its delay: 3s, 10s, 30s, 60s, 120s", async () => {
+    for (const [i, wait] of schedule.entries()) {
+      const k = i + 1;
+      // What is left of the wait, on a clock that has not moved since the refusal landed — so it IS
+      // the delay this try was scheduled with.
+      const left = await page2.evaluate(() => sessions.get(sidOf("recovery-nospawn", "agent")).retryAt - Date.now());
+      if (left !== wait) throw new Error(`try ${k} was scheduled ${left}ms out, not ${wait}ms`);
+      const now = await pane();
+      const told = `It retries on its own: next try in ${wait / 1000}s (${k} of 5). Nothing in your box is wrong.`;
+      if (!now.strip.endsWith(told)) throw new Error(`before try ${k} the strip reads "${now.strip}"`);
+      await page2.clock.runFor(left - 1);
+      await nap(300);
+      if (tries.length !== k) throw new Error(`try ${k} went out before its ${wait}ms were up (${tries.length} sockets)`);
+      await page2.clock.runFor(2);
+      if (!await settled(k + 1)) throw new Error(`try ${k} never went out, or never came back refused (${tries.length} sockets)`);
+    }
+  });
+
+  await check("and stops after the fifth, handing over to the button", async () => {
+    const done = await pane();
+    const want = "skein could not open this terminal / It tried 5 times over 4 minutes. Press Try again once the cause above is fixed.";
+    if (done.strip !== want) throw new Error(`the strip reads "${done.strip}"`);
+    if (!done.button) throw new Error("no control once the tries are spent");
+    await page2.clock.runFor(10 * 60 * 1000);
+    await nap(300);
+    if (tries.length !== 6) throw new Error(`${tries.length - 6} more tries went out after the fifth`);
   });
 
   await check("no page errors and no 5xx while any of that happened", () => {

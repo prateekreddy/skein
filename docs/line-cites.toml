@@ -215,59 +215,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:125"]
+["src/bin/skein-server/main.rs:127"]
 line = "eprintln!(\"skein-server: {msg}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:136"]
+["src/bin/skein-server/main.rs:138"]
 line = "eprintln!(\"skein-server: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:142"]
+["src/bin/skein-server/main.rs:144"]
 line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:148"]
+["src/bin/skein-server/main.rs:150"]
 line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:151"]
+["src/bin/skein-server/main.rs:153"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:158"]
+["src/bin/skein-server/main.rs:160"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:165"]
+["src/bin/skein-server/main.rs:167"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:178"]
+["src/bin/skein-server/main.rs:180"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:235"]
+["src/bin/skein-server/main.rs:237"]
 line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:273"]
+["src/bin/skein-server/main.rs:275"]
 line = "\"skein: {}\\n {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:561"]
+["src/bin/skein-server/main.rs:568"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:571"]
+["src/bin/skein-server/main.rs:578"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:662"]
+["src/bin/skein-server/main.rs:669"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:668"]
+["src/bin/skein-server/main.rs:675"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -349,45 +349,49 @@ cited_by = ["docs/recovery-survey.md"]
 line = "fn watching_for_box(name: &str) -> String {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:298"]
-line = "this terminal by itself: use Try again below. If it keeps failing, {likely}.\\r\\n\""
+["src/bin/skein-server/terminal.rs:304"]
+line = "terminal by itself: use Try again below.\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:394"]
+["src/bin/skein-server/terminal.rs:405"]
 line = "const AFTER_NO_WATCH: &str = \"no-watch\";"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:597"]
+["src/bin/skein-server/terminal.rs:410"]
+line = "const AFTER_RETRY: &str = \"retry\";"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:620"]
 line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:615"]
+["src/bin/skein-server/terminal.rs:638"]
 line = "pub(super) async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:621"]
+["src/bin/skein-server/terminal.rs:644"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:624"]
+["src/bin/skein-server/terminal.rs:647"]
 line = "return (StatusCode::BAD_REQUEST, \"unsupported runtime\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:644"]
+["src/bin/skein-server/terminal.rs:667"]
 line = "// the login surface is a modal that closes with its socket, and one that reopened itself over"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:654"]
+["src/bin/skein-server/terminal.rs:677"]
 line = "terminal and press log in again.\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:693"]
+["src/bin/skein-server/terminal.rs:718"]
 line = "vec![format!(\"logged in, but the post-login share failed: {e}\")]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:704"]
+["src/bin/skein-server/terminal.rs:729"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1860,23 +1864,27 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:729"]
+["src/web/app/board.js:728"]
+line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/board.js:766"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:730"]
+["src/web/app/board.js:767"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:817"]
+["src/web/app/board.js:857"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1021"]
-line = "s.recover.querySelector(\".recover-go\")?.addEventListener(\"click\", () => reconnectSession(s.box, s.kind));"
+["src/web/app/board.js:1065"]
+line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1045"]
+["src/web/app/board.js:1097"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1998,67 +2006,67 @@ cited_by = ["docs/recovery-survey.md"]
 line = "function openReview(repoId) {"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/app/review.js:315"]
+["src/web/app/review.js:336"]
 line = "let landed = false;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:443"]
+["src/web/app/review.js:464"]
 line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:449"]
+["src/web/app/review.js:470"]
 line = "revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);"
 cited_by = ["docs/review-ux.md"]
 
-["src/web/app/review.js:532"]
+["src/web/app/review.js:553"]
 line = "const n = { draft: 0, conflicted: 0 };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:640"]
+["src/web/app/review.js:661"]
 line = "<span>${esc(f.repo_id)} — skein could not read this queue: ${esc(f.error)}</span>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:641"]
+["src/web/app/review.js:662"]
 line = "<button type=\"button\" class=\"revchip\" onclick=\"loadReview(true)\">try again</button></div>`),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:647"]
+["src/web/app/review.js:668"]
 line = "<span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || \"its review queue is switched off\")}</span>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:648"]
+["src/web/app/review.js:669"]
 line = "<button type=\"button\" class=\"revchip\" onclick=\"openSettings('repos')\">Settings → Repos</button></div>`),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:902"]
+["src/web/app/review.js:923"]
 line = "body = `<div class=\"revempty\">asking GitHub…</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:909"]
+["src/web/app/review.js:930"]
 line = "body += `<div class=\"revfail\"><b>the queue could not be built</b>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:910"]
+["src/web/app/review.js:931"]
 line = "<div>GitHub said: ${esc(revQueue.error)}</div>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:911"]
+["src/web/app/review.js:932"]
 line = "${revQueue.remembered"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:917"]
+["src/web/app/review.js:938"]
 line = "<button type=\"button\" class=\"revchip go\" onclick=\"loadReview(true)\">${revLoading ? \"trying…\" : \"try again\"}</button>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:934"]
+["src/web/app/review.js:955"]
 line = "}</b>${failed.map(f => `<div>${esc(f.repo_id)} — ${esc(f.error)}</div>`).join(\"\")}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:1392"]
+["src/web/app/review.js:1418"]
 line = "// than left set, or the row would sit on \"…\" for ever with nothing to retry it: opening the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:1559"]
+["src/web/app/review.js:1585"]
 line = "if (d.error) toast(\"the workflow file has a problem — fix it before editing here\");"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2077,20 +2085,32 @@ line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:589"]
+["src/web/app/settings.js:493"]
+line = "? \"this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field.\""
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:495"]
+line = "? `${esc(host)} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein.`"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:613"]
 line = ".catch(e => toast(`pull failed: ${e.message}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:644"]
+["src/web/app/settings.js:668"]
 line = ".catch(e => toast(`couldn't save: ${e.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:689"]
+["src/web/app/settings.js:713"]
 line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:703"]
+["src/web/app/settings.js:727"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/settings.js:1234"]
+line = "arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, \"warn\");"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/voice.js:126"]

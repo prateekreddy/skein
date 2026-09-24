@@ -578,6 +578,12 @@ pub struct Queue {
     /// miss things. Every path that can fail partially — team review requests needing `read:org`,
     /// a query that errored — states itself here rather than returning a shorter list.
     pub blind_spots: Vec<String>,
+    /// The set-aside files this refresh could not read, each with the `blind_spots` line it put
+    /// there — so the page can hang `move it aside` on that line without re-parsing a sentence
+    /// (SKEIN-552). Empty for a queue remembered by an older skein, which is the honest reading:
+    /// it said nothing about the files.
+    #[serde(default)]
+    pub unreadable_set_aside: Vec<UnreadableSetAside>,
     /// When this was read from GitHub, RFC 3339.
     ///
     /// Load-bearing rather than decoration. A queue may now be served from the copy on disk before
@@ -618,6 +624,15 @@ pub struct Queue {
     /// trunk called nothing.
     #[serde(default)]
     pub trunk: String,
+}
+
+/// A set-aside file (`archived` or `snoozed`) that a refresh could not read (SKEIN-552).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnreadableSetAside {
+    /// `archived` or `snoozed` — the word the move-aside route takes.
+    pub file: String,
+    /// The line this file put in [`Queue::blind_spots`], verbatim.
+    pub blind_spot: String,
 }
 
 /// `Queue::fresh` defaults true: everything that computes one directly has just read GitHub, and a

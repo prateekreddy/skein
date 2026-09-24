@@ -19,13 +19,14 @@ for nothing is worse than a button.
 
 **A path that cannot say what to do next is a defect in that path, not a constraint to design
 around.** Nothing below is marked "no next step possible" as an acceptable state; where a path has
-none, that is the finding.
+none, that is the finding. One row is the written-down exception, and says why: §7's Write token row
+for a repo on another host (SKEIN-812).
 
 ---
 
 ## Summary
 
-**243 rows**, drawn from **465 candidate sites** enumerated by the twelve commands in
+**244 rows**, drawn from **465 candidate sites** enumerated by the twelve commands in
 [§0](#0-how-this-was-enumerated). Rows are fewer than candidates because identical strings are
 collapsed into one row (the eighteen `invalid box name` returns are one row), and because the
 candidate sets deliberately over-collect — an enumeration that only catches what is already known
@@ -56,8 +57,9 @@ repo` said seven and is thirteen, and `usage: skein` said eight subcommands and 
 | **N** — names no next step | 130 | the finding. States a failure and stops |
 | **U** — says what to do, and it cannot be watched | 12 | the act is off this machine, or it is a person's deliberate "no" |
 
-One further row, `src/fleet/disk.rs:301`, carries no verdict: it is a well-written refusal that
-`src/health/disk.rs:162` swallows, so nobody ever reads it.
+Two further rows carry no verdict. The Write token row (§7, SKEIN-812) is the one documented
+exception to SKEIN-752, added after the 2026-09-09 measurement; and `src/fleet/disk.rs:301` is a
+well-written refusal that `src/health/disk.rs:162` swallows, so nobody ever reads it.
 
 **Requirement 1 is met almost everywhere and requirement 3 almost nowhere.** 100 rows say what to
 do; 42 of those name a condition skein could watch and does not, and only a handful of the
@@ -78,7 +80,7 @@ in [§0a](#0a-whether-anybody-can-get-there--the-reach-column).
 
 | reach | rows | |
 |---|---:|---|
-| **R** — a person can be shown this | 222 | with the concrete trigger in the cell |
+| **R** — a person can be shown this | 223 | with the concrete trigger in the cell |
 | **X** — they cannot | 17 | with the file:line that forecloses it |
 | **?** — not established | 4 | with what would settle it |
 
@@ -86,7 +88,7 @@ Against the verdicts above:
 
 | | C | W | N | U | — |
 |---|---:|---:|---:|---:|---:|
-| **R** | 58 | 39 | 114 | 11 | 0 |
+| **R** | 58 | 39 | 114 | 11 | 1 |
 | **X** | 0 | 3 | 12 | 1 | 1 |
 | **?** | 0 | 0 | 4 | 0 | 0 |
 
@@ -119,14 +121,14 @@ Ranked by reachability × severity — how easily an ordinary session lands here
 person is when it does.
 
 **1. The terminal reconnect overlay waits for a click, over a sentence it hides.**
-`src/web/app/board.js:729` paints *"session not connected / click to reconnect"* on any box terminal
+`src/web/app/board.js:766` paints *"session not connected / click to reconnect"* on any box terminal
 whose socket drops with a code that is not `CLOSE_CHILD_ENDED`. There was no retry timer
 when this was written: `reconnectSession` had four call sites, and every one of them was a person
 acting — a restart, a tab click, the overlay itself, a file drop. **That is no longer true**
 (re-read 2026-09-23, `grep -n 'reconnectSession(' src/web/app/*.js` prints its definition and
 six calls):
-`src/web/app/board.js:269`, `src/web/app/board.js:664`, `src/web/app/board.js:730`,
-`src/web/app/board.js:1021` (the recovery card's *Try again*), `src/web/app/board.js:1045` and
+`src/web/app/board.js:269`, `src/web/app/board.js:664`, `src/web/app/board.js:767`,
+`src/web/app/board.js:1065` (the recovery card's *Try again*), `src/web/app/board.js:1097` and
 `src/web/app/boot.js:177` — and the fifth is not a person: `retryWaiting` reconnects every pane
 waiting on a condition the moment the board tick or a `pty-freed` event says it cleared. Worse,
 the six failure sentences in `terminal_session`, `login_session` and `pump_pty`
@@ -468,7 +470,7 @@ detected and the surface clears with nobody pressing anything.
 |---|---|---|---|---|---|---|
 | `src/health/disk.rs:275` | the boxes' disk is N% full … | **R** — the sandbox's image store crosses `DISK_FULL_PCT`; a live `df` reading, nothing normalises it | health banner / `skein doctor`, above `DISK_FULL_PCT` | y — "`skein stop <box>` keeps its checkout, branch and conversation, or clear its build output in place"; the image-store arm adds a `docker system prune -af` line and is marked `destroys` | yes — the next 15s poll re-measures | C |
 | `src/health/scratch.rs:84` | {path} in {whose} belongs to uid {owner}, and the fleet runs as uid {mine} — a `claude` that derives its own temp directory refuses to start there | **R** — another uid holds the shared `/tmp` scratch directory; the probe's own three-word answer | health banner; a shared `/tmp` taken by another uid | y — names `rm -rf {path}` on that machine and says why skein will not do it | yes — re-derived each poll | C |
-| `src/health/sandbox.rs:102` | the host warden did not answer … | **R** — stop the host warden — `warden_client::sighting()` returns `None` | health banner; warden not running | y — two arms: "something is answering on {addr} and it is not a warden this skein can use", with `$SKEIN_WARDEN` and `$SKEIN_WARDEN_PORT` named | yes — `warden_report` on the poll; also printed once at startup, `src/bin/skein-server/main.rs:235` | C |
+| `src/health/sandbox.rs:102` | the host warden did not answer … | **R** — stop the host warden — `warden_client::sighting()` returns `None` | health banner; warden not running | y — two arms: "something is answering on {addr} and it is not a warden this skein can use", with `$SKEIN_WARDEN` and `$SKEIN_WARDEN_PORT` named | yes — `warden_report` on the poll; also printed once at startup, `src/bin/skein-server/main.rs:237` | C |
 | `src/health/sandbox.rs:168` | started before the current isolation and still running under the old one: {boxes} | **R** — upgrade the isolation with boxes still running: `uncovered` non-empty | health banner after an upgrade | y — "`skein restart {box}` … Its checkout and its branch are untouched; whatever the agent was part-way through is not, so pick the moment" | yes — `cover_is_current`, recomputed each poll | C |
 | `src/health/sandbox.rs:238` | ON but nothing is scoped, so every box holds … | **R** — gitgate on with no usable credential — `gitgate::scope_status()` answers `Unusable` | health banner; gitgate on with no usable credential | y — "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use" | yes — `scope_status` on the poll | C |
 | `src/health/report.rs:428` | … The kernel has killed N process(es) for memory since skein last looked | **R** — an OOM kill in the fleet; `pressure().killed > 0` is a kernel counter | health banner after an OOM kill | y — "give the fleet more memory (Settings → Fleet), or stop a box you are not …" | yes — the counter re-read each poll | C |
@@ -543,7 +545,7 @@ rows below are doctor's own hand-rolled lines.
 | `src/bin/skein.rs:665` | ✗ logins {runtime} expired {date} | **R** — a runtime credential that has expired | `skein doctor` after a fleet-wide logout | y (`src/bin/skein.rs:668`) — "every box holds the same dead token … one `skein login {runtime}` heals the whole fleet" | yes — and the cockpit already watches it, see §7 | C |
 | `src/bin/skein.rs:677` | ! logins none — `skein login <runtime>` signs the fleet in once | **R** — `skein doctor` on a fleet nobody has logged in on | `skein doctor` on a fleet with no login | y — the command is the message | yes | C |
 | `src/bin/skein.rs:738` | ✗ box ceilings N running outside the fleet's ceiling: {boxes} | **R** — `uncapped_boxes()` non-empty — real per-box cgroup state | `skein doctor` | y (`src/bin/skein.rs:747`) — "a runaway build in one of these reaches the whole sandbox; `skein restart <box>` puts it under the current plan" | yes — `uncapped_boxes` | C |
-| `src/bin/skein.rs:824` | ✗ review {repos}: {why} | **R** — a repo whose review queue will not build | `skein doctor` with a repo whose queue will not build | **n** | yes — the next queue build; the cockpit's own copy of this at `src/web/app/review.js:532` does add "try again" | N |
+| `src/bin/skein.rs:824` | ✗ review {repos}: {why} | **R** — a repo whose review queue will not build | `skein doctor` with a repo whose queue will not build | **n** | yes — the next queue build; the cockpit's own copy of this at `src/web/app/review.js:553` does add "try again" | N |
 | `src/bin/skein.rs:835` | ! kit not written yet (server startup / `skein add` installs it) | **R** — `skein doctor` before the first server start writes the kit | `skein doctor` before first start | y — names both things that install it | yes — the file appearing | C |
 | `src/bin/skein.rs:842` | ✗ settings unreadable — {why} | **R** — a malformed `config.json` — `config_error()` is `Some` | `skein doctor` with a malformed config | partly (`src/bin/skein.rs:845`) — "every setting below is a fallback default, not your choice; skein has not overwritten the file". Says what is true, not what to do | yes — the file parsing | N |
 | `src/bin/skein.rs:870` | ! boxes push nothing chosen — no GitHub credential is placed in a box | **R** — no box credential chosen; all three paths are opt-in, so this is the fresh default | `skein doctor` | y (`src/bin/skein.rs:878`) — "Settings → GitHub & keys: a GitHub App, or a per-repo token" | yes | C |
@@ -592,7 +594,7 @@ same shape and all of them conform.
 **Already owned: SKEIN-702**, which is decided and blocked only on file ownership. Included so the
 table is complete, and because measuring them changed one thing: the defect is not only that some
 say nothing, it is that *none of the six early returns sends a close code*, so
-`src/web/app/board.js:817` reads 1006, decides the connection went away, and covers the sentence with
+`src/web/app/board.js:857` reads 1006, decides the connection went away, and covers the sentence with
 the reconnect card. `CLOSE_CHILD_ENDED` (`src/bin/skein-server.rs:4469`) is only sent at `src/bin/skein-server.rs:4405`,
 which is reached solely when `pump_pty` returned a child's exit code.
 
@@ -636,12 +638,12 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >   * **The login modal's copy of the PTY cap — W → C on the other arm of C**: it is not watched,
 >     deliberately, because that surface is a modal that closes with its socket and one that reopened
 >     itself over whatever somebody had moved on to would be worse than the walk back
->     (`src/bin/skein-server/terminal.rs:644`), so it names the control still on screen behind it
->     (`src/bin/skein-server/terminal.rs:654`).
+>     (`src/bin/skein-server/terminal.rs:667`), so it names the control still on screen behind it
+>     (`src/bin/skein-server/terminal.rs:677`).
 >   * **`pump_pty`'s own four — N → W, and NOT to C** (SKEIN-883, which is the poll). Requirement 2
 >     is met: `skeins_own_fault` says whose failure it is, that nothing will reopen the pane by
->     itself, and which control to use (`src/bin/skein-server/terminal.rs:298`), and `AFTER_NO_WATCH`
->     (`src/bin/skein-server/terminal.rs:394`) is what puts that button on the page instead of a spinner
+>     itself, and which control to use (`src/bin/skein-server/terminal.rs:304`), and `AFTER_NO_WATCH`
+>     (`src/bin/skein-server/terminal.rs:405`) is what puts that button on the page instead of a spinner
 >     (`src/web/app/board.js:719`). Requirement 3 is open, and that is what W is for: three of the four
 >     rows below already NAME the condition in their `watchable?` cell — a pty slot freeing, the
 >     program appearing on PATH, fd pressure easing — and the fourth is that same fd pressure one
@@ -649,6 +651,15 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     because nothing has been spawned yet when it fails. C asks for the condition to be watched, or
 >     for there to be genuinely nothing to watch ([§Summary](#summary)); a button offered in place of
 >     a poll is neither, and reading it as C is what would hide requirement 3 on four more surfaces.
+>   * **And then W → C for a box terminal, by a bounded poll** (SKEIN-883). None of the four
+>     conditions announces the moment it clears, so the poll is the retry itself: a box terminal's
+>     pump failures now close with `retry` (`src/bin/skein-server/terminal.rs:410`), and the pane
+>     tries again at 3s, 10s, 30s, 60s and 120s through `retryWaiting`, saying when the next try is
+>     and offering no button, then hands over to the button after the fifth
+>     (`src/web/app/board.js:728`). `openpty` failing spawns nothing, so a try risks nothing. The
+>     login modal's copy of the same four stays `no-watch` and keeps its button, for the reason the
+>     cap refusal above gives. `tests/ui/recovery.mjs` drives the whole run on Playwright's clock and
+>     counts the tries off the wire. The row letters below are still the 2026-09-09 measurement.
 > * **Row `src/bin/skein-server.rs:4768` is the one that did not move, and it is a finding rather than an omission.** Its
 >   four words now carry what to do *with* the answer — "nothing here changes by itself … press log
 >   in again once it is [fixed]" — but the sentence itself is written in `login_spawn_argv`, which
@@ -687,8 +698,8 @@ which is reached solely when `pump_pty` returned a child's exit code.
 | `src/bin/skein-server.rs:4652` | skein: pty writer: {e} | **R** — the same, one call later | `take_writer` failing | **n** · **reworded by SKEIN-702 — `skeins_own_fault` says what to do, so y now; §5's note re-reads this row's letter as W** | yes | N |
 | `src/bin/skein-server.rs:4889` | skein: too many terminals open — close one and retry | **R** — hold 24 PTY permits, then open the login pane | clicking "log in" with every permit held | partly · **reworded by SKEIN-702 — the `{PTY_MAX}` wording names the control, so y now; §5's note re-reads this row's letter as C** | yes — a permit freeing | W |
 | `src/bin/skein-server.rs:4899` | skein: no fleet sandbox configured | **X** — the only `Err` `login_spawn_argv` could return was `fleet_sandbox().is_empty()`, foreclosed by `src/config.rs:459-461` and deleted by SKEIN-756 — so this arm is now dead by inhabitedness. SKEIN-774 is narrowing the signature. **Dequeued by SKEIN-777 — code already gone**, re-verified 2026-09-11: SKEIN-774 landed, and `login_spawn_argv` (`src/fleet/fleetlogin.rs:520`) returns a tuple, so there is no `Err` for a caller to render | clicking "log in" on a fleet with no sandbox | **n** — four words, no variable, no page, no command. It was written in `login_spawn_argv` itself, which SKEIN-756 emptied of it and SKEIN-774 narrowed, so no line in the tree writes it now — this `n` is the 2026-09-09 reading | yes — `fleet_sandbox()` becoming non-empty | N |
-| `src/bin/skein-server/terminal.rs:693` | logged in, but the post-login share failed: {e} | **?** — the text says the post-login share failed, but the branch is a `JoinError` from `spawn_blocking(after_login)`; a REAL share failure is caught earlier and rendered as a different, softer sentence (`share_outcome`). Settled by finding a panic in `after_login`'s call tree | finishing a cockpit login when `share_login_with_boxes` fails | n — the person cannot tell whether running boxes have the credential | **yes, and it is already fixed silently**: `heal_logins` (`src/bin/skein-server/main.rs:165`) runs a 60s ticker that repairs exactly this. The message does not say so | N |
-| `src/bin/skein-server/terminal.rs:704` | skein: login exited {code} — nothing changed | **R** — abort the login TUI — `pump_pty` returns a non-zero code | aborting the runtime's login TUI | partly — "nothing changed" closes the loop | no — a person's own decision | U |
+| `src/bin/skein-server/terminal.rs:718` | logged in, but the post-login share failed: {e} | **?** — the text says the post-login share failed, but the branch is a `JoinError` from `spawn_blocking(after_login)`; a REAL share failure is caught earlier and rendered as a different, softer sentence (`share_outcome`). Settled by finding a panic in `after_login`'s call tree | finishing a cockpit login when `share_login_with_boxes` fails | n — the person cannot tell whether running boxes have the credential | **yes, and it is already fixed silently**: `heal_logins` (`src/bin/skein-server/main.rs:167`) runs a 60s ticker that repairs exactly this. The message does not say so | N |
+| `src/bin/skein-server/terminal.rs:729` | skein: login exited {code} — nothing changed | **R** — abort the login TUI — `pump_pty` returns a non-zero code | aborting the runtime's login TUI | partly — "nothing changed" closes the loop | no — a person's own decision | U |
 
 ## 6. The server — startup stderr and HTTP bodies
 
@@ -700,27 +711,27 @@ does it by reaching for
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/bin/skein-server/main.rs:125` | skein-server: {argv complaint}, then exit 2 | **R** — `skein-server --not-a-flag` | a bad flag | y — the message is a usage complaint | no — a keystroke | C |
-| `src/bin/skein-server/main.rs:136` | skein-server: {volume refusal}, then exit 1 | **R** — point `$SKEIN_HOME` at a moved or unreadable volume | starting against a moved or unreadable volume; text from `ensure_volume` | y — see §10, `src/volume.rs:104` and siblings name both branches | yes — `$SKEIN_HOME` matching | W |
-| `src/bin/skein-server/main.rs:142` | skein: turn-state probe not installed ({e}); boxes will show live/stale only | **R** — a store the probe install cannot write | server start | n | yes — the probe file appearing | N |
-| `src/bin/skein-server/main.rs:148` | skein: ensure_fleet_kit: {e} | **R** — the same, for the fleet kit | server start | **n**, and it is the only startup line with neither a consequence nor a step | yes | N |
-| `src/bin/skein-server/main.rs:151` | skein: kit not installed ({e}); boxes will fail to provision | **R** — the same, for the box kit | server start | n | yes | N |
-| `src/bin/skein-server/main.rs:158` | skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings | **R** — `heal_fleet` failing at startup — it did so on this box while probing SKEIN-756 | server start | n | yes | N |
-| `src/bin/skein-server/main.rs:178` | skein: the docker watchdog could not be started ({e}); a dockerd that dies will stay dead and cost a fleet rebuild | **R** — OS thread creation failing (RLIMIT_NPROC) | server start | n — highest stake of the startup family | yes | N |
-| `src/bin/skein-server/main.rs:273` | skein: {warden failure} then the `warden_report` fix | **R** — start the server with no host warden — the ordinary local state | server start with no warden | y — inherited from §1 | yes | C |
+| `src/bin/skein-server/main.rs:127` | skein-server: {argv complaint}, then exit 2 | **R** — `skein-server --not-a-flag` | a bad flag | y — the message is a usage complaint | no — a keystroke | C |
+| `src/bin/skein-server/main.rs:138` | skein-server: {volume refusal}, then exit 1 | **R** — point `$SKEIN_HOME` at a moved or unreadable volume | starting against a moved or unreadable volume; text from `ensure_volume` | y — see §10, `src/volume.rs:104` and siblings name both branches | yes — `$SKEIN_HOME` matching | W |
+| `src/bin/skein-server/main.rs:144` | skein: turn-state probe not installed ({e}); boxes will show live/stale only | **R** — a store the probe install cannot write | server start | n | yes — the probe file appearing | N |
+| `src/bin/skein-server/main.rs:150` | skein: ensure_fleet_kit: {e} | **R** — the same, for the fleet kit | server start | **n**, and it is the only startup line with neither a consequence nor a step | yes | N |
+| `src/bin/skein-server/main.rs:153` | skein: kit not installed ({e}); boxes will fail to provision | **R** — the same, for the box kit | server start | n | yes | N |
+| `src/bin/skein-server/main.rs:160` | skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings | **R** — `heal_fleet` failing at startup — it did so on this box while probing SKEIN-756 | server start | n | yes | N |
+| `src/bin/skein-server/main.rs:180` | skein: the docker watchdog could not be started ({e}); a dockerd that dies will stay dead and cost a fleet rebuild | **R** — OS thread creation failing (RLIMIT_NPROC) | server start | n — highest stake of the startup family | yes | N |
+| `src/bin/skein-server/main.rs:275` | skein: {warden failure} then the `warden_report` fix | **R** — start the server with no host warden — the ordinary local state | server start with no warden | y — inherited from §1 | yes | C |
 | `src/bin/skein-server.rs:285` | skein: ssh key not loaded ({e}); SSH git push from boxes may fail | **R** — an ssh key configured while the host agent is unreachable | server start | n | yes — `ssh-add -l` listing a key | N |
-| `src/bin/skein-server/main.rs:561` | {doorway::missing()}, then exit 1 | **R** — set the doorway's inherited-only variable and start the binary directly rather than through the supervisor | server start without the doorway | not established — text is `doorway`'s | yes — the doorway appearing | W |
-| `src/bin/skein-server/main.rs:571` | skein-server: {why} for a bad inherited fd, then exit 1 | **R** — **and the survey undersold it as "not established"** — a misconfigured socket-activation supervisor: `LISTEN_FDS=2`, or a `LISTEN_PID` naming another process (`src/doorway.rs:80-107`) | not established — a supervisor handing a bad fd | n | none | N |
-| `src/bin/skein-server/main.rs:662` | skein-server: cannot accept connections ({e}) — N in a row. The usual cause is running out of file descriptors; the cockpit keeps trying. | **R** — fd exhaustion (EMFILE) in the accept loop | a server under fd exhaustion | y — names the cause, and says it keeps trying | yes, and it *does*: this is a retry loop that narrates itself | C |
-| `src/bin/skein-server/main.rs:668` | skein-server: N consecutive accept failures ({e}) and not one connection ever served … Exiting rather than sitting up and quiet, which is indistinguishable from working. | **R** — the same, before a single connection has been served | the same, never having served | y — both branches named | n/a — it exits deliberately | C |
+| `src/bin/skein-server/main.rs:568` | {doorway::missing()}, then exit 1 | **R** — set the doorway's inherited-only variable and start the binary directly rather than through the supervisor | server start without the doorway | not established — text is `doorway`'s | yes — the doorway appearing | W |
+| `src/bin/skein-server/main.rs:578` | skein-server: {why} for a bad inherited fd, then exit 1 | **R** — **and the survey undersold it as "not established"** — a misconfigured socket-activation supervisor: `LISTEN_FDS=2`, or a `LISTEN_PID` naming another process (`src/doorway.rs:80-107`) | not established — a supervisor handing a bad fd | n | none | N |
+| `src/bin/skein-server/main.rs:669` | skein-server: cannot accept connections ({e}) — N in a row. The usual cause is running out of file descriptors; the cockpit keeps trying. | **R** — fd exhaustion (EMFILE) in the accept loop | a server under fd exhaustion | y — names the cause, and says it keeps trying | yes, and it *does*: this is a retry loop that narrates itself | C |
+| `src/bin/skein-server/main.rs:675` | skein-server: N consecutive accept failures ({e}) and not one connection ever served … Exiting rather than sitting up and quiet, which is indistinguishable from working. | **R** — the same, before a single connection has been served | the same, never having served | y — both branches named | n/a — it exits deliberately | C |
 | `src/bin/skein-server.rs:3245` | skein: ssh key not loaded ({e}) | **R** — Settings → Save with an ssh key skein cannot load | pressing Save in cockpit settings | **cannot tell** — a person causes it and a person will not see it: it goes to the server's stderr while the Save returns 200 | yes | N |
 | `src/bin/skein-server/boxes.rs:82` | invalid box name | **R** — any API call carrying a box name with `/`, a space, a leading `-`/`.`, or `..`; eighteen sites, derived rather than listed: `cat src/bin/skein-server/*.rs | grep -c '"invalid box name"'` | any cockpit action on a name with a disallowed character | **n** — never states the grammar; `warden/src/serve.rs:567` does, for the same class | no — a keystroke, but not one the person can make blind | N |
 | `src/bin/skein-server/repos.rs:44` | no such repo | **R** — remove a repo in Settings while a stale tab still names its id; thirteen returns, derived rather than listed: `grep -n '"no such repo"' src/bin/skein-server/*.rs` prints fourteen lines, the fourteenth a comment quoting the message | a cockpit action against a repo that was removed | n | yes — the repo record appearing | N |
-| `src/bin/skein-server/terminal.rs:48`, `src/bin/skein-server/terminal.rs:621`, `src/bin/skein-server/boxes.rs:192` | cross-origin terminal blocked · cross-origin stream blocked | **R** — open the cockpit from a LAN host outside the allowed set with `$SKEIN_ALLOWED_ORIGINS` unset | opening the cockpit on an origin not in `$SKEIN_ALLOWED_ORIGINS` | **n** — the variable that governs it is never named | yes — the origin being added | N |
+| `src/bin/skein-server/terminal.rs:48`, `src/bin/skein-server/terminal.rs:644`, `src/bin/skein-server/boxes.rs:192` | cross-origin terminal blocked · cross-origin stream blocked | **R** — open the cockpit from a LAN host outside the allowed set with `$SKEIN_ALLOWED_ORIGINS` unset | opening the cockpit on an origin not in `$SKEIN_ALLOWED_ORIGINS` | **n** — the variable that governs it is never named | yes — the origin being added | N |
 | `src/bin/skein-server/boxes.rs:86` | a box is created on a branch | **R** — `POST /api/boxes/<name>` with a blank `branch` | POSTing a create with no branch | partly — implies the missing field | no — a keystroke | C |
 | `src/bin/skein-server/boxes.rs:175` | no such act — it may have finished longer ago than the warden keeps them | **R** — poll an act more than `RETENTION` (30 min) after it ended — a sleeping laptop | polling an act that has aged out | partly — names the cause | no — the act is gone | U |
 | `src/bin/skein-server/events.rs:25` | too many live boards open — close one and retry | **R** — open 64 board event streams, then a 65th | opening more boards than `EVENT_LIMIT` | partly — manual | yes — a permit freeing, exactly as §5's two PTY rows | W |
-| `src/bin/skein-server/terminal.rs:624` | unsupported runtime | **R** — open the login websocket with a runtime id skein does not support | opening a login socket for an unknown runtime | n — no list, same omission as `src/bin/skein.rs:1449` | no | N |
+| `src/bin/skein-server/terminal.rs:647` | unsupported runtime | **R** — open the login websocket with a runtime id skein does not support | opening a login socket for an unknown runtime | n — no list, same omission as `src/bin/skein.rs:1449` | no | N |
 | `src/bin/skein-server/boxes.rs:62`, `src/bin/skein-server/repos.rs:48`, `src/bin/skein-server/fleet.rs:168`, `src/bin/skein-server/fleet.rs:168` | {tokio JoinError}, at 500 | **?** — four `spawn_blocking` sites; `stream::acknowledge` was read and has no panic path, and `moduledocs::status`, `machine::sandboxes` and `fleet::pressure` were not traced. Settled by auditing those three | a panicking blocking task | **cannot tell** how the cockpit renders it; either way it is not a sentence | yes | N |
 | `src/bin/skein-server/review.rs:481`, `src/bin/skein-server/fleet.rs:120` | {why}, at 503, forwarded from below | **R** — `sbx` wedged while the cockpit polls shape or machine sandboxes | the cockpit polling shape or sandboxes while `sbx` is wedged | inherits; the comment at `src/bin/skein-server/review.rs:478` refuses an empty list because the two causes "send a person to different places" | yes — and both are polled, so recovery is automatic | C |
 | `src/bin/skein-server/boxes.rs:112` | {why}, at 409, from `act::begin` | **R** — double-submit a box create for the same name before the first act ends | starting an act while one is running | y — the comment at `src/bin/skein-server/boxes.rs:110` says the message names which act to watch | yes — the other act finishing | C |
@@ -729,39 +740,52 @@ does it by reaching for
 
 `src/web/index.html` holds **32 failure toasts** and **14 in-place failure renders**. The page has
 exactly two self-healing patterns, and they are good: the health poll (§1) and `revStaleTimer`
-(`src/web/app/review.js:443`), a 4/8/16/32/64s re-ask that degrades to a visible "try again" control
+(`src/web/app/review.js:464`), a 4/8/16/32/64s re-ask that degrades to a visible "try again" control
 after `REV_STALE_TRIES`. Everything below either copies those or does not.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/web/app/board.js:729` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
+| `src/web/app/board.js:766` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
 | `src/web/app/board.js:258`, `src/web/app/board.js:272`, `src/web/app/box.js:17`, `src/web/app/box.js:27` | continue failed: {server error} · restart failed · stop failed · destroy failed | **R** — any of the four resume/restart/stop/destroy POSTs answering non-ok | the row action buttons on the fleet board. **Not** the other `continue failed` pair, at `src/web/app/box.js:40` and `src/web/app/box.js:44`, which is a different surface (SKEIN-891): the header's Continue N (`#contall`) or saying "continue all", one POST to `/api/resume-batch` for several boxes. Its first arm used to be unreachable — `api_resume_batch` answered `ok: true` on every path, so a batch that failed inside the server toasted "continuing 0" as a success. It now answers `ok: false` whenever a box it was asked for was neither continued nor held, with a sentence naming those boxes (`src/bin/skein-server/boxes.rs:603`), and the page toasts that sentence (SKEIN-1132); "continue failed" is left as the fallback for an answer without one and for the request itself failing | **n** — verb plus "failed", in a 3.5s toast | yes — the box's own state on `/api/events`: a stop that failed leaves the box running | N |
 | `src/web/app/voice.js:126` | send failed | **R** — `POST /api/mailbox` failing | Mailbox → Send with a failing POST | **n** — two words. The typed text survives, and nothing says so | yes — the HTTP status distinguishes a safely re-sendable 5xx from a 4xx | N |
 | `src/web/app/panels.js:563` | could not run the test | **R** — the git-probe POST failing | Settings → GitHub & keys → test writes | **n** | yes — `health.gitgate` already carries the same fact on the 15s poll | N |
 | `src/web/app/box.js:497` | could not load diff | **R** — the diff GET failing with the Diff tab open | box → Diff tab when the endpoint rejects | **n** — the ok path distinguishes causes in `d.note`; this one does not | yes — the box's run state | N |
 | `src/web/app/box.js:482` | could not read {path} — {reason} | **R** — opening a file whose read fails — a race with the box vanishing | box → Files → click a file | n | yes | N |
 | `src/web/app/box.js:236` | loading… | **R** — trivially: `loadSession` sets it before the fetch, so every open of the pane | box → session digest pane | **n**, and there is no failure arm at all: a rejected fetch leaves the spinner up for ever and only the global handler says anything | yes — the fetch settling. **The worst spinner in the file** | N |
-| `src/web/app/review-rows.js:476` | skein could not reach its own summary for this PR: {error} | **R** — the in-flight review-brief read erroring | Review pane, a PR whose in-flight read failed | n — a raw fetch error in a row | yes, and half-built: it is flagged `transient`, and the next full load deletes it (`src/web/app/review.js:315`). Nothing on screen says so, and nothing triggers that load | N |
-| `src/web/app/settings.js:703`, `src/web/app/settings.js:689` | — not saved: {server error}, per box · nothing was copied out: {e} | **R** — a save act returning a per-box error, or refusing for want of room | Settings → Save every box's work, partial failure | partly — the headline from `cockpit/src/saved.mjs:22` states the stake ("a destroy would take it"); the per-box line is a bare server string with no per-box retry | yes — the failed names are already a list; one endpoint away | N |
+| `src/web/app/review-rows.js:476` | skein could not reach its own summary for this PR: {error} | **R** — the in-flight review-brief read erroring | Review pane, a PR whose in-flight read failed | n — a raw fetch error in a row | yes, and half-built: it is flagged `transient`, and the next full load deletes it (`src/web/app/review.js:336`). Nothing on screen says so, and nothing triggers that load | N |
+| `src/web/app/settings.js:727`, `src/web/app/settings.js:713` | — not saved: {server error}, per box · nothing was copied out: {e} | **R** — a save act returning a per-box error, or refusing for want of room | Settings → Save every box's work, partial failure | partly — the headline from `cockpit/src/saved.mjs:22` states the stake ("a destroy would take it"); the per-box line is a bare server string with no per-box retry | yes — the failed names are already a list; one endpoint away | N |
 | `src/web/app/boot.js:977` | the update failed; the log says where | **R** — Settings → Update skein failing | Settings → Update skein | partly — points at the pane below, which `loadUpdate` does refresh | yes — and the log tail at `src/web/app/boot.js:960` is exemplary, retrying every 1.5s across the binary swap | W |
-| `src/web/app/review-rows.js:1282` | Workflows are not running. {error} | **R** — a repo whose workflow file will not parse | Review → expand a PR whose repo has a malformed workflow file | **n** here, while `src/web/app/review.js:1559` answers the same fact with "the workflow file has a problem — fix it before editing here" | yes — the next `loadWorkflows` after an edit | N |
-| `src/web/app/review.js:934` | {repo} — {error}, under "N repos' queues could not be built" | **R** — one repo's GitHub queue build failing — a bad token or a rate limit | Review pane, several repos failing | **n**, while the same fact in the clear-screen at `src/web/app/review.js:641` adds "try again" and `src/web/app/review.js:648` adds "Settings → Repos" | yes — `revStaleTimer` already exists, three lines away | N |
-| `src/web/app/review.js:910` | GitHub said: {error}, under "the queue could not be built" | **R** — the whole queue fetch failing | Review pane, GitHub refusing | y — `src/web/app/review.js:917` adds "try again" and "Settings → GitHub & keys", and `src/web/app/review.js:911` keeps the remembered queue with a caveat | yes — `revStaleTimer` | C |
-| `src/web/app/review.js:640`, `src/web/app/review.js:647` | {repo} — skein could not read this queue: {error} — try again · skein did not ask: {why} — Settings → Repos | **R** — the same data rendered on the cleared screen | Review pane cold, all repos failing | y | yes | C |
+| `src/web/app/review-rows.js:1282` | Workflows are not running. {error} | **R** — a repo whose workflow file will not parse | Review → expand a PR whose repo has a malformed workflow file | **n** here, while `src/web/app/review.js:1585` answers the same fact with "the workflow file has a problem — fix it before editing here" | yes — the next `loadWorkflows` after an edit | N |
+| `src/web/app/review.js:955` | {repo} — {error}, under "N repos' queues could not be built" | **R** — one repo's GitHub queue build failing — a bad token or a rate limit | Review pane, several repos failing | **n**, while the same fact in the clear-screen at `src/web/app/review.js:662` adds "try again" and `src/web/app/review.js:669` adds "Settings → Repos" | yes — `revStaleTimer` already exists, three lines away | N |
+| `src/web/app/review.js:931` | GitHub said: {error}, under "the queue could not be built" | **R** — the whole queue fetch failing | Review pane, GitHub refusing | y — `src/web/app/review.js:938` adds "try again" and "Settings → GitHub & keys", and `src/web/app/review.js:932` keeps the remembered queue with a caveat | yes — `revStaleTimer` | C |
+| `src/web/app/review.js:661`, `src/web/app/review.js:668` | {repo} — skein could not read this queue: {error} — try again · skein did not ask: {why} — Settings → Repos | **R** — the same data rendered on the cleared screen | Review pane cold, all repos failing | y | yes | C |
 | `src/web/app/board.js:154` | sbx could not be asked ({status}) | **R** — type `foreign:` in the board filter while `sbx` is wedged | typing `foreign:` in the board filter | n | yes — but `askForForeign` runs only on demand | N |
 | `src/web/app/boot.js:426` | board is Ns stale — the server stopped answering | **R** — the SSE producer stalling with the socket still open | the EventSource open, the producer wedged | **n** — and nothing re-dials. The sibling state at the same site, "reconnecting…", is honest because the browser is retrying | yes — a tick arriving; `lastTickAt` is already the clock | N |
 | `src/web/app/boot.js:507` | reconnecting… | **R** — trivially: any `EventSource` error — a server restart | the stream erroring | y — implicit, and true: EventSource retries by itself | yes — already watched | C |
-| `src/web/app/boot.js:633` | the fleet's {runtime} login was refused at {time}: {said} — summaries, critiques and workflows are declining model calls | **R** — a runtime credential expiring | an expired fleet credential | y — a "log in" button that opens a PTY (`login_terminal`, `src/bin/skein-server/terminal.rs:615`) | **yes, and watched** — the same 15s health poll clears `expired_logins`, and `src/web/app/boot.js:1051` re-reads on close. **The best surface in the product** | C |
+| `src/web/app/boot.js:633` | the fleet's {runtime} login was refused at {time}: {said} — summaries, critiques and workflows are declining model calls | **R** — a runtime credential expiring | an expired fleet credential | y — a "log in" button that opens a PTY (`login_terminal`, `src/bin/skein-server/terminal.rs:638`) | **yes, and watched** — the same 15s health poll clears `expired_logins`, and `src/web/app/boot.js:1051` re-reads on close. **The best surface in the product** | C |
 | `src/web/app/boot.js:594` | {check}: {first sentence of detail} (+N more) | **R** — any of the ten checked health keys going unsatisfied | any unsatisfied health check | y — clicking opens Settings → diagnostics, where the `fix` is | yes — §1 | C |
-| `src/web/app/review-rows.js:1164` | The brief could not be fetched — {error} Close the row and open it again to retry. | **R** — the brief fetch failing — `s.prose_failed` | Review row whose brief fetch fails | y — names the retry gesture, and `src/web/app/review.js:1392` clears the waiting flag deliberately so the row does not "sit on '…' for ever with nothing to retry it" | yes — but it asks for the gesture instead | W |
+| `src/web/app/review-rows.js:1164` | The brief could not be fetched — {error} Close the row and open it again to retry. | **R** — the brief fetch failing — `s.prose_failed` | Review row whose brief fetch fails | y — names the retry gesture, and `src/web/app/review.js:1418` clears the waiting flag deliberately so the row does not "sit on '…' for ever with nothing to retry it" | yes — but it asks for the gesture instead | W |
 | `src/web/app/box.js:66` | something went wrong in the page: {first line of the exception} | **R** — trivially: the page's catch-all for any uncaught exception | any uncaught error or rejected promise | **n** — de-duped 60s, deliberately does not re-render | none — it is the catch-all | N |
-| `src/web/app/settings.js:325`, `src/web/app/settings.js:331`, `src/web/app/settings.js:339`, `src/web/app/settings.js:589`, `src/web/app/settings.js:644`, `src/web/app/boot.js:934` | {server string} · pull failed: {e} · couldn't save: {e} · could not start: {r.error} … | **R** — each a settings/sync/repo/update endpoint answering non-2xx. **Seventeen sites, derived rather than listed** (SKEIN-878): `grep -cE -e 'toast\(e\.message\)' -e 'toast\([^;]*\$\{e\.message\}' -e 'toast\([^;]*\$\{error\.message\}' -e 'toast\([^;]*\$\{r\.error\}' -e 'toast\([^;]*\$\{e\}' src/web/index.html` prints 18, of which `src/web/app/board.js:272` is the box-actions row above. The cells name the three identical bare copies and the three the message column quotes; the 2026-09-09 reading said fourteen, listed fifteen addresses, and one of the fifteen was the success toast one line above `src/web/app/settings.js:331`'s `.catch` | settings fields, repo actions, sync cards, update controls | **n** — a server string in a 3.5s toast, no step, no retry. The 2026-09-09 reading put 13 of §0's 32 failure toasts in this shape; the enumeration beside it derives seventeen by a pattern §0's does not reach, since a bare `toast(e.message)` carries none of the words §0 greps for | varies; each has a status code that distinguishes retryable from not | N |
+| `src/web/app/settings.js:325`, `src/web/app/settings.js:331`, `src/web/app/settings.js:339`, `src/web/app/settings.js:613`, `src/web/app/settings.js:668`, `src/web/app/boot.js:934` | {server string} · pull failed: {e} · couldn't save: {e} · could not start: {r.error} … | **R** — each a settings/sync/repo/update endpoint answering non-2xx. **Seventeen sites, derived rather than listed** (SKEIN-878): `grep -cE -e 'toast\(e\.message\)' -e 'toast\([^;]*\$\{e\.message\}' -e 'toast\([^;]*\$\{error\.message\}' -e 'toast\([^;]*\$\{r\.error\}' -e 'toast\([^;]*\$\{e\}' src/web/index.html` prints 18, of which `src/web/app/board.js:272` is the box-actions row above. The cells name the three identical bare copies and the three the message column quotes; the 2026-09-09 reading said fourteen, listed fifteen addresses, and one of the fifteen was the success toast one line above `src/web/app/settings.js:331`'s `.catch` | settings fields, repo actions, sync cards, update controls | **n** — a server string in a 3.5s toast, no step, no retry. The 2026-09-09 reading put 13 of §0's 32 failure toasts in this shape; the enumeration beside it derives seventeen by a pattern §0's does not reach, since a bare `toast(e.message)` carries none of the words §0 greps for | varies; each has a status code that distinguishes retryable from not | N |
 | `src/web/app/box.js:488` | asking the box… | **R** — trivially: `loadDiff` sets it before the fetch, so every open of the Diff tab | box → Diff tab | n/a — a spinner that waits on a real `git` fork, and has a catch. Honest but unbounded, with no elapsed counter | yes — the fetch settling | C |
-| `src/web/app/review.js:902` | asking GitHub… | **R** — a cold open of the Review pane, before the first queue fetch resolves | Review pane, cold open | n/a — waits on `/api/review`; `src/web/app/review.js:909` replaces it on failure | yes | C |
+| `src/web/app/review.js:923` | asking GitHub… | **R** — a cold open of the Review pane, before the first queue fetch resolves | Review pane, cold open | n/a — waits on `/api/review`; `src/web/app/review.js:930` replaces it on failure | yes | C |
 | `src/web/app/panels.js:286` | could not load package requests | **R** — the substrate GET rejecting while the package panel is open; it re-polls, so it clears itself | the package-request panel | n | **yes, and watched** — the panel re-loads every 20s while open (`src/web/app/boot.js:1213`), so it self-heals within a cycle | C |
 | `src/web/v2.html:325`, `src/web/v2.html:330` | the change could not be read | **R** — at `src/web/v2.html:330` — click a stale PR row for a repo removed since the queue loaded: `api_pr_shape` answers 404 as **plain text**, so `answer.json()` throws. The sibling at `src/web/v2.html:325` is **X**: `shape_response`'s JSON error arms always set a non-empty `error`, and the plain-text arms throw before that check | v2 board → click a row | **n** — no retry control in the pane at all | yes | N |
 | `src/web/v2.html:457`, `src/web/v2.html:515` | it could not be added · it was not accepted ({status}) | **R** — submit a repo source or branch that passes the client's empty-check and fails server-side | v2 add-a-repo, make-a-box | n — the button re-enables, unremarked | no — a keystroke | N |
 | `src/web/v2.html:382` | — disconnected — | **R** — the v2 terminal websocket closing, for any reason | v2 terminal socket closing | **n** — written into the buffer, then nothing. No overlay, no retry. It does at least not cover the last line | yes — `src/web/v2.html:257` already auto-reconnects the *stream* every 4s; the terminal does not | N |
+| `src/web/app/settings.js:495`, `src/web/app/settings.js:493` | Write token — {host} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein. · Write token — this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field. | **R** — any repo whose `slug` comes back empty: registered from a GitLab, Bitbucket or self-hosted URL (the first sentence), or a legacy entry registered from a path whose mirror has no GitHub `origin` (the second) | Settings → Repos → the repo's card, its Write token row | the path arm: **y** — re-add by URL; `repos::add_repo` replaces the entry with the same id in place and touches no box. The host arm: **no, and correctly** — see below the table | the path arm: nothing to watch, the person's own add re-renders the card. The host arm: none — nothing about the repo can change that would make a GitHub push credential mean something for it | — |
+
+**The Write token row is the one place in this survey where a row legitimately stops at naming the
+problem** (SKEIN-812, the owner's decision of 2026-09-23), and it carries no verdict because the
+three requirements presuppose a next step that this case does not have. The token exists to let a
+box push to GitHub; a repo on another host is not there, and nothing its owner could do to the repo
+changes that — the missing thing is non-GitHub push credentials in skein, which is a statement about
+skein's support rather than a step. So the sentence says whose limit it is and that the repo is
+fine, and stops. The add dialog says the same before the clone (`src/web/app/settings.js:1234`), so
+nobody meets it for the first time on the card. **This is an exception, written down so it stays
+one**: the row used to carry advice to give a host clone an `origin` (removed by SKEIN-588), which
+was false advice added to fill the gap, and a rule with an undocumented exception is how the next
+person re-adds it. The path arm is not the exception — it has a next step and says it.
 
 ## 8. The board's rows
 
@@ -988,6 +1012,6 @@ person.
    sentence; it was deleted, and `src/fleet/resize.rs:1222` now asserts it stays deleted. Anything
    planning work from that citation should re-read it first.
 2. **A path with no next step is not always a path with no next step *available*.** Three of the
-   worst rows — `src/bin/skein-server/terminal.rs:597`, `src/web/app/review-rows.js:325`, `src/fleet/start.rs:791` —
+   worst rows — `src/bin/skein-server/terminal.rs:620`, `src/web/app/review-rows.js:325`, `src/fleet/start.rs:791` —
    sit beside machinery that already performs the recovery. The defect in those is not that skein
    cannot recover; it is that it recovers silently and tells the person they are stuck.
