@@ -1,0 +1,53 @@
+# Paths the markdown names that this repository does not track, on purpose. Read by
+# `tools/link-check.py`, which fails on any other link or backticked repo path that names nothing.
+#
+# Two things belong here and nothing else — the classes `docs/prose-symbols.toml` already uses:
+#
+#   * a path named in the PAST TENSE, deliberately: a file that was deleted or split into a
+#     directory, named by a sentence about what happened to it or about what was measured in it
+#     before it moved. Rewriting the name to today's path would make the record claim something
+#     happened somewhere it did not.
+#   * a path that is SOMEBODY ELSE'S: relative to where a file is installed rather than to where it
+#     sits in this tree, or a path in another repository.
+#
+# A link a reader is meant to follow that names nothing is neither. It is a dead link, and the fix
+# is the link. Entries are keyed by the file that names the path, so one document's past tense does
+# not excuse the same path in another. An entry that excuses nothing any more fails the gate.
+
+["ARCHITECTURE.md"]
+"docs/TODO.md" = "past tense. The page says the open items USED to live here and that the file is gone from this repository; the sentence's whole content is the absence, and the page's own falsifier paragraph says this path must stay off its `ls` line for the same reason."
+"docs/in-fleet-handoff.md" = "past tense, the same sentence: the handoff document that was folded into the TODO file before both left the repository. The page names it because it was a dead link there for weeks."
+
+["CONTRIBUTING.md"]
+"tests/server.rs" = "past tense, twice: the SKEIN-685 incident (it spawned a real server that rewrote the live launcher) and the Files-tab defect the browser tier exists for. SKEIN-1118 split the file into `tests/server/`; the incidents happened to the single file."
+"src/fleet.rs" = "past tense, twice: the third comment cutter that reported nothing for this file, and the SKEIN-810 snapshot incident. Both happened to the single file SKEIN-934 later split into `src/fleet/`."
+
+["docs/architecture.md"]
+"src/health.rs" = "past tense: the barrier that was never there had been copied into this file before anybody checked. SKEIN-1099 made it `src/health/`; the copy was made into the file."
+
+["docs/delivery.md"]
+"src/deployment.rs" = "past tense: the module that carried `SKEIN_IN_FLEET` and its enumerated list, deleted by SKEIN-521 and SKEIN-576. The paragraph is the record of how the migration arrived."
+
+["docs/parity.md"]
+"src/fleet-agent.py" = "past tense: the sentence says this file is deleted (SKEIN-573) and lists what went with it."
+
+["docs/recovery-survey.md"]
+"src/bin/skein-server.rs" = "past tense: the survey (2026-09-09) names the six refusal paths it found in this file as Offender 1, before SKEIN-1103 split it into `src/bin/skein-server/`. Its `path:line` citations of the same file are declared historical in `docs/line-cites.toml`; this is the plain mention beside them."
+"src/fleet.rs" = "past tense: rows and notes the survey measured in this file before SKEIN-934 split it, one sentence saying so in as many words, and the SKEIN-756 guards that were gone before the pass. Its line citations are historical in `docs/line-cites.toml`."
+"src/health.rs" = "past tense: a cell recording where the survey looked for a panic site on the day it was measured, before SKEIN-1099 made it `src/health/`. Restating it against the directory would claim a search nobody ran."
+
+["src/store/sync/UPSTREAM.md"]
+"docs/onboarding.md" = "somebody else's: the Upstream column of this table names paths in the sync repository (the `upstream/sync` submodule), not in this one."
+
+["src/store/sync/work-tracking.organising.md"]
+"SKILL.md" = "somebody else's layout: this file is installed as `organising.md` beside the skill's `SKILL.md`, and the link is relative to that install directory. It is copied verbatim from upstream, which `src/store/sync/UPSTREAM.md` records."
+
+["src/store/sync/work-tracking.troubleshooting.md"]
+"SKILL.md" = "the same install layout: installed as `troubleshooting.md` beside `SKILL.md`, copied verbatim from upstream."
+
+["src/store/sync/work-tracking.skill.md"]
+"organising.md" = "the same install layout from the other side: this file is installed as `SKILL.md`, and links to its two siblings by their installed names. Copied verbatim from upstream."
+"troubleshooting.md" = "the same install layout: the second sibling, by its installed name."
+
+["tests/ui/README.md"]
+"tests/server.rs" = "past tense: the Files-tab defect this suite was written for, when `tests/server.rs` was one green file that could not see it. SKEIN-1118 split it into `tests/server/`."

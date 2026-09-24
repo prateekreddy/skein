@@ -237,8 +237,8 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 33
-tools/gates.sh --list | wc -l                        # → 19
+grep -c '^      - run:' .github/workflows/ci.yml     # → 34
+tools/gates.sh --list | wc -l                        # → 20
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -253,6 +253,7 @@ tools/gates.sh --list | wc -l                        # → 19
 | `env-lock-check` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `fleet-pin-check` | a test that pins `$SKEIN_HOME` or `$SKEIN_FLEET_ROOT` says something about the other | `docs/fleet-pins.toml` |
 | `prose-check` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
+| `link-check` | every markdown link, and every backticked repo path, names a file git tracks | `docs/links.toml` |
 | `line-cite-check` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
 | `continuation-check` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
 | `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
