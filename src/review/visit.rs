@@ -1594,6 +1594,80 @@ mod tests {
         crate::prq::forget_host_token();
     }
 
+    /// **A reading that acts as the App and has no App to act as says so on the reading itself**
+    /// (SKEIN-516) — through the real merged visit, not the decision function alone, so what is
+    /// held here is that the refusal reaches `Summary::not_posted`.
+    ///
+    /// The changes that fail it: the merged visit writing `not_posted: String::new()` instead of
+    /// the credential's reason (the first assertion), or writing it whatever the reason (the
+    /// second: the same reading acting as the owner carries nothing).
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_that_cannot_act_as_the_app_carries_why_and_one_acting_as_you_does_not() {
+        let _g = crate::testutil::env_lock();
+        let _crossing = crate::place::seam::doing_nothing();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", home);
+        let _asked = drafting_fixture(home);
+        let repo = || {
+            crate::repos::load_repos()
+                .into_iter()
+                .find(|r| r.id == "crit")
+                .expect("the fixture repo")
+        };
+        let read = |number: u64, head: &str| {
+            summarise(
+                &repo(),
+                "acme/thing",
+                &budget_pr(number, head),
+                &["me".into()],
+                false,
+                Trigger::Asked,
+            )
+        };
+
+        // "app", and this fixture configures no App and stores no token for the repository.
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_identity":"app"}"#,
+        )
+        .unwrap();
+        let s = read(31, "sha31");
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "the reading did not run: {}",
+            s.unread_because
+        );
+        assert_eq!(
+            s.not_posted,
+            "Reviews act as the skein App, but no App is set up — nothing will be posted.",
+            "a reading that acted as nothing did not say why it posted nothing"
+        );
+
+        // The same reading, acting as the owner, who has a token: nothing to say.
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_identity":"me"}"#,
+        )
+        .unwrap();
+        let s = read(32, "sha32");
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "the reading did not run: {}",
+            s.unread_because
+        );
+        assert_eq!(
+            s.not_posted, "",
+            "a reading acting as you carried a not-posted notice"
+        );
+    }
+
     /// **What skein reads on its own is skein's answer, not the caller's** (SKEIN-242).
     ///
     /// `read_prs` and [`worth_reading`] used to live in [`read_waiting`] alone, which made them a
