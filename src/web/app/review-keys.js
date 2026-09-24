@@ -30,12 +30,22 @@ function revComposeStore(c) { return `skein.revdraft.${c.repo}#${c.number}.${c.k
 /// caret, and it must still be KEPT.
 function revComposeSave(c = revComposing) {
   if (!c) return;
-  try { localStorage.setItem(revComposeStore(c), JSON.stringify({ text: c.text, answer: c.answer })); } catch {}
+  // `outside` and `draftedFrom` too (SKEIN-819): the line saying an answer or a draft came from
+  // outside its box has to survive a reload exactly as the text it is about does, or a reload is a
+  // way to lose the warning and keep the words it warns about.
+  try {
+    localStorage.setItem(revComposeStore(c), JSON.stringify({
+      text: c.text, answer: c.answer, outside: c.outside || "", draftedFrom: c.draftedFrom || "",
+    }));
+  } catch {}
 }
 function revCompose(repo, number, kind) {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(revComposeStore({ repo, number, kind })) || "null"); } catch {}
-  revComposing = { repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "", busy: false };
+  revComposing = {
+    repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "",
+    outside: (saved && saved.outside) || "", draftedFrom: (saved && saved.draftedFrom) || "", busy: false,
+  };
   renderReviewNow();
   setTimeout(() => document.getElementById("rev-compose")?.focus(), 30);
 }
@@ -50,8 +60,12 @@ function revComposeHtml(pr) {
     : "Request changes — posted to GitHub under your name, and moves this out of your lane.";
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
+    ${!asking && c.outside ? `<div class="revstale outsidebox"><b>Drafted outside its box — ${esc(c.outside)}. The model did not see the change: check every claim about the code before you post it.</b>
+      <button type="button" class="revchip" onclick="revDraftAgain(${pr.number})"${c.busy ? " disabled" : ""}>draft again</button></div>` : ""}
     <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
       oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
+    ${c.answer && c.outside ? `<div class="revstale outsidebox"><b>Answered outside its box — ${esc(c.outside)}. It could not look at the code or the earlier reading, so this is from your question alone.</b>
+      <button type="button" class="revchip" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>ask again</button></div>` : ""}
     ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
     <div class="revacts">
       ${asking
@@ -103,7 +117,9 @@ function revAsk(number) {
   revPost(c.repo, number, "ask", c.text).then(d => {
     c.busy = false;
     // `c`, named — not whatever composer is open by the time this runs (SKEIN-841).
-    if (d.ok) { c.answer = d.text; revComposeSave(c); } else toast(d.error || "no answer");
+    // `outside` is the server's reason this answer did not come from the box (SKEIN-819) — empty,
+    // and so cleared, when it did, which is what makes "ask again" able to retire the line.
+    if (d.ok) { c.answer = d.text; c.outside = d.outside || ""; revComposeSave(c); } else toast(d.error || "no answer");
     revComposePaint(c);
   });
 }
@@ -114,12 +130,29 @@ function revDraft(number) {
   const c = revComposing;
   if (!c || !c.text.trim()) { toast("say roughly what you want to tell them"); return; }
   c.busy = true; renderReviewNow();
+  // The notes this draft is made FROM, kept so "draft again" drafts from them rather than from
+  // the draft that replaced them in the box (SKEIN-819).
+  const notes = c.text;
   revPost(c.repo, number, "draft", c.text).then(d => {
     c.busy = false;
     // `c`, named — the identical shape, and the identical loss (SKEIN-841).
-    if (d.ok) { c.text = d.text; revComposeSave(c); } else toast(d.error || "could not draft");
+    if (d.ok) {
+      c.text = d.text; c.outside = d.outside || ""; c.draftedFrom = notes;
+      revComposeSave(c);
+    } else toast(d.error || "could not draft");
     revComposePaint(c);
   });
+}
+
+/// "draft again", on the line that says a draft was written outside its box (SKEIN-819): the same
+/// press as "draft with skein", from the notes the draft was made from. What is in the box now is
+/// the draft itself, and drafting from a draft would be a model rewording its own words about a
+/// change it did not see.
+function revDraftAgain(number) {
+  const c = revComposing;
+  if (!c || c.busy) return;
+  if (c.draftedFrom) c.text = c.draftedFrom;
+  revDraft(number);
 }
 
 /// The answer to a composer's own press, painted NOW (SKEIN-416).

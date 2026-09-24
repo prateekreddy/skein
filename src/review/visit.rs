@@ -921,7 +921,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
 /// The separation from [`draft_comment`] is the point: most questions are for your own
 /// understanding, and an answer that might be published is a different, more careful, less useful
 /// answer. Posting is a second, deliberate act.
-pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<String, String> {
+pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<Composed, String> {
     if !summaries_enabled() {
         return Err(
             "reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
@@ -966,18 +966,37 @@ Their question: {question}"#,
         acting_credential().as_ref(),
         bench.machine(),
     )
-    // The answer only. A question answered outside its box is a downgrade nobody has decided how
-    // to say yet — SKEIN-799 settled the wording for the review row, and this is a different
-    // surface with a different reader. Captured rather than silently dropped: see the item.
-    .map(|a| a.said)
+    // The answer, and whether it came from outside the box (SKEIN-819): the composer says so above
+    // it, in the owner's words, with a way to ask again.
+    .map(|a| Composed {
+        text: a.said,
+        outside: a.outside_box,
+    })
     .map_err(|unread| unread.say())
+}
+
+/// **What a composer is handed back: the text, and whether it came from outside the box**
+/// (SKEIN-819).
+///
+/// [`ask`] and [`draft_comment`] are addressed to the pull request's own review box, and fall
+/// through to a local call when it cannot take the turn — which loses the conversation that read
+/// the change, so the answer is "from your question alone" and a draft is written by a model that
+/// did not see the change. `outside` is [`crate::ai::outside_box_because`]'s reason, carried from
+/// [`crate::ai::Answered`] rather than dropped, so the composer can say so above the text with a
+/// way to ask or draft again. `None` whenever the turn ran in its box, or there was no box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composed {
+    /// The answer, or the drafted comment's body.
+    pub text: String,
+    /// Why this did not run in its box, in words for a reader. `None` when it did.
+    pub outside: Option<String>,
 }
 
 /// Draft a comment for a PR from your rough intent. Returns text to **edit**, never to post.
 ///
 /// The posting is a separate call for the reason you gave: the agent drafts, you correct it, then it
 /// goes. A draft that could post itself would be a different feature with a different risk.
-pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<String, String> {
+pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<Composed, String> {
     if !summaries_enabled() {
         return Err("reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes.".into());
     }
@@ -1017,7 +1036,12 @@ Their notes: {intent}"#,
         acting_credential().as_ref(),
         bench.machine(),
     )
-    .map(|a| drafted_body(&a.said))
+    // The body, and where it was written (SKEIN-819) — a draft written outside the box goes out
+    // under a person's name about a change the model did not see, so the composer says so.
+    .map(|a| Composed {
+        text: drafted_body(&a.said),
+        outside: a.outside_box,
+    })
     .map_err(|unread| unread.say())
 }
 #[cfg(test)]

@@ -461,6 +461,76 @@ await check("⌘↵ in a comment posts it through the undo window, not past it",
   await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, key);
   await settle();
 });
+// **An answer or a draft from outside its box says so above itself** (SKEIN-819, the owner's option
+// A, wording approved as drafted). The server puts `outside` on the act's answer when the turn fell
+// through to a local call; the fixture's `claude` is named by SKEIN_CLAUDE_BIN, which skips the box
+// altogether, so the route is answered here instead — what is under test is what the composer DOES
+// with `outside`, and the Rust side (`acted`) is tested where it is built.
+//
+// Fails on: the line not drawn, drawn in other words, not surviving the composer being closed and
+// reopened (which is the reload path: both restore from `revComposeSave`'s copy), not retired by an
+// answer from inside the box, the draft's line drawn below the text it is about, or "draft again"
+// drafting from the draft instead of from the notes.
+const OUTSIDE_WHY = "skein has no record of where that box is, so it was never started or it is gone";
+await check("an answer or a draft from outside its box says so above it, and asking again can retire it", async () => {
+  const sent = [];
+  let outside = OUTSIDE_WHY;
+  await page.route("**/review/*/act", route => {
+    const body = JSON.parse(route.request().postData() || "{}");
+    sent.push(body);
+    const text = body.kind === "ask" ? "an answer from here" : "COMMENT drafted here";
+    return route.fulfill({ contentType: "application/json",
+      body: JSON.stringify(outside ? { ok: true, text, outside } : { ok: true, text }) });
+  });
+  const line = () => page.$eval("#revpane .revcompose .outsidebox b", e => e.textContent.trim()).catch(() => null);
+  try {
+    await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
+    await until(() => !!document.getElementById("rev-compose"), null, "pressing ask drew no composer");
+    await page.fill("#rev-compose", "is this safe?");
+    await page.click("#revpane .revcompose .revchip:has-text('ask')");
+    await page.waitForSelector("#revpane .revanswer", { timeout: 15000 });
+    const want = `Answered outside its box — ${OUTSIDE_WHY}. It could not look at the code or the earlier reading, so this is from your question alone.`;
+    if ((await line()) !== want) throw new Error(`the ask's line is not the approved one: ${JSON.stringify(await line())}`);
+    await mustSee("#revpane .revcompose .outsidebox .revchip:has-text('ask again')", "the ask-again button");
+    // Closed and reopened: the copy a reload restores from.
+    await page.evaluate(() => { const c = revComposing; revComposeClose(); revCompose(c.repo, c.number, c.kind); });
+    await until(() => !!document.querySelector("#revpane .revcompose .outsidebox"), null,
+      "the line did not survive the composer being reopened, so a reload loses the warning and keeps the answer");
+    outside = "";
+    await page.click("#revpane .revcompose .outsidebox .revchip:has-text('ask again')");
+    await until(() => !document.querySelector("#revpane .revcompose .outsidebox"), null,
+      "an answer from inside the box left the outside line standing");
+    const askKey = await page.evaluate(() => revComposeStore(revComposing));
+    await page.click("#revpane .revcompose .revchip:has-text('cancel')");
+    await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, askKey);
+
+    outside = OUTSIDE_WHY;
+    await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
+    await until(() => !!document.getElementById("rev-compose"), null, "pressing comment drew no composer");
+    await page.fill("#rev-compose", "the notes the draft is made from");
+    await page.click("#revpane .revcompose .revchip:has-text('draft with skein')");
+    await until(() => !!document.querySelector("#revpane .revcompose .outsidebox"), null, "a draft from outside its box drew no line");
+    const drafted = `Drafted outside its box — ${OUTSIDE_WHY}. The model did not see the change: check every claim about the code before you post it.`;
+    if ((await line()) !== drafted) throw new Error(`the draft's line is not the approved one: ${JSON.stringify(await line())}`);
+    const above = await page.evaluate(() => {
+      const l = document.querySelector("#revpane .revcompose .outsidebox"), t = document.getElementById("rev-compose");
+      return !!(l.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    if (!above) throw new Error("the draft's line is not above the draft it is about");
+    sent.length = 0;
+    await page.click("#revpane .revcompose .outsidebox .revchip:has-text('draft again')");
+    for (let i = 0; i < 50 && !sent.length; i++) await new Promise(r => setTimeout(r, 50));
+    if (!sent.length || sent[0].kind !== "draft" || sent[0].body !== "the notes the draft is made from")
+      throw new Error(`"draft again" did not draft from the notes: ${JSON.stringify(sent)}`);
+    await page.waitForFunction(() => revComposing && !revComposing.busy, null, { timeout: 5000 });
+    const draftKey = await page.evaluate(() => revComposeStore(revComposing));
+    await page.click("#revpane .revcompose .revchip:has-text('cancel')");
+    await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, draftKey);
+    await until(() => !document.querySelector("#revpane .revcompose"), null, "cancel left the composer open");
+  } finally {
+    await page.unroute("**/review/*/act");
+  }
+});
 // Private by construction: an answer that might be published is a different, more careful, less
 // useful answer — so asking must never look like a step on the way to posting.
 await check("asking a question keeps the answer off GitHub", async () => {

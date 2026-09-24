@@ -839,6 +839,21 @@ pub(super) struct ActReq {
     drafted_at: String,
 }
 
+/// What a successful act answers: the text, and `outside` when an ask or a draft ran outside its
+/// box (SKEIN-819).
+///
+/// `outside` is `ai::outside_box_because`'s reason, and the key is absent rather than empty when
+/// the turn ran where it was addressed, so every act that has no box to lose answers exactly what
+/// it answered before. The page keeps it on the composer (`revAsk`, `revDraft`) so the line above
+/// the answer survives a reload.
+fn acted(text: &str, outside: Option<&str>) -> serde_json::Value {
+    let mut said = serde_json::json!({ "ok": true, "text": text });
+    if let Some(why) = outside.filter(|why| !why.is_empty()) {
+        said["outside"] = serde_json::Value::from(why);
+    }
+    said
+}
+
 pub(super) async fn api_review_act(
     Path((id, number)): Path<(String, u64)>,
     Json(req): Json<ActReq>,
@@ -872,6 +887,9 @@ pub(super) async fn api_review_act(
                 .find(|p| p.number == number)
                 .ok_or_else(|| "that PR is not in your queue".to_string())
         };
+        // Why an ask or a draft ran outside its box, when it did (SKEIN-819). Only those two arms
+        // set it; everything else here acts on GitHub and has no box to lose.
+        let mut outside: Option<String> = None;
         let text = match (verdict, req.kind.as_str()) {
             (Some(v), _) if !req.comments.is_empty() => {
                 // What `commit_id` must name. `head_to_post_against` reads the LIVE head and is
@@ -932,8 +950,16 @@ pub(super) async fn api_review_act(
                 };
                 skein::prwork::merge_by_hand(&slug, number, &seen)?
             }
-            (None, "ask") => skein::review::ask(&repo, &slug, &queued()?, &req.body)?,
-            (None, "draft") => skein::review::draft_comment(&repo, &slug, &queued()?, &req.body)?,
+            (None, "ask") => {
+                let composed = skein::review::ask(&repo, &slug, &queued()?, &req.body)?;
+                outside = composed.outside;
+                composed.text
+            }
+            (None, "draft") => {
+                let composed = skein::review::draft_comment(&repo, &slug, &queued()?, &req.body)?;
+                outside = composed.outside;
+                composed.text
+            }
             (None, other) => return Err(format!("unknown action: {other}")),
         };
         // Anything that touched GitHub changed the lane this PR belongs in, and the queue is cached
@@ -944,11 +970,11 @@ pub(super) async fn api_review_act(
         ) {
             skein::prq::invalidate(&id);
         }
-        Ok::<_, String>(text)
+        Ok::<_, String>((text, outside))
     })
     .await;
     Json(match out {
-        Ok(Ok(text)) => serde_json::json!({ "ok": true, "text": text }),
+        Ok(Ok((text, outside))) => acted(&text, outside.as_deref()),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
@@ -1610,5 +1636,31 @@ pub(super) mod review_routes {
             me.contains("fn queue_as_known("),
             "the read-only routes lost the thing that keeps GitHub off the reader's path"
         );
+    }
+
+    /// **An ask or a draft that ran outside its box says so on the answer** (SKEIN-819), and every
+    /// other act answers exactly what it did before.
+    ///
+    /// The owner's decision puts `"outside": "<outside_box_because>"` on the route's answer so the
+    /// composer can draw its line above the text. **What makes it fail:** `acted` dropping the key
+    /// (the first assertion), or writing it whether or not there is a reason — the second and third,
+    /// which is the direction that would put "Answered outside its box — ." over every ordinary
+    /// answer.
+    #[test]
+    fn an_answer_from_outside_the_box_carries_why_and_an_ordinary_one_carries_nothing() {
+        let why = "skein has no record of where that box is, so it was never started or it is gone";
+        let said = acted("the answer", Some(why));
+        assert_eq!(said["ok"], true);
+        assert_eq!(said["text"], "the answer");
+        assert_eq!(
+            said["outside"], why,
+            "the reason the answer ran outside its box was dropped on the way to the composer: {said}"
+        );
+        for ordinary in [acted("the answer", None), acted("the answer", Some(""))] {
+            assert!(
+                ordinary.get("outside").is_none(),
+                "an answer from inside its box was marked as from outside it: {ordinary}"
+            );
+        }
     }
 }
