@@ -1226,6 +1226,21 @@ mod tests {
             .join("\n");
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
+        // What the block's own `claude` calls, and bash about them, printed (SKEIN-888). The shipped
+        // block sends all of it to /dev/null and swallows every failure with `|| true`, so when a
+        // leg below recorded the wrong set under load there was nothing to say why — a `claude`
+        // that ran and listed nothing and one that never ran at all (bash's "Text file busy", say)
+        // read the same. Redirected here, in the test's copy only, and printed with any failure.
+        let trace = root.join("trace");
+        let traced = block
+            .replace(" >/dev/null 2>&1", &format!(" >>{} 2>&1", trace.display()))
+            .replace(" 2>/dev/null", &format!(" 2>>{}", trace.display()));
+        assert!(
+            traced.matches(&*trace.display().to_string()).count() >= 5,
+            "the bootstrap's plugin block no longer silences its `claude` calls the way this test \
+             rewrites, so a failure below would say nothing about them:\n{block}"
+        );
+        let block = traced;
         let home = root.join("home");
         let store = root.join("store");
         let bin = root.join("bin");
@@ -1242,10 +1257,12 @@ mod tests {
         // here, since the real one fails exactly that quietly.
         let fake_claude = |installs: bool| {
             let script = format!(
-                "#!/bin/sh\ncase \"$1 $2\" in\n\
+                "#!/bin/sh\necho \"claude $* (installs: {installs})\" >> {trace}\n\
+                 case \"$1 $2\" in\n\
                  'plugin list') cat {listed} 2>/dev/null || true ;;\n\
                  'plugin install') {act} ;;\n\
                  *) : ;;\nesac\nexit 0\n",
+                trace = trace.display(),
                 listed = root.join("listed").display(),
                 act = if installs {
                     format!("echo \"$3\" >> {}", root.join("listed").display())
@@ -1258,7 +1275,10 @@ mod tests {
                 .unwrap();
         };
         let marker = home.join(".claude/.skein-plugins-materialized");
+        // Each run's trace on its own, so a failure shows the leg that failed and not the ones
+        // before it.
         let run = || {
+            let _ = std::fs::remove_file(&trace);
             let out = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(format!(
@@ -1277,13 +1297,20 @@ mod tests {
             );
             std::fs::read_to_string(&marker).unwrap_or_default()
         };
+        let printed = || {
+            format!(
+                "\n--- what the block's `claude` calls printed, and bash about them:\n{}",
+                std::fs::read_to_string(&trace).unwrap_or_else(|e| format!("(no trace: {e})"))
+            )
+        };
 
         // Installs that quietly do nothing must leave no marker, or this box never tries again.
         fake_claude(false);
         assert_eq!(
             run(),
             "",
-            "a box that installed nothing was marked done for good"
+            "a box that installed nothing was marked done for good{}",
+            printed()
         );
         assert!(
             !marker.exists(),
@@ -1293,7 +1320,12 @@ mod tests {
         // Now they work. The marker records the set, sorted, and only the enabled ones.
         fake_claude(true);
         let done = run();
-        assert_eq!(done, "alpha@market beta@market ", "recorded: {done:?}");
+        assert_eq!(
+            done,
+            "alpha@market beta@market ",
+            "recorded: {done:?}{}",
+            printed()
+        );
         assert!(
             !done.contains("off@market"),
             "a disabled plugin was installed anyway"
@@ -1305,7 +1337,8 @@ mod tests {
         assert_eq!(
             run(),
             "alpha@market beta@market ",
-            "a settled box did the work again"
+            "a settled box did the work again{}",
+            printed()
         );
 
         // Enabling one more must reach a box that already exists. This is the half that would have
@@ -1319,7 +1352,8 @@ mod tests {
         assert_eq!(
             run(),
             "alpha@market beta@market gamma@market ",
-            "a newly enabled plugin never reached an existing box"
+            "a newly enabled plugin never reached an existing box{}",
+            printed()
         );
     }
 
