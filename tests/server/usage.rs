@@ -340,3 +340,78 @@ fn the_first_usage_load_on_a_host_that_has_never_counted_takes_the_reading() {
          whole walk again — which is the cost the cache exists to stop"
     );
 }
+
+/// One of skein's own calls, filed where a call spawned on the fleet's login files it: under the
+/// fleet login home, in a session whose id carries its call site (SKEIN-1074). A million input
+/// tokens of `claude-haiku-4-5`, so each one is exactly one dollar.
+fn add_own_call(home: &Path, site: skein::ai::Site, msg: &str) {
+    let dir = home.join("fleet-home/.claude/projects/-work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let record = serde_json::json!({
+        "type": "assistant",
+        "timestamp": "2026-09-03T10:00:00.000Z",
+        "requestId": format!("req-{msg}"),
+        "message": {
+            "id": format!("msg-{msg}"),
+            "model": "claude-haiku-4-5",
+            "content": [{"type": "text", "text": "this body must never reach the payload"}],
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 0},
+        },
+    });
+    std::fs::write(
+        dir.join(format!("{}.jsonl", skein::ai::labelled_session(site))),
+        format!("{record}\n"),
+    )
+    .unwrap();
+}
+
+/// **An abandoned reading's spend is charged to the one that finished, not dropped** (SKEIN-1076).
+///
+/// Two readings, one dollar of S1 each; one finished and one did not. The figure is dollars per
+/// **completed** reading, so it must be two dollars: the reading that did not finish still cost
+/// money, and a technique that makes readings fail more often must not look cheaper for it.
+///
+/// | assertion | what breaks it |
+/// |---|---|
+/// | `per_finished` is 2.00 | dividing by attempts (finished + unfinished) instead of completions — it reads 1.00 |
+/// | `readings.cost` is 2.00 | dropping the abandoned reading's spend |
+/// | no box carries it | charging skein's own calls to a box |
+#[test]
+fn an_abandoned_readings_spend_is_charged_to_the_reading_that_finished() {
+    let home = usage_home("usage-per-reading");
+    add_own_call(&home, skein::ai::Site::Summary, "finished");
+    add_own_call(&home, skein::ai::Site::Summary, "abandoned");
+    std::fs::write(
+        home.join("usage-own.jsonl"),
+        "{\"reading\":\"finished\",\"at\":1}\n{\"reading\":\"unfinished\",\"at\":2}\n",
+    )
+    .unwrap();
+    let (child, addr) = usage_server(&home);
+    let _kid = Kid(child);
+
+    let got = usage_json(&addr, "/api/usage?refresh=1");
+    let readings = &got["own"]["readings"];
+    assert_eq!(
+        (&readings["finished"], &readings["unfinished"]),
+        (&serde_json::json!(1), &serde_json::json!(1)),
+        "the ledger's two readings did not reach the payload: {got}"
+    );
+    assert_eq!(
+        readings["cost"].as_f64(),
+        Some(2.0),
+        "the abandoned reading's spend was dropped: {got}"
+    );
+    assert_eq!(
+        readings["per_finished"].as_f64(),
+        Some(2.0),
+        "the figure divided by attempts rather than by completed readings: {got}"
+    );
+    assert_eq!(readings["tokens_per_finished"], 2_000_000);
+    assert_eq!(
+        got["boxes"].as_array().map(|b| b.len()),
+        Some(1),
+        "skein's own calls surfaced as a box: {got}"
+    );
+    assert_eq!(got["boxes"][0]["tokens"], USAGE_TOKENS_1);
+    assert_eq!(got["totals"]["tokens"], USAGE_TOKENS_1 + 2_000_000);
+}
