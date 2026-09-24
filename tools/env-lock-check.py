@@ -165,7 +165,7 @@ TEST_DIRS = [os.path.join(ROOT, "tests")]
 # makes the list falsifiable instead is `src/testutil.rs`: `EnvPins`'s field is private and the
 # struct is constructed in exactly one place, so a NEW wrapper has to be a fn in that file returning
 # an `EnvPins`, and `env_pins(` in its body keeps it a finding here until it is named.
-TOUCH = re.compile(r"\b(?:remove_var|set_var|env_pins|no_warden)\s*\(")
+TOUCH = re.compile(r"\b(?:remove_var|set_var|env_pins|no_warden|audit_sink)\s*\(")
 
 # A guard is a BINDING. `let _g = …` and `let _ = …` differ by one character and by the entire
 # lifetime of the lock, which is exactly why this is checked mechanically.

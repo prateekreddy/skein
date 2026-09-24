@@ -152,6 +152,19 @@ pub struct Config {
     /// on every settings save. The key is read by `openssl` and never enters skein's memory.
     #[serde(default)]
     pub github_app_key: String,
+    /// Whose GitHub identity a pull-request review acts with: `"me"` or `"app"` (SKEIN-516).
+    ///
+    /// **`"me"` by default, and that is the owner's rule rather than a placeholder**: everything
+    /// skein does on its own is done as the owner, with no "on behalf of", so a review reads and
+    /// posts with the owner's own token (`crate::prq::host_token`). `"app"` is for team installs,
+    /// where the review should act as the skein GitHub App instead: the session is handed
+    /// `gitgate::mint_token(slug)`, and only when an App is configured.
+    ///
+    /// A string rather than an enum, on purpose. `config.json` is hand-editable and one field serde
+    /// cannot read discards the whole file (`config_error`), so a typo here would cost every other
+    /// setting. Anything that is not `"app"` reads as `"me"` — see [`Config::reviews_as_app`].
+    #[serde(default = "default_review_identity")]
+    pub review_identity: String,
     /// Spend *rationed* Haiku calls on the Claude subscription to enrich the board: a one-line
     /// summary for a box with no journal, and a conservative safety gate on **Continue N**.
     ///
@@ -599,6 +612,21 @@ fn default_review_reads_per_day() -> u32 {
     100
 }
 
+fn default_review_identity() -> String {
+    "me".to_string()
+}
+
+impl Config {
+    /// Does a review act as the skein GitHub App rather than as the owner?
+    ///
+    /// Only an exact `"app"` says so. Every other value, a typo included, is the owner's default,
+    /// because the alternative reading of a value nobody meant is a review acting as an identity
+    /// nobody chose.
+    pub fn reviews_as_app(&self) -> bool {
+        self.review_identity.trim() == "app"
+    }
+}
+
 /// Every field here calls the SAME function its `#[serde(default = …)]` names.
 ///
 /// The four booleans used to be spelled as a literal `true` while serde called `default_true`, which
@@ -618,6 +646,7 @@ impl Default for Config {
             scope_git_to_repo: default_true(),
             github_app_id: String::new(),
             github_app_key: String::new(),
+            review_identity: default_review_identity(),
             ai_enrichment: false,
             review_summaries: default_true(),
             box_plugin: default_true(),
@@ -640,6 +669,24 @@ impl Default for Config {
 
 #[cfg(test)]
 mod tests {
+    /// **A review acts as the owner unless the owner says otherwise** (SKEIN-516) — for a config
+    /// that never mentions the key, for the built-in default, and for a value nobody recognises.
+    ///
+    /// The concrete change that fails it: `default_review_identity` answering `"app"`, or
+    /// `reviews_as_app` testing anything looser than the exact word.
+    #[test]
+    fn a_review_acts_as_the_owner_unless_the_config_says_app() {
+        let absent: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.review_identity, "me");
+        assert!(!absent.reviews_as_app());
+        assert!(!super::Config::default().reviews_as_app());
+        let garbled: super::Config =
+            serde_json::from_str(r#"{"review_identity":"application"}"#).unwrap();
+        assert!(!garbled.reviews_as_app(), "an unknown word chose the App");
+        let app: super::Config = serde_json::from_str(r#"{"review_identity":"app"}"#).unwrap();
+        assert!(app.reviews_as_app());
+    }
+
     /// **A fleet always has a name, whatever is in the file** (SKEIN-484).
     ///
     /// The serde default only covers an ABSENT key. A key present and EMPTY is what a partial

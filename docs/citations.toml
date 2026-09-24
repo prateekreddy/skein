@@ -189,7 +189,7 @@ subject = "refactor: lib.rs declares modules and nothing else"
 date = "2026-08-20T14:06:41Z"
 
 [citations."abc1234"]
-external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1405 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1832 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1406 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1832 (SELF_CHECK_DATED's own worked example). SKEIN-708."
 sites = ["docs/line-cites.toml", "src/prwork/perform.rs", "tools/prose-check.py"]
 
 [citations."abc6bbb"]
@@ -218,7 +218,7 @@ subject = "fix(isolation): a box sees its own repo, and nothing the sandbox moun
 date = "2026-08-20T14:29:30Z"
 
 [citations."d2abd03"]
-external = "acme/testbed's own commit, not skein's — src/review/asking.rs:622 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
+external = "acme/testbed's own commit, not skein's — src/review/asking.rs:708 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/review/asking.rs"]
 
 [citations."dbe2318"]
@@ -232,7 +232,7 @@ subject = "refactor(review): the session posts its own review to GitHub, and ske
 date = "2026-08-27T14:48:33Z"
 
 [citations."def5678"]
-external = "the other half of src/prwork/perform.rs:1405's invented pair — see `abc1234`. SKEIN-708."
+external = "the other half of src/prwork/perform.rs:1406's invented pair — see `abc1234`. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/prwork/perform.rs"]
 
 [citations."df48daa"]

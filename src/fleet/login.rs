@@ -466,6 +466,10 @@ for key, path in ranked:
     # two trade places every tick, and the mtime tiebreak above means nothing.
     if place(source, path, (stamp.st_atime_ns, stamp.st_mtime_ns)):
         print(path)
+        # The fleet's own copy was just replaced by a box's — the one direction ISO-5 guards, and
+        # so a line of its own naming where it came from, which `heal_told` reports (SKEIN-516).
+        if path == home_path:
+            print("promoted\t" + source)
 SKEIN_HEAL
 done
 "#
@@ -539,12 +543,52 @@ pub fn heal_logins() -> Result<Vec<String>, String> {
     // does not. The other two call sites keep both directions; only here is one side known to be
     // newer than the other by construction.
     sync_fleet_login_saving_only(&sandbox);
-    Ok(told
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(heal_told(&told, &fleet_root()))
+}
+
+/// **What one heal tick wrote, with every box login it promoted over the fleet's copy reported to
+/// the audit log** (SKEIN-516).
+///
+/// The script prints each path it placed, and — after the fleet's own `$HOME` copy, the one that
+/// seeds every box and is saved to the host — a `promoted<TAB><source>` line naming the box copy
+/// it came from, `{root}/<box>/home/<rel>`. That is the one direction [`heal_logins_script`] makes a
+/// box earn (ISO-5): a box's credential becoming the fleet's is a thing done with the owner's login,
+/// so it is in the host's log with the box it came from.
+///
+/// Its own function, and not three lines in [`heal_logins`], because `heal_logins` cannot be driven
+/// — its output comes back from inside a sandbox — and this is the half that can be.
+pub(super) fn heal_told(told: &str, root: &str) -> Vec<String> {
+    let mut written = Vec::new();
+    for line in told.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line.strip_prefix("promoted\t") {
+            Some(source) => {
+                let (from, rel) = promoted_from(source, root);
+                crate::warden_client::reported(
+                    "login-promoted",
+                    "promoted a box's login over the fleet's copy",
+                    &format!("{from}: {rel}"),
+                );
+            }
+            None => written.push(line.to_string()),
+        }
+    }
+    written
+}
+
+/// The box and the login file a promoted copy came from: `{root}/<box>/home/<rel>` read back into
+/// `(<box>, <rel>)`. A path that is not under `root` is named whole rather than dropped — the
+/// report is about something that happened, and a wrong-looking name is still a name.
+fn promoted_from(source: &str, root: &str) -> (String, String) {
+    let under = source
+        .strip_prefix(root.trim_end_matches('/'))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .and_then(|rest| rest.split_once("/home/"));
+    match under {
+        Some((name, rel)) if !name.is_empty() && !name.contains('/') => {
+            (name.to_string(), rel.to_string())
+        }
+        _ => (source.to_string(), String::new()),
+    }
 }
 
 /// Put the fleet's login into every box that already exists, and answer with the ones it reached.
@@ -1810,9 +1854,18 @@ for a in sys.argv[2:]:
         // `skein-test-sk-ancient` came back refused — something that HAPPENED, to a credential the sidecar
         // names — and that is the one thing a box cannot write, because a box cannot make skein's
         // call fail on skein's own behalf.
+        let promoted = run(Some(("claude", now_ms)));
         assert!(
-            run(Some(("claude", now_ms))).contains(&canon.display().to_string()),
+            promoted.contains(&canon.display().to_string()),
             "the fleet's copy stayed put with a refusal recorded against the very credential in it"
+        );
+        // And the script says which box it came from, which is what the audit entry names
+        // (SKEIN-516, `heal_told`).
+        assert!(
+            promoted
+                .lines()
+                .any(|l| l == format!("promoted\t{}", winner.display())),
+            "the fleet's copy was replaced and the script did not say from where: {promoted}"
         );
         assert!(
             read(&canon).contains("skein-test-sk-current"),
@@ -1903,5 +1956,59 @@ for a in sys.argv[2:]:
             &cred(future),
         );
         assert_eq!(run(), "", "healthy credentials were rewritten");
+    }
+
+    /// **A box's login promoted over the fleet's copy is in the audit log, naming the box**
+    /// (SKEIN-516) — and a heal between boxes, which is SKEIN-488's ordinary traffic, is not.
+    ///
+    /// `heal_logins` itself cannot be driven (its output comes back from inside a sandbox), so this
+    /// drives the function it hands that output to, and `the_login_tick_reports_what_it_promoted`
+    /// holds the two together. The concrete change that fails it: delete the `reported` call in
+    /// [`heal_told`], and the sink hears nothing.
+    #[test]
+    fn a_boxs_login_promoted_over_the_fleets_copy_is_reported_with_the_box() {
+        let _env = crate::testutil::env_lock();
+        let (_warden, _warden_home, heard) = crate::testutil::audit_sink();
+        let wait = Duration::from_secs(3);
+        let told = "/fleet/example/home/.claude/.credentials.json\n\
+                    /sandbox-home/.claude/.credentials.json\n\
+                    promoted\t/fleet/thing/home/.claude/.credentials.json\n";
+
+        let written = heal_told(told, "/fleet/");
+        assert_eq!(
+            written,
+            [
+                "/fleet/example/home/.claude/.credentials.json",
+                "/sandbox-home/.claude/.credentials.json",
+            ],
+            "the marker line was counted as a path the tick wrote"
+        );
+        let entries = crate::testutil::audit_entries(&heard, wait);
+        assert_eq!(entries.len(), 1, "one promotion, one entry: {entries:?}");
+        assert_eq!(entries[0]["operation"], "login-promoted");
+        assert_eq!(
+            entries[0]["what"],
+            "promoted a box's login over the fleet's copy"
+        );
+        assert_eq!(entries[0]["detail"], "thing: .claude/.credentials.json");
+
+        heal_told("/fleet/example/home/.claude/.credentials.json\n", "/fleet");
+        let quiet = crate::testutil::audit_entries(&heard, wait);
+        assert!(
+            quiet.is_empty(),
+            "a heal between boxes was reported: {quiet:?}"
+        );
+    }
+
+    /// The tick hands what the script said to [`heal_told`], which is where a promotion is
+    /// reported — source-shaped, for the reason the two tests above this one's neighbours give.
+    #[test]
+    fn the_login_tick_reports_what_it_promoted() {
+        let body = fn_body(include_str!("login.rs"), "pub fn heal_logins()");
+        assert!(
+            body.contains("heal_told(&told"),
+            "heal_logins no longer passes the script's output through heal_told, so a box's login \
+             can replace the fleet's copy with nothing in the audit log"
+        );
     }
 }

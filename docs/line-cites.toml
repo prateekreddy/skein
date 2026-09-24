@@ -838,11 +838,11 @@ cited_by = ["docs/threat-model.md"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/config.rs:469"]
+["src/config.rs:482"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/config.rs:544"]
+["src/config.rs:557"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1524,7 +1524,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "let refused = pr.review_decision == \"CHANGES_REQUESTED\";"
 cited_by = ["docs/review-queue.md"]
 
-["src/prwork/perform.rs:1405"]
+["src/prwork/perform.rs:1406"]
 line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
 cited_by = ["docs/citations.toml"]
 
@@ -1600,7 +1600,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub(crate) fn registrable_source(source: &str) -> bool {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/review/asking.rs:622"]
+["src/review/asking.rs:708"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
 

@@ -140,6 +140,7 @@ fn audit_now(pr: &Subject) -> ReadStep {
     }
     let said = match crate::review::audit_owed(
         reading.repo,
+        pr.slug,
         pr.number,
         pr.head_sha,
         &reading.pr.base_ref,

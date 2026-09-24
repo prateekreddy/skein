@@ -802,33 +802,35 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // **Whether this reading can post what it finds**, decided once and used twice — the prompt
     // is written from it, and the call is given the credential the prompt promises. Two answers
     // here would be a prompt telling a model to run `gh` in a session that has no token.
-    let credential = acting_credential();
+    let credential = acting_credential(slug, pr.number);
     let answered = match crate::ai::as_site(crate::ai::Site::Review, || {
-        crate::ai::claude_in_conversation(
-            &merged_prompt(MergedPrompt {
-                pr,
-                slug,
-                owned,
-                signals,
-                described,
-                standing,
-                posting: credential.is_some(),
-                diff: &diff,
-                cut,
-            }),
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
-            // gets the diff itself needs at least the time a reading handed one did — more of it
-            // goes on tool calls — so the budget cannot be allowed to collapse to the floor just
-            // because the bytes moved out of the message. `merged_budget` clamps at
-            // [`CRITIQUE_BYTES`], which is what the truncated length used to be worth, so the
-            // handed-a-diff path is unchanged.
-            merged_budget(raw_diff.len()),
-            talk,
-            at,
-            credential.as_ref(),
-            bench.machine(),
-        )
+        credential.handed(|| {
+            crate::ai::claude_in_conversation(
+                &merged_prompt(MergedPrompt {
+                    pr,
+                    slug,
+                    owned,
+                    signals,
+                    described,
+                    standing,
+                    posting: credential.is_some(),
+                    diff: &diff,
+                    cut,
+                }),
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
+                // gets the diff itself needs at least the time a reading handed one did — more of it
+                // goes on tool calls — so the budget cannot be allowed to collapse to the floor just
+                // because the bytes moved out of the message. `merged_budget` clamps at
+                // [`CRITIQUE_BYTES`], which is what the truncated length used to be worth, so the
+                // handed-a-diff path is unchanged.
+                merged_budget(raw_diff.len()),
+                talk,
+                at,
+                credential.secret(),
+                bench.machine(),
+            )
+        })
     }) {
         Ok(answered) => answered,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -875,7 +877,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let sweep_said = sweep(talk, at, credential.as_ref(), bench.machine());
+    let sweep_said = credential.handed(|| sweep(talk, at, credential.secret(), bench.machine()));
     let swept = sweep_said.is_some();
     let findings_block = sweep_said.as_deref().and_then(findings_block);
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
@@ -980,16 +982,19 @@ Their question: {question}"#,
         checkout = standing_line(standing, "answering"),
         question = question,
     );
+    let acting = acting_credential(slug, pr.number);
     crate::ai::as_site(crate::ai::Site::Ask, || {
-        crate::ai::claude_in_conversation(
-            &prompt,
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            Duration::from_secs(180),
-            talk,
-            at,
-            acting_credential().as_ref(),
-            bench.machine(),
-        )
+        acting.handed(|| {
+            crate::ai::claude_in_conversation(
+                &prompt,
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                Duration::from_secs(180),
+                talk,
+                at,
+                acting.secret(),
+                bench.machine(),
+            )
+        })
     })
     // The answer, and whether it came from outside the box (SKEIN-819): the composer says so above
     // it, in the owner's words, with a way to ask again.
@@ -1052,16 +1057,19 @@ Their notes: {intent}"#,
         checkout = standing_line(standing, "writing"),
         intent = intent,
     );
+    let acting = acting_credential(slug, pr.number);
     crate::ai::as_site(crate::ai::Site::Draft, || {
-        crate::ai::claude_in_conversation(
-            &prompt,
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            Duration::from_secs(180),
-            talk,
-            at,
-            acting_credential().as_ref(),
-            bench.machine(),
-        )
+        acting.handed(|| {
+            crate::ai::claude_in_conversation(
+                &prompt,
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                Duration::from_secs(180),
+                talk,
+                at,
+                acting.secret(),
+                bench.machine(),
+            )
+        })
     })
     // The body, and where it was written (SKEIN-819) — a draft written outside the box goes out
     // under a person's name without the earlier reading behind it, so the composer says so.

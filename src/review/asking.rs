@@ -175,18 +175,104 @@ pub(super) fn truncate(text: &str, limit: usize) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
-/// **The credential a review call may act on GitHub with** — the owner's own, or nothing.
+/// **The credential a review call may act on GitHub with, and whose it is** — or nothing.
 ///
-/// The same token the queue reads with (`crate::prq::host_token`), and deliberately not a second,
-/// quieter one: that function's doc states the rule this inherits — "everything skein does on its
-/// own is done as you, and shows up in the repository's history under your name where you can see
-/// it". The owner's decision, asked and answered on 2026-08-27: the session gets the token.
+/// By default the owner's own: the same token the queue reads with (`crate::prq::host_token`), and
+/// deliberately not a second, quieter one. That function's doc states the rule this inherits —
+/// "everything skein does on its own is done as you, and shows up in the repository's history under
+/// your name where you can see it". The owner's decision, asked and answered on 2026-08-27: the
+/// session gets the token.
+///
+/// **`review_identity = "app"` is the one exception, and it is the owner's to make** (SKEIN-516):
+/// a team that installed the skein GitHub App can have reviews act as the App instead, and then the
+/// session gets `gitgate::mint_token(slug)` — an installation token for this one repository — and
+/// never the owner's token. See [`choose_acting`] for what happens when the App is not there.
 ///
 /// `None` where there is no credential at all, which is not an error here. A reading with no way to
 /// reach GitHub still reads; it just cannot post what it found, and says so in its own words rather
 /// than failing.
-pub(super) fn acting_credential() -> Option<crate::secret::Secret> {
-    crate::prq::host_token().ok()
+pub(super) fn acting_credential(slug: &str, number: u64) -> Acting {
+    let (token, whose) = choose_acting(
+        crate::config::load_config().reviews_as_app(),
+        || crate::gitgate::credential_for(slug).is_some(),
+        || crate::gitgate::app_credentials().is_ok(),
+        || crate::gitgate::mint_token(slug).ok(),
+        || crate::prq::host_token().ok(),
+    );
+    Acting {
+        token,
+        whose,
+        subject: format!("{slug}#{number}"),
+    }
+}
+
+/// Whose GitHub identity a review's credential is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Whose {
+    /// The owner's own token — the host's, or a token they stored for this one repository.
+    Owner,
+    /// An installation token the skein GitHub App minted for this one repository.
+    App,
+}
+
+/// What [`acting_credential`] hands a review call: the token, whose it is, and which pull request
+/// it is for.
+pub(super) struct Acting {
+    token: Option<crate::secret::Secret>,
+    whose: Whose,
+    subject: String,
+}
+
+impl Acting {
+    /// The token itself, for the call.
+    pub(super) fn secret(&self) -> Option<&crate::secret::Secret> {
+        self.token.as_ref()
+    }
+
+    /// Is there a credential at all — whether the reading may promise to post.
+    pub(super) fn is_some(&self) -> bool {
+        self.token.is_some()
+    }
+
+    /// **Run the model call that is handed this credential.** When it is the owner's own token the
+    /// call runs inside [`crate::fleet::as_review_of`], so the moment the token is written into a
+    /// box (`fleet::github_export`) is reported to the audit log with the pull request it was for.
+    /// An App token is not the owner's, and a call with no token hands nothing, so neither is.
+    pub(super) fn handed<T>(&self, call: impl FnOnce() -> T) -> T {
+        match (&self.token, self.whose) {
+            (Some(_), Whose::Owner) => crate::fleet::as_review_of(&self.subject, call),
+            _ => call(),
+        }
+    }
+}
+
+/// **Which credential a review gets**, decided without touching GitHub, the config or the disk —
+/// each of those arrives as a closure, and only the ones the decision needs are called.
+///
+/// * `"me"` (the default): the owner's token, as it always was.
+/// * `"app"`: `mint` — `gitgate::mint_token`. That function prefers a token the owner stored for
+///   this one repository over the App, and says why at the line that does it; such a token is the
+///   owner's, so it is marked [`Whose::Owner`] and the handover is still reported.
+/// * `"app"` with **no App configured and no stored token for the repository: nothing.** Not the
+///   owner's token. Somebody who chose "the App" chose not to act as themselves, and falling back
+///   to their own token would do exactly that without saying so; the reading goes ahead without a
+///   credential, which is what a reading with none has always done — it reads, and does not post.
+///   A mint that fails is the same answer, for the same reason.
+pub(super) fn choose_acting(
+    as_app: bool,
+    stored_for_repo: impl FnOnce() -> bool,
+    app_ready: impl FnOnce() -> bool,
+    mint: impl FnOnce() -> Option<crate::secret::Secret>,
+    owners: impl FnOnce() -> Option<crate::secret::Secret>,
+) -> (Option<crate::secret::Secret>, Whose) {
+    if !as_app {
+        return (owners(), Whose::Owner);
+    }
+    let stored = stored_for_repo();
+    if !stored && !app_ready() {
+        return (None, Whose::App);
+    }
+    (mint(), if stored { Whose::Owner } else { Whose::App })
 }
 
 /// The paths a PR touches.
@@ -773,6 +859,98 @@ pub(super) fn drafted_body(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Which credential a review is handed, for each of `review_identity`'s answers** (SKEIN-516).
+    ///
+    /// Closures that say which of them was asked, so the test sees the decision and not only its
+    /// result. The changes that fail it: the `"app"` arm handing `owners()` (the PAT) instead of the
+    /// minted token; an `"app"` with no App falling back to `owners()`; the `"me"` arm minting.
+    #[test]
+    fn a_review_is_handed_the_owners_token_or_the_apps_and_never_the_owners_in_place_of_the_apps() {
+        use crate::secret::Secret;
+        use std::cell::Cell;
+        let pat = || Some(Secret::new("skein-test-owners-pat"));
+        let minted = || Some(Secret::new("skein-test-app-installation"));
+        let said =
+            |got: &(Option<Secret>, Whose)| (got.0.as_ref().map(|t| t.expose().to_string()), got.1);
+
+        // "me", the default: the owner's token, and the App is not asked.
+        let asked_app = Cell::new(false);
+        let me = choose_acting(
+            false,
+            || false,
+            || true,
+            || {
+                asked_app.set(true);
+                minted()
+            },
+            pat,
+        );
+        assert_eq!(
+            said(&me),
+            (Some("skein-test-owners-pat".into()), Whose::Owner)
+        );
+        assert!(!asked_app.get(), "\"me\" minted an App token");
+
+        // "app" with an App configured: the minted token, and NOT the PAT.
+        let asked_owner = Cell::new(false);
+        let app = choose_acting(
+            true,
+            || false,
+            || true,
+            minted,
+            || {
+                asked_owner.set(true);
+                pat()
+            },
+        );
+        assert_eq!(
+            said(&app),
+            (Some("skein-test-app-installation".into()), Whose::App)
+        );
+        assert!(!asked_owner.get(), "\"app\" read the owner's token");
+
+        // "app" with no App configured: nothing — not the owner's token in its place.
+        let asked_owner = Cell::new(false);
+        let none = choose_acting(
+            true,
+            || false,
+            || false,
+            minted,
+            || {
+                asked_owner.set(true);
+                pat()
+            },
+        );
+        assert_eq!(
+            said(&none).0,
+            None,
+            "\"app\" with no App fell back to the owner's token"
+        );
+        assert!(!asked_owner.get());
+
+        // "app" whose mint fails: the same answer, for the same reason.
+        let failed = choose_acting(true, || false, || true, || None, pat);
+        assert_eq!(
+            said(&failed).0,
+            None,
+            "a failed mint fell back to the owner's token"
+        );
+
+        // "app" where the owner stored a token for this repository: `mint_token` hands that one
+        // over the App, and it is the owner's, so it is marked theirs and its handover reported.
+        let stored = choose_acting(
+            true,
+            || true,
+            || false,
+            || Some(Secret::new("skein-test-stored")),
+            pat,
+        );
+        assert_eq!(
+            said(&stored),
+            (Some("skein-test-stored".into()), Whose::Owner)
+        );
+    }
 
     #[test]
     fn a_well_formed_verdict_parses() {

@@ -576,6 +576,13 @@ depends_on = [
 # `config` carries the review-model setting — which model reads and reviews PRs is the owner's
 # choice, not a constant.
 #
+# `gitgate` for `acting_credential` and nothing else (SKEIN-516): with `review_identity = "app"` a
+# review acts as the skein GitHub App, and minting the App's token for one repository is
+# `gitgate::mint_token`'s job — as is knowing whether an App is configured (`app_credentials`) and
+# whether the owner stored a token for this repository (`credential_for`), which `mint_token` hands
+# over the App. A second spelling of either here would be the copy that stops agreeing. No cycle:
+# `gitgate` is in the knot above and nothing in the knot reaches `review`.
+#
 # `secret` for `acting_credential`, and for nothing else: a review is posted as the person, so the
 # owner's token passes through this module on its way to `ai` and to `prq::submit_review_with_
 # comments`. It passes through as a `Secret` so that "passes through" cannot become "was logged".
@@ -585,10 +592,12 @@ depends_on = [
 # cut took it with everything else. The test module still uses `testutil::env_lock` 60 times, which
 # is invisible to this graph by design — a test's reach says nothing about the design.
 #
-# `fleet` for ONE name, `box_root`, and it is this module's only production reach into `fleet`:
-# `grep -rn 'crate::fleet::' src/review/` is one line, `box_root(&name)` in `at_a_review_box` in
+# `fleet` for TWO names, and they are this module's only production reach into `fleet`:
+# `grep -rn 'crate::fleet::' src/review/` is two lines. `box_root(&name)` in `at_a_review_box` in
 # `src/review/checkout.rs`, where a review box's own tree becomes the directory the reading stands
-# in. (Count it rather than eyeballing `fleet::`, which also answers two commented call-path lines
+# in; and `as_review_of` in `Acting::handed` in `src/review/asking.rs`, which names the pull request
+# a call handed the owner's own token is for, so that `fleet::github_export` — the moment the token
+# is written into a box — can report it to the audit log with that name (SKEIN-516). (Count it rather than eyeballing `fleet::`, which also answers two commented call-path lines
 # inside `visit`'s test module — comments and test items are both cut before this graph is read.)
 # A box's root is the FLEET's layout and not this module's to spell: `box_root` is
 # `fleet_root()/<name>`, and `fleet_root()` reads `$SKEIN_FLEET_ROOT`, which an operator sets and
@@ -619,7 +628,7 @@ depends_on = [
 # answer is computed here and recorded in the summary against the sha it came from. The edge is
 # downward and narrow: `owed` depends on `config` alone, so it cannot pull anything toward the
 # `{prq, review}` knot, which is the failure `reviewbox`'s row above records.
-depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "owed", "prq", "repos", "reviewbox", "secret", "util", "workflow"]
+depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "gitgate", "owed", "prq", "repos", "reviewbox", "secret", "util", "workflow"]
 
 [current.reviewbox]
 # The box skein opens to read one pull request — `docs/pr-review.md` §11. Deliberately a leaf, for

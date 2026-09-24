@@ -172,6 +172,15 @@ reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) ho
 [exempt."src/testutil::no_warden"]
 reason = "pins $SKEIN_WARDEN at 127.0.0.1:1 through an `EnvPins` it returns, so the pin is undone by `Drop` at the caller and cannot take the lock itself without deadlocking a caller that already pins — `ENV_LOCK` is a plain `Mutex` and `no_warden`'s callers are already under it. Its 36 callers are held to rule one instead: `no_warden(` has been in this checker's TOUCH pattern since SKEIN-895, so a test whose only env write is this call is asked for the lock like any other. The row remains only because no #[test] anywhere in the `testutil` module calls it, and that module is the single file src/testutil.rs — the callers are in every other module of the crate, which is past the radius SKEIN-904 gave `callers_of` and would need a real resolver rather than a wider grep"
 
+# `audit_sink()` (SKEIN-516) is `no_warden`'s twin in every respect this gate reads: it hands back an
+# `EnvPins` naming a listening fake warden, and its callers are `#[test]`s in other modules. So it
+# joined `no_warden` in TOUCH on the day it was written — a test whose only env write is
+# `crate::testutil::audit_sink()` is asked for the lock — and this row is the same row as the one
+# above, for the same one-file module. Re-check with `python3 tools/env-lock-check.py --show | grep
+# audit_sink`.
+[exempt."src/testutil::audit_sink"]
+reason = "pins $SKEIN_WARDEN and $SKEIN_WARDEN_HOME at a listening fake through an `EnvPins` it returns, so the pins are undone by `Drop` at the caller and it cannot take the lock itself without deadlocking a caller that already holds it. Its callers are held to rule one instead: `audit_sink(` is in this checker's TOUCH pattern from the day it was written, so every test that calls it is asked for the lock. The row remains only because no #[test] in the one-file `testutil` module calls it, which is `no_warden`'s row's reason exactly"
+
 # `tests/common/mod.rs::put` (SKEIN-722) used to read as "the only env-touching scope in its own
 # test binary" — the automatic rule-one waiver `verdict` gives a lone `tests/*.rs` scope, on the
 # theory that cargo gives that file its own process. That theory is FALSE for this file: it is not
