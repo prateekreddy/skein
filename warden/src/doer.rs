@@ -1,4 +1,4 @@
-//! The three doers, and the thing that has to say yes before any of them runs (§8.1, §8.3).
+//! The doers, and the thing that has to say yes before any of them runs (§8.1, §8.3).
 //!
 //! **Each behind its own Cargo feature**, so a warden built without one does not contain it. §8.3's
 //! argument only works if absence is absence: a runtime check falls to a bug in the check, and
@@ -24,7 +24,12 @@
 
 // Every user of it is a doer, and a doer is behind a feature — so a sink-and-observation warden
 // (§8.3's "capabilities are compiled", taken to its limit) would carry this as an unused import.
-#[cfg(any(feature = "create", feature = "destroy", feature = "unpublish"))]
+#[cfg(any(
+    feature = "create",
+    feature = "destroy",
+    feature = "publish",
+    feature = "unpublish"
+))]
 use crate::outcome::{cross_then, Did, Reach};
 
 /// What the warden was asked to do, after its own parse.
@@ -105,6 +110,11 @@ pub fn described(
             "`{}sbx rm -f {}` — THIS DESTROYS THE FLEET",
             described_env(request),
             request.sandbox
+        ),
+        Capability::Publish => format!(
+            "`{}sbx {}` — forwards a host port into the sandbox",
+            described_env(request),
+            argv_publish(request)?.join(" ")
         ),
         Capability::Unpublish => format!(
             "`{}sbx {}` — withdraws a host port mapping",
@@ -223,12 +233,88 @@ pub fn argv_destroy(request: &Request) -> Vec<String> {
     vec!["rm".to_string(), "-f".into(), request.sandbox.clone()]
 }
 
+/// Open a host port mapping into the sandbox.
+///
+/// Publishing opens a host port into the network namespace every box shares, which is why it stays
+/// a prompted act (§9.4, `capability::Capability::Publish`). The warden performs it, but only after
+/// the person types the operation id — the approver is asked here exactly as it is for every other
+/// doer, and there is no path to [`run`] that does not go through it.
+#[cfg(feature = "publish")]
+pub fn publish(approver: &dyn Approver, request: &Request, reach: Reach<'_>) -> Did {
+    let argv = match argv_publish(request) {
+        Ok(argv) => argv,
+        Err(why) => return Did::Never(why),
+    };
+    let what = match described(request, crate::capability::Capability::Publish) {
+        Ok(what) => what,
+        Err(why) => return Did::Never(why),
+    };
+    match approver.approve(request, &what) {
+        Ok(()) => cross_then(reach, || run(&argv, &request.env)),
+        Err(why) => Did::Never(why),
+    }
+}
+
+/// The argv for a publish, **validated rather than trusted** — [`argv_unpublish`]'s rules, mirrored.
+///
+/// **The verb is `ports`** and **the sandbox is this request's sandbox**, so the endpoint cannot be
+/// aimed at another sandbox on the host. **The flag is `--publish`, and `--unpublish` is refused by
+/// name**, so each port doer runs only its own act.
+///
+/// **And the mapping is exactly `HOST:SANDBOX/tcp`, two port numbers and nothing else.** sbx takes
+/// an address in front of the host port as well, and that address is what decides which network
+/// the opened port answers on — so a mapping the warden did not check could open the port beyond
+/// this machine while the approval still read like the cockpit's ordinary line.
+///
+/// Ungated, for [`argv_unpublish`]'s reason: [`described`] renders every verb so that
+/// `serve::vetted` can measure the approval in every build.
+pub fn argv_publish(request: &Request) -> Result<Vec<String>, String> {
+    let argv = request.args.clone();
+    let refuse = |why: &str| {
+        Err(format!(
+            "the publish for {} {why}, so it is not a port forwarded into it: `sbx {}`",
+            request.sandbox,
+            argv.join(" ")
+        ))
+    };
+    match argv.first().map(String::as_str) {
+        Some("ports") => {}
+        _ => return refuse("does not begin with the `ports` verb"),
+    }
+    if argv.get(1).map(String::as_str) != Some(request.sandbox.as_str()) {
+        return refuse("names a sandbox other than the one it was sent for");
+    }
+    if argv.iter().any(|a| a == "--unpublish") {
+        return refuse("asks to WITHDRAW a port, which is the other doer's act");
+    }
+    if argv.get(2).map(String::as_str) != Some("--publish") || argv.len() != 4 {
+        return refuse("is not exactly `ports <sandbox> --publish <mapping>`");
+    }
+    if !plain_mapping(&argv[3]) {
+        return refuse("maps something other than one host port to one sandbox port over tcp");
+    }
+    Ok(argv)
+}
+
+/// `HOST:SANDBOX/tcp`, both of them port numbers from 1 to 65535, and nothing else.
+fn plain_mapping(mapping: &str) -> bool {
+    let port = |p: &str| {
+        !p.is_empty()
+            && p.len() <= 5
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u16>().is_ok_and(|n| n != 0)
+    };
+    match mapping.strip_suffix("/tcp").and_then(|m| m.split_once(':')) {
+        Some((host, sandbox)) => port(host) && port(sandbox),
+        None => false,
+    }
+}
+
 /// Withdraw a host port mapping.
 ///
-/// The one doer whose whole purpose is to CLOSE something, which is why it exists where a `publish`
-/// does not (`capability::Capability::Unpublish`). Skein publishes host ports and could not take
-/// them back, so until this every mapping made by mistake — a probe that judged a live port dead, a
-/// fleet whose agent never came up — was a line somebody had to be asked to run.
+/// The doer whose whole purpose is to CLOSE something, and the mirror of [`publish`]. Skein could
+/// not take a mapping back, so until this every mapping made by mistake — a probe that judged a live
+/// port dead, a fleet whose agent never came up — was a line somebody had to be asked to run.
 #[cfg(feature = "unpublish")]
 pub fn unpublish(approver: &dyn Approver, request: &Request, reach: Reach<'_>) -> Did {
     let argv = match argv_unpublish(request) {
@@ -254,9 +340,10 @@ pub fn unpublish(approver: &dyn Approver, request: &Request, reach: Reach<'_>) -
 /// aimed at another sandbox on the host by a caller that got past the token.
 ///
 /// **The flag is `--unpublish`, and `--publish` is refused by name.** Without that check this doer
-/// is a general `sbx ports` executor and the capability's whole safety argument — that withdrawing
-/// only ever closes an opening — is decided by the caller rather than by the warden. A warden that
-/// can be talked into publishing is a warden with a `publish` capability it never declared.
+/// is a general `sbx ports` executor, and what it opens or closes is decided by the caller rather
+/// than by the warden. Opening a port is [`publish`]'s act, which a warden can be built without —
+/// and a warden that could be talked into publishing through this endpoint would have a `publish`
+/// capability its build never declared.
 ///
 /// Ungated, where the doer above is not, for the reason [`argv_create`] gives and one more that is
 /// new: [`described`] renders every verb so that `serve::vetted` can measure the approval before a
@@ -279,7 +366,7 @@ pub fn argv_unpublish(request: &Request) -> Result<Vec<String>, String> {
         return refuse("names a sandbox other than the one it was sent for");
     }
     if argv.iter().any(|a| a == "--publish") {
-        return refuse("asks to PUBLISH a port, which this warden has no capability for");
+        return refuse("asks to PUBLISH a port, which is the other doer's act");
     }
     if argv.get(2).map(String::as_str) != Some("--unpublish") || argv.len() != 4 {
         return refuse("is not exactly `ports <sandbox> --unpublish <mapping>`");
@@ -294,7 +381,12 @@ pub fn argv_unpublish(request: &Request) -> Result<Vec<String>, String> {
 /// `Command::new(program)` with the name arriving as an argument is a crossing the law cannot see.
 /// The first version of this function took the program as a parameter and the checker went quiet on
 /// the most privileged reach in the system.
-#[cfg(any(feature = "create", feature = "destroy", feature = "unpublish"))]
+#[cfg(any(
+    feature = "create",
+    feature = "destroy",
+    feature = "publish",
+    feature = "unpublish"
+))]
 fn run(argv: &[String], env: &[(String, String)]) -> Result<String, String> {
     let out = std::process::Command::new("sbx")
         .args(argv)
@@ -380,12 +472,11 @@ mod tests {
 
     /// **A withdrawal endpoint that can be talked into publishing is a publish capability.**
     ///
-    /// The capability's entire safety argument is that withdrawing a mapping only ever CLOSES an
-    /// opening — which is why `Unpublish` exists where `Publish` deliberately does not (§9.4 makes
-    /// opening a host port a prompted act). That argument is about what this doer will run, so it
-    /// has to be the warden deciding and not the caller: without the checks below, `/v1/unpublish`
-    /// is a general `sbx ports` executor and a warden that got past the token could be asked to
-    /// open a host port into the network namespace every box shares.
+    /// Opening a host port is its own doer, removable on its own (`capability::Capability::Publish`),
+    /// because it opens a way into the network namespace every box shares (§9.4). That separation is
+    /// about what each doer will run, so it has to be the warden deciding and not the caller:
+    /// without the checks below, `/v1/unpublish` is a general `sbx ports` executor and a warden
+    /// built without `publish` could still be asked to open a port.
     ///
     /// The sandbox check is §8.4's rule, the same one `argv_create` applies: what is approved names
     /// the sandbox it was sent for, or it is refused.
@@ -407,7 +498,7 @@ mod tests {
         let opening = and_args(vec!["ports", "skein-fleet", "--publish", "7878:7878/tcp"]);
         let why = argv_unpublish(&opening).unwrap_err();
         assert!(
-            why.contains("PUBLISH") && why.contains("no capability"),
+            why.contains("PUBLISH") && why.contains("the other doer's act"),
             "a publish smuggled through the withdrawal endpoint was not named as one: {why}"
         );
 
@@ -441,6 +532,85 @@ mod tests {
             let why = argv_unpublish(&and_args(args.clone())).unwrap_err();
             assert!(why.contains(expected), "{args:?} was refused as: {why}");
         }
+    }
+
+    /// **A publish runs one mapping into this sandbox, and nothing else it could be talked into.**
+    ///
+    /// The mirror of the withdrawal test above, plus the check that only a publish needs: the mapping
+    /// is two port numbers over tcp. sbx also takes an address in front of the host port, and that
+    /// address decides which network the opened port answers on — so `0.0.0.0:7878:7878/tcp` is the
+    /// cockpit's line with the one change that matters most, and it is refused.
+    ///
+    /// **What makes this fail**: dropping any one check in `argv_publish` — the case that names it
+    /// then comes back `Ok` and `unwrap_err` panics on it.
+    #[test]
+    fn a_publish_that_is_anything_but_one_port_into_this_sandbox_is_refused() {
+        let and_args = |args: Vec<&str>| Request {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            ..asked()
+        };
+        let good = vec!["ports", "skein-fleet", "--publish", "7878:7878/tcp"];
+        assert_eq!(
+            argv_publish(&and_args(good.clone())).unwrap(),
+            good.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+            "the one shape this doer exists to run must run"
+        );
+        for (args, expected) in [
+            (
+                vec!["ports", "skein-fleet", "--unpublish", "7878:7878/tcp"],
+                "WITHDRAW",
+            ),
+            (
+                vec!["ports", "someone-elses-fleet", "--publish", "7878:7878/tcp"],
+                "names a sandbox other than",
+            ),
+            (
+                vec!["rm", "-f", "skein-fleet"],
+                "does not begin with the `ports` verb",
+            ),
+            (
+                vec![
+                    "ports",
+                    "skein-fleet",
+                    "--publish",
+                    "7878:7878/tcp",
+                    "--publish",
+                    "1:1/tcp",
+                ],
+                "is not exactly",
+            ),
+            (
+                vec!["ports", "skein-fleet", "--publish", "0.0.0.0:7878:7878/tcp"],
+                "one host port to one sandbox port",
+            ),
+            (
+                vec!["ports", "skein-fleet", "--publish", "7878:7878/udp"],
+                "one host port to one sandbox port",
+            ),
+            (
+                vec!["ports", "skein-fleet", "--publish", "0:7878/tcp"],
+                "one host port to one sandbox port",
+            ),
+            (
+                vec!["ports", "skein-fleet", "--publish", "7878-7890:7878/tcp"],
+                "one host port to one sandbox port",
+            ),
+        ] {
+            let why = argv_publish(&and_args(args.clone())).unwrap_err();
+            assert!(why.contains(expected), "{args:?} was refused as: {why}");
+        }
+        // And what a person is shown is that argv, whole, with the approved suffix.
+        assert_eq!(
+            described(
+                &Request {
+                    env: Vec::new(),
+                    ..and_args(good)
+                },
+                crate::capability::Capability::Publish
+            )
+            .unwrap(),
+            "`sbx ports skein-fleet --publish 7878:7878/tcp` — forwards a host port into the sandbox"
+        );
     }
 
     /// And it refuses a create that would make a sandbox other than the one being approved.

@@ -20,10 +20,12 @@
 //!
 //! **A doer that says who, not a callback.** §2.4 makes the doer optional, and the second operation
 //! expressed this way is what made the field earn its place: publishing the cockpit's port is
-//! *idempotent* and still must never be driven, because the thing that could drive it does not
-//! exist. Without the field [`Operation::may_drive`] answers "yes" for an act nothing can perform,
-//! which is the same shape as driving on `unknown` — a caller asks permission, is granted it, and
-//! then has to invent a performer. [`Doer`] names who may act; it does not carry a closure, because
+//! *idempotent* and is not driven from here. When the field was written, nothing could drive it.
+//! The warden has a `publish` doer since SKEIN-1130, and it still performs only after the person
+//! types the operation id, because publishing opens a host port into the network namespace every
+//! box shares. Without the field [`Operation::may_drive`] answers "yes" for an operation nobody is
+//! to drive, which is the same shape as driving on `unknown`: a caller asks permission, is granted
+//! it, and then has to invent a performer. [`Doer`] names who may act; it does not carry a closure, because
 //! the performing lives in `crate::warden_client::perform` where the approval and audit are.
 //!
 //! **No lease.** That is about an in-flight attempt, and `crate::attempt` already holds the
@@ -120,7 +122,8 @@ impl Operation {
     /// back `unknown` whatever the class, and `false` when there is no doer — an operation nothing
     /// can perform is not one a caller may be told to go ahead with. All three refusals are here
     /// rather than at each call site because a caller that has not read §2.4 is exactly the caller
-    /// that would drive on `unknown`, or invent a performer for an act that deliberately has none.
+    /// that would drive on `unknown`, or invent a performer for an operation that deliberately
+    /// names none.
     pub fn may_drive(&self) -> bool {
         self.doer.is_some()
             && matches!(self.class, Class::Idempotent)
@@ -206,10 +209,11 @@ mod tests {
     ///
     /// The case that made [`Doer`] a field rather than a comment: publishing the cockpit's port is
     /// idempotent, so the class does not withhold it, and on a host the check answers `unsatisfied`
-    /// rather than `unknown`, so the check does not either. What withholds it is that no doer
-    /// exists — `warden_client::Act::Publish` deliberately has none (§9.4: opening a hole and
-    /// closing one are not the same act). Without this clause `may_drive` grants permission for an
-    /// act, and the caller then has to invent a performer, which is `sbx` — the exact fallback
+    /// rather than `unknown`, so the check does not either. What withholds it is `doer: None`. The
+    /// warden has a `publish` doer since SKEIN-1130, asked only with the person typing the
+    /// operation id, but this operation's caller does not ask it (SKEIN-1140). Without this clause
+    /// `may_drive` grants permission for an operation nobody is to drive, and the caller then has
+    /// to invent a performer, which is `sbx` — the exact fallback
     /// `docs/delivery.md` says must not exist, "because that fallback would be taken on exactly the
     /// day something was wrong".
     ///

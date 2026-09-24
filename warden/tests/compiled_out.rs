@@ -215,9 +215,9 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
 
 /// Every doer this warden has — the acts §8.3 makes removable at compile time.
 ///
-/// One list, so that adding a fourth doer is one edit and the assertions below cannot be satisfied
+/// One list, so that adding a doer is one edit and the assertions below cannot be satisfied
 /// by a manifest that declares it and never ships it.
-const DOERS: [&str; 3] = ["create", "destroy", "unpublish"];
+const DOERS: [&str; 4] = ["create", "destroy", "publish", "unpublish"];
 
 /// The two that only report have no feature at all, so there is nothing to build them without.
 ///

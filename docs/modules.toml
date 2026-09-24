@@ -359,9 +359,10 @@ depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 # here — they are asked of the host warden, which is the whole point of building it before skein
 # moves inside (§8). One `sbx` spelling is left in this module: `ports`, which only a host needs.
 #
-# `operation` since SKEIN-576, for the cockpit's port. Skein no longer publishes it — there is no
-# doer for `Act::Publish` (§9.4 keeps opening a hole away from the warden), so what used to be a
-# publish loop is `publish_cockpit_port`, an Operation whose recipe a person runs. The edge is what
+# `operation` since SKEIN-576, for the cockpit's port. Skein no longer publishes it, so what used to
+# be a publish loop is `publish_cockpit_port`, an Operation whose recipe a person runs. The warden
+# has a `publish` doer since SKEIN-1130, performed only after the person types the operation id,
+# and this Operation's caller does not ask it (SKEIN-1140). The edge is what
 # stops that being a bare `String` message: the tri-state check is why "I cannot see the host from
 # here" does not read as "nothing forwards this port".
 depends_on = [

@@ -488,11 +488,32 @@ impl Warden {
         self.doer("destroy", sandbox, &[], &[])
     }
 
+    /// Forward a host port into the sandbox.
+    ///
+    /// Publishing opens a host port into the network namespace every box shares, which is why it
+    /// stays a prompted act: the warden performs it only after the person types the operation id at
+    /// its terminal. The argv is sent in full and the warden checks it rather than trusting it
+    /// (`warden/src/doer.rs::argv_publish`).
+    pub fn publish(
+        &self,
+        sandbox: &str,
+        host_port: u16,
+        sandbox_port: u16,
+    ) -> Result<Answered, String> {
+        let argv = vec![
+            "ports".to_string(),
+            sandbox.to_string(),
+            "--publish".to_string(),
+            format!("{host_port}:{sandbox_port}/tcp"),
+        ];
+        self.doer("publish", sandbox, &argv, &[])
+    }
+
     /// Withdraw a host port mapping.
     ///
     /// The argv is sent in full and the warden checks it rather than trusting it — in particular it
-    /// refuses `--publish` by name, because a withdrawal endpoint that can be talked into opening a
-    /// port is a publish capability nobody declared (`warden/src/doer.rs::argv_unpublish`).
+    /// refuses `--publish` by name, so opening a port stays the `publish` doer's act and a warden
+    /// built without that doer cannot be talked into it (`warden/src/doer.rs::argv_unpublish`).
     pub fn unpublish(
         &self,
         sandbox: &str,
@@ -765,14 +786,16 @@ pub fn by_hand(argv: &[String]) -> String {
     )
 }
 
-/// A privileged act: one of the three things skein must not — and in the fleet cannot — do itself.
+/// A privileged act: one of the things skein must not — and in the fleet cannot — do itself.
 ///
 /// **Enumerated, not open.** These are what `docs/sources.toml`'s `[sbx]` row reaches for and what
 /// `warden/src/` has doers for: `sbx create` (`warden/src/doer.rs`, `argv_create`), `sbx rm -f`
 /// (`argv_destroy` — and a resize rides on it, because `warden/src/capability.rs` says removing
-/// `Destroy` removes resize with it), and `sbx ports … --publish` — which no warden performs, so
-/// it is a recipe a person runs (`fleet::publish_cockpit_port`). A
-/// fourth would need a doer, a prompt and a reason, which is the point of making the list a type.
+/// `Destroy` removes resize with it), and `sbx ports … --publish` and `--unpublish`
+/// (`argv_publish`, `argv_unpublish`). Publishing opens a host port into the network namespace
+/// every box shares, which is why it stays a prompted act: the warden performs it only after the
+/// person types the operation id, so the person stays in the decision (SKEIN-1130). Another act
+/// would need a doer, a prompt and a reason, which is the point of making the list a type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     /// Make the fleet sandbox. `argv` and `env` are exactly what `sbx` would be given — the same
@@ -792,9 +815,9 @@ pub enum Act {
         host_port: u16,
         sandbox_port: u16,
     },
-    /// Withdraw one. The mirror of [`Act::Publish`] and, unlike it, something a warden can do:
-    /// `capability::Capability::Unpublish` exists and `Publish` deliberately does not, because
-    /// closing an opening and opening one are not the same act (§9.4).
+    /// Withdraw one. The mirror of [`Act::Publish`], and a separate doer from it
+    /// (`capability::Capability::Unpublish`), because closing an opening and opening one are not
+    /// the same act (§9.4) and a warden may be built with either alone.
     Unpublish {
         sandbox: String,
         host_port: u16,
@@ -938,22 +961,26 @@ impl Act {
         }
     }
 
-    /// The doer that would perform this, or `None` where no warden has one.
+    /// Ask the warden's doer for this act.
     ///
-    /// `Publish` is `None` and that is the rule's clearest case rather than a gap: there is no
-    /// `/v1/ports` endpoint in `warden/src/serve.rs`, so no warden anywhere can be asked for it and
-    /// "no capability is available" is simply always true. Asking first and prompting on the 404
-    /// would say the same thing after a round trip and a misleading error.
-    fn asked_of(&self, warden: &Warden) -> Option<Result<Answered, String>> {
+    /// Every act has one now. `Publish` was the one that did not, and it has one since SKEIN-1130:
+    /// publishing opens a host port into the network namespace every box shares, which is why it
+    /// stays a prompted act — the warden performs it only after the person types the operation id
+    /// at its terminal, so the person stays in the decision.
+    fn asked_of(&self, warden: &Warden) -> Result<Answered, String> {
         match self {
-            Act::Create { sandbox, argv, env } => Some(warden.create(sandbox, argv, env)),
-            Act::Destroy { sandbox } => Some(warden.destroy(sandbox)),
-            Act::Publish { .. } => None,
+            Act::Create { sandbox, argv, env } => warden.create(sandbox, argv, env),
+            Act::Destroy { sandbox } => warden.destroy(sandbox),
+            Act::Publish {
+                sandbox,
+                host_port,
+                sandbox_port,
+            } => warden.publish(sandbox, *host_port, *sandbox_port),
             Act::Unpublish {
                 sandbox,
                 host_port,
                 sandbox_port,
-            } => Some(warden.unpublish(sandbox, *host_port, *sandbox_port)),
+            } => warden.unpublish(sandbox, *host_port, *sandbox_port),
         }
     }
 
@@ -987,8 +1014,9 @@ pub struct Prompt {
     pub if_declined: String,
     /// What the warden said when it was asked first, where there was a warden to ask.
     ///
-    /// `None` means nothing was asked — either there is no doer anywhere for this act, or the
-    /// endpoint could not be reached at all and the transport error names the address itself.
+    /// `None` means nothing was asked. [`perform_through`] always asks, so it carries what came
+    /// back — a transport error names the address itself; `None` is a prompt built directly with
+    /// [`Act::prompt`].
     pub warden_said: Option<String>,
     /// Audit lines the warden could not write while it was asked (SKEIN-554). A refusal goes
     /// unrecorded as easily as a run does, so it is carried here too. Not rendered: how a person is
@@ -1060,11 +1088,7 @@ pub fn perform(act: &Act) -> Performed {
 
 /// The rule, against a named warden. [`perform`] is this against the configured one.
 pub fn perform_through(warden: &Warden, act: &Act) -> Performed {
-    let Some(asked) = act.asked_of(warden) else {
-        // No doer exists anywhere for this act, so there is nothing to detect and nobody to ask.
-        return Performed::Prompt(act.prompt(None));
-    };
-    match asked {
+    match act.asked_of(warden) {
         // A transport failure is the "no warden at all" case, and the client's own error already
         // names the address it tried — so it is carried into the prompt rather than re-derived.
         Err(why) => Performed::Prompt(act.prompt(Some(why))),
@@ -1416,40 +1440,72 @@ mod tests {
         }
     }
 
-    /// **A withdrawal goes to the warden; a publish never does. That asymmetry IS the design.**
+    /// **A publish and a withdrawal both go to the warden, each to its own doer** (SKEIN-1130).
     ///
-    /// The two acts differ by one flag and are otherwise the same `sbx ports` line, so it would be
-    /// easy — and wrong — to give the warden both. Opening a host port puts a listener into the
-    /// network namespace every box shares, which architecture §9.4 makes a prompted act on purpose;
-    /// closing one can only ever take something away. `capability::Capability::Unpublish` exists and
-    /// there is deliberately no `Publish`, and this is the assertion that keeps it that way: the two
-    /// halves are driven against the SAME fake warden, one turn apart, and must not behave alike.
+    /// Publishing opens a host port into the network namespace every box shares, which is why it
+    /// stays a prompted act — and the warden performs it now, after the person types the operation
+    /// id at its terminal. So a publish is ASKED, not printed, and it is asked of `/v1/publish` with
+    /// the argv the warden will check and show: two acts that differ by one flag must not reach
+    /// the same endpoint, or a warden built without one doer could be talked into it through the
+    /// other.
     ///
-    /// The fake says yes to everything, so a passing publish arm cannot mean the request merely
-    /// failed — it means no request was made, which is what `Act::asked_of` returning `None` is for.
+    /// **What makes this fail**: `Act::asked_of` sending a publish anywhere but `/v1/publish`, or
+    /// with a mapping other than `HOST:SANDBOX/tcp`; or `perform_through` turning a warden's `ran`
+    /// into a prompt.
     #[test]
-    fn a_port_is_withdrawn_by_the_warden_and_never_opened_by_it() {
-        let port = fake_warden(|_| {
-            (
-                200,
-                r#"{"state":"ran","ok":true,"said":"done"}"#.to_string(),
-            )
-        });
+    fn a_port_is_opened_and_withdrawn_by_asking_the_warden_each_at_its_own_endpoint() {
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let port = {
+            let asked = std::sync::Arc::clone(&asked);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    let mut raw = [0u8; 4096];
+                    let read = stream.read(&mut raw).unwrap_or(0);
+                    asked
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&raw[..read]).to_string());
+                    let body = r#"{"state":"ran","ok":true,"said":"done"}"#;
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+            });
+            port
+        };
         let warden = Warden::at("127.0.0.1", port);
 
-        match perform_through(&warden, &withdrawing()) {
-            Performed::Warden(answered) => assert_eq!(answered.happened(), Some(true)),
-            other => panic!(
-                "a warden that says yes did not withdraw the mapping, so skein is still asking a \
-                 person to undo its own port: {other:?}"
-            ),
+        for act in [publishing(), withdrawing()] {
+            match perform_through(&warden, &act) {
+                Performed::Warden(answered) => assert_eq!(answered.happened(), Some(true)),
+                other => panic!(
+                    "a warden that says yes did not perform {act:?}, so skein is still asking a \
+                     person to type it: {other:?}"
+                ),
+            }
         }
-        match perform_through(&warden, &publishing()) {
-            Performed::Prompt(prompt) => assert_eq!(
-                prompt.warden_said, None,
-                "the same warden was asked to OPEN a port — §9.4 puts that to a person, always"
-            ),
-            other => panic!("a publish reached a warden: {other:?}"),
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        for (request, path, flag) in [
+            (&asked[0], "POST /v1/publish ", "--publish"),
+            (&asked[1], "POST /v1/unpublish ", "--unpublish"),
+        ] {
+            assert!(
+                request.starts_with(path),
+                "asked of the wrong doer: {request}"
+            );
+            assert!(
+                request.contains(&format!(
+                    r#""args":["ports","skein-fleet","{flag}","7878:7878/tcp"]"#
+                )),
+                "the argv is not the one the warden checks and shows: {request}"
+            );
         }
     }
 
@@ -1653,34 +1709,33 @@ mod tests {
         }
     }
 
-    /// A publish is prompted without asking anything, and names how the mapping is taken back.
+    /// With no warden answering, a publish is put to the person, and names how the mapping is taken
+    /// back.
     ///
-    /// There is no `/v1/ports` in `warden/src/serve.rs`, so no warden anywhere has this capability
-    /// and "otherwise the person is prompted" is simply always the answer — proved against a fake
-    /// that would say yes to anything, so a passing test cannot mean the request merely failed.
+    /// The warden is asked first now (SKEIN-1130), so a prompt carries what the asking came to —
+    /// here, the transport error naming the address it tried.
     ///
     /// This doc used to say the wording was louder than the other two because **sbx has no
     /// unpublish**, while the assertions below already checked the opposite — the drift SKEIN-457
     /// exists to end, sitting inside the test that catches it. What is true: the mapping IS
-    /// recoverable, by a call skein does not have, so the person who runs the publish is also the
-    /// only one who can undo it. That is worth saying to them, and it is not the same as permanence.
+    /// recoverable, and that is worth saying to the person deciding, and it is not permanence.
     #[test]
-    fn publishing_a_port_is_prompted_without_asking_any_warden_and_names_how_it_is_taken_back() {
-        let port = fake_warden(|_| {
-            (
-                200,
-                r#"{"state":"ran","ok":true,"said":"done"}"#.to_string(),
-            )
-        });
-        match perform_through(&Warden::at("127.0.0.1", port), &publishing()) {
+    fn with_no_warden_a_publish_is_put_to_the_person_and_names_how_it_is_taken_back() {
+        // Port 1 on loopback: nothing listens there, and connecting fails immediately.
+        match perform_through(&Warden::at("127.0.0.1", 1), &publishing()) {
             Performed::Prompt(prompt) => {
                 assert_eq!(
                     prompt.command,
                     "sbx 'ports' 'skein-fleet' '--publish' '7878:7878/tcp'"
                 );
-                assert_eq!(
-                    prompt.warden_said, None,
-                    "something was asked for an act no warden has an endpoint for"
+                assert!(
+                    prompt
+                        .warden_said
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("not answering on 127.0.0.1:1"),
+                    "the prompt does not say which warden was asked: {:?}",
+                    prompt.warden_said
                 );
                 // The prompt has to say what a wrong number COSTS, and for years it said the cost
                 // was permanence — "sbx has no unpublish". `sbx ports --help` takes `--unpublish`,
@@ -1698,7 +1753,7 @@ mod tests {
                     prompt.why
                 );
             }
-            other => panic!("a publish was not put to a person: {other:?}"),
+            other => panic!("a publish with no warden was not put to a person: {other:?}"),
         }
     }
 

@@ -540,7 +540,8 @@ pub fn stop_serving(sandbox: &str) -> Result<String, String> {
 /// by the time anyone could take it back — and skein withdraws nothing. Deleting it (SKEIN-576)
 /// deleted that refusal, and the person who now runs `sbx ports --publish` is acting on what skein
 /// told them. **So the guard did not go with the publisher; it went with the advice.** A guard that
-/// is fooled no longer publishes to a squatter itself — it advises somebody else to.
+/// is fooled no longer publishes to a squatter itself. It advises somebody else to, and that holds
+/// for the warden's `publish` doer too (SKEIN-1130): nothing is put to it for a port this refuses.
 ///
 /// The judgement is the stamp and never a TCP connect ([`door_holds_port`]): a squatter accepts
 /// exactly as the doorway does, which is the whole of §9.4.
@@ -568,11 +569,15 @@ pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation,
 /// run by hand."* What used to be here was that fallback: two candidate ports, a publish attempt
 /// per candidate, and a prompt only once both had failed.
 ///
-/// **There is no doer, and that is deliberate rather than unfinished.**
-/// [`crate::warden_client::Act::Publish`] has none — `asked_of` answers `None` for it — because
-/// §9.4 makes opening a hole a different act from closing one, which is why the warden ships
-/// `Unpublish` and not its mirror. So [`crate::operation::Operation::may_drive`] is false for this
-/// operation on every path, and the recipe is the whole of what skein offers.
+/// **The warden has a doer for this act now, and this operation still names none.**
+/// [`crate::warden_client::Act::Publish`] is asked of the warden's `publish` doer (SKEIN-1130).
+/// Publishing opens a host port into the network namespace every box shares, which is why it stays
+/// a prompted act: the warden performs it only after the person types the operation id at its
+/// terminal, so the person stays in the decision. `doer` is still `None` here because nothing
+/// drives this operation. Its one caller, `request_fleet_create`, runs right after a create whose
+/// argv already carries `-p` for this port (`create_argv`), and whether that caller should ask the
+/// warden at all is SKEIN-1140. So [`crate::operation::Operation::may_drive`] is false here, and
+/// the recipe is what skein prints.
 ///
 /// **The check is three-valued because the honest answer usually is.** In the fleet `sbx` cannot be
 /// run at all, so [`existing_forwards`] returns `None` and this is `unknown` — not "no mapping",
@@ -651,8 +656,9 @@ fn cockpit_port_operation(
         check,
         recipe,
         class: Class::Idempotent,
-        // Nobody. See this function's doc: §9.4 keeps `Publish` away from the warden on purpose,
-        // so `may_drive` is false here whatever the check says.
+        // Nothing drives this operation, though the warden has a `publish` doer (SKEIN-1130). See
+        // `publish_cockpit_port`'s doc: its one caller follows a create that already published
+        // the port, and whether it should ask the warden is SKEIN-1140.
         doer: None,
     }
 }
@@ -927,7 +933,9 @@ mod tests {
     /// prompted only once both had failed. That is the fallback `docs/delivery.md:143` rules out —
     /// *"an unreachable warden does not fall back to running `sbx` here, because that fallback
     /// would be taken on exactly the day something was wrong"* — so the publishing went and what
-    /// remains is [`publish_cockpit_port`], an Operation with no doer.
+    /// remains is [`publish_cockpit_port`], an Operation nothing drives. The warden has a
+    /// `publish` doer since SKEIN-1130, but it is asked only with the person typing the operation
+    /// id at its terminal, and never by `sbx` here.
     ///
     /// **Three properties survived the deletion and all three are here.**
     ///
@@ -1043,11 +1051,12 @@ mod tests {
             "the check did not say which mapping it found: {:?}",
             op.check
         );
-        // Nothing may perform it, whatever the check said. This is the clause that keeps the line
-        // above true for a caller that has not read §9.4.
+        // Nothing may drive it, whatever the check said. This is the clause that keeps the line
+        // above true for a caller that has not read §9.4. The warden's `publish` doer asks the
+        // person at its own terminal, which is a different thing from being driven from here.
         assert!(
             !op.may_drive(),
-            "an operation with no doer was cleared to run — the only way to obey is to run `sbx`"
+            "an operation nothing drives was cleared to run, and the only way to obey is to run `sbx`"
         );
         // sbx's spelling, `HOST:SANDBOX/PROTOCOL`. A typo here is a line a person pastes and that
         // publishes nothing, with `sbx ports` reporting success.

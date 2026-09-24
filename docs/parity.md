@@ -560,9 +560,13 @@ What a person loses, in order of how much they will notice it:
 - **Skein publishing the port at all.** It prints the line instead: `publish_cockpit_port` is an
   Operation (§2.4) whose `check` is three-valued and whose `recipe` is the `sbx ports … --publish`
   command, quoted exactly as it must be typed. In the fleet the check is always `unknown`, because
-  `sbx` is host-only and *"cannot ask"* is not *"nothing forwards it"*. There is no doer:
-  `Act::Publish` deliberately has none (§9.4 — the warden ships `Unpublish` and not its mirror), so
-  nothing drives it and the recipe is the whole of what skein offers. This is `docs/delivery.md`'s
+  `sbx` is host-only and *"cannot ask"* is not *"nothing forwards it"*. The operation names no
+  doer, so nothing drives it and the recipe is what skein prints. The warden has had a `publish`
+  doer since SKEIN-1130. Publishing opens a host port into the network namespace every box shares,
+  which is why it stays a prompted act (§9.4): the warden performs it only after the person types
+  the operation id at its terminal, so the person stays in the decision. The cockpit port's one
+  caller does not ask it yet, because that caller follows a create that already publishes the port
+  with `-p` (SKEIN-1140). This is `docs/delivery.md`'s
   rule at a second site: an unreachable doer does not fall back to running `sbx`, "because that
   fallback would be taken on exactly the day something was wrong".
 - **The two-candidate retry.** A publish that does not settle is a person's to notice now. What it

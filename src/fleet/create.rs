@@ -622,9 +622,11 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
 ///
 /// The mirror of [`publish_cockpit_port`], and the difference between them is the whole point of
 /// [`crate::operation::Doer`] being a field: this one *has* a doer, so a reachable warden performs
-/// it and only an unreachable one falls back to a person. `Act::Publish` has no doer at all, so it
-/// is always the person. Two operations, one shape, and the difference is data rather than two
-/// spellings of the same decision.
+/// it and only an unreachable one falls back to a person. The cockpit port's operation names none.
+/// The warden has a `publish` doer since SKEIN-1130, and it runs only after the person types the
+/// operation id at its terminal, because publishing opens a host port into the network namespace
+/// every box shares. But nothing drives that operation (SKEIN-1140). Two operations, one shape,
+/// and the difference is data rather than two spellings of the same decision.
 ///
 /// **The check is asked of the warden, not of `sbx`.** In the fleet `sbx ls` cannot answer — it is
 /// a question about the *machine*, and this process is not standing on it — so `fleet_exists`
@@ -736,9 +738,10 @@ pub fn request_fleet_create(sandbox: &str, mounts: &[String]) -> Result<String, 
             theirs.age()
         ));
     }
-    // A fresh sandbox is serving on a port nothing outside it can reach yet, and skein cannot
-    // publish that mapping — `Act::Publish` has no doer by §9.4. What it can do is say so once,
-    // with the line to run, and only when the doorway actually holds the port.
+    // The line to publish the cockpit's port, and only when the doorway actually holds it. The
+    // warden has a `publish` doer (SKEIN-1130) and this does not ask it: the create above already
+    // carries `-p` for this port (`create_argv`), and whether this should ask the warden instead
+    // of printing is SKEIN-1140's question. Until then, the printed line is unchanged.
     let mut said = format!("the fleet sandbox {sandbox} was created");
     match cockpit_port_advice(sandbox) {
         Ok(publish) => said.push_str(&format!(

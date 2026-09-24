@@ -30,14 +30,20 @@ pub enum Capability {
     Create,
     /// Destroy it. Removable, and removing it removes resize with it.
     Destroy,
+    /// Open a host port mapping — `sbx ports <sandbox> --publish HOST:SANDBOX/tcp`. Removable.
+    ///
+    /// **Publishing opens a host port into the network namespace every box shares, which is why it
+    /// stays a prompted act (§9.4).** The warden performs it now, but only after the person types
+    /// the operation id at its terminal — the same approval every doer waits for — so the person
+    /// stays in the decision. Nothing makes it pre-approvable: there is no field on the wire that
+    /// could say yes (`serve::Asked` refuses unknown fields), and a refusal is re-asked rather than
+    /// replayed (SKEIN-1130).
+    Publish,
     /// Withdraw a host port mapping — `sbx ports <sandbox> --unpublish HOST:SANDBOX`. Removable.
     ///
-    /// **There is no `Publish`, and that is the whole of why this one is safe to have.** Skein
-    /// publishes host ports and cannot take them back, so every mapping it makes by mistake was a
-    /// line a person had to run. Withdrawing one only ever closes an opening; publishing opens a
-    /// host port into the network namespace every box shares, which is exactly the act §9.4 makes
-    /// prompted. A warden that could publish would remove the person from the decision that needs
-    /// them most, so this half is here and that half is not.
+    /// The mirror of [`Capability::Publish`], and the two are separate doers on purpose: each
+    /// refuses the other's flag by name (`doer::argv_publish`, `doer::argv_unpublish`), so a
+    /// warden built with one cannot be talked into the other.
     Unpublish,
 }
 
@@ -46,6 +52,7 @@ impl Capability {
         match self {
             Capability::Create => "create",
             Capability::Destroy => "destroy",
+            Capability::Publish => "publish",
             Capability::Unpublish => "unpublish",
         }
     }
@@ -63,6 +70,9 @@ pub fn linked() -> Vec<Capability> {
     }
     if cfg!(feature = "destroy") {
         all.push(Capability::Destroy);
+    }
+    if cfg!(feature = "publish") {
+        all.push(Capability::Publish);
     }
     if cfg!(feature = "unpublish") {
         all.push(Capability::Unpublish);
@@ -114,6 +124,7 @@ mod tests {
         for capability in [
             Capability::Create,
             Capability::Destroy,
+            Capability::Publish,
             Capability::Unpublish,
         ] {
             assert_eq!(
@@ -121,6 +132,7 @@ mod tests {
                 match capability {
                     Capability::Create => cfg!(feature = "create"),
                     Capability::Destroy => cfg!(feature = "destroy"),
+                    Capability::Publish => cfg!(feature = "publish"),
                     Capability::Unpublish => cfg!(feature = "unpublish"),
                 },
                 "{} is advertised on evidence other than being compiled",

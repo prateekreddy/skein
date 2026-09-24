@@ -273,10 +273,13 @@ doer — all three from the value alone.
 **The optional doer is not decoration, and the second operation is what proved it** (SKEIN-576).
 Publishing the cockpit's port is *idempotent*, so the class does not withhold it, and on a host the
 check answers `unsatisfied` rather than `unknown`, so the check does not either. What withholds it is
-that no doer exists: `warden_client::Act::Publish` deliberately has none, because §9.4 makes opening
-a hole a different act from closing one. Without the third refusal `may_drive` grants permission for
-an act nothing can perform, and the caller then has to invent a performer — which is `sbx`, the
-fallback `docs/delivery.md` says must not exist "because that fallback would be taken on exactly the
+the absent doer. When this was written no doer existed. The warden has had a `publish` doer since
+SKEIN-1130. Publishing opens a host port into the network namespace every box shares, which is why
+it stays a prompted act: the warden performs it only after the person types the operation id at its
+terminal, so the person stays in the decision. The cockpit port's operation still names no doer,
+because its one caller follows a create that already published the port (SKEIN-1140). Without the
+third refusal `may_drive` grants permission for an operation nobody is to drive, and the caller
+then has to invent a performer — which is `sbx`, the fallback `docs/delivery.md` says must not exist "because that fallback would be taken on exactly the
 day something was wrong". `Doer` names who may act rather than carrying a closure; the performing
 stays in `warden_client::perform`, where the approval and the audit are.
 
@@ -665,9 +668,11 @@ not configured — absent. A runtime check falls to a bug in the check; absent c
 Only the **doer** is removable. Recipes and checks live in skein, always compiled, never privileged —
 they are needed precisely when the doer is absent.
 
-**Three doers and two reporters, and only the doers are removable.** The doers are `create`,
-`destroy` and `unpublish` — one Cargo feature each — and the default build ships all three
-(`warden/Cargo.toml`, `warden/src/capability.rs`). Written as a shape rather than a total for §13's
+**Doers and two reporters, and only the doers are removable.** The doers are `create`, `destroy`,
+`publish` and `unpublish` — one Cargo feature each — and the default build ships every one
+(`warden/Cargo.toml`, `warden/src/capability.rs`). `publish` came last (SKEIN-1130), and it is a
+doer like the others: nothing runs until the person types the operation id at the warden's
+terminal. Written as a shape rather than a total for §13's
 reason. The total had already been unified once — `48d2f7c1`, *"one warden count, everywhere"*,
 2026-08-20 — and nine days later `6256aba7` added `unpublish` and made every copy of it wrong at the
 same instant. No gate catches that: `tools/prose-check.py` fails on a symbol the code does not have,

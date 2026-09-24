@@ -130,7 +130,10 @@ pub fn cross_then(reach: Reach<'_>, command: impl FnOnce() -> Done) -> Did {
 /// A doer's own tests are about its parse and its approval text, and they need a [`Reach`] that
 /// always succeeds — so that a doer which wrongly skipped its approver would still reach the fake
 /// `sbx` those tests watch for, and be caught by that rather than by an unwritten marker.
-#[cfg(test)]
+///
+/// Gated on the doers whose tests use it, so a reduced build's test binary (the minimal one, or
+/// `publish` or `unpublish` alone) does not carry it unused.
+#[cfg(all(test, any(feature = "create", feature = "destroy")))]
 pub(crate) fn crossed_for_a_test() -> Result<Crossed, String> {
     Ok(Crossed(()))
 }
