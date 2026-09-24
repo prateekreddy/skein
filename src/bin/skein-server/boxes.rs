@@ -539,13 +539,73 @@ pub(super) struct BatchReq {
 }
 
 /// Batch-resume the boxes paused on a trivial "proceed?" (step 6). With AI on (step 7) each is first
-/// run past the conservative safety gate; genuine decisions are held back. Returns {ok, resumed, held}.
+/// run past the conservative safety gate; genuine decisions are held back. Returns
+/// {ok, resumed, held, not_continued} and, when `ok` is false, `error`: the sentence the page shows.
 pub(super) async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json::Value> {
-    let (resumed, held) =
-        tokio::task::spawn_blocking(move || skein::sandbox::resume_batch(&r.names))
-            .await
-            .unwrap_or_default();
-    Json(serde_json::json!({ "ok": true, "resumed": resumed, "held": held }))
+    let names = r.names.clone();
+    let outcome = tokio::task::spawn_blocking(move || skein::sandbox::resume_batch(&r.names))
+        .await
+        .map_err(|e| e.to_string());
+    Json(batch_answer(&names, outcome))
+}
+
+/// What a batch Continue answers, given what was asked and what came back.
+///
+/// **`ok` is true only when every box asked for was continued or held** (SKEIN-1132). It used to be
+/// true on every path: a panic inside the batch became `unwrap_or_default()`, an empty result, and
+/// the page toasted "continuing 0" — a failure presented as a success, after the person had
+/// confirmed a list of named boxes. A box that `resume_batch` neither resumed nor held is one it
+/// skipped or failed to resume, and it is named, because "some of them did not" leaves the person
+/// to work out which by opening every one.
+fn batch_answer(
+    names: &[String],
+    outcome: Result<(Vec<String>, Vec<String>), String>,
+) -> serde_json::Value {
+    let (resumed, held) = match outcome {
+        Ok(pair) => pair,
+        Err(why) => {
+            return serde_json::json!({
+                "ok": false,
+                "resumed": [],
+                "held": [],
+                "not_continued": names,
+                "error": format!(
+                    "continue stopped inside skein ({why}) — none of {} is known to have \
+                     continued",
+                    names.join(", ")
+                ),
+            })
+        }
+    };
+    let not_continued: Vec<&String> = names
+        .iter()
+        .filter(|n| !resumed.contains(n) && !held.contains(n))
+        .collect();
+    if not_continued.is_empty() {
+        return serde_json::json!({
+            "ok": true, "resumed": resumed, "held": held, "not_continued": [],
+        });
+    }
+    let listed: Vec<&str> = not_continued.iter().map(|n| n.as_str()).collect();
+    let mut error = format!(
+        "{} of {} did not continue: {}",
+        not_continued.len(),
+        names.len(),
+        listed.join(", ")
+    );
+    if !resumed.is_empty() {
+        error.push_str(&format!(" · continuing {}", resumed.len()));
+    }
+    if !held.is_empty() {
+        error.push_str(&format!(" · held {} for your eyes", held.len()));
+    }
+    serde_json::json!({
+        "ok": false,
+        "resumed": resumed,
+        "held": held,
+        "not_continued": not_continued,
+        "error": error,
+    })
 }
 
 /// Stop a box: halt the sandbox (frees compute; resume later via attach). Non-destructive — the box
@@ -574,4 +634,63 @@ pub(super) async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Va
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// **A batch Continue that did not continue every box it was asked to says so, and names them**
+    /// (SKEIN-1132).
+    ///
+    /// Three outcomes, because each is a way the old `ok: true` lied or could be made to: the batch
+    /// failing inside the server (a `JoinError`, which became an empty result and "continuing 0"),
+    /// a box it neither resumed nor held, and — the half that proves the other two are not simply
+    /// "always false" — a batch where every box was accounted for.
+    ///
+    /// **What would make this fail:** answering `"ok": true` on the error path, which is the line
+    /// this replaced; or dropping the not-continued check, so a partial batch reads as a success.
+    #[test]
+    fn a_batch_continue_that_did_not_continue_every_box_is_not_a_success() {
+        let asked = names(&["alpha", "beta", "gamma"]);
+
+        let failed = batch_answer(&asked, Err("task panicked".into()));
+        assert_eq!(
+            failed["ok"], false,
+            "a batch that failed inside the server answered ok, and the page toasts it as success"
+        );
+        let why = failed["error"].as_str().unwrap_or_default();
+        assert!(
+            why.contains("task panicked") && why.contains("alpha, beta, gamma"),
+            "the failure does not say what went wrong and which boxes it was: {why}"
+        );
+        assert_eq!(failed["not_continued"], serde_json::json!(asked));
+
+        let partial = batch_answer(&asked, Ok((names(&["alpha"]), names(&["gamma"]))));
+        assert_eq!(
+            partial["ok"], false,
+            "a box that was neither continued nor held read as a success"
+        );
+        assert_eq!(partial["not_continued"], serde_json::json!(["beta"]));
+        let why = partial["error"].as_str().unwrap_or_default();
+        assert!(
+            why.contains("1 of 3") && why.contains("beta") && !why.contains("alpha,"),
+            "the partial failure does not name exactly the box that did not continue: {why}"
+        );
+        assert_eq!(partial["held"], serde_json::json!(["gamma"]));
+
+        let whole = batch_answer(&asked, Ok((names(&["alpha", "beta"]), names(&["gamma"]))));
+        assert_eq!(
+            whole["ok"], true,
+            "every box continued or held, and the batch was reported as a failure: {whole}"
+        );
+        assert!(
+            whole.get("error").is_none(),
+            "a success carried an error: {whole}"
+        );
+    }
 }

@@ -172,6 +172,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server/boxes.rs:603"]
+line = "\"ok\": false,"
+window = "serde_json::json!({\u000b\"ok\": false,\u000b\"resumed\": resumed,"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server/events.rs:25"]
 line = "\"too many live boards open — close one and retry\","
 cited_by = ["docs/recovery-survey.md"]
@@ -1741,11 +1746,6 @@ line = "return Err(format!("
 window = "if base.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:813"]
-line = "return Err(format!(\"{name} is not running\"));"
-window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/tracking.rs:801"]
 line = "return Err(format!("
 window = "if gateway.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
@@ -1754,6 +1754,11 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/tracking.rs:807"]
 line = "return Err(format!("
 window = "if connection_token(&conn.id).is_none() {\u000breturn Err(format!(\u000b\"no Plane token stored for {} — add it in Settings → Work tracking\","
+cited_by = ["docs/recovery-survey.md"]
+
+["src/tracking.rs:813"]
+line = "return Err(format!(\"{name} is not running\"));"
+window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/tracking.rs:854"]
@@ -1935,6 +1940,10 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/box.js:27"]
 line = "}).catch(() => toast(\"destroy failed\"));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:40"]
+line = "if (!d.ok) { toast(d.error || \"continue failed\"); if (h && d.held[0]) select(d.held[0]); return; }"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/box.js:44"]

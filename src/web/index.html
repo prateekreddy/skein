@@ -7440,8 +7440,8 @@ function batchResume() {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ names: ps.map(b => b.name) })
   }).then(r => r.json()).then(d => {
-    if (!d.ok) { toast("continue failed"); return; }
     const n = (d.resumed || []).length, h = (d.held || []).length;
+    if (!d.ok) { toast(d.error || "continue failed"); if (h && d.held[0]) select(d.held[0]); return; }
     // held = boxes the AI safety gate flagged as a real decision (only when SKEIN_AI=on) — route to one
     toast(`continuing ${n}${h ? ` · held ${h} for your eyes` : ""}`);
     if (h && d.held[0]) select(d.held[0]);
