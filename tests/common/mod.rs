@@ -1152,11 +1152,40 @@ pub fn chromium_why_not(ui: &Path) -> String {
 pub const NO_WARDEN: &str = "127.0.0.1:1";
 
 /// The `skein-server` this `cargo test` built. Private, for [`NO_WARDEN`]'s reason.
-const SKEIN_SERVER: &str = env!("CARGO_BIN_EXE_skein-server");
+///
+/// A function rather than `const SKEIN_SERVER: &str = env!("CARGO_BIN_EXE_skein-server");`, which
+/// this held until SKEIN-556. `env!` expands at compile time, and Cargo only defines
+/// `CARGO_BIN_EXE_skein-server` for a test target of the package that actually builds a binary
+/// named `skein-server` — the `skein` package. `warden/tests/compiled_out.rs` reaches this file
+/// across the crate boundary with `#[path]` (see its module doc comment), and the `warden`
+/// package does not build that binary, so the old `const` failed every build of `warden`'s tests
+/// before any test in either package ran, whether or not the failing one called anything here.
+/// `option_env!` does not error where `env!` does — it reads `None` instead — so resolving the
+/// actual value moves from compile time to the first call of one of the three functions below,
+/// none of which `warden`'s tests call.
+///
+/// A `let`-`else` rather than `option_env!(..).expect(..)`: clippy's `option_env_unwrap`, deny by
+/// default, exists for callers who could have used `env!` and get a worse error by not doing so —
+/// which is the opposite of this function's reason for using `option_env!` at all, and the lint
+/// matches the AST shape of the chained call rather than the intent behind it.
+fn skein_server_binary() -> &'static str {
+    let Some(path) = option_env!("CARGO_BIN_EXE_skein-server") else {
+        // Not spelling the variable's name again here: `harness.rs`'s
+        // `every_skein_server_a_test_starts_is_pinned_away_from_a_real_warden` counts exactly one
+        // line under `tests/` that names it, and a second mention in this message would be a
+        // second place — see that test before changing this string.
+        panic!(
+            "cargo did not set the environment variable this reads — this function is only for \
+             a `skein` package test binary, which cargo always sets it for; see this function's \
+             own doc comment"
+        );
+    };
+    path
+}
 
 /// The `skein-server` this `cargo test` built, to be started directly, pinned to [`NO_WARDEN`].
 pub fn skein_server() -> Command {
-    let mut server = Command::new(SKEIN_SERVER);
+    let mut server = Command::new(skein_server_binary());
     server.env("SKEIN_WARDEN", NO_WARDEN);
     server
 }
@@ -1171,7 +1200,7 @@ pub fn skein_server_behind<S: AsRef<std::ffi::OsStr>>(
     let mut behind = Command::new(program);
     behind
         .args(before)
-        .arg(SKEIN_SERVER)
+        .arg(skein_server_binary())
         .env("SKEIN_WARDEN", NO_WARDEN);
     behind
 }
@@ -1180,5 +1209,5 @@ pub fn skein_server_behind<S: AsRef<std::ffi::OsStr>>(
 /// suites, whose `tests/ui/harness/server.mjs` pins `$SKEIN_WARDEN` to the same address itself.
 /// `tests/harness.rs` checks that pin is there.
 pub fn skein_server_for_the_browser_suites() -> &'static str {
-    SKEIN_SERVER
+    skein_server_binary()
 }
