@@ -17,7 +17,9 @@
 # for the one *silent* failure mode skein cannot tolerate: a message that sits unread because nothing
 # ever re-checked after SessionStart.
 #
-# Installed by skein into <store>/skein/bin, so the store is two levels up from this script.
+# Installed twice: into <store>/skein/bin, where the store is two levels up from this script and an
+# agent runs it by hand, and into skein's read-only plugin (`probe/`), which is the copy the hooks
+# run (SKEIN-1144) and which finds the store from the project, as box-status.sh does.
 #
 # Usage:
 #   mailbox.sh send --to <vmid|broadcast|all-projects|project:<id>> \
@@ -30,7 +32,16 @@
 #   mailbox.sh prune [days] # delete fully-seen messages older than N days (default 14)
 set -uo pipefail
 
-here="$(cd "$(dirname "$0")/../.." && pwd)"   # .claude (script lives in .claude/skein/bin)
+self="$(cd "$(dirname "$0")" && pwd)"
+if [ "$(basename "$(dirname "$self")")" = skein ]; then
+  here="$(dirname "$(dirname "$self")")"   # the store's copy: .claude/skein/bin, two levels down
+else
+  # The plugin's copy. The project's .claude, with the merged layout's hop (box-status.sh says why).
+  cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
+  here="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")/.claude"
+  if [ -L "$here/skein" ]; then here="$(dirname "$(readlink "$here/skein")")"; fi
+  [ -d "$here" ] || exit 0
+fi
 command -v jq >/dev/null 2>&1 || {
   echo "[skein-mailbox] jq is unavailable; mailbox delivery is disabled (visible in /api/health)" >&2
   exit 0

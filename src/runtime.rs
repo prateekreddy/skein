@@ -243,7 +243,13 @@ pub(crate) fn headless(runtime: &RuntimeAdapter, name: &str, prompt: &str) -> St
 /// has bound read-only (box-plugin §2.1). Installed with the launcher on every start and heal, so
 /// it is always the plugin of the skein build that is running.
 pub(crate) fn plugin_dir() -> String {
-    format!("{}/.skein/plugin", fleet_root())
+    plugin_dir_under(&fleet_root())
+}
+
+/// [`plugin_dir`] under a fleet root the caller names, for a caller that must not resolve the
+/// live one: the isolation tests install the plugin into a fixture fleet through this.
+pub fn plugin_dir_under(fleet_root: &str) -> String {
+    format!("{fleet_root}/.skein/plugin")
 }
 
 /// The plugin's narrower variant, for a fleet whose switch is off: skein's manifest and its
@@ -251,8 +257,19 @@ pub(crate) fn plugin_dir() -> String {
 /// under the same read-only `.skein`, rather than inside it, so that loading one variant can never
 /// load the other with it.
 pub(crate) fn turn_state_plugin_dir() -> String {
-    format!("{}/.skein/plugin-turn-state", fleet_root())
+    turn_state_plugin_dir_under(&fleet_root())
 }
+
+/// [`turn_state_plugin_dir`] under a fleet root the caller names.
+pub fn turn_state_plugin_dir_under(fleet_root: &str) -> String {
+    format!("{fleet_root}/.skein/{TURN_STATE_PLUGIN}")
+}
+
+/// The name of [`turn_state_plugin_dir`] under `.skein`. Codex's hooks spell it too
+/// (`probes::codex_hooks_with_probe`): Codex loads no Claude plugin, so it has no
+/// `${CLAUDE_PLUGIN_ROOT}` and names the directory by its path inside the box. This variant, and
+/// not [`plugin_dir`], because it is installed whatever the fleet's switch says.
+pub(crate) const TURN_STATE_PLUGIN: &str = "plugin-turn-state";
 
 /// The plugin's files, relative to [`plugin_dir`], as the build carries them. `src/plugin/` is the
 /// source; `fleet::install_launcher` writes them beside the launcher through
