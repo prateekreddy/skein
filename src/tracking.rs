@@ -831,19 +831,9 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     // Registration itself is the store installer's job, not a second copy of that logic here: it is
     // the thing that knows both runtimes, and it is the same script the kit runs at startup, so a
     // box wired up by hand and one wired up on creation cannot end up differently configured. FORCE
-    // is exactly the "a new token has arrived" case it exists for.
-    //
-    // Resolved through the box's own `.claude`, because that is the store however it got mounted —
-    // a symlinked store, a repo that ships its own `.claude` with `skein/` linked inside it, or a
-    // direct-mode checkout all land here.
-    let install = "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
-         store=\"$root/.claude\"; \
-         if [ -L \"$store/skein\" ]; then store=\"$(dirname \"$(readlink \"$store/skein\")\")\"; \
-         elif [ -L \"$store\" ]; then store=\"$(readlink -f \"$store\")\"; fi; \
-         script=\"$store/skein/bin/sync-install.sh\"; \
-         if [ -r \"$script\" ]; then SKEIN_SYNC_FORCE=1 bash \"$script\" 2>&1; \
-         else echo 'skein: no sync installer in this box'\\''s store'; fi";
-    let report = sbx_guest_output(name, install, Duration::from_secs(60)).unwrap_or_default();
+    // is exactly the "a new token has arrived" case it exists for. See [`SYNC_INSTALL_IN_BOX`].
+    let report =
+        sbx_guest_output(name, SYNC_INSTALL_IN_BOX, Duration::from_secs(60)).unwrap_or_default();
     if report.contains("work tracking ready") {
         Ok(format!("{name} is tracking work as {}", minted.agent))
     } else {
@@ -890,6 +880,28 @@ pub fn sync_docs_available(store: &Path) -> bool {
     )
 }
 
+/// The shell that runs the tracker's installer inside a box: skein's read-only copy under the fleet
+/// root's `.skein` (SKEIN-1149), not the store's, which every box of the repo can write. The script
+/// finds the store itself, through the box's own `.claude`, because that is the store however it
+/// got mounted — a symlinked store, a repo that ships its own `.claude` with `skein/` linked inside
+/// it, or a direct-mode checkout. `probes::every_start_helper_runs_from_the_read_only_plugin` holds
+/// it there.
+pub(crate) const SYNC_INSTALL_IN_BOX: &str =
+    "script=\"${SKEIN_FLEET_ROOT:-/boxes}/.skein/plugin-turn-state/probe/sync-install.sh\"; \
+     if [ -r \"$script\" ]; then SKEIN_SYNC_FORCE=1 bash \"$script\" 2>&1; \
+     else echo 'skein: no sync installer in this box'\\''s store'; fi";
+
+/// The shell that runs the tracker's refresh inside a box, from the same read-only copy as
+/// [`SYNC_INSTALL_IN_BOX`] and for the same reason.
+pub(crate) fn sync_refresh_in_box(force: bool) -> String {
+    format!(
+        "script=\"${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/plugin-turn-state/probe/sync-refresh.sh\"; \
+         if [ -r \"$script\" ]; then bash \"$script\"{}; \
+         else echo 'skein: no refresh script in this box'\\''s store' >&2; fi",
+        if force { " --force" } else { "" }
+    )
+}
+
 /// Re-apply the work-tracking documents to a box that already has them.
 ///
 /// `sync_provision_box` installs once and hands off, which is what lets a box own its config — but
@@ -904,18 +916,7 @@ pub fn sync_refresh_box(name: &str, force: bool) -> Result<String, String> {
     if box_liveness(name) != Some(Liveness::Running) {
         return Err(format!("{name} is not running"));
     }
-    // Same store resolution as provisioning, for the same reason: whichever way this repo's `.claude`
-    // is mounted, the box's own view of it is the one that is right.
-    let script = format!(
-        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
-         store=\"$root/.claude\"; \
-         if [ -L \"$store/skein\" ]; then store=\"$(dirname \"$(readlink \"$store/skein\")\")\"; \
-         elif [ -L \"$store\" ]; then store=\"$(readlink -f \"$store\")\"; fi; \
-         script=\"$store/skein/bin/sync-refresh.sh\"; \
-         if [ -r \"$script\" ]; then bash \"$script\"{}; \
-         else echo 'skein: no refresh script in this box'\\''s store' >&2; fi",
-        if force { " --force" } else { "" }
-    );
+    let script = sync_refresh_in_box(force);
     // stderr deliberately not merged: stdout is the machine-readable report and stderr is the prose.
     let report = sbx_guest_output(name, &script, Duration::from_secs(60))?;
     Ok(describe_refresh(&report, force))

@@ -74,10 +74,11 @@ const STORE_README: &str = include_str!("store/README.md");
 /// Provision a repo's shared-data folder at `store` (a `.claude` dir): scaffold the directory
 /// structure (only what's missing — never clobbering data the user already put there), install skein's
 /// own machinery (turn-state probe + the SessionStart bootstrap, mailbox, and a default status line,
-/// all under `skein/bin/`), and wire it into `settings.json`. Idempotent and safe to run on every
-/// launch — an empty folder comes up fully working (memory bridge, mailbox, status line), an
-/// already-populated one is left intact (machinery refreshed, settings merged additively). The user
-/// only optionally fills `memory/` and `skills/` with their own content.
+/// copies under `skein/bin/`; what a box runs is skein's read-only plugin's), and wire it into
+/// `settings.json`. Idempotent and safe to run on every launch — an empty folder comes up fully
+/// working (memory bridge, mailbox, status line), an already-populated one is left intact (machinery
+/// refreshed, settings merged additively). The user only optionally fills `memory/` and `skills/`
+/// with their own content.
 ///
 /// **A store path that is not absolute is refused, and the refusal is the fix for SKEIN-551.** See
 /// [`store_freshly_created`] for what an empty one used to do.
@@ -356,7 +357,12 @@ mod tests {
             assert!(store.join(f).is_file(), "missing {f}");
         }
         assert!(store.join("settings.json").is_file());
-        assert!(store.join("skein/codex-hooks.json").is_file());
+        // Codex's generated hooks ship in skein's read-only plugin beside their installer, not
+        // here, where any box of the repo could rewrite them for its siblings (SKEIN-1149).
+        assert!(
+            !store.join("skein/codex-hooks.json").exists(),
+            "the store was given Codex's hook wiring, which every box of the repo can rewrite"
+        );
         assert!(store.join("skein/probe-revision").is_file());
         assert!(store.join("skein/runtimes.tsv").is_file());
         // layout is documented for the user to (optionally) fill

@@ -32,11 +32,21 @@
 # never take a box down with it.
 set -uo pipefail
 
-store="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"
-src="$store/skein/sync"
-
 project="${WORKSPACE_DIR:-}"
 [ -n "$project" ] || project="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# The store. Two copies of this script exist and they find it differently, as mailbox.sh's do: the
+# store's own, two levels below it (`.claude/skein/bin/`), and skein's read-only plugin's
+# (`probe/`), which is the one skein runs (SKEIN-1149) and which finds it from the project's
+# `.claude`, with the merged layout's hop (box-status.sh says why).
+self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+if [ "$(basename "$(dirname "$self")")" = skein ]; then
+  store="$(dirname "$(dirname "$self")")"
+else
+  store="$project/.claude"
+  if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"
+  elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi
+fi
+src="$store/skein/sync"
 
 slug="$(printf '%s' "$project" | sed 's#/#-#g')"
 state_dir="$HOME/.local/state/skein"

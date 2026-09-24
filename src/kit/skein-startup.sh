@@ -322,11 +322,20 @@ if [ -n "$git_dir" ]; then
     || printf '/.claude\n' >> "$git_dir/info/exclude"
 fi
 
+# The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
+# store is writable by every box of the repo, so a helper run from there is one a sibling box can
+# rewrite and this box then runs as it starts. They are installed with this script, under the fleet
+# root's `.skein`, in the plugin variant every box loads whichever way the fleet's switch is set, and
+# the launcher binds that directory read-only into every box. Found from this script's own path,
+# which is where the fleet runs it from (`fleet::box_provision_path`). A per-VM sandbox runs its
+# copy from ~/.local/bin, has no `.skein`, and so goes without these.
+skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe"
+
 # Expose the project-scoped durable workspace without sharing literal HOME. The helper is
-# provider-neutral, lives on the mounted store, and refuses to overwrite a real HOME/shared
-# path. Keep startup gated on its verified result: silent non-sharing would risk data loss.
+# provider-neutral and refuses to overwrite a real HOME/shared path. Keep startup gated on its
+# verified result: silent non-sharing would risk data loss.
 shared_home_state="failed"
-shared_home_helper="$store/skein/bin/shared-home.sh"
+shared_home_helper="$skein_probe/shared-home.sh"
 if [ -r "$shared_home_helper" ] && bash "$shared_home_helper" "$store"; then
   shared_home_state="linked"
 else
@@ -349,8 +358,8 @@ if [ -r "$store/skein/runtimes.tsv" ]; then
     fi
   done < "$store/skein/runtimes.tsv"
 fi
-if [ -n "$instruction_file" ] && [ -r "$store/skein/bin/agent-guide.sh" ] \
-  && bash "$store/skein/bin/agent-guide.sh" "$store" "$instruction_file" "$instruction_override"; then
+if [ -n "$instruction_file" ] && [ -r "$skein_probe/agent-guide.sh" ] \
+  && bash "$skein_probe/agent-guide.sh" "$store" "$instruction_file" "$instruction_override"; then
   agent_guide_state="installed"
 else
   echo "[skein-kit] durable agent guidance unavailable — check runtime manifest" >&2
@@ -364,8 +373,8 @@ fi
 # installed without it.
 codex_hooks_state="absent"
 codex_home="$HOME/.codex"
-codex_installer="$store/skein/bin/install-codex-hooks.sh"
-if [ -r "$codex_installer" ] && bash "$codex_installer" "$store"; then
+codex_installer="$skein_probe/install-codex-hooks.sh"
+if [ -r "$codex_installer" ] && bash "$codex_installer"; then
   codex_hooks_state="installed"
 fi
 
@@ -410,8 +419,8 @@ touch "$startup_ready"
 startup_done="true"
 
 # Work tracking: wire this box to the `sync` gateway if credentials are already present.
-# The script lives in the store (refreshed host-side every launch), so it reaches boxes
-# created before it existed too — this line only decides whether a box wires itself up at
+# The script is skein's read-only copy (reinstalled with this one on every start and heal), so it
+# reaches boxes created before it existed too — this line only decides whether a box wires itself up at
 # START, which is what makes a NEW box come up already tracking once Skein has provisioned
 # its token. A box with no tracker is not a broken box, so this can never gate startup.
 #
@@ -428,7 +437,7 @@ startup_done="true"
 # holding the pipe would keep the create waiting exactly as before — `&` alone is not detaching.
 # `-k` because SIGTERM is a request. The inner `claude` calls bound themselves against
 # `$SKEIN_SYNC_BUDGET`, and this outer one only ever fires when one of them declined to die.
-sync_install="$store/skein/bin/sync-install.sh"
+sync_install="$skein_probe/sync-install.sh"
 if [ -r "$sync_install" ]; then
   sync_budget=240
   if command -v timeout >/dev/null 2>&1; then
