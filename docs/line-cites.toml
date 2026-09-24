@@ -1048,24 +1048,24 @@ line = "return Err(format!(\"unusable box name {name:?}\"));"
 window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:297"]
+["src/fleet/disk.rs:299"]
 line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:301"]
+["src/fleet/disk.rs:303"]
 line = "return Err(format!("
 window = "if installed.is_empty() {\u000breturn Err(format!(\u000b\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:302"]
+["src/fleet/disk.rs:304"]
 line = "\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:309"]
+["src/fleet/disk.rs:311"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:386"]
+["src/fleet/disk.rs:388"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 

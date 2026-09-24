@@ -212,6 +212,19 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
         // The fleet sandbox itself, not a box inside it — no namespace to enter.
         own_sandbox(sandbox).write(&script, body.as_bytes(), Duration::from_secs(30))?;
     }
+    // skein's box plugin, beside the launcher and under the same read-only `.skein`, so the plugin
+    // every box loads is always this build's (box-plugin §2.1, SKEIN-1056).
+    for (rel, body) in crate::runtime::PLUGIN_FILES {
+        let path = format!("{}/{rel}", crate::runtime::plugin_dir());
+        let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
+        let script = format!(
+            "mkdir -p {} && cat > {} && chmod 755 {}",
+            sh_quote(dir),
+            sh_quote(&path),
+            sh_quote(&path)
+        );
+        own_sandbox(sandbox).write(&script, body.as_bytes(), Duration::from_secs(30))?;
+    }
     Ok(())
 }
 
@@ -315,6 +328,53 @@ mod tests {
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **skein's box plugin is installed where every box's argv looks for it**, byte for byte
+    /// (SKEIN-1056).
+    ///
+    /// Driven through the same seam as the launcher test above, keeping each write's argv beside
+    /// its bytes. What would make it fail: the plugin loop dropped from `install_launcher` (boxes
+    /// would be started with a `--plugin-dir` naming an empty directory), or its path computed
+    /// from anything but `runtime::plugin_dir`, which is the path the adapter strings resolve to.
+    #[test]
+    fn the_box_plugin_is_installed_where_the_agent_is_told_to_load_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let kept = home.join("kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let into = kept.clone();
+        let _stood_in = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            let n = std::fs::read_dir(&into).map(|d| d.count()).unwrap_or(0) / 2;
+            std::fs::write(into.join(format!("{n}.argv")), argv.join("\n")).unwrap();
+            Some(vec![
+                "sh".to_string(),
+                "-c".into(),
+                format!("cat > {}/{n}.body", into.display()),
+            ])
+        }));
+
+        install_launcher("skein-fleet").expect("install into the stood-in sandbox");
+
+        let writes: Vec<(String, String)> = (0..)
+            .map_while(|n| {
+                Some((
+                    std::fs::read_to_string(kept.join(format!("{n}.argv"))).ok()?,
+                    std::fs::read_to_string(kept.join(format!("{n}.body"))).ok()?,
+                ))
+            })
+            .collect();
+        for (rel, body) in crate::runtime::PLUGIN_FILES {
+            let path = format!("{}/{rel}", crate::runtime::plugin_dir());
+            let landed = writes
+                .iter()
+                .find(|(argv, _)| argv.contains(&format!("cat > {}", sh_quote(&path))))
+                .unwrap_or_else(|| panic!("nothing was installed at {path}"));
+            assert_eq!(&landed.1, body, "{path} was installed with other bytes");
+        }
     }
 
     /// The marker line and the report have to agree, because nothing later can catch it if they do

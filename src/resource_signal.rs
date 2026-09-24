@@ -294,6 +294,13 @@ pub struct Ask {
 // From the previous file and a reading to the next file
 // ------------------------------------------------------------------------------------------------
 
+/// A time as the file writes it: whole seconds, UTC, `Z`. Whole seconds because the plugin reads
+/// it with Python's `datetime.fromisoformat`, which before 3.11 refuses the nanoseconds `chrono`
+/// would otherwise print, and a stamp it cannot read makes the whole file unbelievable to it.
+fn stamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 /// How much a counter grew. A counter that went backwards was reset — the box restarted and got a
 /// new cgroup — and what it reads now is everything since.
 fn grew_by(then: u64, now: u64) -> u64 {
@@ -421,7 +428,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
     };
 
     let mut out = Signals {
-        at: r.at.to_rfc3339(),
+        at: stamp(r.at),
         disk: DiskLevel {
             mb: r.disk_mb,
             limit_mb: r.disk_limit_mb,
@@ -440,7 +447,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
                 max: c.max,
                 throttled: c.throttled,
                 throttled_per_min,
-                read_at: Some(r.at.to_rfc3339()),
+                read_at: Some(stamp(r.at)),
             },
             // Carried rather than blanked: the next reading's rate is worked out from this one.
             None => prev.map(|p| p.memory.clone()).unwrap_or_default(),
@@ -466,7 +473,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
                 ..fresh
             },
             None => Ask {
-                since: r.at.to_rfc3339(),
+                since: stamp(r.at),
                 crossing_id: format!("{kind}-{}", r.at.timestamp_millis()),
                 ..fresh
             },
@@ -1251,5 +1258,315 @@ mod tests {
             FleetDisk::NotAsked { over_by: 4198 },
             "a box outside the audience was asked"
         );
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // The plugin's hooks, run as a box runs them: the shipped script, fed a file `write_box` wrote.
+    // --------------------------------------------------------------------------------------------
+
+    /// A box: its state directory, its home, and the plugin's script as the build carries it.
+    struct Hooked {
+        _dir: crate::testutil::TempDir,
+        state: PathBuf,
+        home: PathBuf,
+        script: PathBuf,
+    }
+
+    fn hooked() -> Hooked {
+        let dir = crate::testutil::tempdir();
+        let root: &Path = dir.as_ref();
+        let (state, home) = (root.join("state"), root.join("home"));
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        // The bytes `fleet::install_launcher` puts in `.skein/plugin`, not a copy of them.
+        let body = crate::runtime::PLUGIN_FILES
+            .iter()
+            .find(|(rel, _)| *rel == "bin/skein-resources")
+            .expect("the plugin ships no hook script")
+            .1;
+        let script = root.join("skein-resources");
+        std::fs::write(&script, body).unwrap();
+        Hooked {
+            _dir: dir,
+            state,
+            home,
+            script,
+        }
+    }
+
+    impl Hooked {
+        /// Run one hook or a monitor pass, and return its stdout.
+        fn run(&self, args: &[&str], stdin: &str, xdg: Option<&Path>) -> String {
+            use std::io::Write;
+            let mut cmd = std::process::Command::new("python3");
+            cmd.arg(&self.script)
+                .args(args)
+                .env("SKEIN_STATE", &self.state)
+                .env("HOME", &self.home)
+                .env_remove("XDG_STATE_HOME")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            if let Some(x) = xdg {
+                cmd.env("XDG_STATE_HOME", x);
+            }
+            let mut child = cmd.spawn().expect("python3");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stdin.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "the hook failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        }
+
+        fn tool(&self, session: &str) -> Option<String> {
+            let out = self.run(
+                &["pre-tool-use"],
+                &format!(r#"{{"session_id":"{session}","tool_name":"Bash"}}"#),
+                None,
+            );
+            match out.trim() {
+                "" => None,
+                said => {
+                    let v: serde_json::Value = serde_json::from_str(said).unwrap();
+                    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+                    Some(
+                        v["hookSpecificOutput"]["permissionDecisionReason"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    )
+                }
+            }
+        }
+
+        fn context(&self, event: &str, session: &str) -> Option<String> {
+            let out = self.run(
+                &[event],
+                &format!(r#"{{"session_id":"{session}","prompt":"go on"}}"#),
+                None,
+            );
+            match out.trim() {
+                "" => None,
+                said => {
+                    let v: serde_json::Value = serde_json::from_str(said).unwrap();
+                    Some(
+                        v["hookSpecificOutput"]["additionalContext"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    )
+                }
+            }
+        }
+
+        fn write(&self, secs: i64, cg: Cgroup, fleet: FleetDisk) -> Signals {
+            write_box(
+                &self.state,
+                &Reading {
+                    at: Utc::now() + chrono::Duration::seconds(secs),
+                    disk_mb: Some(9626),
+                    disk_limit_mb: None,
+                    fleet,
+                    cgroup: Some(cg),
+                },
+            )
+            .unwrap()
+        }
+    }
+
+    fn with_pids(n: u64) -> Cgroup {
+        Cgroup { pids: n, ..calm() }
+    }
+
+    /// **One held call per crossing: deny, then allow, then allow, and deny again for a new id.**
+    ///
+    /// The hook is the shipped script and the file is one `write_box` wrote, so the words that
+    /// reach the agent are the words the Rust side rendered.
+    ///
+    /// What would make each assertion fail:
+    /// * *the second call runs* — the hook does not record the id it held for (drop the `record`
+    ///   call from the PreToolUse hook), so every call is held.
+    /// * *a new crossing is held again* — the hook records something other than the crossing id
+    ///   (the kind, say), so a second crossing of the same kind reads as shown.
+    /// * *another session is held once too* — the record is not per session.
+    #[test]
+    fn a_crossing_holds_one_call_and_the_next_runs() {
+        let h = hooked();
+        let first = h.write(0, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(kinds(&first), vec!["pids"]);
+
+        assert_eq!(
+            h.tool("s1").as_deref(),
+            Some(first.asks[0].hold.as_str()),
+            "the crossing did not hold the call, or held it with other words"
+        );
+        assert_eq!(h.tool("s1"), None, "the next call was held too");
+        assert_eq!(h.tool("s1"), None, "and the one after");
+
+        // Back under, then over again: a new crossing.
+        h.write(1, with_pids(300), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(h.tool("s1"), None, "nothing is asked, so nothing is held");
+        let again = h.write(2, with_pids(7100), FleetDisk::NotAsked { over_by: 0 });
+        assert_ne!(again.asks[0].crossing_id, first.asks[0].crossing_id);
+        assert!(
+            h.tool("s1").is_some(),
+            "a second crossing was not held, so it read as already shown"
+        );
+        assert_eq!(h.tool("s1"), None);
+
+        assert!(
+            h.tool("s2").is_some(),
+            "a new session was not held for a crossing it has never been shown"
+        );
+    }
+
+    /// **The SessionStart line counts as shown** (owner, SKEIN-1055), and only where there is one.
+    ///
+    /// * A disk share ask has an approved start line: the session is told at start and its first
+    ///   command runs. Fails if the SessionStart hook does not record what it printed.
+    /// * A process-count ask has none: nothing is printed at start, so the first command is held.
+    ///   Fails if the SessionStart hook records ids it did not print.
+    #[test]
+    fn the_start_line_counts_as_shown_and_nothing_else_does() {
+        let h = hooked();
+        let disk = h.write(
+            0,
+            calm(),
+            FleetDisk::Asked(Share {
+                over_by: 4198,
+                free: 2355,
+                holds: 9626,
+                others: 2,
+                every_box: false,
+            }),
+        );
+        assert_eq!(
+            h.context("session-start", "s1").as_deref(),
+            disk.asks[0].start.as_deref()
+        );
+        assert_eq!(
+            h.tool("s1"),
+            None,
+            "a session told at start was held for the same crossing"
+        );
+        assert_eq!(
+            h.context("prompt", "s1").as_deref(),
+            Some("skein: still asked of this box: clear 2.3G of storage (it holds 9.4G).")
+        );
+
+        let g = hooked();
+        g.write(0, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(g.context("session-start", "s1"), None);
+        assert!(
+            g.tool("s1").is_some(),
+            "an ask with no start line was recorded as shown at start"
+        );
+        assert_eq!(g.context("prompt", "s1"), None);
+    }
+
+    /// **No CPU reading ever produces a hold**, and neither does a kind the hook does not know.
+    ///
+    /// * A box using every core: nothing in its file asks, so nothing holds.
+    /// * A file claiming a `cpu` ask: the hook holds only for disk, memory and pids. Fails if the
+    ///   kind filter in the hook is dropped.
+    #[test]
+    fn no_cpu_reading_ever_holds_a_call() {
+        let h = hooked();
+        let busy = |secs: i64| Cgroup {
+            usage_usec: (secs as u64 + 60) * 64 * 1_000_000,
+            ..calm()
+        };
+        h.write(0, busy(0), FleetDisk::NotAsked { over_by: 0 });
+        let file = h.write(60, busy(60), FleetDisk::NotAsked { over_by: 0 });
+        assert!(file.cpu.cores.unwrap_or(0.0) > 32.0, "{:?}", file.cpu);
+        assert_eq!(h.tool("s1"), None);
+
+        let forged = Signals {
+            asks: vec![Ask {
+                kind: "cpu".into(),
+                crossing_id: "cpu-1".into(),
+                hold: "held for cpu".into(),
+                ..Default::default()
+            }],
+            ..file
+        };
+        std::fs::write(signal_path(&h.state), serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert_eq!(h.tool("s1"), None, "a cpu ask held a call");
+    }
+
+    /// **Fail open**: a file skein stopped refreshing asks nothing, and a hold that cannot be
+    /// recorded is not made.
+    ///
+    /// * Stale: fails if the hook's five-minute staleness check is dropped.
+    /// * Unrecordable: the state home is a file, so the record cannot be written. Fails if the
+    ///   hook denies before knowing the record landed, which would hold every call for ever.
+    #[test]
+    fn a_stale_file_or_an_unrecordable_hold_holds_nothing() {
+        let h = hooked();
+        h.write(-600, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(h.tool("s1"), None, "a file ten minutes old held a call");
+
+        h.write(0, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        let blocked = h.home.join("not-a-dir");
+        std::fs::write(&blocked, "").unwrap();
+        let out = h.run(
+            &["pre-tool-use"],
+            r#"{"session_id":"s1","tool_name":"Bash"}"#,
+            Some(&blocked),
+        );
+        assert_eq!(out.trim(), "", "a hold it could not record was made anyway");
+    }
+
+    /// **The monitor prints one line when a band changes, either way, and nothing otherwise.**
+    ///
+    /// Driven one pass at a time, with the last look kept in a file, so no timing is involved.
+    /// Fails if the first look prints an ask already standing (SessionStart told the session), if
+    /// a band that holds prints again, or if leaving prints nothing.
+    #[test]
+    fn the_monitor_says_one_line_per_band_change() {
+        let h = hooked();
+        let keep = h.home.join("monitor.json");
+        let keep = keep.to_str().unwrap();
+        let pass = || h.run(&["monitor", "--passes", "1", "--state", keep], "", None);
+
+        // A session that starts with an ask standing: SessionStart told it, so the monitor's first
+        // look says nothing either.
+        let g = hooked();
+        g.write(0, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        let first = g.home.join("monitor.json");
+        let first = first.to_str().unwrap();
+        assert_eq!(
+            g.run(&["monitor", "--passes", "1", "--state", first], "", None),
+            "",
+            "the first look repeated an ask the session was already told at start"
+        );
+
+        h.write(0, calm(), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(pass(), "", "the first look spoke");
+        assert_eq!(pass(), "", "nothing changed and it spoke");
+
+        h.write(1, with_pids(6410), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(
+            pass(),
+            "skein: this box is running 6,410 of its 8,192 processes; end the ones you no longer \
+             need.\n"
+        );
+        h.write(2, with_pids(6500), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(pass(), "", "a band that held was announced again");
+
+        h.write(3, with_pids(1204), FleetDisk::NotAsked { over_by: 0 });
+        assert_eq!(
+            pass(),
+            "skein: this box is back to 1,204 processes. Nothing more is asked.\n"
+        );
+        assert_eq!(pass(), "");
     }
 }

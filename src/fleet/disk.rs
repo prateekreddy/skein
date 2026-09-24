@@ -204,16 +204,16 @@ pub fn skein_dir() -> String {
 /// rename moves the answer with it, because the function IS the definition.
 ///
 /// **Directories only, and that is what makes the derivation complete rather than merely long.**
-/// Every one of the six is placed by a function above or in a module `fleet` already depends on;
+/// Every one of them is placed by a function above or in a module `fleet` already depends on;
 /// every other name directly in `.skein` is a *file* (`box-session.sh`, `skein-server`,
 /// `server.door`, `skein-home`), and `substrate_strays` never looks at files. A name under one of
-/// the six is not in this question at all — `server.tmux` stopped being asked about here when it
+/// them is not in this question at all — `server.tmux` stopped being asked about here when it
 /// moved under `private/` (SKEIN-529), the same way the tokens already had. That matters for more
 /// than tidiness: a
 /// live fleet carries `.skein/fleet-agent.py` and `.skein/fleet-agent.token`, which nothing in this
 /// tree spells any more, and offering to delete a credential to save 64 bytes would be the worst
 /// version of this feature. `substrate_names_the_code_spells_are_all_accounted_for` is the guard
-/// that keeps the split honest when a seventh directory is added.
+/// that keeps the split honest when another directory is added.
 fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
     let dirs = [
         fleet_private_dir(),
@@ -221,6 +221,8 @@ fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
         skein_toolchain_path(),
         crate::substrate::substrate_dir(),
         crate::gitgate::gitgate_dir(),
+        // skein's box plugin, installed beside the launcher (SKEIN-1056).
+        crate::runtime::plugin_dir(),
         // `detached/<session>.sh` is a script named for a session, so the session is a placeholder
         // and only its parent is the directory skein makes.
         detached_script_path("any")
@@ -1163,6 +1165,7 @@ mod tests {
     const SUBSTRATE_DIRS: &[&str] = &[
         "detached",
         "gitgate",
+        "plugin",
         "private",
         "src",
         "substrate",
@@ -1281,7 +1284,7 @@ mod tests {
         );
     }
 
-    /// skein's own six directories are never offered for deletion, beside a stray that is.
+    /// skein's own directories are never offered for deletion, beside a stray that is.
     ///
     /// Both halves in one test on purpose: "nothing was named" would pass if the sweep were broken
     /// altogether, so the stray is here to prove the sweep ran.

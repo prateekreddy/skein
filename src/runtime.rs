@@ -72,15 +72,20 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // (see `share_paths` in box-session.sh) every box's agent is reachable via `SendMessage`,
         // and an unnamed session shows up in another box's `ListAgents` as a pid — which is not
         // something anyone can address, and not something the fleet has any other name for.
-        interactive_start: "claude --name '{box}'",
+        //
+        // `--plugin-dir {plugin}` on every `claude` here, both halves of each `||`: skein's own
+        // plugin, loaded from the read-only build for this session only (box-plugin §2.1, SKEIN-1056).
+        // Passed by the launcher's argv rather than installed into settings, so a box cannot unload
+        // it and no box can remove it from another. `{plugin}` is resolved by [`for_box`].
+        interactive_start: "claude --name '{box}' --plugin-dir {plugin}",
         // `|| claude` is not belt-and-braces: a box can legitimately have nothing to continue — a
         // cross-runtime replacement box whose new agent was never spoken to, a box whose transcript
         // was cleared, a session killed before its first turn. There `claude --continue` exits with
         // "No conversation found", the tmux session dies with it, and every reconnect replayed that
         // same failure. Fall back to a fresh conversation (the takeover brief is on disk, so the new
         // agent still picks up the context). Mirrors Codex's `resume --last || codex` below.
-        interactive_resume: "claude --name '{box}' --continue || claude --name '{box}'",
-        headless_resume: "claude --continue --print {prompt} || claude --print {prompt}",
+        interactive_resume: "claude --name '{box}' --plugin-dir {plugin} --continue || claude --name '{box}' --plugin-dir {plugin}",
+        headless_resume: "claude --plugin-dir {plugin} --continue --print {prompt} || claude --plugin-dir {plugin} --print {prompt}",
         context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
     RuntimeAdapter {
@@ -196,14 +201,155 @@ pub(crate) fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
 /// unset there. The obvious fallback, `$(hostname)`, is the trap: in a shared sandbox every box
 /// reports `skein-fleet`, so all of them would answer to one name and `SendMessage` would have
 /// nothing to address. A box is not a sandbox, in its newest costume.
+///
+/// `{plugin}` is resolved here too, to [`plugin_dir`] shell-quoted, for the same reason: it is a
+/// path under the fleet root, which the host knows and a fresh crossing into the box need not.
 pub(crate) fn for_box(command: &str, name: &str) -> String {
-    command.replace("{box}", name)
+    command
+        .replace("{box}", name)
+        .replace("{plugin}", &sh_quote(&plugin_dir()))
 }
+
+/// A runtime's headless command for one box, with `prompt` (already shell-quoted) in place.
+pub(crate) fn headless(runtime: &RuntimeAdapter, name: &str, prompt: &str) -> String {
+    for_box(runtime.headless_resume, name).replace("{prompt}", prompt)
+}
+
+/// Where skein's own box plugin is installed: under the fleet root's `.skein`, which every box
+/// has bound read-only (box-plugin §2.1). Installed with the launcher on every start and heal, so
+/// it is always the plugin of the skein build that is running.
+pub(crate) fn plugin_dir() -> String {
+    format!("{}/.skein/plugin", fleet_root())
+}
+
+/// The plugin's files, relative to [`plugin_dir`], as the build carries them. `src/plugin/` is the
+/// source; `fleet::install_launcher` writes these beside the launcher.
+pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
+    (
+        ".claude-plugin/plugin.json",
+        include_str!("plugin/.claude-plugin/plugin.json"),
+    ),
+    ("hooks/hooks.json", include_str!("plugin/hooks/hooks.json")),
+    (
+        "monitors/monitors.json",
+        include_str!("plugin/monitors/monitors.json"),
+    ),
+    (
+        "bin/skein-resources",
+        include_str!("plugin/bin/skein-resources"),
+    ),
+];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
     if runtime == agent_for_box(name) {
         "skein-agent".to_string()
     } else {
         format!("skein-agent-{runtime}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Every `claude` the adapter can start carries skein's plugin**, both halves of every `||`,
+    /// and the placeholder resolves to the read-only build's copy under the fleet root.
+    ///
+    /// What would make it fail: dropping `--plugin-dir {plugin}` from any of the three strings, or
+    /// from the fallback half of one (a box whose `--continue` finds nothing would then start
+    /// without the plugin); or `for_box` leaving `{plugin}` unresolved.
+    #[test]
+    fn every_claude_the_adapter_starts_loads_skeins_plugin() {
+        let claude = runtime_adapter("claude").unwrap();
+        for (what, command) in [
+            ("interactive_start", claude.interactive_start),
+            ("interactive_resume", claude.interactive_resume),
+            ("headless_resume", claude.headless_resume),
+        ] {
+            let starts: Vec<&str> = command.split("||").map(str::trim).collect();
+            for start in starts {
+                assert!(
+                    start.starts_with("claude ") && start.contains(" --plugin-dir {plugin}"),
+                    "{what} starts a claude without skein's plugin: {start:?}"
+                );
+            }
+        }
+
+        let _lock = crate::testutil::env_lock();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
+        env.set("SKEIN_HOME", "/skein-home-example");
+        let resolved = for_box(claude.interactive_resume, "web-main");
+        assert!(!resolved.contains("{plugin}"), "{resolved}");
+        assert_eq!(
+            resolved
+                .matches(
+                    "claude --name 'web-main' --plugin-dir '/fleet-root-example/.skein/plugin'"
+                )
+                .count(),
+            2,
+            "{resolved}"
+        );
+    }
+
+    /// **The plugin the build carries is the one its argv names**: a manifest, the three hooks
+    /// the design gives it and no others, and a monitor.
+    ///
+    /// What would make it fail: a plugin file missing from `PLUGIN_FILES` (the install would put a
+    /// plugin with no hooks under `.skein`), a hook event added or dropped, or the `PreToolUse`
+    /// matcher losing `Bash`. It also keeps the plugin away from `Stop`, which the store's own
+    /// `mailbox.sh stop-check` owns and which this plugin leaves as it is.
+    #[test]
+    fn the_plugin_carries_its_three_hooks_and_its_monitor() {
+        let file = |rel: &str| {
+            PLUGIN_FILES
+                .iter()
+                .find(|(r, _)| *r == rel)
+                .unwrap_or_else(|| panic!("the plugin ships no {rel}"))
+                .1
+        };
+        let manifest: serde_json::Value =
+            serde_json::from_str(file(".claude-plugin/plugin.json")).unwrap();
+        assert_eq!(manifest["name"], "skein");
+
+        let hooks: serde_json::Value = serde_json::from_str(file("hooks/hooks.json")).unwrap();
+        let events: Vec<&str> = hooks["hooks"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            events,
+            vec!["PreToolUse", "SessionStart", "UserPromptSubmit"],
+            "the plugin's hook events moved"
+        );
+        let matcher = hooks["hooks"]["PreToolUse"][0]["matcher"].as_str().unwrap();
+        assert!(
+            matcher.split('|').any(|m| m == "Bash"),
+            "the hold no longer reaches Bash: {matcher}"
+        );
+        for event in &events {
+            let command = hooks["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(
+                command.contains("${CLAUDE_PLUGIN_ROOT}/bin/skein-resources"),
+                "{event} runs something the plugin does not ship: {command}"
+            );
+        }
+
+        let monitors: serde_json::Value =
+            serde_json::from_str(file("monitors/monitors.json")).unwrap();
+        assert_eq!(monitors[0]["name"], "resources");
+        assert!(
+            monitors[0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("/bin/skein-resources\" monitor"),
+            "{}",
+            monitors[0]
+        );
+        assert!(file("bin/skein-resources").starts_with("#!/usr/bin/env python3"));
     }
 }

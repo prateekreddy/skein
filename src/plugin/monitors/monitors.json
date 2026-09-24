@@ -1,0 +1,7 @@
+[
+  {
+    "name": "resources",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/skein-resources\" monitor",
+    "description": "skein resources"
+  }
+]

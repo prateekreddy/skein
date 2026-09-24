@@ -416,7 +416,7 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
             .replace("{prompt}", &sh_quote(p))
             .replace("{runtime}", &sh_quote(runtime.info.id)),
         _ => {
-            let guest = runtime.headless_resume.replace("{prompt}", &sh_quote(p));
+            let guest = crate::runtime::headless(runtime, name, &sh_quote(p));
             // Through the box's placement, never `sbx exec <box>`: that names a sandbox, and for a
             // fleet box there is none — or worse, an unrelated one wearing the same name.
             //
@@ -1125,6 +1125,9 @@ mod tests {
     #[test]
     fn codex_launch_records_runtime_and_bypasses_generated_hook_review() {
         let _g = env_lock();
+        // The agent's command names skein's plugin under the fleet root (SKEIN-1056).
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         // The sandbox-per-box path — the fleet builds its session a different way.
@@ -1274,6 +1277,9 @@ mod tests {
     #[test]
     fn a_box_rebuilt_from_a_snapshot_resumes_instead_of_starting_over() {
         let _g = env_lock();
+        // The agent's command names skein's plugin under the fleet root (SKEIN-1056).
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_LAUNCH_CMD");
@@ -1938,6 +1944,9 @@ mod tests {
     #[test]
     fn a_shared_box_is_attached_through_its_namespace_and_its_own_tmux_server() {
         let _g = env_lock();
+        // The agent's command names skein's plugin under the fleet root (SKEIN-1056).
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
         env::set_var("SKEIN_HOME", tempdir());
         record_place(
             "thing-x",
@@ -2023,6 +2032,9 @@ mod tests {
     #[test]
     fn shell_and_attach_argv_differ() {
         let _g = env_lock();
+        // The agent's command names skein's plugin under the fleet root (SKEIN-1056).
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
         // empty home ⇒ repo_for_box finds nothing ⇒ the default agent (claude) → `--continue`.
         env::set_var("SKEIN_HOME", tempdir());
         // Placed, because an unplaced box has no argv: it is addressed through the record, and there
@@ -2064,7 +2076,7 @@ mod tests {
         assert!(first
             .last()
             .unwrap()
-            .contains(r#""claude --name 'thing-x' ||"#));
+            .contains(r#""claude --name 'thing-x' --plugin-dir "#));
         assert!(!first.last().unwrap().contains("{box}"));
         assert!(!first.last().unwrap().contains("--continue"));
         // a start that fails outright holds the session open as a shell instead of vanishing and
@@ -2087,7 +2099,8 @@ mod tests {
         // what gives `for_box` something to do, and its absence would silently un-name every box.
         assert_eq!(
             agent_resume_cmd("claude"),
-            "claude --name '{box}' --continue || claude --name '{box}'"
+            "claude --name '{box}' --plugin-dir {plugin} --continue || claude --name '{box}' \
+             --plugin-dir {plugin}"
         );
         assert!(agent_resume_cmd("codex").contains("resume --last"));
         assert!(agent_resume_cmd("codex").contains("||"));
