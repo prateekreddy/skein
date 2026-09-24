@@ -979,9 +979,9 @@ Their question: {question}"#,
 /// (SKEIN-819).
 ///
 /// [`ask`] and [`draft_comment`] are addressed to the pull request's own review box, and fall
-/// through to a local call when it cannot take the turn — which loses the conversation that read
-/// the change, so the answer is "from your question alone" and a draft is written by a model that
-/// did not see the change. `outside` is [`crate::ai::outside_box_because`]'s reason, carried from
+/// through to a local call when it cannot take the turn. That call still stands in the box's
+/// checkout (`ai::tried` runs in `turn.at()`, the box's tree), so it can read the code; what it
+/// loses is the conversation that read the change — the earlier reading. `outside` is [`crate::ai::outside_box_because`]'s reason, carried from
 /// [`crate::ai::Answered`] rather than dropped, so the composer can say so above the text with a
 /// way to ask or draft again. `None` whenever the turn ran in its box, or there was no box.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1037,7 +1037,7 @@ Their notes: {intent}"#,
         bench.machine(),
     )
     // The body, and where it was written (SKEIN-819) — a draft written outside the box goes out
-    // under a person's name about a change the model did not see, so the composer says so.
+    // under a person's name without the earlier reading behind it, so the composer says so.
     .map(|a| Composed {
         text: drafted_body(&a.said),
         outside: a.outside_box,

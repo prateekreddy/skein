@@ -462,7 +462,8 @@ await check("⌘↵ in a comment posts it through the undo window, not past it",
   await settle();
 });
 // **An answer or a draft from outside its box says so above itself** (SKEIN-819, the owner's option
-// A, wording approved as drafted). The server puts `outside` on the act's answer when the turn fell
+// A; wording as corrected by the owner on 2026-09-24, because the fall-through still stands in the
+// box's checkout and loses only the earlier reading). The server puts `outside` on the act's answer when the turn fell
 // through to a local call; the fixture's `claude` is named by SKEIN_CLAUDE_BIN, which skips the box
 // altogether, so the route is answered here instead — what is under test is what the composer DOES
 // with `outside`, and the Rust side (`acted`) is tested where it is built.
@@ -489,7 +490,7 @@ await check("an answer or a draft from outside its box says so above it, and ask
     await page.fill("#rev-compose", "is this safe?");
     await page.click("#revpane .revcompose .revchip:has-text('ask')");
     await page.waitForSelector("#revpane .revanswer", { timeout: 15000 });
-    const want = `Answered outside its box — ${OUTSIDE_WHY}. It could not look at the code or the earlier reading, so this is from your question alone.`;
+    const want = `Answered outside its box — ${OUTSIDE_WHY}. It did not have its earlier reading of this pull request, so this answer comes from your question and the code alone.`;
     if ((await line()) !== want) throw new Error(`the ask's line is not the approved one: ${JSON.stringify(await line())}`);
     await mustSee("#revpane .revcompose .outsidebox .revchip:has-text('ask again')", "the ask-again button");
     // Closed and reopened: the copy a reload restores from.
@@ -510,7 +511,7 @@ await check("an answer or a draft from outside its box says so above it, and ask
     await page.fill("#rev-compose", "the notes the draft is made from");
     await page.click("#revpane .revcompose .revchip:has-text('draft with skein')");
     await until(() => !!document.querySelector("#revpane .revcompose .outsidebox"), null, "a draft from outside its box drew no line");
-    const drafted = `Drafted outside its box — ${OUTSIDE_WHY}. The model did not see the change: check every claim about the code before you post it.`;
+    const drafted = `Drafted outside its box — ${OUTSIDE_WHY}. It did not have its earlier reading of this change, so check every claim about the code before you post it.`;
     if ((await line()) !== drafted) throw new Error(`the draft's line is not the approved one: ${JSON.stringify(await line())}`);
     const above = await page.evaluate(() => {
       const l = document.querySelector("#revpane .revcompose .outsidebox"), t = document.getElementById("rev-compose");

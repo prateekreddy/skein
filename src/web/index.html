@@ -6298,11 +6298,11 @@ function revComposeHtml(pr) {
     : "Request changes — posted to GitHub under your name, and moves this out of your lane.";
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
-    ${!asking && c.outside ? `<div class="revstale outsidebox"><b>Drafted outside its box — ${esc(c.outside)}. The model did not see the change: check every claim about the code before you post it.</b>
+    ${!asking && c.outside ? `<div class="revstale outsidebox"><b>Drafted outside its box — ${esc(c.outside)}. It did not have its earlier reading of this change, so check every claim about the code before you post it.</b>
       <button type="button" class="revchip" onclick="revDraftAgain(${pr.number})"${c.busy ? " disabled" : ""}>draft again</button></div>` : ""}
     <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
       oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
-    ${c.answer && c.outside ? `<div class="revstale outsidebox"><b>Answered outside its box — ${esc(c.outside)}. It could not look at the code or the earlier reading, so this is from your question alone.</b>
+    ${c.answer && c.outside ? `<div class="revstale outsidebox"><b>Answered outside its box — ${esc(c.outside)}. It did not have its earlier reading of this pull request, so this answer comes from your question and the code alone.</b>
       <button type="button" class="revchip" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>ask again</button></div>` : ""}
     ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
     <div class="revacts">
