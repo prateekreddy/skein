@@ -51,7 +51,7 @@ about.
 the handoff document linked in the section above — so the check passed for weeks while the page
 carried a dead link, which is precisely the failure it exists to catch. A falsifier that covers most
 of a page reports "true" about the part it does not cover. **If you add a path to this page, add it
-here in the same edit**; a link that is not on this line is not checked by anything.
+here in the same edit.** `tools/link-check.py` also fails the build on a link to a file git does not track.
 
 It missed one again, and the same way. `CLAUDE.md` is named in the last section — a live file, and
 a live claim, since a rename would leave that sentence pointing nowhere — and it was not on the
