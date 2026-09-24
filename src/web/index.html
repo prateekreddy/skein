@@ -11855,9 +11855,12 @@ function updatePaneOpen() {
   return !!document.querySelector('.set-pane[data-pane="update"].on');
 }
 
-async function loadUpdate() {
+async function loadUpdate(again) {
   const box = document.getElementById("set-update");
   if (!box) return;
+  // The boxes still on an old agent CLI: asked once per opening, not on the re-read below, because
+  // it asks every running box when its agent started.
+  if (!again) loadAgentsBehind();
   if (!updateState) box.innerHTML = `<div class="set-note">reading…</div>`;
   try {
     updateState = await fetch("/api/update").then(r => r.json());
@@ -11875,7 +11878,7 @@ async function loadUpdate() {
   clearTimeout(updateAgain);
   const u = updateState.skein || {};
   const settled = !!u.remote || (!!u.why && u.why !== "not asked yet");
-  if (!settled && updatePaneOpen()) updateAgain = setTimeout(loadUpdate, 1200);
+  if (!settled && updatePaneOpen()) updateAgain = setTimeout(() => loadUpdate(true), 1200);
   // A build already going when the pane opens — a reload during one, or a second tab. Pick it up
   // rather than showing a button that would refuse.
   if (updateState.running && !updateTail) tailUpdate();
@@ -11930,7 +11933,8 @@ function renderUpdate() {
     ${updateEnded === "cancelled" && !updateState.running ? `<div class="set-note warn" id="upd-ended">${esc(UPDATE_WORDS.cancelledNote)}</div>` : ""}
     <div id="upd-stall" class="set-note warn" hidden></div>
     <pre id="upd-log" class="set-log" ${updateState.running || updateSaw ? "" : "hidden"}>${esc(updateSaw)}</pre>
-    ${renderRuntimeUpdates(updateState.runtimes || [])}`;
+    ${renderRuntimeUpdates(updateState.runtimes || [])}
+    <div id="upd-agents">${agentsBehindHtml()}</div>`;
   renderUpdateStall();
   // Redrawn from the saved text, so put the reader back at the end — the stall notice points at the
   // log's last lines, and a redraw that left the scroll at the top would be pointing at the first.
@@ -12104,6 +12108,168 @@ function renderRuntimeUpdates(updates) {
       `${esc(u.runtime)} ${esc(u.have)} &rarr; ${esc(u.latest)}`).join(" · ")}${
       updates.length > 1 ? " are" : " is"} available in the fleet's sandbox — every box shares them`
     + `<button type="button" class="kbtn" onclick="pressUpdateAgents(this)">update agents</button></div>`;
+}
+
+// Every sentence the list of boxes still on an old agent CLI, and its per-box restart, put in front
+// of a person — the owner's approved wording (SKEIN-1069), kept in one place to be read as a whole.
+// `rt` is the runtime, `old` what a box started on, `now` what the last install put in place.
+const AGENTS_WORDS = {
+  several: (n, rt, old, now) => `${n} boxes are still running ${rt} ${old} and move to ${now} at their next session:`,
+  one: (box, rt, old, now) => `${box} is still running ${rt} ${old} and moves to ${now} at its next session.`,
+  none: (rt, now) => `every running box is on ${rt} ${now}. Stopped boxes start on it.`,
+  unknown: (box, rt) => `skein could not read when ${box}'s agent started, so it cannot say which ${rt} it is running.`,
+  waiting: "waiting for you",
+  working: "working",
+  workingMoves: "moves when this turn's session ends",
+  button: now => `Restart on ${now}`,
+  offer: (box, rt, now) => `Stops ${rt} in ${box} and reopens its conversation on ${now}. ${box} is waiting for you, so no turn is cut off, and nothing is sent to it. What its agent's terminal was running stops with it; anything started to outlive the terminal (nohup, setsid) keeps running.`,
+  restarting: "restarting…",
+  done: (box, rt, now) => `${box} is on ${rt} ${now}`,
+  refused: box => `Not restarted: ${box} started working after this list was drawn. It moves at its next session, and the button comes back when it is waiting again.`,
+  failed: (box, why) => `Could not restart ${box}: ${why}`,
+  notRunning: now => `its agent is not running, so there is nothing to restart. Its next session starts on ${now}.`,
+  noReading: "skein has no recent reading of its agent, so it cannot tell that it is waiting.",
+};
+
+// The states a box can only reach from `waiting` by starting a turn — so a press refused in one of
+// them is truthfully "started working after this list was drawn".
+const TURN_STARTED = new Set(["working", "compacting", "needs-input", "error", "done"]);
+// A refusal in any other state gets a plain reason in the Failed wording (the owner, 2026-09-24):
+// the agent has ended, or skein has no recent reading to tell waiting from anything else.
+const AGENT_NOT_RUNNING = new Set(["ended"]);
+const AGENT_NO_READING = new Set(["stale", "live", "idle", "unknown", ""]);
+
+// What a refused press says, by the state the server read at the press. **No state word reaches the
+// page** (the owner, 2026-09-24): a state in none of the sets above — one a later probe invents — is
+// read as what it is to this pane, a state that is not a reading of the agent waiting.
+function refusalText(box, state, now) {
+  if (TURN_STARTED.has(state)) return AGENTS_WORDS.refused(box);
+  if (AGENT_NOT_RUNNING.has(state)) return AGENTS_WORDS.failed(box, AGENTS_WORDS.notRunning(now));
+  return AGENTS_WORDS.failed(box, AGENTS_WORDS.noReading);
+}
+
+// A row reads left to right — box, state, what happens — rather than spread across the pane the way
+// a setting and its control are. Inline for the reason `renderUpdateStall` gives: a rule in the
+// stylesheet moves every line below it, and `docs/line-cites.toml` cites into that file.
+const AGENT_ROW = "justify-content:flex-start;gap:14px;padding:6px 0";
+
+let agentsBehind = null;        // `/api/update-agents/boxes`'s last answer, per runtime
+const agentsBusy = new Set();   // boxes whose restart press is in flight
+const agentsSaid = new Map();   // box -> { text, refused } its last press said, when it was not a success
+let agentsTick = null;          // the redraw that follows the board's live turn states
+
+// A box's turn state as the BOARD has it now, falling back to what the list was drawn with. The
+// board's states arrive live, so the button follows them: gone the moment a box starts working, and
+// back when it is waiting again, without asking every box again.
+function agentLiveState(b) {
+  return (boxes.find(x => x.name === b.name) || b).state || "";
+}
+
+async function loadAgentsBehind() {
+  let r = null;
+  try { r = await fetch("/api/update-agents/boxes").then(x => x.json()); } catch { return; }
+  if (!r || !Array.isArray(r.runtimes)) return;
+  agentsBehind = r.runtimes;
+  drawAgentsBehind();
+  clearInterval(agentsTick);
+  agentsTick = setInterval(() => {
+    if (!updatePaneOpen()) { clearInterval(agentsTick); agentsTick = null; return; }
+    drawAgentsBehind();
+  }, 2000);
+}
+
+function drawAgentsBehind() {
+  const el = document.getElementById("upd-agents");
+  if (!el) return;
+  const html = agentsBehindHtml();
+  if (el.dataset.drawn === html) return;   // a press in flight keeps its button
+  el.dataset.drawn = html;
+  el.innerHTML = html;
+}
+
+// The restart control for one box: only while the board reads it `waiting`. A refusal that said it
+// "comes back when it is waiting again" is dropped at the moment that becomes true.
+function agentRestartHtml(b, rt, now) {
+  const busy = agentsBusy.has(b.name);
+  return `<button type="button" class="kbtn" data-box="${esc(b.name)}" data-rt="${esc(rt)}" data-now="${esc(now)}"
+      ${busy ? "disabled" : ""} onclick="pressRestartOntoUpdate(this)">${esc(busy ? AGENTS_WORDS.restarting : AGENTS_WORDS.button(now))}</button>
+    <span class="dim">${esc(AGENTS_WORDS.offer(b.name, rt, now))}</span>`;
+}
+
+function agentSaidHtml(b) {
+  const said = agentsSaid.get(b.name);
+  return said ? `<div class="set-note warn upd-agent-said" data-box="${esc(b.name)}">${esc(said.text)}</div>` : "";
+}
+
+function agentsBehindHtml() {
+  if (!agentsBehind) return "";
+  let html = "";
+  for (const r of agentsBehind) {
+    const rt = r.runtime, now = r.latest;
+    const groups = new Map();
+    for (const b of r.behind || []) {
+      if (agentLiveState(b) === "waiting" && agentsSaid.get(b.name)?.refused) agentsSaid.delete(b.name);
+      if (!groups.has(b.have)) groups.set(b.have, []);
+      groups.get(b.have).push(b);
+    }
+    for (const [old, list] of groups) {
+      if (list.length === 1) {
+        const b = list[0];
+        html += `<div class="set-note behind upd-agents-line">${esc(AGENTS_WORDS.one(b.name, rt, old, now))}</div>`;
+        if (agentLiveState(b) === "waiting") html += `<div class="set-row upd-agent" style="${AGENT_ROW}" data-box="${esc(b.name)}">${agentRestartHtml(b, rt, now)}</div>`;
+        html += agentSaidHtml(b);
+        continue;
+      }
+      html += `<div class="set-note behind upd-agents-line">${esc(AGENTS_WORDS.several(list.length, rt, old, now))}</div>`;
+      for (const b of list) {
+        const state = agentLiveState(b);
+        const tail = state === "waiting"
+          ? `<span class="dim">${esc(AGENTS_WORDS.waiting)}</span>${agentRestartHtml(b, rt, now)}`
+          : state === "working"
+            ? `<span class="dim">${esc(AGENTS_WORDS.working)}</span><span class="dim">${esc(AGENTS_WORDS.workingMoves)}</span>`
+            : "";
+        html += `<div class="set-row upd-agent" style="${AGENT_ROW}" data-box="${esc(b.name)}"><code>${esc(b.name)}</code>${tail}</div>${agentSaidHtml(b)}`;
+      }
+    }
+    for (const name of r.unknown || []) {
+      html += `<div class="set-note upd-agents-line">${esc(AGENTS_WORDS.unknown(name, rt))}</div>`;
+    }
+    if (!(r.behind || []).length && !(r.unknown || []).length) {
+      html += `<div class="set-note ok upd-agents-line">${esc(AGENTS_WORDS.none(rt, now))}</div>`;
+    }
+  }
+  return html;
+}
+
+// The press: ONE box, the one on the button. The server reads its turn state again and refuses it
+// if it is no longer waiting; nothing is sent to the agent either way.
+async function pressRestartOntoUpdate(btn) {
+  const { box, rt, now } = btn.dataset;
+  agentsBusy.add(box);
+  agentsSaid.delete(box);
+  drawAgentsBehind();
+  let r = null;
+  try {
+    r = await fetch(`/api/update-agents/boxes/${encodeURIComponent(box)}/restart`, { method: "POST" }).then(x => x.json());
+  } catch (e) {
+    r = { ok: false, why: "failed", error: String(e) };
+  }
+  agentsBusy.delete(box);
+  if (r.ok) toast(AGENTS_WORDS.done(box, rt, now));
+  else {
+    const refused = r.why === "not-waiting" && TURN_STARTED.has(r.state);
+    // What the server just read is fresher than the list: without this the next draw finds the box
+    // still `waiting` in it, takes that for "waiting again", and drops the refusal it just said.
+    if (r.why === "not-waiting") for (const rt of agentsBehind || []) for (const b of rt.behind || []) if (b.name === box) b.state = r.state;
+    agentsSaid.set(box, {
+      refused,
+      text: r.why === "not-waiting"
+        ? refusalText(box, r.state || "", now)
+        : AGENTS_WORDS.failed(box, r.error || r.why),
+    });
+  }
+  drawAgentsBehind();
+  loadAgentsBehind();
 }
 
 // The press. It ends by replacing the process serving this page, so nothing here waits for a

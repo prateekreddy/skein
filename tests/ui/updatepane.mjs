@@ -134,6 +134,135 @@ await page.waitForTimeout(600);
     [!!bare, bare.startsWith(shown), shown.length > 0], [true, true, true]);
 }
 
+// --- the boxes still on an old agent CLI, and one restart per waiting box (SKEIN-1070, SKEIN-1071) ----
+//
+// The list is the server's (`/api/update-agents/boxes`) and asking it needs running boxes with agent
+// sessions, which this fixture has none of — so the route is answered here, and what is under test
+// is what the pane makes of an answer: the owner's approved wording, verbatim, and the restart
+// control on a `waiting` box and nowhere else. The server's own half (who is listed, the re-check at
+// the press, one box per route) is tested in `src/fleet/substrate.rs` and `src/bin/skein-server/agents.rs`.
+//
+// **What would make these fail**: dropping the `waiting` filter in `agentsBehindHtml` puts a button
+// on box-b and box-c; any drift in `AGENTS_WORDS` from the approved text fails the string it
+// changes; a press that sent more than the one box on its button fails the request count; mapping a
+// refusal to the Failed wording fails the Refused check.
+{
+  const W = {
+    several: "3 boxes are still running claude 2.1.278 and move to 2.1.280 at their next session:",
+    one: "box-a is still running claude 2.1.278 and moves to 2.1.280 at its next session.",
+    none: "every running box is on claude 2.1.280. Stopped boxes start on it.",
+    unknown: "skein could not read when box-d's agent started, so it cannot say which claude it is running.",
+    offer: "Stops claude in box-a and reopens its conversation on 2.1.280. box-a is waiting for you, so no turn is cut off, and nothing is sent to it. What its agent's terminal was running stops with it; anything started to outlive the terminal (nohup, setsid) keeps running.",
+    notRunning: "Could not restart box-a: its agent is not running, so there is nothing to restart. Its next session starts on 2.1.280.",
+    noReading: "Could not restart box-a: skein has no recent reading of its agent, so it cannot tell that it is waiting.",
+    refused: "Not restarted: box-a started working after this list was drawn. It moves at its next session, and the button comes back when it is waiting again.",
+    failed: "Could not restart box-a: box \"box-a\" is not running",
+    done: "box-a is on claude 2.1.280",
+  };
+  const behind = (name, state) => ({ name, have: "2.1.278", state });
+  let listed = null, answer = null;
+  const pressed = [];
+  await page.route("**/api/update-agents/boxes", r => r.fulfill({ json: { runtimes: listed } }));
+  await page.route("**/api/update-agents/boxes/*/restart", r => {
+    pressed.push(`${r.request().method()} ${new URL(r.request().url()).pathname}`);
+    return r.fulfill({ json: answer });
+  });
+  const show = async runtimes => {
+    listed = runtimes;
+    await page.evaluate(() => loadAgentsBehind());
+    await page.waitForTimeout(300);
+    return page.$$eval("#upd-agents > *", els => els.map(e => ({
+      cls: e.className, box: e.dataset.box || "",
+      text: e.textContent.replace(/\s+/g, " ").trim(),
+      parts: [...e.children].map(c => c.textContent.replace(/\s+/g, " ").trim()),
+      buttons: [...e.querySelectorAll("button")].map(b => b.textContent.trim()),
+    })));
+  };
+  const claude = (b, unknown = [], current = 1) =>
+    [{ runtime: "claude", latest: "2.1.280", behind: b, unknown, current }];
+
+  const several = await show(claude(
+    [behind("box-a", "waiting"), behind("box-b", "working"), behind("box-c", "working")], ["box-d"]));
+  const row = name => several.find(e => e.box === name && e.cls.includes("upd-agent")) || {};
+  check("Several: the line is the approved wording", several[0]?.text, W.several);
+  check("the waiting box offers its restart, with the approved button and offer",
+    row("box-a").parts, ["box-a", "waiting for you", "Restart on 2.1.280", W.offer]);
+  check("a working box never offers the restart, and says when it moves",
+    [row("box-b").buttons, row("box-b").parts, row("box-c").buttons],
+    [[], ["box-b", "working", "moves when this turn's session ends"], []]);
+  check("Unknown: the line is the approved wording", several.some(e => e.text === W.unknown), true);
+  check("no control restarts more than one box: one button per waiting box, and none for all",
+    several.flatMap(e => e.buttons), ["Restart on 2.1.280"]);
+
+  const one = await show(claude([behind("box-a", "waiting")]));
+  check("One: the line is the approved wording", one[0]?.text, W.one);
+  const oneWorking = await show(claude([behind("box-a", "working")]));
+  check("One, working: the line, and no restart", [oneWorking[0]?.text, oneWorking.flatMap(e => e.buttons)], [W.one, []]);
+  const none = await show(claude([], [], 3));
+  check("None: the line is the approved wording", none.map(e => e.text), [W.none]);
+
+  // A press on a box that turned working since the list was drawn: the server refuses it.
+  // The list is drawn with box-a waiting; by the press the server reads it working.
+  await show(claude([behind("box-a", "waiting")]));
+  listed = claude([behind("box-a", "working")]);
+  answer = { ok: false, why: "not-waiting", state: "working" };
+  await page.click('#upd-agents button[data-box="box-a"]');
+  await page.waitForTimeout(400);
+  check("a press sends one request, for the box on its button",
+    pressed, ["POST /api/update-agents/boxes/box-a/restart"]);
+  check("a refused press says so in the approved words, and the button is gone while it works",
+    [await page.$eval("#upd-agents .upd-agent-said", e => e.textContent.trim()).catch(() => ""),
+      await page.$$eval("#upd-agents button", els => els.length)], [W.refused, 0]);
+  const back = await show(claude([behind("box-a", "waiting")]));
+  check("the button comes back when it is waiting again, and the refusal goes with it",
+    [back.flatMap(e => e.buttons), back.some(e => e.cls.includes("upd-agent-said"))], [["Restart on 2.1.280"], false]);
+
+  // Every state a refusal can come back with, and the sentence each one gets (the owner, 2026-09-24).
+  // **What would make this fail**: moving a state between the sets in boot.js — `ended` read as "no
+  // reading", `live` as not running, a turn state given a plain reason — or any drift in the two
+  // plain sentences.
+  const REFUSALS = [
+    ["working", W.refused], ["compacting", W.refused], ["needs-input", W.refused],
+    ["error", W.refused], ["done", W.refused],
+    ["ended", W.notRunning],
+    ["stale", W.noReading], ["live", W.noReading], ["idle", W.noReading], ["unknown", W.noReading],
+    ["", W.noReading],
+    // A state no probe writes today: it must still get a sentence, never its own name.
+    ["somethingnew", W.noReading],
+  ];
+  const saidFor = [];
+  for (const [state] of REFUSALS) {
+    await show(claude([behind("box-a", "waiting")]));
+    listed = claude([behind("box-a", state || "waiting")]);
+    answer = { ok: false, why: "not-waiting", state };
+    await page.click('#upd-agents button[data-box="box-a"]');
+    await page.waitForTimeout(300);
+    saidFor.push([state, await page.$eval("#upd-agents .upd-agent-said", e => e.textContent.trim()).catch(() => "")]);
+  }
+  check("each refused state gets its approved sentence", saidFor, REFUSALS);
+  // **No state word reaches the page** (the owner, 2026-09-24). What would make this fail: a
+  // fallback that names the state — `Could not restart box-a: idle` — for any state in the table.
+  check("no refused state is told as the bare 'Could not restart box-a: <word>'",
+    saidFor.filter(([, said]) => /^Could not restart box-a: [\w-]*\.?$/.test(said)).map(([state]) => state), []);
+  pressed.length = 1;   // the table's presses are counted by its own check, not the tally below
+  await show(claude([behind("box-a", "waiting")]));
+
+  answer = { ok: false, why: "failed", error: 'box "box-a" is not running' };
+  await page.click('#upd-agents button[data-box="box-a"]');
+  await page.waitForTimeout(400);
+  check("a failed press says why in the approved words",
+    await page.$eval("#upd-agents .upd-agent-said", e => e.textContent.trim()).catch(() => ""), W.failed);
+
+  answer = { ok: true };
+  await page.click('#upd-agents button[data-box="box-a"]');
+  await page.waitForTimeout(300);
+  check("a restart that took is told in the approved toast",
+    await page.$eval("#toast", e => e.textContent.trim()).catch(() => ""), W.done);
+  check("three presses, three requests, each for box-a alone", pressed.length, 3);
+  await page.unroute("**/api/update-agents/boxes/*/restart");
+  await page.unroute("**/api/update-agents/boxes");
+}
+
 // --- and nothing threw ------------------------------------------------------------------------------
 sayBlips();
 check("the pane raised no page errors", errors, []);

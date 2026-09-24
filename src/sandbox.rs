@@ -950,6 +950,45 @@ pub(crate) fn agent_attach_argv(
     command: &str,
     wait_for_setup: bool,
 ) -> Vec<String> {
+    let Some(place) = place_of(name) else {
+        return refusal_argv(name);
+    };
+    let shell = agent_session_shell(
+        &place,
+        name,
+        runtime,
+        tmux_name,
+        command,
+        wait_for_setup,
+        OnceCreated::Attach,
+    );
+    place.interactive_argv(&shell)
+}
+
+/// What [`agent_session_shell`] does once the agent's session exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnceCreated {
+    /// Become a tmux client of it — the cockpit's terminal, which is the attach every reconnect makes.
+    Attach,
+    /// Leave it running with nobody attached, and exit with whether it is there
+    /// ([`reopen_agent_session`], SKEIN-1071). There is no terminal on the other end of this one,
+    /// so a missing CLI exits with its message instead of handing an interactive shell to nobody.
+    Leave,
+}
+
+/// The shell that finds or creates a box's agent session — **one spelling for the attach and for
+/// the reopen**, so a session the Update pane reopens is started exactly as a reconnect would start
+/// it: the same resume command, the same instruction refresh, the same observer and the same tmux
+/// settings. Two copies of this would be two places for "how an agent session starts" to disagree.
+fn agent_session_shell(
+    place: &crate::place::Place,
+    name: &str,
+    runtime: &RuntimeAdapter,
+    tmux_name: &str,
+    command: &str,
+    wait_for_setup: bool,
+    then: OnceCreated,
+) -> String {
     let agent = runtime.info.id;
     let executable = runtime.info.executable;
     let setup_wait = if wait_for_setup {
@@ -960,26 +999,32 @@ pub(crate) fn agent_attach_argv(
     let instruction = agent_instruction_setup(runtime);
     let command = crate::runtime::for_box(command, name);
     let command = guarded_agent_command(agent, &command);
-    let Some(place) = place_of(name) else {
-        return refusal_argv(name);
-    };
     // Every `tmux` below is this box's server, socket-qualified because the sandbox is shared: session
     // names are identical across boxes, so without the socket two boxes would both find a live
     // `skein-agent` on the sandbox's one server and attach to each other's.
     let tmux = place.tmux();
     let observer = pane_observer_start(tmux_name, place.tmux_sock());
     let configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} "));
-    let shell = format!(
-        "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
+    let (no_cli, last) = match then {
+        OnceCreated::Attach => (
+            "exec bash -li".to_string(),
+            format!("exec {tmux} -u attach-session -t {tmux_name}"),
+        ),
+        OnceCreated::Leave => (
+            "exit 1".to_string(),
+            format!("{tmux} has-session -t {tmux_name}"),
+        ),
+    };
+    format!(
+        "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; {no_cli}; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          {setup}; \
          created=0; if ! {tmux} has-session -t {tmux_name} 2>/dev/null; then {instruction}; {tmux} new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then {tmux} set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {observer} \
-         {configure}exec {tmux} -u attach-session -t {tmux_name}",
+         {configure}{last}",
         setup = runtime.interactive_setup,
-    );
-    place.interactive_argv(&shell)
+    )
 }
 
 /// Stop one runtime's persistent tmux process without touching the sandbox or another provider's
@@ -1032,6 +1077,47 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
             detail.trim().to_string()
         })
     }
+}
+
+/// Restart a box's agent onto whatever CLI the sandbox now has, and **reopen its conversation
+/// without sending it anything** — the Update pane's per-box press (SKEIN-1071).
+///
+/// Two steps, and the second is the whole reason this exists beside [`restart_agent_session`]:
+///
+/// 1. [`restart_agent_session`] ends the agent's tmux session. That alone leaves the box with no
+///    agent until somebody opens its terminal, which is what the board's own restart relies on — it
+///    reconnects the terminal right after. The Update pane has no terminal to reconnect.
+/// 2. The session is created again, detached, by the same shell a reconnect runs
+///    ([`agent_session_shell`]) with the runtime's `interactive_resume` — `claude --continue`,
+///    `codex resume --last` — which reopens the conversation and waits at its prompt.
+///
+/// **Never [`resume_box`].** That runs the runtime's `headless_resume`, `--print` with a prompt
+/// ("Yes, please proceed." when none is given): it SENDS a turn. The offer this backs says
+/// "nothing is sent to it", and a restart that started a turn would make it false on a box the
+/// person was told is waiting for them.
+///
+/// **What the first step stops**, measured with tmux 3.6 on 2026-09-24: `kill-session` hangs up
+/// the pane, so the agent and whatever it runs in the foreground or as an ordinary background job
+/// stop with it. A process that ignores SIGHUP (`nohup`, a `trap '' HUP`) or left the session
+/// (`setsid`) keeps running, as [`restart_agent_session`]'s own note says of what the agent "left
+/// in the background".
+///
+/// One box per call, by its signature. The caller re-checks the turn state; this does not know it.
+pub fn reopen_agent_session(name: &str) -> Result<(), String> {
+    restart_agent_session(name, None)?;
+    let runtime = resolve_runtime(&agent_for_box(name));
+    let session = agent_session_name(name, runtime.info.id);
+    let place = place_of(name).ok_or_else(|| no_place(name))?;
+    let shell = agent_session_shell(
+        &place,
+        name,
+        runtime,
+        &session,
+        runtime.interactive_resume,
+        false,
+        OnceCreated::Leave,
+    );
+    place.exec(&shell, Duration::from_secs(60)).map(|_| ())
 }
 
 /// The shell command that (re)starts an agent, resuming prior history when the runtime supports it —
@@ -2332,6 +2418,95 @@ mod tests {
                  {said}"
             );
         }
+    }
+
+    /// **The Update pane's restart reopens the conversation and sends it nothing** (SKEIN-1071).
+    ///
+    /// Every crossing [`reopen_agent_session`] makes is recorded through the seam, which is the one
+    /// place a fleet-scope command becomes a process, so nothing it runs can go unseen here.
+    ///
+    /// **What makes it fail:** restarting through [`resume_box`] — the path the design first named —
+    /// which runs the runtime's `headless_resume`, `--print` with "Yes, please proceed.": the
+    /// `--print` assertion fails. Dropping the second step, so the session is only killed, fails the
+    /// `new-session` one; creating it with `interactive_start` instead of `interactive_resume`
+    /// fails the `--continue` one; and ordering the kill after the create fails the order check.
+    #[test]
+    fn reopening_an_agent_session_kills_it_then_resumes_it_without_a_prompt() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let root = home.join("fleet");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        save_config(&Config {
+            fleet_sandbox: "skein-fleet".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        fs::create_dir_all(root.join("thing-x")).unwrap();
+        let _listening =
+            std::os::unix::net::UnixListener::bind(root.join("thing-x").join("session.sock"))
+                .unwrap();
+        placed("thing-x");
+        env::remove_var("SKEIN_RESUME_CMD");
+        assert_eq!(
+            box_liveness("thing-x"),
+            Some(Liveness::Running),
+            "the fixture box does not read as running, so the restart would refuse before crossing"
+        );
+
+        let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let outcome = {
+            let ran = ran.clone();
+            let _stood_in = crate::place::seam::install(Box::new(move |argv: &[String]| {
+                ran.lock().unwrap().push(argv.join(" "));
+                Some(vec!["true".into()])
+            }));
+            reopen_agent_session("thing-x")
+        };
+        forget_place("thing-x");
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+        outcome.expect("the stand-in answered both crossings");
+        let ran = ran.lock().unwrap().clone();
+
+        // First, because it is the promise the offer makes: "nothing is sent to it".
+        for said in &ran {
+            assert!(
+                !said.contains("--print") && !said.contains("Yes, please proceed."),
+                "a prompt was sent to the agent — this is the headless resume, which starts a \
+                 turn: {said}"
+            );
+            assert!(
+                !said.contains("attach-session"),
+                "nothing attaches here; the session is left for the terminal to find: {said}"
+            );
+        }
+        let killed = ran
+            .iter()
+            .position(|a| a.contains("kill-session -t skein-agent"));
+        let created = ran
+            .iter()
+            .position(|a| a.contains("new-session -d -s skein-agent"));
+        assert!(
+            killed.is_some(),
+            "the agent's session was never ended: {ran:#?}"
+        );
+        assert!(
+            created.is_some(),
+            "the session was ended and never created again, so the box has no agent until \
+             somebody opens its terminal: {ran:#?}"
+        );
+        assert!(
+            killed < created,
+            "the session has to be ended BEFORE it is created, or the create finds the old one \
+             alive and does nothing: {ran:#?}"
+        );
+        let create = &ran[created.unwrap()];
+        assert!(
+            create.contains("--continue"),
+            "the conversation is not reopened — the create does not carry the resume command: \
+             {create}"
+        );
     }
 
     #[test]
