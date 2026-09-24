@@ -9,25 +9,26 @@ which mark archived branches, not versions. So there is no version history to wr
 is instead: what skein does today, under **Unreleased**, and how it got there, under **Development
 history**.
 
-Every entry below traces to at least one commit. Nothing here was written from memory.
+Every entry below traces to at least one commit, though most predate this repository's public
+history and are not cited by sha. Nothing here was written from memory.
 
 **Every count below names the commit it was taken at**, so it reproduces for good rather than
 until the next push. The first version of this block did not, and by the time anyone re-ran it
 every figure in it was wrong.
 
 ```sh
-git log --format='%s' 02ad7cfb | wc -l                          # 878 commits
+git log --format='%s' a8cbac3 | wc -l                            # 858 commits
 git log --reverse --format='%ad' --date=short | head -1          # 2026-06-28
-git log -1 --format='%ad' --date=short 02ad7cfb                  # 2026-09-07
-git log --format='%s' 02ad7cfb | grep -oE '^[a-z]+' | sort | uniq -c | sort -rn
+git log -1 --format='%ad' --date=short a8cbac3                   # 2026-09-07
+git log --format='%s' a8cbac3 | grep -oE '^[a-z]+' | sort | uniq -c | sort -rn
 ```
 
-`fix` 370, `feat` 274, `docs` 117, `refactor` 45, `test` 44, `perf` 9, `chore` 7, `build` 4, `ci` 2,
-`style` 2, and one each of `wip` and `tools`, which are the two that are not conventional types at
-all. No commit in this history is marked `!` and no body carries a `BREAKING CHANGE` footer
-(`git log --format='%B' 02ad7cfb | grep -c '^BREAKING CHANGE'` → 0), so nothing below is a declared
-break — the removals are recorded as removals because they removed a capability, not because a
-version boundary was crossed.
+`fix` 366, `feat` 271, `docs` 114, `refactor` 45, `test` 35, `perf` 9, `chore` 7, `build` 3,
+`style` 2, `ci` 2, and one each of `wip` and `tools`, which are the two that are not conventional
+types at all. No commit in this history is marked `!` and no body carries a `BREAKING CHANGE`
+footer (`git log --format='%B' a8cbac3 | grep -c '^BREAKING CHANGE'` → 0), so nothing below is a
+declared break — the removals are recorded as removals because they removed a capability, not
+because a version boundary was crossed.
 
 The anchor in that last command is not decoration. Unanchored it returns 1, and the one match is
 *this paragraph*, quoted inside the commit body that added it: a falsifier that can be satisfied by
@@ -164,16 +165,15 @@ The state of the tree at `2026-09-07`.
 
 ## Development history
 
-**These changes predate this repository's public history, so their commits are not in this
-repository.** `git cat-file -e <sha>^{commit}` resolves for 3 of the 51 shas this section cited —
-`5370a435`, `7a76b911`, `9520f864` — and fails for the other 48; those entries keep their text
-below, with the citation removed.
+**The commits these entries were written from predate this repository's public history, so they
+are not cited here.** Each entry keeps its text; the few that a commit in this history backs still
+cite it.
 
 Counts per month reproduce with
-`git log --format='%ad' --date=format:'%Y-%m' 02ad7cfb | sort | uniq -c`,
+`git log --format='%ad' --date=format:'%Y-%m' a8cbac3 | sort | uniq -c`,
 and each is taken at that commit for the reason the block at the top of this file gives.
 
-### 2026-09 — 89 commits: going public, and the last of the host
+### 2026-09 — 69 commits: going public, and the last of the host
 
 The work of making the repository readable by a stranger, and the last few things that still
 assumed skein ran on the host.
@@ -188,11 +188,10 @@ assumed skein ran on the host.
 - One writer for every credential, and a type that will not talk.
 - Four minutes of every box creation, spent on nothing, recovered; a box clones the branch it needs
   and can still fetch the rest.
-- ~~CI installs chromium, so the six browser suites that prove the page finally run.~~ **Not on this
-  branch.** That commit is the only one of this file's commits that `git merge-base --is-ancestor
-  <sha> master` rejects; it is on the unmerged `ci-tier` branch, and `grep -niE
-  'chromium|playwright|npm' .github/workflows/ci.yml` finds nothing. So the six browser suites are
-  still silently skipped on every green CI run, which is the state this entry claimed to have ended.
+- CI installs chromium, so the six browser suites that prove the page finally run — true again,
+  confirmed with `grep -niE 'chromium|playwright' .github/workflows/ci.yml`. The commit this entry
+  first cited for it never merged under that hash and does not resolve here either, like the rest of
+  this section; the capability landed through separate, later work.
 
 ### 2026-08 — 645 commits: the shared sandbox, the review queue, and the warden
 
