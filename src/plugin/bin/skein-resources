@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+# The box plugin's hooks and its monitor: what skein asks of this box, put in front of the agent.
+#
+# skein-server writes `$SKEIN_STATE/signals/resources.json` once a minute (`src/resource_signal.rs`).
+# That directory is bound read-only into the box, so every word printed here is one skein wrote,
+# with integers filled in; nothing in this script composes a sentence. It only decides WHEN:
+#
+#   session-start   SessionStart: each standing ask's start line, as context. Counts as shown.
+#   pre-tool-use    PreToolUse on Bash|Task|Agent: hold exactly one call per crossing this session
+#                   has not been shown, with that ask's words. Every later call runs.
+#   prompt          UserPromptSubmit: each standing ask's reminder, as context.
+#   monitor         The `resources` monitor: one line when a band changes, either way.
+#
+# It never stops, kills or slows anything, and a hold never repeats: a deny that repeated would trap
+# an agent that cannot comply, and the kernel's limits hold whether or not the agent acts.
+#
+# Fail-open throughout. No file, a file skein has not refreshed in five minutes, a session with no
+# id, or a record that cannot be written: the command runs. A hold that could not be recorded
+# would be a hold on every call, which is the trap above.
+#
+# Python 3 standard library only, as `server-doorway.py` is: it runs in every box and installs
+# nothing.
+
+import json
+import os
+import sys
+import time
+from datetime import datetime
+
+# The only kinds a hold is ever for. There is no `cpu`: CPU is fair-shared on purpose, and a busy
+# box is not asked anything (`ASK_KINDS` in `src/resource_signal.rs`).
+KINDS = ("disk", "memory", "pids")
+
+# skein writes every 60 s. Five missed writes means skein is not looking, and an ask it is not
+# looking at is not one to hold anybody for.
+STALE_AFTER = 300
+
+# The monitor's period.
+EVERY = 30
+
+
+def signals():
+    """The file, or None when there is none to believe."""
+    state = os.environ.get("SKEIN_STATE", "")
+    if not state:
+        return None
+    try:
+        with open(os.path.join(state, "signals", "resources.json"), encoding="utf-8") as f:
+            s = json.load(f)
+        written = datetime.fromisoformat(s["at"].replace("Z", "+00:00")).timestamp()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if time.time() - written > STALE_AFTER:
+        return None
+    return s
+
+
+def asks(s):
+    """Standing asks of a kind a hold may be for, each with its crossing id."""
+    if not s:
+        return []
+    return [
+        a
+        for a in s.get("asks") or []
+        if isinstance(a, dict) and a.get("kind") in KINDS and a.get("crossing_id")
+    ]
+
+
+def hook_input():
+    try:
+        return json.load(sys.stdin)
+    except ValueError:
+        return {}
+
+
+def shown_file(session):
+    """Where this session records the crossings it has been shown. Under the box's own home, in
+    `~/.local/state`, which the launcher binds back from the box's home so it survives a restart."""
+    safe = "".join(c for c in str(session) if c.isalnum() or c in "-_")
+    if not safe:
+        return None
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(base, "skein", "shown", safe)
+
+
+def shown(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {line.strip() for line in f if line.strip()}
+    except OSError:
+        return set()
+
+
+def record(path, ids):
+    """Record ids as shown. False when they could not be, and then nothing may be held."""
+    if not path:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            for i in ids:
+                f.write(i + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def context(event, lines):
+    if lines:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": event,
+                        "additionalContext": "\n".join(lines),
+                    }
+                }
+            )
+        )
+
+
+def session_start():
+    path = shown_file(hook_input().get("session_id", ""))
+    told = [a for a in asks(signals()) if a.get("start")]
+    # Shown here counts as shown (owner, SKEIN-1055): a session is not held for an ask it was
+    # just told about. Only what was actually printed is recorded.
+    if told and record(path, [a["crossing_id"] for a in told]):
+        context("SessionStart", [a["start"] for a in told])
+
+
+def pre_tool_use():
+    path = shown_file(hook_input().get("session_id", ""))
+    if not path:
+        return
+    seen = shown(path)
+    unshown = [a for a in asks(signals()) if a["crossing_id"] not in seen and a.get("hold")]
+    if not unshown or not record(path, [a["crossing_id"] for a in unshown]):
+        return
+    # Every unshown ask in one held call, because each text ends "the next will run" and must be
+    # true when it says so.
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "\n\n".join(a["hold"] for a in unshown),
+                }
+            }
+        )
+    )
+
+
+def prompt():
+    hook_input()
+    context("UserPromptSubmit", [a["remind"] for a in asks(signals()) if a.get("remind")])
+
+
+def monitor_pass(before, s):
+    """One look. `before` is {kind: crossing_id} from the last look, or None on the first.
+    Returns the new state and the lines to print."""
+    if s is None:
+        # Nothing to believe: no band has moved.
+        return before, []
+    now = {a["kind"]: a["crossing_id"] for a in asks(s)}
+    if before is None:
+        # The first look says nothing; SessionStart has already told the session what stands.
+        return now, []
+    lines = []
+    by_kind = {a["kind"]: a for a in asks(s)}
+    cleared = s.get("cleared") or {}
+    for kind in KINDS:
+        if kind in now and now[kind] != before.get(kind):
+            line = by_kind[kind].get("enter")
+        elif kind in before and kind not in now:
+            line = cleared.get(kind)
+        else:
+            line = None
+        if isinstance(line, str) and line:
+            lines.append(line)
+    return now, lines
+
+
+def monitor(args):
+    every, passes, keep = EVERY, None, None
+    while args:
+        flag, value, args = args[0], args[1] if len(args) > 1 else "", args[2:]
+        if flag == "--every":
+            every = float(value)
+        elif flag == "--passes":
+            passes = int(value)
+        elif flag == "--state":
+            # Tests only: keep the last look in a file, so one pass at a time can be driven.
+            keep = value
+    before = None
+    if keep:
+        try:
+            with open(keep, encoding="utf-8") as f:
+                before = json.load(f)
+        except (OSError, ValueError):
+            before = None
+    n = 0
+    while passes is None or n < passes:
+        before, lines = monitor_pass(before, signals())
+        for line in lines:
+            print(line, flush=True)
+        n += 1
+        if passes is None or n < passes:
+            time.sleep(every)
+    if keep and before is not None:
+        with open(keep, "w", encoding="utf-8") as f:
+            json.dump(before, f)
+
+
+def main(argv):
+    what = argv[1] if len(argv) > 1 else ""
+    try:
+        if what == "session-start":
+            session_start()
+        elif what == "pre-tool-use":
+            pre_tool_use()
+        elif what == "prompt":
+            prompt()
+        elif what == "monitor":
+            monitor(argv[2:])
+    except Exception:  # noqa: BLE001 - a hook that throws must never be what stops an agent
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

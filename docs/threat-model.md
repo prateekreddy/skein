@@ -34,6 +34,7 @@ says, and the rows below are mostly about files for that reason.
 | its own checkout | read-write | bwrap test `a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses` |
 | its own repo's store (memory, mailbox, skills) | read-write | same test |
 | its own state directory, including the git token the host minted for it | read-only; its conversation is writable through a separate bind at `$HOME` | same test |
+| its own resource signal file, `signals/resources.json` in its state directory, which says what skein asks of it | read-only; the box plugin's hooks read it and nothing in the box can clear or invent an ask | bwrap test `a_box_cannot_write_its_own_signal_file`, with the workshop box as the control that can |
 | another box's checkout, conversation or git tokens | **no** | same test, and `src/box-session.sh:1785`, `src/box-session.sh:1893` |
 | another repo's store, or any other host path the sandbox mounts | **no** | same test; the per-mount cover is `src/box-session.sh:1942` |
 | the fleet's credentials on the volume: `credentials/`, `github-pats/`, `api-token`, the warden's secret | **no** | bwrap test `a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` |

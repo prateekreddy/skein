@@ -56,6 +56,7 @@ pub mod prwork;
 pub mod queue;
 pub mod registry;
 pub mod repos;
+pub mod resource_signal;
 pub mod review;
 pub mod reviewbox;
 pub mod runtime;

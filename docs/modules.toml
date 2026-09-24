@@ -308,7 +308,10 @@ depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "flee
 # content: `UsageReport` has no field that can carry a message body, which is the property
 # `only_counts_leave_the_transcript` exists to hold, and serving it over HTTP is exactly the
 # occasion that property was written for.
-depends_on = ["act", "ai", "announce", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
+#
+# `resource_signal` for one spawn: the loop that writes each box's signal file once a minute, for
+# the reason the disk announcement runs here rather than behind a cockpit connection (SKEIN-1054).
+depends_on = ["act", "ai", "announce", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -623,6 +626,16 @@ depends_on = ["ai", "codeowners", "config", "contracts", "fleet", "owed", "prq",
 # root and would pass. The name has to be refused before it is ever joined to a path.
 depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 
+[current.resource_signal]
+# Each box's read-only resource signal file (SKEIN-1054). A leaf: nothing in `src/` depends on it,
+# only the server's spawn, so it cannot pull anything toward the knot.
+#
+# `announce` for `cover`, so the boxes this file asks to clear disk are the boxes the fleet-disk
+# note goes to, computed once. `health` for the disk demand and `gib`, so figures print as the
+# health row prints them. `fleet` for the box list's root, each box's cgroup path, its disk
+# allowance and the disk walk's figures. `util` to write the file atomically.
+depends_on = ["announce", "fleet", "health", "util"]
+
 [current.runtime]
 depends_on = ["repos", "util"]
 
@@ -671,7 +684,7 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # Nothing, and that is the claim rather than an accident — but the claim this row makes is a
 # different one from `assets`, `knock` or `doorway` above, and it is worth saying which.
 #
-# **This whole unit is test code.** `src/lib.rs:74` is `mod testutil;` under the `#[cfg(test)]` on
+# **This whole unit is test code.** `src/lib.rs:75` is `mod testutil;` under the `#[cfg(test)]` on
 # the line above it, so
 # not one byte of `src/testutil.rs` is in a release build. The other empty rows say "this module
 # reaches nothing"; this one says "this module is not in the architecture", which is the same rule
@@ -689,7 +702,7 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # `#[cfg(test)] mod tests` block.
 #
 # Empty rather than deleted, so the argument stays where the module is and the failure stays loud:
-# take the `#[cfg(test)]` off `src/lib.rs:74`'s declaration and `place` and `registry` come back,
+# take the `#[cfg(test)]` off `src/lib.rs:75`'s declaration and `place` and `registry` come back,
 # with nothing here allowing them.
 depends_on = []
 

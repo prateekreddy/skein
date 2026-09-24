@@ -43,6 +43,7 @@ mod network;
 mod path;
 mod private;
 mod requests;
+mod signals;
 
 use harness::*;
 use network::*;
