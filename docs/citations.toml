@@ -189,7 +189,7 @@ subject = "refactor: lib.rs declares modules and nothing else"
 date = "2026-08-20T14:06:41Z"
 
 [citations."abc1234"]
-external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1405 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1759 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1405 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1832 (SELF_CHECK_DATED's own worked example). SKEIN-708."
 sites = ["docs/line-cites.toml", "src/prwork/perform.rs", "tools/prose-check.py"]
 
 [citations."abc6bbb"]

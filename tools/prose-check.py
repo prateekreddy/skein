@@ -149,6 +149,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -535,12 +536,53 @@ def prose_sources():
 
 
 # Vendored, generated, or not text at all: `target` and `.target` are cargo's, `node_modules` is
-# playwright and its dependencies, and `.git` is an object store.
+# playwright and its dependencies, and `.git` is an object store. Only used by the FALLBACK walk
+# below, now that `tracked_files()` answers this question directly — see there for why a name-list
+# like this one can never be the whole answer.
 SHELL_PROSE_SKIP = {".git", "target", ".target", "node_modules"}
 
 
+def tracked_files(root=None):
+    """Every path `git ls-files` reports under `root` (default `ROOT`), or `None` if git could not
+    answer.
+
+    Tracked is never gitignored and gitignored is never tracked, so this is "the tree, minus
+    whatever an install or a scaffold left lying around" without hand-listing a single directory
+    name — the shape `residue-check.py`'s `tracked()` already settled, including keeping `None`
+    ("git could not say") apart from `[]` ("git said this tree tracks nothing"): a caller that
+    mistakes the second for the first scans zero files and calls the tree clean.
+
+    THIS IS SKEIN-1146. `shell_files()` and `tree_files()` used to walk `os.walk(ROOT)` filtered
+    only by a name-list (`SHELL_PROSE_SKIP`, `NOT_OURS`), and `.gitignore` is not a name-list —
+    `/skein/` is one entry (`.gitignore:28`) that covers a box's entire installed copy of this
+    repository's own store scripts. A checkout that is ALSO a skein box has that directory on disk,
+    the walk read `skein/bin/box-status.sh` as prose the same as the real `src/probe/box-status.sh`,
+    and after SKEIN-1062 renamed a symbol the installed copy still named the old one — so the gate
+    went red in that one checkout, over a file this repository does not own, while a fresh
+    `git worktree` of the identical commit had no `/skein/` and passed. Untracked-but-not-ignored
+    files stop being read the moment this lands — the same trade `residue-check.py` already made,
+    and named in `CONTRIBUTING.md`: "a new file is invisible to it until staged."
+
+    `root` is injectable, the same way `bad_citations`' `index` and `misqualified`'s `code` are,
+    so `self_check` can point this at a scratch git repository of its own instead of `ROOT` — the
+    one call in this file that has to touch a real `.git` to be tested at all, since the defect it
+    guards against is a property of git and `.gitignore`, not of any string this file could hold.
+    """
+    root = ROOT if root is None else root
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "ls-files", "-z"],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [p for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
+
+
 def shell_files():
-    """Every `.sh` file in the tree, as (relative label, absolute path).
+    """Every `.sh` file this repository tracks, as (relative label, absolute path).
 
     This read `src/store/` alone until SKEIN-561, and the directory was never the reason — the
     reason was that the store's scripts are installed into a box and read there. So are the eleven
@@ -561,10 +603,18 @@ def shell_files():
     what a shell file should do, since it names no Rust module paths. Their spellings are not
     written here for the reason the last paragraph of `prose_sources` gives.
 
-    The walk and `git ls-files '*.sh'` agree at twenty-four, so nothing is missed here for being
-    untracked and nothing counted for being generated. `main` compares this count with what came
-    out of `prose_sources` and refuses the gate when they differ.
+    `tracked_files()` first — `git ls-files '*.sh'` reads exactly twenty-four, by construction
+    rather than by coincidence (see `tracked_files` for why a walk cannot make that same claim).
+    `main` compares this count with what came out of `prose_sources` and refuses the gate when
+    they differ. Falls back to the old `os.walk(ROOT)`, ignored paths and all, only when git could
+    not answer — the same degraded path `residue-check.py` takes for the same reason.
     """
+    listed = tracked_files()
+    if listed is not None:
+        for rel in sorted(listed):
+            if rel.endswith(".sh"):
+                yield rel, os.path.join(ROOT, rel)
+        return
     for base, dirs, files in os.walk(ROOT):
         dirs[:] = [d for d in dirs if d not in SHELL_PROSE_SKIP]
         for f in sorted(files):
@@ -734,8 +784,20 @@ def prose_source_count(suffix):
     a number nobody is allowed to change. The failure this guards against is the WALK being
     narrowed, re-rooted or switched off while the constant stays put, and against that these two
     sides now genuinely disagree.
+
+    THE `.sh` HALF NOW SHARES `tracked_files()` WITH `shell_files()` (SKEIN-1146), the same way it
+    used to share `SHELL_PROSE_SKIP` with a second, independently-written `os.walk(ROOT)` — one
+    call here, one there, each free to be narrowed without moving the other. `tracked_files()`
+    replaces the name-list `os.walk(ROOT)` needed and could never finish (`.gitignore` grows a line
+    at a time; a walk that skips by name has to grow with it, or it reads an installed `/skein/` the
+    same as this repository's own scripts, which is exactly what happened). Sabotage the count above
+    on its own — narrow its filter, or point it back at the old walk over one directory — and it
+    still disagrees with `shell_files()`, because the two sides remain two call sites.
     """
     if suffix == ".sh":
+        listed = tracked_files()
+        if listed is not None:
+            return sum(1 for p in listed if p.endswith(".sh"))
         n = 0
         for _, dirs, files in os.walk(ROOT):
             dirs[:] = [d for d in dirs if d not in SHELL_PROSE_SKIP]
@@ -1197,7 +1259,18 @@ CITATION_SUFFIXES = (".rs", ".mjs", ".js", ".py", ".sh", ".toml", ".md", ".html"
 
 
 def tree_files():
-    """Every repo-relative file path, for resolving a citation against."""
+    """Every repo-relative file path, for resolving a citation against.
+
+    `tracked_files()` first, for the same reason `shell_files()` reads it (SKEIN-1146): `NOT_OURS`
+    is a name-list the way `SHELL_PROSE_SKIP` was, and a checkout that is also a skein box has an
+    ignored `/skein/` this list never named. Left unfixed, a citation naming a real file by its bare
+    name — `box-status.sh:26`, say — would find it a SECOND time under `/skein/` and `resolve()`
+    would call the pair ambiguous, over a file this repository does not own. Falls back to the old
+    walk, `NOT_OURS` and all, only when git could not answer.
+    """
+    listed = tracked_files()
+    if listed is not None:
+        return list(listed)
     out = []
     for base, dirs, files in os.walk(ROOT):
         dirs[:] = [d for d in dirs if d not in NOT_OURS]
@@ -2048,6 +2121,45 @@ def self_check():
             "clean (SKEIN-561)"
             % ("derives no files at all" if not labels else "reaches nothing outside src/store/")
         )
+    # SKEIN-1146: an ignored directory must not be read as this repository's own prose. Built in a
+    # REAL scratch git repository rather than fixture strings, because the defect is a property of
+    # git and `.gitignore` that no in-memory tree can stand in for — and NOT under `ROOT`, since an
+    # ignored path under `ROOT` is invisible to every git command run here, which is exactly the
+    # property a broken fix would fail to have.
+    with tempfile.TemporaryDirectory(prefix="prose-check-self-check-") as scratch:
+
+        def run(*args):
+            subprocess.run(["git", "-C", scratch] + list(args), check=True, capture_output=True)
+
+        run("init", "-q")
+        run("config", "user.email", "prose-check-self-check@example.invalid")
+        run("config", "user.name", "prose-check self_check")
+        os.makedirs(os.path.join(scratch, "skein", "bin"))
+        with open(os.path.join(scratch, ".gitignore"), "w", encoding="utf-8") as f:
+            f.write("/skein/\n")
+        stale = "a_fixture_symbol_" + "the_tree_does_not_have"
+        with open(os.path.join(scratch, "skein", "bin", "box-status.sh"), "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n# " + stale + "\n")
+        run("add", ".gitignore")
+        run("commit", "-q", "-m", "gitignore /skein/")
+        ignored = tracked_files(scratch)
+        if ignored is None or any(p.startswith("skein/") for p in ignored):
+            raise SystemExit(
+                "prose-check: tracked_files() reports a path under a directory `.gitignore` "
+                "names — a checkout that is also a skein box would have its installed copy of "
+                "the store scripts read as this repository's own prose again (SKEIN-1146)\n"
+                "  got %r" % ignored
+            )
+        run("add", "-f", "skein/bin/box-status.sh")
+        run("commit", "-q", "-m", "track the installed copy")
+        tracked = tracked_files(scratch)
+        if tracked is None or "skein/bin/box-status.sh" not in tracked:
+            raise SystemExit(
+                "prose-check: tracked_files() does not report a file once it is tracked, even "
+                "though `.gitignore` still names its directory — `git ls-files` itself would not "
+                "do that, so the result is being filtered on the way out (SKEIN-1146)\n"
+                "  got %r" % tracked
+            )
 
 
 def main():
