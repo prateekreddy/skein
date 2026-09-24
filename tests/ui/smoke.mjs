@@ -577,6 +577,45 @@ await check("the pane doesn't pretend Save applies to repo cards", async () => {
   await page.click('.set-navi[data-pane="repos"]');
   await settle(250);
 });
+await check("an env note names only the Boxes fields SKEIN_* really overrides (SKEIN-1141)", async () => {
+  // Boxes is the only pane with a real server-side override, and it names exactly the four fields
+  // `ai::ai_enabled`, `ai::summaries_enabled`, `runtime::box_plugin_on` and `review::asking::review_model`
+  // let an env var win over. The blanket footer used to say this of every pane, true or not; now a
+  // qualifying field carries its own note and nothing else claims one.
+  await page.click('.set-navi[data-pane="boxes"]');
+  await settle(300);
+  const boxesHint = await text("#set-hint");
+  if (boxesHint !== "") throw new Error(`Boxes has no pane-level override to announce, got "${boxesHint}"`);
+  const notes = await page.$$eval('.set-pane[data-pane="boxes"] .set-envnote', els => els.map(e => e.textContent.trim()));
+  const want = [
+    "$SKEIN_AI overrides this",
+    "$SKEIN_REVIEW_AI overrides this",
+    "$SKEIN_BOX_PLUGIN overrides this",
+    "$SKEIN_REVIEW_MODEL overrides this",
+  ];
+  for (const w of want) if (!notes.includes(w)) throw new Error(`missing env note "${w}" on Boxes — got ${JSON.stringify(notes)}`);
+  if (notes.length !== want.length)
+    throw new Error(`Boxes shows ${notes.length} env notes, expected exactly ${want.length}: ${JSON.stringify(notes)}`);
+  // Each note has to actually be seen beside its field, not merely sit in the DOM.
+  for (const id of ["set-ai", "set-prai", "set-boxplugin", "set-review-model"]) {
+    const field = await mustSee(`#${id}`, `the ${id} control`);
+    const note = field.locator("xpath=ancestor::label[1]").locator(".set-envnote");
+    if (!(await note.count())) throw new Error(`#${id} has no .set-envnote in its own row`);
+  }
+  // A pane with no overridden field — Fleet has none — shows no hint and no env note at all.
+  await page.click('.set-navi[data-pane="fleet"]');
+  await settle(300);
+  const fleetHint = await text("#set-hint");
+  if (fleetHint !== "") throw new Error(`Fleet has no field a SKEIN_* var overrides, so the footer should be empty, got "${fleetHint}"`);
+  if (await page.$('.set-pane[data-pane="fleet"] .set-envnote'))
+    throw new Error("Fleet shows an env-override note though nothing on it has one");
+  // The retired blanket line is gone from the dialog altogether, on every pane.
+  const dialogHtml = await page.locator("#settings").innerHTML();
+  if (/env vars override these/.test(dialogHtml))
+    throw new Error('the retired "$SKEIN_* env vars override these" footer is still in the settings dialog');
+  await page.click('.set-navi[data-pane="repos"]');
+  await settle(250);
+});
 await check("a gateway that isn't a URL is refused, not stored", async () => {
   await page.click('.set-navi[data-pane="tracking"]');
   await settle(300);

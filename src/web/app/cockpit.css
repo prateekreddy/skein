@@ -1181,6 +1181,11 @@
   .set-state.warn { border-color:color-mix(in srgb,var(--error) 50%,var(--line)); color:var(--text); }
   .set-opt { font-size:10.5px; color:var(--faint); border:1px solid var(--line); border-radius:999px;
              padding:1px 6px; margin-left:6px; vertical-align:1px; }
+  /* Per-field env-override note (SKEIN-1141): only a field a `$SKEIN_*` var really overrides gets
+     one, in its own words, beside that field — replacing the blanket footer that used to promise
+     this of every pane whether or not it was true. */
+  .set-envnote { font-size:10.5px; color:var(--faint); margin-left:8px; font-weight:400; }
+  .set-envnote code { font-family:var(--mono); }
   .set-creds { display:flex; flex-direction:column; gap:7px; margin:8px 0 4px; }
   .set-cred { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 11px;
               background:var(--card); border:1px solid var(--line); border-radius:8px; }
