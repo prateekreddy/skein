@@ -952,15 +952,15 @@ const TURN_STARTED = new Set(["working", "compacting", "needs-input", "error", "
 // A refusal in any other state gets a plain reason in the Failed wording (the owner, 2026-09-24):
 // the agent has ended, or skein has no recent reading to tell waiting from anything else.
 const AGENT_NOT_RUNNING = new Set(["ended"]);
-const AGENT_NO_READING = new Set(["stale", "live", ""]);
+const AGENT_NO_READING = new Set(["stale", "live", "idle", "unknown", ""]);
 
-// What a refused press says, by the state the server read at the press. `idle` and `unknown` fit
-// neither plain reason and are the owner's to word; until then they are named as the state itself.
+// What a refused press says, by the state the server read at the press. **No state word reaches the
+// page** (the owner, 2026-09-24): a state in none of the sets above — one a later probe invents — is
+// read as what it is to this pane, a state that is not a reading of the agent waiting.
 function refusalText(box, state, now) {
   if (TURN_STARTED.has(state)) return AGENTS_WORDS.refused(box);
   if (AGENT_NOT_RUNNING.has(state)) return AGENTS_WORDS.failed(box, AGENTS_WORDS.notRunning(now));
-  if (AGENT_NO_READING.has(state)) return AGENTS_WORDS.failed(box, AGENTS_WORDS.noReading);
-  return AGENTS_WORDS.failed(box, state);
+  return AGENTS_WORDS.failed(box, AGENTS_WORDS.noReading);
 }
 
 // A row reads left to right — box, state, what happens — rather than spread across the pane the way

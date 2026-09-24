@@ -225,7 +225,10 @@ await page.waitForTimeout(600);
     ["working", W.refused], ["compacting", W.refused], ["needs-input", W.refused],
     ["error", W.refused], ["done", W.refused],
     ["ended", W.notRunning],
-    ["stale", W.noReading], ["live", W.noReading], ["", W.noReading],
+    ["stale", W.noReading], ["live", W.noReading], ["idle", W.noReading], ["unknown", W.noReading],
+    ["", W.noReading],
+    // A state no probe writes today: it must still get a sentence, never its own name.
+    ["somethingnew", W.noReading],
   ];
   const saidFor = [];
   for (const [state] of REFUSALS) {
@@ -237,6 +240,10 @@ await page.waitForTimeout(600);
     saidFor.push([state, await page.$eval("#upd-agents .upd-agent-said", e => e.textContent.trim()).catch(() => "")]);
   }
   check("each refused state gets its approved sentence", saidFor, REFUSALS);
+  // **No state word reaches the page** (the owner, 2026-09-24). What would make this fail: a
+  // fallback that names the state — `Could not restart box-a: idle` — for any state in the table.
+  check("no refused state is told as the bare 'Could not restart box-a: <word>'",
+    saidFor.filter(([, said]) => /^Could not restart box-a: [\w-]*\.?$/.test(said)).map(([state]) => state), []);
   pressed.length = 1;   // the table's presses are counted by its own check, not the tally below
   await show(claude([behind("box-a", "waiting")]));
 
