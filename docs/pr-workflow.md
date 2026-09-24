@@ -3,15 +3,15 @@
 What a workflow is, and the two facts about GitHub that decide its shape. Written before the engine,
 because one of those facts changes what the feature can honestly promise.
 
-The request, in the owner's words:
+The request it was written for, restated:
 
-> once the PR where I am an author is approved, then apply a specific tag that enabled CI and then
-> let the CI be completed, if not successful flag so that we can fix it. If successful and mergeble
-> merge automatically and delete the branch. If not mergable for say if the base branch moved, then
-> rebase without losing the approvals (github has a way to do this) and then do the same, let the CI
-> complete then once done merge it and delete branch.
+Once a pull request you wrote is approved, apply the label that enables CI and let CI finish; if it
+fails, flag it so it can be fixed. If it passes and is mergeable, merge it and delete the branch. If
+it is not mergeable because, say, the base branch moved, rebase without losing the approvals —
+GitHub was believed to have a way to do this — and then do the same: let CI finish, merge, and
+delete the branch.
 
-Everything here is **author-side** — pull requests the owner wrote. The reviewer role has no engine
+Everything here is **author-side** — pull requests you wrote. The reviewer role has no engine
 at all, and `docs/pr-review.md` proposes one over this same machinery: a second vocabulary, not a
 second engine.
 
@@ -26,7 +26,7 @@ survive a 40-minute CI run, a restarted server, a rate limit and a laptop lid cl
 step set does not: **the state is the program counter.** Crash anywhere and the next poll picks up
 from wherever GitHub actually is, because that is the only place the position was ever kept.
 
-The owner's example is five steps and no new concepts:
+That request is five steps and no new concepts:
 
 | when | do |
 |---|---|
@@ -43,7 +43,7 @@ state; that is the whole safety property.
 
 ## The finding: rebasing and approvals
 
-The owner's "github has a way to do this" is half right, and the half that is wrong is the half the
+The belief that GitHub has a way to do this is half right, and the half that is wrong is the half the
 feature would have promised.
 
 **There is a way to rebase, and it is not the REST endpoint.** `PUT /repos/{owner}/{repo}/pulls/
@@ -95,7 +95,7 @@ Two things, and the second is the one worth stating out loud.
 and the row says the repository's branch protection decides whether the approval survives. Anything
 warmer than that is a promise somebody else's setting will break.
 
-**On a repo that dismisses stale approvals, the owner's workflow cannot complete on its own, and
+**On a repo that dismisses stale approvals, the requested workflow cannot complete on its own, and
 that is correct.** Approve → base moves → rebase → *approval dismissed* → the "approved" guard is
 false → it waits for a human. It has not failed and it must not retry: it is holding unapproved code
 out of the base branch, which is what the setting exists for.
@@ -115,9 +115,9 @@ approval, the row says so in those words: *skein updated this branch, which dism
 
 ## The merge train (SKEIN-207)
 
-The owner's second ask, 2026-08-24: per repo, take the oldest fully-approved PRs first; rebase,
+The second request, 2026-08-24: per repo, take the oldest fully-approved PRs first; rebase,
 apply the CI-enabling label, and merge+delete when green — one at a time; stacks too; skip anything
-that fails and say so. Three decisions, made by the owner:
+that fails and say so. Three decisions were made:
 
 - **Serial.** One PR at a time per serial workflow. Only the front of that workflow's train is
   rebased, labeled and merged; everyone else in it waits. A parallel train re-runs CI on every
@@ -132,8 +132,8 @@ that fails and say so. Three decisions, made by the owner:
   the configuration this was designed for, cannot tell the difference. A repo running two gets back
   exactly the re-run tax serial was chosen to avoid, so if a second train is ever wanted, the
   decision to re-take is whether the front should be keyed on the repo instead.
-- **Any fully-approved PR**, not just the owner's. The train acts on the fleet's credential, so
-  every label, merge and branch deletion shows under the owner's name (`prq::host_token`'s
+- **Any fully-approved PR**, not just your own. The train acts on the fleet's credential, so
+  every label, merge and branch deletion shows under the credential holder's name (`prq::host_token`'s
   contract).
 - **Stacks: merge the approved prefix.** Not atomic — the train ships from the bottom up as far as
   approvals reach.
@@ -167,17 +167,17 @@ of unreviewed code. The anchor is on the acts where being wrong would ship somet
 
 **Derived.** There are exactly two places skein merges a pull request —
 `grep -rn '/pulls/{number}/merge' src/` gives `src/prwork/acts.rs` and `src/prq/write.rs`, one each. Until
-SKEIN-338 they were not equally safe, and the safe one was switched off on the owner's fleet.
+SKEIN-338 they were not equally safe, and the safe one was switched off on the fleet it was measured on.
 
 | | the train's merge | the merge chip in the cockpit |
 |---|---|---|
 | where | `src/prwork/acts.rs`, `merge_pr` | `src/prq/write.rs`, `merge`, reached from `src/bin/skein-server/review.rs` |
 | carries `sha` *(as it stood)* | yes, always | **no** — the body was `{"merge_method": …}` and nothing else |
 | trunk check *(as it stood)* | yes — every act goes through `workflow::instead_of_merging_off_the_trunk` | **no** — the guard was reachable from `workflow.rs` and `prwork.rs` only, and this route was in neither |
-| runs when `$SKEIN_PR_WORKFLOWS` is off | no | yes — and the switch is off on the owner's fleet |
+| runs when `$SKEIN_PR_WORKFLOWS` is off | no | yes — and the switch is off by default (`src/config.rs`, `pr_workflows: false`) |
 
 The last row is what turned two gaps into one live defect: **the unguarded merge was the only merge
-skein offered**. Reading step 7 of a stack (base `ladder/tenants-07-…`) and pressing merge would
+skein offered**. Reading step 7 of a stack and pressing merge would
 merge step 6 into step 7 and delete its branch — SKEIN-237 reproduced by hand, from the surface
 built for reading pull requests.
 
@@ -231,7 +231,7 @@ is `mergeHead` on a merge, so the press carries the sha the reader was looking a
 
 `approved` and `review-satisfied` look like the same condition and are not, and the train needs
 both. The difference is not a nicety: reading one as the other is what kept the train from claiming
-a single pull request on the owner's own fleet, silently, for the whole life of the feature.
+a single pull request on the fleet it was built for, silently, for the whole life of the feature.
 
 **`reviewDecision` does not mean "somebody approved this".** It means "this branch's review
 *requirement* is satisfied", so GitHub sets it to `APPROVED` only where branch protection requires a
@@ -239,7 +239,7 @@ review and the requirement is met, and leaves it null wherever review is social 
 approvals a pull request carries. `CHANGES_REQUESTED` still surfaces either way, because a refusal
 is not gated on a requirement, which is precisely why the field reads as though it works.
 
-Measured, on the owner's live queue — `GET /api/repos/gadget-demo/review`, 21 open PRs,
+Measured on a live queue — `GET /api/repos/<repo>/review`, 21 open PRs,
 2026-08-26:
 
 ```
@@ -247,7 +247,7 @@ review_decision:  {'': 20, 'CHANGES_REQUESTED': 1}
 my_review:        {'none': 12, 'commented': 7, 'approved': 2}
 ```
 
-`APPROVED` on none of the twenty-one, including the two the owner had approved by hand. The train
+`APPROVED` on none of the twenty-one, including the two that had been approved by hand. The train
 below asks for `approved` in `matches`, and `matches` gates before `steps` — so nothing claimed
 anything, no step ran, no `flag` fired, and even the catch-all `wait:` that exists to make silence
 audible never evaluated. Nothing to see, by construction.
@@ -290,7 +290,7 @@ and nobody has checked it against:
 
 - **Children are excluded, not queued.** `base:trunk` in `matches` is a claim rule, so every
   stacked child is off the train until its parent lands — reported by the 2026-08-26 audit as all
-  18 of the stacked PRs on the owner's fleet, which is a count worth re-running rather than
+  18 of the stacked PRs on the fleet it audited, which is a count worth re-running rather than
   quoting. The claim above describes what happens after each parent merges, one sweep at a time;
   nothing has watched a stack do it.
 - **GitHub's retarget is not a rebase.** When a parent merges, GitHub moves a child's base ref to
@@ -318,7 +318,7 @@ Four conditions and one workflow property, all answerable from the queue skein a
 | `base:trunk` | the PR's base ref is the repository's default branch |
 | `"serial": true` | on a workflow: one at a time per **(repo, workflow)** — not per repo; order this workflow's carrying PRs oldest-first (lowest number); only the first one without a stop acts. A stopped PR is passed over — that is the "skip and move ahead" |
 
-### How a skip reaches the owner
+### How a skip reaches a person
 
 A failure (`flag:`, or an action GitHub refused) writes a stop, exactly as before — and the stops
 now travel on the counts poll to a **banner row** in the cockpit (`#trainban`, a block row like the

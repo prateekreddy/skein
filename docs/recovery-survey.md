@@ -1,10 +1,10 @@
 # Where skein tells a person something went wrong — and whether they can get out
 
-A survey, not a fix. SKEIN-752 states the standard, in the owner's words:
+A survey, not a fix. SKEIN-752 set the standard it measures against:
 
-> *"leaving user with no way to recover is the worst thing that can be done right?"*
-> *"we should at least tell user, what they are supposed to do."*
-> *"and once they do that, we should detect and connect or whatever."*
+- leaving a person with no way to recover is the worst thing a surface can do;
+- so a surface must at least tell them what they are supposed to do;
+- and once they have done it, skein should detect that and recover without being asked.
 
 Three requirements, in the order they get missed:
 
@@ -66,8 +66,8 @@ do; 42 of those name a condition skein could watch and does not, and only a hand
 remaining 58 are watched because somebody built the watching — the health poll, `revStaleTimer`,
 the accept-loop retry, and the fleet-create lease.
 
-**The fourth verdict, `W`, is mine and not the brief's**, and it is the whole shape of the gap.
-The brief offers *conforms* / *names no next step* / *says what to do but cannot be watched*.
+**The fourth verdict, `W`, is this survey's and not SKEIN-752's**, and it is the whole shape of the gap.
+SKEIN-752 offers *conforms* / *names no next step* / *says what to do but cannot be watched*.
 Collapsing `W` into *conforms* would hide requirement 3 entirely — 42 surfaces name a step and then
 sit there — and collapsing it into *cannot be watched* would be false, because in every one of the
 42 the condition is named in the row and is a poll skein already knows how to write.
@@ -198,7 +198,7 @@ that `skein doctor` prints `HealthCheck::unsatisfied`'s `fix` field wherever it 
 (`src/bin/skein.rs:536`) — these four faults are the ones that bypass that machinery by being
 hand-rolled `println!`s.
 
-### The one I would fix first
+### Which to fix first
 
 **Offender 1** — and specifically its second half, the missing close code on the six refusal paths
 in `src/bin/skein-server.rs`. Reason: it is the only one of the three where skein *already wrote the
@@ -210,7 +210,7 @@ done into work a person can see, and it is decided already (SKEIN-702).
 
 ### One-line and egregious
 
-Three, noted for the owner to rule on, not fixed here:
+Three, noted for a decision rather than fixed here:
 
 - `src/bin/skein.rs:1449` and `src/bin/skein.rs:1669` say *"unsupported runtime {x}"*. `src/bin/skein.rs:1695`, in
   the same file, says *"unsupported runtime {x}; available: {list}"*. Two of the three ways to name
@@ -558,7 +558,7 @@ rows below are doctor's own hand-rolled lines.
 | `src/bin/skein.rs:1011` | ! this sandbox now reports {n} CPUs, so it is not the one that was approved | **R** — a sandbox whose CPU count no longer matches what was recorded | `skein doctor` on a fleet whose shape changed | n | yes — the recorded size matching | N |
 | `src/bin/skein.rs:1018` | ! fleet size nobody stated this fleet's memory or CPUs; it has {n} CPUs | **R** — any fleet predating `~/.skein/fleet-size`, or one whose bootstrap did not write it | `skein doctor` | partly (`src/bin/skein.rs:1022`) — "sbx fixes both at create and has no resize, so changing them means rebuilding the sandbox" is a constraint, not a step | no — it is a fact about `sbx`, not a condition | U |
 | `src/bin/skein.rs:1050` | ✗ {tool} missing in the sandbox — {why} | **R** — a sandbox image without `bwrap`, `tmux` or `git` — a live `command -v` probe | `skein doctor` on a fleet without `bwrap`, `tmux` or `git` | **n** — and each `{why}` says a box cannot work without it | yes — the probe finding it | N |
-| `src/bin/skein.rs:1131` | ✗ ceilings no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box | **R** — a host without cgroup delegation; the `sudo mkdir /sys/fs/cgroup/skein` probe fails on this very box | `skein doctor` | **n** | yes — the `mkdir` probe succeeding | N |
+| `src/bin/skein.rs:1131` | ✗ ceilings no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box | **R** — a host without cgroup delegation; the `sudo mkdir /sys/fs/cgroup/skein` probe fails there | `skein doctor` | **n** | yes — the `mkdir` probe succeeding | N |
 | `src/bin/skein.rs:1146` | ✗ {cgroup} {said} | **R** — a cgroup left `max` that should be capped, or a numeric cap an older skein wrote | `skein doctor`; text comes from `ceiling_reading` | not established — the sentence is `fleet`'s, and the comment at `src/bin/skein.rs:1142` says the judgement moved there deliberately | yes — the cgroup file being rewritten | N |
 | `src/bin/skein.rs:1207`, `src/bin/skein.rs:1214` | ✗ mount {path} — not visible in the sandbox; boxes for it would come up with no store / NOT MOUNTED, though directories under it are … | **R** — a repo registered after the sandbox's mounts were fixed at create | `skein doctor` on a fleet created with a short create line | y — both arms end with "`skein resize {size}` rebuilds it with the create line above and carries every box across" | no — the rebuild is a host act | U |
 | `src/bin/skein.rs:1225` | ! mount {path} — the directory is there, but nothing in this namespace is mounted at it | **R** — run `skein doctor` inside a box rather than at fleet scope | `skein doctor` run from inside a box | y — "Run this at fleet scope rather than inside a box" | yes — trivially, the scope it is run at | C |
@@ -776,7 +776,7 @@ after `REV_STALE_TRIES`. Everything below either copies those or does not.
 | `src/web/app/settings.js:501`, `src/web/app/settings.js:499` | Write token — {host} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein. · Write token — this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field. | **R** — any repo whose `slug` comes back empty: registered from a GitLab, Bitbucket or self-hosted URL (the first sentence), or a legacy entry registered from a path whose mirror has no GitHub `origin` (the second) | Settings → Repos → the repo's card, its Write token row | the path arm: **y** — re-add by URL; `repos::add_repo` replaces the entry with the same id in place and touches no box. The host arm: **no, and correctly** — see below the table | the path arm: nothing to watch, the person's own add re-renders the card. The host arm: none — nothing about the repo can change that would make a GitHub push credential mean something for it | — |
 
 **The Write token row is the one place in this survey where a row legitimately stops at naming the
-problem** (SKEIN-812, the owner's decision of 2026-09-23), and it carries no verdict because the
+problem** (SKEIN-812, decided 2026-09-23), and it carries no verdict because the
 three requirements presuppose a next step that this case does not have. The token exists to let a
 box push to GitHub; a repo on another host is not there, and nothing its owner could do to the repo
 changes that — the missing thing is non-GitHub push credentials in skein, which is a statement about
@@ -861,7 +861,7 @@ their `where` column instead, which is exactly what blinded the misanchor gate t
 | `src/fleet/resize.rs:375` | skein: could not measure the space this needs; continuing | **R** — `df` output missing the keys the parse wants, during `skein save` | `skein save`, and any path through `room_to_copy_out` | **n** — hands the reader a risk with no lever, then proceeds | yes — re-running the measurement | N |
 | `src/fleet/start.rs:781` | skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can take down every other box in the fleet | **R** — start a box on a host with no cgroup delegation — row 136's condition, at launch | `skein start` | **n** — the highest-stakes step-free line in the module | yes — `uncapped_reason` returning `None`, which the board already renders | N |
 | `src/fleet/heal.rs:60`, `src/fleet/create.rs:844` | skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can bind :{port} before skein does | **R** — a sandbox image without python3, at server start or box start | server start / fleet heal | n | yes — `door_settles` (`src/fleet/server.rs:362`), already written | N |
-| `src/fleet/heal.rs:70`, `src/fleet/create.rs:860` | skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} stay outside the ceiling | **R** — dockerd unreachable in the sandbox; seen on this box while probing SKEIN-756 | server start / fleet heal | n | yes | N |
+| `src/fleet/heal.rs:70`, `src/fleet/create.rs:860` | skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} stay outside the ceiling | **R** — dockerd unreachable in the sandbox; seen while probing SKEIN-756 | server start / fleet heal | n | yes | N |
 | `src/fleet/hosts.rs:74`, `src/fleet/hosts.rs:91` | skein: could not pin SSH host keys in {x} ({e}); a box cloning over SSH will fail host key verification | **R** — a configured SSH host unreachable from the sandbox during provisioning | box provisioning | n | yes — the pinned hosts appearing in the sandbox's known hosts | N |
 | `src/fleet/create.rs:89` | skein: could not write the fleet kit ({e}) — the create line below still names it, and the fleet will not put its own door back after a restart until it exists | **R** — the fleet-kit directory unwritable, on every `skein resize` (row 146's always-run path) | fleet create rendering | n | yes — the kit file appearing | N |
 | `src/fleet/start.rs:149`, `src/fleet/start.rs:160` | skein: {name} matches no repository skein knows … it starts with the sandbox's whole view, as boxes did before covers · skein: {mount} has a newline in it, so boxes cannot be told about it | **R** — `skein repos remove <id>` while a box under it still exists, then restart it — `remove_repo` does not check for live boxes. The newline-in-mount arm needs a hand-edited `fleet_mounts` | box launch | n — both state an isolation loss and stop | yes — the repo record; the mount being renamed | N |
@@ -956,7 +956,7 @@ person.
 | `warden/src/doer.rs:75` | {what} for {sandbox} was not run: this warden has no approval surface, and a privileged host command needs a human at the host to confirm it (architecture §8.1). Operation {id}. | **R** — `nohup skein-warden &` — no controlling terminal selects `Unattended` — then any Launch | pressing Launch against a warden started with no controlling terminal | partly — names the shape of the fix, not the act. `warden/src/main.rs:152` prints the missing half at boot: "Run it where a person can answer it." | yes — a controlling terminal appearing | N |
 | `warden/src/serve.rs:179` | this warden has no secret to check against ({path}), so it refuses everything — it mints one at start when that path is writable | **R** — make the warden's secret path unwritable before it starts, then send any request | every request, on a warden whose secret path is unwritable | y — names the path and the restart | yes — the path becoming writable; nothing retries the mint after start | W |
 | `warden/src/serve.rs:189` | this warden does not know who is asking — skein presents the secret from under the mount cover, and nothing else can read it (architecture §9.5 R5) | **R** — point skein at a different volume from the one the warden started with | skein and the warden pointed at different volumes; every warden-backed button fails | **n** — explains the mechanism, names no action. The actionable sentence exists only at `warden/src/main.rs:112`, printed at boot, where the person hitting the 401 is not looking | yes — the two volumes agreeing, comparable at request time | N |
-| `warden/src/serve.rs:271` | this warden was built without `{cap}`. Nothing can turn it on: the doer is not in the binary (architecture §8.3). | **R** — a warden built without the capability the button needs | pressing Launch or Destroy against a reduced-capability warden | **n** — and this is exactly the case the brief warns about. "Nothing can turn it on" is true of *this binary*; installing one built with the capability is the step, and it is not said | no — a compile-time fact | N |
+| `warden/src/serve.rs:271` | this warden was built without `{cap}`. Nothing can turn it on: the doer is not in the binary (architecture §8.3). | **R** — a warden built without the capability the button needs | pressing Launch or Destroy against a reduced-capability warden | **n** — and this is exactly the case the standard at the top warns about. "Nothing can turn it on" is true of *this binary*; installing one built with the capability is the step, and it is not said | no — a compile-time fact | N |
 | `warden/src/serve.rs:603` | {name} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, and not beginning with `-` | **R** — `POST /v1/create` with a sandbox name carrying an illegal character or a leading `-` | a malformed sandbox name | y — the grammar, which `src/bin/skein-server/boxes.rs:82` and its twelve siblings omit | no — a keystroke | C |
 | `warden/src/serve.rs:610` | the {cap} for {name} carries N arguments, and more than {MOST_ARGS} is more than an approval can put in front of a person | **R** — the same with `args` longer than `MOST_ARGS` | an over-long argv | partly | no | C |
 | `warden/src/serve.rs:619`, `warden/src/serve.rs:651` | an argument of the {cap} for {name} cannot be shown as what it is, so it cannot be approved: {arg} · the value of `{key}` cannot be shown as what it is … | **R** — an `args` or `env` value over `LONGEST_VALUE`, or with unreadable bytes | an unrenderable argument | partly — names the offending argument | no | C |

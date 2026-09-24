@@ -1,9 +1,9 @@
 # The reviewer's engine
 
 **Status: written as a proposal, and now partly a record.** It was written down so it could be
-argued with before any of it existed, which is the order the owner asked for: *"think through
-thoroughly and then ask me any questions … before you propose a design which we can discuss before
-you actually start with it."* Built since: §6's vocabulary and evaluator, §7's adapter rules, §10's
+argued with before any of it existed, which is the order that was asked for: think it through
+thoroughly, ask the open questions, and propose a design to be discussed, all before any
+of it is built. Built since: §6's vocabulary and evaluator, §7's adapter rules, §10's
 flags and the three of them that gate a reading, §15 step 3 in both halves (`Act::Read` reads and
 files, and the reading runs in the pull request's own box), and §11's box lifecycle and teardown.
 **Not built:** the posts (step 4), the owed-checks file (§8), and §7d's scope fix.
@@ -11,10 +11,10 @@ files, and the reading runs in the pull request's own box), and §11's box lifec
 Where a section has been built, it says so in place rather than here — a status list at the top is
 the first thing to go stale, and the point of this document is that it does not.
 
-The ask, verbatim: *"gadget-demo-repo-archaeology did an awesome PR review cycle in full
-automated mode. I want the automated mode for us to be like that. … for fully automated mode that
-is the ideal, then manual mode is just automate checkboxes so that I can choose which ones have to
-be automated and which shouldn't. So mechanism doesn't change much, just gates change."*
+The ask: one agent box, working a single repository, had run a full pull-request review cycle
+unattended, and skein's automated mode should work like that. Fully automated is the ideal; manual
+mode is the same thing with a checkbox per step, choosing which steps run unattended and which
+wait. The mechanism does not change; only the gates do.
 
 That box was interviewed at length. Its answers are the reason several things below are written the
 way they are, and where it corrected an earlier draft of this design the correction is kept in view
@@ -68,8 +68,8 @@ SKEIN-339.
 `reviewDecision` does not answer *"does an approval exist"*. It answers **"is this branch's review
 requirement satisfied"** — `APPROVED` only where branch protection requires a review and the
 requirement is met, `null` on every repository where review is social, however many approvals the
-pull request carries. Measured on the owner's own queue: `APPROVED` on **zero of twenty-one** open
-pull requests, two of which he had personally approved. And whether a push ends an approval is the
+pull request carries. Measured on one live queue: `APPROVED` on **zero of twenty-one** open
+pull requests, two of which had been approved by hand. And whether a push ends an approval is the
 repository's `dismiss_stale_reviews` setting, not a property of the word: with it off, GitHub goes
 on saying `APPROVED` across pushes and means it.
 
@@ -310,8 +310,8 @@ a property of that repository.
 
 ## 9. The gates
 
-The owner's axis, in their own words: *"I was talking about gates like for each PR or what happens
-on new PR requesting review and so on."* — per **event**, not per action. That maps onto guarded
+The gates are drawn on one axis: what happens on each pull request, on a new one requesting
+review, and so on — per **event**, not per action. That maps onto guarded
 steps directly: each step's trigger gets a checkbox, per repo.
 
 | event | full-auto | what "off" means |
@@ -327,12 +327,12 @@ steps directly: each step's trigger gets a checkbox, per repo.
 
 **The mechanism is identical either way** — the queue and the reading happen regardless. The
 checkbox only decides whether the last step fires or waits. That is what makes manual mode the same
-machine rather than a second one, which is what the owner asked for.
+machine rather than a second one, which is what was asked for.
 
 The five **event** rows are the trigger set in §10. The three **post** rows are not three switches:
 they are one ordered ceiling, for the reason given there.
 
-Unattended approval is the owner's decision, made explicitly. The argument against it is recorded
+Unattended approval was decided explicitly (§13). The argument against it is recorded
 in §13 rather than re-litigated here.
 
 ### The steps, written down as a workflow somebody can switch on
@@ -381,8 +381,8 @@ on `label:blocked` and it fires today); what cannot be reached is the intended g
 
 Closing it means the reading reporting whether what it found must block — a field on
 `review::Summary` beside `swept`, answered by the same second turn that already accounts for
-coverage. That is a decision about when skein refuses a pull request unattended, so it is the
-owner's rather than the code's, and it is recorded rather than taken.
+coverage. That is a decision about when skein refuses a pull request unattended, so it is a
+person's to make rather than the code's, and it is recorded rather than taken.
 
 ## 10. The flags
 
@@ -423,7 +423,7 @@ A reviewer flow is assigned to a row the same way, so:
 
 ### The trigger set
 
-The third thing asked for — *"the trigger is just review requested state, but not new commits"* — is
+The third thing asked for — that the trigger be the review-requested state alone, and not new commits — is
 a **subset of this list**, and it is the proposed default:
 
 | trigger | fires when | in the default set |
@@ -485,13 +485,13 @@ towards keeping it; here the value is a **permission**, and a downgrade must nev
 does while nobody is looking. Both fail towards the answer that cannot surprise anybody.
 
 **The default when a repo is switched on is `comment`** — findings unattended, verdicts waiting.
-Unattended approval is reachable because the owner chose it; it is not what switching a repo on
+Unattended approval is reachable because it was chosen (§13); it is not what switching a repo on
 gives you, and the box's asymmetry argument is why the two are different questions.
 
 ### Two more worth having
 
 **`auto_review_dry_run`.** The engine decides and shows what it *would* post, and posts nothing.
-There is direct precedent — `prwork::Standing` is *"the dry run the owner asked to see before
+There is direct precedent — `prwork::Standing` is documented as the dry run asked for *"before
 trusting this, and the same `workflow::next` the tick uses… a preview computed a second way is a
 preview that can disagree with what happens."* This is how a repo should be turned on for the first
 time, and it is worth more here than on the author side: a merge is one visible event, a review is a
@@ -503,9 +503,9 @@ a wrong verdict is seen by somebody who did not opt into any of this. `mine` is 
 Built, and a word this build does not recognise reads as `mine` — the narrow one, for the reason the
 ceiling fails narrow: a permission may never be widened by a value skein cannot understand.
 
-### One I am deliberately not proposing
+### One deliberately not proposed
 
-**A settle or quiet period before re-reading.** It existed, and you removed it on 2026-08-24:
+**A settle or quiet period before re-reading.** It existed, and was removed on 2026-08-24:
 `worth_reading` records that the daily ceiling became *the* money guard and the hour became obsolete.
 Nothing about an engine changes that argument, and the churn guard it would duplicate is already
 built from two parts — the cache key `(number, head_sha)` means an unchanged head is never re-read,
@@ -547,9 +547,9 @@ other guard in this file exists to avoid.
 
 ## 11. The reviewer is a box, managed
 
-The owner's decision, and it is a **simplification rather than an addition**: *"use boxes instead
-but group those boxes separately from manual boxes. That way you aren't creating a new class of
-sessions but just box but managed automatically."*
+Decided 2026-08-30, and it is a **simplification rather than an addition**: run the reviewer in
+boxes, grouped apart from the boxes people start by hand, so that no new class of session is
+created — only boxes that skein manages itself.
 
 That is right, and it deletes more of this design than it adds. An earlier draft of this section
 proposed a `/skein/review` cgroup, a memory cap, a CPU weight, a concurrency setting and a cleanup
@@ -586,8 +586,8 @@ memory the box's own rather than a directory that happens to be an address.
 
 ### Four things it needs that do not exist
 
-**1. A box comes up at the wrong commit.** *"When you are opening for a PR, it will pull its own PR
-files and base files right? What do you need to implement there?"* — the honest answer is that it
+**1. A box comes up at the wrong commit.** The question was whether a box opened for a pull request
+fetches that pull request's files and its base's, and what that needs — the honest answer is that it
 splits in two, and one half is much smaller than it looks.
 
 **The base needs nothing.** `clone_script` runs a full `git clone --branch <base>` — no `--depth`,
@@ -624,7 +624,7 @@ after every move. Three lines in the box's own checkout step, and no change to h
 
 **2. A name collision is silent adoption, not a refusal.** Boxes are named `<repo>-<slug(branch)>`,
 and nothing enforces uniqueness at creation. A review box for a pull request on `feat/x` would take
-the name of the owner's own box on `feat/x` — and `start_box_inner` does not refuse: it prints
+the name of a person's own box on `feat/x` — and `start_box_inner` does not refuse: it prints
 *"already has a checkout; keeping it"*, re-provisions, and re-records the placement of somebody
 else's box. So a review box needs a name that cannot collide — the pull request number, which the
 branch does not carry — and a managed create must refuse rather than adopt.
@@ -651,8 +651,8 @@ review, the conversation across rounds, and the isolation.
 
 ### What is still a resource question
 
-A box's ceiling is **70% of the whole pool** — on this fleet, 16.8 GiB of 23.8 GiB, and five boxes
-each carry that same ceiling. Ceilings are not reservations: they stop one box killing the sandbox,
+A box's ceiling is **70% of the whole pool** — on a 23.8 GiB pool that is 16.8 GiB, and every box
+carries that same ceiling. Ceilings are not reservations: they stop one box killing the sandbox,
 not five exhausting it together. So a cap on how many review boxes run at once is real, and it is a
 cap on **boxes** — the same unanswered question skein already has, not a new one.
 
@@ -677,7 +677,7 @@ the work and raced at the post. This engine lives in `skein-server`: one process
 *engine*. No lease, no claims file, no per-box attribution.
 
 **Not "one writer", though — a draft of this said that and it is false.** Three things already post
-to a pull request under the owner's login: the cockpit's `act` route, when a person presses it; the
+to a pull request under your login: the cockpit's `act` route, when a person presses it; the
 reading session itself, straight to `gh` from inside its checkout; and any box, which also holds the
 token. What the single tick buys is that **no two engine rounds race**, which is the collision the
 box actually hit. A person pressing the button while a round is in flight is a different case, and
@@ -691,19 +691,19 @@ That is correctness, not coordination, and it is `VerdictStanding`.
 
 ## 13. What was decided, and what it cost to ask
 
-**Unattended approvals: yes** (owner, 2026-08-30), with the note that automatic review is behind
+**Unattended approvals: yes** (decided 2026-08-30), with the note that automatic review is behind
 `auto_review` regardless, so the exposure is opt-in per repo before it is anything else.
 
 The box's argument against is kept rather than dropped, because it is not caution but asymmetry: *a
 wrong changes-requested is loud and somebody argues with it; a wrong approval is silent and it
 discharges the review.* §10's ceiling is where that argument now lives — a repo can run everything
 else unattended with the ceiling at `changes-requested`, which is the shape the box was asking for
-without denying the owner the mode they chose.
+without taking away the mode that was chosen.
 
-**§7c stands as a correctness rule, not a gate** (owner: "sure"). A pass that did not cover the
+**§7c stands as a correctness rule, not a gate** (agreed). A pass that did not cover the
 whole changed file set at one commit may post findings and may never post an approval, wherever the
-ceiling sits. The question that came back with the agreement — *"what is the case in which it does
-not cover the whole changed file?"* — turned out to matter more than the rule: the answer is in §7c
+ceiling sits. The question that came back with the agreement — in what case does a pass not
+cover the whole changed file set? — turned out to matter more than the rule: the answer is in §7c
 and it turned out to be a **correction rather than an answer**: the cut diff is not the evidence,
 because the reviewer stands in a checkout and can open what the cut dropped. The evidence is the
 sweep. The rule is load-bearing rather than theoretical — and it costs one persisted field, because
@@ -713,7 +713,7 @@ the sweep was throwing its own answer away.
 it is a deviation from this section's own letter, and the reason is that the ask and the mechanism
 turned out to be separable.
 
-What the owner asked for is that skein post verdicts unattended. §15 step 4 delivers exactly that,
+What was asked for is that skein post verdicts unattended. §15 step 4 delivers exactly that,
 and it does **not** touch the sentence in the prompt: the reading session still may not approve or
 request changes. The **engine** takes the verdict instead, through `prwork::post_verdict` and
 `prq::submit_review_with_comments`. Every guard this design built lives on that path and none of it
@@ -757,7 +757,7 @@ their doc comments, `prq`'s lane doc, and three passages in these docs. So lifti
 and not an edit, and §10's ceiling becomes the guard that remains.
 
 Two things it must not take with it. **Nothing records who posted** — skein keeps no copy of a review
-any more, by design, so an engine verdict is indistinguishable from the owner's, on GitHub and in the
+any more, by design, so an engine verdict is indistinguishable from your own, on GitHub and in the
 queue. Against §2's *"every action audited, with which-workflow-which-step attribution"*, the
 reviewer side needs an equivalent and has none. — **Answered by the body.** A posted verdict says
 that skein left it, names the workflow and the step, names the commit the reading was made against,
@@ -771,7 +771,7 @@ asserting *"a comment is deliberately not a decision"* about behaviour the engin
 
 `prwork::facts_of` builds the merge train's `approved` from `standing_approvals` — *"the approvals
 GitHub holds against the current head from any reviewer"* — and an approval the engine posts under
-the owner's login is one of those. So wherever a merge train is switched on:
+your login is one of those. So wherever a merge train is switched on:
 
     engine reviews → engine approves → Facts::approved → label, await CI, merge, delete branch
 
@@ -779,8 +779,8 @@ skein approves its own work and merges it, with nobody in it. Neither half is wr
 were chosen deliberately; the composition had simply never been put to anybody, because until the
 prohibition is lifted it cannot happen.
 
-**The owner's answer (2026-08-30): keep them apart, per repo** — *"If needed, we can just chain them
-by saying merge all approved ones, how it reach approved is not needed by merge train right."*
+**Decided (2026-08-30): keep them apart, per repo** — and where they are wanted together, chain them
+by having the train merge whatever is approved; how a PR reached approval is not its concern.
 
 That reading is correct and it is the reason this costs nothing to build. The train reads
 `Facts::approved` and has no interest in **provenance**: an approval is an approval, whoever left
@@ -832,17 +832,17 @@ point. Reading an unknown ceiling narrows to `none` so a downgrade cannot widen 
 unattended; doing that on a *write* would take a person's "approve", store `none`, and flash "saved"
 at them. A settings surface that lies about what it stored is worse than one that refuses.
 
-**The reviewer is a box** (owner, 2026-08-30: *"use boxes instead but group those boxes separately
-from manual boxes… you aren't creating a new class of sessions"*). §11. It deletes four mechanisms
+**The reviewer is a box** (decided 2026-08-30: grouped apart from the boxes people start by hand,
+so that no new class of session is created). §11. It deletes four mechanisms
 this document had proposed, and inverts the injection-surface objection rather than answering it.
 
-**The undoability asymmetry is accepted** (owner: "this is fine"). Recorded here because it is the
+**The undoability asymmetry is accepted.** Recorded here because it is the
 one place the closed-set argument is weaker on the reviewer side than on the author side: a review
 can be dismissed and superseded, but an approval that discharges a block cannot be un-discharged
 before somebody merges on it.
 
-**No repo starts with `auto_review` on** (owner: *"auto review I will toggle on when needed. So no
-default."*). It ships off everywhere and is switched on per repo by hand. The other two defaults in
+**No repo starts with `auto_review` on.** There is no default: it ships off everywhere and is
+switched on per repo, by hand, when it is wanted. The other two defaults in
 §10 stand: the trigger set is `requested` alone, and `auto_review_authors` is `mine`.
 
 ## 14. Where it hooks in
@@ -873,7 +873,7 @@ thing that decides can be shown to be right."*
    demonstrably alive; 3b changed nothing about what `Read` means, which is why it was a
    substitution behind it rather than a prerequisite for it.
 
-   **3b is for every reading, not only the engine's.** The owner's call, and it is `src/review/`'s own
+   **3b is for every reading, not only the engine's.** That was decided, and it is `src/review/`'s own
    rule rather than a preference: that module fought hardest against having a second reader, and a
    box for the engine alone would have been exactly that. So the pane's "read it" button opens a box
    too, gated on `read_prs` and not on `auto_review` — a person pressing a button has asked for the
