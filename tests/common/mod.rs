@@ -309,6 +309,9 @@ pub const TMUX: Tool = Tool {
 /// was in no list at all until SKEIN-790 — see that constant for why that mattered.
 pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     (LIB, &[BWRAP, DU, GIT, JQ, NODE, PYTHON3, TMUX]),
+    // The stand-in installer is fetched with the real `curl`, on the machine's own PATH — a
+    // machine without one has no download to bound and skips.
+    ("bootstrap_installer_stall", &[CURL]),
     ("browser_suites", &[NODE, CHROMIUM]),
     // `python3` because the launcher's credential leg IS python — `login_life`, `merge_login`, and
     // the onboarding flag that goes with a seeded login (SKEIN-957). It was always needed and was
@@ -321,6 +324,9 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     ("git_write_request", &[JQ, GIT, CURL]),
     ("isolation_bwrap", &[BWRAP, JQ, PYTHON3]),
     ("mail_provenance", &[JQ, FLOCK]),
+    // The launcher's package-request leg shells out through `jq` to file the request; a machine
+    // without it skips both tests that drive that leg.
+    ("plugin_tools", &[JQ]),
     // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
     // `tests/server/` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
     // `tmux new-session` — before the port is bound, so a machine without tmux has been running
@@ -330,7 +336,11 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // `bwrap` joined it when the upload test stopped standing the `nsenter` hop in and started
     // making a real namespace to cross into (SKEIN-832): the anchor it enters is a `bwrap` process,
     // so on a machine without bwrap that test has no box and skips.
-    ("server", &[PYTHON3, TMUX, BWRAP]),
+    //
+    // `jq` because `tests/server/asks.rs` reads the ask queue back through it (SKEIN-1061) —
+    // present since that file was written and never listed here, masked until SKEIN-1150 because
+    // this test's own undeclared-binary assertion panicked first every time it ran.
+    ("server", &[PYTHON3, TMUX, BWRAP, JQ]),
     ("substrate_request", &[JQ]),
     ("turn_state_probe", &[JQ]),
     ("warden_roundtrip", &[CARGO]),
