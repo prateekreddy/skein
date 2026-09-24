@@ -1647,6 +1647,48 @@ mod tests {
         );
     }
 
+    /// **Several new asks hold one call together, and the next call runs** (owner-approved
+    /// behaviour, 2026-09-24).
+    ///
+    /// Each hold text ends "the next will run", so that must be true however many asks arrive
+    /// at once.
+    ///
+    /// What would make each assertion fail:
+    /// * *one call carries both* — the hook holds for only the first unshown ask, or leaves the
+    ///   others out of its reason.
+    /// * *the next call runs* — the hook records only some of the ids it held for (for example
+    ///   only the first), so the one left over holds the next call too.
+    #[test]
+    fn several_new_asks_hold_one_call_together_and_the_next_runs() {
+        let h = hooked();
+        let file = h.write(
+            0,
+            with_pids(7000),
+            FleetDisk::Asked(Share {
+                over_by: 4198,
+                free: 2355,
+                holds: 9626,
+                others: 2,
+                every_box: false,
+            }),
+        );
+        assert_eq!(kinds(&file), vec!["disk", "pids"]);
+
+        let held = h.tool("s1").expect("two new asks did not hold the call");
+        for a in &file.asks {
+            assert!(
+                held.contains(a.hold.as_str()),
+                "the held call left out the {} ask: {held}",
+                a.kind
+            );
+        }
+        assert_eq!(
+            h.tool("s1"),
+            None,
+            "the call after a held one was held again, so \"the next will run\" was false"
+        );
+    }
+
     /// **The SessionStart line counts as shown** (owner, SKEIN-1055), and only where there is one.
     ///
     /// * A disk share ask has an approved start line: the session is told at start and its first
