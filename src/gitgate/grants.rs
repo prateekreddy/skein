@@ -75,11 +75,26 @@ pub(super) fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
 /// direction, so answering Ok on a file that was never read would be the one shape that is worse
 /// than either: every other grant destroyed, and a person told the withdrawal they asked for is the
 /// only thing that happened.
+///
+/// **The box is told** (SKEIN-1142): each request of its own that was granted for this repository
+/// gets `write request <id>, revoked` in its read-only inbox, in the owner's words — but only when a
+/// grant was actually taken away, so revoking what was never granted says nothing.
 pub fn revoke(box_name: &str, repo: &str) -> Result<(), String> {
-    crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+    let removed = crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+        let before = all.len();
         all.retain(|g| !(g.box_name == box_name && same_repo(&g.repo, repo)));
-        Ok(())
-    })
+        Ok(all.len() != before)
+    })?;
+    if removed {
+        for id in super::decide::granted_request_ids(box_name, repo) {
+            if let Err(e) = crate::mailbox::send_answer(box_name, "write", &id, "revoked") {
+                eprintln!(
+                    "skein: the answer to write request {id} did not reach {box_name}'s inbox: {e}"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The live grants for one box, which is what the token refresher acts on.

@@ -505,6 +505,22 @@ pub fn decide(
     decided.log = String::new();
     write_decision(&path, &decided)?;
 
+    // The answer the box can believe (SKEIN-1142), worded as the owner approved it: an approval
+    // here is "granted" to the box, the word its write requests get too. One message in its own
+    // read-only inbox, best-effort for `gitgate::decide`'s reason. The install that follows an
+    // approval sends its own answer, `installed` or `not installed: <why>` ([`install_outcome`]).
+    if let Err(e) = crate::mailbox::send_answer(
+        &rendered.box_name,
+        "package",
+        &rendered.id,
+        if approve { "granted" } else { "denied" },
+    ) {
+        eprintln!(
+            "skein: the answer to package request {} did not reach {}'s inbox: {e}",
+            rendered.id, rendered.box_name
+        );
+    }
+
     // Courtesy only, and it must stay that way: the box reads its own file to learn what happened,
     // and skein never reads that answer back. Best-effort because a box that has deleted or locked
     // its request has told skein nothing skein needs — the decision above is the record.
@@ -578,6 +594,27 @@ fn log_script(box_name: &str, id: &str, state: &str, tail: &str) -> String {
     )
 }
 
+/// What an install's outcome says to the box that asked, in the owner's approved words:
+/// `installed`, or `not installed: <why>`.
+///
+/// `<why>` is the last line of the install's own output with something on it, which is where apt
+/// and npm put the reason (`E: Unable to locate package …`), cut to 300 characters so an answer
+/// stays one line. An install that failed and said nothing has only its state to give, `failed`.
+fn install_outcome(state: &str, log: &str) -> String {
+    if state == "installed" {
+        return "installed".into();
+    }
+    let why: String = log
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or(state)
+        .chars()
+        .take(300)
+        .collect();
+    format!("not installed: {why}")
+}
+
 /// Install an approved request, then record the outcome on it.
 ///
 /// Slow by nature — apt on a cold index is minutes — so callers run it off the request thread.
@@ -623,6 +660,16 @@ pub fn install(sandbox: &str, box_name: &str, id: &str) -> Result<Request, Strin
     done.state = state.into();
     done.log = tail.clone();
     write_decision(&path, &done)?;
+    // The answer the box can believe, after the record and for `decide`'s reason (SKEIN-1142): the
+    // owner's words, `installed` or `not installed: <why>`.
+    if let Err(e) =
+        crate::mailbox::send_answer(&req.box_name, "package", id, &install_outcome(state, &tail))
+    {
+        eprintln!(
+            "skein: the answer to package request {id} did not reach {}'s inbox: {e}",
+            req.box_name
+        );
+    }
     // Then the box's own copy, so an agent can read why its install failed. Courtesy, best-effort,
     // and never read back.
     let _ = own_sandbox(sandbox).exec(
@@ -737,6 +784,194 @@ pub fn approved_packages() -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every message file in each box's owner inbox under `home`, as `(box, message)`.
+    fn inbox_messages(home: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+        let mut out: Vec<(String, String, serde_json::Value)> = Vec::new();
+        let Ok(boxes) = std::fs::read_dir(home.join("boxes")) else {
+            return Vec::new();
+        };
+        for b in boxes.flatten() {
+            let Ok(files) = std::fs::read_dir(b.path().join("inbox")) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let body = std::fs::read_to_string(f.path()).unwrap();
+                out.push((
+                    b.file_name().to_string_lossy().into_owned(),
+                    f.file_name().to_string_lossy().into_owned(),
+                    serde_json::from_str(&body).unwrap(),
+                ));
+            }
+        }
+        // In the order they were written: skein names each message by its nanosecond.
+        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        out.into_iter().map(|(b, _, m)| (b, m)).collect()
+    }
+
+    /// The answer bodies in `home`'s inboxes that name `id`, in the order they were written, with
+    /// the box each landed in.
+    fn answers_for(home: &std::path::Path, id: &str) -> Vec<(String, String)> {
+        inbox_messages(home)
+            .into_iter()
+            .filter(|(_, m)| m["kind"] == "answer" && m["body"].as_str().unwrap_or("").contains(id))
+            .map(|(b, m)| (b, m["body"].as_str().unwrap().to_string()))
+            .collect()
+    }
+
+    /// **An install tells the box that asked what happened, in the owner's words**:
+    /// `package request <id>, installed`, or `package request <id>, not installed: <why>`, after
+    /// the `granted` its decision sent, and in no other box's inbox (SKEIN-1142).
+    ///
+    /// The crossing is stood in for through the execution seam: once succeeding, once failing
+    /// with apt's own sentence on stderr, which is where a failed crossing's reason is kept.
+    ///
+    /// What would make it fail: `install` not sending an answer (only `granted` would be there); a
+    /// word of either outcome changed ("installed" → "done", or the colon dropped); the answer
+    /// naming another id; `<why>` taken from anywhere but the recorded outcome's last line; or
+    /// the answer reaching another box's inbox.
+    #[test]
+    fn an_install_answers_the_box_installed_or_not_installed_with_why() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("boxes/other-box/inbox")).unwrap();
+        // The sandbox this skein stands in, so the crossing needs no hop and the seam's stand-in is
+        // what runs.
+        std::fs::write(
+            home.join("config.json"),
+            r#"{"fleet_sandbox":"skein-fleet"}"#,
+        )
+        .unwrap();
+
+        let (ok, bad) = ("20260924-110000-1", "20260924-110000-2");
+        for id in [ok, bad] {
+            let rendered = Request {
+                id: id.into(),
+                ..req("apt", &["libnss3"])
+            };
+            decide("no-such-sandbox", &rendered, true, false).expect("decided");
+        }
+
+        {
+            let _crossing = crate::place::seam::install(Box::new(|_argv: &[String]| {
+                Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo 'Setting up libnss3'".into(),
+                ])
+            }));
+            install("skein-fleet", "web-main", ok).expect("installed");
+        }
+        {
+            let _crossing = crate::place::seam::install(Box::new(|_argv: &[String]| {
+                Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "echo 'Reading package lists...' >&2; \
+                     echo 'E: Unable to locate package libnss3' >&2; exit 100"
+                        .into(),
+                ])
+            }));
+            install("skein-fleet", "web-main", bad).expect_err("not installed");
+        }
+
+        let web = |body: String| ("web-main".to_string(), body);
+        assert_eq!(
+            answers_for(&home, ok),
+            vec![
+                web(format!("package request {ok}, granted")),
+                web(format!("package request {ok}, installed")),
+            ]
+        );
+        assert_eq!(
+            answers_for(&home, bad),
+            vec![
+                web(format!("package request {bad}, granted")),
+                web(format!(
+                    "package request {bad}, not installed: E: Unable to locate package libnss3"
+                )),
+            ]
+        );
+    }
+
+    /// **`<why>` is one line: the last the install said, at most 300 characters**, and an install
+    /// that failed saying nothing gives its state.
+    ///
+    /// What would make it fail: taking the first line instead of the last, keeping blank lines,
+    /// dropping the cap (an answer spilling past one line of the box's inbox), or an empty `<why>`.
+    #[test]
+    fn why_an_install_failed_is_the_last_line_it_said() {
+        assert_eq!(
+            install_outcome("installed", "anything\nat all"),
+            "installed"
+        );
+        assert_eq!(
+            install_outcome(
+                "failed",
+                "Reading package lists...\nE: no such package\n\n  \n"
+            ),
+            "not installed: E: no such package"
+        );
+        assert_eq!(install_outcome("failed", ""), "not installed: failed");
+        let long = "x".repeat(400);
+        assert_eq!(
+            install_outcome("failed", &long),
+            format!("not installed: {}", "x".repeat(300))
+        );
+    }
+
+    /// **Deciding a package request writes exactly one answer, to the box that asked and to no
+    /// other box's inbox**, worded as the owner approved: `package request <id>, granted` or
+    /// `…, denied` (SKEIN-1142).
+    ///
+    /// Another box's inbox exists beforehand, so "no other box's" is a directory that could have
+    /// received it. What would make it fail: `decide` not calling `send_answer` (no message); it
+    /// sending to `broadcast` or to every box (a message in the neighbour's inbox); the body drifting
+    /// from the approved words, or saying `approved` where the owner's shape says `granted`; the
+    /// kind being anything but `answer`, which is what `skein_requests` matches.
+    #[test]
+    fn a_decision_answers_the_asking_box_once_and_no_other() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("boxes/other-box/inbox")).unwrap();
+        std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
+
+        for (id, approve, word) in [
+            ("20260924-100000-1", true, "granted"),
+            ("20260924-100000-2", false, "denied"),
+        ] {
+            let rendered = Request {
+                id: id.into(),
+                ..req("apt", &["libnss3"])
+            };
+            decide("no-such-sandbox", &rendered, approve, false).expect("decided");
+            let now = inbox_messages(&home);
+            let mine: Vec<_> = now
+                .iter()
+                .filter(|(_, m)| m["body"].as_str().unwrap_or("").contains(id))
+                .collect();
+            assert_eq!(mine.len(), 1, "{id}: not exactly one answer: {now:?}");
+            let (to, m) = mine[0];
+            assert_eq!(
+                to, "web-main",
+                "{id}: answered in another box's inbox: {now:?}"
+            );
+            assert_eq!(m["kind"], "answer", "{m}");
+            assert_eq!(m["to"], "web-main", "{m}");
+            assert_eq!(m["body"], format!("package request {id}, {word}"), "{m}");
+        }
+        assert!(
+            inbox_messages(&home).iter().all(|(to, _)| to == "web-main"),
+            "{:?}",
+            inbox_messages(&home)
+        );
+    }
 
     fn req(kind: &str, packages: &[&str]) -> Request {
         Request {

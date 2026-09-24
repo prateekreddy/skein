@@ -179,6 +179,16 @@ pub struct Config {
     /// `$SKEIN_AI_MODEL` — the everything-override — still trumps both, as it always has.
     #[serde(default)]
     pub review_model: String,
+    /// Load skein's own plugin into every agent's session: the resource holds and the `skein_*`
+    /// tools (box-plugin §2.1, SKEIN-1058). **On by default**, and fleet-wide on purpose: there is
+    /// no per-box setting (owner's answer 4).
+    ///
+    /// Read on the host by [`crate::runtime::for_box`], which is what decides whether a start or
+    /// resume passes `--plugin-dir`; a box cannot write this file, so a box cannot change it. It
+    /// takes effect at a box's next session, because a running agent keeps the argv it started
+    /// with. `$SKEIN_BOX_PLUGIN=on|off` overrides, as the Settings footer promises.
+    #[serde(default = "default_true")]
+    pub box_plugin: bool,
     /// How many pull requests the review queue may ANALYSE per UTC day, across every repo — one
     /// fleet-wide budget, counted in [`crate::review`] at the moment a model call is actually
     /// made. One unit is one `(number, head_sha)` analysed, whether the visit produced a
@@ -610,6 +620,7 @@ impl Default for Config {
             github_app_key: String::new(),
             ai_enrichment: false,
             review_summaries: default_true(),
+            box_plugin: default_true(),
             review_reads_per_day: default_review_reads_per_day(),
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
