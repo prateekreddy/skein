@@ -585,6 +585,7 @@ mod tests {
                     not_reread: String::new(),
                     computed: true,
                     budget_stopped: false,
+                    stopped_at_box: false,
                 },
             )
             .unwrap();
@@ -661,6 +662,7 @@ mod tests {
             not_reread: String::new(),
             computed: true,
             budget_stopped: false,
+            stopped_at_box: false,
         };
         store("demo", &fresh).unwrap();
 
@@ -913,6 +915,7 @@ mod tests {
                 not_reread: String::new(),
                 computed: true,
                 budget_stopped: false,
+                stopped_at_box: false,
             },
         )
         .unwrap();
@@ -1034,6 +1037,14 @@ mod tests {
             !super::about_the_setup(&slow),
             "a call that ran out of time reads as a broken setup, so the one note that SHOULD \
              stop a row being re-bought stopped stopping it: {slow}"
+        );
+        // And a box that did not answer in time is about this reading too (SKEIN-818): the
+        // person was offered the next spend, and an unattended pass must not take it for them.
+        let box_slow = Unread::BoxSlow(std::time::Duration::from_secs(900)).say();
+        assert!(
+            !super::about_the_setup(&box_slow),
+            "a box that ran out of time reads as a broken setup, so the unattended pass would buy \
+             the same timeout again on its own: {box_slow}"
         );
         assert!(
             !super::about_the_setup("the model answered in a shape skein could not read"),

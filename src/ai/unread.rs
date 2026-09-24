@@ -29,6 +29,20 @@ pub enum Unread {
     Refused { code: String, said: String },
     /// It was still going when the budget ran out.
     Slow(Duration),
+    /// **The box it was addressed to did not answer within the budget, and skein stopped there**
+    /// (SKEIN-818). Told apart from [`Unread::Slow`] because the two want opposite next moves.
+    ///
+    /// Before this, a crossing that outlived its timeout fell through to the local spawn like any
+    /// other box that could not take the turn, and handed it THE SAME budget it had just spent in
+    /// full. A box that hangs on a large pull request therefore cost two of the largest budgets
+    /// skein issues, on one reading. Worse, the local attempt could answer with a refusal (a
+    /// `--resume` of a session that lives in the box and not here) and [`claude_in_conversation`]
+    /// steps down on a refusal — back into the box, for another full budget, up to three times.
+    ///
+    /// The owner's decision (2026-09-23): the person decides whether to spend again. So this ends
+    /// the call, the ladder does not step down on it, `review::after_merged` answers `Stop`, and
+    /// the row offers the two ways on — read it again, or read it here instead.
+    BoxSlow(Duration),
     /// The prompt was bigger than [`PROMPT_CEILING`], so nothing was spawned and no model was
     /// asked. Carries the two numbers, because the reader's question is "by how much".
     ///
@@ -123,6 +137,12 @@ impl Unread {
                  allows; nothing is wrong with the model.",
                 budget.as_secs()
             ),
+            // The owner's approved wording (SKEIN-818). The row puts `Not read — ` in front of it.
+            Unread::BoxSlow(budget) => format!(
+                "its box did not answer within {}, and skein stopped there rather than spend the \
+                 same again reading it outside the box.",
+                briefly(*budget)
+            ),
             // Both numbers, and the overrun between them: "too large" alone leaves the reader
             // unable to tell a prompt that missed by a hundred bytes from one that missed by four
             // times, and those want different answers.
@@ -153,6 +173,32 @@ impl Unread {
             false => Some(why.to_string()),
         }
     }
+}
+
+/// A budget as a person would say it on a row: `15m`, `7m 30s`, `45s`.
+///
+/// Minutes because the budgets this is written for are `review::merged_budget`'s — five to
+/// fifteen of them — and "900s" is a number the reader has to divide before it means anything.
+fn briefly(budget: Duration) -> String {
+    let secs = budget.as_secs();
+    match (secs / 60, secs % 60) {
+        (0, 0) => format!("{}ms", budget.as_millis()),
+        (0, s) => format!("{s}s"),
+        (m, 0) => format!("{m}m"),
+        (m, s) => format!("{m}m {s}s"),
+    }
+}
+
+/// **Did the crossing into a box run out of time**, as opposed to never being made at all?
+///
+/// Read off `util::run_bounded`'s own sentence, which is the only thing
+/// [`crate::fleet::model_call_in_box`] hands back. One function because two places need the same
+/// answer: [`outside_box_because`] words it for a reader, and [`claude_in_turn`] decides on it
+/// that the call ends here (SKEIN-818). Two copies of the literal would be two places for it to
+/// stop agreeing with the producer; `the_plain_reasons_are_the_ones_a_lost_box_really_answers_with`
+/// drives the real producer through this.
+pub(crate) fn box_ran_out_of_time(why: &str) -> bool {
+    why.contains("did not finish within")
 }
 
 /// A transport's own diagnosis, cut down to what a row can carry — the environment left out of it.
@@ -221,7 +267,7 @@ pub(crate) fn outside_box_because(why: &str) -> String {
                 gone"
             .into();
     }
-    if why.contains("did not finish within") {
+    if box_ran_out_of_time(why) {
         return "getting into it did not finish in time".into();
     }
     if let Some(at) = why.find(SPAWN_REFUSED) {
@@ -406,6 +452,7 @@ mod tests {
                 limit: PROMPT_CEILING,
             },
             Unread::Silent,
+            Unread::BoxSlow(Duration::from_secs(900)),
         ];
         // The compiler keeps this list honest: a new variant stops this match compiling, and the
         // count below stops somebody adding an arm without adding a sentence to check.
@@ -417,13 +464,14 @@ mod tests {
             Unread::Slow(_) => 4,
             Unread::TooLarge { .. } => 5,
             Unread::Silent => 6,
+            Unread::BoxSlow(_) => 7,
         };
         let mut seen: Vec<usize> = every.iter().map(tag).collect();
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(
             seen,
-            [0, 1, 2, 3, 4, 5, 6],
+            [0, 1, 2, 3, 4, 5, 6, 7],
             "a variant has no sentence checked here"
         );
 

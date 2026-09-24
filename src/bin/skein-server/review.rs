@@ -536,7 +536,7 @@ pub(super) async fn api_review_summary(
 ) -> Response {
     // What must come back, rather than who is asking — see the note above. Read first because
     // `force` follows from it.
-    let redraft = flag(&q, "redraft");
+    let (redraft, here) = redraft_and_here(&q);
     let force = redraft || flag(&q, "force");
     // The owner's boundary (see `review::Trigger`): the daily budget limits only what skein does
     // on its own initiative. A request a person made — the read button (`asked=1`) or a forced
@@ -570,7 +570,7 @@ pub(super) async fn api_review_summary(
         // against a head that has since moved is worse than waiting for the refresh that says so,
         // so those arms still ask for the current queue.
         if !held {
-            return read_a_pull_request(&repo, number, redraft, force, trigger);
+            return read_a_pull_request(&repo, number, (redraft, here), force, trigger);
         }
         let queue = queue_as_known(&repo)?;
         let pr = queue
@@ -591,6 +591,17 @@ pub(super) async fn api_review_summary(
     }
 }
 
+/// `redraft=1`, and `here=1` beside it (SKEIN-818).
+///
+/// `here=1` is "read it here instead": the row whose box did not answer in time offers it, and it
+/// reads the pull request on skein's own disk rather than in its box. It is a redraft by
+/// construction — a press, reviewed, past the cache — so it implies `redraft` rather than needing
+/// the page to remember to send both.
+fn redraft_and_here(q: &HashMap<String, String>) -> (bool, bool) {
+    let here = flag(q, "here");
+    (here || flag(q, "redraft"), here)
+}
+
 /// The blocking half of a reading: the queue it was taken against, and the answer.
 ///
 /// **One function, two doors.** [`api_review_summary`] answers it on the request that asked, and
@@ -601,7 +612,7 @@ pub(super) async fn api_review_summary(
 fn read_a_pull_request(
     repo: &skein::repos::Repo,
     number: u64,
-    redraft: bool,
+    (redraft, here): (bool, bool),
     force: bool,
     trigger: skein::review::Trigger,
 ) -> Result<(skein::prq::Queue, skein::review::Known), String> {
@@ -615,7 +626,9 @@ fn read_a_pull_request(
         .find(|p| p.number == number)
         .ok_or("that PR is not in your queue")?;
     let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-    let summary = if redraft {
+    let summary = if here {
+        skein::review::re_read_here_instead(repo, &queue.slug, pr, &identities)
+    } else if redraft {
         skein::review::re_read_and_review(repo, &queue.slug, pr, &identities)
     } else {
         skein::review::summarise(repo, &queue.slug, pr, &identities, force, trigger)
@@ -657,7 +670,7 @@ pub(super) async fn api_review_read(
     // Read exactly as [`api_review_summary`] reads them, including the safe default: absent both
     // markers the request is UNASKED, so a caller that forgets one gates a button rather than
     // un-gating a sweep.
-    let redraft = flag(&q, "redraft");
+    let (redraft, here) = redraft_and_here(&q);
     let force = redraft || flag(&q, "force");
     let asked = force || flag(&q, "asked");
     let trigger = match asked {
@@ -671,7 +684,7 @@ pub(super) async fn api_review_read(
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
     tokio::task::spawn_blocking(move || {
-        let done = match read_a_pull_request(&repo, number, redraft, force, trigger) {
+        let done = match read_a_pull_request(&repo, number, (redraft, here), force, trigger) {
             Ok((queue, known)) => skein::review::ReadingDone {
                 repo_id: repo.id.clone(),
                 number,

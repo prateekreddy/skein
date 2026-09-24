@@ -272,7 +272,8 @@ function revFetchSummary(id, number, how) {
   // name. The merged queue holds every repo at once, so there is no "current repo" to fall back
   // on, which is what used to send the pump to `/api/repos/undefined/…`.
   if (!id || !revHeld) return;
-  const force = how === "force" || how === true;
+  // "here" is "read it here instead" (SKEIN-818): a forced read, outside the pull request's box.
+  const force = how === "force" || how === true || how === "here";
   // **`redraft=1`: read it again, and draft a NEW review from that reading** (SKEIN-293, the
   // owner's "go with one control"). It implies a forced read — a cached reading returns from
   // `review::visit` before anything is drafted, so a redraft honouring the cache would be a press
@@ -293,7 +294,7 @@ function revFetchSummary(id, number, how) {
   // neither label said so. Both the check and the drafting are gone (skein stores no review), so
   // there is one press buying one reading; `?redraft=1` is what is left of the distinction, and it
   // now means only `review::Review::Always` — read it even where skein would not read unasked.
-  const q = force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
+  const q = how === "here" ? "?redraft=1&here=1" : force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
   const key = id + "#" + number;
   // **A second read of the same row, started before the first landed** (SKEIN-366). `revReadWaits`
   // is keyed by pull request, so the entry about to be written would replace an outstanding one and
@@ -1180,6 +1181,12 @@ function revDetail(pr) {
   // and it told them to give up while the collapsed row was still drawing them a button
   // (`revReadAgain` counts depth === "unread"): the pane and the row disagreeing about whether
   // there was anything left to do. §law 1 — never a statement without the move it implies.
+  // **Its box did not answer in time, and skein stopped there** (SKEIN-818). The owner's wording,
+  // and the owner's decision: spending the budget again is the reader's call, so the row offers
+  // both ways on — the box again, or here instead — and presses neither by itself.
+  if (s.depth === "unread" && s.stopped_at_box) return `<div class="revnosum boxslow">Not read — ${esc(s.unread_because || "")}
+    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>
+      <button type="button" class="revchip" onclick="revFetchSummary(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'here')">read it here instead</button></div></div>`;
   if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")}
     <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div></div>`;
   // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable

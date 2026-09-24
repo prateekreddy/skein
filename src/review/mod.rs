@@ -68,6 +68,6 @@ pub use summary::{known_at, ownership, summaries_enabled, Depth, Known, Ownershi
 #[cfg(test)]
 pub(crate) use summary::summary_notice_for_test;
 pub use visit::{
-    announce_reading, ask, draft_comment, re_read_and_review, readings, subscribe_readings,
-    summarise, ReadingDone, ReadingNow,
+    announce_reading, ask, draft_comment, re_read_and_review, re_read_here_instead, readings,
+    subscribe_readings, summarise, ReadingDone, ReadingNow,
 };

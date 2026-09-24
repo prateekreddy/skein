@@ -85,7 +85,11 @@ pub(super) fn after_merged(unread: &crate::ai::Unread) -> AfterMerged {
         | Unread::Unreachable { .. }
         | Unread::AbsentInSandbox { .. }
         | Unread::Refused { .. }
-        | Unread::Silent => AfterMerged::Stop,
+        | Unread::Silent
+        // Not because a smaller read would fail, but because the owner decided (SKEIN-818) that a
+        // box which has already spent the whole budget is the reader's to spend again, and the
+        // narrower ladder is another spend.
+        | Unread::BoxSlow(_) => AfterMerged::Stop,
     }
 }
 
@@ -1186,6 +1190,7 @@ mod tests {
                 said: "not logged in".into(),
             },
             Unread::Silent,
+            Unread::BoxSlow(std::time::Duration::from_secs(900)),
         ] {
             assert_eq!(
                 super::after_merged(&refusal),

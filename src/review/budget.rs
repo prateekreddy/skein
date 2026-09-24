@@ -383,6 +383,7 @@ mod tests {
                 not_reread: String::new(),
                 computed: true,
                 budget_stopped: false,
+                stopped_at_box: false,
             },
         )
         .unwrap();

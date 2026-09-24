@@ -448,6 +448,63 @@ await check("a collapsed row keeps within reach the sentence its column cuts", a
   }, [openKey, rev400Was]);
 });
 
+// **A box that did not answer in time leaves the next spend to the reader** (SKEIN-818).
+//
+// The server stops rather than spend the same budget again outside the box, and says so in
+// `ai::Unread::BoxSlow`'s sentence with `stopped_at_box` beside it. The row's job is the owner's
+// wording, verbatim — `Not read — ` and the sentence — and both ways on: the box again, or here
+// instead. "read it here instead" must ask for exactly that, `here=1`, which the server reads as
+// a forced, reviewed reading on skein's own disk. The start is answered with a refusal here so no
+// reading is spent; what is asserted is what the press ASKED for.
+//
+// Fails on: the `stopped_at_box` branch dropped from `revDetail` (the generic "Not summarised — …"
+// with one button comes back), either button missing, or the press not sending `here=1`.
+const BOXSLOW_WHY = "its box did not answer within 15m, and skein stopped there rather than spend "
+  + "the same again reading it outside the box.";
+await check("a box that ran out of time offers the box again or here instead, and presses neither", async () => {
+  const was = await page.evaluate(k => {
+    const s = revSums.get(k);
+    return s && s !== "…" ? s : null;
+  }, openKey);
+  await page.evaluate(([k, why]) => {
+    const s = revSums.get(k);
+    revSums.set(k, { ...(s && s !== "…" ? s : { number: 0 }), depth: "unread",
+      budget_stopped: false, stopped_at_box: true, stale: false, unread_because: why });
+    revOpen = new Set([k]);
+    revStackOpenKey = null;
+    revStackStep = null;
+    renderReviewNow();
+  }, [openKey, BOXSLOW_WHY]);
+  const body = `#revpane .revrow.open[data-rk="${openKey}"] .revnosum`;
+  await mustSee(body, "the open row's unread body");
+  const got = await page.$eval(body, e => ({
+    text: e.firstChild ? e.firstChild.textContent.trim() : "",
+    chips: [...e.querySelectorAll(".revacts .revchip")].map(b => b.textContent.trim()),
+  }));
+  if (got.text !== "Not read — " + BOXSLOW_WHY)
+    throw new Error(`the row does not say the approved sentence: ${JSON.stringify(got.text)}`);
+  if (JSON.stringify(got.chips) !== JSON.stringify(["read it again", "read it here instead"]))
+    throw new Error(`the row does not offer both ways on: ${JSON.stringify(got.chips)}`);
+  let asked = "";
+  await page.route("**/review/*/read*", route => {
+    asked = route.request().url();
+    return route.fulfill({ status: 409, body: "stand-in: no reading is spent by this check" });
+  });
+  try {
+    await page.click(`${body} .revchip:has-text('read it here instead')`);
+    for (let i = 0; i < 50 && !asked; i++) await new Promise(r => setTimeout(r, 50));
+  } finally {
+    await page.unroute("**/review/*/read*");
+  }
+  if (!/[?&]here=1(&|$)/.test(asked) || !/[?&]redraft=1(&|$)/.test(asked))
+    throw new Error(`"read it here instead" did not ask for a reading here: ${JSON.stringify(asked)}`);
+  await page.evaluate(([k, w]) => {
+    if (w) revSums.set(k, w); else revSums.delete(k);
+    revOpen = new Set();
+    renderReviewNow();
+  }, [openKey, was]);
+});
+
 // **SKEIN-284's actual shape**: the row that had no feedback was inside a STACK.
 //
 // `revStackSteps` draws a stacked pull request as a `.step`, and the `.revrow` around it carries

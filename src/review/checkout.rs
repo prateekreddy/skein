@@ -79,6 +79,24 @@ pub(super) fn conversation_of(repo: &Repo, number: u64, head_sha: &str, base_ref
     if let Some(bench) = at_a_review_box(repo, number, head_sha, base_ref, &talk) {
         return bench;
     }
+    on_skeins_own_disk(repo, number, head_sha, base_ref, talk)
+}
+
+/// The bench on skein's own disk, **without asking for the box first** — "read it here instead"
+/// (SKEIN-818). The same bench [`conversation_of`] falls back to when there is no box; this is a
+/// person choosing it over a box that did not answer in time.
+pub(super) fn conversation_here(repo: &Repo, number: u64, head_sha: &str, base_ref: &str) -> Bench {
+    let talk = crate::ai::conversation_for(&repo.id, number);
+    on_skeins_own_disk(repo, number, head_sha, base_ref, talk)
+}
+
+fn on_skeins_own_disk(
+    repo: &Repo,
+    number: u64,
+    head_sha: &str,
+    base_ref: &str,
+    talk: String,
+) -> Bench {
     let at = review_dir(&repo.id).join("trees").join(number.to_string());
     // The directory is the conversation's address (SKEIN-376), so it is made whether or not the
     // checkout below succeeds and it never moves. A cwd that changed with the weather would file

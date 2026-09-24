@@ -77,6 +77,23 @@ pub fn re_read_and_review(repo: &Repo, slug: &str, pr: &Pr, identities: &[String
     )
 }
 
+/// [`re_read_and_review`], **outside the pull request's box** — "read it here instead" (SKEIN-818).
+///
+/// Reached only from the row that says its box did not answer in time: skein stopped there rather
+/// than spend the same budget again outside the box, and this is the person deciding to. Everything
+/// else about the visit is the redraft's — forced, asked, reviewed.
+pub fn re_read_here_instead(repo: &Repo, slug: &str, pr: &Pr, identities: &[String]) -> Summary {
+    visit(
+        repo,
+        slug,
+        pr,
+        identities,
+        true,
+        Trigger::Asked,
+        Review::HereInstead,
+    )
+}
+
 /// Whether this visit must come back having reviewed as well as summarised.
 ///
 /// The distinction exists because a review can be **asked for directly** — the panel's redraft —
@@ -90,6 +107,14 @@ pub(super) enum Review {
     IfYours,
     /// Review it whatever `draft_due` would have answered. Somebody pressed for one.
     Always,
+    /// [`Review::Always`], **and read it outside its box** — the second of the two ways on that a
+    /// row offers when its box did not answer in time (SKEIN-818, "read it here instead"). The
+    /// person has been told the box already spent a whole budget and is choosing to spend another
+    /// here; skein never makes that choice by itself, so nothing but this press reaches it.
+    ///
+    /// A variant of this enum rather than a parameter beside it because it is only meaningful with
+    /// `Always` — a press — and because [`spend_a_visit`] is already at clippy's argument ceiling.
+    HereInstead,
 }
 
 /// **One reading, whichever half you asked for.** The summary and the review are different tasks
@@ -481,7 +506,7 @@ pub(super) fn spend_a_visit(
     // read what is already on the pull request before it says anything, which is a better answer
     // to the same question than a file skein kept beside it.
     let draft_due = match review {
-        Review::Always => true,
+        Review::Always | Review::HereInstead => true,
         Review::IfYours => identities.first().is_some_and(|viewer| {
             worth_a_visit(pr)
                 && (pr.author == *viewer
@@ -502,6 +527,7 @@ pub(super) fn spend_a_visit(
         signals: &signals,
         fired: &fired,
         described: &described,
+        here: review == Review::HereInstead,
     };
     // **The purchase.** One analysed pull request = one unit, taken the moment before the model is
     // asked (a call that then fails still spent — the same boundary `computed` draws below), and
@@ -548,6 +574,9 @@ pub(super) struct Visit<'a> {
     fired: &'a [String],
     /// What the author said the change is for — the one statement of intent that exists.
     described: &'a str,
+    /// Read it on skein's own disk rather than in the pull request's box, because a person asked
+    /// for exactly that ([`Review::HereInstead`]). Only the merged call has a box to skip.
+    here: bool,
 }
 
 /// The summary-only ladder: one cheap call over the first [`STAGE1_BYTES`], and a second, longer
@@ -573,6 +602,9 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         signals,
         fired,
         described,
+        // The summary-only ladder asks no box — its calls are one-shots, `Machine::Wherever` —
+        // so there is nothing here to read outside of.
+        here: _,
     } = what;
     let (diff, cut) = truncate(full, STAGE1_BYTES);
     let raw = match crate::ai::claude_oneshot_telling(
@@ -619,6 +651,7 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         // Reached only by having run the model.
         computed: true,
         budget_stopped: false,
+        stopped_at_box: false,
         // The two-stage path has no second turn — `sweep` is called from the merged path alone —
         // so nothing has accounted for what this pass covered and it says so.
         swept: false,
@@ -713,6 +746,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         signals,
         fired,
         described,
+        here,
     } = what;
     let spent_unread = |why: &str| {
         let mut said = Summary::unread(pr.number, &pr.head_sha, why);
@@ -724,7 +758,14 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // coverage on a second turn, and a second turn needs the first one to have been named; naming
     // it after the pull request instead of after the moment means the next round resumes what this
     // one left rather than paying to be told the same change again.
-    let bench = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    //
+    // **Unless a person asked for it here** (SKEIN-818): its box did not answer in time, skein
+    // stopped rather than spend the budget again, and "read it here instead" is the reader
+    // deciding to. Then the bench is the one a reading had before review boxes existed.
+    let bench = match here {
+        true => conversation_here(repo, pr.number, &pr.head_sha, &pr.base_ref),
+        false => conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref),
+    };
     let (talk, at, standing) = (&bench.talk, &bench.at, &bench.standing);
     // The review's byte budget, not the summary's: the review is the reader that cannot say
     // anything about a file it never saw, so the merged call gets the most diff either consumer
@@ -789,7 +830,14 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
             }
             return narrower;
         }
-        Err(unread) => return spent_unread(&unread.say()),
+        // **A box that did not answer in time is the reader's to spend again** (SKEIN-818). The
+        // row says so in the variant's own words and offers both ways on: read it again (the
+        // box), or read it here instead. The flag is what tells the pane to draw the second.
+        Err(unread) => {
+            let mut said = spent_unread(&unread.say());
+            said.stopped_at_box = matches!(unread, crate::ai::Unread::BoxSlow(_));
+            return said;
+        }
     };
     // **Taken off the answer before anything else makes a model call** (SKEIN-799). `sweep` below
     // is one, and it answers for itself; this is the reading's own reason and there is exactly one
@@ -830,6 +878,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         depth: if expand { Depth::Expanded } else { Depth::Line },
         computed: true,
         budget_stopped: false,
+        stopped_at_box: false,
         // The second turn's outcome, carried rather than dropped: this is the one reading in the
         // tree a sweep speaks for, and `crate::prwork::facts_of_in` reads it back off this file.
         swept,
