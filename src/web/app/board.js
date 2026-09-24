@@ -719,6 +719,43 @@ const RECOVERY = {
   "no-watch": ["skein could not open this terminal",
                "There is no condition to wait for, so nothing will reopen it by itself.", true],
 };
+// **`retry`: skein's own failure inside `pump_pty`, tried again on a bounded backoff** (SKEIN-883).
+// Not a row in `RECOVERY`, because its strip is not one sentence: while the tries last it says when
+// the next one is and offers no button, and after the fifth it offers the button and stops. The
+// delays are the owner's (2026-09-23); the fifth ends 223s after the first failure, which the
+// exhausted sentence rounds to four minutes. Each try goes through `retryWaiting`, so
+// `RETRY_FLOOR_MS` holds for these as for every other automatic reconnect.
+const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];
+// Per `sid`, like `retriedAt`, because a try replaces the session object and the count must outlive
+// it. Cleared when the pane shows it is live (its first PTY bytes) or when somebody presses Try again.
+const retryTries = new Map();
+const retryTimers = new Map();
+function scheduleRetry(s) {
+  clearTimeout(retryTimers.get(s.sid));
+  const n = retryTries.get(s.sid) || 0;
+  if (n >= RETRY_BACKOFF_MS.length) { s.retryAt = 0; return; }
+  const wait = RETRY_BACKOFF_MS[n];
+  retryTries.set(s.sid, n + 1);
+  s.retryTry = n + 1; s.retryAt = Date.now() + wait;
+  const fire = () => {
+    retryTimers.delete(s.sid);
+    if (sessions.get(s.sid) !== s || s.waitFor !== "retry") return;   // closed, or already back
+    retryWaiting("retry", s.box, s.kind);
+    // Held back by the floor: try again the moment it allows, rather than never.
+    if (sessions.get(s.sid) === s && s.waitFor === "retry")
+      retryTimers.set(s.sid, setTimeout(fire, Math.max(50, RETRY_FLOOR_MS - (Date.now() - (retriedAt.get(s.sid) || 0)))));
+  };
+  retryTimers.set(s.sid, setTimeout(fire, wait));
+}
+function retryStrip(s) {
+  if (s.retryAt) {
+    const secs = Math.max(0, Math.ceil((s.retryAt - Date.now()) / 1000));
+    return ["skein could not open this terminal — trying again",
+            `It retries on its own: next try in ${secs}s (${s.retryTry} of ${RETRY_BACKOFF_MS.length}). Nothing in your box is wrong.`, false];
+  }
+  return ["skein could not open this terminal",
+          `It tried ${RETRY_BACKOFF_MS.length} times over 4 minutes. Press Try again once the cause above is fixed.`, true];
+}
 function createSession(box, kind, launchBranch, runtime, handoff = false, fromRuntime = null) {
   runtime = kind === "agent" ? (runtime || agentOf(box)) : "shell";
   if (DEMO) return createDemoSession(box, kind, runtime);   // no server in demo — show a placeholder pane
@@ -799,6 +836,9 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
     }
   };
   ws.onmessage = e => {
+    // PTY bytes arrive binary and a refusal's sentence as text, so the first binary frame is the
+    // pane being live — the end of any `retry` run it was in (SKEIN-883).
+    if (typeof e.data !== "string") retryTries.delete(id);
     term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
     markStreaming(id);
   };
@@ -818,6 +858,7 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
     s.dead = true; s.ended = e.code === CLOSE_NOTHING_TO_RECONNECT;
     s.waitFor = s.ended ? String(e.reason || "").split(" ")[0] : "";
     host.classList.add("dead"); host.classList.toggle("ended", s.ended);
+    if (s.waitFor === "retry") scheduleRetry(s);
     showRecovery(s);
     renderTabs(); refreshRow(box);
   };
@@ -1009,7 +1050,8 @@ function reconnectSession(box, kind, bring = true) {
 // A reason this build has never heard of falls to the button rather than to silence: an unknown
 // token is precisely the case where the page cannot claim to be watching anything.
 function showRecovery(s) {
-  const known = RECOVERY[s.waitFor];
+  clearInterval(s.retryTick);
+  const known = s.waitFor === "retry" ? retryStrip(s) : RECOVERY[s.waitFor];
   const offer = s.waitFor && s.waitFor !== "child-ended";
   s.host.classList.toggle("recovering", !!offer);
   if (!offer) { s.recover.innerHTML = ""; return; }
@@ -1018,7 +1060,16 @@ function showRecovery(s) {
     (button || !known ? "" : `<span class="recover-w"></span>`) +
     `<span class="recover-t">${esc(title)}</span><span class="recover-b">${esc(body)}</span>` +
     (button || !known ? `<button class="recover-go">Try again</button>` : "");
-  s.recover.querySelector(".recover-go")?.addEventListener("click", () => reconnectSession(s.box, s.kind));
+  // A press starts a fresh run of tries: it is somebody saying the cause is fixed.
+  s.recover.querySelector(".recover-go")?.addEventListener("click", () => {
+    retryTries.delete(s.sid); reconnectSession(s.box, s.kind);
+  });
+  // The countdown in the retry strip, a second at a time, and only while a try is pending.
+  if (s.waitFor === "retry" && s.retryAt) s.retryTick = setInterval(() => {
+    const b = s.recover.querySelector(".recover-b");
+    if (sessions.get(s.sid) !== s || s.waitFor !== "retry" || !b) { clearInterval(s.retryTick); return; }
+    b.textContent = retryStrip(s)[1];
+  }, 1000);
   // The terminal is 46px shorter now, and xterm sizes itself from the box it was given.
   requestAnimationFrame(() => { try { s.fit.fit(); } catch {} });
 }
@@ -1034,11 +1085,12 @@ const retriedAt = new Map();
 // Every pane waiting for `what`, reconnected without being asked. The wait is cleared FIRST, so a
 // refusal that repeats re-arms from the new socket's own close rather than this firing twice for one
 // condition.
-function retryWaiting(what, box = null) {
+function retryWaiting(what, box = null, kind = null) {
   const now = Date.now();
   for (const [, s] of [...sessions]) {
     if (s.waitFor !== what) continue;
     if (box !== null && s.box !== box) continue;
+    if (kind !== null && s.kind !== kind) continue;
     if (now - (retriedAt.get(s.sid) || 0) < RETRY_FLOOR_MS) continue;
     retriedAt.set(s.sid, now);
     s.waitFor = "";

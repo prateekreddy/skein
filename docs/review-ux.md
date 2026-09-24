@@ -91,7 +91,7 @@ after : { focused: "BODY",        caret: 0 }
 ```
 
 `renderReview()` fires on: each of up to six summaries landing, the 4-second stale re-poll
-(`app/review.js:449`), each filter change, and the module fetch. So writing "request changes" on a
+(`app/review.js:470`), each filter change, and the module fetch. So writing "request changes" on a
 queue that is still settling means losing the caret mid-sentence, repeatedly, with the text intact so
 you do not notice until you type the next character in the wrong place.
 
