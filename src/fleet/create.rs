@@ -625,8 +625,9 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
 /// it and only an unreachable one falls back to a person. The cockpit port's operation names none.
 /// The warden has a `publish` doer since SKEIN-1130, and it runs only after the person types the
 /// operation id at its terminal, because publishing opens a host port into the network namespace
-/// every box shares. But nothing drives that operation (SKEIN-1140). Two operations, one shape,
-/// and the difference is data rather than two spellings of the same decision.
+/// every box shares. But a publish is a repair, and nothing drives that operation (SKEIN-1140).
+/// Two operations, one shape, and the difference is data rather than two spellings of the same
+/// decision.
 ///
 /// **The check is asked of the warden, not of `sbx`.** In the fleet `sbx ls` cannot answer — it is
 /// a question about the *machine*, and this process is not standing on it — so `fleet_exists`
@@ -738,19 +739,48 @@ pub fn request_fleet_create(sandbox: &str, mounts: &[String]) -> Result<String, 
             theirs.age()
         ));
     }
-    // The line to publish the cockpit's port, and only when the doorway actually holds it. The
-    // warden has a `publish` doer (SKEIN-1130) and this does not ask it: the create above already
-    // carries `-p` for this port (`create_argv`), and whether this should ask the warden instead
-    // of printing is SKEIN-1140's question. Until then, the printed line is unchanged.
+    Ok(after_create(
+        sandbox,
+        published_at_create(&create_argv(sandbox, mounts)),
+        cockpit_port_advice(sandbox),
+    ))
+}
+
+/// Did this create's argv publish the cockpit's port itself (`-p P:P`)?
+///
+/// Read off the argv rather than assumed. `create_argv` has carried it since 4391aa4, and the day
+/// it stops, the printed line below comes back by itself instead of being lost.
+fn published_at_create(argv: &[String]) -> bool {
+    let port = server_sandbox_port();
+    let mapping = format!("{port}:{port}");
+    argv.windows(2).any(|w| w[0] == "-p" && w[1] == mapping)
+}
+
+/// What a person is told once a create has succeeded.
+///
+/// **The owner's decision on SKEIN-1130 ("keep Publish for repair"):** when the create published
+/// the cockpit's port itself, the "…it is yours to run: sbx ports … --publish" line is dropped,
+/// because it asked for a mapping that already exists. The door check stays, and its refusal is
+/// still printed: a port the doorway does not hold is §9.4's squat, whoever made the mapping. A
+/// create that did not publish the port keeps the printed recipe exactly as it was.
+///
+/// The warden's `publish` doer is not asked here. Publishing is a repair, and nothing skein can
+/// observe tells it the mapping is missing (SKEIN-1130's report).
+fn after_create(
+    sandbox: &str,
+    published_at_create: bool,
+    advice: Result<crate::operation::Operation, String>,
+) -> String {
     let mut said = format!("the fleet sandbox {sandbox} was created");
-    match cockpit_port_advice(sandbox) {
+    match advice {
+        Ok(_) if published_at_create => {}
         Ok(publish) => said.push_str(&format!(
             ".\nReaching its cockpit from your machine is one command, and it is yours to run:\n{}",
             publish.render()
         )),
         Err(why) => said.push_str(&format!(".\n{why}")),
     }
-    Ok(said)
+    said
 }
 
 /// Create the fleet sandbox if it is missing, open the cockpit's door in it, then install the
@@ -880,6 +910,74 @@ mod tests {
     use super::*;
     use crate::fleet::testkit::*;
     use crate::testutil::*;
+
+    /// **After a create that published the port itself, nobody is told to publish it again.**
+    ///
+    /// The owner's decision on SKEIN-1130 ("keep Publish for repair"). Three cases, and the third
+    /// is the no-warden recipe pinned byte for byte: the frame, `Operation::render`'s lines, and
+    /// the quoted `sbx ports` line, exactly as `request_fleet_create` printed them before.
+    ///
+    /// **What makes this fail**: dropping the `published_at_create` arm (the first case prints the
+    /// recipe again), dropping the door refusal with it (the second case loses §9.4's text), or
+    /// any change to the frame or the render (the third case's `assert_eq`).
+    #[test]
+    fn a_create_that_published_the_port_is_not_followed_by_a_line_to_publish_it() {
+        use crate::operation::{Check, Class, Operation};
+        let recipe = Operation {
+            id: "publish-cockpit-port-abc".into(),
+            desired: "a browser on this machine reaches the cockpit inside skein-fleet on :7878"
+                .into(),
+            check: Check::Unknown(
+                "cannot ask this machine which ports skein-fleet forwards".into(),
+            ),
+            recipe: vec!["sbx 'ports' 'skein-fleet' '--publish' '7878:7878/tcp'".into()],
+            class: Class::Idempotent,
+            doer: None,
+        };
+
+        assert_eq!(
+            after_create("skein-fleet", true, Ok(recipe.clone())),
+            "the fleet sandbox skein-fleet was created"
+        );
+        assert_eq!(
+            after_create("skein-fleet", true, Err("the port is squatted".into())),
+            "the fleet sandbox skein-fleet was created.\nthe port is squatted"
+        );
+        assert_eq!(
+            after_create("skein-fleet", false, Ok(recipe)),
+            "the fleet sandbox skein-fleet was created.\n\
+             Reaching its cockpit from your machine is one command, and it is yours to run:\n\
+             publish-cockpit-port-abc\n\
+             \x20 wanted: a browser on this machine reaches the cockpit inside skein-fleet on :7878\n\
+             \x20 now:    unknown — cannot ask this machine which ports skein-fleet forwards\n\
+             \x20 nothing can do this for you — it is yours to run\n\
+             \x20   sbx 'ports' 'skein-fleet' '--publish' '7878:7878/tcp'\n"
+        );
+    }
+
+    /// The `-p` is read off the argv the create really sends, so the day `create_argv` stops
+    /// carrying it, the printed line above comes back rather than being lost.
+    ///
+    /// **What makes this fail**: `published_at_create` answering `true` without looking, or
+    /// `create_argv` losing its `-p` (the first assertion).
+    #[test]
+    fn the_create_argv_is_what_says_the_port_was_published() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::env::remove_var("SKEIN_SERVER_PORT");
+        let argv = create_argv("skein-fleet", &["/h/.skein".to_string()]);
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        assert!(published_at_create(&argv), "{argv:?}");
+        let without: Vec<String> = argv
+            .iter()
+            .filter(|a| *a != "-p" && *a != "7878:7878")
+            .cloned()
+            .collect();
+        assert!(!published_at_create(&without), "{without:?}");
+    }
 
     /// With no warden reachable, making a fleet says what to type — not just that it failed.
     ///

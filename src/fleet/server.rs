@@ -574,10 +574,12 @@ pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation,
 /// Publishing opens a host port into the network namespace every box shares, which is why it stays
 /// a prompted act: the warden performs it only after the person types the operation id at its
 /// terminal, so the person stays in the decision. `doer` is still `None` here because nothing
-/// drives this operation. Its one caller, `request_fleet_create`, runs right after a create whose
-/// argv already carries `-p` for this port (`create_argv`), and whether that caller should ask the
-/// warden at all is SKEIN-1140. So [`crate::operation::Operation::may_drive`] is false here, and
-/// the recipe is what skein prints.
+/// drives this operation. The owner's decision (SKEIN-1140, "keep Publish for repair") makes a
+/// publish a repair: `sbx create` publishes this port itself (`-p` in `create_argv`), and the
+/// warden looks at `sbx ports` before it asks. Skein has nothing that observes a missing mapping
+/// (this function is the only reader, and it cannot read in-fleet), so there is no caller to drive
+/// it from. [`crate::operation::Operation::may_drive`] is false here, and the recipe is what skein
+/// prints.
 ///
 /// **The check is three-valued because the honest answer usually is.** In the fleet `sbx` cannot be
 /// run at all, so [`existing_forwards`] returns `None` and this is `unknown` — not "no mapping",
@@ -657,8 +659,8 @@ fn cockpit_port_operation(
         recipe,
         class: Class::Idempotent,
         // Nothing drives this operation, though the warden has a `publish` doer (SKEIN-1130). See
-        // `publish_cockpit_port`'s doc: its one caller follows a create that already published
-        // the port, and whether it should ask the warden is SKEIN-1140.
+        // `publish_cockpit_port`'s doc: a publish is a repair, and skein cannot observe a missing
+        // mapping from in-fleet (SKEIN-1140).
         doer: None,
     }
 }

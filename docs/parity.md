@@ -564,9 +564,10 @@ What a person loses, in order of how much they will notice it:
   doer, so nothing drives it and the recipe is what skein prints. The warden has had a `publish`
   doer since SKEIN-1130. Publishing opens a host port into the network namespace every box shares,
   which is why it stays a prompted act (§9.4): the warden performs it only after the person types
-  the operation id at its terminal, so the person stays in the decision. The cockpit port's one
-  caller does not ask it yet, because that caller follows a create that already publishes the port
-  with `-p` (SKEIN-1140). This is `docs/delivery.md`'s
+  the operation id at its terminal, so the person stays in the decision. The owner decided that a
+  publish is a repair (SKEIN-1140): the create already publishes the port with `-p`, so the
+  post-create line is gone, and the warden reads `sbx ports` before it asks. Nothing in skein
+  observes a missing mapping, so nothing asks the warden yet. This is `docs/delivery.md`'s
   rule at a second site: an unreachable doer does not fall back to running `sbx`, "because that
   fallback would be taken on exactly the day something was wrong".
 - **The two-candidate retry.** A publish that does not settle is a person's to notice now. What it

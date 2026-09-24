@@ -324,6 +324,36 @@ impl Warden {
             }
         };
 
+        // **A publish looks before it asks** (SKEIN-1130, the owner's "keep Publish for repair").
+        // `sbx create` already publishes the cockpit's port, so a publish is a repair: when the
+        // mapping is there nothing is put to the person and nothing runs, and the answer is a
+        // success, because the state asked for holds. That is the same 200 and `ok: true` a replay
+        // gets, with its own `state` so a client can tell "looked and found it" from "ran it". A
+        // listing that cannot be read is answered as a refusal with the reason. It is never read as
+        // "missing", because that would publish blind.
+        #[cfg(feature = "publish")]
+        if which == capability::Capability::Publish {
+            match doer::already_published(&op) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let said = format!(
+                        "{} is already published for {}, so nothing was asked and nothing ran",
+                        op.args[3], op.sandbox
+                    );
+                    unrecorded.note(self.log.record(&op.operation, "settled", &said));
+                    return unrecorded.onto(Response::json(
+                        200,
+                        serde_json::json!({ "state": "already", "ok": true, "said": said })
+                            .to_string(),
+                    ));
+                }
+                Err(why) => {
+                    unrecorded.note(self.log.record(&op.operation, "refused", &why));
+                    return unrecorded.onto(answer(&Outcome::Refused(why)));
+                }
+            }
+        }
+
         // At-most-once, around the whole of it. The approval is inside, so a retry of an operation a
         // person already refused is answered with the refusal rather than asking them again — which
         // is how approval fatigue is manufactured (§8.5).
@@ -1995,11 +2025,19 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
     /// * a request that says it is approved, which is the pre-approval a wire could carry;
     /// * and a retry of a refusal, which must be asked again rather than answered from the record.
     ///
-    /// Then the id is typed, and it runs once — the approved `will run` line on the screen, the
-    /// argv whole in the transcript — and a retry is replayed without asking or running again.
+    /// The warden looks before it asks (the owner's "keep Publish for repair"). A mapping already
+    /// in `sbx ports` is answered `already`, with nobody asked and nothing run. A listing that
+    /// cannot be read or parsed is refused, with nobody asked and nothing run. Both cases have a
+    /// Console attached that would approve, so asking anyway would show up as a run.
+    ///
+    /// Then, with the mapping missing, the id is typed and it runs once: the approved `will run`
+    /// line on the screen, the argv whole in the transcript. A retry is replayed without asking or
+    /// running again.
     ///
     /// **What makes this fail**: `doer::publish` calling [`doer::run`] without asking its approver
-    /// (the first count goes to 1), or a `serve::Asked` that accepted an `approved` field.
+    /// (the first count goes to 1); a `serve::Asked` that accepted an `approved` field; skipping
+    /// the look (the `already` case prompts and runs); or reading an unreadable listing as
+    /// "missing" (the blind cases prompt and run).
     #[test]
     #[cfg(feature = "publish")]
     fn a_publish_reaches_sbx_only_after_its_operation_id_is_typed_at_the_terminal() {
@@ -2010,16 +2048,26 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         let dir = scratch("publish");
         std::fs::create_dir_all(&dir).unwrap();
         let ran = dir.join("sbx-ran");
+        let listing = dir.join("listing");
         let fake = dir.join("sbx");
+        // A publish is recorded and succeeds. A read prints the listing file, and fails the way an
+        // unreachable daemon does when there is no listing file. Only publishes are counted.
         std::fs::write(
             &fake,
             // Quoted for the `ThreadId(n)` `scratch` puts in the path — see the replay test above.
             format!(
-                "#!/bin/sh\necho \"$@\" >> '{}'\necho published\n",
-                ran.display()
+                "#!/bin/sh\n\
+                 if [ \"$3\" = --publish ]; then echo \"$@\" >> '{ran}'; echo published; exit 0; fi\n\
+                 [ -f '{listing}' ] || {{ echo 'the daemon is not answering' >&2; exit 1; }}\n\
+                 cat '{listing}'\n",
+                ran = ran.display(),
+                listing = listing.display()
             ),
         )
         .unwrap();
+        const HEADER: &str = "HOST IP\tHOST PORT\tSANDBOX PORT\tPROTOCOL\n";
+        // The mapping is missing: another port is forwarded, and the one asked for is not.
+        std::fs::write(&listing, format!("{HEADER}127.0.0.1\t9999\t22\ttcp\n")).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let real = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{real}", dir.display()));
@@ -2101,6 +2149,67 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         );
         assert_eq!(claimed.code, 400, "{}", claimed.body);
         assert_eq!(runs(), 0, "a publish that approved itself ran");
+
+        // **The mapping is already there**: nothing is put to the person and nothing runs. A
+        // Console that would approve is attached, so a warden that asked anyway would publish.
+        std::fs::write(
+            &listing,
+            format!("{HEADER}127.0.0.1\t7878\t7878\ttcp\n::1\t7878\t7878\ttcp\n"),
+        )
+        .unwrap();
+        let screen = Screen::default();
+        let there = ask(
+            &at("there", typing("op-p6\n", &screen)),
+            "POST",
+            "/v1/publish",
+            &body("op-p6"),
+        );
+        assert_eq!(there.code, 200, "{}", there.body);
+        assert!(
+            there.body.contains(r#""state":"already""#),
+            "{}",
+            there.body
+        );
+        assert!(
+            screen.0.lock().unwrap().is_empty(),
+            "a person was asked to publish a mapping that already exists"
+        );
+        assert_eq!(runs(), 0, "a publish ran for a mapping that already exists");
+
+        // **The listing cannot be read, or is not the table**: nothing is published blind, and
+        // nobody is asked, although the Console would approve.
+        for (name, table) in [
+            ("unreadable", None),
+            ("unparsed", Some("sbx: a table in some other shape\n")),
+        ] {
+            match table {
+                Some(table) => std::fs::write(&listing, table).unwrap(),
+                None => std::fs::remove_file(&listing).unwrap(),
+            }
+            let screen = Screen::default();
+            let said = ask(
+                &at(name, typing("op-p7\n", &screen)),
+                "POST",
+                "/v1/publish",
+                &body("op-p7"),
+            );
+            assert_eq!(said.code, 409, "{name}: {}", said.body);
+            assert!(
+                said.body.contains("nothing was published blind"),
+                "{name}: {}",
+                said.body
+            );
+            assert!(
+                screen.0.lock().unwrap().is_empty(),
+                "{name}: a person was asked on a listing nobody could read"
+            );
+            assert_eq!(
+                runs(),
+                0,
+                "{name}: a publish ran on a listing nobody could read"
+            );
+        }
+        std::fs::write(&listing, HEADER).unwrap();
 
         // And approved: the id typed, once.
         let screen = Screen::default();

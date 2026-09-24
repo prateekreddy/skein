@@ -296,6 +296,68 @@ pub fn argv_publish(request: &Request) -> Result<Vec<String>, String> {
     Ok(argv)
 }
 
+/// **Is the mapping this publish asks for already there?** The read a publish makes before it asks.
+///
+/// The owner's decision on SKEIN-1130 ("keep Publish for repair"): `sbx create` already publishes
+/// the cockpit's port, so a publish is a repair, and the person is asked only when the mapping is
+/// actually missing. `sbx ports <sandbox>` is a read, so it needs no approval, and it goes through
+/// [`run`] rather than through `cross_then`, because nothing privileged is reached.
+///
+/// `Err` when the listing cannot be read or parsed. **The caller must then not publish blind**: a
+/// listing it cannot read would turn "I could not look" into "it is missing", and that would put a
+/// publish in front of the person for a mapping that may already be there.
+#[cfg(feature = "publish")]
+pub fn already_published(request: &Request) -> Result<bool, String> {
+    let argv = argv_publish(request)?;
+    let listing = run(
+        &["ports".to_string(), request.sandbox.clone()],
+        &request.env,
+    )
+    .map_err(|why| unreadable(request, &why))?;
+    mapped_in(&listing, &argv[3]).map_err(|why| unreadable(request, &why))
+}
+
+#[cfg(feature = "publish")]
+fn unreadable(request: &Request, why: &str) -> String {
+    format!(
+        "the ports {} publishes could not be read, so nothing was published blind: {why}",
+        request.sandbox
+    )
+}
+
+/// Does the `sbx ports` table hold `mapping` (`HOST:SANDBOX/tcp`)?
+///
+/// The table is `HOST IP / HOST PORT / SANDBOX PORT / PROTOCOL`, with one row per address family.
+/// Every line must be the header or a row whose two port columns are numbers. A line that is
+/// neither means the output is not the table this was written against, and that is an `Err`,
+/// never "missing". An empty listing is a table with no rows.
+///
+/// Ungated and pure, so the parse is testable without a process.
+pub fn mapped_in(table: &str, mapping: &str) -> Result<bool, String> {
+    let (ports, protocol) = mapping
+        .split_once('/')
+        .ok_or_else(|| format!("`{mapping}` is not HOST:SANDBOX/PROTOCOL"))?;
+    let (host, sandbox) = ports
+        .split_once(':')
+        .ok_or_else(|| format!("`{mapping}` is not HOST:SANDBOX/PROTOCOL"))?;
+    let mut found = false;
+    for line in table.lines().filter(|l| !l.trim().is_empty()) {
+        if line.contains("HOST PORT") && line.contains("SANDBOX PORT") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let row_ports =
+            cols.len() == 4 && cols[1].parse::<u16>().is_ok() && cols[2].parse::<u16>().is_ok();
+        if !row_ports {
+            return Err(format!(
+                "`sbx ports` printed a line that is not a mapping: {line}"
+            ));
+        }
+        found |= cols[1] == host && cols[2] == sandbox && cols[3].eq_ignore_ascii_case(protocol);
+    }
+    Ok(found)
+}
+
 /// `HOST:SANDBOX/tcp`, both of them port numbers from 1 to 65535, and nothing else.
 fn plain_mapping(mapping: &str) -> bool {
     let port = |p: &str| {
@@ -611,6 +673,44 @@ mod tests {
             .unwrap(),
             "`sbx ports skein-fleet --publish 7878:7878/tcp` — forwards a host port into the sandbox"
         );
+    }
+
+    /// **The listing a publish reads before it asks: found, missing, or not a listing at all.**
+    ///
+    /// Three answers that must stay three. "Not a listing" read as "missing" would put a publish in
+    /// front of the person for a mapping that may already be there, so that case is an `Err`.
+    ///
+    /// **What makes this fail**: dropping the row check in `mapped_in` (the garbage line comes
+    /// back `Ok(false)`), or matching on the host port alone (the `9999:22` row, or a `7878:1`
+    /// row, would count).
+    #[test]
+    fn the_listing_says_found_or_missing_and_anything_else_is_not_an_answer() {
+        const HEADER: &str = "HOST IP\tHOST PORT\tSANDBOX PORT\tPROTOCOL\n";
+        let asked = "7878:7878/tcp";
+        let with = |rows: &str| format!("{HEADER}{rows}");
+        assert_eq!(mapped_in(&with("::1\t7878\t7878\ttcp\n"), asked), Ok(true));
+        assert_eq!(
+            mapped_in(&with("127.0.0.1\t7878\t7878\ttcp\n"), asked),
+            Ok(true)
+        );
+        for missing in [
+            with(""),
+            String::new(),
+            with("127.0.0.1\t9999\t22\ttcp\n"),
+            with("127.0.0.1\t7878\t1\ttcp\n"),
+            with("127.0.0.1\t7878\t7878\tudp\n"),
+        ] {
+            assert_eq!(mapped_in(&missing, asked), Ok(false), "{missing:?}");
+        }
+        for garbage in [
+            "error: sandbox not found\n".to_string(),
+            with("127.0.0.1\tseven\t7878\ttcp\n"),
+        ] {
+            assert!(
+                mapped_in(&garbage, asked).is_err(),
+                "{garbage:?} was read as a listing"
+            );
+        }
     }
 
     /// And it refuses a create that would make a sandbox other than the one being approved.

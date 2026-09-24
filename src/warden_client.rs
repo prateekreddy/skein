@@ -492,7 +492,8 @@ impl Warden {
     ///
     /// Publishing opens a host port into the network namespace every box shares, which is why it
     /// stays a prompted act: the warden performs it only after the person types the operation id at
-    /// its terminal. The argv is sent in full and the warden checks it rather than trusting it
+    /// its terminal. It looks first: a mapping already in `sbx ports` is answered `already`, with
+    /// nobody asked. The argv is sent in full and the warden checks it rather than trusting it
     /// (`warden/src/doer.rs::argv_publish`).
     pub fn publish(
         &self,
@@ -712,6 +713,8 @@ fn read_answer(code: u16, said: &str, operation: &str) -> Result<Answered, Strin
     };
     match (code, parsed.state.as_str()) {
         (200, "replayed") => Ok(Answered::Replayed(reply(detail))),
+        // `already` is a publish that found its mapping in place and ran nothing (SKEIN-1130). What
+        // was asked for holds, so it is read as having happened, the same as `ran`.
         (200, _) => Ok(Answered::Ran(reply(detail))),
         (_, "undecided") => Ok(Answered::Undecided(reply(format!(
             "{operation} was accepted at {} and never settled — it may have happened. Ask the \
@@ -913,8 +916,8 @@ impl Act {
                 "the host's :{host_port} still forwards into {sandbox}:{sandbox_port} and nothing \
                  useful is behind it — a probe that judged a live port dead, or an agent that never \
                  came up. Withdrawing it frees the number and closes a way in that skein is no \
-                 longer using. This is the one port act that only ever CLOSES something, which is \
-                 why a warden may do it where a publish is always put to you."
+                 longer using. This is the one port act that only ever CLOSES something, where a \
+                 publish opens one."
             ),
         }
     }
@@ -1706,6 +1709,25 @@ mod tests {
                     "{act:?} may already have happened and was offered for running again: {other:?}"
                 ),
             }
+        }
+    }
+
+    /// A warden that finds the mapping already there answers `already`, and that counts as done.
+    ///
+    /// **What makes this fail**: `read_answer` treating a 200 it does not know the state of as
+    /// anything but `Ran`, which would turn a mapping that holds into a prompt to make it again.
+    #[test]
+    fn a_mapping_the_warden_found_in_place_is_done_and_nobody_is_asked_to_make_it() {
+        let port = fake_warden(|_| {
+            (
+                200,
+                r#"{"state":"already","ok":true,"said":"7878:7878/tcp is already published"}"#
+                    .to_string(),
+            )
+        });
+        match perform_through(&Warden::at("127.0.0.1", port), &publishing()) {
+            Performed::Warden(answered) => assert_eq!(answered.happened(), Some(true)),
+            other => panic!("a mapping already in place was put to a person: {other:?}"),
         }
     }
 

@@ -20,7 +20,7 @@
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:1755"]
+["docs/architecture.md:1756"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -992,39 +992,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = "cpus,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:707"]
+["src/fleet/create.rs:708"]
 line = "\"skein cannot create {sandbox} from here and will not guess.\\n{}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:735"]
+["src/fleet/create.rs:736"]
 line = "\"the fleet sandbox {sandbox} is already being created — that started {} ago and takes \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:767"]
+["src/fleet/create.rs:797"]
 line = "return Err(\"invalid fleet sandbox name\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:790"]
+["src/fleet/create.rs:820"]
 line = "if fleet_exists(sandbox) != Some(true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:792"]
+["src/fleet/create.rs:822"]
 line = "\"{sandbox} is not the fleet sandbox this skein is running inside, and from in here \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:814"]
+["src/fleet/create.rs:844"]
 line = "\"skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:830"]
+["src/fleet/create.rs:860"]
 line = "\"skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:879"]
+["src/fleet/create.rs:909"]
 line = "mod tests {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:1307"]
+["src/fleet/create.rs:1405"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
@@ -1832,7 +1832,7 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1162"]
+["src/warden_client.rs:1165"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -2224,19 +2224,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "_ => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:356"]
+["warden/src/doer.rs:418"]
 line = "\"the unpublish for {} {why}, so it is not a withdrawal: `sbx {}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:372"]
+["warden/src/doer.rs:434"]
 line = "return refuse(\"is not exactly `ports <sandbox> --unpublish <mapping>`\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:395"]
+["warden/src/doer.rs:457"]
 line = ".map_err(|e| format!(\"could not run `sbx`: {e}\"))?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:398"]
+["warden/src/doer.rs:460"]
 line = "false => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2317,37 +2317,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"this warden has no `approved` field, and adding one to the request would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:573"]
+["warden/src/serve.rs:603"]
 line = "return Err(format!("
 window = "if !named {\u000breturn Err(format!(\u000b\"{name:?} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:580"]
+["warden/src/serve.rs:610"]
 line = "return Err(format!("
 window = "if asked.args.len() > MOST_ARGS {\u000breturn Err(format!(\u000b\"the {} for {name} carries {} arguments, and more than {MOST_ARGS} is more than an \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:589"]
+["warden/src/serve.rs:619"]
 line = "return Err(format!("
 window = "if arg.len() > LONGEST_VALUE || !readable(arg) {\u000breturn Err(format!(\u000b\"an argument of the {} for {name} cannot be shown as what it is, so it cannot be \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:604"]
+["warden/src/serve.rs:634"]
 line = "return Err(format!("
 window = "if asked.env[..at].iter().any(|(seen, _)| seen == key) {\u000breturn Err(format!(\u000b\"`{key}` is given twice, and `sbx` would take the last one — so what ran would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:610"]
+["warden/src/serve.rs:640"]
 line = "return Err(format!("
 window = "if !allowed.contains(&key.as_str()) {\u000breturn Err(format!(\u000b\"this warden does not pass `{key}` to a {}. The environment decides what a relative \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:621"]
+["warden/src/serve.rs:651"]
 line = "return Err(format!("
 window = "if value.len() > LONGEST_VALUE || !readable(value) {\u000breturn Err(format!(\u000b\"the value of `{key}` cannot be shown as what it is, so it cannot be approved: \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:646"]
+["warden/src/serve.rs:676"]
 line = "return Err(format!("
 window = "if shown.len() > LONGEST_APPROVAL {\u000breturn Err(format!(\u000b\"the approval for this {} would be {} bytes of text, and more than \\"
 cited_by = ["docs/recovery-survey.md"]
