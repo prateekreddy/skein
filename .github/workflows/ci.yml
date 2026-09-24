@@ -163,6 +163,10 @@ jobs:
       # to point at; the fix it recommends is a symbol name, which the check above already keeps
       # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
       - run: tools/gates.sh run prose-check
+      # Whether the file a markdown link or a backticked repo path names is tracked at all — the
+      # question the step above never asks. `[docs/live-check.md](docs/live-check.md)` on the root
+      # page passed every doc gate the day that file left the repository (SKEIN-1157).
+      - run: tools/gates.sh run link-check
       # The other half of that citation, and the half that actually goes wrong. `prose-check.py`
       # above asks only whether the line is INSIDE the file it names, and says so itself — "GREEN
       # HERE MEANS FOLLOWABLE, NEVER RIGHT". `docs/prose-symbols.toml` cited
