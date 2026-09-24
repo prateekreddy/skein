@@ -508,7 +508,7 @@ fn shape_response(
 /// of SKEIN-293. The intent travels from the surface rather than being decided here, because
 /// whether a row wants a review of its own is the pane's question and not this route's.
 ///
-/// A redraft is always a forced read — `review::re_read_replacing_the_review` spells that itself,
+/// A redraft is always a forced read — `review::re_read_and_review` spells that itself,
 /// because a cached reading returns from `visit` before anything is drafted and a redraft that
 /// honoured the cache would be a press that does nothing. It is folded into `force` here as well,
 /// for one reason: PRECEDENCE. `held=1` asks this route to read nothing at all, and the marker
@@ -616,7 +616,7 @@ fn read_a_pull_request(
         .ok_or("that PR is not in your queue")?;
     let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
     let summary = if redraft {
-        skein::review::re_read_replacing_the_review(repo, &queue.slug, pr, &identities)
+        skein::review::re_read_and_review(repo, &queue.slug, pr, &identities)
     } else {
         skein::review::summarise(repo, &queue.slug, pr, &identities, force, trigger)
     };
@@ -947,7 +947,7 @@ pub(super) async fn api_review_act(
 /// above are pure — mixing them would make a pure test's failure depend on an env var somebody
 /// else's test set.
 #[cfg(test)]
-mod review_routes {
+pub(super) mod review_routes {
     use super::*;
 
     /// Drives an async body to completion on a runtime of this test's own, from a SYNC test.
@@ -1038,15 +1038,20 @@ mod review_routes {
     /// `skein-server` is a separate `[[bin]]` that only sees the library's `pub` surface —
     /// `tests/common/mod.rs` carries the same copy for the same reason, for the integration
     /// binaries. Restores from `Drop`, so a test that panics still puts these back, which the
-    /// `for key in [..] { remove_var(key) }` loop this replaces did not survive.
-    struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
+    /// `for key in [..] { remove_var(key) }` loop this replaces did not survive. `pub(crate)` so the
+    /// settings routes' tests pin through it too rather than growing a third copy.
+    pub(crate) struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>);
 
-    fn env_pins() -> EnvPins {
+    pub(crate) fn env_pins() -> EnvPins {
         EnvPins(Vec::new())
     }
 
     impl EnvPins {
-        fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) -> &mut EnvPins {
+        pub(crate) fn set(
+            &mut self,
+            name: &str,
+            value: impl AsRef<std::ffi::OsStr>,
+        ) -> &mut EnvPins {
             self.0.push((name.into(), std::env::var_os(name)));
             std::env::set_var(name, value);
             self

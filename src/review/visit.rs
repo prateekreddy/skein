@@ -37,7 +37,7 @@ use std::time::Duration;
 /// The conservative half of the pair. [`Review::IfYours`] means the review half runs only where it
 /// is yours to give — `spend_a_visit`'s `draft_due`, which asks the lane and then whether you
 /// wrote this or somebody asked you for it. That is why this is the default and
-/// [`re_read_replacing_the_review`] is not: the background may read anything in scope, and may not
+/// [`re_read_and_review`] is not: the background may read anything in scope, and may not
 /// put a review on a pull request nobody involved you in.
 pub fn summarise(
     repo: &Repo,
@@ -58,11 +58,6 @@ pub fn summarise(
 /// Nothing in either name said so. The pair is named for the difference now, so the call site has
 /// to choose it deliberately.
 ///
-/// The name still says "replacing", and it is a commit behind: nothing is drafted on disk any more
-/// (the reading session posts its own review), so a second reading ADDS to what is on the pull
-/// request rather than replacing it — the prompt tells it to read what is already there and say
-/// only what has not been said.
-///
 /// **Never reached except by a person who asked for it.** Nothing in the background comes here —
 /// [`read_waiting`] and the pane's pump both go through [`summarise`].
 ///
@@ -70,12 +65,7 @@ pub fn summarise(
 /// here. A cached reading returns from [`visit`] before a model is asked anything, so a redraft
 /// that honoured the cache would be a press that did nothing; and the day's ceiling is on skein's
 /// own initiative, which this is by definition not.
-pub fn re_read_replacing_the_review(
-    repo: &Repo,
-    slug: &str,
-    pr: &Pr,
-    identities: &[String],
-) -> Summary {
+pub fn re_read_and_review(repo: &Repo, slug: &str, pr: &Pr, identities: &[String]) -> Summary {
     visit(
         repo,
         slug,

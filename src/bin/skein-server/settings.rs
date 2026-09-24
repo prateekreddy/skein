@@ -26,6 +26,14 @@ pub(super) async fn api_set_box_tracking(
     if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
+    // The same split for the choice: the library refuses it too, and a value a client sent is a 400.
+    if let Some(Err(why)) = r
+        .connection
+        .as_deref()
+        .map(skein::tracking::check_box_tracking_choice)
+    {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
     match skein::tracking::set_box_tracking(&name, r.connection.as_deref()) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -287,6 +295,66 @@ pub(super) async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A box's tracking choice that is not a connection id is refused with the value in the
+    /// answer, and clearing it with `""` still works** (SKEIN-538).
+    ///
+    /// Both halves in one test because the guard is `is_empty() || valid_connection_id`, and the
+    /// easy way to get it wrong is to drop the first half — which refuses the one legitimate
+    /// non-id this route takes. Driven through the handler rather than the library, because the
+    /// status is half of what is asserted: a 500 would mean the write was attempted.
+    #[test]
+    fn a_tracking_choice_that_is_no_connection_id_is_refused_and_an_empty_one_still_clears() {
+        let _env = super::env_lock();
+        let home = super::scratch_dir("538");
+        // The review routes' `EnvPins`, which restores from `Drop`: this binary cannot reach the
+        // library's, for the reason its doc gives, and a third copy is how copies drift.
+        let mut env = super::review::review_routes::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let file = home.join("boxes/probe-a/tracking");
+
+        let post = |connection: &str| {
+            let r = TrackingReq {
+                connection: Some(connection.to_string()),
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a tokio runtime for this test's body")
+                .block_on(async {
+                    let response = api_set_box_tracking(Path("probe-a".into()), Json(r)).await;
+                    let status = response.status();
+                    let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+                        .await
+                        .unwrap();
+                    (status, String::from_utf8_lossy(&body).to_string())
+                })
+        };
+
+        let (status, why) = post("Not A Connection");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a choice that is no connection id was not refused as a bad request: {why}"
+        );
+        assert!(
+            why.contains("\"Not A Connection\""),
+            "the refusal does not name the value it refused: {why}"
+        );
+        assert!(!file.exists(), "a refused choice was written anyway");
+
+        let (status, why) = post("");
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "clearing a box's choice with \"\" was refused: {why}"
+        );
+        assert_eq!(
+            skein::tracking::box_tracking("probe-a").as_deref(),
+            Some(""),
+            "an empty choice did not record \"this box claims no work\""
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// No security-deciding setting is read out of the directory a box writes (§9.5 R8).
     ///

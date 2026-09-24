@@ -518,9 +518,32 @@ pub fn box_tracking(name: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Whether `choice` may be recorded as a box's tracking choice: empty, meaning "this box claims no
+/// work", or a well-formed connection id.
+///
+/// Refusing it here is about diagnosis, not paths — the choice is file content, and a value that
+/// was never a connection id simply finds no connection in [`connection_for_box`]. What it cost was
+/// that the box then claimed through nothing while its file said something else, so nothing that
+/// read it could tell "cleared on purpose" from a typo (SKEIN-538). Public so the route can answer
+/// with a 400 before the library is asked; [`set_box_tracking`] applies it again so no other caller
+/// can skip it.
+pub fn check_box_tracking_choice(choice: &str) -> Result<(), String> {
+    let choice = choice.trim();
+    if choice.is_empty() || valid_connection_id(choice) {
+        return Ok(());
+    }
+    Err(format!(
+        "{choice:?} is not a connection id — an id is lowercase letters, digits and dashes, and an \
+         empty one means this box claims no work"
+    ))
+}
+
 /// Record (or clear) that choice. `None` returns the box to its repo's default.
 pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<(), String> {
     let path = box_tracking_path(name).ok_or_else(|| format!("unusable box name {name:?}"))?;
+    if let Some(choice) = choice {
+        check_box_tracking_choice(choice)?;
+    }
     let Some(choice) = choice else {
         return match fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -1032,6 +1055,14 @@ mod tests {
             Some("team".to_string()),
             "and it is one box's choice, not the repo's — its siblings are untouched"
         );
+
+        // A value that is no connection id is refused by the library as well as the route, and
+        // leaves the choice that was there (SKEIN-538).
+        assert!(
+            set_box_tracking("web-main", Some("../Solo")).is_err(),
+            "the library recorded a choice that is no connection id"
+        );
+        assert_eq!(box_tracking("web-main").as_deref(), Some("solo"));
 
         // Empty is a decision, not an absence: this box claims nowhere.
         set_box_tracking("web-main", Some("")).unwrap();
