@@ -1520,10 +1520,6 @@ cited_by = ["docs/env-lock.toml"]
 line = "/// GraphQL, because REST cannot rebase: `PUT …/update-branch` takes `expected_head_sha` and merges,"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/prwork/facts.rs:85"]
-line = "let refused = pr.review_decision == \"CHANGES_REQUESTED\";"
-cited_by = ["docs/review-queue.md"]
-
 ["src/prwork/perform.rs:1405"]
 line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
 cited_by = ["docs/citations.toml"]
