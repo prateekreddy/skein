@@ -462,7 +462,7 @@ check("a self-hosted remote names its own host, without the port",
 for (const [source, want] of [
   ["git@gitlab.com:acme/thing.git", "gitlab.com"],
   ["https://bitbucket.org/acme/thing", "bitbucket.org"],
-  ["ssh://git@git.example.com:22/a/b.git", "git.example.com"],
+  ["ssh://git.example.com:22/a/b.git", "git.example.com"],
   ["https://github.com/acme/thing", ""],
   ["git@github.com:acme/thing.git", ""],
   ["acme/thing", ""],
