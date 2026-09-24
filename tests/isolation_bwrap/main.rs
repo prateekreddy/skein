@@ -39,6 +39,7 @@ fn script(name: &str) -> PathBuf {
 mod cover;
 mod harness;
 mod homes;
+mod hookscripts;
 mod network;
 mod path;
 mod private;

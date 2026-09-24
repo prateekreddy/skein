@@ -1,9 +1,11 @@
 //! The in-box probe scripts, and the hook wiring that makes a box report at all.
 //!
-//! skein ships these hook scripts into the store, so a box reports working / waiting / needs-input
-//! and its current task without the *repo* providing anything. The store is linked into every box by
-//! the kit. The hooks that run them are **not** in the store: they load from skein's read-only
-//! plugin ([`turn_state_hooks`], SKEIN-1062), which a box cannot edit. See `docs/self-sufficient.md`.
+//! skein ships these hook scripts so a box reports working / waiting / needs-input and its current
+//! task without the *repo* providing anything. Neither the hooks nor the scripts they run are in the
+//! store, which every box of the repo can write: both load from skein's read-only plugin — the
+//! wiring since SKEIN-1062 ([`turn_state_hooks`]), the scripts since SKEIN-1144
+//! ([`plugin_install`]). The store still gets copies, for the kit and for an agent that runs
+//! `mailbox.sh` by hand; no hook runs them. See `docs/self-sufficient.md`.
 //!
 //! This is still the highest-blast-radius write in the system — it edits a settings file the user
 //! also edits, in every store, on every upgrade, to take skein's past hooks back out and to keep the
@@ -25,9 +27,9 @@ use std::path::Path;
 use std::time::Duration;
 
 // ---------- the turn-state probe (skein-owned, installed into the shared store) ----------
-// skein ships these hook scripts into the store, so a box reports working/waiting/needs-input + its
-// current task without the *repo* providing anything. The hooks that call them load from skein's
-// plugin (`turn_state_hooks`); the store is linked into every box by the kit, so the scripts resolve.
+// skein ships these hook scripts into the store and into its plugin, so a box reports
+// working/waiting/needs-input + its current task without the *repo* providing anything. The hooks
+// load from skein's plugin (`turn_state_hooks`) and run the plugin's copies (`plugin_install`).
 /// Wires a box to the `sync` work tracker and installs the discipline for it. Lives in the store
 /// rather than the kit on purpose: a kit only reaches boxes created after it changed, and an
 /// existing box has to be wireable too. See `sync_provision_box`.
@@ -89,7 +91,10 @@ const AGENT_GUIDE_SH: &str = include_str!("store/agent-guide.sh");
 const INSTALL_CODEX_HOOKS_SH: &str = include_str!("store/install-codex-hooks.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
-// Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
+// Box-side path of the store's copies of the scripts (the store is linked at `<clone>/.claude`).
+// **No hook runs these any more** (SKEIN-1144): they are the commands a past skein wired, kept so
+// that [`store_settings`] can retire them from a store in exactly the spelling it wrote. The hooks
+// run the plugin's copies instead — see [`PLUGIN_PROBE`].
 const PROBE_STATUS_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh";
 const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh";
 const PROBE_DIFF_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-diff.sh";
@@ -106,6 +111,42 @@ const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusl
 // so the same message can't fire twice.
 const MAILBOX_INBOX_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh inbox";
 const MAILBOX_STOPCHECK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh stop-check";
+
+/// Where every command above pointed: the store's `skein/bin/`, which every box of the repo can
+/// write (docs/threat-model.md, "its own repo's store").
+const STORE_PROBE: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/";
+/// Where the turn-state hooks' scripts are now (SKEIN-1144): a `probe/` directory inside the plugin
+/// that carries the hooks, under the fleet root's `.skein`, which the launcher binds read-only into
+/// every box. `${CLAUDE_PLUGIN_ROOT}` is Claude Code's name for whichever variant loaded, so each
+/// variant runs its own copy. Not the plugin's `bin/`, which is `skein-resources` and `skein-mcp`.
+const PLUGIN_PROBE: &str = "${CLAUDE_PLUGIN_ROOT}/probe/";
+/// The directory [`PLUGIN_PROBE`] names, relative to a plugin variant's root.
+const PLUGIN_PROBE_DIR: &str = "probe";
+
+/// The scripts installed into each plugin variant's [`PLUGIN_PROBE_DIR`]: every script a turn-state
+/// hook runs, Claude's or Codex's, and every script one of those runs in turn. A script left out of
+/// this list and run by one that is in it is a script a sibling box can still rewrite, which is why
+/// the siblings are here: `sandbox-bootstrap.sh` runs `shared-home.sh`, `agent-guide.sh` and
+/// `mailbox.sh` from its own directory, and `box-codex-hook.sh` runs the probe it is named from its
+/// own directory. `plugin_probe_scripts_are_every_script_a_hook_runs` holds the list to that.
+fn plugin_probe_scripts() -> [(&'static str, &'static str); 14] {
+    [
+        ("box-status.sh", PROBE_STATUS_SH),
+        ("box-task.sh", PROBE_TASK_SH),
+        ("box-diff.sh", PROBE_DIFF_SH),
+        ("box-journal.sh", PROBE_JOURNAL_SH),
+        ("box-token-usage.sh", PROBE_TOKEN_USAGE_SH),
+        ("box-handoff.sh", PROBE_HANDOFF_SH),
+        ("box-session.sh", PROBE_SESSION_SH),
+        ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
+        ("shared-home.sh", SHARED_HOME_SH),
+        ("agent-guide.sh", AGENT_GUIDE_SH),
+        ("mailbox.sh", MAILBOX_SH),
+        ("box-codex-hook.sh", PROBE_CODEX_HOOK_SH),
+        ("box-codex-task.sh", PROBE_CODEX_TASK_SH),
+        ("box-codex-telemetry.sh", PROBE_CODEX_TELEMETRY_SH),
+    ]
+}
 
 /// Content-derived revision for lifecycle *wiring* loaded when an agent starts. Probe scripts live
 /// on the shared mount and update in place, so hashing their bodies made harmless docs/implementation
@@ -128,9 +169,9 @@ fn probe_revision() -> String {
 
 /// Install skein's turn-state probe into the shared store: write the hook scripts to
 /// `<store>/skein/bin/`, and take skein's own hooks back **out** of `<store>/settings.json`
-/// ([`store_settings`]: the repo's own hooks are preserved, re-runs change nothing). The store is
-/// mounted into every box, so the scripts resolve in any box without the repo shipping a thing; the
-/// hooks that run them come from skein's plugin ([`turn_state_hooks`]).
+/// ([`store_settings`]: the repo's own hooks are preserved, re-runs change nothing). The hooks come
+/// from skein's plugin ([`turn_state_hooks`]) and run the plugin's copies of these scripts, not
+/// these (SKEIN-1144); the store's copies are for the kit and the agent's own use.
 ///
 /// Refreshes *every* store skein reads — each managed repo's plus `store_dir()` — so multi-repo
 /// fleets all report turn-state. Best-effort: errors are collected, not fatal.
@@ -318,9 +359,23 @@ fn publish_sync_gateway(store: &Path) -> Result<(), String> {
 /// The store's `settings.json` is writable by every box of the repo, so a box could delete a
 /// sibling's hooks there; it cannot unload a `--plugin-dir` the read-only launcher passes.
 ///
-/// This table is also what [`store_settings`] retires from a store provisioned before the move,
-/// in every spelling a past skein wrote.
+/// Each command runs the plugin's own copy of its script ([`PLUGIN_PROBE`], SKEIN-1144): this is
+/// [`store_era_entries`] with the store's `skein/bin/` swapped for it, so the two tables cannot
+/// disagree about anything but where the script is.
 fn turn_state_entries() -> [(&'static str, String, Option<&'static str>); 24] {
+    store_era_entries().map(|(event, cmd, matcher)| {
+        let script = cmd
+            .strip_prefix(STORE_PROBE)
+            .expect("every store-era command runs a script from the store's skein/bin/");
+        (event, format!("{PLUGIN_PROBE}{script}"), matcher)
+    })
+}
+
+/// The same 24 hooks as a past skein wired them, each running the **store's** copy of its script.
+/// Nothing runs these now: the table is what [`store_settings`] retires from a store provisioned
+/// before the move, in every spelling a past skein wrote, and what [`turn_state_entries`] is
+/// derived from.
+fn store_era_entries() -> [(&'static str, String, Option<&'static str>); 24] {
     // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite, and
     // the SessionStart bootstrap that bridges memory + surfaces the mailbox (so an empty store works).
     // Sub-agent tracking: PreToolUse(Task) and SubagentStop maintain an in-flight counter so a
@@ -334,9 +389,7 @@ fn turn_state_entries() -> [(&'static str, String, Option<&'static str>); 24] {
     // it's squashed, every hook fails "permission denied" on every event, silently. The status line
     // learned this lesson first (STATUSLINE_CMD was already bash-prefixed); now it's uniform.
     //
-    // The scripts themselves stay in the store's `skein/bin/`, refreshed by [`ensure_probe_in`]:
-    // only the wiring moved. `$CLAUDE_PROJECT_DIR` reaches a plugin's hook exactly as it reached a
-    // settings hook, so the commands are the same strings they always were.
+    // These are the store-era strings; [`turn_state_entries`] points each at the plugin's copy.
     [
         (
             "UserPromptSubmit",
@@ -437,9 +490,14 @@ fn wire(cmd: &str) -> String {
 /// table order within each event. Installed by `fleet::install_launcher` through
 /// [`plugin_install`], into both of the plugin's variants.
 pub(crate) fn turn_state_hooks() -> serde_json::Value {
+    hooks_json(turn_state_entries())
+}
+
+/// A `hooks.json` value from a table of (event, command, optional matcher), wired.
+fn hooks_json(entries: [(&'static str, String, Option<&'static str>); 24]) -> serde_json::Value {
     use serde_json::{json, Map, Value};
     let mut hooks = Map::<String, Value>::new();
-    for (event, cmd, matcher) in turn_state_entries() {
+    for (event, cmd, matcher) in entries {
         let mut entry = json!({ "hooks": [ { "type": "command", "command": wire(&cmd) } ] });
         if let Some(m) = matcher {
             entry
@@ -463,12 +521,21 @@ pub(crate) fn turn_state_hooks() -> serde_json::Value {
 /// sets of hooks come from [`turn_state_hooks`], so the two cannot drift apart. The directories
 /// are [`crate::runtime`]'s, because the argv names them; the bytes are this module's, because the
 /// hooks are.
+///
+/// Each variant also carries the scripts its hooks run, under [`PLUGIN_PROBE_DIR`] (SKEIN-1144),
+/// so that what a turn-state hook executes is as read-only as the hook itself.
 pub(crate) fn plugin_install() -> Vec<(String, String)> {
+    plugin_install_under(&crate::util::fleet_root())
+}
+
+/// [`plugin_install`] under a fleet root the caller names — the isolation tests install the plugin
+/// into a fixture fleet with this, and run its hooks from there.
+pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
     let turn_state = turn_state_hooks();
     let pretty = |v: &serde_json::Value| {
         serde_json::to_string_pretty(v).expect("a hooks value serialises") + "\n"
     };
-    let full = crate::runtime::plugin_dir();
+    let full = crate::runtime::plugin_dir_under(fleet_root);
     let mut out: Vec<(String, String)> = crate::runtime::PLUGIN_FILES
         .iter()
         .map(|(rel, body)| {
@@ -479,13 +546,18 @@ pub(crate) fn plugin_install() -> Vec<(String, String)> {
             (format!("{full}/{rel}"), body)
         })
         .collect();
-    let narrow = crate::runtime::turn_state_plugin_dir();
+    let narrow = crate::runtime::turn_state_plugin_dir_under(fleet_root);
     for (rel, body) in crate::runtime::PLUGIN_FILES {
         if *rel == ".claude-plugin/plugin.json" {
             out.push((format!("{narrow}/{rel}"), body.to_string()));
         }
     }
     out.push((format!("{narrow}/hooks/hooks.json"), pretty(&turn_state)));
+    for dir in [&full, &narrow] {
+        for (file, body) in plugin_probe_scripts() {
+            out.push((format!("{dir}/{PLUGIN_PROBE_DIR}/{file}"), body.to_string()));
+        }
+    }
     out
 }
 
@@ -515,7 +587,9 @@ fn with_turn_state(own: &str, turn_state: &serde_json::Value) -> serde_json::Val
 /// this function *added* them; it keeps the retire half it always had and loses the add half.
 fn store_settings(existing: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Value};
-    let entries = turn_state_entries();
+    // The store-era table, not [`turn_state_entries`]: the plugin's commands were never written
+    // into a store, and the store's were (SKEIN-1144).
+    let entries = store_era_entries();
     // Every spelling of skein's own hooks that a store can carry. Exact-match only, so a user's own
     // hook of the same name is untouched:
     // - the current, `bash`-wrapped form, which every store provisioned before SKEIN-1062 carries;
@@ -628,8 +702,13 @@ fn codex_hooks_with_probe() -> serde_json::Value {
         } else {
             format!(" {args}")
         };
+        // The plugin's read-only copy (SKEIN-1144), not the store's, which every box of the repo
+        // can write. By its path inside the box, because Codex has no `${CLAUDE_PLUGIN_ROOT}`: the
+        // fleet root the launcher passes every box, and the directory it binds read-only there.
+        // `box-codex-hook.sh` runs `{file}` from its own directory, so the probe is the plugin's too.
         format!(
-            "bash \"$(git rev-parse --show-toplevel)/.claude/skein/bin/box-codex-hook.sh\" {event} {file}{suffix}"
+            "bash \"${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/{plugin}/{PLUGIN_PROBE_DIR}/box-codex-hook.sh\" {event} {file}{suffix}",
+            plugin = crate::runtime::TURN_STATE_PLUGIN,
         )
     };
     let mut hooks = Map::<String, Value>::new();
@@ -851,15 +930,15 @@ mod tests {
     /// **A store provisioned before SKEIN-1062 loses every skein hook and keeps every one of its
     /// own**, and a second pass changes nothing.
     ///
-    /// The store carries all 24 entries exactly as the old merge wrote them — taken from
-    /// [`turn_state_hooks`], so this is the real set and not a sample — beside the person's own
+    /// The store carries all 24 entries exactly as the old merge wrote them — built from
+    /// [`store_era_entries`], so this is the real set and not a sample — beside the person's own
     /// hooks and status line. What would make it fail: the retire list losing the current
     /// `bash`-wrapped spelling (every upgraded store would keep all 24 and each box would fire each
     /// hook twice, once from the plugin and once from here); the add half coming back; or the
     /// retire matching by anything looser than the exact command (the person's hooks would go).
     #[test]
     fn an_upgraded_store_loses_skeins_hooks_and_keeps_its_own() {
-        let mut existing = turn_state_hooks();
+        let mut existing = hooks_json(store_era_entries());
         existing["statusLine"] =
             serde_json::json!({ "type": "command", "command": "statusline.sh" });
         let theirs = [
@@ -872,7 +951,7 @@ mod tests {
                 serde_json::json!({ "hooks": [ { "type": "command", "command": command } ] }),
             );
         }
-        let skeins = commands(&turn_state_hooks());
+        let skeins = commands(&hooks_json(store_era_entries()));
         assert_eq!(skeins.len(), 24, "the fixture is not the real set");
         assert_eq!(commands(&existing).len(), 27, "the fixture did not build");
 
@@ -1731,9 +1810,14 @@ mod tests {
         let home = home_tmp.join("home");
         ensure_store(&store).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
+        // The person's own hook, and one a store-era skein wrote, which ran the store's copy of
+        // the adapter (SKEIN-1144): the first stays and the second goes.
+        let store_era = r#"bash \"$(git rev-parse --show-toplevel)/.claude/skein/bin/box-codex-hook.sh\" Stop box-status.sh waiting"#;
         fs::write(
             home.join(".codex/hooks.json"),
-            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"hooks/user.sh"}]}]}}"#,
+            format!(
+                r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"hooks/user.sh"}}]}},{{"hooks":[{{"type":"command","command":"{store_era}"}}]}}]}}}}"#
+            ),
         )
         .unwrap();
         let installer = store.join("skein/bin/install-codex-hooks.sh");
@@ -1757,6 +1841,10 @@ mod tests {
         let text = twice.to_string();
         assert!(text.contains("hooks/user.sh"));
         assert!(text.contains("box-status.sh"));
+        assert!(
+            !text.contains(".claude/skein/bin/"),
+            "a store-era hook survived: {text}"
+        );
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -2510,26 +2598,37 @@ mod tests {
     /// reports its turn state — through the hooks of either variant of skein's plugin** (SKEIN-1062).
     ///
     /// The whole path, with nothing hand-written in between: [`ensure_probe_in`] scaffolds the
-    /// store, [`plugin_install`] gives the bytes `fleet::install_launcher` puts
-    /// under `.skein`, and each variant's own `UserPromptSubmit` and `Stop` commands are run the way
-    /// Claude Code runs a hook — through a shell, with `$CLAUDE_PROJECT_DIR` set — against the
-    /// store's own `box-status.sh`. The board reads what they write.
+    /// store, [`plugin_install_under`] gives the bytes `fleet::install_launcher` puts under
+    /// `.skein`, written here into a fixture fleet root, and each variant's own `UserPromptSubmit`
+    /// and `Stop` commands are run the way Claude Code runs a hook — through a shell, with
+    /// `$CLAUDE_PROJECT_DIR` and `${CLAUDE_PLUGIN_ROOT}` set — against the plugin's own copy of
+    /// `box-status.sh` (SKEIN-1144). The board reads what they write, in the store.
     ///
     /// What would make it fail: the store scaffold writing skein's hooks again (the first
-    /// assertion); a variant losing its turn-state hooks (no command is found); or a command
-    /// the plugin carries that no longer reaches the store's script (no state is written).
+    /// assertion); a variant losing its turn-state hooks (no command is found); a command the
+    /// plugin carries that no longer reaches a script the plugin installs, or a plugin copy that
+    /// no longer finds the store from the project (no state is written); the same for Codex's
+    /// commands, which name the turn-state variant by the fleet root.
     #[test]
     fn a_fresh_store_has_no_skein_hooks_and_the_plugin_still_reports_turn_state() {
         let _g = env_lock();
         let home = tempdir();
+        let fleet = tempdir();
+        let fleet_root = fleet.to_string_lossy().into_owned();
         let mut env = env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &Path);
-        env.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
+        env.set("SKEIN_FLEET_ROOT", &fleet_root);
         // Not under a git checkout: the probe resolves its store from `git rev-parse` and would
         // otherwise climb out into a real one.
         let root = tempdir();
         let store = root.join(".claude");
         ensure_probe_in(&store).expect("scaffold the store");
+        let installed = plugin_install_under(&fleet_root);
+        for (path, body) in &installed {
+            let path = Path::new(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
 
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap())
@@ -2540,10 +2639,9 @@ mod tests {
         );
         assert!(settings["statusLine"].is_object(), "{settings}");
 
-        let installed = plugin_install();
         for dir in [
-            crate::runtime::plugin_dir(),
-            crate::runtime::turn_state_plugin_dir(),
+            crate::runtime::plugin_dir_under(&fleet_root),
+            crate::runtime::turn_state_plugin_dir_under(&fleet_root),
         ] {
             let path = format!("{dir}/hooks/hooks.json");
             let hooks: serde_json::Value = serde_json::from_str(
@@ -2563,6 +2661,7 @@ mod tests {
                     .arg("-c")
                     .arg(&command)
                     .env("CLAUDE_PROJECT_DIR", root.as_ref() as &Path)
+                    .env("CLAUDE_PLUGIN_ROOT", &dir)
                     .env("SKEIN_BOX", "example")
                     .stdin(Stdio::null())
                     .output()
@@ -2581,6 +2680,31 @@ mod tests {
             assert_eq!(status(), "waiting", "through {path}");
             fs::remove_file(store.join("status/example.json")).unwrap();
         }
+
+        // And Codex's, which reach the same plugin copy by the fleet root rather than by
+        // `${CLAUDE_PLUGIN_ROOT}`, from the box's working directory rather than a project variable.
+        let codex = codex_hooks_with_probe();
+        for (event, mode) in [("UserPromptSubmit", "working"), ("Stop", "waiting")] {
+            let (_, command) = commands(&codex)
+                .into_iter()
+                .find(|(e, c)| e == event && c.contains(&format!("box-status.sh {mode}")))
+                .unwrap_or_else(|| panic!("Codex has no {event} hook for box-status.sh"));
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(&command)
+                .current_dir(root.as_ref() as &Path)
+                .env_remove("CLAUDE_PROJECT_DIR")
+                .env("SKEIN_FLEET_ROOT", &fleet_root)
+                .env("SKEIN_BOX", "example")
+                .stdin(Stdio::null())
+                .output()
+                .expect("bash");
+            assert!(out.status.success(), "{command}: {out:?}");
+            let text = fs::read_to_string(store.join("status/example.json"))
+                .unwrap_or_else(|e| panic!("Codex's {event} hook wrote no state: {e}"));
+            let v: serde_json::Value = serde_json::from_str(&text).expect(&text);
+            assert_eq!(v["status"], mode, "through Codex's {event}");
+        }
     }
 
     /// **A repo that ships its own `.claude/` loses the copies of skein's hooks a past merge put
@@ -2594,7 +2718,7 @@ mod tests {
     #[test]
     fn a_repo_shipped_settings_file_loses_skeins_copied_hooks() {
         if Command::new("jq").arg("--version").output().is_err() {
-            eprintln!("no jq here, and the kit's merge is jq");
+            crate::testutil::skip("no jq here, and the kit's merge is jq");
             return;
         }
         let script = crate::kit::KIT_STARTUP_SH;
@@ -2604,7 +2728,8 @@ mod tests {
         let from = script.find(open).unwrap() + open.len();
         let program = &script[from..from + script[from..].find(close).expect("merge end")];
 
-        let mut repo = turn_state_hooks();
+        // What the kit copied was the store's hooks, so the store-era commands (SKEIN-1144).
+        let mut repo = hooks_json(store_era_entries());
         repo["hooks"]["Stop"]
             .as_array_mut()
             .unwrap()
@@ -2710,5 +2835,146 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// The script a hook command runs: `bash "<script>" …` or `python3 "<script>" …`, the two
+    /// shapes skein's hooks take.
+    fn script_of(command: &str) -> String {
+        let rest = command
+            .split_once(" \"")
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("not an interpreter and a quoted script: {command}"));
+        let (script, _) = rest
+            .split_once('"')
+            .unwrap_or_else(|| panic!("unterminated script path: {command}"));
+        script.to_string()
+    }
+
+    /// **Every turn-state hook, Claude's and Codex's, runs a script skein's plugin installs under
+    /// the fleet root's `.skein`** — the directory the launcher binds read-only into every box —
+    /// **and none runs anything out of the store**, which every box of the repo can write
+    /// (SKEIN-1144).
+    ///
+    /// Resolved the way the box resolves it: `${CLAUDE_PLUGIN_ROOT}` is the variant that loaded,
+    /// `${SKEIN_FLEET_ROOT:-/boxes}` the fleet root, and the resolved path has to be one
+    /// [`plugin_install_under`] actually writes. Codex's hooks run `box-codex-hook.sh`, which runs
+    /// the probe it is named from its own directory, so that probe has to be installed beside it.
+    ///
+    /// What would make it fail: a command put back on `$CLAUDE_PROJECT_DIR/.claude/skein/bin/`
+    /// (it does not start with `${CLAUDE_PLUGIN_ROOT}/`); Codex's command put back on
+    /// `$(git rev-parse --show-toplevel)/.claude/…`; or a script a hook names dropped from
+    /// [`plugin_probe_scripts`] (the resolved path is not installed).
+    #[test]
+    fn every_turn_state_hook_runs_a_script_the_read_only_plugin_installs() {
+        let root = "/fleet-root-example";
+        let installed: std::collections::BTreeSet<String> = plugin_install_under(root)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        let read_only = format!("{root}/.skein/");
+        let resolves = |path: &str, from: &str| {
+            assert!(
+                path.starts_with(&read_only) && installed.contains(path),
+                "{from} runs {path}, which the plugin does not install under {read_only}"
+            );
+        };
+
+        let mut seen = 0;
+        for dir in [
+            crate::runtime::plugin_dir_under(root),
+            crate::runtime::turn_state_plugin_dir_under(root),
+        ] {
+            let path = format!("{dir}/hooks/hooks.json");
+            let body = &plugin_install_under(root)
+                .into_iter()
+                .find(|(p, _)| *p == path)
+                .unwrap_or_else(|| panic!("nothing is installed at {path}"))
+                .1;
+            let hooks: serde_json::Value = serde_json::from_str(body).unwrap();
+            for (event, command) in commands(&hooks) {
+                assert!(
+                    !command.contains(".claude/"),
+                    "{path}: {event} still names the store: {command}"
+                );
+                let script = script_of(&command);
+                let rel = script
+                    .strip_prefix("${CLAUDE_PLUGIN_ROOT}/")
+                    .unwrap_or_else(|| panic!("{path}: {event} runs {script}, not the plugin's"));
+                resolves(&format!("{dir}/{rel}"), &format!("{path} {event}"));
+                seen += 1;
+            }
+        }
+        // 24 in the turn-state variant, 24 and the plugin's own 3 in the full one.
+        assert_eq!(seen, 24 + 24 + 3, "the hooks read are not the whole set");
+
+        let codex = codex_hooks_with_probe();
+        let mut codex_seen = 0;
+        for (event, command) in commands(&codex) {
+            let script = script_of(&command);
+            let rel = script
+                .strip_prefix("${SKEIN_FLEET_ROOT:-/boxes}/")
+                .unwrap_or_else(|| panic!("Codex {event} runs {script}, not the fleet's"));
+            let adapter = format!("{root}/{rel}");
+            resolves(&adapter, &format!("Codex {event}"));
+            // `bash "<adapter>" <Event> <probe> …`: the probe runs from the adapter's directory.
+            let probe = command
+                .split_whitespace()
+                .nth(3)
+                .unwrap_or_else(|| panic!("Codex {event} names no probe: {command}"));
+            let dir = adapter.rsplit_once('/').unwrap().0;
+            resolves(&format!("{dir}/{probe}"), &format!("Codex {event}"));
+            codex_seen += 1;
+        }
+        assert!(codex_seen > 0, "Codex has no hooks to check");
+    }
+
+    /// **A script the plugin installs runs nothing out of the store**, and every sibling it runs
+    /// by its own directory is installed beside it (SKEIN-1144).
+    ///
+    /// Moving the hook's own script is not enough: `sandbox-bootstrap.sh` runs `shared-home.sh`,
+    /// `agent-guide.sh` and `mailbox.sh`, and a helper run from the store is a helper a sibling box
+    /// can rewrite and this box's SessionStart then executes. What would make it fail: any of
+    /// those put back on `$store/skein/bin/…` (a code line names `skein/bin`), or a helper run as
+    /// `$here/<name>` that [`plugin_probe_scripts`] does not install.
+    #[test]
+    fn plugin_probe_scripts_are_every_script_a_hook_runs() {
+        let names: Vec<&str> = plugin_probe_scripts().iter().map(|(n, _)| *n).collect();
+        let mut siblings = 0;
+        for (name, body) in plugin_probe_scripts() {
+            for (n, line) in body.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                let code = line.split(" #").next().unwrap_or(line);
+                assert!(
+                    !code.contains("skein/bin"),
+                    "{name}:{} runs something from the store: {line}",
+                    n + 1
+                );
+                let mut rest = code;
+                while let Some(at) = rest.find("$here/") {
+                    let tail = &rest[at + "$here/".len()..];
+                    let helper: String = tail
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                        .collect();
+                    if helper.ends_with(".sh") {
+                        assert!(
+                            names.contains(&helper.as_str()),
+                            "{name}:{} runs {helper} beside itself, and the plugin does not \
+                             install it",
+                            n + 1
+                        );
+                        siblings += 1;
+                    }
+                    rest = tail;
+                }
+            }
+        }
+        assert!(
+            siblings >= 3,
+            "sandbox-bootstrap.sh's three helpers were not found, so this checked nothing"
+        );
     }
 }

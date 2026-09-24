@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# sandbox-bootstrap.sh — skein's SessionStart hook (installed into <store>/skein/bin by ensure_store).
+# sandbox-bootstrap.sh — skein's SessionStart hook. The hook runs the copy in skein's read-only plugin
+# (`probe/`, SKEIN-1144); ensure_store also puts a copy in <store>/skein/bin, which no hook runs.
 #
 # Makes a box's shared store fully live, so an EMPTY shared folder still works end-to-end:
 #   - bridges this box's per-$HOME memory dir to the store's memory/ (Claude's memory tool then
@@ -21,11 +22,15 @@ store="$root/.claude"
 # Merged layout: the shared store is that link's target parent, not the repo dir (box-status.sh).
 if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || { echo "[skein-bootstrap] no .claude store at $store — skipping" >&2; exit 0; }
+# The helpers this runs are the ones BESIDE it, not the store's (SKEIN-1144). The hook runs this
+# script from skein's read-only plugin; running a helper out of the store would hand whatever a
+# sibling box wrote there to this box's SessionStart, which is the hole moving this script closed.
+here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 
 # --- durable project workspace: private $HOME/shared -> mounted store/shared-home ----------------
 # The same provider-neutral helper runs during durable kit startup. Running it again here self-heals
 # boxes created with an older kit as soon as their live shared probe refreshes.
-shared_home="$store/skein/bin/shared-home.sh"
+shared_home="$here/shared-home.sh"
 [ -r "$shared_home" ] || {
   echo "[skein-bootstrap] shared-home helper missing at $shared_home" >&2
   exit 1
@@ -34,7 +39,7 @@ bash "$shared_home" "$store" || exit 1
 
 # Materialise each runtime's native durable-instruction file. This hook self-heals older boxes; the
 # kit performs the same step before a newly-created agent starts. No prompt-hook context is emitted.
-agent_guide="$store/skein/bin/agent-guide.sh"
+agent_guide="$here/agent-guide.sh"
 runtime_manifest="$store/skein/runtimes.tsv"
 if [ -r "$agent_guide" ] && [ -r "$runtime_manifest" ]; then
   while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe instruction_file instruction_override; do
@@ -49,7 +54,7 @@ fi
 # so its absence means a legacy box alone in its VM where the sandbox's name IS the box's, and its
 # presence means a shared sandbox, where SANDBOX_VM_ID is one string for every box in it and a
 # signal keyed on it lands on whichever box owns that name. The argument in full, and the measured
-# residue that settled it, is in box-status.sh — installed beside this one in <store>/skein/bin/.
+# residue that settled it, is in box-status.sh — installed beside this one.
 #
 # Empty rather than `exit 0`, because most of what this hook does is not keyed on identity at all —
 # the shared-home contract, the memory bridge and the gitignored-path surfacing are what make the
@@ -292,7 +297,7 @@ fi
 # the same chain this file just fixed — so it inherited the fault instead of the answer. Skipped
 # outright when there is no identity: an inbox read under the wrong name delivers nothing that was
 # addressed to this box and marks other boxes' broadcasts seen by a name nobody owns.
-[ -n "$vmid" ] && [ -x "$store/skein/bin/mailbox.sh" ] \
-  && SKEIN_BOX="$vmid" "$store/skein/bin/mailbox.sh" inbox 2>/dev/null || true
+[ -n "$vmid" ] && [ -r "$here/mailbox.sh" ] \
+  && SKEIN_BOX="$vmid" CLAUDE_PROJECT_DIR="$root" bash "$here/mailbox.sh" inbox 2>/dev/null || true
 
 exit 0
