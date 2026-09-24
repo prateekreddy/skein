@@ -9,8 +9,8 @@ which mark archived branches, not versions. So there is no version history to wr
 is instead: what skein does today, under **Unreleased**, and how it got there, under **Development
 history**.
 
-Every entry below traces to at least one commit, though most predate this repository's public
-history and are not cited by sha. Nothing here was written from memory.
+Every entry below traces to at least one commit, though most were cited by hashes this history no
+longer has. Nothing here was written from memory.
 
 **Every count below names the commit it was taken at**, so it reproduces for good rather than
 until the next push. The first version of this block did not, and by the time anyone re-ran it
@@ -165,9 +165,9 @@ The state of the tree at `2026-09-07`.
 
 ## Development history
 
-**The commits these entries were written from predate this repository's public history, so they
-are not cited here.** Each entry keeps its text; the few that a commit in this history backs still
-cite it.
+**These entries cited commits by the hashes they had before this history was rewritten for
+publication; those hashes do not resolve here, so they are not cited.** Each entry keeps its text;
+the few whose commit kept its hash still cite it.
 
 Counts per month reproduce with
 `git log --format='%ad' --date=format:'%Y-%m' a8cbac3 | sort | uniq -c`,
