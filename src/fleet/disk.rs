@@ -221,6 +221,8 @@ fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
         skein_toolchain_path(),
         crate::substrate::substrate_dir(),
         crate::gitgate::gitgate_dir(),
+        // A box's questions for its owner (SKEIN-1061), the third request queue.
+        crate::asks::asks_dir(),
         // skein's box plugin, installed beside the launcher (SKEIN-1056).
         crate::runtime::plugin_dir(),
         // `detached/<session>.sh` is a script named for a session, so the session is a placeholder
@@ -1165,6 +1167,7 @@ mod tests {
     /// `skeins_own_substrate_directories_are_never_offered_for_deletion` asserts the code still
     /// names the same set, so drift fails rather than hides.
     const SUBSTRATE_DIRS: &[&str] = &[
+        "asks",
         "detached",
         "gitgate",
         "plugin",
