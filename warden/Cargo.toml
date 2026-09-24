@@ -30,12 +30,14 @@ libc = "0.2"
 # One feature per doer, all in the default set. §8.3: only the DOER is removable, and a warden that
 # could not destroy could not resize either — resize is destroy + create (§7.3).
 #
-# `unpublish` is a doer like the other two and removable like them. There is deliberately no
-# `publish`: withdrawing a mapping only ever CLOSES an opening, where publishing one opens a host
-# port into the shared network namespace, which §9.4 makes a prompted act on purpose. The asymmetry
-# is the design.
+# `publish` and `unpublish` are doers like the other two and removable like them. Publishing opens
+# a host port into the network namespace every box shares, which is why §9.4 keeps it a prompted
+# act: the warden performs it only after the person types the operation id at its terminal, the
+# same as every other doer, and nothing makes it pre-approvable (SKEIN-1130). A host that should
+# never open a port into its fleet builds without it.
 [features]
-default = ["create", "destroy", "unpublish"]
+default = ["create", "destroy", "publish", "unpublish"]
 create = []
 destroy = []
+publish = []
 unpublish = []

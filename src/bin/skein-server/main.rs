@@ -159,6 +159,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     if let Err(e) = skein::fleet::heal_fleet() {
         eprintln!("skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings");
     }
+    skein::fleet::ask_warden_to_publish_cockpit_port_at_start();
     // **The Docker daemon, watched.** `dockerd` runs in this sandbox with pid 1 for a parent and
     // nothing supervising it, so a container that gets it killed costs a rebuild of the whole fleet
     // to recover one process (`src/dockerd.rs`).

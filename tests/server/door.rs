@@ -31,7 +31,7 @@ fn doorstep(addr: &str) -> serde_json::Value {
 fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     let home = token_home("flood");
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             // The warden too, where nothing listens — see the first spawn above.
@@ -319,21 +319,27 @@ if s.fileno() != 3:
 os.environ["LISTEN_FDS"] = "1"
 os.execv(sys.argv[2], sys.argv[2:])
 "#;
-    let child = Command::new("python3")
-        .args(["-c", handover])
-        .arg(&where_port)
-        .arg(env!("CARGO_BIN_EXE_skein-server"))
-        // Somewhere it could never have bound by itself, so a pass cannot be a bind that happened to
-        // work: the address served below is read back from the socket python opened.
-        .env("SKEIN_ADDR", "127.0.0.1:1")
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
-        // The warden too, where nothing listens — see the first spawn above.
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    // `python3 -c <handover> <port file> <skein-server>`: the script reads the port file from
+    // `argv[1]` and execs `argv[2]`.
+    let child = skein_server_behind(
+        "python3",
+        [
+            OsStr::new("-c"),
+            OsStr::new(handover),
+            where_port.as_os_str(),
+        ],
+    )
+    // Somewhere it could never have bound by itself, so a pass cannot be a bind that happened to
+    // work: the address served below is read back from the socket python opened.
+    .env("SKEIN_ADDR", "127.0.0.1:1")
+    .env("SKEIN_HOME", home.path())
+    .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+    // The warden too, where nothing listens — see the first spawn above.
+    .env("SKEIN_WARDEN", "127.0.0.1:1")
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
     let _kid = Kid(child);
 
     let start = Instant::now();
@@ -382,7 +388,7 @@ fn a_spawned_server_holds_its_port_from_before_it_starts() {
     // `handed` rather than `serving`: the claim is about the window *before* the server is up, so
     // this must not wait for it to come up first.
     let (child, addr) = handed(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             // The warden too, where nothing listens — see the first spawn above.
@@ -444,7 +450,7 @@ fn a_spawned_server_holds_its_port_from_before_it_starts() {
 fn an_answer_from_a_server_that_is_not_ours_is_caught_rather_than_believed() {
     let home = token_home("not-ours");
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             // The warden too, where nothing listens — see the first spawn above.
@@ -457,7 +463,7 @@ fn an_answer_from_a_server_that_is_not_ours_is_caught_rather_than_believed() {
     let _kid = Kid(child);
 
     let bare = token_home("not-ours-dead");
-    let mut dead = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+    let mut dead = skein_server()
         .env("SKEIN_HOME", bare.path())
         .env_remove("SKEIN_FLEET_ROOT")
         .env_remove("SKEIN_SHARED")
@@ -505,7 +511,7 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
         .local_addr()
         .expect("the listener knows its address")
         .to_string();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+    let mut child = skein_server()
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_HOME", home.path())
         .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
@@ -602,7 +608,7 @@ fn the_auth_off_switch_is_refused_under_the_fleets_doorway_and_honoured_outside_
     // dropped after it, into the second spawn's child. `handed_with` refuses that now, so this
     // shape is the one that compiles *and* runs; the note there has the measurement.
     let cockpit = || {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_skein-server"));
+        let mut cmd = skein_server();
         cmd.env("SKEIN_REGISTRY", &reg)
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
@@ -742,7 +748,7 @@ fn the_server_says_at_boot_when_no_warden_is_answering() {
     // It serves, and the complaint is a complaint rather than a refusal — which `serving` is now
     // what establishes, since it returns on an answered request rather than on a connection.
     let (mut child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             .env("SKEIN_WARDEN", format!("127.0.0.1:{quiet}"))
@@ -865,26 +871,26 @@ fn no_process_the_server_starts_holds_the_cockpits_listening_socket() {
     // `free_port`'s window is harmless here: the doorway retries `EADDRINUSE` for ten seconds, and
     // a sibling that took the number would make it refuse loudly rather than serve somewhere else.
     let (door_port, fleet_port) = (free_port(), free_port());
-    let child = Command::new("python3")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/server-doorway.py"
-        ))
-        .arg(door_port.to_string())
-        .arg(env!("CARGO_BIN_EXE_skein-server"))
-        .arg(home.join("door-stamp"))
-        .env("SKEIN_HOME", home.path())
-        .env("SKEIN_FLEET_ROOT", &root)
-        .env("SKEIN_SERVER_PORT", fleet_port.to_string())
-        .env("SKEIN_WARDEN", "127.0.0.1:1")
-        .env("SKEIN_REGISTRY", "")
-        .env_remove("SKEIN_SHARED")
-        .env_remove("LISTEN_FDS")
-        .env_remove("LISTEN_PID")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("python3 runs the doorway");
+    let child = skein_server_behind(
+        "python3",
+        [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/server-doorway.py").to_string(),
+            door_port.to_string(),
+        ],
+    )
+    .arg(home.join("door-stamp"))
+    .env("SKEIN_HOME", home.path())
+    .env("SKEIN_FLEET_ROOT", &root)
+    .env("SKEIN_SERVER_PORT", fleet_port.to_string())
+    .env("SKEIN_WARDEN", "127.0.0.1:1")
+    .env("SKEIN_REGISTRY", "")
+    .env_remove("SKEIN_SHARED")
+    .env_remove("LISTEN_FDS")
+    .env_remove("LISTEN_PID")
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .expect("python3 runs the doorway");
     let mut door = Kid(child);
     let door_pid = door.0.id();
     let addr = format!("127.0.0.1:{door_port}");

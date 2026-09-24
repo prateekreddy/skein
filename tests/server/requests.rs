@@ -144,7 +144,7 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
     }
 
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             // The warden too, where nothing listens — see the first spawn above.
@@ -334,7 +334,7 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
     .unwrap();
 
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             // The warden too, where nothing listens — see the first spawn above.
@@ -486,7 +486,7 @@ fn a_printed_cockpit_url_carries_a_token_that_opens_the_api() {
     // checked against the port the requests below go to, and not against a number both sides took
     // on trust.
     let (mut child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             // The warden too, where nothing listens — see the first spawn above.
@@ -570,7 +570,7 @@ fn a_store_outside_skein_home_is_refused_over_http_and_still_accepted_from_the_c
     const SOURCE: &str = "https://127.0.0.1:1/storeguard.git";
 
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             .env("SKEIN_WARDEN", "127.0.0.1:1")

@@ -20,7 +20,7 @@
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:1750"]
+["docs/architecture.md:1757"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -37,7 +37,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:467"]
+["docs/modules.toml:469"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -239,35 +239,35 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:167"]
+["src/bin/skein-server/main.rs:168"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:180"]
+["src/bin/skein-server/main.rs:181"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:237"]
+["src/bin/skein-server/main.rs:238"]
 line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:275"]
+["src/bin/skein-server/main.rs:276"]
 line = "\"skein: {}\\n {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:572"]
+["src/bin/skein-server/main.rs:573"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:582"]
+["src/bin/skein-server/main.rs:583"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:673"]
+["src/bin/skein-server/main.rs:674"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:679"]
+["src/bin/skein-server/main.rs:680"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -992,39 +992,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = "cpus,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:705"]
+["src/fleet/create.rs:708"]
 line = "\"skein cannot create {sandbox} from here and will not guess.\\n{}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:733"]
+["src/fleet/create.rs:736"]
 line = "\"the fleet sandbox {sandbox} is already being created — that started {} ago and takes \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:764"]
+["src/fleet/create.rs:797"]
 line = "return Err(\"invalid fleet sandbox name\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:787"]
+["src/fleet/create.rs:820"]
 line = "if fleet_exists(sandbox) != Some(true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:789"]
+["src/fleet/create.rs:822"]
 line = "\"{sandbox} is not the fleet sandbox this skein is running inside, and from in here \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:811"]
+["src/fleet/create.rs:844"]
 line = "\"skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:827"]
+["src/fleet/create.rs:860"]
 line = "\"skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:876"]
+["src/fleet/create.rs:909"]
 line = "mod tests {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/create.rs:1304"]
+["src/fleet/create.rs:1405"]
 line = "assert!(!under(\"/Users/y/dev/skein-shared/.claude\", &workspace));"
 cited_by = ["docs/residue.toml"]
 
@@ -1220,7 +1220,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:551"]
+["src/fleet/server.rs:560"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1832,7 +1832,7 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1138"]
+["src/warden_client.rs:1168"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -2203,40 +2203,40 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Err(e) => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:70"]
+["warden/src/doer.rs:75"]
 line = "Err(format!("
 window = "fn approve(&self, request: &Request, what: &str) -> Result<(), String> {\u000bErr(format!(\u000b\"{what} for {} was not run: this warden has no approval surface, and a privileged host \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:192"]
+["warden/src/doer.rs:202"]
 line = "return Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:194"]
+["warden/src/doer.rs:204"]
 line = "{}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:206"]
+["warden/src/doer.rs:216"]
 line = "[] => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:211"]
+["warden/src/doer.rs:221"]
 line = "_ => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:269"]
+["warden/src/doer.rs:418"]
 line = "\"the unpublish for {} {why}, so it is not a withdrawal: `sbx {}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:285"]
+["warden/src/doer.rs:434"]
 line = "return refuse(\"is not exactly `ports <sandbox> --unpublish <mapping>`\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:303"]
+["warden/src/doer.rs:457"]
 line = ".map_err(|e| format!(\"could not run `sbx`: {e}\"))?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:306"]
+["warden/src/doer.rs:460"]
 line = "false => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2274,15 +2274,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"none\" => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:304"]
+["warden/src/outcome.rs:307"]
 line = "Err(e) => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:321"]
+["warden/src/outcome.rs:324"]
 line = "self.put(&path, &finished).map_err(|e| {"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:413"]
+["warden/src/outcome.rs:416"]
 line = "format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2300,54 +2300,54 @@ line = "return Response::fault("
 window = "if !self.secret.matches(&request.secret) {\u000breturn Response::fault(\u000b401,"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:208"]
+["warden/src/serve.rs:210"]
 line = "_ => Response::fault("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:238"]
+["warden/src/serve.rs:240"]
 line = "\"error\": format!(\"the sandboxes could not be listed: {why}\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:269"]
+["warden/src/serve.rs:271"]
 line = "return Response::fault("
 window = "if !capability::is_linked(which) {\u000breturn Response::fault(\u000b404,"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:286"]
+["warden/src/serve.rs:288"]
 line = "\"this warden has no `approved` field, and adding one to the request would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:567"]
+["warden/src/serve.rs:603"]
 line = "return Err(format!("
 window = "if !named {\u000breturn Err(format!(\u000b\"{name:?} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:574"]
+["warden/src/serve.rs:610"]
 line = "return Err(format!("
 window = "if asked.args.len() > MOST_ARGS {\u000breturn Err(format!(\u000b\"the {} for {name} carries {} arguments, and more than {MOST_ARGS} is more than an \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:583"]
+["warden/src/serve.rs:619"]
 line = "return Err(format!("
 window = "if arg.len() > LONGEST_VALUE || !readable(arg) {\u000breturn Err(format!(\u000b\"an argument of the {} for {name} cannot be shown as what it is, so it cannot be \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:598"]
+["warden/src/serve.rs:634"]
 line = "return Err(format!("
 window = "if asked.env[..at].iter().any(|(seen, _)| seen == key) {\u000breturn Err(format!(\u000b\"`{key}` is given twice, and `sbx` would take the last one — so what ran would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:604"]
+["warden/src/serve.rs:640"]
 line = "return Err(format!("
 window = "if !allowed.contains(&key.as_str()) {\u000breturn Err(format!(\u000b\"this warden does not pass `{key}` to a {}. The environment decides what a relative \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:615"]
+["warden/src/serve.rs:651"]
 line = "return Err(format!("
 window = "if value.len() > LONGEST_VALUE || !readable(value) {\u000breturn Err(format!(\u000b\"the value of `{key}` cannot be shown as what it is, so it cannot be approved: \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:640"]
+["warden/src/serve.rs:676"]
 line = "return Err(format!("
 window = "if shown.len() > LONGEST_APPROVAL {\u000breturn Err(format!(\u000b\"the approval for this {} would be {} bytes of text, and more than \\"
 cited_by = ["docs/recovery-survey.md"]

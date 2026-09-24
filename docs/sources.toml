@@ -115,7 +115,8 @@ reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/s
 # because the pattern was widened to see past a line break (SKEIN-104). It is **1** now, and this
 # note claimed 3 until SKEIN-478 made the number checkable. What left: `sbx ports … --publish` is
 # no longer spawned by skein at all — `fleet::publish_cockpit_port` returns it as a recipe a person
-# runs, because no warden performs it (`warden_client::Act::Publish`) — and the interactive login
+# runs, and where it is performed it is the warden's `publish` doer that runs it, on the host, after
+# the person types the operation id (`warden_client::Act::Publish`, SKEIN-1130) — and the interactive login
 # lost its host arm with the deployment flag (SKEIN-576), so `login_argv` spawns `bash` and `sbx`
 # is not in the sandbox to be run. What is left is the READ: `fleet::existing_forwards` runs
 # `sbx ports <sandbox>` to learn which host ports already forward to one, and answers `None` rather

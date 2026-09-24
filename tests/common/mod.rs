@@ -1138,3 +1138,47 @@ pub fn chromium_why_not(ui: &Path) -> String {
         )
     }
 }
+
+/// Where every `skein-server` a test starts is told the warden is: loopback port 1, which the
+/// kernel refuses before a packet leaves the machine.
+///
+/// **A server asks the warden at every start** (SKEIN-1130): once, on a thread of its own, to
+/// publish the cockpit's port. One that is not told where the warden is asks the default,
+/// `host.docker.internal`, and that is the owner's warden on any machine running one — a test
+/// reaching a real service outside its fixture, the class SKEIN-762 closed for the client. So
+/// the path to the binary is not handed out bare: [`skein_server`] and [`skein_server_behind`]
+/// are the only ways to it, both pin this, and `tests/harness.rs` fails if a test names the
+/// binary anywhere else. A test that stands up its own fake warden says so after, and wins.
+pub const NO_WARDEN: &str = "127.0.0.1:1";
+
+/// The `skein-server` this `cargo test` built. Private, for [`NO_WARDEN`]'s reason.
+const SKEIN_SERVER: &str = env!("CARGO_BIN_EXE_skein-server");
+
+/// The `skein-server` this `cargo test` built, to be started directly, pinned to [`NO_WARDEN`].
+pub fn skein_server() -> Command {
+    let mut server = Command::new(SKEIN_SERVER);
+    server.env("SKEIN_WARDEN", NO_WARDEN);
+    server
+}
+
+/// `program`, given `before` and then the `skein-server` this `cargo test` built as arguments —
+/// a doorway or a hand-over that execs the server — pinned to [`NO_WARDEN`]. The pin reaches the
+/// server through the environment `program` passes on to what it execs.
+pub fn skein_server_behind<S: AsRef<std::ffi::OsStr>>(
+    program: &str,
+    before: impl IntoIterator<Item = S>,
+) -> Command {
+    let mut behind = Command::new(program);
+    behind
+        .args(before)
+        .arg(SKEIN_SERVER)
+        .env("SKEIN_WARDEN", NO_WARDEN);
+    behind
+}
+
+/// The binary's path, for the one caller that starts it from another language: the browser
+/// suites, whose `tests/ui/harness/server.mjs` pins `$SKEIN_WARDEN` to the same address itself.
+/// `tests/harness.rs` checks that pin is there.
+pub fn skein_server_for_the_browser_suites() -> &'static str {
+    SKEIN_SERVER
+}

@@ -69,7 +69,7 @@
 # A home directory, which names a person and often a machine.
 [homes]
 "/Users/me" = "a synthetic checkout path in the tests that prove a local path is not a slug"
-"/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet/create.rs:1304 exists to refuse"
+"/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet/create.rs:1405 exists to refuse"
 "/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
 "/home/..." = "an elision inside a doc comment, not a path"
 "/home/.claude" = "the `$HOME/.claude` store, written with the variable already expanded away"

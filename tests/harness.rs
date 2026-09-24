@@ -479,3 +479,100 @@ fn the_gate_runner_checks_out_a_worktrees_uninitialised_submodule_and_moves_no_o
          the upgrade `src/store/sync/UPSTREAM.md` walks through (it said {said:?})"
     );
 }
+
+/// Every `skein-server` a test starts is told the warden is somewhere nothing listens.
+///
+/// A server asks the warden at every start now (SKEIN-1130), and one with no `$SKEIN_WARDEN` asks
+/// the default address — the owner's warden on any machine running one. So this reads the pin off
+/// the two commands `tests/common` hands out, then counts every place a test names the binary, in
+/// every `.rs` file under `tests/`, and requires that the one place is `tests/common/mod.rs`: a
+/// test that builds its own `Command` for the binary is a test whose environment nobody pinned,
+/// and the browser suites, which start it from node, have their harness's own pin checked too.
+///
+/// **What makes this fail**: either helper losing its `.env("SKEIN_WARDEN", …)`; any test naming
+/// the binary's `env!` path itself; or `tests/ui/harness/server.mjs` losing its pin.
+#[test]
+fn every_skein_server_a_test_starts_is_pinned_away_from_a_real_warden() {
+    use std::ffi::OsStr;
+    use std::path::Path;
+    for (how, started) in [
+        ("common::skein_server", common::skein_server()),
+        (
+            "common::skein_server_behind",
+            common::skein_server_behind("python3", ["-c", "pass"]),
+        ),
+    ] {
+        let pin = started
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("SKEIN_WARDEN"))
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            pin,
+            Some(OsStr::new(common::NO_WARDEN)),
+            "{how} starts a skein-server whose $SKEIN_WARDEN is not pinned to {}",
+            common::NO_WARDEN
+        );
+    }
+
+    // Spelt in two halves so this file is not one of the places it counts.
+    let needle = concat!("CARGO_BIN_EXE_", "skein-server");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir)
+            .expect("tests/ is readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name() != Some(OsStr::new("node_modules")) {
+                    walk(&path, found);
+                }
+            } else if path.extension() == Some(OsStr::new("rs")) {
+                found.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&root.join("tests"), &mut files);
+    let mut named = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).expect("a test file is readable");
+        for (at, line) in text.lines().enumerate() {
+            if line.contains(needle) && !line.trim_start().starts_with("//") {
+                let shown = file
+                    .strip_prefix(root)
+                    .unwrap_or(file)
+                    .display()
+                    .to_string();
+                named.push(format!("{shown}:{}", at + 1));
+            }
+        }
+    }
+    eprintln!(
+        "read {} .rs file(s) under tests/; the binary is named at {named:?}",
+        files.len()
+    );
+    assert!(
+        files.len() > 1,
+        "found no test files to read under {}",
+        root.display()
+    );
+    assert_eq!(
+        named.len(),
+        1,
+        "the skein-server binary is named outside `tests/common` — start it through \
+         `common::skein_server` or `common::skein_server_behind`, which pin $SKEIN_WARDEN: {named:?}"
+    );
+    assert!(
+        named[0].starts_with("tests/common/mod.rs:"),
+        "the one place the binary is named is not tests/common/mod.rs: {named:?}"
+    );
+
+    let harness = std::fs::read_to_string(root.join("tests/ui/harness/server.mjs"))
+        .expect("the browser suites' harness is readable");
+    let pinned = format!("childEnv.SKEIN_WARDEN = \"{}\";", common::NO_WARDEN);
+    assert!(
+        harness.lines().any(|line| line.trim() == pinned),
+        "tests/ui/harness/server.mjs no longer pins the server it starts with `{pinned}`"
+    );
+}

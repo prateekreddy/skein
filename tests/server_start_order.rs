@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::Scratch;
+use common::{skein_server, Scratch};
 use skein::doorway::{FIRST, INHERITED_ONLY};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -160,7 +160,7 @@ fn nothing_the_server_starts_inherits_the_socket_activation_variables() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     let addr = listener.local_addr().unwrap().to_string();
     let fd = listener.as_raw_fd();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_skein-server"));
+    let mut cmd = skein_server();
     // SAFETY: the closure runs between fork and exec and calls only `dup`, `dup2` and `close`; `fd`
     // is valid for the whole of `spawn`, and the parent's copy is dropped after it returns.
     unsafe {
