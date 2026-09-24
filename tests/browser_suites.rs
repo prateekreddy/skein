@@ -76,7 +76,7 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 27] = [
+const NODE_SUITES: [&str; 28] = [
     "attach",
     "budget",
     // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
@@ -122,6 +122,7 @@ const NODE_SUITES: [&str; 27] = [
     "trainpanel",
     "tabs",
     "undo",
+    "unowned",
     "voice",
 ];
 

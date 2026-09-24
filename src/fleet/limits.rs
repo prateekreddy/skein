@@ -400,14 +400,69 @@ pub fn fleet_guarantees() -> String {
     let Some(plan) = memory_plan() else {
         return String::new();
     };
+    let mut pairs = Vec::new();
     // Nothing at all rather than a token guarantee: below this the promise is not worth the
     // arithmetic, and `memory.min` on a cgroup that cannot hold its own working set inside it is a
     // number that reads as protection and is not one.
     let min = plan.plumbing / 2;
-    if min < 128 {
-        return String::new();
+    if min >= 128 {
+        pairs.push(format!("docker={min}M"));
     }
-    format!("docker={min}M")
+    // The boxes' floors, as ONE budget the launcher divides between the box cgroups it finds.
+    // Under `boxes`, which names no cgroup: a launcher older than this looks for
+    // `/sys/fs/cgroup/boxes`, finds no directory and skips the pair without a word, which is the
+    // failure mode the separate variable was chosen for.
+    let floors = box_floor_budget();
+    if floors > 0 {
+        pairs.push(format!("boxes={floors}M"));
+    }
+    pairs.join(",")
+}
+
+/// How much memory every box's floor adds up to, in MiB, before the launcher divides it between
+/// the boxes it finds. Zero when there is no plan, or no room for a floor.
+///
+/// **What a floor is for.** When one box bursts, the kernel reclaims from whatever sits under the
+/// ceiling that box hit. If that is its own `memory.max`, it reclaims only from itself. If it is
+/// the shared ceiling on `skein`, it reclaims from every box, and the quiet one somebody is
+/// working in loses its working set to another box's build. `memory.min` on each box's cgroup is
+/// what that box keeps through it. Reclaim that starts at `skein` measures each child against the
+/// child's own `memory.min`, so `skein` needs no floor of its own for this, and has none: see
+/// `a_guarantee_is_written_to_memory_min_and_scaled_like_a_ceiling`.
+///
+/// **Why the budget is the gap between two ceilings.** The shared ceiling throttles at `high`, 90%
+/// of the boxes' share ([`fleet_limits`]). One box may use up to its own `max`, 70% of it by
+/// default ([`box_limits`]). A box at its own `max` plus every floor still fits under the shared
+/// `high` when the floors add up to no more than the difference:
+///
+/// ```text
+///   floors ≤ skein high − one box's max = 90% − 70% = 20% of the boxes' share
+/// ```
+///
+/// So the box that is bursting reaches its own ceiling, and reclaims from itself, before the
+/// fleet's line is crossed. A bigger budget would do worse than nothing: with everything under
+/// `skein` protected, a burst has nothing left to reclaim and meets the hard limit, where the
+/// kernel picks a victim from the whole workload. The owner's answer was to throttle and never
+/// kill (box-plugin.md, answer 3), and this floor kills nothing.
+///
+/// An explicit `box_memory_max` is taken as it is. If it reaches the shared `high` there is no gap,
+/// and no floor.
+pub fn box_floor_budget() -> u64 {
+    let Some(plan) = memory_plan() else {
+        return 0;
+    };
+    // Both ceilings from the arithmetic that writes them: `fleet_limits`' `ceiling` and
+    // `box_limits`' `pick`.
+    let skein_high = (plan.boxes * 9 / 10).max(512);
+    let one_box_max = match load_config().box_memory_max.trim() {
+        "" => (plan.boxes * 70 / 100).max(512),
+        explicit => match parse_mib(explicit) {
+            Some(mib) => mib,
+            // A size this skein cannot read is not one it can promise underneath.
+            None => return 0,
+        },
+    };
+    skein_high.saturating_sub(one_box_max)
 }
 
 /// Why a box has no memory ceiling, or `None` when it has one.
@@ -831,14 +886,196 @@ mod tests {
         let said = fleet_guarantees();
         std::env::remove_var("SKEIN_HOME");
         assert_eq!(
-            said,
-            format!("docker={}M", plan.plumbing / 2),
-            "the guarantee is not half the plumbing share"
+            said.split(',').find(|p| p.starts_with("docker=")),
+            Some(format!("docker={}M", plan.plumbing / 2).as_str()),
+            "the guarantee is not half the plumbing share: {said}"
         );
         assert!(
             plan.plumbing / 2 < plan.plumbing,
             "a guarantee the size of the whole share leaves the rest of the plumbing nothing"
         );
+    }
+
+    /// Every box's floor together is the gap between one box's ceiling and the fleet's throttle
+    /// line, so a box bursting to its own `max` never has to reclaim from another box's floor.
+    ///
+    /// What makes it fail: a budget taken as a plain share of the boxes' memory (a third, say)
+    /// rather than as the gap. A box at its own `max` plus the floors then crosses the shared
+    /// `high`, which is the first assertion. A budget that ignores an explicit `box_memory_max`
+    /// fails the second half.
+    #[test]
+    fn the_boxes_floors_fit_between_one_box_at_its_ceiling_and_the_fleets_throttle() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        for total in ["4g", "8g", "26g", "64g"] {
+            save_config(&Config {
+                fleet_memory: total.into(),
+                ..Config::default()
+            })
+            .unwrap();
+            let plan = memory_plan().unwrap();
+            let floors = box_floor_budget();
+            let spec = fleet_limits();
+            let skein_high = spec
+                .split(',')
+                .find_map(|p| p.strip_prefix("skein="))
+                .and_then(|v| v.split_once('/'))
+                .and_then(|(_, high)| parse_mib(high))
+                .unwrap_or_else(|| panic!("no shared high in {spec}"));
+            let one_box_max = box_limits()
+                .split(',')
+                .find_map(|p| p.strip_prefix("max="))
+                .and_then(parse_mib)
+                .unwrap_or_else(|| panic!("no box max in {}", box_limits()));
+            assert!(floors > 0, "no floor at all at {total}");
+            assert!(
+                one_box_max + floors <= skein_high,
+                "a box at its own ceiling plus every floor crosses the fleet's throttle at {total}: \
+                 {one_box_max}M + {floors}M > {skein_high}M"
+            );
+            let docker_min = fleet_guarantees()
+                .split(',')
+                .find_map(|p| p.strip_prefix("docker="))
+                .and_then(parse_mib)
+                .unwrap_or(0);
+            assert!(
+                floors + docker_min <= plan.boxes,
+                "the floors and the plumbing's guarantee add up to more than the workload's share \
+                 at {total}"
+            );
+            assert!(
+                fleet_guarantees().contains(&format!("boxes={floors}M")),
+                "the launcher is never handed the budget: {}",
+                fleet_guarantees()
+            );
+        }
+        // One box allowed as much as the fleet's throttle line leaves no gap, and no floor.
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            box_memory_max: "30g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        assert_eq!(box_floor_budget(), 0);
+        assert!(
+            !fleet_guarantees().contains("boxes="),
+            "a floor with no room for it: {}",
+            fleet_guarantees()
+        );
+    }
+
+    /// The launcher gives every box cgroup its share of the budget and adds up to no more than it,
+    /// on a fake cgroup tree with the real launcher's shell.
+    ///
+    /// What makes it fail: skipping a box (the `box-a has no floor` assertion), writing the whole
+    /// budget to each box instead of dividing it (the sum assertion), or counting `containers` as
+    /// a box (its own assertion). The second pass adds a box, which is how a fleet grows. Every
+    /// floor has to shrink so the sum still fits. A launcher that wrote only the new box fails
+    /// the sum.
+    #[test]
+    fn every_box_gets_a_floor_and_the_floors_never_add_up_to_more_than_the_budget() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        let plan = memory_plan().unwrap();
+        let (limits, guarantees, budget) = (fleet_limits(), fleet_guarantees(), box_floor_budget());
+        drop(env);
+
+        let dir = tempdir();
+        let root = std::path::Path::new(&dir);
+        for cgroup in [
+            "skein",
+            "skein/containers",
+            "skein/box-a",
+            "skein/box-b",
+            "skein/box-c",
+            "docker",
+        ] {
+            std::fs::create_dir_all(root.join("cgroup").join(cgroup)).unwrap();
+        }
+        // Exactly the configured size, so nothing is scaled and the arithmetic below is exact.
+        std::fs::write(
+            root.join("meminfo"),
+            format!("MemTotal:       {} kB\n", 26 * 1024 * 1024),
+        )
+        .unwrap();
+        let harness = format!(
+            "set -uo pipefail\n\
+             {sudo}\n\
+             {body}\n\
+             fleet_limits={limits}\n\
+             SKEIN_FLEET_GUARANTEES={guarantees}\n\
+             apply_fleet_ceilings\n",
+            sudo = SUDO_WRITES_A_VALUE_TO_A_PATH,
+            limits = sh_quote(&limits),
+            guarantees = sh_quote(&guarantees),
+            body = BOX_SESSION_SH
+                .lines()
+                .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()))
+                .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
+                + "\n}",
+        );
+        let floor = |cgroup: &str| -> Option<u64> {
+            std::fs::read_to_string(root.join("cgroup").join(cgroup).join("memory.min"))
+                .ok()
+                .and_then(|s| parse_mib(s.trim()))
+        };
+        let docker_min = guarantees
+            .split(',')
+            .find_map(|p| p.strip_prefix("docker="))
+            .and_then(parse_mib)
+            .expect("the plumbing's guarantee");
+        for boxes in [
+            &["box-a", "box-b", "box-c"][..],
+            &["box-a", "box-b", "box-c", "box-d"],
+        ] {
+            std::fs::create_dir_all(root.join("cgroup/skein").join(boxes[boxes.len() - 1]))
+                .unwrap();
+            let out = run_harness(root, &harness);
+            let floors: Vec<u64> = boxes
+                .iter()
+                .map(|name| {
+                    floor(&format!("skein/{name}")).unwrap_or_else(|| {
+                        panic!(
+                            "{name} has no floor: {}",
+                            String::from_utf8_lossy(&out.stderr)
+                        )
+                    })
+                })
+                .collect();
+            let sum: u64 = floors.iter().sum();
+            assert!(
+                sum <= budget && sum + docker_min <= plan.boxes,
+                "{} boxes' floors add up to {sum}M against a budget of {budget}M",
+                boxes.len()
+            );
+            assert!(
+                floors.iter().all(|f| *f == budget / boxes.len() as u64),
+                "the boxes did not get equal shares of the budget: {floors:?}"
+            );
+            assert_eq!(
+                floor("skein/containers"),
+                None,
+                "the containers were counted as a box and given a floor"
+            );
+            assert_eq!(
+                floor("skein"),
+                None,
+                "the workload's parent was given a floor"
+            );
+        }
     }
 
     /// The `sudo` stand-ins these tests run the launcher's own shell against.

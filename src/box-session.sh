@@ -236,8 +236,9 @@ apply_fleet_ceilings() {
     dir="/sys/fs/cgroup/${pair%%=*}"
     want="${pair#*=}"
     # Same rule as the ceilings below: only ever write over a cgroup that already exists. Creating
-    # `docker` would hand dockerd a cgroup it did not make and expects to own.
-    [ -d "$dir" ] || continue
+    # `docker` would hand dockerd a cgroup it did not make and expects to own. `boxes` is the one
+    # name that is not a cgroup; it is handled below.
+    [ "${pair%%=*}" = boxes ] || [ -d "$dir" ] || continue
     case "${want%M}" in
       "" | *[!0-9]*)
         echo "skein: ignoring the guarantee on ${dir##*/}: '$want' is not a size this launcher understands" >&2
@@ -246,6 +247,24 @@ apply_fleet_ceilings() {
     esac
     mib="${want%M}"
     [ -n "$scale" ] && mib=$(( mib * actual / planned ))
+    # `boxes` is what every box's floor adds up to (`box_floor_budget()` says why it is that size).
+    # It is divided here, between the box cgroups that exist now, because only the sandbox can
+    # count them. Every box gets the same share and each one is rewritten, so the floors add up to
+    # no more than the budget however many boxes there are. A fleet that has grown since the last
+    # write has each box's floor shrunk to fit. `containers` is not a box, and its containers have
+    # no floor.
+    if [ "${pair%%=*}" = boxes ]; then
+      boxes_found=0
+      for box_cg in /sys/fs/cgroup/skein/*/; do
+        [ -d "$box_cg" ] && [ "$box_cg" != /sys/fs/cgroup/skein/containers/ ] && boxes_found=$(( boxes_found + 1 ))
+      done
+      [ "$boxes_found" -gt 0 ] || continue
+      for box_cg in /sys/fs/cgroup/skein/*/; do
+        [ -d "$box_cg" ] && [ "$box_cg" != /sys/fs/cgroup/skein/containers/ ] || continue
+        sudo -n sh -c 'echo "$1" > "$2"' _ "$(( mib / boxes_found ))M" "${box_cg}memory.min" 2>/dev/null || true
+      done
+      continue
+    fi
     sudo -n sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/memory.min" 2>/dev/null || true
   done
 
