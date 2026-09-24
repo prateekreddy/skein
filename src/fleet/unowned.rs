@@ -368,7 +368,7 @@ pub fn unowned_row(
             offers: vec![
                 Offer {
                     lead: format!("see {them}:"),
-                    command: format!("cat {}/cgroup.procs", stale.path),
+                    command: format!("sbx exec {sandbox} cat {}/cgroup.procs", stale.path),
                     destructive: false,
                 },
                 Offer {
@@ -376,7 +376,12 @@ pub fn unowned_row(
                         1 => "if it is yours to end:".into(),
                         _ => "if they are yours to end:".into(),
                     },
-                    command: format!("echo 1 > {}/cgroup.kill", stale.path),
+                    // `sudo`, because `cgroup.kill` is root's, and `sbx exec`, because the cgroup
+                    // is in the sandbox and the person reading this is not.
+                    command: format!(
+                        "sbx exec {sandbox} sudo sh -c 'echo 1 > {}/cgroup.kill'",
+                        stale.path
+                    ),
                     destructive: true,
                 },
             ],
@@ -801,12 +806,13 @@ mod tests {
                         offers: vec![
                             offer(
                                 "see them:",
-                                "cat /sys/fs/cgroup/skein/box-old/cgroup.procs",
+                                "sbx exec example cat /sys/fs/cgroup/skein/box-old/cgroup.procs",
                                 false
                             ),
                             offer(
                                 "if they are yours to end:",
-                                "echo 1 > /sys/fs/cgroup/skein/box-old/cgroup.kill",
+                                "sbx exec example sudo sh -c 'echo 1 > \
+                                 /sys/fs/cgroup/skein/box-old/cgroup.kill'",
                                 true,
                             ),
                         ],
@@ -931,6 +937,30 @@ mod tests {
                 .contains("still holds 2 processes using 3.0G"),
             "{:?}",
             held.said
+        );
+        // Both stale-cgroup commands run in the sandbox, where the cgroup is, and the kill as root,
+        // because `cgroup.kill` is root's. What makes it fail: either command losing its
+        // `sbx exec <sandbox>` prefix (it would then read the host's own `/sys`), or the kill losing
+        // its `sudo` (the write is refused).
+        let [see, end] = held.said[1].offers.as_slice() else {
+            panic!(
+                "a stale cgroup offers two commands: {:?}",
+                held.said[1].offers
+            );
+        };
+        for offer in [see, end] {
+            assert!(
+                offer.command.starts_with("sbx exec example "),
+                "a stale-cgroup command would run on the host, not in the sandbox: {}",
+                offer.command
+            );
+        }
+        assert!(
+            end.command
+                .starts_with("sbx exec example sudo sh -c 'echo 1 > ")
+                && end.command.ends_with("/cgroup.kill'"),
+            "the kill is not written as root: {}",
+            end.command
         );
 
         // A memory skein could not read is `?`, and so is any total it would have been part of.

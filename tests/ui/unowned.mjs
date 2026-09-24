@@ -10,7 +10,7 @@
 // Each check below names the change that would make it fail.
 //
 //   node tests/ui/unowned.mjs
-import { grab, harness, stubDom } from "./lift.mjs";
+import { esc, grab, harness, stubDom } from "./lift.mjs";
 
 const t = harness();
 
@@ -44,8 +44,8 @@ const found = {
       {
         text: "box-old no longer exists, but its cgroup still holds 3 processes using 180M, and they count against the fleet's memory. skein removes a gone box's cgroup only once it is empty.",
         offers: [
-          { lead: "see them:", command: "cat /sys/fs/cgroup/skein/box-old/cgroup.procs" },
-          { lead: "if they are yours to end:", command: "echo 1 > /sys/fs/cgroup/skein/box-old/cgroup.kill", destructive: true },
+          { lead: "see them:", command: "sbx exec example cat /sys/fs/cgroup/skein/box-old/cgroup.procs" },
+          { lead: "if they are yours to end:", command: "sbx exec example sudo sh -c 'echo 1 > /sys/fs/cgroup/skein/box-old/cgroup.kill'", destructive: true },
         ],
       },
     ],
@@ -62,9 +62,9 @@ t.check("the pill counts no fault for it", pill, "");
 for (const command of [
   "sbx exec example docker stop pg-scratch a3f9c01e",
   "sbx exec example docker rm -f pg-scratch a3f9c01e",
-  "cat /sys/fs/cgroup/skein/box-old/cgroup.procs",
-  "echo 1 &gt; /sys/fs/cgroup/skein/box-old/cgroup.kill",
-]) t.check(`copyable: ${command}`, html.includes(`<code>${command}</code>`), true);
+  "sbx exec example cat /sys/fs/cgroup/skein/box-old/cgroup.procs",
+  "sbx exec example sudo sh -c 'echo 1 > /sys/fs/cgroup/skein/box-old/cgroup.kill'",
+]) t.check(`copyable: ${command}`, html.includes(`<code>${esc(command)}</code>`), true);
 // Fails if a Stop (or any) button appears: the owner declined one.
 t.check("no button anywhere in the row", /<button|onclick/i.test(html), false);
 // Fails if the destructive warning goes missing, or lands on a safe command too.
