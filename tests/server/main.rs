@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod asks;
 mod door;
 mod fixture;
 mod fleet;

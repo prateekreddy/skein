@@ -37,7 +37,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:474"]
+["docs/modules.toml:482"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -215,59 +215,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:129"]
+["src/bin/skein-server/main.rs:131"]
 line = "eprintln!(\"skein-server: {msg}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:140"]
+["src/bin/skein-server/main.rs:142"]
 line = "eprintln!(\"skein-server: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:146"]
+["src/bin/skein-server/main.rs:148"]
 line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:152"]
+["src/bin/skein-server/main.rs:154"]
 line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:155"]
+["src/bin/skein-server/main.rs:157"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:162"]
+["src/bin/skein-server/main.rs:164"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:170"]
+["src/bin/skein-server/main.rs:172"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:183"]
+["src/bin/skein-server/main.rs:185"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:240"]
+["src/bin/skein-server/main.rs:242"]
 line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:278"]
+["src/bin/skein-server/main.rs:280"]
 line = "\"skein: {}\\n {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:582"]
+["src/bin/skein-server/main.rs:587"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:592"]
+["src/bin/skein-server/main.rs:597"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:683"]
+["src/bin/skein-server/main.rs:688"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:689"]
+["src/bin/skein-server/main.rs:694"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -790,51 +790,51 @@ cited_by = ["docs/threat-model.md"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1893"]
+["src/box-session.sh:1896"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1917"]
+["src/box-session.sh:1920"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1942"]
+["src/box-session.sh:1945"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 
-["src/box-session.sh:1950"]
+["src/box-session.sh:1953"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2006"]
+["src/box-session.sh:2009"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2007"]
+["src/box-session.sh:2010"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2070"]
+["src/box-session.sh:2073"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2195"]
+["src/box-session.sh:2198"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2264"]
+["src/box-session.sh:2267"]
 line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2637"]
+["src/box-session.sh:2640"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2687"]
+["src/box-session.sh:2690"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2728"]
+["src/box-session.sh:2731"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1065,7 +1065,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:388"]
+["src/fleet/disk.rs:390"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1487,7 +1487,7 @@ cited_by = ["docs/prose-symbols.toml"]
 historical = "`docs/inventory.md` cites `src/lib.rs:35-50` for what the module graph looked like BEFORE SKEIN-576 split it — “was `pub use <mod>::*` over sixteen modules”, past tense, and the point of the paragraph. Lines 61-76 today are `pub mod` declarations, so relocating the citation would move it onto code that does not support the sentence."
 cited_by = ["docs/inventory.md"]
 
-["src/lib.rs:75"]
+["src/lib.rs:76"]
 line = "mod testutil;"
 cited_by = ["docs/modules.toml"]
 
@@ -1982,7 +1982,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:563"]
+["src/web/app/panels.js:661"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 

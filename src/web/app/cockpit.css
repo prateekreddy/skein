@@ -1045,8 +1045,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #askq.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
   /* the login terminal: a one-shot PTY in the modal stack — not the dock, whose sessions persist,
      reconnect and belong to boxes; this flow ENDS when its socket does */
   .lt-card { max-width:860px; height:min(70vh, 560px); }
@@ -1063,9 +1063,12 @@
   .sq-log { font-family:var(--mono); font-size:10px; color:var(--faint); white-space:pre-wrap;
             max-height:120px; overflow-y:auto; margin-top:7px; padding:7px 9px;
             background:var(--inset); border:1px solid var(--line); border-radius:7px; }
+  /* a box's question: its own words, as plain text, wrapped where it wraps */
+  .aq-body { font-size:12px; color:var(--text); white-space:pre-wrap; word-break:break-word; margin-top:6px; }
+  .aq-reply { flex:1; min-width:10em; }
   /* the badge that says something is waiting on a decision */
-  #subqbtn { position:relative; }
-  #subqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+  #subqbtn, #askqbtn { position:relative; }
+  #subqbtn .badge, #askqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
     border-radius:7px; background:var(--attn); color:#fff; font-size:9px; line-height:14px; text-align:center; font-family:var(--mono); }
   /* Same shape as the package-request badge above, deliberately: both mean "something is waiting on
      you", and a second visual language for the same idea is a second thing to learn. Periwinkle

@@ -1828,7 +1828,7 @@ SKEIN_ANCESTOR_MOUNTS
   [ -d "$private" ] && binds+=(--tmpfs "$private")
   unset private
 
-  # --- the two drop-boxes a box may WRITE into, inside the read-only `.skein` -------------------
+  # --- the three drop-boxes a box may WRITE into, inside the read-only `.skein` -----------------
   #
   # Read-only `.skein` is right for everything in it except the one thing a box is supposed to put
   # there: a request for its owner to approve. `--request-package` (which the sudo shim calls on
@@ -1859,10 +1859,13 @@ SKEIN_ANCESTOR_MOUNTS
   # uid, `substrate.rs` says at length that this gate is a chokepoint and not a wall, and collapsing
   # a repeated ask across boxes needs the read.
   #
+  # The third queue, `asks`, is a box's questions for its owner (the `skein_ask_person` tool in the
+  # box plugin, SKEIN-1061), bound the same way for the same reason: the directory is who asked.
+  #
   # What a box gains is exactly the ability to ask, which is what the cockpit's approval panels were
   # built for. It gains no ability to answer: the grants, the decisions and the package manifest all
   # live elsewhere under `.skein` and stay read-only.
-  for asking in substrate gitgate; do
+  for asking in substrate gitgate asks; do
     drop="$fleet_root_dir/.skein/$asking/requests/$box"
     mkdir -p "$drop" 2>/dev/null || true
     [ -d "$drop" ] && binds+=(--bind "$drop" "$drop")

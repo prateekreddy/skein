@@ -1,4 +1,4 @@
-//! A box may write its own request queue and no other box's, and cannot answer its own
+//! A box may write its own request queues and no other box's, and cannot answer its own
 //! git-write request.
 
 use super::*;
@@ -53,6 +53,100 @@ fn a_box_can_write_its_own_request_queue_and_no_other_boxs() {
              drop-box:\n{report}"
         );
     }
+}
+
+/// **A box can write its own ask queue and no other box's** (box-plugin §4, SKEIN-1061), through
+/// the tool an agent actually calls.
+///
+/// The `skein_ask_person` tool runs inside the box, as the box, and writes one file into
+/// `.skein/asks/requests/<box>/`. Which box that is, is the tool's `$SKEIN_BOX` — a variable the box
+/// owns — so the name cannot be what stops a box filing a question under a neighbour's name. The
+/// mount is: the launcher binds this box's own drop-box read-write and leaves every other one under
+/// the read-only `.skein`. So this runs the shipped server inside the namespace twice, once as
+/// itself and once claiming to be `other-main`, and reads both drop-boxes back from outside.
+///
+/// The probe verdicts come first, so a cover that stops holding is named as that before the tool
+/// is asked anything.
+///
+/// **What would make it fail**: `asks` dropped from the launcher's `for asking in substrate gitgate
+/// asks` loop (the box cannot ask at all), or the bind widened to `.skein/asks/requests` (the
+/// neighbour's question lands).
+#[test]
+fn a_box_can_write_its_own_ask_queue_and_no_other_boxs() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create \
+             a user namespace here, so the per-box ask queue was NOT exercised",
+        );
+    }
+    let fleet = Fleet::make("asks");
+    let report = fleet.seen_by_box(Born::Covered);
+    let root = fleet.fleet_root.join(".skein/asks/requests");
+    assert_eq!(
+        verdict(&report, &root.join("web-main")),
+        "write",
+        "the box cannot write its own ask queue:\n{report}"
+    );
+    assert_eq!(
+        verdict(&report, &root.join("other-main")),
+        "see",
+        "a box can write another box's ask queue:\n{report}"
+    );
+    assert_eq!(
+        verdict(&report, &root),
+        "see",
+        "the ask queue root is writable:\n{report}"
+    );
+
+    // The shipped server, where the launcher installs the plugin: under the read-only `.skein`.
+    let server = fleet.fleet_root.join(".skein/plugin/bin/skein-mcp");
+    fs::create_dir_all(server.parent().unwrap()).unwrap();
+    fs::write(&server, include_str!("../../src/plugin/bin/skein-mcp")).unwrap();
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"skein_ask_person","arguments":{"question":"keep the table?","options":["Drop it","Keep it"]}}}"#;
+    let said = String::from_utf8_lossy(
+        &fleet.in_box(
+            Born::Covered,
+            r#"for who in web-main other-main; do
+  printf '%s: ' "$who"
+  printf '%s\n' "$1" | SKEIN_BOX="$who" SKEIN_STATE="$3" python3 "$2"
+done"#,
+            &[
+                call.to_string(),
+                server.to_string_lossy().into_owned(),
+                fleet
+                    .state_parent
+                    .join("web-main")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+        ),
+    )
+    .to_string();
+
+    let questions_in = |owner: &str| -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(root.join(owner))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("q-"))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        questions_in("web-main").len(),
+        1,
+        "the tool could not file the box's own question:\n{said}"
+    );
+    assert_eq!(
+        questions_in("other-main"),
+        Vec::<String>::new(),
+        "a box filed a question in another box's queue by naming it:\n{said}"
+    );
+    assert!(
+        said.contains(r#"not-recorded"#),
+        "the tool did not say the neighbour's question was not recorded:\n{said}"
+    );
 }
 
 /// **A box cannot answer its own git-write request, and cannot hide it from its owner** (SKEIN-940).

@@ -25,6 +25,7 @@ pub mod ai;
 pub mod announce;
 pub mod answer;
 pub mod apiauth;
+pub mod asks;
 pub mod assets;
 pub mod attempt;
 pub mod board;

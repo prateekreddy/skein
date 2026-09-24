@@ -37,6 +37,7 @@ use tokio_stream::StreamExt;
 use skein::cockpit::{INDEX, V2};
 
 mod agents;
+mod asks;
 mod boxes;
 mod door;
 mod events;
@@ -53,6 +54,7 @@ mod upload;
 mod workflows;
 
 use agents::*;
+use asks::*;
 use boxes::*;
 use door::*;
 use events::*;
@@ -450,6 +452,9 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/machine/pressure", get(api_machine_pressure))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
+        // A box's questions for its owner, and the answer to one (SKEIN-1061).
+        .route("/api/fleet/asks", get(api_asks))
+        .route("/api/fleet/asks/:id", post(api_ask_answer))
         .route("/api/fleet/git-grants", get(api_git_grants))
         .route("/api/fleet/git-grants/:id", post(api_git_grant_decide))
         .route(
