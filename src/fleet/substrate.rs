@@ -420,7 +420,282 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
     // `skein update-agents` both — and done inline rather than by invalidating, because this has already
     // spent minutes in npm and a reading the very next poll can use beats a gap it cannot.
     remember_updates(check_runtimes(sandbox));
+    // **When it moved, so the pane can say who has not** (SKEIN-1070). A box keeps the binary it
+    // started with, so the only way to know which boxes are still on the old one is to compare
+    // when each agent started with when this finished — and this is the one place that knows.
+    if let Err(e) = record_installs(&said, Utc::now().timestamp()) {
+        eprintln!("skein: the agent CLI install is not recorded, so Settings → Update cannot list the boxes still on the old one: {e}");
+    }
     Ok(said)
+}
+
+/// One install that moved an agent CLI, as [`update_runtimes`] reported it (SKEIN-1070).
+///
+/// `at` is when the install **finished**, in epoch seconds. An agent that started before it is
+/// running `was`; one that started at it or after is running `now`. A box that started while npm was
+/// still writing is counted as before, which lists it when it may already be on the new one — the
+/// direction a restart that was not needed costs nothing in, where the other would hide a box.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeInstall {
+    pub runtime: String,
+    pub was: String,
+    pub now: String,
+    pub at: i64,
+}
+
+/// How many installs are kept. Installs are a person's press, a few a week at most; the list only
+/// has to reach back as far as the oldest agent still running, and twenty presses is months.
+const INSTALLS_KEPT: usize = 20;
+
+fn installs_path() -> std::path::PathBuf {
+    skein_home().join("agent-installs.json")
+}
+
+/// Every recorded install, oldest first. Nothing recorded, or a file that does not parse, is an
+/// empty list: the pane then says nothing about old versions, which is what it said before this.
+pub fn runtime_installs() -> Vec<RuntimeInstall> {
+    std::fs::read_to_string(installs_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// File what `said` reports as moved, at `at`. Only a line that went FROM a version TO another: a
+/// runtime that was "already current" moved nothing, and one "installed, now …" had no old version
+/// for a box to be running.
+fn record_installs(said: &str, at: i64) -> Result<(), String> {
+    let moved = moved_runtimes(said);
+    if moved.is_empty() {
+        return Ok(());
+    }
+    let mut all = runtime_installs();
+    all.extend(moved.into_iter().map(|(runtime, was, now)| RuntimeInstall {
+        runtime,
+        was,
+        now,
+        at,
+    }));
+    let drop = all.len().saturating_sub(INSTALLS_KEPT);
+    all.drain(..drop);
+    let path = installs_path();
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let bytes = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
+    write_atomic(&path, &dir, &bytes)
+}
+
+/// `claude: 2.1.278 (Claude Code) -> 2.1.280 (Claude Code)` → `("claude", "2.1.278", "2.1.280")`,
+/// from [`RUNTIME_UPDATE_SCRIPT`]'s own report. The version is the first token that starts with a
+/// digit, for the reason [`parse_runtime_versions`] gives: `codex --version` puts its name first.
+fn moved_runtimes(said: &str) -> Vec<(String, String, String)> {
+    let version = |side: &str| {
+        side.split_whitespace()
+            .find(|t| t.starts_with(|c: char| c.is_ascii_digit()))
+            .map(str::to_string)
+    };
+    said.lines()
+        .filter_map(|line| {
+            let (runtime, rest) = line.trim().split_once(": ")?;
+            if !crate::runtime::valid_runtime(runtime) {
+                return None;
+            }
+            let (was, now) = rest.split_once(" -> ")?;
+            let (was, now) = (version(was)?, version(now)?);
+            (was != now).then(|| (runtime.to_string(), was, now))
+        })
+        .collect()
+}
+
+/// When a box's agent started, as far as its tmux session can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStart {
+    /// Epoch seconds.
+    At(i64),
+    /// The box has no agent session. Nothing in it is running an old CLI; the next attach starts
+    /// one on whatever is installed then.
+    NoAgent,
+    /// The box answered nothing skein could read.
+    Unknown,
+}
+
+/// A running box, as the caller's board has it: which runtime, and its fused turn state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxTurn {
+    pub name: String,
+    pub runtime: String,
+    pub state: String,
+}
+
+/// A box still running an older agent CLI than the sandbox has installed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BehindBox {
+    pub name: String,
+    /// The version it started on.
+    pub have: String,
+    /// Its fused turn state, so the pane can offer the restart only on `waiting`.
+    pub state: String,
+}
+
+/// For one runtime, which running boxes are on what the last install put in place and which are not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StillRunning {
+    pub runtime: String,
+    /// What the last install moved it to.
+    pub latest: String,
+    pub behind: Vec<BehindBox>,
+    /// Boxes whose agent's start could not be read.
+    pub unknown: Vec<String>,
+    /// How many running boxes are on `latest`.
+    pub current: usize,
+}
+
+/// Settings → Update's list of the boxes still on an old agent CLI (SKEIN-1070), for `boxes` —
+/// the running ones, as the caller's board has them.
+pub fn agents_behind(boxes: &[BoxTurn]) -> Vec<StillRunning> {
+    // A stopped box runs nothing, and asking it would be an exec that can only fail.
+    let running: Vec<BoxTurn> = boxes
+        .iter()
+        .filter(|b| crate::sbx::box_liveness(&b.name) == Some(crate::sbx::Liveness::Running))
+        .cloned()
+        .collect();
+    agents_behind_with(&runtime_installs(), &running, agent_started)
+}
+
+/// [`agents_behind`] with the installs and the start reader as arguments, so a test can hand it
+/// both. The reads run side by side: each is an exec into a box, and one per box in turn would make
+/// the pane wait for the sum of them.
+fn agents_behind_with<F>(
+    installs: &[RuntimeInstall],
+    boxes: &[BoxTurn],
+    started: F,
+) -> Vec<StillRunning>
+where
+    F: Fn(&str, &str) -> AgentStart + Sync,
+{
+    let starts: Vec<AgentStart> = std::thread::scope(|scope| {
+        let reads: Vec<_> = boxes
+            .iter()
+            .map(|b| {
+                let started = &started;
+                scope.spawn(move || started(&b.name, &b.runtime))
+            })
+            .collect();
+        reads
+            .into_iter()
+            .map(|r| r.join().unwrap_or(AgentStart::Unknown))
+            .collect()
+    });
+    let mut runtimes: Vec<&str> = installs.iter().map(|i| i.runtime.as_str()).collect();
+    runtimes.sort_unstable();
+    runtimes.dedup();
+    runtimes
+        .into_iter()
+        .filter_map(|runtime| {
+            let mut history: Vec<&RuntimeInstall> =
+                installs.iter().filter(|i| i.runtime == runtime).collect();
+            history.sort_by_key(|i| i.at);
+            let latest = history.last()?.now.clone();
+            let mut out = StillRunning {
+                runtime: runtime.to_string(),
+                latest: latest.clone(),
+                behind: Vec::new(),
+                unknown: Vec::new(),
+                current: 0,
+            };
+            let mut uses_it = false;
+            for (b, start) in boxes.iter().zip(&starts) {
+                if b.runtime != runtime {
+                    continue;
+                }
+                match *start {
+                    AgentStart::NoAgent => {}
+                    AgentStart::Unknown => {
+                        uses_it = true;
+                        out.unknown.push(b.name.clone());
+                    }
+                    AgentStart::At(t) => {
+                        uses_it = true;
+                        let have = version_started_on(&history, t);
+                        if have == latest {
+                            out.current += 1;
+                        } else {
+                            out.behind.push(BehindBox {
+                                name: b.name.clone(),
+                                have,
+                                state: b.state.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            // A runtime no running box uses has nobody to list, and "every running box is on
+            // codex …" about a fleet with no codex box in it says nothing true that matters.
+            uses_it.then_some(out)
+        })
+        .collect()
+}
+
+/// The version an agent that started at `started` loaded: what the last install at or before then
+/// put in place, or, when it started before every recorded install, what the first one replaced.
+fn version_started_on(history: &[&RuntimeInstall], started: i64) -> String {
+    let mut on = history.first().map(|i| i.was.clone()).unwrap_or_default();
+    for install in history {
+        if started >= install.at {
+            on = install.now.clone();
+        }
+    }
+    on
+}
+
+/// Ask one box when its agent started. See [`agent_start_script`] for what is read.
+fn agent_started(name: &str, runtime: &str) -> AgentStart {
+    let Some(place) = place_of(name) else {
+        return AgentStart::Unknown;
+    };
+    let session = crate::runtime::agent_session_name(name, runtime);
+    let script = agent_start_script(&place.tmux(), &session);
+    parse_agent_start(place.exec(&script, Duration::from_secs(20)).ok().as_deref())
+}
+
+/// **The pane's newest child, not the pane itself.** tmux runs the session's command through `sh
+/// -c` (it holds `||`), so the pane's own process is that shell, started with the session. The
+/// agent is its child — and when `claude --continue` fails and the `|| claude` behind it starts a
+/// fresh one, that child is newer than the shell, possibly newer than an install, and it is the
+/// binary that was loaded. With no child the pane itself is read.
+///
+/// `ps -o etimes` is seconds since it started, subtracted from the box's own clock, so the answer
+/// never depends on reading `/proc/<pid>/stat` against a boot time. `none` means there is no agent
+/// session at all — asked with `has-session`, because `display-message` for a session that is not
+/// there answers nothing and exits 0 (tmux 3.6), which would read as a box skein cannot see into.
+fn agent_start_script(tmux: &str, session: &str) -> String {
+    let exact = sh_quote(&format!("={session}"));
+    let target = sh_quote(&format!("={session}:"));
+    format!(
+        "{tmux} has-session -t {exact} 2>/dev/null || {{ echo none; exit 0; }}\n\
+         pid=$({tmux} display-message -p -t {target} '#{{pane_pid}}' 2>/dev/null) || exit 1\n\
+         case \"$pid\" in '' | *[!0-9]*) exit 1 ;; esac\n\
+         age=$(ps -o etimes= --ppid \"$pid\" 2>/dev/null | sort -n | head -n 1 | tr -d ' ')\n\
+         [ -n \"$age\" ] || age=$(ps -o etimes= -p \"$pid\" 2>/dev/null | tr -d ' ')\n\
+         case \"$age\" in '' | *[!0-9]*) exit 1 ;; esac\n\
+         echo \"started $(( $(date +%s) - age ))\"\n"
+    )
+}
+
+fn parse_agent_start(out: Option<&str>) -> AgentStart {
+    let Some(out) = out else {
+        return AgentStart::Unknown;
+    };
+    let out = out.trim();
+    if out == "none" {
+        return AgentStart::NoAgent;
+    }
+    out.strip_prefix("started ")
+        .and_then(|t| t.trim().parse().ok())
+        .map(AgentStart::At)
+        .unwrap_or(AgentStart::Unknown)
 }
 
 /// **Asked for by name, never by `command -v`.** That guard is the whole defect this exists for: a
@@ -1054,5 +1329,196 @@ mod tests {
             "{quoted}"
         );
         assert_eq!(sh_quote("a'; rm -rf /; '"), r#"'a'\''; rm -rf /; '\'''"#);
+    }
+
+    fn turn(name: &str, runtime: &str, state: &str) -> BoxTurn {
+        BoxTurn {
+            name: name.into(),
+            runtime: runtime.into(),
+            state: state.into(),
+        }
+    }
+
+    /// **Exactly the boxes whose agent started before the install are listed** (SKEIN-1070), as
+    /// what they started on — read back from the record `update_runtimes` writes, not handed in.
+    ///
+    /// The install is filed at 1000. `box-a` started at 500 and is on the old CLI; `box-b` started
+    /// at 1500 and is on the new one. Every clock here is fake, and the real one is far past all of
+    /// them — which is what makes the check-time failure visible.
+    ///
+    /// **What makes it fail:** inverting the comparison in `version_started_on` (`started <
+    /// install.at`) lists `box-b` and not `box-a`; comparing against the time of the check
+    /// (`Utc::now()`) instead of the install's lists both, since every fake start is before now.
+    /// Either way `behind` is wrong. Listing a box with no agent session fails the `unknown`/count
+    /// assertions, and reporting a runtime no running box uses fails the length check.
+    #[test]
+    fn the_boxes_still_on_the_old_cli_are_exactly_those_started_before_the_install() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        record_installs(
+            "claude: 2.1.278 (Claude Code) -> 2.1.280 (Claude Code)\n\
+             codex: codex-cli 0.150.1 (already current)\n",
+            1000,
+        )
+        .expect("the install record is written");
+        let installs = runtime_installs();
+        assert_eq!(
+            installs,
+            vec![RuntimeInstall {
+                runtime: "claude".into(),
+                was: "2.1.278".into(),
+                now: "2.1.280".into(),
+                at: 1000,
+            }],
+            "the record is not what the install reported"
+        );
+
+        let boxes = [
+            turn("box-a", "claude", "waiting"),
+            turn("box-b", "claude", "working"),
+            turn("box-c", "claude", "waiting"),
+            turn("box-d", "claude", "waiting"),
+            turn("box-e", "codex", "waiting"),
+        ];
+        let found = agents_behind_with(&installs, &boxes, |name, _| match name {
+            "box-a" => AgentStart::At(500),
+            "box-b" => AgentStart::At(1500),
+            "box-c" => AgentStart::Unknown,
+            "box-d" => AgentStart::NoAgent,
+            _ => AgentStart::At(10),
+        });
+        assert_eq!(
+            found.len(),
+            1,
+            "only claude moved, so only claude has anything to say: {found:?}"
+        );
+        let claude = &found[0];
+        assert_eq!(claude.latest, "2.1.280");
+        assert_eq!(
+            claude.behind,
+            vec![BehindBox {
+                name: "box-a".into(),
+                have: "2.1.278".into(),
+                state: "waiting".into(),
+            }],
+            "the boxes listed as behind are not exactly the one that started before the install"
+        );
+        assert_eq!(claude.unknown, vec!["box-c".to_string()]);
+        assert_eq!(
+            claude.current, 1,
+            "box-b is on the new CLI, and box-d runs no agent at all"
+        );
+    }
+
+    /// **A box is on what the last install before its start put in place**, not simply "old".
+    ///
+    /// **What makes it fail:** answering every pre-install box with the LAST install's `was` gives
+    /// `box-1` 2.1.280 instead of 2.1.278; picking the first install at or after its start instead
+    /// of the last before it gives `box-2` 2.1.281.
+    #[test]
+    fn a_box_is_on_what_the_install_before_its_start_put_in_place() {
+        let at = |was: &str, now: &str, at| RuntimeInstall {
+            runtime: "claude".into(),
+            was: was.into(),
+            now: now.into(),
+            at,
+        };
+        let installs = [
+            at("2.1.278", "2.1.280", 1000),
+            at("2.1.280", "2.1.281", 2000),
+        ];
+        let boxes = [
+            turn("box-1", "claude", "waiting"),
+            turn("box-2", "claude", "waiting"),
+            turn("box-3", "claude", "waiting"),
+        ];
+        let found = agents_behind_with(&installs, &boxes, |name, _| match name {
+            "box-1" => AgentStart::At(100),
+            "box-2" => AgentStart::At(1500),
+            _ => AgentStart::At(2500),
+        });
+        let have: Vec<(&str, &str)> = found[0]
+            .behind
+            .iter()
+            .map(|b| (b.name.as_str(), b.have.as_str()))
+            .collect();
+        assert_eq!(have, vec![("box-1", "2.1.278"), ("box-2", "2.1.280")]);
+        assert_eq!((found[0].latest.as_str(), found[0].current), ("2.1.281", 1));
+    }
+
+    /// Only a runtime that went from one version to another is recorded.
+    ///
+    /// **What makes it fail:** taking the second token rather than the first that starts with a
+    /// digit reads `codex-cli`'s version as `0.150.1` on one side and the name on the other; not
+    /// skipping an unchanged version records a move that moved nothing; accepting any `x: a -> b`
+    /// line records the shadowed-install warning's words as a runtime.
+    #[test]
+    fn only_a_runtime_that_moved_is_recorded() {
+        let said = "claude: 2.1.278 (Claude Code) -> 2.1.280 (Claude Code)\n\
+                    codex: codex-cli 0.150.1 -> codex-cli 0.151.0\n\
+                    claude: 2.1.280 (Claude Code) (already current)\n\
+                    codex: installed, now codex-cli 0.151.0\n\
+                    npm ERR!: 1 -> 2\n\
+                    nothing moved — every runtime here was already the newest npm has.\n";
+        assert_eq!(
+            moved_runtimes(said),
+            vec![
+                ("claude".into(), "2.1.278".into(), "2.1.280".into()),
+                ("codex".into(), "0.150.1".into(), "0.151.0".into()),
+            ]
+        );
+    }
+
+    /// **The start time is read from a real tmux pane, and it is the agent's, not its shell's.**
+    ///
+    /// The session's command is `sleep 3; sleep 60; :` — the pane's shell starts at once and its
+    /// second child three seconds later, the way `claude --continue || claude` starts a fresh agent
+    /// after the first one fails. The trailing `:` stops the shell exec'ing its last command in
+    /// place, which would leave no child to find.
+    ///
+    /// **What makes it fail:** reading the pane's own pid (`-p "$pid"` first) answers the shell's
+    /// start, three seconds early, and the lower bound fails; dropping the `echo none` branch turns
+    /// a box with no session into `Unknown`; an `etimes` subtracted the wrong way round lands
+    /// decades away from `now`.
+    #[test]
+    fn an_agents_start_is_read_off_its_tmux_pane() {
+        let dir = crate::testutil::tempdir();
+        let sock = dir.join("t.sock");
+        let tmux = format!("tmux -S {}", sh_quote(sock.to_str().unwrap()));
+        let run = |script: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .expect("sh runs");
+            status_and_text(out)
+        };
+        fn status_and_text(out: std::process::Output) -> Option<String> {
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        let begun = Utc::now().timestamp();
+        run(&format!(
+            "{tmux} new-session -d -s skein-agent 'sleep 3; sleep 60; :'"
+        ))
+        .expect("tmux starts a session");
+        std::thread::sleep(Duration::from_millis(4500));
+        let read = parse_agent_start(run(&agent_start_script(&tmux, "skein-agent")).as_deref());
+        let absent = parse_agent_start(run(&agent_start_script(&tmux, "skein-nothing")).as_deref());
+        let now = Utc::now().timestamp();
+        run(&format!("{tmux} kill-server"));
+
+        let AgentStart::At(t) = read else {
+            panic!("the pane's start could not be read: {read:?}");
+        };
+        assert!(
+            t >= begun + 2,
+            "this is the pane's shell, not the agent it started three seconds later: {t} vs {begun}"
+        );
+        assert!(t <= now, "a start in the future: {t} vs {now}");
+        assert_eq!(absent, AgentStart::NoAgent, "a box with no agent session");
     }
 }

@@ -36,6 +36,7 @@ use tokio_stream::StreamExt;
 
 use skein::cockpit::{INDEX, V2};
 
+mod agents;
 mod boxes;
 mod door;
 mod events;
@@ -51,6 +52,7 @@ mod update;
 mod upload;
 mod workflows;
 
+use agents::*;
 use boxes::*;
 use door::*;
 use events::*;
@@ -513,6 +515,13 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         // something else: this installs software into the sandbox every box shares, which is not a
         // thing to reach by accident.
         .route("/api/update-agents", post(api_update_agents))
+        // Settings -> Update's boxes still on the old agent CLI, and one waiting box's restart onto
+        // the new one (SKEIN-1070, SKEIN-1071). One box per press: there is no route for all.
+        .route("/api/update-agents/boxes", get(api_agents_behind))
+        .route(
+            "/api/update-agents/boxes/:name/restart",
+            post(api_restart_onto_update),
+        )
         // Settings -> Update (SKEIN-1037); `restart` POSTs SKEIN-1029's press, GETs the holder.
         .route("/api/update", get(api_update))
         .route("/api/update/start", post(api_update_start))

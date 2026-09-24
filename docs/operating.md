@@ -185,6 +185,18 @@ only way anyone would notice it coming back short of timing a box. Moving the ve
 `skein update-agents` (SKEIN-404) — one command, run where sudo works, printing what actually
 moved (`claude: 1.2.3 -> 1.2.9`) rather than "done".
 
+**A running agent keeps the CLI it started with**, so an install moves no box until its next
+session. After one, Settings → Update lists the boxes still on the old version (SKEIN-1070): the
+install records when it finished and what moved, in `agent-installs.json` under `$SKEIN_HOME`, and
+the pane compares each running box's agent start time with that record — "3 boxes are still running
+claude 2.1.278 and move to 2.1.280 at their next session". A box whose agent is `waiting` gets one
+restart button of its own and a working box gets none; there is no "restart all" (SKEIN-1071). The
+press ends the box's agent session and opens it again with the runtime's resume command, so the
+conversation comes back and nothing is sent to it. The server reads the box's turn state again when
+the button is pressed and refuses a box that has started working since the list was drawn. Ending
+the session hangs up its terminal, which stops the agent and whatever it runs there; a process that
+ignores the hangup (`nohup`) or left the session (`setsid`) keeps running.
+
 tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
 pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser
 wheel scrolling moves through conversation output instead of cycling prompt history. Claude feeds

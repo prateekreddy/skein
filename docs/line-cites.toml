@@ -215,59 +215,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:127"]
+["src/bin/skein-server/main.rs:129"]
 line = "eprintln!(\"skein-server: {msg}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:138"]
+["src/bin/skein-server/main.rs:140"]
 line = "eprintln!(\"skein-server: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:144"]
+["src/bin/skein-server/main.rs:146"]
 line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:150"]
+["src/bin/skein-server/main.rs:152"]
 line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:153"]
+["src/bin/skein-server/main.rs:155"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:160"]
+["src/bin/skein-server/main.rs:162"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:167"]
+["src/bin/skein-server/main.rs:169"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:180"]
+["src/bin/skein-server/main.rs:182"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:237"]
+["src/bin/skein-server/main.rs:239"]
 line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:275"]
+["src/bin/skein-server/main.rs:277"]
 line = "\"skein: {}\\n {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:572"]
+["src/bin/skein-server/main.rs:581"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:582"]
+["src/bin/skein-server/main.rs:591"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:673"]
+["src/bin/skein-server/main.rs:682"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:679"]
+["src/bin/skein-server/main.rs:688"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1673,12 +1673,12 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"teardown failed (exit {code}): {}\", err.trim()));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1000"]
+["src/sandbox.rs:1045"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1014"]
+["src/sandbox.rs:1059"]
 line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1917,28 +1917,28 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:934"]
+["src/web/app/boot.js:1084"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:960"]
+["src/web/app/boot.js:1110"]
 line = "updateTail = setTimeout(step, 1500);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:977"]
+["src/web/app/boot.js:1127"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1051"]
+["src/web/app/boot.js:1201"]
 line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1205"]
+["src/web/app/boot.js:1355"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1213"]
+["src/web/app/boot.js:1363"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 
