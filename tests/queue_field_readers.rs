@@ -252,11 +252,13 @@ fn renamed(attrs: &str) -> Option<String> {
 /// [`line_reads`]'s list too: that function is per line by contract and a caller who has not masked
 /// its text should get the SKEIN-992 behaviour, not none.
 ///
-/// The limit that is left: `//`, `*` and `/*` are still per line, so a JavaScript block comment
-/// whose interiors do not begin with `*` still reads as code. `cockpit.js` indents every one of its
-/// interiors with `*`, which is why it had none of the four lines above.
+/// **`/*` is a span too now** (SKEIN-1014): a JavaScript or CSS block comment whose interiors do
+/// not begin with `*` was read as code — 210 such lines in `index.html`, one of which
+/// (`index.html:503`) names the payload field `step`, which has real readers elsewhere, so the
+/// count did not move. [`without_block_comments`] blanks it and says why a `/*` inside a string or
+/// a regex cannot open one.
 fn page_reads(page: &str, field: &str) -> bool {
-    without_html_comments(page)
+    without_comments(page)
         .lines()
         .any(|line| line_reads(line, field))
 }
@@ -337,6 +339,89 @@ fn blanked(line: &str, from: usize, to: usize) -> String {
     )
 }
 
+/// `page` with every `/* … */` block comment blanked out, the same way and for the same reason
+/// [`without_html_comments`] blanks `<!--` — same lines, same line numbers, and code that shares
+/// a line with a comment left standing (SKEIN-1014).
+///
+/// **The opener is anchored exactly where the per-line filter anchored it**: a `/*` opens a span
+/// only when it begins its line (after leading whitespace), or begins what is left of a line after
+/// a span closed on it. That is the whole answer to the swallow this was left open for. A `/*`
+/// inside a string (`"/*"`) or a regex literal (`/\/*/`) is ordinary JavaScript, and an unanchored
+/// span would open a comment there and drop every read after it; neither can begin a line, since a
+/// string begins with its quote and a regex cannot begin with `*`. The closer is the first `*/`
+/// after the opener, which is the language's own rule in both JavaScript and CSS — a comment has
+/// no escape for it.
+///
+/// **An opener with no `*/` after it blanks its own line and nothing else**, the per-line
+/// behaviour, so no input makes this see less than the per-line filter saw. The one it cannot
+/// answer is a line of a multi-line template literal that begins with `/*` and is never closed; no
+/// page has one — every line-start opener in the scanned pages closes, the longest span is 26
+/// lines (`cockpit.js:612`) — and the `<!--` span carries the same exposure.
+///
+/// Measured over [`PAGE`] after the `<!--` mask: `index.html` 160 openers blanking 370 lines, 210
+/// of them interiors that do not begin with `*` and were read as code before this; `cockpit.js`
+/// 5 and 53 (0 — its interiors all begin with `*`). The same function as `cockpit_routes`' in
+/// `src/bin/skein-server/main.rs`, copied for the compilation boundary [`without_html_comments`]
+/// names.
+fn without_block_comments(page: &str) -> String {
+    let lines: Vec<&str> = page.lines().collect();
+    // Spans per line in the ORIGINAL coordinates, applied at the end right to left: `blanked`
+    // counts characters, so blanking one span would move the byte offsets of the next on its line.
+    let mut spans: Vec<Vec<(usize, usize)>> = vec![Vec::new(); lines.len()];
+    let (mut i, mut col) = (0usize, 0usize);
+    while i < lines.len() {
+        let rest = &lines[i][col..];
+        let t = rest.trim_start();
+        if !t.starts_with("/*") {
+            i += 1;
+            col = 0;
+            continue;
+        }
+        let open = col + rest.len() - t.len();
+        // The first `*/` after the opener, on its own line or a later one.
+        let closed = lines.iter().enumerate().skip(i).find_map(|(j, line)| {
+            let from = if j == i { open + 2 } else { 0 };
+            line[from..].find("*/").map(|k| (j, from + k + 2))
+        });
+        match closed {
+            Some((j, end)) => {
+                for (m, span) in spans.iter_mut().enumerate().take(j + 1).skip(i) {
+                    let from = if m == i { open } else { 0 };
+                    let to = if m == j { end } else { lines[m].len() };
+                    span.push((from, to));
+                }
+                // Carry on from the closer, so `*/ /* next` opens again and the result has no
+                // opener left in it — which is what makes masking twice the same as once.
+                i = j;
+                col = end;
+            }
+            None => {
+                spans[i].push((open, lines[i].len()));
+                i += 1;
+                col = 0;
+            }
+        }
+    }
+    lines
+        .iter()
+        .zip(&spans)
+        .map(|(line, spans)| {
+            spans
+                .iter()
+                .rev()
+                .fold((*line).to_string(), |acc, &(from, to)| {
+                    blanked(&acc, from, to)
+                })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Both comment syntaxes blanked: `<!--` first, so a `/*` inside an HTML comment is already gone.
+fn without_comments(page: &str) -> String {
+    without_block_comments(&without_html_comments(page))
+}
+
 /// One line of the page, read the way [`page_reads`] reads the whole of it.
 ///
 /// Split out so the comment filter and the match live at the same granularity: the check is per
@@ -380,7 +465,7 @@ fn census() -> Vec<(String, bool)> {
     // masks again and finds nothing left to mask, which is the property its doc comment names.
     census_of(
         &units,
-        &PAGE.map(read).map(|p| without_html_comments(&p)).join("\n"),
+        &PAGE.map(read).map(|p| without_comments(&p)).join("\n"),
     )
 }
 
@@ -823,6 +908,118 @@ pub struct Invented {
         masked,
         "masking is not idempotent, so masking twice is not the same as masking once and the two \
          call sites disagree about what the page says"
+    );
+}
+
+/// **And a field named on the interior of a `/* … */` block comment** (SKEIN-1014).
+///
+/// The same hole one comment syntax down: `/*` was per line, so an interior line that does not
+/// begin with `*` read as code — `index.html:503` names `.step` that way. Asserted with the four
+/// directions a `/*` span could get wrong, two of which are why it was left open: a `/*` inside a
+/// string and one inside a regex literal, each with a `*/` after it so a span opened there would
+/// have somewhere to run to. Then planted into the real pages and measured on the mask, for the
+/// reason [`a_field_named_inside_a_multi_line_page_comment_still_has_no_reader`] gives: the census
+/// count cannot move under a plant, so asserting on it proves nothing.
+///
+/// **What would make this fail:** dropping [`without_block_comments`] from [`page_reads`] (the
+/// fixture's interior line reads as a read), or letting a `/*` open anywhere on a line rather than
+/// only at its start (the string and regex rows, and the planted pages).
+#[test]
+fn a_field_named_inside_a_multi_line_block_comment_still_has_no_reader() {
+    let source = "\
+#[derive(Serialize)]
+pub struct Invented {
+    pub only_in_a_block_comment: String,
+}
+"
+    .to_string();
+    assert_eq!(
+        serialised_fields(&source).get("Invented"),
+        Some(&vec!["only_in_a_block_comment".to_string()]),
+        "the fixture payload did not parse, so what follows proves nothing"
+    );
+    let units = [source];
+    let no_declarations = BTreeSet::new();
+    let named = "Invented.only_in_a_block_comment";
+
+    // The shape `src/web/index.html:503` is in: an interior line that does not begin with `*`.
+    let page = [
+        "  /* The caption used to be",
+        "     row.textContent = q.only_in_a_block_comment, before the server rendered it. */",
+    ]
+    .join("\n");
+    let page = page.as_str();
+    assert_eq!(
+        unread_and_undeclared(&census_of(&units, page), &no_declarations),
+        vec![named],
+        "the gate did not name a field whose only mention in the page is a line INSIDE a block \
+         comment"
+    );
+    assert!(
+        !page_reads(page, "only_in_a_block_comment"),
+        "a line inside a block comment only NAMES the field, and it was read as a read of it"
+    );
+
+    for (what, page) in [
+        (
+            "code after a block comment that closes on its own line",
+            "  /* old */ row.textContent = q.only_in_a_block_comment;",
+        ),
+        (
+            "code under a block comment that is never closed",
+            "  /* never closed\n  row.textContent = q.only_in_a_block_comment;",
+        ),
+        (
+            "code after a `/*` inside a string",
+            "  const s = \"/*\";\n  row.textContent = q.only_in_a_block_comment;\n  /* closer */",
+        ),
+        (
+            "code after a `/*` inside a regex literal",
+            "  const re = /\\/*/;\n  row.textContent = q.only_in_a_block_comment;\n  /* closer */",
+        ),
+    ] {
+        assert_eq!(
+            census_of(&units, page),
+            vec![(named.to_string(), true)],
+            "{what}: the page reads the field and the census says it does not — a false accusation \
+             against working code"
+        );
+    }
+
+    let blanked_lines = |text: &str| -> usize {
+        let masked = without_comments(text);
+        text.lines()
+            .zip(masked.lines())
+            .filter(|(raw, cooked)| raw != cooked)
+            .count()
+    };
+    let mut plantable = 0;
+    for name in PAGE {
+        let text = read(name);
+        if !text.contains("*/") {
+            continue;
+        }
+        plantable += 1;
+        let before = blanked_lines(&text);
+        for plant in ["  const s = \"/*\";", "  const re = /\\/*/;"] {
+            assert_eq!(
+                blanked_lines(&format!("{plant}\n{text}")),
+                before,
+                "{name}: `{plant}` opened a block comment, and every field whose only reader is in \
+                 what it blanked stops having one"
+            );
+        }
+        let masked = without_comments(&text);
+        assert_eq!(
+            without_comments(&masked),
+            masked,
+            "{name}: masking twice is not masking once, so the census's two call sites disagree"
+        );
+    }
+    assert!(
+        plantable > 0,
+        "no page holds a `*/` at all, so a stray opener has nowhere to run to and the counts above \
+         would be equal whatever this scanner did"
     );
 }
 
