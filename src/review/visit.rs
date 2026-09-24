@@ -383,17 +383,7 @@ pub(super) fn spend_a_visit(
     // `computed` stays false, so saying this costs the day nothing.
     if trigger == Trigger::Unasked {
         if let Some(why) = read_tried(&repo.id).get(&format!("{}-{}", pr.number, pr.head_sha)) {
-            // **A box that did not answer in time comes back as that row, not this one**
-            // (SKEIN-818). The note is the sentence and nothing else, so the reason is recognised
-            // from it; and the approved row IS the sentence — it already says skein stopped rather
-            // than spend again — so it is not wrapped, and `stopped_at_box` puts both ways on
-            // beside it exactly as a fresh timeout does.
-            if crate::ai::says_its_box_did_not_answer(why) {
-                let mut said = Summary::unread(pr.number, &pr.head_sha, why);
-                said.stopped_at_box = true;
-                return said;
-            }
-            return Summary::unread(
+            let mut said = Summary::unread(
                 pr.number,
                 &pr.head_sha,
                 &format!(
@@ -401,6 +391,16 @@ pub(super) fn spend_a_visit(
                      another by itself. Press \"read it\" to try again."
                 ),
             );
+            // **A box that did not answer in time comes back as that row, not this one**
+            // (SKEIN-818). The note is the sentence and nothing else, so the reason is recognised
+            // from it; and the approved row IS the sentence — it already says skein stopped rather
+            // than spend again — so it goes unwrapped, and `stopped_at_box` puts both ways on
+            // beside it exactly as a fresh timeout does.
+            if crate::ai::says_its_box_did_not_answer(why) {
+                said.unread_because = why.clone();
+                said.stopped_at_box = true;
+            }
+            return said;
         }
     }
     // **A ROUND RUNS WHEN SOMEBODY ASKS FOR ONE, and GitHub already has a way to ask** (SKEIN-444).
@@ -1178,22 +1178,6 @@ mod tests {
         );
     }
 
-    /// **A model that fails every time is bought once per commit, not once per row per reload**
-    /// (SKEIN-253).
-    ///
-    /// The tried-note is what stops a failure being re-bought, and it used to gate the background
-    /// pass alone. The pane's own pump sends no `asked` marker, so its requests are
-    /// `Trigger::Unasked` and ARE charged — and a `claude` that is not logged in fails instantly
-    /// and for free, so thirty rows over three reloads spent the day's ceiling on zero summaries,
-    /// after which every row read "today's automatic reading budget is spent".
-    ///
-    /// Three asks, and each one is a different rule:
-    ///
-    ///   * the first spends a unit and asks the model, which is right — nothing knew yet;
-    ///   * the second spends NOTHING, asks nothing, and comes back carrying what the model said;
-    ///   * the third is a person pressing "read it", which goes nowhere near the note. A standing
-    ///     failure must never make a button do nothing (`ai::forget_refusal`'s rule), and an asked
-    ///     read is un-budgeted besides.
     /// **A box timeout the background pass wrote down comes back as the approved row**
     /// (SKEIN-818).
     ///
@@ -1263,6 +1247,22 @@ mod tests {
         );
     }
 
+    /// **A model that fails every time is bought once per commit, not once per row per reload**
+    /// (SKEIN-253).
+    ///
+    /// The tried-note is what stops a failure being re-bought, and it used to gate the background
+    /// pass alone. The pane's own pump sends no `asked` marker, so its requests are
+    /// `Trigger::Unasked` and ARE charged — and a `claude` that is not logged in fails instantly
+    /// and for free, so thirty rows over three reloads spent the day's ceiling on zero summaries,
+    /// after which every row read "today's automatic reading budget is spent".
+    ///
+    /// Three asks, and each one is a different rule:
+    ///
+    ///   * the first spends a unit and asks the model, which is right — nothing knew yet;
+    ///   * the second spends NOTHING, asks nothing, and comes back carrying what the model said;
+    ///   * the third is a person pressing "read it", which goes nowhere near the note. A standing
+    ///     failure must never make a button do nothing (`ai::forget_refusal`'s rule), and an asked
+    ///     read is un-budgeted besides.
     #[cfg(unix)]
     #[test]
     fn a_model_that_always_fails_is_not_re_bought_on_every_reload() {
