@@ -30,7 +30,7 @@ const source = [
   "gitqShown", "gitqAnnounced", "gitqCreds", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
   "gitqGrantRow", "revokeGitq", "gitCredRow", "editGitCred", "credId", "credFor", "storeGitCred",
   "addGitCred", "removeGitCred", "renderGitState", "nameable", "slugFromPath", "repoSlug",
-  "repoTokenRow", "arApplySettings",
+  "nonGitHubHost", "repoTokenRow", "arApplySettings",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -94,7 +94,7 @@ const scope = new Function(`
   ${source}
   return {
     decideGitq, pollGitq, gitqCard, gitqGrantRow, revokeGitq, gitCredRow, editGitCred,
-    addGitCred, removeGitCred, renderGitState, repoSlug, repoTokenRow, arApplySettings, credFor,
+    addGitCred, removeGitCred, renderGitState, repoSlug, nonGitHubHost, repoTokenRow, arApplySettings, credFor,
     fields: () => fields,
     form: () => form,
     state: () => state,
@@ -440,11 +440,35 @@ const adopted = T.repoTokenRow({ id: "skein", source: "/Users/me/code/skein", sl
 check("an adopted repo with a GitHub origin gets a token field", adopted.includes(`data-repotoken="acme/skein"`), true);
 check("named for the repository the host will mint against", adopted.includes("<b>acme/skein</b>"), true);
 
-// Only a repo with no GitHub remote anywhere has nothing to offer — and it is the absent remote that
-// is worth saying, since that is what a box cannot push without.
+// Two different repos reach the no-slug branch, and each gets its own sentence in the owner's
+// approved words (SKEIN-812). Asserted whole: a sentence approved verbatim is the thing under test,
+// and a `.includes` of one phrase would pass a row that lost the other half.
+const rowSaid = row => (/<span class="desc" data-notoken>(.*?)<\/span>/.exec(row) || [])[1];
+// A legacy entry registered from a path, whose mirror has no GitHub origin: it has a next step.
 const local = T.repoTokenRow({ id: "scratch", source: "/Users/me/code/scratch", slug: "" });
-check("a repo with no remote is told so", local.includes("no GitHub remote"), true);
+check("a path-registered repo is told to add it again by its GitHub URL", rowSaid(local),
+  "this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field.");
 check("and gets no token field at all", local.includes("data-repotoken"), false);
+check("a ~ path is a path too", rowSaid(T.repoTokenRow({ id: "s", source: "~/code/s", slug: "" })), rowSaid(local));
+// A repo on another host has none, and the row says the limit is skein's, naming the host.
+const gitlab = T.repoTokenRow({ id: "thing", source: "git@gitlab.com:acme/thing.git", slug: "" });
+check("a repo on another host is told the limit is skein's", rowSaid(gitlab),
+  "gitlab.com is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein.");
+check("and gets no token field either", gitlab.includes("data-repotoken"), false);
+check("a self-hosted remote names its own host, without the port",
+  rowSaid(T.repoTokenRow({ id: "b", source: "https://git.example.com:8443/a/b.git", slug: "" })).split(" ")[0],
+  "git.example.com");
+// The host the add dialog warns about is the same parse.
+for (const [source, want] of [
+  ["git@gitlab.com:acme/thing.git", "gitlab.com"],
+  ["https://bitbucket.org/acme/thing", "bitbucket.org"],
+  ["ssh://git@git.example.com:22/a/b.git", "git.example.com"],
+  ["https://github.com/acme/thing", ""],
+  ["git@github.com:acme/thing.git", ""],
+  ["acme/thing", ""],
+  ["/Users/me/code/thing", ""],
+  ["", ""],
+]) check(`nonGitHubHost(${JSON.stringify(source)})`, T.nonGitHubHost(source), want);
 
 // --- the add dialog's follow-up work ---------------------------------------------------------------
 // Everything here keys on the repo's id, which the *server* picks — so it runs after the clone.

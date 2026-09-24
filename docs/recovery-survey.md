@@ -19,13 +19,14 @@ for nothing is worse than a button.
 
 **A path that cannot say what to do next is a defect in that path, not a constraint to design
 around.** Nothing below is marked "no next step possible" as an acceptable state; where a path has
-none, that is the finding.
+none, that is the finding. One row is the written-down exception, and says why: §7's Write token row
+for a repo on another host (SKEIN-812).
 
 ---
 
 ## Summary
 
-**243 rows**, drawn from **465 candidate sites** enumerated by the twelve commands in
+**244 rows**, drawn from **465 candidate sites** enumerated by the twelve commands in
 [§0](#0-how-this-was-enumerated). Rows are fewer than candidates because identical strings are
 collapsed into one row (the eighteen `invalid box name` returns are one row), and because the
 candidate sets deliberately over-collect — an enumeration that only catches what is already known
@@ -56,8 +57,9 @@ repo` said seven and is thirteen, and `usage: skein` said eight subcommands and 
 | **N** — names no next step | 130 | the finding. States a failure and stops |
 | **U** — says what to do, and it cannot be watched | 12 | the act is off this machine, or it is a person's deliberate "no" |
 
-One further row, `src/fleet/disk.rs:301`, carries no verdict: it is a well-written refusal that
-`src/health/disk.rs:162` swallows, so nobody ever reads it.
+Two further rows carry no verdict. The Write token row (§7, SKEIN-812) is the one documented
+exception to SKEIN-752, added after the 2026-09-09 measurement; and `src/fleet/disk.rs:301` is a
+well-written refusal that `src/health/disk.rs:162` swallows, so nobody ever reads it.
 
 **Requirement 1 is met almost everywhere and requirement 3 almost nowhere.** 100 rows say what to
 do; 42 of those name a condition skein could watch and does not, and only a handful of the
@@ -78,7 +80,7 @@ in [§0a](#0a-whether-anybody-can-get-there--the-reach-column).
 
 | reach | rows | |
 |---|---:|---|
-| **R** — a person can be shown this | 222 | with the concrete trigger in the cell |
+| **R** — a person can be shown this | 223 | with the concrete trigger in the cell |
 | **X** — they cannot | 17 | with the file:line that forecloses it |
 | **?** — not established | 4 | with what would settle it |
 
@@ -86,7 +88,7 @@ Against the verdicts above:
 
 | | C | W | N | U | — |
 |---|---:|---:|---:|---:|---:|
-| **R** | 58 | 39 | 114 | 11 | 0 |
+| **R** | 58 | 39 | 114 | 11 | 1 |
 | **X** | 0 | 3 | 12 | 1 | 1 |
 | **?** | 0 | 0 | 4 | 0 | 0 |
 
@@ -762,6 +764,19 @@ after `REV_STALE_TRIES`. Everything below either copies those or does not.
 | `src/web/v2.html:325`, `src/web/v2.html:330` | the change could not be read | **R** — at `src/web/v2.html:330` — click a stale PR row for a repo removed since the queue loaded: `api_pr_shape` answers 404 as **plain text**, so `answer.json()` throws. The sibling at `src/web/v2.html:325` is **X**: `shape_response`'s JSON error arms always set a non-empty `error`, and the plain-text arms throw before that check | v2 board → click a row | **n** — no retry control in the pane at all | yes | N |
 | `src/web/v2.html:457`, `src/web/v2.html:515` | it could not be added · it was not accepted ({status}) | **R** — submit a repo source or branch that passes the client's empty-check and fails server-side | v2 add-a-repo, make-a-box | n — the button re-enables, unremarked | no — a keystroke | N |
 | `src/web/v2.html:382` | — disconnected — | **R** — the v2 terminal websocket closing, for any reason | v2 terminal socket closing | **n** — written into the buffer, then nothing. No overlay, no retry. It does at least not cover the last line | yes — `src/web/v2.html:257` already auto-reconnects the *stream* every 4s; the terminal does not | N |
+| `src/web/app/settings.js:495`, `src/web/app/settings.js:493` | Write token — {host} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein. · Write token — this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field. | **R** — any repo whose `slug` comes back empty: registered from a GitLab, Bitbucket or self-hosted URL (the first sentence), or a legacy entry registered from a path whose mirror has no GitHub `origin` (the second) | Settings → Repos → the repo's card, its Write token row | the path arm: **y** — re-add by URL; `repos::add_repo` replaces the entry with the same id in place and touches no box. The host arm: **no, and correctly** — see below the table | the path arm: nothing to watch, the person's own add re-renders the card. The host arm: none — nothing about the repo can change that would make a GitHub push credential mean something for it | — |
+
+**The Write token row is the one place in this survey where a row legitimately stops at naming the
+problem** (SKEIN-812, the owner's decision of 2026-09-23), and it carries no verdict because the
+three requirements presuppose a next step that this case does not have. The token exists to let a
+box push to GitHub; a repo on another host is not there, and nothing its owner could do to the repo
+changes that — the missing thing is non-GitHub push credentials in skein, which is a statement about
+skein's support rather than a step. So the sentence says whose limit it is and that the repo is
+fine, and stops. The add dialog says the same before the clone (`src/web/app/settings.js:1234`), so
+nobody meets it for the first time on the card. **This is an exception, written down so it stays
+one**: the row used to carry advice to give a host clone an `origin` (removed by SKEIN-588), which
+was false advice added to fill the gap, and a rule with an undocumented exception is how the next
+person re-adds it. The path arm is not the exception — it has a next step and says it.
 
 ## 8. The board's rows
 

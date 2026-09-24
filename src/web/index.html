@@ -9995,6 +9995,17 @@ function repoSlug(source) {
   }
   return slugFromPath(path);
 }
+// The host a source names, when it names one that is not GitHub — "" for GitHub, for a path, and
+// for anything `repoSlug` can read a GitHub slug out of (SKEIN-812). The host half of `repoSlug`'s
+// own parse, so the two cannot disagree about where the host ends.
+function nonGitHubHost(source) {
+  const url = (source || "").trim();
+  if (!url || /^[/.~]/.test(url) || repoSlug(url)) return "";
+  const afterScheme = url.includes("://") ? url.slice(url.indexOf("://") + 3) : url;
+  const at = afterScheme.lastIndexOf("@");
+  const host = (at >= 0 ? afterScheme.slice(at + 1) : afterScheme).split(/[:/]/)[0];
+  return host && host.toLowerCase() !== "github.com" ? host : "";
+}
 // A repo's write token, on the repo's own card — because "which token does *this* repo push with"
 // is a question about the repo, and answering it three panes away is how it went unfound.
 function repoTokenRow(r) {
@@ -10003,8 +10014,21 @@ function repoTokenRow(r) {
   // `source` here instead was wrong for every such repo: a path says nothing about its remote.
   const slug = r.slug || "";
   if (!slug) {
+    // **Two different repos reach this row, and each gets its own sentence** (SKEIN-812, the
+    // owner's wording of 2026-09-23). A legacy entry registered from a path has a next step, and it
+    // is re-adding by URL: `repos::add_repo` replaces the entry with the same id in place and leaves
+    // the mirror and every box alone. A repo on another host has none — the write token exists to
+    // let a box push to GitHub, and this repo is not there. That second sentence is the one place a
+    // row legitimately stops at naming the problem; `docs/recovery-survey.md` §7 records why.
+    const src = (r.source || "").trim();
+    const host = nonGitHubHost(src);
+    const why = /^[/.~]/.test(src)
+      ? "this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field."
+      : host
+        ? `${esc(host)} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein.`
+        : "no GitHub remote — nothing to scope, and nowhere for a box to push";
     return `<label class="set-field"><span class="set-title">Write token</span>`
-      + `<span class="desc">no GitHub remote — nothing to scope, and nowhere for a box to push</span></label>`;
+      + `<span class="desc" data-notoken>${why}</span></label>`;
   }
   const c = credFor(slug);
   const state = c && !c.problem && c.has_token
@@ -10682,7 +10706,7 @@ function arSetMsg(text, kind) {        // kind: "" | "err" | "warn" | "ok"
 }
 function openAddRepo() {
   const src = document.getElementById("ar-src");
-  src.value = ""; arSetMsg("");
+  src.value = ""; arSetMsg(""); arWarnedHost = "";
   document.getElementById("ar-token").value = "";
   document.getElementById("ar-plane").value = "";
   // Off, matching `repos::add`. A new repo is a repo nobody has said they review yet, and the
@@ -10728,10 +10752,21 @@ function arUpdateDerived() {
     ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
     : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with. On the App path you need none.`;
 }
+// The source the non-GitHub warning was last shown for: pressing Add again on the same source is
+// the "anyway" (SKEIN-812). Cleared when the dialog opens, so a new visit asks again.
+let arWarnedHost = "";
 function submitAddRepo() {
   const src = document.getElementById("ar-src").value.trim();
   if (!src) { arSetMsg("Paste the repo's git URL.", "err"); return; }
   if (DEMO) { arSetMsg("Adding repos is disabled in demo.", "warn"); return; }
+  // Said BEFORE the clone rather than after it: the clone is the expensive part, and a repo that
+  // cannot push and has no queue is a thing somebody may not want once they know.
+  const host = nonGitHubHost(src);
+  if (host && arWarnedHost !== src) {
+    arWarnedHost = src;
+    arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, "warn");
+    return;
+  }
   const agent = document.getElementById("ar-agent").value;
   const go = document.getElementById("ar-go");
   // `add_repo` clones inline with a 300s bound, so this can sit here for minutes on a large repo.
