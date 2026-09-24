@@ -1061,7 +1061,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:311"]
+["src/fleet/disk.rs:313"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
 cited_by = ["docs/recovery-survey.md"]
 
