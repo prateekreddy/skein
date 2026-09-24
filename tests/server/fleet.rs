@@ -30,7 +30,7 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
     let home = token_home("fleet-root");
     let root = fleet_root_in(&home);
     let (child, _addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", &root)
             // The warden too, where nothing listens — see the first spawn above.
@@ -57,7 +57,7 @@ fn a_server_heals_the_fleet_root_it_was_given_and_refuses_when_given_none() {
     // say `cannot bind`, and the refusal below says something else entirely. `free_port` would give
     // a number nobody holds, where reaching the bind and refusing look identical.
     let held = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
-    let out = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+    let out = skein_server()
         .env(
             "SKEIN_ADDR",
             held.local_addr().expect("it knows its address").to_string(),
@@ -132,7 +132,7 @@ fn the_doorway_supervisor_stops_when_the_teardown_runs_and_not_when_the_fixture_
     let home = token_home("doorway");
     let root = fleet_root_in(&home);
     let (child, _addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", &root)
             // The warden too, where nothing listens — see the first spawn above.
@@ -422,7 +422,7 @@ fn an_uploaded_body_is_on_the_crossings_stdin_and_not_in_its_cmdline() {
     // the crossing, so this is how the capture hook above gets in front of it — and, unlike a PATH
     // entry, it is not something `Place::enter`'s pin can take away.
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
             .env("SKEIN_WARDEN", "127.0.0.1:1")

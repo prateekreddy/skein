@@ -11,7 +11,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-use common::{fake_github, have, skip, Scratch};
+use common::{fake_github, have, skein_server, skein_server_behind, skip, Scratch};
 use skein::doorway::{FIRST, INHERITED_ONLY};
 use std::ffi::OsStr;
 use std::io::{Read, Write};

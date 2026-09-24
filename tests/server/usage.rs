@@ -97,7 +97,7 @@ fn usage_home(tag: &str) -> Scratch {
 /// Spawn a server over `home` with nothing of the real fleet or registry reachable from it.
 fn usage_server(home: &Scratch) -> (Child, String) {
     serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(home))
             // Where nothing listens, as every other spawn in this file does: a server that goes

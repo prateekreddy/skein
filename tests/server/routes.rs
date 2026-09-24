@@ -30,7 +30,7 @@ fn server_serves_ui_vendor_and_guards_routes() {
     // **No `$SKEIN_ADDR`, and no port chosen in advance.** `serving` hands the server a socket it
     // already holds — see [`handed`] for why every spawn in this file is written this way now.
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_REGISTRY", &reg)
             .env("SKEIN_HOME", home.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
@@ -307,7 +307,7 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
     // the server is serving. Waiting for an actual response means the ~2s that follows is the
     // starvation under test rather than the tail of a start-up.
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
             .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
             .env("SKEIN_HOME", home.path())
@@ -354,7 +354,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
 
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", dir.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
             // The warden too, where nothing listens — see the first spawn above.
@@ -451,7 +451,7 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     .unwrap();
 
     let (child, addr) = serving(
-        Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        skein_server()
             .env("SKEIN_HOME", dir.path())
             .env("SKEIN_FLEET_ROOT", fleet_root_in(&dir))
             // The warden too, where nothing listens — see the first spawn above.

@@ -175,7 +175,10 @@ fn run(suite: &str) -> Option<(bool, String)> {
         // plus burst of load right as the suites' timeouts start ticking is what made review.mjs
         // fail its ownership check about one workspace run in four, never standalone (SKEIN-119).
         // Run by hand, `node tests/ui/<suite>.mjs` has no such variable and builds for itself.
-        .env("SKEIN_SERVER_BIN", env!("CARGO_BIN_EXE_skein-server"))
+        .env(
+            "SKEIN_SERVER_BIN",
+            common::skein_server_for_the_browser_suites(),
+        )
         .current_dir(repo())
         .output()
         .ok()?;
