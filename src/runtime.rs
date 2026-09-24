@@ -249,7 +249,7 @@ pub(crate) fn plugin_dir() -> String {
 /// [`plugin_dir`] under a fleet root the caller names, for a caller that must not resolve the
 /// live one: the isolation tests install the plugin into a fixture fleet through this.
 pub fn plugin_dir_under(fleet_root: &str) -> String {
-    format!("{fleet_root}/.skein/plugin")
+    format!("{}/.skein/plugin", fleet_root)
 }
 
 /// The plugin's narrower variant, for a fleet whose switch is off: skein's manifest and its
@@ -262,7 +262,10 @@ pub(crate) fn turn_state_plugin_dir() -> String {
 
 /// [`turn_state_plugin_dir`] under a fleet root the caller names.
 pub fn turn_state_plugin_dir_under(fleet_root: &str) -> String {
-    format!("{fleet_root}/.skein/{TURN_STATE_PLUGIN}")
+    // Spelt out rather than built from [`TURN_STATE_PLUGIN`]: `fleet::disk` reads the names
+    // under `.skein` from `{}/.skein/<name>` in the source. Codex's hooks use the constant, and
+    // `every_turn_state_hook_runs_a_script_the_read_only_plugin_installs` fails if the two part.
+    format!("{}/.skein/plugin-turn-state", fleet_root)
 }
 
 /// The name of [`turn_state_plugin_dir`] under `.skein`. Codex's hooks spell it too
