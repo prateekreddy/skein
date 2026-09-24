@@ -263,7 +263,11 @@ fi
 #      silently skipped the link and the box ran hookless forever. Now: link the store's
 #      skein/ into the repo's .claude (probe scripts resolve the true store through that
 #      link) and MERGE the store's hook wiring into the repo's own settings.json (additive,
-#      dedup by whole entry, repo's own hooks preserved — jq, which the apt step above ensures);
+#      dedup by whole entry, repo's own hooks preserved — jq, which the apt step above ensures).
+#      The same pass RETIRES every skein hook a past merge copied there: skein's turn-state hooks
+#      load from its read-only plugin now (SKEIN-1062), and a copy left here would fire each of them
+#      twice. "skein's" is the rule `takeover::sanitized_user_hooks` uses: a command that runs
+#      something under `/.claude/skein/bin/`, skein's own namespace in the store;
 #   3. .claude is already the store symlink → nothing to do.
 link_state="failed"
 if [ ! -d "$store" ]; then
@@ -282,7 +286,15 @@ else
   if [ -L "$rc/skein" ] && command -v jq >/dev/null 2>&1; then
     [ -f "$rc/settings.json" ] || echo '{}' > "$rc/settings.json"
     merged="$(jq -s '
-      .[0] as $c | .[1] as $s | ($c.hooks // {}) as $ch |
+      def unskein: with_entries(.value |= (if type == "array" then
+          map(if (.hooks | type) == "array"
+            then .hooks |= map(select((.command // "" | tostring | contains("/.claude/skein/bin/")) | not))
+            else . end)
+          | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
+        else . end))
+        | with_entries(select((.value | type) != "array" or (.value | length) > 0));
+      (.[0] | if (.hooks | type) == "object" then .hooks |= unskein else . end) as $c
+      | .[1] as $s | ($c.hooks // {}) as $ch |
       $c
       | .hooks = (($s.hooks // {}) | to_entries
           | reduce .[] as $e ($ch;

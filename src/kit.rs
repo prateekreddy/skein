@@ -361,7 +361,8 @@ mod tests {
         assert!(store.join("skein/runtimes.tsv").is_file());
         // layout is documented for the user to (optionally) fill
         assert!(store.join("README.md").is_file());
-        // settings wire the SessionStart bootstrap + a default statusLine
+        // settings carry a default statusLine and no skein hooks: those load from skein's plugin
+        // (SKEIN-1062), and the store's settings.json is writable by every box of the repo
         let s: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap())
                 .unwrap();
@@ -370,10 +371,7 @@ mod tests {
             .unwrap()
             .contains("statusline-command.sh"));
         assert_eq!(s["statusLine"]["refreshIntervalMs"], 30_000);
-        assert!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("sandbox-bootstrap.sh"));
+        assert!(s.get("hooks").is_none(), "the store was given hooks: {s}");
         let kit = ensure_kit().unwrap();
         assert!(kit.join("spec.yaml").is_file());
         let kit_text = fs::read_to_string(kit.join("spec.yaml")).unwrap();

@@ -205,20 +205,21 @@ pub(crate) fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
 /// `{plugin}` is resolved here too, to [`plugin_dir`] shell-quoted, for the same reason: it is a
 /// path under the fleet root, which the host knows and a fresh crossing into the box need not.
 ///
-/// **And `--plugin-dir {plugin}` is dropped here when the fleet's switch is off** ([`box_plugin_on`]).
+/// **And `{plugin}` names the narrower of the plugin's two variants when the fleet's switch is
+/// off** ([`box_plugin_on`]): the one with the turn-state hooks and nothing else.
 pub(crate) fn for_box(command: &str, name: &str) -> String {
-    // The Settings switch's read site (SKEIN-1058). Today "off" drops the whole flag, because the
-    // plugin holds only the resource holds and the `skein_*` tools. **The owner's rule for when
-    // that stops being true:** once SKEIN-1062 moves the turn-state hooks into the plugin, off must
-    // still load those hooks and drop only the holds and the tools — so this line must then stop
-    // removing the flag and pass something narrower, not keep removing it.
-    let command = match box_plugin_on() {
-        true => command.to_string(),
-        false => command.replace(" --plugin-dir {plugin}", ""),
+    // The Settings switch's read site (SKEIN-1058). The plugin carries skein's turn-state hooks as
+    // well as the resource holds and the `skein_*` tools (SKEIN-1062), and **the owner's rule** is
+    // that off drops only the holds and the tools: turn state keeps loading. So off does not remove
+    // the flag; it points it at [`turn_state_plugin_dir`], which carries the turn-state hooks alone.
+    // Exactly one `--plugin-dir` either way, and both variants are the one plugin named `skein`.
+    let plugin = match box_plugin_on() {
+        true => plugin_dir(),
+        false => turn_state_plugin_dir(),
     };
     command
         .replace("{box}", name)
-        .replace("{plugin}", &sh_quote(&plugin_dir()))
+        .replace("{plugin}", &sh_quote(&plugin))
 }
 
 /// Whether the fleet loads skein's plugin into agents' sessions: `$SKEIN_BOX_PLUGIN` when it is set
@@ -245,8 +246,17 @@ pub(crate) fn plugin_dir() -> String {
     format!("{}/.skein/plugin", fleet_root())
 }
 
+/// The plugin's narrower variant, for a fleet whose switch is off: skein's manifest and its
+/// turn-state hooks, with no resource holds, monitor or tools (SKEIN-1062). Beside [`plugin_dir`]
+/// under the same read-only `.skein`, rather than inside it, so that loading one variant can never
+/// load the other with it.
+pub(crate) fn turn_state_plugin_dir() -> String {
+    format!("{}/.skein/plugin-turn-state", fleet_root())
+}
+
 /// The plugin's files, relative to [`plugin_dir`], as the build carries them. `src/plugin/` is the
-/// source; `fleet::install_launcher` writes these beside the launcher.
+/// source; `fleet::install_launcher` writes them beside the launcher through
+/// `probes::plugin_install`, which adds skein's turn-state hooks to `hooks/hooks.json`.
 pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     (
         ".claude-plugin/plugin.json",
@@ -321,16 +331,19 @@ mod tests {
         );
     }
 
-    /// **The fleet's switch decides whether a session's argv carries the plugin**, for all three
-    /// starts, and `$SKEIN_BOX_PLUGIN` overrides the stored value either way (SKEIN-1058).
+    /// **The fleet's switch decides which variant of the plugin a session's argv names**, for all
+    /// three starts, and `$SKEIN_BOX_PLUGIN` overrides the stored value either way (SKEIN-1058).
+    /// On names the full plugin; off names the turn-state one (SKEIN-1062). Every `claude` carries
+    /// exactly one `--plugin-dir` either way.
     ///
     /// Written through the real `config.json` in a pinned `$SKEIN_HOME`, the file the Settings
     /// route writes. What would make it fail: `for_box` not reading the value (every "off" case
-    /// still carries the flag); the value's default flipped to off (the file with no key would
-    /// lose it); the env override not consulted, or consulted the wrong way round; or off leaving
-    /// half a flag behind (`--plugin-dir` with no path, which `claude` would reject).
+    /// still names the full plugin); the value's default flipped to off (the file with no key would
+    /// lose it); the env override not consulted, or consulted the wrong way round; off dropping
+    /// the flag, as it did before the turn-state hooks moved into the plugin; or half a flag left
+    /// behind (`--plugin-dir` with no path, which `claude` would reject).
     #[test]
-    fn the_fleets_switch_decides_whether_the_argv_carries_the_plugin() {
+    fn the_fleets_switch_decides_which_plugin_the_argv_names() {
         let _lock = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
@@ -346,15 +359,19 @@ mod tests {
         let config = |body: &str| {
             std::fs::write(home.join("config.json"), body).unwrap();
         };
+        // (full, turn-state-only) flags in one resolved command.
         let carries = |command: &str| {
             let resolved = for_box(command, "web-main");
             let flags = resolved.matches("--plugin-dir").count();
-            let dirs = resolved
+            let full = resolved
                 .matches("--plugin-dir '/fleet-root-example/.skein/plugin'")
                 .count();
-            assert_eq!(flags, dirs, "half a flag left behind: {resolved}");
+            let narrow = resolved
+                .matches("--plugin-dir '/fleet-root-example/.skein/plugin-turn-state'")
+                .count();
+            assert_eq!(flags, full + narrow, "half a flag left behind: {resolved}");
             assert!(!resolved.contains("{plugin}"), "{resolved}");
-            flags
+            (full, narrow)
         };
         for (body, env_value, on) in [
             ("{}", None, true),
@@ -372,29 +389,33 @@ mod tests {
                 let halves = command.split("||").count();
                 assert_eq!(
                     carries(command),
-                    if on { halves } else { 0 },
+                    if on { (halves, 0) } else { (0, halves) },
                     "config {body}, $SKEIN_BOX_PLUGIN {env_value:?}: {}",
                     for_box(command, "web-main")
                 );
             }
         }
-        // Off leaves the rest of the command as it was.
+        // Off changes the directory and nothing else.
         config(r#"{"box_plugin": false}"#);
         env.unset("SKEIN_BOX_PLUGIN");
         assert_eq!(
             for_box(claude.interactive_resume, "web-main"),
-            "claude --name 'web-main' --continue || claude --name 'web-main'"
+            "claude --name 'web-main' --plugin-dir '/fleet-root-example/.skein/plugin-turn-state' \
+             --continue || claude --name 'web-main' --plugin-dir \
+             '/fleet-root-example/.skein/plugin-turn-state'"
         );
     }
 
-    /// **The plugin the build carries is the one its argv names**: a manifest, the three hooks
-    /// the design gives it and no others, a monitor, and the in-box tools' MCP server.
+    /// **The plugin the build carries is the one its argv names**: a manifest, the three resource
+    /// hooks the design gives it and no others, a monitor, and the in-box tools' MCP server. These
+    /// are its own files in `src/plugin/`; the turn-state hooks join them at install
+    /// (`probes::plugin_install`, tested by `turn_state_hooks_load_whichever_way_the_switch_is_set`).
     ///
     /// What would make it fail: a plugin file missing from `PLUGIN_FILES` (the install would put a
-    /// plugin with no hooks under `.skein`), a hook event added or dropped, or the `PreToolUse`
-    /// matcher losing `Bash`. It also keeps the plugin away from `Stop`, which the store's own
-    /// `mailbox.sh stop-check` owns and which this plugin leaves as it is. And it fails if
-    /// `.mcp.json` names a server other than the shipped `bin/skein-mcp`.
+    /// plugin with no hooks under `.skein`), a resource hook event added or dropped, or the
+    /// `PreToolUse` matcher losing `Bash`. It also keeps the resource hooks away from `Stop`, where
+    /// the turn-state set's `mailbox.sh stop-check` runs. And it fails if `.mcp.json` names a
+    /// server other than the shipped `bin/skein-mcp`.
     #[test]
     fn the_plugin_carries_its_three_hooks_and_its_monitor() {
         let file = |rel: &str| {

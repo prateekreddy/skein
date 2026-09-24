@@ -22,8 +22,8 @@
 #   IMPORTANT: the Notification hook's stdin JSON carries no field that names which of the above
 #   fired (confirmed against Claude Code's hooks docs — there is no `notification_type` on the
 #   payload). Claude Code disambiguates *before* invoking the hook, via each hook entry's own
-#   `matcher` in settings.json — so the modes above are selected by which matcher routed here, wired
-#   as separate Notification entries in `settings_with_probe` (lib.rs), never by reading the payload.
+#   `matcher` in skein's plugin hooks — so the modes above are selected by which matcher routed here, wired
+#   as separate Notification entries in `turn_state_entries` (probes.rs), never by reading the payload.
 #   error        (StopFailure)      the turn died on an API error; .error_type → the detail (rate_limit…)
 #   compacting   (PreCompact)       context compaction running — busy, not stuck; also writes down
 #                                    where the box was, for `compacted` to restore
