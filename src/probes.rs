@@ -2718,7 +2718,7 @@ mod tests {
     #[test]
     fn a_repo_shipped_settings_file_loses_skeins_copied_hooks() {
         if Command::new("jq").arg("--version").output().is_err() {
-            eprintln!("no jq here, and the kit's merge is jq");
+            crate::testutil::skip("no jq here, and the kit's merge is jq");
             return;
         }
         let script = crate::kit::KIT_STARTUP_SH;
