@@ -1837,6 +1837,12 @@
             <div class="set-head">Set it up once<span class="sub">a GitHub App is the whole of it — every token a box gets is minted from this one key</span></div>
             <div class="set-desc">One credential, and skein derives the rest: a write token scoped to a box's own repository, and a read-only one covering everything you installed the App on — both minted per box, valid an hour, renewed while the box runs. Nothing below is needed on this path.</div>
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
+            <!-- Whose identity a pull-request review acts with (SKEIN-516). Words approved by the owner on
+                 SKEIN-516, verbatim; "app" hands a review no token at all until an App is configured. -->
+            <label class="set-field narrow"><span class="set-title">Reviews act as</span><select id="set-review-identity" onchange="renderReviewIdentityNote()"><option value="me">you (your GitHub token)</option><option value="app">the skein GitHub App (team installs)</option></select></label>
+            <!-- Owner-approved on SKEIN-516, verbatim. Shown by `renderReviewIdentityNote` from the server's
+                 `app_ready`, which is the same `gitgate::app_credentials()` a review's credential is chosen by. -->
+            <p class="set-note warn" id="set-review-identity-note" hidden>Reviews act as the skein App, but no App is set up — nothing will be posted, except in repositories where you stored a token.</p>
             <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
             <div id="gq-probe-rows"></div>
 
@@ -6234,6 +6240,14 @@ function revDetail(pr) {
     ? `<div class="revstale outsidebox"><b>${esc(s.read_outside_box)}</b>
         <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div>`
     : "";
+  // **This review would have posted and could not** (SKEIN-516): it acts as the skein App, and
+  // there was no App token to act with. The server composes the sentence
+  // (`review::Summary::not_posted`, from `review::asking::Refused`) and this draws it verbatim, in
+  // the same notice as the two above — the brief below is still the reading, and this is what did
+  // not happen with it. No button: the way out is in Settings → GitHub & keys, not in reading again.
+  const notPosted = s.not_posted
+    ? `<div class="revstale notposted"><b>${esc(s.not_posted)}</b></div>`
+    : "";
   // Three ways, exactly as `review::Ownership` answers (SKEIN-117): attributed, could-not-look,
   // or the repo has no CODEOWNERS. Silence is the right rendering for the third and the WRONG one
   // for the second — an empty `yours` used to draw as nothing either way, so a brief written
@@ -6257,7 +6271,7 @@ function revDetail(pr) {
   const detail = s.detail
     ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
     : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
-  return stale + blind + outside + owned + signals + detail;
+  return stale + blind + outside + notPosted + owned + signals + detail;
 }
 
 // What governs this pull request, what it would do next, and how to change either.
@@ -9427,7 +9441,20 @@ function gitCredRow(c) {
 // The pane's own status line. No single control can give this answer: the scope switch can be on
 // while nothing is scoped, which is precisely the state worth naming — and the one a switch drawn
 // "on" would otherwise misreport.
+// **"app" chosen with no App to act as** (SKEIN-516). The answer is the server's: `app_ready` in
+// `/api/fleet/git-grants` is `gitgate::app_credentials().is_ok()`, the very check
+// `review::asking::acting_credential` hands `choose_acting` — so this cannot say "no App" about a
+// fleet whose reviews would in fact act as one. Hidden until that payload has answered at all
+// (`app_ready` absent), rather than flashing the warning while it is in flight.
+function renderReviewIdentityNote() {
+  const note = document.getElementById("set-review-identity-note");
+  const chosen = document.getElementById("set-review-identity");
+  if (!note || !chosen) return;
+  note.hidden = !(chosen.value === "app" && gitLast.app_ready === false);
+}
+
 function renderGitState(d) {
+  renderReviewIdentityNote();
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
@@ -9980,6 +10007,8 @@ function openSettings(pane = "repos") {
     document.getElementById("set-onedisk").checked = !!settings.fleet_one_disk;
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
+    document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
+    renderReviewIdentityNote();
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
@@ -10432,6 +10461,7 @@ function settingsPayload() {
     fleet_one_disk: document.getElementById("set-onedisk").checked,
     scope_git_to_repo: document.getElementById("set-gitscope").checked,
     github_app_id: document.getElementById("set-ghappid").value.trim(),
+    review_identity: document.getElementById("set-review-identity").value,
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.

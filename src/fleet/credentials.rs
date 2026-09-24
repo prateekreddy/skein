@@ -120,6 +120,16 @@ pub(super) fn github_export(
     {
         return nothing;
     }
+    // **Reported the moment it is in the box, and only then** (SKEIN-516): a write that failed
+    // handed nothing. Only inside [`as_review_of`], which a review enters with the owner's own
+    // token and not with the App's.
+    if let Some(subject) = review_of() {
+        crate::warden_client::reported(
+            "review-credential",
+            "handed the owner's GitHub token to a review",
+            &format!("{}: {subject}", at.name),
+        );
+    }
     GithubCredential {
         export: format!("export GH_TOKEN=\"$(cat {file})\" GITHUB_TOKEN=\"$(cat {file})\"\n"),
         path: Some(file),
@@ -209,5 +219,51 @@ mod tests {
         // Twice, because the unlink runs whatever the call answered and a second stop must not be
         // an error — a fleet where the first `rm` already ran is the ordinary case, not a fault.
         run(&forget_credential_script(&file), "");
+    }
+
+    /// **The owner's token going into a box is in the audit log, with the box and the pull request**
+    /// (SKEIN-516) — and a handover outside a review of theirs, or one that wrote nothing, is not.
+    ///
+    /// The concrete change that fails it: delete the `reported` call in [`github_export`], and the
+    /// sink hears nothing. A report made outside the `review_of` check fails the second half.
+    #[test]
+    fn handing_the_owners_token_to_a_review_is_reported_with_the_box_and_the_pull_request() {
+        let _env = crate::testutil::env_lock();
+        let _crossing = crate::place::seam::doing_nothing();
+        let (_warden, _warden_home, heard) = crate::testutil::audit_sink();
+        let place = Place {
+            name: "example".into(),
+            sandbox: "example-sandbox".into(),
+            at: crate::place::Where::SandboxItself,
+        };
+        let token = crate::secret::Secret::new("skein-test-review-token");
+        let wait = Duration::from_secs(3);
+
+        let handed = super::super::as_review_of("example-org/thing#7", || {
+            github_export(&place, Some(&token))
+        });
+        assert!(handed.path.is_some(), "the write was meant to succeed");
+        let entries = crate::testutil::audit_entries(&heard, wait);
+        assert_eq!(entries.len(), 1, "one handover, one entry: {entries:?}");
+        assert_eq!(entries[0]["operation"], "review-credential");
+        assert_eq!(
+            entries[0]["what"],
+            "handed the owner's GitHub token to a review"
+        );
+        assert_eq!(entries[0]["detail"], "example: example-org/thing#7");
+        assert!(
+            !entries[0].to_string().contains("skein-test-review-token"),
+            "the token itself reached the audit log"
+        );
+
+        // Outside a review of the owner's (an App's token, or any other caller), and with no token
+        // at all inside one: nothing of the owner's was handed, so nothing is said.
+        github_export(&place, Some(&token));
+        super::super::as_review_of("example-org/thing#7", || github_export(&place, None));
+        let quiet = crate::testutil::audit_entries(&heard, wait);
+        assert!(
+            quiet.is_empty(),
+            "reported a handover that was not one: {quiet:?}"
+        );
     }
 }

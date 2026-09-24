@@ -320,10 +320,10 @@ mod tests {
     /// that used to sit in the `?t=` exchange is the reason [`matches`] exists at all.
     #[test]
     fn comparison_rejects_near_misses_and_length_games() {
-        let want = crate::secret::Secret::new("abc");
-        assert!(want.same("abc"));
-        assert!(!want.same("abd"));
-        assert!(!want.same("abcd"));
+        let want = crate::secret::Secret::new("skein-test-abc");
+        assert!(want.same("skein-test-abc"));
+        assert!(!want.same("skein-test-abd"));
+        assert!(!want.same("skein-test-abcd"));
         assert!(!crate::secret::Secret::new("").same("a"));
         assert!(crate::secret::Secret::new("").same(""));
     }

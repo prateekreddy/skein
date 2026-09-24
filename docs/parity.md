@@ -31,8 +31,8 @@ its check in `tests/parity_numbers.rs`.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server/main.rs               # 103  (NOT '.route("' — that gives 90, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 167 unique, 170 occurrences
-grep -c 'function ' src/web/index.html                          # 457
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
+grep -c 'function ' src/web/index.html                          # 458
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -908,7 +908,7 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
   ```sh
   curl -s -o /dev/null -w '%{http_code}\n' https://api.github.com/user                # 200
   curl -s -o /dev/null -w '%{http_code}\n' \
-    -H 'Authorization: Bearer not-a-real-token' https://api.github.com/user            # 200
+    -H 'Authorization: Bearer skein-test-not-a-real-token' https://api.github.com/user            # 200
   curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' https://api.github.com/user  # 401
   ```
 

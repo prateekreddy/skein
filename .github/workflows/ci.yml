@@ -200,6 +200,22 @@ jobs:
       # It is also the gate whose failure is unfixable after the fact — a push cannot be unseen —
       # which is precisely the kind that must not depend on memory (SKEIN-492).
       - run: tools/gates.sh run residue-check
+      # The four secrets rules of SKEIN-516: one writer for a 0600 credential, nothing on argv,
+      # every header built from a `Secret`, a credential file under `private/`, and every test
+      # credential visibly not one. The allow-lists, with their reasons, are in the tool.
+      - run: tools/gates.sh run secret-check
+      # And the scanner a stranger would run on this repository before trusting it. Not a gate in
+      # `tools/gates.sh`, because a contributor's machine has no gitleaks, and a gate that cannot
+      # run everywhere fails for a reason that is not the change. The release is pinned by its
+      # sha256 rather than by a third-party action, so what runs here is exactly the binary that
+      # was checked. `.gitleaks.toml` is the allow-list, and it allows only the `skein-test-`
+      # prefix and code that is not this repository's.
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.

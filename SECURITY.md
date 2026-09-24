@@ -107,6 +107,14 @@ Anything that lets a box, a page, or a repository skein reads cross a line skein
 * **Cross-site scripting in the cockpit, or anything that exfiltrates its cookie.** The cookie is
   `HttpOnly` and `SameSite=Strict`, and the page carries a CSP for the exfiltration half; a way
   around any of the three is in scope.
+
+  **A known risk, kept on purpose (SKEIN-516):** the cockpit link skein prints ends in `?t=`
+  followed by the long-lived `api-token` itself, and the cookie the page swaps it for holds that
+  same token for a year (`src/bin/skein-server/door.rs:131-171`). So anyone who sees that link —
+  over a shoulder, in a screenshot, in shell history or a pasted log — can open the cockpit until
+  the token is changed, and changing it means minting a new `api-token`, which signs out every
+  browser that holds the old one. Treat the link as you would the token. A way to use it without
+  having seen it is still in scope.
 * **Reaching the cockpit from off-origin.** It binds loopback and guards the `Origin` header;
   bypassing that guard is in scope.
 * **Content in a repository skein reads turning into execution.** skein reads pull requests, diffs

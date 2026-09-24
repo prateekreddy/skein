@@ -140,6 +140,7 @@ fn audit_now(pr: &Subject) -> ReadStep {
     }
     let said = match crate::review::audit_owed(
         reading.repo,
+        pr.slug,
         pr.number,
         pr.head_sha,
         &reading.pr.base_ref,
@@ -1854,7 +1855,7 @@ mod tests {
         let mut env = a_fleet_where_workflows_run(home.as_ref() as &std::path::Path);
         let (base, heard) = github(200);
         env.set("SKEIN_GITHUB_API", &base);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
 
         let repo = crate::repos::Repo {
             auto_review_ceiling: crate::repos::Ceiling::Approve,

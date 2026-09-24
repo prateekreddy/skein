@@ -221,7 +221,7 @@ impl Fleet {
         .unwrap();
         fs::write(
             f.fleet_root.join(".skein/private/review-github.token"),
-            "ghp_review\n",
+            "skein-test-review\n",
         )
         .unwrap();
         // The three request queues, one drop-box per box. A box may write its OWN and no other's,
@@ -259,7 +259,7 @@ impl Fleet {
         // The artifact: a token the HOST minted and placed, which this box reads to push.
         fs::write(
             f.state_parent.join("web-main/git-tokens/owner%2Frepo"),
-            "ghs_scoped\n",
+            "skein-test-scoped\n",
         )
         .unwrap();
         fs::write(f.state_parent.join("other-main/conversation.jsonl"), "{}\n").unwrap();
@@ -273,7 +273,7 @@ impl Fleet {
                 "{\"token\":\"live\"}\n",
             )
             .unwrap();
-            fs::write(volume.join("github-pats/acme"), "ghp_live\n").unwrap();
+            fs::write(volume.join("github-pats/acme"), "skein-test-live-pat\n").unwrap();
             fs::write(volume.join("api-token"), "t".repeat(64)).unwrap();
             // The warden's shared secret. `warden/secret.rs` says the bind may only widen because
             // "a file in a place no box's mount view reaches is a thing skein can have and a box

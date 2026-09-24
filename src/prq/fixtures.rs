@@ -142,7 +142,7 @@ pub(super) fn wired(base: &str) -> impl Drop {
     let guard = crate::testutil::env_lock();
     let home = crate::testutil::tempdir();
     std::env::set_var("SKEIN_HOME", &home);
-    std::env::set_var("GH_TOKEN", "gho_test");
+    std::env::set_var("GH_TOKEN", "skein-test-gho");
     std::env::remove_var("GITHUB_TOKEN");
     std::env::set_var("SKEIN_GITHUB_API", base);
     forget_host_token();

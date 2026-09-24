@@ -1243,7 +1243,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        fs::write(dir.join("plane-token"), "plane_api_secret\n").unwrap();
+        fs::write(dir.join("plane-token"), "skein-test-plane-secret\n").unwrap();
         let repo = |id: &str, gw: &str| Repo {
             read_prs: false,
             id: id.into(),
@@ -1290,7 +1290,7 @@ mod tests {
                 connection_token(&c.id)
                     .map(|t| t.expose().to_string())
                     .as_deref(),
-                Some("plane_api_secret")
+                Some("skein-test-plane-secret")
             );
         }
         // The legacy state is gone, so this runs exactly once.
@@ -1422,19 +1422,19 @@ mod tests {
 
         upsert_connection(Some("shared"), "shared", "https://plane.example.com", None).unwrap();
         assert!(!sync_status().ready, "a gateway alone cannot mint anything");
-        set_connection_token("shared", "  plane_api_secret  ").unwrap();
+        set_connection_token("shared", "  skein-test-plane-secret  ").unwrap();
         assert_eq!(
             connection_token("shared")
                 .map(|t| t.expose().to_string())
                 .as_deref(),
-            Some("plane_api_secret"),
+            Some("skein-test-plane-secret"),
             "trimmed"
         );
 
         // Not in connections.json — the object the settings screen GETs.
         let listed = fs::read_to_string(dir.join("connections.json")).unwrap();
         assert!(
-            !listed.contains("plane_api_secret"),
+            !listed.contains("skein-test-plane-secret"),
             "the token must never be written where the settings form can read it: {listed}"
         );
         // ...and not in what the cockpit is told either.
@@ -1442,7 +1442,7 @@ mod tests {
         assert!(status.ready && status.connections[0].token_set);
         let json = serde_json::to_string(&status).unwrap();
         assert!(
-            !json.contains("plane_api_secret"),
+            !json.contains("skein-test-plane-secret"),
             "leaked to the browser: {json}"
         );
 
@@ -1733,7 +1733,7 @@ mod tests {
         assert!(e.contains("Plane token"), "{e}");
         // Configured, but the box is not running — refuse before minting a credential for a box
         // that cannot receive it.
-        set_connection_token("shared", "plane_api_x").unwrap();
+        set_connection_token("shared", "skein-test-plane-x").unwrap();
         let e = sync_provision_box("web-main").unwrap_err();
         assert!(e.contains("not running"), "{e}");
         assert!(
@@ -1774,7 +1774,7 @@ mod tests {
             Some("shared"),
             "shared",
             "http://127.0.0.1:9",
-            Some("plane_api_x"),
+            Some("skein-test-plane-x"),
         )
         .unwrap();
         assert!(
@@ -1839,7 +1839,7 @@ mod tests {
                 .env("WORKSPACE_DIR", &project)
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .env("SYNC_GATEWAY_URL", "https://gw.test/")
-                .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+                .env("SYNC_AGENT_TOKEN", "skein-test-sync-agent")
                 .output()
                 .unwrap()
         };
@@ -1874,7 +1874,7 @@ mod tests {
         // a fallback, it is the only way it ever gets these tools.
         let codex = fs::read_to_string(boxhome.join(".codex/config.toml")).unwrap();
         assert!(codex.contains("[mcp_servers.sync]"), "{codex}");
-        assert!(codex.contains("Bearer sync_agent_abc"), "{codex}");
+        assert!(codex.contains("Bearer skein-test-sync-agent"), "{codex}");
         assert!(
             codex.contains("https://theirs.test"),
             "it appends, never rewrites: {codex}"
@@ -1975,7 +1975,7 @@ mod tests {
             .env("WORKSPACE_DIR", &project)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("SYNC_GATEWAY_URL", "https://gw.test")
-            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .env("SYNC_AGENT_TOKEN", "skein-test-sync-agent")
             .output()
             .unwrap();
         assert!(out.status.success(), "still must not gate startup");
@@ -2168,7 +2168,7 @@ mod tests {
             .env("WORKSPACE_DIR", &project)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("SYNC_GATEWAY_URL", "https://gw.test/")
-            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .env("SYNC_AGENT_TOKEN", "skein-test-sync-agent")
             .output()
             .unwrap();
         assert!(out.status.success());
@@ -2197,7 +2197,7 @@ mod tests {
             .env("WORKSPACE_DIR", &project)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("SYNC_GATEWAY_URL", "https://gw.test/")
-            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .env("SYNC_AGENT_TOKEN", "skein-test-sync-agent")
             .output()
             .unwrap();
         assert!(out.status.success());
@@ -2245,7 +2245,7 @@ mod tests {
             .env("WORKSPACE_DIR", &project)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("SYNC_GATEWAY_URL", "https://gw.test/")
-            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .env("SYNC_AGENT_TOKEN", "skein-test-sync-agent")
             .output()
             .unwrap();
         assert!(out.status.success());
@@ -2361,7 +2361,7 @@ mod tests {
             Some("shared"),
             "shared",
             &format!("http://127.0.0.1:{port}"),
-            Some("plane_api_secret"),
+            Some("skein-test-plane-secret"),
         )
         .unwrap();
         env.set("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
@@ -2379,7 +2379,7 @@ mod tests {
             "{request}"
         );
         assert!(
-            request.contains("Authorization: Bearer plane_api_secret"),
+            request.contains("Authorization: Bearer skein-test-plane-secret"),
             "the PAT is what authorises a revocation — the box's own token cannot: {request}"
         );
     }
@@ -2430,7 +2430,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        std::fs::write(legacy_token_path(), b"plane_api_secret").unwrap();
+        std::fs::write(legacy_token_path(), b"skein-test-plane-secret").unwrap();
 
         let path = connections_json();
         std::fs::write(&path, b"").unwrap();

@@ -557,7 +557,7 @@ mod tests {
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
         crate::secret::write(
             &read_credential_path(),
-            &crate::secret::Secret::new("the-fleet-wide-read-token"),
+            &crate::secret::Secret::new("skein-test-fleet-wide-read-token"),
         )
         .unwrap();
 

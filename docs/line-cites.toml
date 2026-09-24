@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:492"]
+["CONTRIBUTING.md:494"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:506"]
+["CONTRIBUTING.md:508"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:537"]
+["CONTRIBUTING.md:539"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -208,6 +208,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"ok\": false,"
 window = "serde_json::json!({\u000b\"ok\": false,\u000b\"resumed\": resumed,"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/door.rs:131"]
+line = "/// `?t=<token>` is exchanged for an `HttpOnly` cookie and redirected **back to the page that was"
+cited_by = ["docs/threat-model.md"]
 
 ["src/bin/skein-server/events.rs:25"]
 line = "\"too many live boards open — close one and retry\","
@@ -882,11 +886,11 @@ cited_by = ["docs/threat-model.md"]
 line = "pub fn skein_home() -> PathBuf {"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["src/config.rs:469"]
+["src/config.rs:482"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/config.rs:544"]
+["src/config.rs:557"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1138,27 +1142,27 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: could not save the {rel} login out of {sandbox} — the copy \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:381"]
+["src/fleet/fleetlogin.rs:387"]
 line = "eprintln!(\"skein: could not restore the {rel} login into {sandbox}: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:433"]
+["src/fleet/fleetlogin.rs:439"]
 line = "// **Presence decides the direction; expiry is only ever allowed to guard it** (SKEIN-349)."
 cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
 
-["src/fleet/fleetlogin.rs:504"]
+["src/fleet/fleetlogin.rs:510"]
 line = "code => Err(format!(\"login in {sandbox} exited {code}\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:520"]
+["src/fleet/fleetlogin.rs:526"]
 line = "pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:556"]
+["src/fleet/fleetlogin.rs:562"]
 line = "\"logged in, but could not hand it to the boxes already running ({why}) — they pick it \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:876"]
+["src/fleet/fleetlogin.rs:882"]
 line = "fn an_expired_credential_propagates_exactly_as_far_as_a_live_one() {"
 cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
 
@@ -1206,7 +1210,7 @@ cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 line = "# `expiresAt` decides WHICH CANDIDATE WINS, and that half was missing. It is the only evidence IN"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/fleet/login.rs:1198"]
+["src/fleet/login.rs:1252"]
 line = "fn the_two_elections_agree_on_which_login_is_best() {"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
@@ -1640,7 +1644,7 @@ cited_by = ["docs/decisions/one-identity.md"]
 line = "/// GraphQL, because REST cannot rebase: `PUT …/update-branch` takes `expected_head_sha` and merges,"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/prwork/perform.rs:1405"]
+["src/prwork/perform.rs:1406"]
 line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
 cited_by = ["docs/citations.toml"]
 
@@ -1720,11 +1724,11 @@ cited_by = ["docs/architecture.md", "docs/parity.md"]
 line = "\"\\n(cut for size: {} more file{} not shown — {}{})\\n\","
 cited_by = ["docs/decisions/pr-summary-calibration.md"]
 
-["src/review/asking.rs:622"]
+["src/review/asking.rs:781"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
 
-["src/review/cache.rs:1357"]
+["src/review/cache.rs:1360"]
 line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
 cited_by = ["docs/citations.toml"]
 
@@ -1744,7 +1748,7 @@ cited_by = ["docs/decisions/pr-summary-calibration.md"]
 line = "/// Mechanical evidence from [`crate::contracts`] — what moved, found in the diff rather than"
 cited_by = ["docs/decisions/pr-summary-calibration.md"]
 
-["src/review/summary.rs:295"]
+["src/review/summary.rs:306"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -2155,7 +2159,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:665"]
+["src/web/app/panels.js:678"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2171,7 +2175,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `The brief could not be fetched — ${esc(s.prose_failed)} Close the row and open it again to retry.`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review-rows.js:1282"]
+["src/web/app/review-rows.js:1290"]
 line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2235,46 +2239,46 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if (d.error) toast(\"the workflow file has a problem — fix it before editing here\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:331"]
+["src/web/app/settings.js:333"]
 line = ".catch(e => toast(e.message));"
 window = "})\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:337"]
+["src/web/app/settings.js:339"]
 line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:345"]
+["src/web/app/settings.js:347"]
 line = ".catch(e => toast(e.message));"
 window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => toast(e.message));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:499"]
+["src/web/app/settings.js:501"]
 line = "? \"this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field.\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:501"]
+["src/web/app/settings.js:503"]
 line = "? `${esc(host)} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein.`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:619"]
+["src/web/app/settings.js:621"]
 line = ".catch(e => toast(`pull failed: ${e.message}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:682"]
+["src/web/app/settings.js:685"]
 line = ".catch(e => toast(`couldn't save: ${e.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:727"]
+["src/web/app/settings.js:730"]
 line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:741"]
+["src/web/app/settings.js:744"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:1248"]
+["src/web/app/settings.js:1251"]
 line = "arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, \"warn\");"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2330,11 +2334,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
-["tools/gates.sh:708"]
+["tools/gates.sh:709"]
 line = "--verify)"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
-["tools/gates.sh:1222"]
+["tools/gates.sh:1223"]
 line = "exit 3"
 window = "echo \" Run it again on a tree nobody else is writing to.\"\u000bexit 3\u000bfi"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]

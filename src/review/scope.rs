@@ -540,6 +540,7 @@ mod tests {
                 unread_because: String::new(),
                 read_outside_box: String::new(),
                 not_reread: String::new(),
+                not_posted: String::new(),
                 computed: true,
                 budget_stopped: false,
                 stopped_at_box: false,
@@ -557,7 +558,7 @@ mod tests {
         // checked only that the pass read nothing with consent off — and passed with the consent
         // check deleted, because the queue could not be read at all in the fixture. A test that
         // cannot tell "declined" from "failed" is not testing consent.
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -1249,7 +1250,7 @@ mod tests {
         )
         .unwrap();
         env.set("SKEIN_CLAUDE_BIN", &claude);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

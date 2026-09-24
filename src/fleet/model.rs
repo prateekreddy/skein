@@ -250,6 +250,36 @@ pub fn model_scratch_export() -> String {
     )
 }
 
+thread_local! {
+    static REVIEW_OF: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// **Run `call` as the review of `subject` (`owner/name#n`), holding the owner's own GitHub token.**
+///
+/// The audit log's half of SKEIN-516: the owner's token going into a box is a thing done with their
+/// identity, and [`github_export`] reports it — but `github_export` is four calls below the review
+/// that knows which pull request the token is for. A scope rather than a parameter for
+/// [`crate::ai::as_site`]'s reason, which is the same four doors: the calls are synchronous, so the
+/// thread that set the subject is the thread that writes the token. Restored on the way out.
+///
+/// Only the owner's token is handed inside one (`review::Acting::handed`): a call with an App's
+/// token, or none, reports nothing, because nothing of the owner's was handed.
+pub fn as_review_of<T>(subject: &str, call: impl FnOnce() -> T) -> T {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REVIEW_OF.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(REVIEW_OF.with(|c| c.borrow_mut().replace(subject.to_string())));
+    call()
+}
+
+/// The pull request the calling thread is reviewing with the owner's token, if any.
+pub(super) fn review_of() -> Option<String> {
+    REVIEW_OF.with(|c| c.borrow().clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

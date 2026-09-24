@@ -34,6 +34,6 @@ failing to refresh rewrites its own file on every attempt.
 - `src/fleet/login.rs:125` — `carries_login`, presence only, and never expiry.
 - `src/fleet/login.rs:205-206` — `RuntimeLogin` is reporting only: nothing that seeds or heals reads
   it.
-- `src/fleet/fleetlogin.rs:433` — the move, and the incident, where it is decided.
-- `src/fleet/fleetlogin.rs:876` — `an_expired_credential_propagates_exactly_as_far_as_a_live_one`,
+- `src/fleet/fleetlogin.rs:439` — the move, and the incident, where it is decided.
+- `src/fleet/fleetlogin.rs:882` — `an_expired_credential_propagates_exactly_as_far_as_a_live_one`,
   which runs the same moves live and expired, so identical expectations are the assertion.

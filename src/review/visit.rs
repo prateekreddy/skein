@@ -691,6 +691,7 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         // there is no box for it to have lost. See `Summary::read_outside_box`.
         read_outside_box: String::new(),
         not_reread: String::new(),
+        not_posted: String::new(),
     };
 
     if expand {
@@ -802,33 +803,35 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // **Whether this reading can post what it finds**, decided once and used twice — the prompt
     // is written from it, and the call is given the credential the prompt promises. Two answers
     // here would be a prompt telling a model to run `gh` in a session that has no token.
-    let credential = acting_credential();
+    let credential = acting_credential(slug, pr.number);
     let answered = match crate::ai::as_site(crate::ai::Site::Review, || {
-        crate::ai::claude_in_conversation(
-            &merged_prompt(MergedPrompt {
-                pr,
-                slug,
-                owned,
-                signals,
-                described,
-                standing,
-                posting: credential.is_some(),
-                diff: &diff,
-                cut,
-            }),
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
-            // gets the diff itself needs at least the time a reading handed one did — more of it
-            // goes on tool calls — so the budget cannot be allowed to collapse to the floor just
-            // because the bytes moved out of the message. `merged_budget` clamps at
-            // [`CRITIQUE_BYTES`], which is what the truncated length used to be worth, so the
-            // handed-a-diff path is unchanged.
-            merged_budget(raw_diff.len()),
-            talk,
-            at,
-            credential.as_ref(),
-            bench.machine(),
-        )
+        credential.handed(|| {
+            crate::ai::claude_in_conversation(
+                &merged_prompt(MergedPrompt {
+                    pr,
+                    slug,
+                    owned,
+                    signals,
+                    described,
+                    standing,
+                    posting: credential.is_some(),
+                    diff: &diff,
+                    cut,
+                }),
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                // Sized by the SIZE OF THE CHANGE, not the size of the prompt. A reading that goes and
+                // gets the diff itself needs at least the time a reading handed one did — more of it
+                // goes on tool calls — so the budget cannot be allowed to collapse to the floor just
+                // because the bytes moved out of the message. `merged_budget` clamps at
+                // [`CRITIQUE_BYTES`], which is what the truncated length used to be worth, so the
+                // handed-a-diff path is unchanged.
+                merged_budget(raw_diff.len()),
+                talk,
+                at,
+                credential.secret(),
+                bench.machine(),
+            )
+        })
     }) {
         Ok(answered) => answered,
         // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
@@ -875,7 +878,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // The second turn. Only ever adds; see [`sweep`]. Still ONE budget unit — the unit is the pull
     // request analysed, the same rule that makes stage 2 free after stage 1 — so nothing is counted
     // here.
-    let sweep_said = sweep(talk, at, credential.as_ref(), bench.machine());
+    let sweep_said = credential.handed(|| sweep(talk, at, credential.secret(), bench.machine()));
     let swept = sweep_said.is_some();
     let findings_block = sweep_said.as_deref().and_then(findings_block);
     // The scanner escalates and never clears — same rule as the two-stage path, see there.
@@ -927,6 +930,9 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
         not_reread: String::new(),
+        // **Why this did not post, when it would have** (SKEIN-516): the reading acts as the App
+        // and there was no App token to act with. Empty whenever it posted or acts as the owner.
+        not_posted: credential.not_posted(),
     };
     // Same rule and same reason as the two-stage path (see the comment there): a summary whose
     // ownership could not be consulted is served but never cached, so a recovered mirror is
@@ -980,16 +986,19 @@ Their question: {question}"#,
         checkout = standing_line(standing, "answering"),
         question = question,
     );
+    let acting = acting_credential(slug, pr.number);
     crate::ai::as_site(crate::ai::Site::Ask, || {
-        crate::ai::claude_in_conversation(
-            &prompt,
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            Duration::from_secs(180),
-            talk,
-            at,
-            acting_credential().as_ref(),
-            bench.machine(),
-        )
+        acting.handed(|| {
+            crate::ai::claude_in_conversation(
+                &prompt,
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                Duration::from_secs(180),
+                talk,
+                at,
+                acting.secret(),
+                bench.machine(),
+            )
+        })
     })
     // The answer, and whether it came from outside the box (SKEIN-819): the composer says so above
     // it, in the owner's words, with a way to ask again.
@@ -1052,16 +1061,19 @@ Their notes: {intent}"#,
         checkout = standing_line(standing, "writing"),
         intent = intent,
     );
+    let acting = acting_credential(slug, pr.number);
     crate::ai::as_site(crate::ai::Site::Draft, || {
-        crate::ai::claude_in_conversation(
-            &prompt,
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            Duration::from_secs(180),
-            talk,
-            at,
-            acting_credential().as_ref(),
-            bench.machine(),
-        )
+        acting.handed(|| {
+            crate::ai::claude_in_conversation(
+                &prompt,
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                Duration::from_secs(180),
+                talk,
+                at,
+                acting.secret(),
+                bench.machine(),
+            )
+        })
     })
     // The body, and where it was written (SKEIN-819) — a draft written outside the box goes out
     // under a person's name without the earlier reading behind it, so the composer says so.
@@ -1298,7 +1310,7 @@ mod tests {
         // a review box, and opening one makes directories under whatever root it resolves.
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
         env.set("SKEIN_REVIEW_AI", "on");
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
 
         // A GitHub that serves a diff, so the visit reaches the model rather than stopping at the
@@ -1477,7 +1489,7 @@ mod tests {
         )
         .unwrap();
         env.set("SKEIN_CLAUDE_BIN", &claude);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
 
         // A GitHub that answers: the diff for #5, and its changed files — one the CODEOWNERS
@@ -1580,6 +1592,80 @@ mod tests {
         );
 
         crate::prq::forget_host_token();
+    }
+
+    /// **A reading that acts as the App and has no App to act as says so on the reading itself**
+    /// (SKEIN-516) — through the real merged visit, not the decision function alone, so what is
+    /// held here is that the refusal reaches `Summary::not_posted`.
+    ///
+    /// The changes that fail it: the merged visit writing `not_posted: String::new()` instead of
+    /// the credential's reason (the first assertion), or writing it whatever the reason (the
+    /// second: the same reading acting as the owner carries nothing).
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_that_cannot_act_as_the_app_carries_why_and_one_acting_as_you_does_not() {
+        let _g = crate::testutil::env_lock();
+        let _crossing = crate::place::seam::doing_nothing();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        // Pinned because this reaches a `Place`: unset, `$SKEIN_FLEET_ROOT` defaults to
+        // `/boxes`, which on a developer's machine is a live fleet (SKEIN-530).
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", home);
+        let _asked = drafting_fixture(home);
+        let repo = || {
+            crate::repos::load_repos()
+                .into_iter()
+                .find(|r| r.id == "crit")
+                .expect("the fixture repo")
+        };
+        let read = |number: u64, head: &str| {
+            summarise(
+                &repo(),
+                "acme/thing",
+                &budget_pr(number, head),
+                &["me".into()],
+                false,
+                Trigger::Asked,
+            )
+        };
+
+        // "app", and this fixture configures no App and stores no token for the repository.
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_identity":"app"}"#,
+        )
+        .unwrap();
+        let s = read(31, "sha31");
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "the reading did not run: {}",
+            s.unread_because
+        );
+        assert_eq!(
+            s.not_posted,
+            "Reviews act as the skein App, but no App is set up — nothing will be posted.",
+            "a reading that acted as nothing did not say why it posted nothing"
+        );
+
+        // The same reading, acting as the owner, who has a token: nothing to say.
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_identity":"me"}"#,
+        )
+        .unwrap();
+        let s = read(32, "sha32");
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "the reading did not run: {}",
+            s.unread_because
+        );
+        assert_eq!(
+            s.not_posted, "",
+            "a reading acting as you carried a not-posted notice"
+        );
     }
 
     /// **What skein reads on its own is skein's answer, not the caller's** (SKEIN-242).

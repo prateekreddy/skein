@@ -532,6 +532,37 @@ await check("an answer or a draft from outside its box says so above it, and ask
     await page.unroute("**/review/*/act");
   }
 });
+// **A review that would have posted and could not says why, on the open row** (SKEIN-516). The
+// sentence is the server's (`review::Summary::not_posted`), so what this holds is the drawing: in the
+// open row, in the notice style `read_outside_box` uses, verbatim, and gone when the field is. What
+// would make it fail: `revDetail` not drawing `s.not_posted`, drawing it escaped-and-altered or in a
+// different element, or leaving it standing once the reading no longer carries it.
+await check("a review that could not post says why on the open row, in the server's words", async () => {
+  const said = "Not posted: GitHub would not give the skein App a token for this repository — check the App is installed on it.";
+  const key = await page.$eval("#revpane .revrow.open", e => e.dataset.rk).catch(() => null);
+  if (!key) throw new Error("no open row to draw the notice on");
+  const had = await page.evaluate(([k, said]) => {
+    const s = revSums.get(k);
+    if (!s || typeof s !== "object") return false;
+    revSums.set(k, { ...s, not_posted: said });
+    renderReviewNow();
+    return true;
+  }, [key, said]);
+  if (!had) throw new Error(`the open row ${key} holds no reading to carry the field`);
+  try {
+    const notice = await mustSee("#revpane .revrow.open .revstale.notposted", "the not-posted notice");
+    const text = (await notice.locator("b").textContent()).trim();
+    if (text !== said) throw new Error(`not the server's sentence, verbatim: ${JSON.stringify(text)}`);
+  } finally {
+    await page.evaluate(k => {
+      const s = revSums.get(k);
+      if (s && typeof s === "object") { const { not_posted, ...rest } = s; revSums.set(k, rest); }
+      renderReviewNow();
+    }, key);
+  }
+  await until(() => !document.querySelector("#revpane .revrow.open .revstale.notposted"), null,
+    "the notice outlived the field it draws");
+});
 // Private by construction: an answer that might be published is a different, more careful, less
 // useful answer — so asking must never look like a step on the way to posting.
 await check("asking a question keeps the answer off GitHub", async () => {

@@ -17,7 +17,7 @@ lost nothing, and one that stops before has lost everything but the diff on disk
 It also makes the gate receipt name a commit — `at <sha>` rather than `at <sha> + N uncommitted
 change(s)` — which is the form `tools/gates.sh --verify` can check against a tree that has not moved.
 
-The amend is only for a commit nothing sits on and nothing has cited (`CONTRIBUTING.md:537`); after
+The amend is only for a commit nothing sits on and nothing has cited (`CONTRIBUTING.md:539`); after
 that, fix with a new commit.
 
 **Rules out.**
@@ -26,5 +26,5 @@ that, fix with a new commit.
 - Taking the gates off the lane instead: that removes its ability to correct itself.
 
 **Enforced at.** Nothing mechanical. `tools/gates.sh` exits 3 when the tree changes during a run
-(`tools/gates.sh:1222`), and `--verify` checks a receipt against its run (`tools/gates.sh:708`), but
+(`tools/gates.sh:1223`), and `--verify` checks a receipt against its run (`tools/gates.sh:709`), but
 neither can tell whether the work was committed first. The lane brief carries the rule.

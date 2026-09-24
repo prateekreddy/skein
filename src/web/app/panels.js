@@ -518,7 +518,20 @@ function gitCredRow(c) {
 // The pane's own status line. No single control can give this answer: the scope switch can be on
 // while nothing is scoped, which is precisely the state worth naming — and the one a switch drawn
 // "on" would otherwise misreport.
+// **"app" chosen with no App to act as** (SKEIN-516). The answer is the server's: `app_ready` in
+// `/api/fleet/git-grants` is `gitgate::app_credentials().is_ok()`, the very check
+// `review::asking::acting_credential` hands `choose_acting` — so this cannot say "no App" about a
+// fleet whose reviews would in fact act as one. Hidden until that payload has answered at all
+// (`app_ready` absent), rather than flashing the warning while it is in flight.
+function renderReviewIdentityNote() {
+  const note = document.getElementById("set-review-identity-note");
+  const chosen = document.getElementById("set-review-identity");
+  if (!note || !chosen) return;
+  note.hidden = !(chosen.value === "app" && gitLast.app_ready === false);
+}
+
 function renderGitState(d) {
+  renderReviewIdentityNote();
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;

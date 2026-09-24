@@ -536,7 +536,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         // The switch is OFF for the whole table, on purpose: `$SKEIN_PR_WORKFLOWS` governs skein
         // acting unattended, and the fleet where it is off is precisely the fleet where this is the
@@ -671,7 +671,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");
@@ -760,7 +760,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");
@@ -814,7 +814,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         env.unset("SKEIN_PR_WORKFLOWS");
         std::env::remove_var("SKEIN_MERGE_METHOD");

@@ -427,16 +427,19 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
-        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        set_credential_token("mine", "skein-test-pat-XYZ").unwrap();
         // A second, unrelated credential, so the fleet can still issue *something* after the first
         // is forgotten. Without it `can_issue_write_tokens` goes false, the box stops being scoped,
         // and the token is taken by the un-scoping path instead — which is a different fix, tested
         // below. This one has to fail to mint while the box is still very much scoped.
         set_write_credential("other", "elsewhere", &["b/two".into()]).unwrap();
-        set_credential_token("other", "github_pat_OTHER").unwrap();
+        set_credential_token("other", "skein-test-pat-OTHER").unwrap();
 
         let path = box_holding("worker", "a/one");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "github_pat_XYZ");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "skein-test-pat-XYZ"
+        );
 
         remove_write_credential("mine").unwrap();
         assert!(box_is_scoped("worker"), "the box must still be scoped here");
@@ -465,7 +468,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
-        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        set_credential_token("mine", "skein-test-pat-XYZ").unwrap();
         let path = box_holding("worker", "a/one");
 
         set_box_scope("worker", Some("fleet")).unwrap();
@@ -494,7 +497,7 @@ mod tests {
         // to whatever warden the machine running the suite can reach (SKEIN-762).
         let _warden = crate::testutil::no_warden();
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
-        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        set_credential_token("mine", "skein-test-pat-XYZ").unwrap();
         let path = box_holding("worker", "a/one");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a placed token was {mode:o}");
@@ -513,14 +516,14 @@ mod tests {
         // override that choice with the exact thing it was made to avoid.
         let (_lock, _home, _env) = fresh_home();
         set_write_credential("mine", "my one repo", &["a/one".into()]).unwrap();
-        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        set_credential_token("mine", "skein-test-pat-XYZ").unwrap();
 
         let (found, token) = credential_for("a/one").expect("a stored token covers a/one");
-        assert_eq!(token.expose(), "github_pat_XYZ");
+        assert_eq!(token.expose(), "skein-test-pat-XYZ");
         assert_eq!(found.label, "my one repo");
         assert_eq!(
             mint_token("a/one").unwrap().expose(),
-            "github_pat_XYZ",
+            "skein-test-pat-XYZ",
             "the stored token is what a box is given"
         );
 
@@ -565,7 +568,7 @@ mod tests {
             r#"[{"id":"wide","label":"","repos":["a/one","a/two"]}]"#,
         )
         .unwrap();
-        set_credential_token("wide", "t").unwrap();
+        set_credential_token("wide", "skein-test-t").unwrap();
 
         assert!(
             credential_for("a/one").is_none(),
@@ -592,7 +595,7 @@ mod tests {
             !can_issue_write_tokens(),
             "a credential with no token is not a way to issue one"
         );
-        set_credential_token("half", "t").unwrap();
+        set_credential_token("half", "skein-test-t").unwrap();
         assert!(can_issue_write_tokens());
         assert!(
             box_is_scoped("any-box"),
@@ -605,7 +608,10 @@ mod tests {
         let (_lock, _home, _env) = fresh_home();
         for bad in ["../../evil", "has/slash", "Upper", "-lead", ""] {
             assert!(!valid_credential_id(bad), "{bad:?} was accepted as an id");
-            assert!(set_credential_token(bad, "t").is_err(), "{bad:?}");
+            assert!(
+                set_credential_token(bad, "skein-test-t").is_err(),
+                "{bad:?}"
+            );
             assert!(set_write_credential(bad, "", &[]).is_err(), "{bad:?}");
         }
     }
@@ -622,7 +628,7 @@ mod tests {
         // A token nothing points at is one nobody rotates, and it would still work.
         let (_lock, _home, _env) = fresh_home();
         set_write_credential("gone", "", &["a/one".into()]).unwrap();
-        set_credential_token("gone", "t").unwrap();
+        set_credential_token("gone", "skein-test-t").unwrap();
         remove_write_credential("gone").unwrap();
         assert!(write_credentials().is_empty());
         assert!(!credential_has_token("gone"), "the token file outlived it");
@@ -647,7 +653,7 @@ mod tests {
         let (_lock, home, _env) = fresh_home();
         set_write_credential("alpha", "one", &["a/one".into()]).unwrap();
         set_write_credential("beta", "two", &["b/two".into()]).unwrap();
-        set_credential_token("alpha", "ghp_alpha").unwrap();
+        set_credential_token("alpha", "skein-test-alpha").unwrap();
         let path = home.join("github-pats.json");
 
         for corrupt in [&b""[..], &b"[{\"id\":\"alpha\""[..]] {

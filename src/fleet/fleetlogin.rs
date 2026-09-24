@@ -372,8 +372,14 @@ fn sync_fleet_login_with(sandbox: &str, allow_restore: bool) -> Vec<(&'static st
             }
             LoginMove::Restore if !allow_restore => {}
             LoginMove::Restore => {
+                // `umask 077` around the `cat`, so a login this CREATES is owner-only from its
+                // first byte rather than from the chmod after — the rule `crate::secret::write`
+                // keeps, spelled in the shell this write is made in. The chmod stays for a file
+                // that already existed, whose mode a `cat >` keeps. Not a temp and a rename, which
+                // would replace a symlink at this path where the `cat` writes through it, and
+                // nothing here says which of the two the sandbox's HOME relies on.
                 let restore = format!(
-                    "mkdir -p \"$(dirname \"$HOME\"/{r})\" && cat > \"$HOME\"/{r} && chmod 600 \"$HOME\"/{r}",
+                    "mkdir -p \"$(dirname \"$HOME\"/{r})\" && (umask 077; cat > \"$HOME\"/{r}) && chmod 600 \"$HOME\"/{r}",
                     r = sh_quote(rel)
                 );
                 let saved = saved.expect("Restore is only returned when the host has a copy");
@@ -708,7 +714,7 @@ mod tests {
     #[test]
     fn a_logged_out_sandbox_cannot_destroy_the_fleets_kept_login() {
         let now = 1_700_000_000_000i64;
-        let login = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        let login = br#"{"claudeAiOauth":{"accessToken":"skein-test-sk-live","refreshToken":"r"}}"#;
         let husk = br#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#;
 
         // The regression, and the only case that loses data.
@@ -739,9 +745,9 @@ mod tests {
     #[test]
     fn an_invalidated_sandbox_login_cannot_destroy_the_fleets_kept_one_either() {
         let now = 1_700_000_000_000i64;
-        let live = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        let live = br#"{"claudeAiOauth":{"accessToken":"skein-test-sk-live","refreshToken":"r"}}"#;
         let dead = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"sk-old","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            r#"{{"claudeAiOauth":{{"accessToken":"skein-test-sk-old","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
             now - 1
         );
         let dead = dead.as_bytes();
@@ -765,7 +771,7 @@ mod tests {
         // fleet, because with both copies expired this arm was the whole of the shared login and
         // it moved nothing at all.
         let other_dead = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"sk-other","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            r#"{{"claudeAiOauth":{{"accessToken":"skein-test-sk-other","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
             now - 2
         );
         assert_eq!(
@@ -808,13 +814,13 @@ mod tests {
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let live = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"sk-typed-in-a-box","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            r#"{{"claudeAiOauth":{{"accessToken":"skein-test-sk-typed-in-a-box","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
             now_ms + 86_400_000
         );
         // The state the fleet is in at the exact moment somebody logs in inside a box: invalidated
         // everywhere. Not a husk — a husk was already caught. This is a real token that died.
         let dead = format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"sk-invalidated","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            r#"{{"claudeAiOauth":{{"accessToken":"skein-test-sk-invalidated","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
             now_ms - 1
         );
 
@@ -841,7 +847,7 @@ mod tests {
         // Leg one: the box's login is now the sandbox's. This part already worked.
         let in_sandbox = std::fs::read(&sandbox_home).unwrap();
         assert!(
-            String::from_utf8_lossy(&in_sandbox).contains("sk-typed-in-a-box"),
+            String::from_utf8_lossy(&in_sandbox).contains("skein-test-sk-typed-in-a-box"),
             "the heal did not carry the box's login up into the sandbox's HOME"
         );
 
@@ -877,7 +883,7 @@ mod tests {
         let now = 1_700_000_000_000i64;
         let cred = |tag: &str, dies: i64| {
             format!(
-                r#"{{"claudeAiOauth":{{"accessToken":"sk-{tag}","refreshToken":"r","refreshTokenExpiresAt":{dies}}}}}"#
+                r#"{{"claudeAiOauth":{{"accessToken":"skein-test-sk-{tag}","refreshToken":"r","refreshTokenExpiresAt":{dies}}}}}"#
             )
         };
         let live = |tag: &str| cred(tag, now + 60_000);
@@ -927,7 +933,7 @@ mod tests {
     #[test]
     fn an_unchanged_login_is_not_rewritten_every_minute() {
         let now = 1_700_000_000_000i64;
-        let login = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        let login = br#"{"claudeAiOauth":{"accessToken":"skein-test-sk-live","refreshToken":"r"}}"#;
         assert_eq!(
             login_move(login, Some(login), now),
             LoginMove::Neither,
@@ -1207,7 +1213,7 @@ mod tests {
 
         let kept = fleet_home_dir().join(LOGIN_FILES[0]);
         std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
-        let live = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        let live = br#"{"claudeAiOauth":{"accessToken":"skein-test-sk-live","refreshToken":"r"}}"#;
         std::fs::write(&kept, live).unwrap();
 
         let refused = capture_fleet_login("skein-no-such-sandbox-for-a-test")

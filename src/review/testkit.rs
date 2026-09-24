@@ -223,7 +223,7 @@ pub(super) fn drafting_fixture_for(
     )
     .unwrap();
     std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
-    std::env::set_var("GH_TOKEN", "gho_test");
+    std::env::set_var("GH_TOKEN", "skein-test-gho");
     crate::prq::forget_host_token();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -343,7 +343,7 @@ pub(super) fn two_repo_fixture(home: &std::path::Path) -> DraftingFixture {
     )
     .unwrap();
     std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
-    std::env::set_var("GH_TOKEN", "gho_test");
+    std::env::set_var("GH_TOKEN", "skein-test-gho");
     crate::prq::forget_host_token();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -587,6 +587,7 @@ pub(super) fn fat(number: u64, head: &str) -> Known {
                 false,
             ),
             not_reread: String::new(),
+            not_posted: String::new(),
             computed: false,
             budget_stopped: false,
             stopped_at_box: false,

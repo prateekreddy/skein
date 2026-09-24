@@ -891,7 +891,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         forget_host_token();
 
@@ -1003,7 +1003,7 @@ mod tests {
         // differently from the refusal being asserted.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         forget_host_token();
 

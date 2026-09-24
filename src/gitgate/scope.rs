@@ -380,7 +380,7 @@ mod tests {
         // A stored token now serves scoping, so that is what a box gets — not the account token, which
         // `box-session.sh` drops at startup for a scoped box.
         set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
-        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        set_credential_token("mine", "skein-test-pat-XYZ").unwrap();
         assert_eq!(
             box_credential(),
             BoxCredential::Scoped {
@@ -439,7 +439,7 @@ mod tests {
     fn a_stored_token_alone_is_enough_to_be_active_with_no_app_at_all() {
         let (_lock, _home, _env) = fresh_home();
         set_write_credential("solo", "", &["a/one".into()]).unwrap();
-        set_credential_token("solo", "t").unwrap();
+        set_credential_token("solo", "skein-test-t").unwrap();
         assert_eq!(
             scope_status(),
             ScopeStatus::Active {

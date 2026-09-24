@@ -932,7 +932,7 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
         env.set("SKEIN_PR_WORKFLOWS", "on");
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
@@ -1134,7 +1134,7 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
         env.set("SKEIN_PR_WORKFLOWS", "on");
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();

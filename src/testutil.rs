@@ -229,6 +229,65 @@ pub(crate) fn no_warden() -> EnvPins {
     pins
 }
 
+/// **A warden that only listens to the audit log**, for the width of the returned guards: every
+/// request that reaches it is handed back on the receiver, and answered `200`. For the tests that
+/// are ABOUT an audit entry — that an act is reported, and with what words — where [`no_warden`]
+/// would make the report fail quietly, which is the one thing such a test cannot tell apart from a
+/// report that was never made. The caller holds [`env_lock`]; the `TempDir` is the warden home the
+/// client reads its secret from, and is dropped after the pins that name it.
+pub(crate) fn audit_sink() -> (EnvPins, TempDir, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for mut sock in listener.incoming().flatten() {
+            sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let body = r#"{"recorded":true}"#;
+            let _ = sock.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+            if tx
+                .send(String::from_utf8_lossy(&buf[..n]).into_owned())
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    let home = tempdir();
+    std::fs::write(home.join("secret"), "skein-test-warden-secret-0123456789").unwrap();
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN", format!("127.0.0.1:{port}"))
+        .set("SKEIN_WARDEN_HOME", &*home);
+    (pins, home, rx)
+}
+
+/// The audit entries a [`audit_sink`] heard within `wait`, as the JSON bodies they were posted with.
+pub(crate) fn audit_entries(
+    heard: &std::sync::mpsc::Receiver<String>,
+    wait: std::time::Duration,
+) -> Vec<serde_json::Value> {
+    let mut entries = Vec::new();
+    while let Ok(said) = heard.recv_timeout(wait) {
+        if !said.starts_with("POST /v1/audit ") {
+            continue;
+        }
+        let body = said.split("\r\n\r\n").nth(1).unwrap_or_default();
+        if let Ok(entry) = serde_json::from_str(body) {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh temp directory, unique per process and per call, **removed when the test ends**.

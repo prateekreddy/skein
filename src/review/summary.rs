@@ -120,6 +120,16 @@ pub struct Summary {
     /// has not replaced it. Silence there would leave a row that looks current and is not.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub not_reread: String,
+    /// **Why this review did not post, when it would have** (SKEIN-516). Empty on every reading
+    /// that posted, that had no reason to, and that acts as the owner — nearly all of them.
+    ///
+    /// Set from the one refusal that is skein's own: `review_identity = "app"`, and the App could
+    /// not be acted as (`review::asking::Refused`). The reading still ran and its findings are in
+    /// the brief; what did not happen is the post, and without this the row reads exactly like a
+    /// review that posted. Composed on the server and drawn verbatim, like
+    /// [`Summary::read_outside_box`], so the owner's approved words have one spelling.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub not_posted: String,
     /// Did answering this actually spend a model call?
     ///
     /// The client keeps a budget for how many pull requests are read WITHOUT being asked, and that
@@ -244,6 +254,7 @@ impl Summary {
             // failure, with its own cure — and that is the one to show.
             read_outside_box: String::new(),
             not_reread: String::new(),
+            not_posted: String::new(),
         }
     }
 }
@@ -335,6 +346,8 @@ impl Known {
         // `the_row_shape_carries_only_what_a_row_draws` is what noticed: it failed the moment the
         // field was added, before this line was.
         self.summary.read_outside_box = String::new();
+        // Behind the fold for the same reason: `revDetail` draws it, from the whole reading.
+        self.summary.not_posted = String::new();
         // Engine state, and a row draws none of it: which of §8's checks a diff fired is read by
         // `prwork::facts_of_in` off the cache on disk, never off a queue payload. Cleared here
         // rather than left to `skip_serializing_if`, because on a reading that ran it is `Some`

@@ -566,6 +566,59 @@ await check("skein in every agent's session is one fleet-wide switch, on by defa
   await page.click('.set-navi[data-pane="repos"]');
   await settle(300);
 });
+await check("Reviews act as is one choice on GitHub & keys, defaulting to you, and saving it reads back (SKEIN-516)", async () => {
+  // The owner's approved words, verbatim: "Reviews act as: you (your GitHub token) · the skein
+  // GitHub App (team installs)". What would make it fail: the select not wired into
+  // `settingsPayload` (the stored value never moves), the load not reading the stored value back
+  // (the control reopens on "me"), or either label drifting from the approved text.
+  await page.click('.set-navi[data-pane="github"]');
+  await settle(300);
+  await mustSee("#set-review-identity", "the Reviews act as choice");
+  const row = await page.$eval("#set-review-identity", e => ({
+    title: e.closest(".set-field").querySelector(".set-title").textContent,
+    options: [...e.options].map(o => [o.value, o.textContent]),
+    value: e.value,
+  }));
+  if (row.title !== "Reviews act as") throw new Error(`not the approved title: "${row.title}"`);
+  const want = [["me", "you (your GitHub token)"], ["app", "the skein GitHub App (team installs)"]];
+  if (JSON.stringify(row.options) !== JSON.stringify(want)) throw new Error(`not the approved options: ${JSON.stringify(row.options)}`);
+  if (row.value !== "me") throw new Error(`it must default to you, got "${row.value}"`);
+  const before = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (before.review_identity !== "me") throw new Error(`the stored default should be "me", got ${before.review_identity}`);
+  // Nothing to act as: this fixture configures no App, so choosing it must say so, in the owner's
+  // approved words, and choosing yourself again must take the sentence away. What would make it
+  // fail: the note not repainted on change, painted from anything but the server's `app_ready`
+  // (which this fixture answers false), or its words drifting.
+  const noApp = "Reviews act as the skein App, but no App is set up — nothing will be posted, except in repositories where you stored a token.";
+  if (await page.isVisible("#set-review-identity-note")) throw new Error("the no-App sentence shows while you are chosen");
+  await page.selectOption("#set-review-identity", "app");
+  const warned = await mustSee("#set-review-identity-note", "the no-App sentence under Reviews act as");
+  if ((await warned.textContent()).trim() !== noApp) throw new Error(`not the approved sentence: "${await warned.textContent()}"`);
+  await page.selectOption("#set-review-identity", "me");
+  if (await page.isVisible("#set-review-identity-note")) throw new Error("the no-App sentence stayed after choosing you again");
+  await page.selectOption("#set-review-identity", "app");
+  await page.click("#set-go");
+  await settle(600);
+  const app = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (app.review_identity !== "app") throw new Error(`choosing the App didn't persist, got ${app.review_identity}`);
+  // And back, read through the control this time: the pane shows what is stored.
+  await page.click('header .kbtn[aria-label^="Settings"]');
+  await settle();
+  await page.click('.set-navi[data-pane="github"]');
+  await settle(300);
+  const shown = await page.$eval("#set-review-identity", e => e.value);
+  if (shown !== "app") throw new Error(`the choice reopened on "${shown}", though "app" is stored`);
+  if (!(await page.isVisible("#set-review-identity-note"))) throw new Error("reopened on the App with no App set up, and said nothing");
+  await page.selectOption("#set-review-identity", "me");
+  await page.click("#set-go");
+  await settle(600);
+  const me = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (me.review_identity !== "me") throw new Error("choosing you again didn't persist");
+  await page.click('header .kbtn[aria-label^="Settings"]');
+  await settle();
+  await page.click('.set-navi[data-pane="repos"]');
+  await settle(300);
+});
 await check("the pane doesn't pretend Save applies to repo cards", async () => {
   const shown = await page.$$eval("#settings .set-foot .primary", els => els.filter(e => e.offsetParent).length);
   if (shown) throw new Error("Save is offered on a pane whose fields already saved themselves");

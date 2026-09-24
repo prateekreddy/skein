@@ -531,24 +531,28 @@ pub(super) const AUDIT_SECS: u64 = 300;
 /// empty answer is an error, and the caller records nothing.
 pub fn audit_owed(
     repo: &Repo,
+    slug: &str,
     number: u64,
     head_sha: &str,
     base_ref: &str,
     owed: &str,
 ) -> Result<String, String> {
     let bench = conversation_of(repo, number, head_sha, base_ref);
+    let acting = acting_credential(slug, number);
     let said = crate::ai::as_site(crate::ai::Site::Audit, || {
-        crate::ai::claude_in_turn(
-            &audit_prompt(owed),
-            review_model(Some("claude-sonnet-5")).as_deref(),
-            Duration::from_secs(AUDIT_SECS),
-            crate::ai::Turn::Resuming {
-                id: &bench.talk,
-                at: &bench.at,
-            },
-            acting_credential().as_ref(),
-            bench.machine(),
-        )
+        acting.handed(|| {
+            crate::ai::claude_in_turn(
+                &audit_prompt(owed),
+                review_model(Some("claude-sonnet-5")).as_deref(),
+                Duration::from_secs(AUDIT_SECS),
+                crate::ai::Turn::Resuming {
+                    id: &bench.talk,
+                    at: &bench.at,
+                },
+                acting.secret(),
+                bench.machine(),
+            )
+        })
     })
     // `Unread::say` rather than the variant: this sentence goes into the workflow journal and onto
     // a row, and each variant carries its own cure.

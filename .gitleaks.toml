@@ -1,0 +1,28 @@
+# What gitleaks is allowed to look away from, and nothing else (SKEIN-516).
+#
+# The default rules stay on. Every allowance is a path that is not this repository's own code, or
+# the one fixture prefix `tools/secret-check.py` makes every test credential carry. A new
+# allowance for anything else is a decision about a real finding, so it belongs in review.
+#
+# CI runs gitleaks 8.30.1, pinned by checksum in `.github/workflows/ci.yml`. To run it yourself:
+#
+#     gitleaks dir . --config .gitleaks.toml --redact
+
+title = "skein"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "not this repository's code: vendored minified JS, the sync submodule, build output"
+paths = [
+  '''^src/web/vendor/''',
+  '''^upstream/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.target/''',
+  '''(^|/)target/''',
+]
+
+[[allowlists]]
+description = "a test credential: `tools/secret-check.py` requires every one to start skein-test-"
+regexes = ['''^skein-test-''']

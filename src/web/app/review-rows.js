@@ -1242,6 +1242,14 @@ function revDetail(pr) {
     ? `<div class="revstale outsidebox"><b>${esc(s.read_outside_box)}</b>
         <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div>`
     : "";
+  // **This review would have posted and could not** (SKEIN-516): it acts as the skein App, and
+  // there was no App token to act with. The server composes the sentence
+  // (`review::Summary::not_posted`, from `review::asking::Refused`) and this draws it verbatim, in
+  // the same notice as the two above — the brief below is still the reading, and this is what did
+  // not happen with it. No button: the way out is in Settings → GitHub & keys, not in reading again.
+  const notPosted = s.not_posted
+    ? `<div class="revstale notposted"><b>${esc(s.not_posted)}</b></div>`
+    : "";
   // Three ways, exactly as `review::Ownership` answers (SKEIN-117): attributed, could-not-look,
   // or the repo has no CODEOWNERS. Silence is the right rendering for the third and the WRONG one
   // for the second — an empty `yours` used to draw as nothing either way, so a brief written
@@ -1265,7 +1273,7 @@ function revDetail(pr) {
   const detail = s.detail
     ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
     : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
-  return stale + blind + outside + owned + signals + detail;
+  return stale + blind + outside + notPosted + owned + signals + detail;
 }
 
 // What governs this pull request, what it would do next, and how to change either.

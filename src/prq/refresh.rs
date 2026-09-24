@@ -949,7 +949,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         let (base, asked) = routing_github();
         env.set("SKEIN_GITHUB_API", &base);
@@ -1219,7 +1219,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::repos::save_repos(&[batched_repo("acme/thing")]).unwrap();
 
@@ -1315,7 +1315,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::repos::save_repos(&[batched_repo("acme/thing")]).unwrap();
 
@@ -1377,7 +1377,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
 
         // #77's only claim on you is a team review request, so none of the four personal searches
@@ -1459,7 +1459,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
 
         let dir = review_dir("corrupt");

@@ -150,7 +150,7 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
             // The warden too, where nothing listens — see the first spawn above.
             .env("SKEIN_WARDEN", "127.0.0.1:1")
             .env("SKEIN_GITHUB_API", &api)
-            .env("GH_TOKEN", "test-token")
+            .env("GH_TOKEN", "skein-test-token")
             .env("SKEIN_REGISTRY", "")
             .stdout(Stdio::null())
             .stderr(Stdio::null()),

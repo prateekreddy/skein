@@ -1497,7 +1497,7 @@ mod tests {
         // secrets, so it covers whatever is on the volume on the day it runs.
         crate::apiauth::token().unwrap();
         crate::gitgate::set_write_credential("mine", "my token", &["owner/repo".into()]).unwrap();
-        crate::gitgate::set_credential_token("mine", "ghp_secret").unwrap();
+        crate::gitgate::set_credential_token("mine", "skein-test-ghp-secret").unwrap();
         crate::tracking::upsert_connection(
             Some("plane"),
             "Plane",

@@ -1455,7 +1455,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         env.set("SKEIN_CLAUDE_BIN", &bin);
-        env.set("ANTHROPIC_API_KEY", "sk-ant-stale");
+        env.set("ANTHROPIC_API_KEY", "skein-test-sk-ant-stale");
 
         // A HOME carrying a login: the key is removed, and the call runs on the subscription.
         let mine = home.join("mine");
@@ -1480,7 +1480,7 @@ mod tests {
         forget_refusal();
         assert_eq!(
             claude_oneshot("hi").as_deref(),
-            Some("sk-ant-stale"),
+            Some("skein-test-sk-ant-stale"),
             "skein took away the only credential the call had"
         );
 
