@@ -200,6 +200,12 @@ jobs:
       # It is also the gate whose failure is unfixable after the fact — a push cannot be unseen —
       # which is precisely the kind that must not depend on memory (SKEIN-492).
       - run: tools/gates.sh run residue-check
+      # The public CLAUDE.md, which every agent in a checkout reads first: no tracker id, no tracker
+      # project id, nothing on the residue register, AGENTS.md a symlink to it, and sync's installer
+      # leaving it byte-identical. That last rule runs the installer's own doc step, because a
+      # renamed `## Work tracking` heading would otherwise append the owner's tracker section to a
+      # tracked file on every box with sync, and nothing else would say so (SKEIN-1158).
+      - run: tools/gates.sh run claude-md-check
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.

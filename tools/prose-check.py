@@ -26,7 +26,7 @@ rule one was green on all five because the leaf exists (SKEIN-695). The rule rep
 than it could, on purpose — `misqualified` lists what it declines to check and what that cost,
 because an honest stated limit is worth more than a rule that over-reports and gets switched off.
 
-WHERE THE PROSE IS. `docs/*.md`, the markdown at the repo root, the page's own comments, **every
+WHERE THE PROSE IS. `docs/**/*.md`, the markdown at the repo root, the page's own comments, **every
 comment in `src/**/*.rs`**, the cockpit suites, the `#` comments in **every `.sh` file in the
 tree** — `find . -name '*.sh' -not -path './.git/*' -not -path './target/*'` is the set, and
 `shell_files` is the walk — and the `#` comments in **`docs/*.toml`** but for two ledgers,
@@ -506,11 +506,12 @@ def prose_sources():
         path = os.path.join(ROOT, f)
         if f.endswith(".md") and os.path.isfile(path):
             yield f, open(path, encoding="utf-8").read().split("\n")
-    docs = os.path.join(ROOT, "docs")
-    for f in sorted(os.listdir(docs)):
-        if f.endswith(".md"):
-            path = os.path.join(docs, f)
-            yield os.path.relpath(path, ROOT), open(path, encoding="utf-8").read().split("\n")
+    # Every tracked `docs/**/*.md`, not `docs/*.md` (SKEIN-1160). This was `os.listdir(docs)`, which
+    # stops at the first level, and `docs/decisions/` is a level down: its records name symbols as
+    # evidence ("Enforced at"), and they were outside this rule while `citation_sources` already
+    # read them for the citation rule. `docs_markdown` has the list; `main`'s count guard holds it.
+    for label, path in docs_markdown():
+        yield label, open(path, encoding="utf-8").read().split("\n")
     # The page's SOURCES, not the page: `src/web/index.html` is assembled from `src/web/app/` by
     # `cockpit/build.mjs` (SKEIN-1104), byte for byte, so its comments are the same comments — but a
     # finding labelled with the assembled file sends its reader to the one copy that must not be
@@ -579,6 +580,26 @@ def tracked_files(root=None):
     except (OSError, subprocess.SubprocessError):
         return None
     return [p for p in out.stdout.decode("utf-8", "replace").split("\0") if p]
+
+
+def docs_markdown():
+    """Every `.md` file this repository tracks under `docs/`, at any depth, as (label, path).
+
+    `tracked_files()` first, for the reason it gives: tracked is the tree. Falls back to walking
+    `docs/` when git could not answer, the same degraded path `shell_files` takes.
+    """
+    listed = tracked_files()
+    if listed is not None:
+        for rel in sorted(listed):
+            if rel.startswith("docs/") and rel.endswith(".md"):
+                yield rel, os.path.join(ROOT, rel)
+        return
+    for base, dirs, files in os.walk(os.path.join(ROOT, "docs")):
+        dirs.sort()
+        for f in sorted(files):
+            if f.endswith(".md"):
+                path = os.path.join(base, f)
+                yield os.path.relpath(path, ROOT), path
 
 
 def shell_files():
@@ -806,6 +827,18 @@ def prose_source_count(suffix):
     if suffix == ".toml":
         present = [f for f in os.listdir(os.path.join(ROOT, "docs")) if f.endswith(".toml")]
         return sum(1 for f in present if f not in TOML_PROSE_EXEMPT)
+    if suffix == "docs/.md":
+        # Every `.md` on disk under `docs/`, at any depth, by a walk `docs_markdown` does not call:
+        # put the old `os.listdir(docs)` back and `docs/decisions/` stops being read, and this
+        # still counts it (SKEIN-1160). A walk rather than git, so that narrowing the git filter in
+        # `docs_markdown` is caught too; an untracked `.md` under `docs/` makes the two disagree,
+        # and the message says to stage it.
+        return sum(
+            1
+            for _, _, files in os.walk(os.path.join(ROOT, "docs"))
+            for f in files
+            if f.endswith(".md")
+        )
     raise ValueError(f"no second walk is written for {suffix!r}")
 
 
@@ -1320,7 +1353,7 @@ def citation_sources():
     """[(label, text, is_markdown)] for every file a citation is read from."""
     out = []
     # The markdown at the REPO ROOT — README, ARCHITECTURE, VISION, CONTRIBUTING, SECURITY,
-    # CHANGELOG. `prose_sources()` above reads `docs/*.md` and stops there, so these are the one
+    # CHANGELOG. `prose_sources()` above read only `docs/` when this was written, so these were the one
     # piece of this project's prose no gate looks at, and they are the prose a stranger reads
     # first. They carry no citations today, so including them costs nothing and closes the door;
     # the symbol half of the same gap is measured in SKEIN-604 and is not free.
@@ -2240,6 +2273,21 @@ def main():
             f"the ARGUMENT for an edge or an exemption, and is read by whoever has to decide "
             f"whether it is still right — so it is prose. Deriving none, or fewer than are in "
             f"scope, means this gate answers about documents it did not open"
+        )
+        return 2
+
+    # And the markdown under `docs/`, at every depth (SKEIN-1160): `os.listdir(docs)` read one level
+    # and `docs/decisions/` was below it, so a record could name a function the tree never had.
+    on_disk = prose_source_count("docs/.md")
+    read = sum(1 for label, _ in sources if label.startswith("docs/") and label.endswith(".md"))
+    if on_disk == 0 or read != on_disk:
+        print(
+            f"prose-check: {on_disk} `.md` file(s) are under docs/ and prose_sources() read "
+            f"{read}\n"
+            f"             rule: a document under docs/, at any depth, is prose, and "
+            f"docs/decisions/ is a level down (SKEIN-1160). A new file is read once git tracks it, "
+            f"so `git add -N` it; otherwise the reader has been narrowed, and this refuses to "
+            f"answer about documents it did not open"
         )
         return 2
 

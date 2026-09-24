@@ -205,6 +205,7 @@ gates() {
     "line-cite-check|yes|python3 tools/line-cite-check.py" \
     "continuation-check|yes|python3 tools/continuation-check.py" \
     "residue-check|yes|python3 tools/residue-check.py" \
+    "claude-md-check|yes|python3 tools/claude-md-check.py" \
     "cockpit-tests|yes|node --test \"cockpit/test/*.test.mjs\"" \
     "cockpit-bundle|yes|node cockpit/build.mjs --check" \
     "fixture-root-check|yes|node tests/ui/harness/leaks.mjs --fixture-root" \

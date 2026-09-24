@@ -237,8 +237,8 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 34
-tools/gates.sh --list | wc -l                        # → 20
+grep -c '^      - run:' .github/workflows/ci.yml     # → 35
+tools/gates.sh --list | wc -l                        # → 21
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -253,10 +253,11 @@ tools/gates.sh --list | wc -l                        # → 20
 | `env-lock-check` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `fleet-pin-check` | a test that pins `$SKEIN_HOME` or `$SKEIN_FLEET_ROOT` says something about the other | `docs/fleet-pins.toml` |
 | `prose-check` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
-| `link-check` | every markdown link, and every backticked repo path, names a file git tracks | `docs/links.toml` |
+| `link-check` | every markdown link, and every backticked repo path, names a file git tracks; every record in `docs/decisions/` is in its README's index | `docs/links.toml` |
 | `line-cite-check` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
 | `continuation-check` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
 | `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
+| `claude-md-check` | `CLAUDE.md` names no tracker id, project id or registered name, `AGENTS.md` is a symlink to it, and `sync`'s installer leaves it byte-identical | — |
 | `cockpit-tests` | the cockpit's pure functions | — |
 | `cockpit-bundle` | the committed bundle is not stale | — |
 | `fixture-root-check` | every browser suite that drives a real server builds its fixture under the fixture root, not `os.tmpdir()` | — |
@@ -705,7 +706,7 @@ with the exceptions in `GATED` (see the README's Build section), but no CI run s
 **What CI runs.** `.github/workflows/ci.yml`, on every branch push and pull request, on
 `ubuntu-latest`:
 
-- the `check` job: every gate `tools/gates.sh` marks for CI, one step each. That is 18 of the 19;
+- the `check` job: every gate `tools/gates.sh` marks for CI, one step each. That is 20 of the 21;
   `alone-check` is the one it does not run, for the reason under "The gate that is not in CI"
   above, and `gate-list-check` fails if that ever stops being the only one.
 - the `msrv` job: `cargo build --locked --all --all-targets` on the toolchain `rust-version` in

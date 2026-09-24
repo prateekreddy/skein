@@ -38,6 +38,16 @@ WHAT FAILS, two shapes and one question.
   from inside `docs/`. Either resolving is enough. The files of a checked-out submodule count as
   tracked (`--recurse-submodules`); the submodule's own markdown is upstream's and is not read.
 
+THE DECISIONS INDEX, the one place the question runs the other way (SKEIN-1159). A record in
+`docs/decisions/` is only found by a reader who meets it in `docs/decisions/README.md`'s index, so
+a record the index does not list is as lost as a link to a file that is gone, and the dead-link
+rule above cannot see it: nothing points at the record, so nothing is dead. So every tracked
+`docs/decisions/*.md` other than the README must be the target of a link in a TABLE ROW of that
+README — a mention in its prose does not count, because the table is what a reader scans. The
+other direction, an index row naming a record that is not there, is the dead-link rule's already.
+A README whose table yields no links at all refuses rather than passes: that is a table this no
+longer knows how to read, not an index that lists nothing.
+
 WHAT IS DECLARED. A path the prose names on purpose although the tree does not have it goes in
 `docs/links.toml`, under the file that names it, with the reason — the shape of
 `docs/prose-symbols.toml`, and the same two classes: a path named in the PAST TENSE, as gone or as
@@ -162,6 +172,29 @@ def dead(docs, known, top, exempt):
     return bad, used
 
 
+DECISIONS = "docs/decisions"
+DECISIONS_INDEX = DECISIONS + "/README.md"
+
+
+def unindexed(files, index_text):
+    """(records the index does not list, how many records the index table links to).
+
+    `files` is every tracked path; `index_text` is `docs/decisions/README.md`, or None when that
+    file is not tracked. A record is a direct child of `docs/decisions/` ending `.md`, the README
+    aside. Only links inside a table row (a line starting `|`) count as listed."""
+    records = sorted(f for f in files if os.path.dirname(f) == DECISIONS and f.endswith(".md")
+                     and f != DECISIONS_INDEX)
+    listed = set()
+    for _, line in prose_lines(index_text or ""):
+        if not line.lstrip().startswith("|"):
+            continue
+        for m in INLINE_LINK.finditer(CODE_SPAN.sub("", line)):
+            path = path_of(m.group(1))
+            if path is not None:
+                listed.add(os.path.normpath(os.path.join(DECISIONS, path)))
+    return [r for r in records if r not in listed], len(listed)
+
+
 def self_check():
     """The rules, against text this file holds, so a broken rule fails here rather than passing
     the tree. The comment on each numbered line is the change that line exists to catch.
@@ -203,6 +236,21 @@ def self_check():
     assert [(s, t) for s, _, t in bad] == [("src/x.md", "gone.md")] and \
         used == {("docs/a.md", "gone.md")}, \
         "link-check self-check: an exemption must excuse its own file's path and no other file's"
+    # The decisions index: a record listed only in prose, or only in a fenced block, is unlisted;
+    # a record in a subdirectory, the README itself and a non-record file are not records.
+    files = ["docs/decisions/README.md", "docs/decisions/a.md", "docs/decisions/b.md",
+             "docs/decisions/c.md", "docs/decisions/d.md", "docs/decisions/sub/e.md",
+             "docs/decisions/f.txt", "docs/g.md"]
+    index = "\n".join([
+        "| record | what |", "|---|---|",
+        "| [a.md](a.md) | listed |",                 # a row: listed
+        "See [b.md](b.md) in passing.",              # prose, not a row: b is unlisted
+        "```", "| [c.md](c.md) | fenced |", "```",    # fenced: c is unlisted
+        "| `[d.md](d.md)` | in code |",              # inside a code span: d is unlisted
+    ])
+    missing, rows = unindexed(files, index)
+    assert missing == ["docs/decisions/b.md", "docs/decisions/c.md", "docs/decisions/d.md"] \
+        and rows == 1, f"link-check self-check: unindexed records {missing}, {rows} row link(s)"
 
 
 def load_ledger():
@@ -249,11 +297,21 @@ def main():
         print(f"{source}:{n}: {target} is not a file this repository tracks")
     for source, path in stale:
         print(f"docs/links.toml: [\"{source}\"] \"{path}\" excuses nothing any more; delete it")
-    if bad or stale or unread:
-        print(f"link-check: {len(bad)} dead path(s), {len(stale)} stale exemption(s)", file=sys.stderr)
+    index_text = dict(docs).get(DECISIONS_INDEX)
+    unlisted, rows = unindexed(own, index_text)
+    for record in unlisted:
+        print(f"{record}: a decision record {DECISIONS_INDEX}'s index table does not list; add "
+              f"its row, which is how a reader finds it")
+    if index_text is not None and rows == 0:
+        print(f"{DECISIONS_INDEX}: its index table yielded no record links, so which records it "
+              f"lists could not be read")
+        unlisted = unlisted or [DECISIONS_INDEX]
+    if bad or stale or unread or unlisted:
+        print(f"link-check: {len(bad)} dead path(s), {len(stale)} stale exemption(s), "
+              f"{len(unlisted)} unindexed decision record(s)", file=sys.stderr)
         return 1
     print(f"link-check: {len(docs)} markdown files, every linked or backticked repo path is tracked"
-          f" ({len(used)} declared exemption(s))")
+          f" ({len(used)} declared exemption(s)); every decision record is in its index table ({rows} row link(s))")
     return 0
 
 

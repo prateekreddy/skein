@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:492"]
+["CONTRIBUTING.md:493"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:506"]
+["CONTRIBUTING.md:507"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:537"]
+["CONTRIBUTING.md:538"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -2334,16 +2334,16 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
-["tools/gates.sh:708"]
+["tools/gates.sh:709"]
 line = "--verify)"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
-["tools/gates.sh:1222"]
+["tools/gates.sh:1223"]
 line = "exit 3"
 window = "echo \" Run it again on a tree nobody else is writing to.\"\u000bexit 3\u000bfi"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
-["tools/prose-check.py:1832"]
+["tools/prose-check.py:1865"]
 line = "\"Written long ago. Citations in this document name lines as they stood at `abc1234`.\\n\""
 cited_by = ["docs/citations.toml"]
 
