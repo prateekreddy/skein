@@ -519,23 +519,52 @@ pub fn box_tracking(name: &str) -> Option<String> {
 }
 
 /// Whether `choice` may be recorded as a box's tracking choice: empty, meaning "this box claims no
-/// work", or a well-formed connection id.
+/// work", or the id of a connection that is configured.
 ///
 /// Refusing it here is about diagnosis, not paths — the choice is file content, and a value that
-/// was never a connection id simply finds no connection in [`connection_for_box`]. What it cost was
-/// that the box then claimed through nothing while its file said something else, so nothing that
-/// read it could tell "cleared on purpose" from a typo (SKEIN-538). Public so the route can answer
-/// with a 400 before the library is asked; [`set_box_tracking`] applies it again so no other caller
-/// can skip it.
+/// names no connection simply finds none in [`connection_for_box`]. What it cost was that the box
+/// then claimed through nothing while its file said something else, so nothing that read it could
+/// tell "cleared on purpose" from a typo (SKEIN-538). A well-formed id is not enough for the same
+/// reason: `plane2` is as much a typo as `Plane 2`, and was saved while only `plane` existed
+/// (SKEIN-1134). Public so the route can answer with a 400 before the library is asked;
+/// [`set_box_tracking`] applies it again so no other caller can skip it.
 pub fn check_box_tracking_choice(choice: &str) -> Result<(), String> {
     let choice = choice.trim();
-    if choice.is_empty() || valid_connection_id(choice) {
+    if choice.is_empty() {
         return Ok(());
     }
-    Err(format!(
-        "{choice:?} is not a connection id — an id is lowercase letters, digits and dashes, and an \
-         empty one means this box claims no work"
-    ))
+    if !valid_connection_id(choice) {
+        return Err(format!(
+            "{choice:?} is not a connection id — an id is lowercase letters, digits and dashes, \
+             and an empty one means this box claims no work"
+        ));
+    }
+    // `read_connections` first, so a file that will not parse is reported as that rather than as
+    // "you have no connections", which is what `load_connections` hands back for it.
+    let list = match read_connections() {
+        Err(why) => {
+            return Err(format!(
+                "cannot check {choice:?} against your work-tracking connections ({why}) — fix or \
+                 move that file, then try again"
+            ))
+        }
+        Ok(_) => load_connections(),
+    };
+    if list.iter().any(|c| c.id == choice) {
+        return Ok(());
+    }
+    let ids: Vec<&str> = list.iter().map(|c| c.id.as_str()).collect();
+    Err(match ids.is_empty() {
+        true => format!(
+            "{choice:?} is not one of your work-tracking connections — you have none yet. Add one \
+             in Settings → Work tracking, or choose none so this box claims no work"
+        ),
+        false => format!(
+            "{choice:?} is not one of your work-tracking connections ({}) — choose one of those, \
+             or none so this box claims no work",
+            ids.join(", ")
+        ),
+    })
 }
 
 /// Record (or clear) that choice. `None` returns the box to its repo's default.
@@ -1061,6 +1090,16 @@ mod tests {
         assert!(
             set_box_tracking("web-main", Some("../Solo")).is_err(),
             "the library recorded a choice that is no connection id"
+        );
+        assert_eq!(box_tracking("web-main").as_deref(), Some("solo"));
+
+        // A well-formed id that names no configured connection is a typo too, and the refusal
+        // lists the ones that exist so the person can see which they meant (SKEIN-1134).
+        let why = set_box_tracking("web-main", Some("solo2"))
+            .expect_err("the library recorded a choice that names no configured connection");
+        assert!(
+            why.contains("\"solo2\"") && why.contains("(team, solo)"),
+            "the refusal does not name the value and the connections that exist: {why}"
         );
         assert_eq!(box_tracking("web-main").as_deref(), Some("solo"));
 
@@ -2491,6 +2530,8 @@ mod tests {
         let dir = tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", &dir);
+        // A configured `solo`, so the ordinary write names a connection that exists (SKEIN-1134).
+        upsert_connection(Some("solo"), "solo", "https://solo.example", None).unwrap();
 
         // The present half, first and in the same test: an absence that was never a presence
         // proves nothing, so every refusal below is measured against a write that does happen.

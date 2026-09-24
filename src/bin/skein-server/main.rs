@@ -1170,6 +1170,87 @@ mod cockpit_routes {
         )
     }
 
+    /// `page` with every `/* … */` block comment blanked out, the same way and for the same reason
+    /// [`without_html_comments`] blanks `<!--` — same lines, same line numbers, and code that shares
+    /// a line with a comment left standing (SKEIN-1014).
+    ///
+    /// **The opener is anchored exactly where the per-line filter anchored it**: a `/*` opens a span
+    /// only when it begins its line (after leading whitespace), or begins what is left of a line after
+    /// a span closed on it. That is the whole answer to the swallow this was left open for. A `/*`
+    /// inside a string (`"/*"`) or a regex literal (`/\/*/`) is ordinary JavaScript, and an unanchored
+    /// span would open a comment there and drop every read after it; neither can begin a line, since a
+    /// string begins with its quote and a regex cannot begin with `*`. The closer is the first `*/`
+    /// after the opener, which is the language's own rule in both JavaScript and CSS — a comment has
+    /// no escape for it.
+    ///
+    /// **An opener with no `*/` after it blanks its own line and nothing else**, the per-line
+    /// behaviour, so no input makes this see less than the per-line filter saw. The one it cannot
+    /// answer is a line of a multi-line template literal that begins with `/*` and is never closed; no
+    /// page has one — every line-start opener in the scanned pages closes, the longest span is 26
+    /// lines (`cockpit.js:612`) — and the `<!--` span carries the same exposure.
+    ///
+    /// Measured over the scanned pages after the `<!--` mask: `index.html` 160 openers blanking 370
+    /// lines, 210 of them interiors that do not begin with `*` and were read as code before this;
+    /// `v2.html` 6 and 15 (9); `cockpit.js` 5 and 53 (0 — its interiors all begin with `*`).
+    fn without_block_comments(page: &str) -> String {
+        let lines: Vec<&str> = page.lines().collect();
+        // Spans per line in the ORIGINAL coordinates, applied at the end right to left: `blanked`
+        // counts characters, so blanking one span would move the byte offsets of the next on its line.
+        let mut spans: Vec<Vec<(usize, usize)>> = vec![Vec::new(); lines.len()];
+        let (mut i, mut col) = (0usize, 0usize);
+        while i < lines.len() {
+            let rest = &lines[i][col..];
+            let t = rest.trim_start();
+            if !t.starts_with("/*") {
+                i += 1;
+                col = 0;
+                continue;
+            }
+            let open = col + rest.len() - t.len();
+            // The first `*/` after the opener, on its own line or a later one.
+            let closed = lines.iter().enumerate().skip(i).find_map(|(j, line)| {
+                let from = if j == i { open + 2 } else { 0 };
+                line[from..].find("*/").map(|k| (j, from + k + 2))
+            });
+            match closed {
+                Some((j, end)) => {
+                    for (m, span) in spans.iter_mut().enumerate().take(j + 1).skip(i) {
+                        let from = if m == i { open } else { 0 };
+                        let to = if m == j { end } else { lines[m].len() };
+                        span.push((from, to));
+                    }
+                    // Carry on from the closer, so `*/ /* next` opens again and the result has no
+                    // opener left in it — which is what makes masking twice the same as once.
+                    i = j;
+                    col = end;
+                }
+                None => {
+                    spans[i].push((open, lines[i].len()));
+                    i += 1;
+                    col = 0;
+                }
+            }
+        }
+        lines
+            .iter()
+            .zip(&spans)
+            .map(|(line, spans)| {
+                spans
+                    .iter()
+                    .rev()
+                    .fold((*line).to_string(), |acc, &(from, to)| {
+                        blanked(&acc, from, to)
+                    })
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Both comment syntaxes blanked: `<!--` first, so a `/*` inside an HTML comment is already gone.
+    fn without_comments(page: &str) -> String {
+        without_block_comments(&without_html_comments(page))
+    }
+
     /// Every `/api/…` path a page can BUILD, as `(1-based line, path)` with `${…}` left standing.
     ///
     /// Two narrowings, both to keep this from reporting prose as a request. The `/api/` must open a
@@ -1196,12 +1277,12 @@ mod cockpit_routes {
     /// (`index.html:1881` `/api/health`, `:1895` `/api/fleet/plan`, `:1931` `/api/update`), and all
     /// three routes are fetched for real elsewhere in the same page, so nothing became uncalled.
     ///
-    /// The limit that is left, since it is the kind that reads as covered: `//`, `*` and `/*` are
-    /// still per LINE. A JavaScript block comment whose interior lines do not begin with `*` is
-    /// still read as code. `cockpit.js` indents every one of its interiors with `*` and
-    /// `index.html` has three `*` lines in all, so there is nothing in the tree that costs today.
+    /// **`/*` is a span too now** (SKEIN-1014): a block comment whose interior lines do not begin
+    /// with `*` was read as code, 210 such lines in `index.html` and 9 in `v2.html`.
+    /// [`without_block_comments`] blanks it and says why a `/*` inside a string cannot open one.
+    /// `//` stays per line, which is all it ever is.
     fn asked_for(page: &str) -> Vec<(usize, String, &'static str)> {
-        let page = without_html_comments(page);
+        let page = without_comments(page);
         let lines: Vec<&str> = page.lines().collect();
         let mut out = Vec::new();
         for (n, line) in lines.iter().enumerate() {
@@ -1837,6 +1918,128 @@ mod cockpit_routes {
             plantable > 0,
             "no page holds a `-->` at all, so there is nowhere a stray opener could run to and the \
              counts above would be equal whatever this scanner did"
+        );
+    }
+
+    /// **And a route named on the interior of a `/* … */` block comment** (SKEIN-1014).
+    ///
+    /// The same hole one comment syntax down: `/*` was per line, so an interior line that does not
+    /// begin with `*` read as code. Asserted with the four directions a `/*` span could get wrong,
+    /// and two of them are the reason it was left open: a `/*` inside a string and one inside a
+    /// regex literal, each with a `*/` after it so a span that opened there would have somewhere
+    /// to run to. Then planted into the real pages and measured on the mask, for the reason
+    /// [`a_route_named_inside_a_multi_line_html_comment_still_has_no_caller`] gives: no page puts a
+    /// request where a stray opener would reach it only by accident, so a request count proves
+    /// nothing about the anchor.
+    ///
+    /// **What would make this fail:** dropping [`without_block_comments`] from [`asked_for`] (the
+    /// fixture's interior line is read as a request), or letting a `/*` open anywhere on a line
+    /// rather than only at its start (the string and regex rows, and the planted pages, blank the
+    /// code after them).
+    #[test]
+    fn a_route_named_inside_a_multi_line_block_comment_still_has_no_caller() {
+        let router = format!(
+            " .{}(\"/api/only-in-a-block-comment\", {}(h)) ",
+            "route", "get"
+        );
+        let routes = entries(&router);
+        assert_eq!(
+            routes,
+            vec![("/api/only-in-a-block-comment", vec!["get"])],
+            "the fixture router did not parse, so what follows proves nothing"
+        );
+
+        // The shape `src/web/index.html:502` is in: an interior line that does not begin with `*`.
+        let page = [
+            "  /* The old pane polled on every tick:",
+            "     fetch(\"/api/only-in-a-block-comment\") — which is why it is gone. */",
+        ]
+        .join("\n");
+        let page = page.as_str();
+        assert!(
+            asked_for(page).is_empty(),
+            "a route named on a line INSIDE a block comment was read as a request to it: {:?}",
+            asked_for(page)
+        );
+        let asks: Vec<(&str, usize, String, &'static str)> = asked_for(page)
+            .into_iter()
+            .map(|(line, path, method)| ("fixture.html", line, path, method))
+            .collect();
+        assert_eq!(
+            unasked(&routes, &asks),
+            vec![("/api/only-in-a-block-comment", "get")],
+            "a route nothing calls read as called, because a block comment's interior names it"
+        );
+
+        let seen = |page: &str| -> Vec<String> {
+            asked_for(page).into_iter().map(|(_, p, _)| p).collect()
+        };
+        for (what, page, path) in [
+            (
+                "code after a block comment that closes on its own line",
+                "  /* the old pane */ fetch(\"/api/after-a-closed-comment\");",
+                "/api/after-a-closed-comment",
+            ),
+            (
+                "code under a block comment that is never closed",
+                "  /* this comment is never closed\n  fetch(\"/api/after-an-unclosed-comment\");",
+                "/api/after-an-unclosed-comment",
+            ),
+            (
+                "code after a `/*` inside a string",
+                "  const s = \"/*\";\n  fetch(\"/api/after-a-string\");\n  /* a closer to run to */",
+                "/api/after-a-string",
+            ),
+            (
+                "code after a `/*` inside a regex literal",
+                "  const re = /\\/*/;\n  fetch(\"/api/after-a-regex\");\n  /* a closer to run to */",
+                "/api/after-a-regex",
+            ),
+        ] {
+            assert_eq!(
+                seen(page),
+                vec![path],
+                "{what}: a request the page makes stopped being counted, so this gate goes quiet \
+                 over it and the router gate accuses a route the page does call"
+            );
+        }
+
+        // Planted into the real pages, and measured on the mask: neither plant may blank a line
+        // that was not already blank.
+        let blanked_lines = |text: &str| -> usize {
+            let masked = without_comments(text);
+            text.lines()
+                .zip(masked.lines())
+                .filter(|(raw, cooked)| raw != cooked)
+                .count()
+        };
+        let mut plantable = 0;
+        for (name, page) in scanned() {
+            if !page.contains("*/") {
+                continue;
+            }
+            plantable += 1;
+            let before = blanked_lines(page);
+            for plant in ["  const s = \"/*\";", "  const re = /\\/*/;"] {
+                assert_eq!(
+                    blanked_lines(&format!("{plant}\n{page}")),
+                    before,
+                    "{name}: `{plant}` opened a block comment, and every request it blanked stops \
+                     being counted"
+                );
+            }
+            // The idempotence the two masks lean on: nothing either leaves can open a comment.
+            let masked = without_comments(page);
+            assert_eq!(
+                without_comments(&masked),
+                masked,
+                "{name}: masking twice is not masking once"
+            );
+        }
+        assert!(
+            plantable > 0,
+            "no page holds a `*/` at all, so a stray opener has nowhere to run to and the counts \
+             above would be equal whatever this scanner did"
         );
     }
 }
