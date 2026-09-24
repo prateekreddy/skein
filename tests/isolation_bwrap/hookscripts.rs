@@ -29,9 +29,10 @@ use super::*;
 /// **What would make this fail**:
 /// - `--bind` in place of `--ro-bind` for `.skein` in `box-session.sh`'s isolation block: A's
 ///   writes to the plugin land (the first assertion);
-/// - a turn-state command put back on `$CLAUDE_PROJECT_DIR/.claude/skein/bin/` in
-///   `probes::store_era_entries`'s place: B's hook runs A's plant, which writes the marker and
-///   reports no state (the last two assertions).
+/// - the turn-state commands put back on `$CLAUDE_PROJECT_DIR/.claude/skein/bin/`, the store's
+///   copies (`probes::turn_state_entries` returning `probes::store_era_entries` unchanged): the
+///   script B's hook runs is then one A can overwrite (the first assertion), and B's hook runs
+///   A's plant, which leaves a marker and reports no state (the last three).
 #[test]
 fn a_box_cannot_rewrite_the_script_its_siblings_turn_state_hook_runs() {
     if !bwrap_works() {
@@ -69,6 +70,9 @@ mkdir -p "$(dirname "$plant")" 2>/dev/null
         let store = fleet.store();
         let tree = fleet.fleet_root.join("web-main/tree");
         std::os::unix::fs::symlink(&store, tree.join(".claude")).unwrap();
+        // And the store holds its own copies, as `probes::ensure_probe_in` leaves every store.
+        let plant = store.join("skein/bin/box-status.sh");
+        fs::create_dir_all(plant.parent().unwrap()).unwrap();
 
         // The hook B fires, from the variant every box loads whichever way the switch is set.
         let plugin = skein::runtime::turn_state_plugin_dir_under(&root);
@@ -88,11 +92,14 @@ mkdir -p "$(dirname "$plant")" 2>/dev/null
         let script = command
             .split_once('"')
             .and_then(|(_, rest)| rest.split_once('"'))
-            .map(|(s, _)| s.replace("${CLAUDE_PLUGIN_ROOT}", &plugin))
+            .map(|(s, _)| {
+                s.replace("${CLAUDE_PLUGIN_ROOT}", &plugin)
+                    .replace("$CLAUDE_PROJECT_DIR", &tree.to_string_lossy())
+            })
             .expect("the hook names its script in quotes");
-        let original = fs::read(&script)
-            .unwrap_or_else(|e| panic!("the hook runs {script}, and nothing is there: {e}"));
-        let plant = store.join("skein/bin/box-status.sh");
+        let original = fs::read(format!("{plugin}/probe/box-status.sh"))
+            .expect("the plugin installs no box-status.sh");
+        fs::write(&plant, &original).unwrap();
 
         let out = fleet.in_box(
             born,

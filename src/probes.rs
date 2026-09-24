@@ -2607,7 +2607,8 @@ mod tests {
     /// What would make it fail: the store scaffold writing skein's hooks again (the first
     /// assertion); a variant losing its turn-state hooks (no command is found); a command the
     /// plugin carries that no longer reaches a script the plugin installs, or a plugin copy that
-    /// no longer finds the store from the project (no state is written).
+    /// no longer finds the store from the project (no state is written); the same for Codex's
+    /// commands, which name the turn-state variant by the fleet root.
     #[test]
     fn a_fresh_store_has_no_skein_hooks_and_the_plugin_still_reports_turn_state() {
         let _g = env_lock();
@@ -2678,6 +2679,31 @@ mod tests {
             run("Stop", r#"box-status.sh" waiting"#);
             assert_eq!(status(), "waiting", "through {path}");
             fs::remove_file(store.join("status/example.json")).unwrap();
+        }
+
+        // And Codex's, which reach the same plugin copy by the fleet root rather than by
+        // `${CLAUDE_PLUGIN_ROOT}`, from the box's working directory rather than a project variable.
+        let codex = codex_hooks_with_probe();
+        for (event, mode) in [("UserPromptSubmit", "working"), ("Stop", "waiting")] {
+            let (_, command) = commands(&codex)
+                .into_iter()
+                .find(|(e, c)| e == event && c.contains(&format!("box-status.sh {mode}")))
+                .unwrap_or_else(|| panic!("Codex has no {event} hook for box-status.sh"));
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(&command)
+                .current_dir(root.as_ref() as &Path)
+                .env_remove("CLAUDE_PROJECT_DIR")
+                .env("SKEIN_FLEET_ROOT", &fleet_root)
+                .env("SKEIN_BOX", "example")
+                .stdin(Stdio::null())
+                .output()
+                .expect("bash");
+            assert!(out.status.success(), "{command}: {out:?}");
+            let text = fs::read_to_string(store.join("status/example.json"))
+                .unwrap_or_else(|e| panic!("Codex's {event} hook wrote no state: {e}"));
+            let v: serde_json::Value = serde_json::from_str(&text).expect(&text);
+            assert_eq!(v["status"], mode, "through Codex's {event}");
         }
     }
 
