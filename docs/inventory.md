@@ -292,9 +292,31 @@ been derived from:
 | `ensure_known_hosts`, `ensure_box_known_hosts` | credentials |
 | `heal_fleet` | **sandbox root** (cgroup ceilings, by shelling the launcher's `--ceilings` path) |
 
-Note `ensure_probe_all` deserves its own line in any design: it writes 19 scripts and merges hooks
-into **every registered repo's `settings.json` on every server start**. Parity records that without
-it there is no turn state at all, which makes it the highest-blast-radius write in the system.
+Note `ensure_probe_all` deserves its own line in any design: it writes 19 scripts and rewrites
+**every registered repo's `settings.json` on every server start** — no longer to add skein's hooks,
+which moved out of the store (§8.1), but to take the ones a past skein wrote there back out while
+keeping the person's own. It edits a file the person also edits, in every store, which makes it the
+highest-blast-radius write in the system.
+
+### 8.1 What a box runs for skein is skein's, and read-only to the box
+
+**A repository implements nothing for skein's sake.** A box is a coding agent in a checkout, and
+everything skein needs from it — turn state, the current task, the diff, the session — comes from
+the host's own reads or from a probe skein ships. If a capability needed the repository to carry a
+script or a hook, that would be a coupling bug, and the fix would be to pull it into skein. What
+stays the project's is what is the project's: its own hooks, dependency install and environment,
+none of which skein touches.
+
+**Where the probe lives is a trust decision, not a packaging one.** It used to be installed into
+the store, `<store>/skein/bin/` with its hooks merged into the store's `settings.json`, and the
+store is written by every box of the repo (`STORE_PROBE`, `src/probes.rs`) — so one box could
+choose what a sibling ran as it started. Now the hooks load from a plugin skein installs under the
+fleet root's `.skein`, which the launcher binds read-only into every box (`turn_state_hooks`,
+`plugin_install`, and `install_launcher` in `src/fleet/launcher.rs`), and each hook runs the
+plugin's own copy of its script (`PLUGIN_PROBE`). What a box runs as it starts, and what Codex's
+hooks and the status line run, comes from the same read-only directory (`box_probe_dir`). The store
+keeps copies under `skein/bin/` for an agent that runs one by hand; nothing skein starts runs them,
+and `store_settings` is the retire half described in §8 above.
 
 ## 9. The level signal is six values
 
