@@ -9,11 +9,21 @@
 // test`'s own build phase just produced, strictly before any suite runs — which is why the hole was
 // in the by-hand loop and nothing a `cargo test` run could have caught on its own.
 //
-// **No fixture repo for the staleness cases.** [`embeddedWebAssets`] and [`serverBinary`] are
-// exercised against the checkout this test runs in — a stand-in `src/` would only prove a reader
-// that never runs for real works on a page that never ships. What is faked is the one thing the item
-// is about: the BINARY. It is a plain file, never executed, because only its mtime is read. The
-// empty-repo case at the bottom is the exception, and says why there.
+// **Cases 1 and 2 use no fixture repo.** [`embeddedWebAssets`] and [`serverBinary`] are exercised
+// against the checkout this test runs in — a stand-in `src/` would only prove a reader that never
+// runs for real works on a page that never ships. What is faked is the one thing the item is about:
+// the BINARY. It is a plain file, never executed, because only its mtime is read.
+//
+// **Case 3 (and the empty-repo case below) build a fixture tree, and here is why that stops being
+// optional.** An integrator's plant caught this suite short: `assets.slice(0, 1)` inside
+// `refuseIfStale`, checking only the first derived asset — and `node tests/ui/stalebin.mjs` still
+// said "all good", because every asset this checkout actually embeds was written by the same `git
+// worktree add` and reads within the same second of each other. "Older than the newest" and "older
+// than the FIRST derived asset" are the same fact on THIS tree, so Case 1 below throws either way
+// and proves nothing about whether every asset is checked or just one. Telling those two apart needs
+// two assets whose relative order is chosen rather than inherited — hence a fixture repo, the way
+// `serverBinary`'s new `repo` parameter (added for exactly this) and the empty-repo case already
+// build one.
 import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,6 +99,63 @@ try {
 } finally {
   restoreEnv();
   rmSync(scratch, { recursive: true, force: true });
+}
+
+// Case 3: two derived assets, ordered so the STALE one is second — the shape `assets.slice(0, 1)`
+// inside `refuseIfStale` hides, because it only ever inspects the first. `aaa.txt` sorts before
+// `zzz.txt`, `aaa.txt` is set older than the binary (fine) and `zzz.txt` newer (stale), so a correct
+// `refuseIfStale` throws naming `zzz.txt` and a `slice(0, 1)`'d one never even reaches it — `aaa.txt`
+// alone is not stale, so the sliced loop finds nothing to refuse and returns the binary as if it
+// were fresh.
+//
+// Named change that breaks this: `for (const asset of assets)` -> `for (const asset of
+// assets.slice(0, 1))` in `refuseIfStale`. All three checks below go from "throws, names zzz.txt,
+// does not name aaa.txt" to "does not throw at all" — proved below by planting exactly that change,
+// watching this suite fail, and restoring from a scratchpad copy checked with `md5sum`.
+const twoAssetRepo = mkdtempSync(path.join(os.tmpdir(), "skein-stalebin-two-"));
+const twoBinDir = mkdtempSync(path.join(os.tmpdir(), "skein-stalebin-twobin-"));
+try {
+  const webDir = path.join(twoAssetRepo, "src", "web");
+  mkdirSync(webDir, { recursive: true });
+  const olderAsset = path.join(webDir, "aaa.txt");
+  const newerAsset = path.join(webDir, "zzz.txt");
+  writeFileSync(olderAsset, "embedded before the binary was built\n");
+  writeFileSync(newerAsset, "embedded after the binary was built\n");
+  writeFileSync(path.join(twoAssetRepo, "src", "lib.rs"),
+    'const A: &str = include_str!("web/aaa.txt");\nconst B: &str = include_str!("web/zzz.txt");\n');
+
+  const base = Date.now();
+  const olderTime = new Date(base - 2 * 60 * 60 * 1000);
+  const binTime = new Date(base - 60 * 60 * 1000);
+  const newerTime = new Date(base);
+  utimesSync(olderAsset, olderTime, olderTime);
+  utimesSync(newerAsset, newerTime, newerTime);
+
+  const twoAssets = embeddedWebAssets(twoAssetRepo);
+  check("the fixture derives both assets, the older one sorted first",
+    twoAssets.map(a => path.basename(a)), ["aaa.txt", "zzz.txt"]);
+
+  const twoBin = path.join(twoBinDir, "skein-server");
+  writeFileSync(twoBin, "stand-in for a built skein-server; only its mtime is read by this suite");
+  utimesSync(twoBin, binTime, binTime);
+
+  process.env.SKEIN_SERVER_BIN = twoBin;
+  let twoError = null;
+  try {
+    serverBinary(twoAssetRepo);
+  } catch (e) {
+    twoError = e;
+  }
+  check("refuses when the SECOND derived asset (not the first) is newer than the binary",
+    Boolean(twoError), true);
+  check("the refusal names that second asset",
+    twoError ? twoError.message.includes("zzz.txt") : false, true);
+  check("and does not blame the older, first-derived asset",
+    twoError ? !twoError.message.includes("aaa.txt") : false, true);
+} finally {
+  restoreEnv();
+  rmSync(twoAssetRepo, { recursive: true, force: true });
+  rmSync(twoBinDir, { recursive: true, force: true });
 }
 
 // A "repo" that embeds nothing the way `src/cockpit.rs` does is refused rather than answered with an

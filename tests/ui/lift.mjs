@@ -303,10 +303,19 @@ reader; do not list the files by hand.`);
 // sabotage was EXPECTED to go red. `tests/browser_suites.rs` never hits this — see below — so the
 // refusal below is for the loop this variable exists to speed up: run by hand, pointed at a binary
 // from an earlier build.
-export function serverBinary() {
+//
+// `repo` defaults to this checkout, exactly as [`embeddedWebAssets`]'s own default does, and every
+// production caller (`harness/server.mjs::startServer`, `restart.mjs`) calls this with no argument
+// and is unaffected. It exists so a test can point the staleness check at a fixture tree it built
+// and controls the mtimes of, rather than at files this repository ships — SKEIN-887's follow-up
+// plant (`assets.slice(0, 1)` inside [`refuseIfStale`]) went unnoticed because every real embedded
+// asset here was checked out within the same second, so "older than the newest" and "older than the
+// FIRST derived asset" were indistinguishable on this tree; they are not indistinguishable on one a
+// test builds by hand.
+export function serverBinary(repo = root) {
   const given = process.env.SKEIN_SERVER_BIN;
-  if (given) return refuseIfStale(given);
-  const build = spawnSync("cargo", ["build", "--bin", "skein-server", "--bin", "skein"], { cwd: root, stdio: "inherit" });
+  if (given) return refuseIfStale(given, repo);
+  const build = spawnSync("cargo", ["build", "--bin", "skein-server", "--bin", "skein"], { cwd: repo, stdio: "inherit" });
   if (build.status !== 0) throw new Error("cargo build failed");
   return join(targetDir(), "debug", "skein-server");
 }
@@ -341,8 +350,8 @@ export function serverBinary() {
 //
 // A binary a person points `$SKEIN_SERVER_BIN` at by hand carries none of that ordering, which is
 // the whole reason this exists: nothing stops them running it a week after the last `cargo build`.
-function refuseIfStale(bin) {
-  const assets = embeddedWebAssets();
+function refuseIfStale(bin, repo = root) {
+  const assets = embeddedWebAssets(repo);
   let binMtime;
   try {
     binMtime = statSync(bin).mtimeMs;
@@ -354,7 +363,7 @@ first: cargo build --bin skein-server --bin skein`);
 web asset(s) derived from src/**/*.rs:`);
   const stale = [];
   for (const asset of assets) {
-    const label = relative(root, asset);
+    const label = relative(repo, asset);
     let assetMtime;
     try {
       assetMtime = statSync(asset).mtimeMs;
