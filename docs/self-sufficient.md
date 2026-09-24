@@ -99,8 +99,11 @@ sbx create --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   `PostToolUse(TodoWrite)` hooks into the store's `settings.json` (idempotent; the repo's own hooks
   preserved). The probe writes turn-state to `<store>/status/<vmid>.json`; `current_status()` reads it,
   wired into `load_views` (registry `status` kept only as a transitional fallback). `ensure_probe_all`
-  runs at server startup. Fixes "don't see working vs waiting". Pure logic unit-tested
-  (`settings_with_probe_*`); the actual hook firing needs sbx (host). NOTE: a running box only picks
+  runs at server startup. Fixes "don't see working vs waiting". Pure logic unit-tested; the actual
+  hook firing needs sbx (host). **Superseded for the wiring by SKEIN-1062:** the hooks now load from
+  skein's read-only plugin (`probes::turn_state_hooks`, installed under `.skein` beside the launcher),
+  the store's `settings.json` carries none, and `probes::store_settings` retires the entries this
+  phase wrote from every store that still has them. NOTE: a running box only picks
   up the hooks on its *next* session start — works for newly-created boxes. With this, the registry's
   last job (turn-state) is covered by skein, so `sandboxes.json` can be dropped from skein's reads
   (left as fallback for now). Caveat: `setup-sandbox.sh --sync` would overwrite the store

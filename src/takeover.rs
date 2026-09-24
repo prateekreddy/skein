@@ -841,7 +841,8 @@ mod tests {
         );
 
         // 2. The half the refusal is closest to breaking: a target with no settings yet still
-        // takes the merge, and comes away with the source's keys *and* skein's hooks.
+        // takes the merge, and comes away with the source's keys *and* skein's defaults (its hooks
+        // load from skein's plugin, not from here — SKEIN-1062).
         fs::remove_file(&settings).unwrap();
         merge_shared_context(&snapshot, &target).expect("a fresh target refused the merge");
         let merged: serde_json::Value =
@@ -851,8 +852,8 @@ mod tests {
             "the old box's settings did not reach the new one: {merged}"
         );
         assert!(
-            merged["hooks"]["UserPromptSubmit"].is_array(),
-            "the new box came away unwired: {merged}"
+            merged["statusLine"].is_object(),
+            "the new box came away without skein's settings: {merged}"
         );
 
         // 3. The quiet half: the *snapshot's* settings will not parse. Silently carrying none of

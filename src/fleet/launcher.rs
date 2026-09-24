@@ -213,9 +213,9 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
         own_sandbox(sandbox).write(&script, body.as_bytes(), Duration::from_secs(30))?;
     }
     // skein's box plugin, beside the launcher and under the same read-only `.skein`, so the plugin
-    // every box loads is always this build's (box-plugin §2.1, SKEIN-1056).
-    for (rel, body) in crate::runtime::PLUGIN_FILES {
-        let path = format!("{}/{rel}", crate::runtime::plugin_dir());
+    // every box loads is always this build's (box-plugin §2.1, SKEIN-1056). Both of its variants,
+    // the full one and the turn-state one a fleet with the switch off loads (SKEIN-1062).
+    for (path, body) in crate::runtime::plugin_install() {
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
         let script = format!(
             "mkdir -p {} && cat > {} && chmod 755 {}",
@@ -331,7 +331,7 @@ mod tests {
     }
 
     /// **skein's box plugin is installed where every box's argv looks for it**, byte for byte
-    /// (SKEIN-1056).
+    /// (SKEIN-1056) — both variants, the full one and the turn-state one (SKEIN-1062).
     ///
     /// Driven through the same seam as the launcher test above, keeping each write's argv beside
     /// its bytes. What would make it fail: the plugin loop dropped from `install_launcher` (boxes
@@ -367,13 +367,12 @@ mod tests {
                 ))
             })
             .collect();
-        for (rel, body) in crate::runtime::PLUGIN_FILES {
-            let path = format!("{}/{rel}", crate::runtime::plugin_dir());
+        for (path, body) in crate::runtime::plugin_install() {
             let landed = writes
                 .iter()
                 .find(|(argv, _)| argv.contains(&format!("cat > {}", sh_quote(&path))))
                 .unwrap_or_else(|| panic!("nothing was installed at {path}"));
-            assert_eq!(&landed.1, body, "{path} was installed with other bytes");
+            assert_eq!(landed.1, body, "{path} was installed with other bytes");
         }
     }
 

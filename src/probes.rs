@@ -1,14 +1,15 @@
 //! The in-box probe scripts, and the hook wiring that makes a box report at all.
 //!
-//! skein ships these hook scripts and wires them into the store's `settings.json`, so a box reports
-//! working / waiting / needs-input and its current task without the *repo* providing anything. The
-//! store is linked into every box by the kit, so every box's agent loads these hooks. See
-//! `docs/self-sufficient.md`.
+//! skein ships these hook scripts into the store, so a box reports working / waiting / needs-input
+//! and its current task without the *repo* providing anything. The store is linked into every box by
+//! the kit. The hooks that run them are **not** in the store: they load from skein's read-only
+//! plugin ([`turn_state_hooks`], SKEIN-1062), which a box cannot edit. See `docs/self-sufficient.md`.
 //!
-//! This is the highest-blast-radius write in the system — it edits a settings file the user also
-//! edits, in every store, on every upgrade. Which is why the merge is additive and idempotent, why
-//! it retires skein's own past entries by shape rather than by wholesale replacement, and why every
-//! one of those rules has a test that would fail loudly rather than quietly overwrite someone.
+//! This is still the highest-blast-radius write in the system — it edits a settings file the user
+//! also edits, in every store, on every upgrade, to take skein's past hooks back out and to keep the
+//! `tui` and `statusLine` defaults. Which is why it retires skein's own past entries by shape rather
+//! than by wholesale replacement, and why every one of those rules has a test that would fail loudly
+//! rather than quietly overwrite someone.
 
 use crate::kit::ensure_store;
 use crate::registry::all_stores;
@@ -24,9 +25,9 @@ use std::path::Path;
 use std::time::Duration;
 
 // ---------- the turn-state probe (skein-owned, installed into the shared store) ----------
-// skein ships these hook scripts and wires them into the store's settings.json, so a box reports
-// working/waiting/needs-input + its current task without the *repo* providing anything. The store is
-// linked into every box by the kit, so every box's Claude loads these hooks. See docs/self-sufficient.md.
+// skein ships these hook scripts into the store, so a box reports working/waiting/needs-input + its
+// current task without the *repo* providing anything. The hooks that call them load from skein's
+// plugin (`turn_state_hooks`); the store is linked into every box by the kit, so the scripts resolve.
 /// Wires a box to the `sync` work tracker and installs the discipline for it. Lives in the store
 /// rather than the kit on purpose: a kit only reaches boxes created after it changed, and an
 /// existing box has to be wireable too. See `sync_provision_box`.
@@ -108,13 +109,15 @@ const MAILBOX_STOPCHECK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailb
 
 /// Content-derived revision for lifecycle *wiring* loaded when an agent starts. Probe scripts live
 /// on the shared mount and update in place, so hashing their bodies made harmless docs/implementation
-/// edits demand agent restarts. Only generated Claude/Codex hook configuration belongs here.
+/// edits demand agent restarts. Only generated Claude/Codex hook configuration belongs here — the
+/// store's settings, the plugin's turn-state hooks and Codex's, since a box loads each of them only
+/// when its agent starts.
 fn probe_revision() -> String {
     let mut hash = 0xcbf29ce484222325u64;
-    let claude =
-        serde_json::to_vec(&settings_with_probe(&serde_json::json!({}))).unwrap_or_default();
+    let claude = serde_json::to_vec(&store_settings(&serde_json::json!({}))).unwrap_or_default();
+    let plugin = serde_json::to_vec(&turn_state_hooks()).unwrap_or_default();
     let codex = serde_json::to_vec(&codex_hooks_with_probe()).unwrap_or_default();
-    for body in [&claude, &codex] {
+    for body in [&claude, &plugin, &codex] {
         for byte in body {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -124,10 +127,10 @@ fn probe_revision() -> String {
 }
 
 /// Install skein's turn-state probe into the shared store: write the hook scripts to
-/// `<store>/skein/bin/` and merge their hook wiring into `<store>/settings.json` (additive +
-/// idempotent — the repo's own hooks are preserved, re-runs don't duplicate). The store is mounted
-/// into every box, so this is how skein gets working/waiting/needs-input + task for any box without
-/// the repo shipping a thing.
+/// `<store>/skein/bin/`, and take skein's own hooks back **out** of `<store>/settings.json`
+/// ([`store_settings`]: the repo's own hooks are preserved, re-runs change nothing). The store is
+/// mounted into every box, so the scripts resolve in any box without the repo shipping a thing; the
+/// hooks that run them come from skein's plugin ([`turn_state_hooks`]).
 ///
 /// Refreshes *every* store skein reads — each managed repo's plus `store_dir()` — so multi-repo
 /// fleets all report turn-state. Best-effort: errors are collected, not fatal.
@@ -199,7 +202,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         write_atomic(&sync.join(file), &sync, body.as_bytes())?;
     }
     // The store's `settings.json` is the one file skein writes that a person also edits by hand,
-    // and this line runs over every store at every server start. So the merge goes through
+    // and this line runs over every store at every server start. So the retire goes through
     // [`crate::util::update_json`]: the read, the merge and the write happen under one lock, and a
     // file that is **there and will not parse** is refused rather than read as `{}` and written
     // over. `fs::read_to_string(..).ok().and_then(from_str(..).ok()).unwrap_or_else(json!({}))` is
@@ -208,13 +211,13 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     // zero-length file a crash between `write_atomic`'s write and its rename leaves, and the next
     // server start replaced the lot with skein's hooks and nothing else.
     //
-    // A store nobody has written settings for is still wired up: `read_json_or_why` answers
-    // `Ok(None)` for an absent file, `Value::default()` is `Null`, and `settings_with_probe`
-    // already normalises a non-object to `{}` (see its `!out.is_object()` branch). Only "there and
-    // unreadable" refuses.
+    // A store nobody has written settings for still gets skein's `tui` and `statusLine` defaults:
+    // `read_json_or_why` answers `Ok(None)` for an absent file, `Value::default()` is `Null`, and
+    // `store_settings` already normalises a non-object to `{}` (see its `!out.is_object()`
+    // branch). Only "there and unreadable" refuses.
     let settings = store.join("settings.json");
     crate::util::update_json::<serde_json::Value, ()>(&settings, |current| {
-        let merged = settings_with_probe(current);
+        let merged = store_settings(current);
         *current = merged;
         Ok(())
     })?;
@@ -308,10 +311,16 @@ fn publish_sync_gateway(store: &Path) -> Result<(), String> {
     }
 }
 
-/// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
-/// duplicating skein's own on a re-run (idempotent). Pure — the testable core of `ensure_probe_in`.
-fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
-    use serde_json::{json, Value};
+/// skein's 24 turn-state hooks, as (event, command, optional matcher), before [`wire`] wraps each
+/// command. **They load from skein's plugin, not from the store's `settings.json`** (SKEIN-1062,
+/// box-plugin §2.1): [`turn_state_hooks`] is the plugin's `hooks/hooks.json`, and every box's argv
+/// names a plugin that carries them whatever the fleet's switch says ([`crate::runtime::for_box`]).
+/// The store's `settings.json` is writable by every box of the repo, so a box could delete a
+/// sibling's hooks there; it cannot unload a `--plugin-dir` the read-only launcher passes.
+///
+/// This table is also what [`store_settings`] retires from a store provisioned before the move,
+/// in every spelling a past skein wrote.
+fn turn_state_entries() -> [(&'static str, String, Option<&'static str>); 24] {
     // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite, and
     // the SessionStart bootstrap that bridges memory + surfaces the mailbox (so an empty store works).
     // Sub-agent tracking: PreToolUse(Task) and SubagentStop maintain an in-flight counter so a
@@ -324,7 +333,11 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // the script path bare relies on the exec bit surviving the shared mount into the microVM — if
     // it's squashed, every hook fails "permission denied" on every event, silently. The status line
     // learned this lesson first (STATUSLINE_CMD was already bash-prefixed); now it's uniform.
-    let entries: [(&str, String, Option<&str>); 24] = [
+    //
+    // The scripts themselves stay in the store's `skein/bin/`, refreshed by [`ensure_probe_in`]:
+    // only the wiring moved. `$CLAUDE_PROJECT_DIR` reaches a plugin's hook exactly as it reached a
+    // settings hook, so the commands are the same strings they always were.
+    [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
@@ -409,35 +422,70 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         ("SessionStart", BOOTSTRAP_CMD.to_string(), None),
         ("SessionStart", format!("{PROBE_HANDOFF_CMD} claude"), None),
         ("SessionStart", format!("{PROBE_STATUS_CMD} started"), None),
-    ];
-    // Entries a *previous* skein version wired that this one has since replaced/renamed. Purely
-    // additive merging (below) would otherwise leave these stale forever in an already-provisioned
-    // project's settings.json — and here that's not just dead weight: the old single unconditional
-    // `box-status.sh notify` entry (replaced by three matcher-scoped notify-blocked/waiting/ignore
-    // entries, since Notification's payload carries no field saying which type fired) still exists
-    // in any store provisioned before this change, but box-status.sh no longer has a `notify` case
-    // at all — it would now hit the passthrough branch and write a literal `status:"notify"`. Retire
-    // it explicitly so upgrading a long-lived project store self-heals instead of accumulating a
-    // silently-wrong hook forever. Exact-match only, so a user's own hook of the same name is untouched.
-    // `bash "<script>" <args>` — see the note above `entries`.
-    let wire = |cmd: &str| -> String {
-        match cmd.split_once(' ') {
-            Some((script, args)) => format!("bash \"{script}\" {args}"),
-            None => format!("bash \"{cmd}\""),
+    ]
+}
+
+/// `bash "<script>" <args>` — see the note in [`turn_state_entries`].
+fn wire(cmd: &str) -> String {
+    match cmd.split_once(' ') {
+        Some((script, args)) => format!("bash \"{script}\" {args}"),
+        None => format!("bash \"{cmd}\""),
+    }
+}
+
+/// The turn-state plugin's `hooks/hooks.json`: every entry of [`turn_state_entries`], wired, in
+/// table order within each event. Installed by `fleet::install_launcher` through
+/// [`crate::runtime::plugin_install`], into both of the plugin's variants.
+pub(crate) fn turn_state_hooks() -> serde_json::Value {
+    use serde_json::{json, Map, Value};
+    let mut hooks = Map::<String, Value>::new();
+    for (event, cmd, matcher) in turn_state_entries() {
+        let mut entry = json!({ "hooks": [ { "type": "command", "command": wire(&cmd) } ] });
+        if let Some(m) = matcher {
+            entry
+                .as_object_mut()
+                .expect("hook entry is an object")
+                .insert("matcher".into(), Value::String(m.to_string()));
         }
-    };
-    // Retire the pre-`bash`-wrapping form of every current entry (stores provisioned before the
-    // exec-bit hardening carry the bare-path commands; purely-additive merging would keep both and
-    // fire each hook twice), plus the explicitly renamed one.
+        hooks
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("hook event is an array")
+            .push(entry);
+    }
+    json!({ "hooks": hooks })
+}
+
+/// The store's `settings.json`, with **no skein hooks in it**: every hook command a past skein
+/// wired there is retired, the person's own hooks are kept exactly, and skein's `tui` and
+/// `statusLine` defaults are added where the store sets none. Idempotent. Pure — the testable core
+/// of `ensure_probe_in`.
+///
+/// The hooks it retires now load from skein's plugin ([`turn_state_hooks`]). Before SKEIN-1062
+/// this function *added* them; it keeps the retire half it always had and loses the add half.
+fn store_settings(existing: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let entries = turn_state_entries();
+    // Every spelling of skein's own hooks that a store can carry. Exact-match only, so a user's own
+    // hook of the same name is untouched:
+    // - the current, `bash`-wrapped form, which every store provisioned before SKEIN-1062 carries;
+    // - the pre-`bash`-wrapping form (stores provisioned before the exec-bit hardening carry the
+    //   bare-path commands);
+    // - the old single unconditional `box-status.sh notify` entry, replaced by the matcher-scoped
+    //   notify-blocked/waiting/ignore entries because Notification's payload carries no field
+    //   saying which type fired. box-status.sh no longer has a `notify` case at all, so it would
+    //   write a literal `status:"notify"`;
+    // - the pre-`skein/` store layout, both spellings (below).
     let mut obsolete: Vec<(&str, String)> = entries
         .iter()
-        .map(|(ev, cmd, _)| (*ev, cmd.clone()))
+        .flat_map(|(ev, cmd, _)| [(*ev, cmd.clone()), (*ev, wire(cmd))])
         .collect();
     obsolete.push(("Notification", format!("{PROBE_STATUS_CMD} notify")));
     // The pre-`skein/` store layout: probes lived directly under `<store>/bin/`, so a store
     // provisioned back then still wires `$CLAUDE_PROJECT_DIR/.claude/bin/…` — a path that stopped
-    // existing when the store grew a `skein/` subdirectory. Additive merging keeps it *beside* the
-    // correct entry, so the box works perfectly and announces a failure at every session start:
+    // existing when the store grew a `skein/` subdirectory. Additive merging kept it *beside* the
+    // correct entry, so the box worked perfectly and announced a failure at every session start:
     //   SessionStart:resume hook error … /…/.claude/bin/sandbox-bootstrap.sh: not found
     // Seen on a box whose store predates the rename. Retire both spellings, since a store old enough
     // to have the old path may carry either the bare or the bash-wrapped form.
@@ -458,47 +506,33 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         out = json!({});
     }
     let root = out.as_object_mut().unwrap();
-    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-    if !hooks.is_object() {
-        *hooks = json!({});
-    }
-    let hooks = hooks.as_object_mut().unwrap();
-    for (event, stale_cmd) in &obsolete {
-        if let Some(arr) = hooks.get_mut(*event).and_then(|a| a.as_array_mut()) {
-            arr.retain(|e| {
-                !e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
-                    hs.iter().any(|h| {
-                        h.get("command").and_then(|c| c.as_str()) == Some(stale_cmd.as_str())
+    // Retire, and never add: a store with no `hooks` key is not given one.
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        let had_any = !hooks.is_empty();
+        let mut emptied = Vec::new();
+        for (event, stale_cmd) in &obsolete {
+            if let Some(arr) = hooks.get_mut(*event).and_then(|a| a.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|e| {
+                    !e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(stale_cmd.as_str())
+                        })
                     })
-                })
-            });
+                });
+                if arr.is_empty() && before > 0 {
+                    emptied.push(*event);
+                }
+            }
         }
-    }
-    for (event, cmd, matcher) in entries {
-        let cmd = wire(&cmd);
-        let arr = hooks.entry(event).or_insert_with(|| json!([]));
-        if !arr.is_array() {
-            *arr = json!([]);
+        // An event this retired down to nothing goes with its last entry, so an upgraded store
+        // reads like a fresh one. An event the person left empty themselves is theirs, and stays.
+        for event in emptied {
+            hooks.remove(event);
         }
-        let arr = arr.as_array_mut().unwrap();
-        // idempotent: skip if an entry already wires this exact command.
-        let present = arr.iter().any(|e| {
-            e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
-                hs.iter()
-                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str()))
-            })
-        });
-        if present {
-            continue;
+        if had_any && hooks.is_empty() {
+            root.remove("hooks");
         }
-        let mut entry = json!({ "hooks": [ { "type": "command", "command": cmd } ] });
-        if let Some(m) = matcher {
-            entry
-                .as_object_mut()
-                .unwrap()
-                .insert("matcher".into(), Value::String(m.to_string()));
-        }
-        arr.push(entry);
     }
     // Default boxes to Claude Code's fullscreen (alternate-screen) renderer — it draws far better in
     // the browser PTY than the inline renderer, and equals `CLAUDE_CODE_NO_FLICKER=1` without needing
@@ -746,53 +780,92 @@ mod tests {
         assert!(!partial.contains(" │ "));
     }
 
-    #[test]
-    fn settings_with_probe_is_additive_and_idempotent() {
-        // an existing project settings.json with its own UserPromptSubmit + PreToolUse hooks.
-        let existing = serde_json::json!({
-            "hooks": {
-                "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "slice-gate.sh" } ] } ],
-                "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "commit-guard.sh" } ] } ]
-            },
-            "statusLine": { "type": "command", "command": "statusline.sh" }
-        });
-        let merged = settings_with_probe(&existing);
-        // existing hooks are preserved …
-        assert_eq!(merged["statusLine"]["command"], "statusline.sh");
-        assert!(merged["statusLine"]["refreshIntervalMs"].is_null());
-        let ups = merged["hooks"]["UserPromptSubmit"].as_array().unwrap();
-        assert!(ups
-            .iter()
-            .any(|e| e["hooks"][0]["command"] == "slice-gate.sh"));
-        // … and skein's are added — every one invoked via `bash "<script>" <args>` so a squashed
-        // exec bit on the shared mount can't silently kill the whole probe set.
-        assert!(ups.iter().any(|e| e["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(r#"box-status.sh" working"#)));
-        assert!(ups
-            .iter()
-            .filter_map(|e| e["hooks"][0]["command"].as_str())
-            .filter(|c| c.contains("skein/bin"))
-            .all(|c| c.starts_with("bash \"")));
-        // Stop: box-status.sh + box-session.sh + box-diff.sh + box-journal.sh + box-token-usage.sh
-        // + mailbox.sh stop-check.
-        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 6);
-        let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(post[0]["matcher"], "TodoWrite");
-
-        // idempotent: re-running adds nothing.
-        let again = settings_with_probe(&merged);
-        assert_eq!(
-            again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
-            ups.len()
-        );
-        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 6);
+    /// A command string of every hook in a settings value, event by event.
+    fn commands(v: &serde_json::Value) -> Vec<(String, String)> {
+        v["hooks"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .flat_map(|(event, groups)| {
+                groups
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+                    .filter_map(|h| h["command"].as_str())
+                    .map(|c| (event.clone(), c.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
+    /// **A store provisioned before SKEIN-1062 loses every skein hook and keeps every one of its
+    /// own**, and a second pass changes nothing.
+    ///
+    /// The store carries all 24 entries exactly as the old merge wrote them — taken from
+    /// [`turn_state_hooks`], so this is the real set and not a sample — beside the person's own
+    /// hooks and status line. What would make it fail: the retire list losing the current
+    /// `bash`-wrapped spelling (every upgraded store would keep all 24 and each box would fire each
+    /// hook twice, once from the plugin and once from here); the add half coming back; or the
+    /// retire matching by anything looser than the exact command (the person's hooks would go).
     #[test]
-    fn settings_with_probe_from_empty() {
-        let merged = settings_with_probe(&serde_json::json!({}));
+    fn an_upgraded_store_loses_skeins_hooks_and_keeps_its_own() {
+        let mut existing = turn_state_hooks();
+        existing["statusLine"] =
+            serde_json::json!({ "type": "command", "command": "statusline.sh" });
+        let theirs = [
+            ("UserPromptSubmit", "slice-gate.sh"),
+            ("PreToolUse", "commit-guard.sh"),
+            ("Stop", "my-own-stop-hook.sh"),
+        ];
+        for (event, command) in theirs {
+            existing["hooks"][event].as_array_mut().unwrap().push(
+                serde_json::json!({ "hooks": [ { "type": "command", "command": command } ] }),
+            );
+        }
+        let skeins = commands(&turn_state_hooks());
+        assert_eq!(skeins.len(), 24, "the fixture is not the real set");
+        assert_eq!(commands(&existing).len(), 27, "the fixture did not build");
+
+        let merged = store_settings(&existing);
+        let left = commands(&merged);
+        assert_eq!(
+            left,
+            vec![
+                ("PreToolUse".to_string(), "commit-guard.sh".to_string()),
+                ("Stop".to_string(), "my-own-stop-hook.sh".to_string()),
+                ("UserPromptSubmit".to_string(), "slice-gate.sh".to_string()),
+            ],
+            "the store should keep exactly the person's own hooks: {merged}"
+        );
+        // Their status line is theirs.
+        assert_eq!(merged["statusLine"]["command"], "statusline.sh");
+        assert!(merged["statusLine"]["refreshIntervalMs"].is_null());
+        // An event skein alone used goes with its last entry.
+        assert!(merged["hooks"].get("SessionEnd").is_none(), "{merged}");
+
+        assert_eq!(
+            store_settings(&merged),
+            merged,
+            "a second pass changed the store"
+        );
+    }
+
+    /// **The plugin's turn-state hooks are the set the store used to carry**, event by event and
+    /// matcher by matcher. A fresh store's settings carry none of them, and still get skein's
+    /// `tui` and status line.
+    ///
+    /// What would make it fail: an entry dropped from [`turn_state_entries`] or its matcher moved,
+    /// or [`store_settings`] adding hooks again.
+    #[test]
+    fn the_turn_state_plugin_carries_every_hook_and_a_fresh_store_none() {
+        let fresh = store_settings(&serde_json::json!({}));
+        assert!(
+            fresh.get("hooks").is_none(),
+            "a fresh store was given hooks: {fresh}"
+        );
+        assert_eq!(fresh["tui"], "fullscreen");
+        let merged = turn_state_hooks();
         // Every event gets at least one hook entry.
         for ev in [
             "PreToolUse",
@@ -926,10 +999,14 @@ mod tests {
         // sub-agent tracking: PreToolUse is scoped to the Task tool
         assert_eq!(merged["hooks"]["PreToolUse"][0]["matcher"], "Task");
         // a default status line is wired when the store doesn't set one
-        assert!(merged["statusLine"]["command"]
+        assert!(fresh["statusLine"]["command"]
             .as_str()
             .unwrap()
             .contains("statusline-command.sh"));
+        // every command runs through `bash`, so a squashed exec bit cannot silence them
+        let all = commands(&merged);
+        assert_eq!(all.len(), 24);
+        assert!(all.iter().all(|(_, c)| c.starts_with("bash \"")), "{all:?}");
     }
 
     /// **A `settings.json` skein cannot parse is left exactly as the person left it.**
@@ -990,55 +1067,41 @@ mod tests {
         );
 
         // The other half, and the one line the refusal is closest to breaking: a store nobody has
-        // written settings for is *not* unreadable, and must still come up fully wired.
+        // written settings for is *not* unreadable, and must still come up with skein's defaults.
         fs::remove_file(&settings).unwrap();
-        ensure_probe_in(&store).expect("a store with no settings.json yet could not be wired");
+        ensure_probe_in(&store).expect("a store with no settings.json yet could not be set up");
         let wired: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
         assert!(
-            wired["hooks"]["UserPromptSubmit"].is_array(),
-            "a fresh store came away without skein's hooks: {wired}"
+            wired["statusLine"].is_object(),
+            "a fresh store came away without skein's status line: {wired}"
         );
 
         std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
-    fn settings_with_probe_retires_the_old_unconditional_notify_entry() {
+    fn store_settings_retires_the_old_unconditional_notify_entry() {
         // A project store provisioned by a pre-matcher-fix skein has this exact stale entry — no
         // matcher, calling a `notify` mode box-status.sh no longer implements at all (it would now
         // fall through to the passthrough branch and write a bogus status:"notify"). Upgrading must
-        // remove it, not just add the three new matcher-scoped entries alongside it.
+        // remove it; it is in no table any more, so only the explicit retire line can.
         let stale_cmd = format!("{PROBE_STATUS_CMD} notify");
         let existing = serde_json::json!({
             "hooks": {
-                "Notification": [ { "hooks": [ { "type": "command", "command": stale_cmd } ] } ]
+                "Notification": [
+                    { "hooks": [ { "type": "command", "command": stale_cmd } ] },
+                    { "hooks": [ { "type": "command", "command": "my-own-notify.sh" } ] }
+                ]
             }
         });
-        let merged = settings_with_probe(&existing);
-        let notif = merged["hooks"]["Notification"].as_array().unwrap();
+        let merged = store_settings(&existing);
         assert_eq!(
-            notif.len(),
-            5,
-            "the stale entry must be replaced by matcher hooks plus the safe payload fallback"
+            commands(&merged),
+            vec![("Notification".to_string(), "my-own-notify.sh".to_string())],
+            "the stale entry should be gone and the person's kept: {merged}"
         );
-        assert!(
-            notif
-                .iter()
-                .all(|e| e["hooks"][0]["command"] != stale_cmd.as_str()),
-            "stale entry should be gone"
-        );
-        assert_eq!(
-            notif.iter().filter(|e| e.get("matcher").is_none()).count(),
-            1
-        );
-        assert!(notif.iter().any(|e| e["hooks"][0]["command"]
-            .as_str()
-            .is_some_and(|command| command.contains("notify-auto"))));
-
-        // Idempotent from here on: re-running doesn't reintroduce or duplicate anything.
-        let again = settings_with_probe(&merged);
-        assert_eq!(again["hooks"]["Notification"].as_array().unwrap().len(), 5);
+        assert_eq!(store_settings(&merged), merged);
     }
 
     #[test]
@@ -1130,10 +1193,10 @@ mod tests {
     }
 
     #[test]
-    fn settings_with_probe_upgrades_bare_path_commands_to_bash_wrapped() {
-        // A store provisioned before the exec-bit hardening carries bare-path commands. The merge
-        // must RETIRE those (they're skein's own, now re-wired via `bash "<script>" <args>`) —
-        // additive-only merging would leave both forms and fire every hook twice per event.
+    fn store_settings_retires_bare_path_commands() {
+        // A store provisioned before the exec-bit hardening carries bare-path commands. They are
+        // skein's own, and the plugin now runs the `bash "<script>" <args>` form of each, so a bare
+        // one left here would fire every hook twice per event.
         let existing = serde_json::json!({
             "hooks": {
                 "Stop": [
@@ -1144,7 +1207,7 @@ mod tests {
                 ]
             }
         });
-        let merged = settings_with_probe(&existing);
+        let merged = store_settings(&existing);
         let stop_cmds: Vec<&str> = merged["hooks"]["Stop"]
             .as_array()
             .unwrap()
@@ -1161,12 +1224,12 @@ mod tests {
                 .any(|c| *c == format!("{PROBE_STATUS_CMD} waiting") || *c == PROBE_DIFF_CMD),
             "bare-path skein commands must be retired, not duplicated"
         );
-        // 6 skein Stop hooks (all bash-wrapped) + 1 user hook
-        assert_eq!(stop_cmds.len(), 7);
+        // no skein Stop hooks at all: only the user's
+        assert_eq!(stop_cmds, vec!["my-own-stop-hook.sh"]);
     }
 
     #[test]
-    fn settings_with_probe_retires_the_pre_skein_store_layout() {
+    fn store_settings_retires_the_pre_skein_store_layout() {
         // Probes used to live directly under `<store>/bin/`. A store provisioned then still wires
         // `$CLAUDE_PROJECT_DIR/.claude/bin/…`, which has not existed since the store grew a
         // `skein/` subdirectory — and because merging is additive it sat *beside* the correct entry,
@@ -1184,7 +1247,7 @@ mod tests {
                 ]
             }
         });
-        let merged = settings_with_probe(&existing);
+        let merged = store_settings(&existing);
         let cmds: Vec<&str> = merged["hooks"]["SessionStart"]
             .as_array()
             .unwrap()
@@ -1196,8 +1259,8 @@ mod tests {
             "a path that no longer exists must not stay wired: {cmds:?}"
         );
         assert!(
-            cmds.iter().any(|c| c.contains(BOOTSTRAP_CMD)),
-            "and the current one must be there: {cmds:?}"
+            !cmds.iter().any(|c| c.contains(BOOTSTRAP_CMD)),
+            "and the current one loads from the plugin, not from here: {cmds:?}"
         );
         assert!(
             cmds.contains(&"my-own-start-hook.sh"),
@@ -2392,5 +2455,134 @@ mod tests {
             "counts across both assistant entries"
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A freshly scaffolded store's `settings.json` carries no skein hook, and a box still
+    /// reports its turn state — through the hooks of either variant of skein's plugin** (SKEIN-1062).
+    ///
+    /// The whole path, with nothing hand-written in between: [`ensure_probe_in`] scaffolds the
+    /// store, [`crate::runtime::plugin_install`] gives the bytes `fleet::install_launcher` puts
+    /// under `.skein`, and each variant's own `UserPromptSubmit` and `Stop` commands are run the way
+    /// Claude Code runs a hook — through a shell, with `$CLAUDE_PROJECT_DIR` set — against the
+    /// store's own `box-status.sh`. The board reads what they write.
+    ///
+    /// What would make it fail: the store scaffold writing skein's hooks again (the first
+    /// assertion); a variant losing its turn-state hooks (no command is found); or a command
+    /// the plugin carries that no longer reaches the store's script (no state is written).
+    #[test]
+    fn a_fresh_store_has_no_skein_hooks_and_the_plugin_still_reports_turn_state() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &Path);
+        env.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
+        // Not under a git checkout: the probe resolves its store from `git rev-parse` and would
+        // otherwise climb out into a real one.
+        let root = tempdir();
+        let store = root.join(".claude");
+        ensure_probe_in(&store).expect("scaffold the store");
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap())
+                .unwrap();
+        assert!(
+            settings.get("hooks").is_none(),
+            "a fresh store's settings.json carries hooks: {settings}"
+        );
+        assert!(settings["statusLine"].is_object(), "{settings}");
+
+        let installed = crate::runtime::plugin_install();
+        for dir in [
+            crate::runtime::plugin_dir(),
+            crate::runtime::turn_state_plugin_dir(),
+        ] {
+            let path = format!("{dir}/hooks/hooks.json");
+            let hooks: serde_json::Value = serde_json::from_str(
+                &installed
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .unwrap_or_else(|| panic!("nothing is installed at {path}"))
+                    .1,
+            )
+            .unwrap();
+            let run = |event: &str, fragment: &str| {
+                let (_, command) = commands(&hooks)
+                    .into_iter()
+                    .find(|(e, c)| e == event && c.contains(fragment))
+                    .unwrap_or_else(|| panic!("{path} has no {event} hook running {fragment}"));
+                let out = Command::new("bash")
+                    .arg("-c")
+                    .arg(&command)
+                    .env("CLAUDE_PROJECT_DIR", root.as_ref() as &Path)
+                    .env("SKEIN_BOX", "example")
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("bash");
+                assert!(out.status.success(), "{command}: {out:?}");
+            };
+            let status = || {
+                let text = fs::read_to_string(store.join("status/example.json"))
+                    .unwrap_or_else(|e| panic!("{path}'s hook wrote no state: {e}"));
+                let v: serde_json::Value = serde_json::from_str(&text).expect(&text);
+                v["status"].as_str().unwrap_or_default().to_string()
+            };
+            run("UserPromptSubmit", r#"box-status.sh" working"#);
+            assert_eq!(status(), "working", "through {path}");
+            run("Stop", r#"box-status.sh" waiting"#);
+            assert_eq!(status(), "waiting", "through {path}");
+            fs::remove_file(store.join("status/example.json")).unwrap();
+        }
+    }
+
+    /// **A repo that ships its own `.claude/` loses the copies of skein's hooks a past merge put
+    /// in its `settings.json`, and keeps its own.** The kit's case 2 (`kit/skein-startup.sh`)
+    /// merged the store's hooks into the repo's settings file additively, so every such box
+    /// carries all 24; with the plugin running them too, each would fire twice.
+    ///
+    /// Runs the kit's own jq program, cut out of the shipped script, over the settings a box of
+    /// that kind has today. What would make it fail: the `unskein` pass dropped from that program
+    /// (all 24 stay); or it matching anything outside skein's namespace (the repo's hook goes).
+    #[test]
+    fn a_repo_shipped_settings_file_loses_skeins_copied_hooks() {
+        if Command::new("jq").arg("--version").output().is_err() {
+            eprintln!("no jq here, and the kit's merge is jq");
+            return;
+        }
+        let script = crate::kit::KIT_STARTUP_SH;
+        let open = "merged=\"$(jq -s '";
+        let close = "' \"$rc/settings.json\" \"$store/settings.json\"";
+        assert_eq!(script.matches(open).count(), 1, "the kit's merge moved");
+        let from = script.find(open).unwrap() + open.len();
+        let program = &script[from..from + script[from..].find(close).expect("merge end")];
+
+        let mut repo = turn_state_hooks();
+        repo["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "hooks": [ { "type": "command", "command": "repo-own-stop.sh" } ] }));
+        repo["model"] = serde_json::json!("example-model");
+        assert_eq!(commands(&repo).len(), 25, "the fixture did not build");
+        let store = store_settings(&serde_json::json!({}));
+
+        let dir = tempdir();
+        let (a, b) = (dir.join("repo.json"), dir.join("store.json"));
+        fs::write(&a, repo.to_string()).unwrap();
+        fs::write(&b, store.to_string()).unwrap();
+        let out = Command::new("jq")
+            .arg("-s")
+            .arg(program)
+            .arg(&a)
+            .arg(&b)
+            .output()
+            .expect("jq");
+        assert!(out.status.success(), "{out:?}");
+        let merged: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            commands(&merged),
+            vec![("Stop".to_string(), "repo-own-stop.sh".to_string())],
+            "{merged}"
+        );
+        assert_eq!(merged["model"], "example-model");
+        assert_eq!(merged["statusLine"], store["statusLine"], "{merged}");
     }
 }

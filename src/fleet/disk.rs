@@ -221,8 +221,10 @@ fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
         skein_toolchain_path(),
         crate::substrate::substrate_dir(),
         crate::gitgate::gitgate_dir(),
-        // skein's box plugin, installed beside the launcher (SKEIN-1056).
+        // skein's box plugin, installed beside the launcher (SKEIN-1056), and its turn-state
+        // variant (SKEIN-1062).
         crate::runtime::plugin_dir(),
+        crate::runtime::turn_state_plugin_dir(),
         // `detached/<session>.sh` is a script named for a session, so the session is a placeholder
         // and only its parent is the directory skein makes.
         detached_script_path("any")
