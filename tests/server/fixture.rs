@@ -541,11 +541,22 @@ pub(super) fn fleet_root_in(home: impl AsRef<Path>) -> PathBuf {
 const TRIES: u32 = 3;
 const BACKOFF: Duration = Duration::from_millis(200);
 
+/// How long one read of a response may wait for its next bytes (SKEIN-817).
+///
+/// A ceiling on liveness, not a tolerance: it bounds each `read`, not the whole response, so a
+/// server that is slow but still sending never reaches it. What reaches it is a server that
+/// accepted the connection and then went quiet — which, with no ceiling, was a suite that hung
+/// for ever rather than one that failed naming the request. `stream_once` and `first_byte` had
+/// one already; this was the helper under every `http_get` and `http_post` in the file.
+const PATIENCE: Duration = Duration::from_secs(20);
+
 /// Send one raw request on a fresh socket and read to EOF. Every socket-level failure comes back
 /// as `Err` — including a response so truncated it has no status line, which is the same dropped
-/// connection wearing a different face — so the caller can retry all of them the same way.
-fn send_once(addr: &str, raw: &[u8]) -> std::io::Result<(u16, String)> {
+/// connection wearing a different face, and a read that waited `patience` for bytes that never
+/// came — so the caller can retry all of them the same way.
+fn send_once(addr: &str, raw: &[u8], patience: Duration) -> std::io::Result<(u16, String)> {
     let mut s = TcpStream::connect(addr)?;
+    s.set_read_timeout(Some(patience))?;
     s.write_all(raw)?;
     let mut buf = Vec::new();
     s.read_to_end(&mut buf)?;
@@ -564,9 +575,15 @@ fn send_once(addr: &str, raw: &[u8]) -> std::io::Result<(u16, String)> {
 /// The retry wrapper under `http_get` and `http_post`. `what` names the request being made
 /// ("GET /api/boxes") and appears in the panic, with the last socket error, when every try failed.
 pub(super) fn send(addr: &str, what: &str, raw: &[u8]) -> (u16, String) {
+    send_within(addr, what, raw, PATIENCE)
+}
+
+/// [`send`], with the per-read ceiling named — so a test can prove a quiet server fails it in
+/// under a second instead of in a minute.
+pub(super) fn send_within(addr: &str, what: &str, raw: &[u8], patience: Duration) -> (u16, String) {
     let mut last = None;
     for attempt in 1..=TRIES {
-        match send_once(addr, raw) {
+        match send_once(addr, raw, patience) {
             Ok(got) => return got,
             Err(e) => last = Some(e),
         }

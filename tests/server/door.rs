@@ -211,15 +211,69 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     // closes it fails this however long the ceiling is.
     last.set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
+    //
+    // **What the read returned, not only whether it was `Ok(0)`** (SKEIN-1106, SKEIN-1119). This
+    // was `matches!(read, Ok(0))` with a message that printed only the elapsed time, so the two
+    // failures seen under load — "still open after 230ms" and "after 449ms" — were a read that had
+    // come back early against a thirty-second ceiling, and the one fact that would have said how
+    // (a reset, or bytes) was thrown away. A reset is the server closing the connection as surely
+    // as an end-of-stream is; only running out the ceiling means "still open".
     let mut byte = [0u8; 1];
-    let deadline = Instant::now();
-    let ended = matches!((&mut &*last).read(&mut byte), Ok(0));
-    assert!(
-        ended,
-        "a connection that never presented a credential was still open after {:?} — the grace \
-         deadline is what makes a slot cost a reconnection instead of nothing",
-        deadline.elapsed()
-    );
+    let reading = Instant::now();
+    let ended = loop {
+        match (&mut &*last).read(&mut byte) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            got => break got,
+        }
+    };
+    match &ended {
+        Ok(0) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            panic!(
+                "a connection that never presented a credential was still open after {:?} — the \
+                 grace deadline is what makes a slot cost a reconnection instead of nothing ({e})",
+                reading.elapsed()
+            )
+        }
+        other => panic!(
+            "a connection that never presented a credential got {other:?} after {:?}, which is \
+             neither the server closing it nor a read that ran out of patience",
+            reading.elapsed()
+        ),
+    }
+
+    // **And the server's own account, which is the half no scheduler can move.** The read above is
+    // what one stranger sees; `knocking` is what the server did to all of them. Every connection in
+    // `flood` is still held open from this side, so the only thing that can bring the count to
+    // zero is the server ending each stranger's task — which the grace deadline does and nothing
+    // else here does. A server whose deadline never fires keeps sixty-four strangers standing for
+    // ever, and this fails at its ceiling saying how many. The ceiling is liveness, not a margin.
+    let waited = Instant::now();
+    loop {
+        let door = doorstep(&addr);
+        let standing = door["knocking"].as_u64().unwrap_or(u64::MAX);
+        if standing == 0 {
+            break;
+        }
+        assert!(
+            waited.elapsed() < Duration::from_secs(30),
+            "{standing} connections that never presented a credential were still on the doorstep \
+             {:?} into a grace of {grace:?} — the grace deadline is what makes a slot cost a \
+             reconnection instead of nothing: {door}",
+            waited.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(flood);
 }
 

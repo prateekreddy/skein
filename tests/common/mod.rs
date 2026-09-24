@@ -888,3 +888,46 @@ pub const RUSTUP: Tool = Tool {
     name: "rustup",
     probe: None,
 };
+
+// ---------------------------------------------------------------------------------------------
+// Why the browser tier did not run
+// ---------------------------------------------------------------------------------------------
+
+/// What the browser tier is missing, as a sentence that says what to run — `None` when nothing is.
+///
+/// **Two different absences, and a skip that named one of them for both** (SKEIN-616). A fresh
+/// `git worktree add` has no `tests/ui/node_modules` — it is gitignored, so only a checkout where
+/// `npm run setup` ran has one — and the skip said "Playwright's chromium is not installed" while
+/// `~/.cache/ms-playwright` held chromium the whole time. The package and the browser are installed
+/// by different commands into different places, and a worktree lacks exactly the one the old
+/// sentence did not name.
+///
+/// [`chromium_ready`] stays the one question, unchanged, because `tools/noskip-check.py` reads the
+/// command out of its body and asks the machine the same thing; this only says why it answered no.
+pub fn chromium_missing() -> Option<String> {
+    if chromium_ready() {
+        return None;
+    }
+    Some(chromium_why_not(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ui"),
+    ))
+}
+
+/// Why [`chromium_ready`] said no, asked of the directory it resolves from.
+///
+/// Told apart by whether the package is on disk there, which is the fact a worktree lacks: with it
+/// present, what is left to be missing is the browser it would launch.
+pub fn chromium_why_not(ui: &Path) -> String {
+    if ui.join("node_modules/playwright/package.json").is_file() {
+        "the playwright package is here but the chromium it launches is not — \
+         `cd tests/ui && npx playwright install chromium`"
+            .to_string()
+    } else {
+        format!(
+            "the playwright package is not installed in {} — a fresh worktree never has its \
+             `node_modules` (it is gitignored): `cd tests/ui && npm run setup`, or link the main \
+             checkout's `tests/ui/node_modules` into this one",
+            ui.display()
+        )
+    }
+}
