@@ -490,7 +490,7 @@ function loadReview(force) {
   }).catch(e => {
     revLoading = false;
     if (!revHeld) return;
-    // **The remembered queue stays** (docs/review-ux.md §8.4, SKEIN-154). An old queue is worth
+    // **The remembered queue stays** (docs/parity.md §3, SKEIN-154). An old queue is worth
     // vastly more than an empty one, skein already has it on screen, and the failure replacing it
     // threw away rows that were there a second ago — and are still on disk in `prq::remember`. It
     // is NOT written back into `revSeen`: this is not an answer, it is the last answer plus a
@@ -561,7 +561,7 @@ function revNotReadyWhy(rows) {
   return parts.join(", ");
 }
 // A lane with nothing in it — and for the lane you came here for, that is an ANSWER rather than an
-// absence (docs/review-ux.md §8.5, SKEIN-154).
+// absence (docs/parity.md §3, SKEIN-154).
 //
 // "nothing here." in the corner of a 1400px page, while the badge in the same window reads 39, is
 // the shape this replaces. A cleared queue is the best moment this product has and it should read

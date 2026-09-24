@@ -173,7 +173,7 @@ const stepOf = (html, number) => {
 
 // ── 3. whose move, and the one state only a stack can be in ────────────────────────────────────
 //
-// `.mv.blocked` is written down in docs/review-ux.md §4 for "a stack step whose base is unreviewed"
+// `.mv.blocked` is written down in docs/parity.md §3 for "a stack step whose base is unreviewed"
 // and `REV_MOVE_WORDS.blocked` has been in the page for it — with no caller. The one thing that
 // makes a stack dangerous, reviewing step 7 before step 3, had no mark at all.
 {

@@ -1225,7 +1225,7 @@ def doc_attachments():
 # `citation_sources`.
 #
 # EXCEPT a fenced code block in markdown, which is a transcript or a mockup rather than a
-# sentence: `docs/review-ux.md` draws a UI mockup whose window shows a file that document is only
+# sentence: a UX review once in `docs/` drew a UI mockup whose window showed a file it was only
 # PROPOSING. Same exclusion, and the same reason, as `doc_attachment` makes for fences.
 #
 # AND EXCEPT two files: this one and the debt list it writes. A rule about unfollowable citations
@@ -1361,9 +1361,9 @@ def citation_sources():
 # reads are the same characters: a machine-only marker in an HTML comment could disagree with the
 # prose beside it, which is the drift class this whole tool exists for.
 #
-# WHY THIS IS NOT THE DOCUMENT'S "written against X" LINE, which both dated reviews already carry
+# WHY THIS IS NOT THE DOCUMENT'S "written against X" LINE, which both dated reviews carried
 # and which would have been free. Those are different claims. "Written against `12ae61a`" says when
-# the document was composed; this says what its citations MEAN. `docs/review-ux.md` is the proof
+# the document was composed; this says what its citations MEAN. A UX review once in `docs/` is the proof
 # that the two come apart: it was written against `e310a24`, and two weeks later a commit replaced
 # a symbol in it with `src/prq.rs:1722` — a line that never existed at `e310a24` and was a claim
 # about the tree that day. Reading the composition date as a licence over every citation would have

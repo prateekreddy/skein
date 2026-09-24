@@ -105,7 +105,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // Reuse the registry-derived state logic; status (turn-state) is the registry's specific
             // datum, lastSeen is only a fallback when sbx liveness is absent.
             // Turn-state: the level observation of the box's own screen, fused with the hook edges
-            // (docs/turn-state.md §4.3). With no observation this is exactly the edge signal, so a
+            // (docs/architecture.md §2.2). With no observation this is exactly the edge signal, so a
             // box running an older probe behaves as it always did.
             //
             // Every reason `screen_health` can give for the screen half not contributing has to be

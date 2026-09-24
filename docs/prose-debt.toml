@@ -68,13 +68,13 @@
 # line". Twenty-one were fixed in the commit that follows the rule, and forty-two were deferred
 # here, every one of them in a file another agent held while that was written.
 #
-# TWENTY-FIVE OF THOSE FORTY-TWO WERE NEVER DEBT (SKEIN-600). Twenty-four were in
-# `docs/review-product-review.md`, a product review of 23 August 2026, and they cite the code as it
-# stood that day — which is what a review's evidence IS. They are gone from this list because that
-# document now declares the commit it cites, and `prose-check.py` follows them there; all
-# twenty-four resolve. The twenty-fifth, in `docs/review-ux.md`, resolved at no commit at all: it
-# had been written INTO the document two weeks after it was composed, replacing a symbol the code
-# no longer had with a line number, and it is fixed by naming a symbol again.
+# TWENTY-FIVE OF THOSE FORTY-TWO WERE NEVER DEBT (SKEIN-600). Twenty-four were in a product
+# review of 23 August 2026, and they cited the code as it stood that day — which is what a review's
+# evidence IS. They left this list because that document declared the commit it cited, and
+# `prose-check.py` followed them there; all twenty-four resolved. The twenty-fifth, in the UX review
+# written the same day, resolved at no commit at all: it had been written INTO the document two
+# weeks after it was composed, replacing a symbol the code no longer had with a line number, and it
+# was fixed by naming a symbol again. Both reviews have since left the repository (SKEIN-512).
 #
 # The rule that survives is the one the row format already implied: a row here is work somebody
 # will do. A claim whose subject is a different tree is not work, and belongs beside the claim.

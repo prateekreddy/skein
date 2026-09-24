@@ -307,6 +307,62 @@ Provenance is a **five**-valued freshness, not four as the architecture says:
 is not `stale`, which is observations having stopped. Collapsing them repeats the error the section
 warns about.
 
+### 9.1 How the screen is read, and what a real box taught it
+
+The level signal exists because edge coverage is incomplete: no runtime fires anything when a
+person answers a permission prompt, dismisses a dialog with `Esc`, interrupts a turn, or when the
+agent dies, so a state set by an edge and cleared by nothing was shown for ever — a permission
+answered at 13:27 still read `decision` at 13:47. The fusion rules that combine the two halves are
+architecture §2.2, "Fusion, defined"; this is the level half, from the code.
+
+**The observer records; the host classifies.** `src/probe/box-pane.sh` runs in the box, `nice`d
+and single-instance, and writes activity age, title and the visible tail to
+`<store>/status/<box>.pane.json`, only when the screen's shape changes or on a 10s heartbeat. It
+deliberately does not classify: the grammar changes with every release of every runtime, and in
+Rust (`classify_pane`, `src/signals.rs`) it is unit-tested against captured screens and ships with
+the binary instead of needing a probe rollout into every store. The rejected alternative was the
+host polling each box through `sbx exec` on every tick. Measured in a box across a live turn: 0.11%
+of one core.
+
+**Only the bottom of the visible pane counts, never scrollback.** `capture-pane -S -24` does not
+mean "the last 24 lines": its coordinates start at the top of the *visible* pane, so a negative
+start reaches into history, and after `/compact` pushed a finished turn's status line up there an
+idle box read `working` indefinitely. The observer asks for `#{pane_height}` in the same call and
+starts at `height - 24`. Within that tail a status line only counts directly above the composer,
+or, with no composer on screen, in the bottom ten non-empty lines, because anything higher is the
+agent *displaying* one — a log, a capture, a test fixture.
+
+**`busy` is the status line's shape, not a marker on it.** Both runtimes were first read by `esc to
+interrupt` and a spinner glyph in the terminal title, and neither held on a real box: the string
+was absent through minutes of continuous work, and the title's glyph was sampled holding one frame
+for thirty seconds while the box worked. `is_working_status_line` matches a spinner glyph, a verb
+ending in an ellipsis, then a parenthesised elapsed time, which is the only part that does not
+change between samples; the glyph guard is a denylist of things a status line never is, because an
+allowlist of glyphs rejected a plain `*` frame until live sampling caught it. The title glyph still
+counts only while the title's text is fresh (`title_is_spinning` over `title_is_fresh`, 90s,
+SKEIN-321). And `busy` outranks `Error` in both runtimes: an error still in the tail from the last
+turn is history while the next turn is visibly running.
+
+**Codex's grammar was captured from a live Codex 0.145.0**, not guessed (fixtures in
+`src/signals.rs`'s tests). The best single signal either runtime offers is Codex's title while a
+dialog is open, `[ ! ] Action Required | <dir>`: it appears when the dialog opens and clears on
+either answer. It animates (`[ ! ]` → `[ . ]`), so the observer compares the title with its whole
+leading run of non-alphanumerics stripped, or it would rewrite the observation every second while
+a dialog waited. Codex keeps its composer hint on screen while working, so "composer present" means
+idle for neither runtime. Two false friends are pinned by fixtures: the user's own echoed prompt
+uses the same `›` glyph as a dialog's options, so a dialog needs the numbered form *and* the
+confirm footer; and Codex's `Hooks need review` gate blocks before any hook can fire, which is the
+wall a skein box meets first, since skein installs hooks into every store.
+
+**When only half the signal is running, the row says so** (`screen_health`, computed in
+`load_views`). A missing level signal is otherwise invisible: turn state falls back to hook edges
+and the board looks normal. `none` (no observer; reattach), `stale` (observations stopped; reattach),
+`unreadable` (a fresh sample the grammar does not recognise; a skein bug to report) and
+`unsupported` (a runtime with no grammar; hooks only by design) are distinct because they ask for
+different moves. It is deliberately not in `skein doctor`: a box on hook-only turn state is not
+unhealthy, and an alarm that fires for every box until the fleet is reattached teaches people to
+ignore alarms.
+
 ## 10. What is actually in the state root
 
 `skein_home().join(...)` across the codebase:

@@ -241,7 +241,7 @@ pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String>
     };
     let runtime = agent_for_box(name);
     // Claude keeps `~/.claude/projects/<slug>/<session>.jsonl`. Codex's rollout files are a
-    // different shape and are NOT read here rather than guessed at — see docs/turn-state.md for
+    // different shape and are NOT read here rather than guessed at — see docs/inventory.md §9.1 for
     // why skein captures a runtime's format from a real box before claiming to understand it.
     if runtime != "claude" {
         return Ok(empty(&format!(

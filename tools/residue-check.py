@@ -204,7 +204,7 @@ ADDRESS = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]{2,})\b"
 #                                  quotes, and requiring the name to be all that is between them,
 #                                  is what drops the three cases SKEIN-542 named as the test —
 #                                  `meta.dev()` and `m.dev()`, which are `MetadataExt::dev` in
-#                                  src/fleet/disk.rs, and a citation in docs/UX-AUDIT.md whose last
+#                                  src/fleet/disk.rs, and a citation in a since-moved audit whose last
 #                                  label is a live gTLD. A naive matcher reports all three.
 #                                  Markdown's backticks count as quotes, so a host in a code span
 #                                  in a doc is read like one in a `.rs` string — which is also why
@@ -1383,8 +1383,8 @@ def self_check():
             "               name sat in this tree through every green run of this gate.",
         )
     # And the other side, which is the harder half and the reason this rule is shaped the way it
-    # is. These three are real lines in this repository: `MetadataExt::dev` called in
-    # src/fleet/disk.rs, and a citation in docs/UX-AUDIT.md. A `\S+\.\w+` matcher reports all three.
+    # is. These three were real lines in this repository: `MetadataExt::dev` called in
+    # src/fleet/disk.rs, and a citation in a since-moved audit. A `\S+\.\w+` matcher reports all three.
     # The quoted four are the other trap — ordinary strings whose last label is somebody's
     # top-level domain, which is what `HOST_TLDS` exists to keep out.
     for quiet in (

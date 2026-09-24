@@ -928,7 +928,7 @@ impl Act {
     /// What happens if they decline — plainly, because a person who cannot see the cost of "no"
     /// has not been given a choice.
     ///
-    /// The one that gets skipped, and the reason `docs/live-check.md` writes "what a failure means"
+    /// The one that gets skipped, and the reason `docs/delivery.md` §7 writes "what a failure means"
     /// under every command on the page. Declining is a supported outcome and each of these says
     /// what skein does next, not what breaks.
     pub fn if_declined(&self) -> String {
@@ -1002,12 +1002,12 @@ impl Act {
     }
 }
 
-/// A privileged command put to the person, in `docs/live-check.md`'s voice.
+/// A privileged command put to the person, in the voice of `docs/delivery.md` §7.
 ///
 /// **Three parts, and it is not shippable without the third.** The command, why skein wants it, and
 /// what happens if they decline. The third is the one that gets skipped: a person who cannot see
 /// the cost of "no" has not been given a choice, they have been given an instruction with a
-/// decoration. `docs/live-check.md` already writes every entry this way — the command, what a pass
+/// decoration. `docs/delivery.md` §7 already writes every entry this way — the command, what a pass
 /// looks like, and what a failure *means*, "because half of these fail in a way that looks like
 /// something else" — and this reuses that voice rather than inventing a second one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1078,8 +1078,8 @@ pub enum Performed {
 /// exactly like one that never claimed it, and so does an unpaired warden — which refuses
 /// *everything* with a 503 (`warden/src/serve.rs`, `secret.missing()`), including the two endpoints
 /// that only report. That second case is the one that made this test-worthy: a mispaired
-/// `$SKEIN_HOME` otherwise reads as a fleet that can do nothing, the symptom `docs/live-check.md`
-/// §4 already warns about, rather than as a fleet whose commands you now type yourself.
+/// `$SKEIN_HOME` otherwise reads as a fleet that can do nothing, the symptom `docs/delivery.md`
+/// §7 already warns about, rather than as a fleet whose commands you now type yourself.
 ///
 /// # The one thing that is not prompted, and why
 ///
@@ -1571,7 +1571,7 @@ mod tests {
     /// A warden that cannot read its own secret fails closed and refuses **everything** with a 503
     /// (`warden/src/serve.rs`, `secret.missing()`), including the two endpoints that only report —
     /// and skein presents the secret on every request, so a mispaired `$SKEIN_HOME` produces exactly
-    /// this. `docs/live-check.md` §4 warns that it "reads as a broken warden rather than as a
+    /// this. `docs/delivery.md` §7 warns that it "reads as a broken warden rather than as a
     /// disagreement"; under the rule it reads as a fleet whose privileged commands you now type
     /// yourself, which is a thing a person can act on.
     #[test]

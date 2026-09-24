@@ -239,7 +239,7 @@ pub fn hook_health(name: &str, running: bool) -> &'static str {
 // died" — so a state nobody clears is shown forever. `box-pane.sh` samples the agent's screen and
 // records what it saw; the interpretation lives here, in Rust, where the provider-specific grammar
 // is unit-tested against real captures and a fix ships with the binary instead of needing a new
-// probe rolled into every store. See docs/turn-state.md.
+// probe rolled into every store. See docs/inventory.md §9.1.
 
 /// One sample of a box's agent screen, as `box-pane.sh` wrote it to
 /// `<store>/<name>.pane.json`. Every field is optional so a probe from a newer/older skein can
@@ -649,7 +649,7 @@ pub fn title_activity(title: &str) -> Option<String> {
 /// and a dialog is only believed when it also carries an option list *and* the composer is gone
 /// (a dialog replaces it).
 ///
-/// Both runtimes are implemented from live captures (docs/turn-state.md §6, §6b); anything else
+/// Both runtimes are implemented from live captures (docs/inventory.md §9.1); anything else
 /// returns `Unknown`, which defers to the hook edges — i.e. exactly the old behaviour — rather than
 /// guess at a grammar nobody has read.
 /// The runtimes whose screens skein can read. Kept next to `classify_pane`'s dispatch so the two
@@ -790,7 +790,7 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
     Screen::Unknown
 }
 
-/// Codex 0.145.0, captured live (docs/turn-state.md §6b). Two things make its screen easier to read
+/// Codex 0.145.0, captured live (docs/inventory.md §9.1). Two things make its screen easier to read
 /// than Claude's: a dialog replaces the composer *and* carries a fixed footer (`Press enter to
 /// confirm…`), and the terminal title says `[ ! ] Action Required` while — and only while — a
 /// decision is pending. That marker is animated (`[ ! ]` → `[ . ]`), so only the words can be matched.
@@ -890,7 +890,7 @@ impl StatusFrom {
 /// Fold the level observation into the edge status. Returns the effective status key, the blocking
 /// kind when there is one, and **where the answer came from**.
 ///
-/// The four rules (docs/turn-state.md §4.3), in order:
+/// The four rules (docs/architecture.md §2.2), in order:
 ///   1. no level observation ⇒ the edge, unchanged — older boxes behave exactly as before;
 ///   2. attention never latches: a fresh level observation *overrides* a stale edge that still
 ///      claims `blocked`/`error`, which is the twenty-minute bug;
@@ -1824,7 +1824,7 @@ mod tests {
         assert_eq!(classify_pane("claude", &obs(retrying)), Screen::Busy);
     }
 
-    // ---------- Codex 0.145.0, captured live from a box (docs/turn-state.md §6b) ----------
+    // ---------- Codex 0.145.0, captured live from a box (docs/inventory.md §9.1) ----------
 
     /// A shell-command approval, exactly as Codex draws it. Note there is no composer footer: a
     /// dialog *replaces* it.

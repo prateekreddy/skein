@@ -366,7 +366,7 @@ console.log("\nreading");
 // next to "Not read yet". The change is readable here now, and a verdict exists only beside it.
 // **The verdict lives on the ROW now** (SKEIN-449). It used to be offered only inside the reading
 // view, on the rule that no verdict comes from a surface that is not showing you the change
-// (`docs/review-ux.md` §6). The reading view is going: the change is read on GitHub and a session
+// (`docs/parity.md` §3). The reading view is going: the change is read on GitHub and a session
 // does the reviewing, so the rule went with the surface that justified it. What must still hold is
 // that everything the owner asked to keep is reachable from the row — "I want to be able to approve
 // when I want with some comments or post some comments of my own and request changes or just

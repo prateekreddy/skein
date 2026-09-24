@@ -425,7 +425,7 @@ const FLEET = {
   "}": "next-session",
 };
 
-// What a key means while the review pane is the surface (SKEIN-151/159, docs/review-ux.md §6).
+// What a key means while the review pane is the surface (SKEIN-151/159, docs/parity.md §3).
 // Consulted INSTEAD of `FLEET` when `where.pane === "review"`, and a miss here does NOT fall
 // through to the fleet table: with the pane open, the fleet's `j`/`k`/`↵`/`d`/`]` would move a
 // selection BEHIND the pane and `↵` would navigate out of review entirely — worse than dead keys,

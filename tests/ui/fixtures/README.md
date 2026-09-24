@@ -32,8 +32,8 @@ proves nothing about that.
 
 **The numbers are kept, and that is a decision rather than an oversight.** A bare integer names
 nothing once the slug and every branch are synthetic, and the numbers are how the assertions and the
-two documents that explain the bug (`docs/review-ux.md`, `src/web/index.html`'s `revChains`
-comment) refer to individual rows. Renaming them would cost every one of those sentences its
+comment that explains the bug (`src/web/index.html`'s `revChains` comment; a UX review since moved
+out of the repository did too) refer to individual rows. Renaming them would cost every one of those sentences its
 subject and buy nothing.
 
 **One suite reads this file**: `tests/ui/review_return.mjs`, in its SKEIN-288 and SKEIN-302

@@ -6,7 +6,7 @@
 # Why this exists: every other signal skein has is an EDGE (a hook firing on an event). Edge coverage
 # is incomplete — no runtime fires anything when a human answers a permission prompt, dismisses a
 # dialog with esc, interrupts a turn, or when the agent dies — so a state nobody clears is shown
-# forever (a permission answered at 13:27 still read "decision" at 13:47; see docs/turn-state.md).
+# forever (a permission answered at 13:27 still read "decision" at 13:47; see docs/inventory.md §9.1).
 # This is the missing level signal: what the box's screen says RIGHT NOW, which is self-clearing by
 # construction — the dialog is either on screen or it isn't.
 #

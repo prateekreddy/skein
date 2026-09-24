@@ -891,7 +891,7 @@ function revGist(s, key, open) {
 // **The verdict controls, on the ROW** (SKEIN-449).
 //
 // They used to live in a reading view of skein's own, gated on the diff being on screen —
-// `docs/review-ux.md` §6, "no verdict from a surface that is not showing you the change". The
+// `docs/parity.md` §3, "no verdict from a surface that is not showing you the change". The
 // change is read on GitHub now and a session does the reviewing, so the gate went with the surface
 // that justified it, and the row is where you say what you think. It is still a surface that has to
 // be OPENED: these are drawn in the row's body, and `a` on a collapsed row refuses out loud.

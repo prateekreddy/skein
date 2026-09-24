@@ -8,7 +8,7 @@
 import { check, page, pressRow, until } from "./setup.mjs";
 
 console.log("\nthe keyboard");
-// SKEIN-151/159, docs/review-ux.md §6. Zero bindings before this, on a surface used thirty times
+// SKEIN-151/159, docs/parity.md §3 Zero bindings before this, on a surface used thirty times
 // a day — and with boxes present the fleet's keys were worse than dead: `j` moved a selection
 // BEHIND the pane and `↵` navigated out of review entirely, which is data-loss-shaped with a
 // composer open. What is asserted here is the browser half; the table's own routing lives in

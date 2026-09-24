@@ -14,9 +14,9 @@ They are meant to be read together, and in this order if you are new:
 | [`docs/parity.md`](docs/parity.md) | **the acceptance gate** — what the rewrite must still do when it is finished |
 | [`docs/delivery.md`](docs/delivery.md) | **the sequence** — order, migration, and the landmines |
 
-Two more sit beside them: [`docs/live-check.md`](docs/live-check.md) is the residue that no test on a
-developer machine can answer because it needs a real sandbox, and [`README.md`](README.md) is how you
-*use* skein rather than how it is built.
+[`README.md`](README.md) sits beside them: it is how you *use* skein rather than how it is built.
+What no test on a developer machine can answer, because it needs a real sandbox, is the last
+section of `docs/delivery.md`.
 
 If you are picking up the **in-fleet install**, the open items are in the work tracker, and
 [`CLAUDE.md`](CLAUDE.md) says which project and how to reach it. They used to be in a
@@ -37,12 +37,12 @@ only way that survives: **every claim on this page is a claim that a named file 
 command checks all of them.**
 
 ```sh
-ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md docs/live-check.md \
+ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md \
    docs/modules.toml docs/sources.toml README.md CLAUDE.md \
    tools/module-check.py tools/source-check.py tests/parity_numbers.rs
 ```
 
-If that command prints twelve paths, this page is true. If it fails, this page is stale in the only
+If that command prints eleven paths, this page is true. If it fails, this page is stale in the only
 way a signpost *can* be stale — something moved and the sign was not repainted — and the failure
 names the file. There is no third state, because there is nothing else on this page to be wrong
 about.

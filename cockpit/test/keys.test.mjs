@@ -67,7 +67,7 @@ test("every key the board dispatches is named here", () => {
   }
 });
 
-// ---- the review pane's table (SKEIN-151/159, docs/review-ux.md §6) ----------------------------
+// ---- the review pane's table (SKEIN-151/159, docs/parity.md §3) -------------------------------
 
 const REV = { pane: "review" };
 
@@ -141,7 +141,7 @@ test("a g chord consumes the next key whole", () => {
 
 test("merge is unbound, deliberately", () => {
   // The one act that cannot be undone from this pane; one letter must not land a commit on a
-  // base branch (docs/review-ux.md §6, "three deliberate absences"). Chip only.
+  // base branch (docs/parity.md §3, "three deliberate absences"). Chip only.
   assert.equal(shortcutFor(key("m"), REV), null);
   assert.equal(shortcutFor(key("m"), { ...REV, pending: "g" }), null);
   assert.ok(!ACTIONS.some(a => /merge/.test(a)), "an action named merge exists — the absence was filled");

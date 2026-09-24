@@ -266,8 +266,8 @@ followed against the working tree** — `sed -n 'Np' <path>`, not `git show`.
 That sentence used to say the opposite: that the numbers were as of the commit that added this
 document. It was overtaken within a day. `dbe2318` re-derived forty-four of them against the tree
 rather than leaving them pinned, and this repository's one machine-readable way to declare a pin —
-the sentence `tools/prose-check.py`'s `CITATIONS_AT` matches, which `docs/review-product-review.md`
-does declare — was never written here. A citation a reader has to `git show` to follow is a
+the sentence `tools/prose-check.py`'s `CITATIONS_AT` matches, which a dated product review of
+2026-08 declared — was never written here. A citation a reader has to `git show` to follow is a
 citation nobody follows, so the claim this document makes is the live one.
 
 **It is no longer maintained by hand** (SKEIN-778). `tools/line-cite-check.py` records in
@@ -803,7 +803,7 @@ help sitting in a doc comment beside it.
 | `src/board.rs:355` | `permission`, `question`, `trust` or `auth` | **R** — the agent's screen showing a permission, question, trust or auth dialog | a blocked agent | partly — the doc at `src/board.rs:353` says "each wants a different move from you, so the row names it instead of saying 'decision'". It names the *kind* of move, not the move | yes — the dialog clearing | N |
 | `src/board.rs:367` | `never`, `misfiled` or `stale` for hooks | **R** — a box just started (no hook file yet), a reused name, or a session predating the installed probe | a box whose signals are not arriving | partly — the doc at `src/board.rs:360` sends the reader to `hook_health` for "what each one asks of a person"; the row carries only the token | yes — a correctly-named signal appearing | N |
 | `src/board.rs:377` | `none`, `stale`, `unreadable`, `unsupported`, `newer`, `misfiled` | **R** — all six values are live branches of `screen_health`; the same drift as row 131 | a box blind to its own screen | **n** | yes — a fresh parseable observation, which `pane_usable` already computes | N |
-| `src/board.rs:372` | `screen`, `edge`, `edge-ahead` | **R** — the turn-state fusion's three rules, each with a real bug behind it (docs/turn-state.md §4.3) | looking at the board | n | yes — the observer catching up | N |
+| `src/board.rs:372` | `screen`, `edge`, `edge-ahead` | **R** — the turn-state fusion's three rules, each with a real bug behind it (docs/architecture.md §2.2) | looking at the board | n | yes — the observer catching up | N |
 | `src/board.rs:395` | a sandbox skein did not place, hidden until the `foreign:` filter reveals it | **R** — type `foreign:` in the board filter with a sandbox `sbx` made directly | typing `foreign:` | n | yes — a placement record appearing | N |
 | `src/board.rs:430` | `older` — the box's isolation cover is out of date | **R** — upgrade the binary while an older-covered box is running | after an upgrade | n at the row; §1's `cover_health` carries the sentence and the cost | yes — `cover_is_current`, computed every tick | N |
 | `src/board.rs:445` | `uncapped no-cgroup-delegation` (or `no-limit-computed`, `could-not-join-cgroup`) | **R** — start a box on a host without cgroup v2 delegation — `box-session.sh` writes the reason | a box started outside the ceiling | partly — the doc at `src/board.rs:440` distinguishes the three, "need a different fleet rather than a different setting"; the row shows the token | yes — the launcher writing `capped` at the next start | N |
