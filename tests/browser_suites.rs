@@ -76,7 +76,7 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 28] = [
+const NODE_SUITES: [&str; 29] = [
     "attach",
     "budget",
     // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
@@ -116,6 +116,10 @@ const NODE_SUITES: [&str; 28] = [
     "screenhalf",
     "stackread",
     "stacksteps",
+    // `serverBinary()` refusing a `$SKEIN_SERVER_BIN` older than a page it embeds — a hole only the
+    // by-hand loop had, since this suite's own `env!("CARGO_BIN_EXE_skein-server")` is always fresh
+    // (SKEIN-887).
+    "stalebin",
     "stream",
     "substrate",
     "train",
