@@ -738,6 +738,36 @@ mod tests {
         );
     }
 
+    /// A cgroup skein cannot see into is one it leaves alone: a gone box's cgroup whose child has
+    /// no readable `cgroup.procs` is kept, and reported as held, never removed as empty.
+    ///
+    /// What makes it fail: counting an unreadable `cgroup.procs` as no processes (`Err(_) => 0` in
+    /// `procs_in`), after which the cgroup reads as empty and goes to `rmdir`.
+    #[test]
+    fn a_gone_boxs_cgroup_skein_cannot_see_into_is_kept_and_reported() {
+        let dir = tempdir();
+        let root = dir.join("cgroup");
+        cgroup(&root, "skein/box-blind", "");
+        // A child with no `cgroup.procs` at all: the simplest unreadable one on a fake tree.
+        std::fs::create_dir_all(root.join("skein/box-blind/sub")).unwrap();
+        let live: BTreeSet<String> = ["box-a".to_string()].into();
+        let mut removed = Vec::new();
+        let got = reclaim(&root, &live, &mut fake_rmdir(&mut removed));
+
+        assert!(
+            removed.is_empty() && root.join("skein/box-blind/sub").is_dir(),
+            "a cgroup skein could not see into was removed as empty: {removed:?}"
+        );
+        assert_eq!(
+            got.held
+                .iter()
+                .map(|h| h.owner.as_str())
+                .collect::<Vec<_>>(),
+            vec!["box-blind"],
+            "a cgroup skein could not see into was not reported as held"
+        );
+    }
+
     /// The row says what the owner approved, word for word, about the fixture above: the example
     /// in the approved wording, built for real from a fake docker, `/proc` and cgroupfs.
     ///
