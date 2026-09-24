@@ -142,12 +142,16 @@ function setPane(pane) {
   const nav = settingsModal().querySelector(`.set-navi[data-pane="${pane}"]`);
   document.getElementById("set-htitle").textContent = nav ? nav.textContent.replace(/\d+$/, "").trim() : pane;
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
+  // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
+  // not — most of Boxes has no override at all, and no other pane has ever had one. Dropped
+  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one now carries its own
+  // `.set-envnote` beside it instead, so the footer says nothing for a pane that has none.
   const hint = document.getElementById("set-hint");
   if (hint) hint.innerHTML = pane === "repos"
     ? "each repo saves as you leave a field — these live in <code>repos.json</code>, not in this form"
     : pane === "tracking"
       ? "each connection saves as you leave a field — a credential never rides along with the config form"
-      : "<code>$SKEIN_*</code> env vars override these";
+      : "";
   if (pane === "diag") renderDiagnostics();
   if (pane === "usage") showUsage();
   if (pane === "update") loadUpdate();
