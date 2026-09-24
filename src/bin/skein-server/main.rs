@@ -310,6 +310,8 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // starts it at all. The relay above, a few file reads every five seconds, needs none of that.
     tokio::spawn(skein::announce::watch_fleet_disk());
     tokio::spawn(skein::fleet::watch_runtime_updates());
+    // Containers and cgroups no box owns: report the containers, remove the empty cgroups.
+    tokio::spawn(skein::fleet::watch_unowned());
     // Keep every running box's GitHub write token ahead of its expiry.
     //
     // An App installation token lives one hour, so this refreshes on a wide margin rather than close

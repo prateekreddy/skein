@@ -246,7 +246,7 @@ fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
 /// belonging to a live box is called unattributed and somebody is offered a command that would
 /// delete work; carrying a name that is no longer a box means one stray goes unreported and 4 GB
 /// stays on the disk. The first is the failure worth two reads.
-fn live_box_names() -> std::collections::BTreeSet<String> {
+pub(super) fn live_box_names() -> std::collections::BTreeSet<String> {
     let mut names: std::collections::BTreeSet<String> = std::fs::read_dir(fleet_root())
         .into_iter()
         .flatten()

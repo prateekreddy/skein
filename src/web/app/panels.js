@@ -746,7 +746,20 @@ function renderDiagnostics() {
   const list = (names, what) => names?.length
     ? `<div class="dg-row bad"><span class="dg-mark">!</span><span class="dg-name">${what}</span>
        <span class="dg-detail">${esc(names.join(", "))}</span></div>` : "";
+  // Containers and cgroups no box owns. It is not one of CHECKS, because it is never a fault: ✓, or
+  // `!` with what was found, and never ✗. Every command in it is only shown for copying, with no
+  // button, because the owner declined one and the server never runs these itself.
+  const u = h.unowned;
+  const unowned = u ? `
+    <div class="dg-row ${u.clear ? "ok" : "warn"}">
+      <span class="dg-mark">${u.clear ? "✓" : "!"}</span>
+      <span class="dg-name">unowned containers</span>
+      <span class="dg-detail">${(u.said || []).map(s => `<div>${esc(s.text)}</div>`
+        + (s.offers || []).map(o => `<div class="dg-fix">→ ${esc(o.lead)} <code>${esc(o.command)}</code>${o.destructive
+          ? ` <span class="dg-danger">destroys something — copy it and run it yourself</span>` : ""}</div>`).join("")).join("")}</span>
+    </div>` : "";
   el.innerHTML = rows
+    + unowned
     + list(h.dark_boxes, "no signals")
     + list(h.stale_boxes, "stale sessions")
     + `<div class="dg-foot">the same report <code>skein doctor</code> prints, which also probes

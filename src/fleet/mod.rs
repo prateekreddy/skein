@@ -84,6 +84,7 @@ mod substrate;
 #[cfg(test)]
 mod testkit;
 mod transcript;
+mod unowned;
 
 pub use checkout::*;
 pub use containers::*;
@@ -111,6 +112,7 @@ pub use start::*;
 pub use stop::*;
 pub use substrate::*;
 pub use transcript::*;
+pub use unowned::*;
 
 /// What a sandbox run reports. Re-exported so a caller that only wants to run something in the
 /// fleet names `fleet` alone — the type is `place`'s and reaching for it directly would be a second

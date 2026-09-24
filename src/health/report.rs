@@ -105,6 +105,7 @@ impl HealthReport {
             stale_boxes: _,
             uncovered_boxes: _,
             uncapped_boxes: _,
+            unowned: _,
             runtimes: _,
             git_credential: _,
             counted: _,
@@ -361,6 +362,16 @@ pub struct HealthReport {
     /// different fleet.
     #[serde(default)]
     pub uncapped_boxes: Vec<String>,
+    /// Running containers and cgroups that no box owns, as the Settings → Diagnostics row draws
+    /// them ([`crate::fleet::unowned_row`]).
+    ///
+    /// Not a `HealthCheck`, for two reasons. The row is marked `!` and carries commands, while a
+    /// check that is not a fault must offer no fix. And nothing it finds is a fault: skein did not
+    /// start these containers and does not remove them. `None` until the server's own pass has run
+    /// once, because the report is polled and must not ask docker itself; the page draws no row
+    /// until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unowned: Option<crate::fleet::UnownedRow>,
     pub runtimes: Vec<RuntimeInfo>,
     /// How boxes get GitHub credentials, named — or empty when nobody has chosen.
     ///
@@ -810,6 +821,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         stale_boxes,
         uncovered_boxes,
         uncapped_boxes,
+        unowned: crate::fleet::unowned_report(),
         runtimes: supported_runtimes(),
         git_credential: crate::gitgate::box_credential().label(),
     };
@@ -1318,7 +1330,7 @@ mod tests {
     /// thing a test moves. `health_report`'s own fixture cannot do this job: it has a fault of its
     /// own (no warden answers a test process, by design), so `ok` is already false there.
     ///
-    /// The literal names all 27 fields, which is deliberate and costs nothing to keep: a field
+    /// The literal names all 28 fields, which is deliberate and costs nothing to keep: a field
     /// added to `HealthReport` stops this compiling, in the same breath as the destructuring in
     /// `checks_with_banner`.
     fn every_check_satisfied() -> HealthReport {
@@ -1351,6 +1363,7 @@ mod tests {
             stale_boxes: Vec::new(),
             uncovered_boxes: Vec::new(),
             uncapped_boxes: Vec::new(),
+            unowned: None,
             runtimes: Vec::new(),
             git_credential: String::new(),
         }

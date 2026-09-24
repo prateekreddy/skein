@@ -255,19 +255,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: {}\\n {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:568"]
+["src/bin/skein-server/main.rs:570"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:578"]
+["src/bin/skein-server/main.rs:580"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:669"]
+["src/bin/skein-server/main.rs:671"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:675"]
+["src/bin/skein-server/main.rs:677"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -745,96 +745,96 @@ cited_by = ["docs/recovery-survey.md"]
 line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:865"]
+["src/box-session.sh:884"]
 line = "share_paths=(\".cargo\" \".rustup\" \".npm\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:891"]
+["src/box-session.sh:910"]
 line = "overlay_paths=(\".local\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1135"]
+["src/box-session.sh:1154"]
 line = "merge_login \"$mine\" \"$canon\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1335"]
+["src/box-session.sh:1354"]
 line = "data[\"crossSessionInbound\"] = \"accept\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1358"]
+["src/box-session.sh:1377"]
 line = "[ -e \"$HOME/$rel\" ] && binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1395"]
+["src/box-session.sh:1414"]
 line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1412"]
+["src/box-session.sh:1431"]
 line = "binds+=(--bind \"$home/.local/state\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1437"]
+["src/box-session.sh:1456"]
 line = "&& binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1719"]
+["src/box-session.sh:1738"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1766"]
+["src/box-session.sh:1785"]
 line = "binds+=(--tmpfs \"$fleet_root_dir\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1809"]
+["src/box-session.sh:1828"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1874"]
+["src/box-session.sh:1893"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1898"]
+["src/box-session.sh:1917"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1923"]
+["src/box-session.sh:1942"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 
-["src/box-session.sh:1931"]
+["src/box-session.sh:1950"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:1987"]
+["src/box-session.sh:2006"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1988"]
+["src/box-session.sh:2007"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2051"]
+["src/box-session.sh:2070"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2176"]
+["src/box-session.sh:2195"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2245"]
+["src/box-session.sh:2264"]
 line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2618"]
+["src/box-session.sh:2637"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2668"]
+["src/box-session.sh:2687"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2709"]
+["src/box-session.sh:2728"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1412,38 +1412,38 @@ cited_by = ["docs/recovery-survey.md"]
 line = "let check = HealthCheck::unsatisfied(detail, fix);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:428"]
+["src/health/report.rs:439"]
 line = "p if p.killed > 0 => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:463"]
+["src/health/report.rs:474"]
 line = "None => HealthCheck::unsatisfied("
 window = "// box across. Nothing may drive this on its own.\u000bNone => HealthCheck::unsatisfied(\u000b\"no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:500"]
+["src/health/report.rs:511"]
 line = "Err(error) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:511"]
+["src/health/report.rs:522"]
 line = "(false, true) => HealthCheck::unsatisfied("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:513"]
+["src/health/report.rs:524"]
 line = "format!(\"install {name}, or start the server from a shell whose PATH has it\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:532"]
+["src/health/report.rs:543"]
 line = "false => HealthCheck::unsatisfied("
 window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:623"]
+["src/health/report.rs:634"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:633"]
+["src/health/report.rs:644"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
