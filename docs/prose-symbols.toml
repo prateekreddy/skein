@@ -55,7 +55,6 @@ F_SETFL = "an `fcntl(2)` command, the kernel's. `src/doorway.rs` names it in `a_
 # ---- named in the past tense, deliberately -------------------------------------------------
 pick_path = "SKEIN-106 deleted the route, the handler and `health::pick_path`. parity.md's row RECORDS that deletion, so it has to be able to say the name."
 read_anchor = "architecture.md §9 describes what the old anchor read and why the box could write it. The paragraph is the argument for the current design and needs the former name to make it."
-CHANGES_REQUIRED = "the misspelling itself. GitHub's value is CHANGES_REQUESTED; review-queue.md now says so explicitly, and the wrong spelling is the thing being corrected."
 SKEIN_KIT = "one of the `$SKEIN_REPO`/`$SKEIN_KIT`/`$SKEIN_STORE` triple the retired per-VM launch mode read. Same record as `persistent_launch_command`: self-sufficient.md quotes the old path in order to say what replaced it."
 transcript_is_vm_local = "a parameter of the per-VM model, 'that only a migration ever set true'. `src/fleet/checkout.rs:423` says in as many words that the flag is gone with the model, and a name in a claim about what is gone still has to be spelled right."
 INITIAL_SETUP_WAIT = "the agent launch's setup wait as it was NAMED when the three deadlines were last inverted. `src/fleet/start.rs:1774-1778` is the account of that inversion; the live reading is `setup_wait_secs()`, which the test beneath it calls."

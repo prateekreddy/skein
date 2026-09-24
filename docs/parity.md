@@ -249,6 +249,15 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   - **One open row.** Opening a row closes every other row and any open stack
     (`src/web/app/review-keys.js`). Unbounded expansion grew the pane's scroll height by three
     quarters over five opens and survived every refetch.
+  - **A queue's lanes come from readiness, not from what you have done** (`prq::Lane`, derived in
+    `build_pr`). *Your move* (`NeedsYou`): somebody is waiting on your review and nothing stops you
+    giving it. *Their move* (`Waiting`): you wrote it, your verdict stands and GitHub has not asked
+    you again (SKEIN-354), or GitHub's own `reviewDecision` already reads `APPROVED` (SKEIN-142).
+    *Not ready* (`NotReady`): a draft or a conflict, drawn as a count with its reasons rather than as
+    rows. Failing checks deliberately do not demote a row: where CI runs only after review, red is the
+    ordinary state of a pull request awaiting you. The rule replaced one that derived the lane from
+    whether you had reviewed the current commit, which a review of 23 August 2026 found putting all
+    twenty-nine open pull requests in one lane; that review has left the repository.
   - **The move mark says whose move it is, and nothing else.** Your move is the only lit mark in
     the column; `.mv.blocked` is a stack step whose base you have not reviewed, found by branch name
     and not by position; red CI is said once for the repo rather than on twenty-five rows. The age
