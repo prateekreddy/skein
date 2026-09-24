@@ -45,6 +45,7 @@ mod path;
 mod private;
 mod requests;
 mod signals;
+mod startscripts;
 
 use harness::*;
 use network::*;

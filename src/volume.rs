@@ -295,11 +295,11 @@ pub fn used_kb(dir: &Path) -> Option<u64> {
 ///
 /// **A store's contents travel bit-for-bit, and that is correct — established, not assumed.** The
 /// worry is a path baked *inside* a store, where a stale entry sits beside a working one and the box
-/// comes up fine while announcing a failure at every start. Nothing written today does that: every
-/// hook command is `$CLAUDE_PROJECT_DIR/.claude/skein/bin/...`, resolved inside the box, and
-/// `a_store_holds_no_path_into_the_volume_it_was_written_on` builds a store and searches it, so that
-/// stays true rather than being a claim about the writers. The exception is the two markers a store
-/// can be old enough to hold — see [`markers`] — and those are rewritten with the rest.
+/// comes up fine while announcing a failure at every start. Nothing written today does that: a store
+/// holds no hook command, its default status line names `${SKEIN_FLEET_ROOT:-/boxes}/.skein/…`,
+/// resolved inside the box, and `a_store_holds_no_path_into_the_volume_it_was_written_on` searches a
+/// built store, so that stays true rather than being a claim about the writers. The exception is the
+/// two markers a store can be old enough to hold — see [`markers`] — and those are rewritten too.
 /// The deepest ancestor of `path` that exists — the filesystem that will hold it.
 fn nearest_existing(path: &Path) -> PathBuf {
     let mut walk = path.to_path_buf();
@@ -708,8 +708,8 @@ fn repoint(source: &Path, target: &Path, apply: bool) -> Result<usize, String> {
 
 /// The same rewrite, for the two path markers a store can be *old enough* to hold.
 ///
-/// Nothing skein writes today puts a volume path inside a store — every hook command is
-/// `$CLAUDE_PROJECT_DIR/.claude/skein/bin/…`, resolved inside the box, and
+/// Nothing skein writes today puts a volume path inside a store — it holds no hook command, and its
+/// default status line names `${SKEIN_FLEET_ROOT:-/boxes}/.skein/…`, resolved inside the box — and
 /// `a_store_holds_no_path_into_the_volume_it_was_written_on` is what keeps that true. But
 /// `sandbox-bootstrap.sh` still *reads* `skein/source` and `skein/mirror`, "for stores seeded before
 /// the two things had separate names", and `skein/mirror` named a path under the volume. A store
@@ -805,9 +805,9 @@ mod tests {
     /// Established by building a store and searching it, rather than by reading the writers and
     /// concluding: the writers are `kit::ensure_store` and `probes::ensure_probe_in` between them,
     /// and a claim about what they emit is exactly the kind that drifts. This is why no rewriter was
-    /// written — every hook command is `$CLAUDE_PROJECT_DIR/.claude/skein/bin/…`, resolved inside
-    /// the box at run time, and the only absolute path in the whole store is the one this test
-    /// would catch if somebody added it.
+    /// written — the store holds no hook command, its default status line names
+    /// `${SKEIN_FLEET_ROOT:-/boxes}/.skein/…`, resolved inside the box at run time, and the only
+    /// absolute path in the whole store is the one this test would catch if somebody added it.
     #[test]
     fn a_store_holds_no_path_into_the_volume_it_was_written_on() {
         let _g = env_lock();

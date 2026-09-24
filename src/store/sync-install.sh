@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # sync-install.sh — wire this box to the `sync` work tracker, and install the discipline for it.
 #
-# Lives in the store (`<store>/skein/bin/`), which is mounted live into every box for the repo. That
-# is deliberately not the kit: a kit only reaches boxes created after it changed, and the whole point
-# is that an EXISTING box can be wired up too. Refreshed host-side on every launch, so a box picks up
-# a newer version of this script by doing nothing.
+# Runs from skein's read-only plugin under the fleet root's `.skein` (SKEIN-1149), which the launcher
+# rewrites on every start and heal. That is deliberately not the kit: a kit only reaches boxes
+# created after it changed, and the whole point is that an EXISTING box can be wired up too, so a box
+# picks up a newer version of this script by doing nothing. It used to run from the store's
+# `skein/bin/`, which is just as live but which every box of the repo can write, so one box could
+# choose what a sibling runs as it starts. The store still gets a copy, which nothing skein runs uses.
 #
 # Runs from two places, and must behave the same in both:
 #   - the kit's startup hook, on every box start (silently does nothing until credentials exist);
@@ -76,12 +78,22 @@ risking an unbounded startup" >&2
 export GIT_TERMINAL_PROMPT=0
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes"
 
-# The store is two levels up from this script — exact, and free of any guess about layout.
-store="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"
-src="$store/skein/sync"
 
 project="${WORKSPACE_DIR:-}"
 [ -n "$project" ] || project="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# The store. Two copies of this script exist and they find it differently, as mailbox.sh's do: the
+# store's own, two levels below it (`.claude/skein/bin/`), and skein's read-only plugin's
+# (`probe/`), which is the one skein runs (SKEIN-1149) and which finds it from the project's
+# `.claude`, with the merged layout's hop (box-status.sh says why).
+self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+if [ "$(basename "$(dirname "$self")")" = skein ]; then
+  store="$(dirname "$(dirname "$self")")"
+else
+  store="$project/.claude"
+  if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"
+  elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi
+fi
+src="$store/skein/sync"
 
 # Credentials: the environment first, then the box-private file skein writes. Never the store — the
 # agent token is a bearer credential and the store is mounted live into every box for this repo.

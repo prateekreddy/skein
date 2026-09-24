@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # install-codex-hooks.sh — idempotently refresh Skein's generated Codex hooks in a box-private HOME.
+#
+# Reads the hooks from BESIDE itself, and is run from skein's read-only plugin (`probe/`, SKEIN-1149):
+# both used to be the store's (`skein/bin/` and `skein/codex-hooks.json`), which every box of the
+# repo can write, so one box could choose what a sibling's Codex hooks run. The store still gets a
+# copy of this script, which finds nothing beside it and exits; nothing skein runs uses it.
 set -euo pipefail
 
-store="${1:-}"
-source_hooks="$store/skein/codex-hooks.json"
+here="$(cd "$(dirname "$0")" && pwd)"
+source_hooks="$here/codex-hooks.json"
 target_dir="$HOME/.codex"
 target="$target_dir/hooks.json"
 [ -r "$source_hooks" ] || { echo "[skein-codex-hooks] source unavailable: $source_hooks" >&2; exit 1; }

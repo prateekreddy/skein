@@ -1994,8 +1994,9 @@ mod tests {
 
         let home = crate::testutil::tempdir();
         let dir = home.as_ref() as &std::path::Path;
-        let bin = dir.join("skein/bin");
-        std::fs::create_dir_all(&bin).expect("store");
+        // Where the kit finds its helpers: skein's read-only copies, not the store (SKEIN-1149).
+        let bin = dir.join("probe");
+        std::fs::create_dir_all(&bin).expect("probe dir");
         // Hangs, the way a git clone waiting on a credential prompt hangs.
         std::fs::write(
             bin.join("sync-install.sh"),
@@ -2005,7 +2006,8 @@ mod tests {
 
         // The budget is NOT shortened. That edit is what hid the cost for as long as it did.
         let script = format!(
-            "store={d}\nmarkers={d}\n{block}\n",
+            "skein_probe={p}\nmarkers={d}\n{block}\n",
+            p = sh_quote(&bin.display().to_string()),
             d = sh_quote(&dir.display().to_string())
         );
 

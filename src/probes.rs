@@ -4,8 +4,9 @@
 //! task without the *repo* providing anything. Neither the hooks nor the scripts they run are in the
 //! store, which every box of the repo can write: both load from skein's read-only plugin — the
 //! wiring since SKEIN-1062 ([`turn_state_hooks`]), the scripts since SKEIN-1144
-//! ([`plugin_install`]). The store still gets copies, for the kit and for an agent that runs
-//! `mailbox.sh` by hand; no hook runs them. See `docs/self-sufficient.md`.
+//! ([`plugin_install`]). So do the helpers a box runs as it starts (SKEIN-1149). The store still
+//! gets copies, for an agent that runs `mailbox.sh` by hand; nothing skein starts runs them. See
+//! `docs/self-sufficient.md`.
 //!
 //! This is still the highest-blast-radius write in the system — it edits a settings file the user
 //! also edits, in every store, on every upgrade, to take skein's past hooks back out and to keep the
@@ -83,7 +84,8 @@ const PROBE_HANDOFF_SH: &str = include_str!("probe/box-handoff.sh");
 const PROBE_SESSION_SH: &str = include_str!("probe/box-session.sh");
 // skein-owned machinery installed alongside the probe so an empty shared folder works end-to-end:
 // the SessionStart bootstrap (memory bridge + mailbox inbox + box registration), the mailbox, and a
-// default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
+// default status line. Copies live in `<store>/skein/bin/` (skein-owned namespace), refreshed each
+// run; what a box RUNS is the plugin's copy under `.skein` ([`plugin_install`], SKEIN-1144/1149).
 const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
 const SHARED_HOME_SH: &str = include_str!("store/shared-home.sh");
 const SHARED_HOME_GUIDE: &str = include_str!("store/SHARED-HOME.md");
@@ -103,7 +105,11 @@ const PROBE_TOKEN_USAGE_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-t
 const PROBE_HANDOFF_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-handoff.sh";
 const PROBE_SESSION_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-session.sh";
 const BOOTSTRAP_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/sandbox-bootstrap.sh";
-const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusline-command.sh";
+/// The status line a past skein set as the store's default, running the store's copy of the
+/// renderer. Kept only so [`store_settings`] can move exactly this string to [`statusline_cmd`]
+/// (SKEIN-1149); a status line a person set is any other string, and stays as it is.
+const STORE_ERA_STATUSLINE_CMD: &str =
+    "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusline-command.sh";
 // mailbox.sh hook entries — turn-boundary delivery so mail is re-checked every turn, not just at
 // SessionStart. `inbox` (UserPromptSubmit) surfaces unread mail as additional context at the start
 // of a turn; `stop-check` (Stop) blocks the stop with exit 2 + stderr if mail arrived mid-turn, so a
@@ -122,6 +128,75 @@ const STORE_PROBE: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/";
 const PLUGIN_PROBE: &str = "${CLAUDE_PLUGIN_ROOT}/probe/";
 /// The directory [`PLUGIN_PROBE`] names, relative to a plugin variant's root.
 const PLUGIN_PROBE_DIR: &str = "probe";
+
+/// The turn-state variant's [`PLUGIN_PROBE_DIR`] as a box names it from anything that is not a
+/// Claude plugin hook, and so has no `${CLAUDE_PLUGIN_ROOT}`: Codex's hooks, the attach shell, the
+/// status line, the tracker's installer. By the fleet root the launcher passes every box, under the
+/// `.skein` it binds read-only there. That variant, and not the full one, because it is installed
+/// whatever the fleet's switch says.
+pub(crate) fn box_probe_dir() -> String {
+    format!(
+        "${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/{}/{PLUGIN_PROBE_DIR}",
+        crate::runtime::TURN_STATE_PLUGIN
+    )
+}
+
+/// skein's default status line: the plugin's copy of the renderer (SKEIN-1149), not the store's,
+/// which every box of the repo can write.
+fn statusline_cmd() -> String {
+    format!("bash \"{}/statusline-command.sh\"", box_probe_dir())
+}
+
+/// What a box runs from skein when it starts rather than from a hook (SKEIN-1149): the helpers the
+/// kit runs (`shared-home.sh` and `agent-guide.sh`, which [`plugin_probe_scripts`] already carries,
+/// and these), the ones the attach shell and the tracker run, and the status line. Installed into
+/// the turn-state variant's [`PLUGIN_PROBE_DIR`] beside [`CODEX_HOOKS_JSON`], the wiring
+/// `install-codex-hooks.sh` reads from its own directory. A helper left in the store is one a
+/// sibling box can rewrite and this box then runs as it starts.
+/// `every_start_helper_runs_from_the_read_only_plugin` holds every caller to this list.
+fn start_helpers() -> [(&'static str, &'static str); 5] {
+    [
+        ("install-codex-hooks.sh", INSTALL_CODEX_HOOKS_SH),
+        ("sync-install.sh", SYNC_INSTALL_SH),
+        ("sync-refresh.sh", SYNC_REFRESH_SH),
+        ("statusline-command.sh", STATUSLINE_SH),
+        ("box-pane.sh", PROBE_PANE_SH),
+    ]
+}
+
+/// Every shell skein runs in a box, as it starts or as it is attached to, that runs one of
+/// [`start_helpers`] by path — each with what it is — except the kit's provisioning script, which
+/// is a file of its own (`kit/skein-startup.sh`). The production strings themselves, so that
+/// `every_start_helper_runs_from_the_read_only_plugin` and the isolation test that runs them in a
+/// box are reading what a box is given rather than a copy.
+pub fn start_invocations() -> Vec<(&'static str, String)> {
+    let codex = crate::runtime::resolve_runtime("codex");
+    vec![
+        ("Codex's setup", codex.interactive_setup.to_string()),
+        (
+            "the attach shell's guide refresh",
+            crate::runtime::agent_instruction_setup(codex),
+        ),
+        (
+            "the attach shell's screen observer",
+            crate::runtime::pane_observer_start("skein-agent", ""),
+        ),
+        (
+            "the tracker's install",
+            crate::tracking::SYNC_INSTALL_IN_BOX.to_string(),
+        ),
+        (
+            "the tracker's refresh",
+            crate::tracking::sync_refresh_in_box(false),
+        ),
+        ("the status line skein sets", statusline_cmd()),
+    ]
+}
+
+/// Codex's generated hooks, which `install-codex-hooks.sh` merges into a box's `~/.codex/hooks.json`.
+/// Beside the installer in the read-only plugin (SKEIN-1149); it used to be the store's
+/// `skein/codex-hooks.json`, which a sibling box could rewrite.
+const CODEX_HOOKS_JSON: &str = "codex-hooks.json";
 
 /// The scripts installed into each plugin variant's [`PLUGIN_PROBE_DIR`]: every script a turn-state
 /// hook runs, Claude's or Codex's, and every script one of those runs in turn. A script left out of
@@ -171,7 +246,8 @@ fn probe_revision() -> String {
 /// `<store>/skein/bin/`, and take skein's own hooks back **out** of `<store>/settings.json`
 /// ([`store_settings`]: the repo's own hooks are preserved, re-runs change nothing). The hooks come
 /// from skein's plugin ([`turn_state_hooks`]) and run the plugin's copies of these scripts, not
-/// these (SKEIN-1144); the store's copies are for the kit and the agent's own use.
+/// these (SKEIN-1144), and the kit runs the plugin's too (SKEIN-1149); the store's copies are for
+/// the agent's own use.
 ///
 /// Refreshes *every* store skein reads — each managed repo's plus `store_dir()` — so multi-repo
 /// fleets all report turn-state. Best-effort: errors are collected, not fatal.
@@ -296,15 +372,12 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         runtime_manifest.as_bytes(),
     )?;
 
-    // Codex loads user-level hooks installed by the kit. Keep the generated, provider-specific
-    // hook source in the shared store so every box gets the same adapter without repo-side files.
-    let codex_hooks = codex_hooks_with_probe();
-    let codex_bytes = serde_json::to_vec_pretty(&codex_hooks).map_err(|e| e.to_string())?;
-    write_atomic(
-        &store.join("skein/codex-hooks.json"),
-        &skein_dir,
-        &codex_bytes,
-    )
+    // Codex's generated hooks are NOT written here any more (SKEIN-1149): a store's copy is one a
+    // sibling box can rewrite, and the installer merged whatever it found into this box's
+    // `~/.codex/hooks.json`. They ship in skein's read-only plugin instead ([`plugin_install`]),
+    // beside the installer that reads them. A store written before still holds a copy; nothing
+    // reads it.
+    Ok(())
 }
 
 /// Publish the gateway this repo's boxes should use, as a file in the store.
@@ -387,7 +460,7 @@ fn store_era_entries() -> [(&'static str, String, Option<&'static str>); 24] {
     // Every command is wrapped `bash "<script>" <args>` at wiring time (see `wire` below): invoking
     // the script path bare relies on the exec bit surviving the shared mount into the microVM — if
     // it's squashed, every hook fails "permission denied" on every event, silently. The status line
-    // learned this lesson first (STATUSLINE_CMD was already bash-prefixed); now it's uniform.
+    // learned this lesson first (its command was already bash-prefixed); now it's uniform.
     //
     // These are the store-era strings; [`turn_state_entries`] points each at the plugin's copy.
     [
@@ -558,6 +631,18 @@ pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
             out.push((format!("{dir}/{PLUGIN_PROBE_DIR}/{file}"), body.to_string()));
         }
     }
+    // What a box runs as it starts, and the Codex wiring (SKEIN-1149): the turn-state variant only,
+    // because that is the one [`box_probe_dir`] names.
+    for (file, body) in start_helpers() {
+        out.push((
+            format!("{narrow}/{PLUGIN_PROBE_DIR}/{file}"),
+            body.to_string(),
+        ));
+    }
+    out.push((
+        format!("{narrow}/{PLUGIN_PROBE_DIR}/{CODEX_HOOKS_JSON}"),
+        pretty(&codex_hooks_with_probe()),
+    ));
     out
 }
 
@@ -672,10 +757,16 @@ fn store_settings(existing: &serde_json::Value) -> serde_json::Value {
     // A default status line so a box shows context/usage out of the box. `or_insert` — a store that
     // already sets its own `statusLine` keeps it.
     let status_line = root.entry("statusLine").or_insert_with(
-        || json!({ "type": "command", "command": STATUSLINE_CMD, "refreshIntervalMs": 30_000 }),
+        || json!({ "type": "command", "command": statusline_cmd(), "refreshIntervalMs": 30_000 }),
     );
+    // skein's past default ran the store's copy of the renderer, which a sibling box can rewrite.
+    // Exactly that string moves to the plugin's copy (SKEIN-1149); the rest of the object, and any
+    // status line a person set, stays exactly as it is.
+    if status_line.get("command").and_then(Value::as_str) == Some(STORE_ERA_STATUSLINE_CMD) {
+        status_line["command"] = json!(statusline_cmd());
+    }
     // Upgrade only Skein's generated default. A user-owned status-line object remains untouched.
-    if status_line.get("command").and_then(Value::as_str) == Some(STATUSLINE_CMD) {
+    if status_line.get("command").and_then(Value::as_str) == Some(statusline_cmd().as_str()) {
         status_line
             .as_object_mut()
             .expect("generated statusLine is an object")
@@ -707,8 +798,8 @@ fn codex_hooks_with_probe() -> serde_json::Value {
         // fleet root the launcher passes every box, and the directory it binds read-only there.
         // `box-codex-hook.sh` runs `{file}` from its own directory, so the probe is the plugin's too.
         format!(
-            "bash \"${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/{plugin}/{PLUGIN_PROBE_DIR}/box-codex-hook.sh\" {event} {file}{suffix}",
-            plugin = crate::runtime::TURN_STATE_PLUGIN,
+            "bash \"{dir}/box-codex-hook.sh\" {event} {file}{suffix}",
+            dir = box_probe_dir(),
         )
     };
     let mut hooks = Map::<String, Value>::new();
@@ -1705,6 +1796,9 @@ mod tests {
                 .arg("-c")
                 .arg(setup)
                 .env("HOME", &home)
+                // The setup ends by running Codex's hook installer from the fleet root's `.skein`;
+                // pinned to an empty one, so this never runs the live fleet's copy.
+                .env("SKEIN_FLEET_ROOT", &home)
                 .status()
                 .unwrap()
         };
@@ -1820,11 +1914,22 @@ mod tests {
             ),
         )
         .unwrap();
-        let installer = store.join("skein/bin/install-codex-hooks.sh");
+        // The copy skein runs, from its read-only plugin, which reads the hooks from beside itself
+        // (SKEIN-1149) — installed into a fixture fleet as `fleet::install_launcher` installs it.
+        let fleet = tempdir();
+        let fleet_root = fleet.to_string_lossy().into_owned();
+        for (path, body) in plugin_install_under(&fleet_root) {
+            let path = Path::new(&path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let installer = format!(
+            "{}/{PLUGIN_PROBE_DIR}/install-codex-hooks.sh",
+            crate::runtime::turn_state_plugin_dir_under(&fleet_root)
+        );
         let run = || {
             Command::new("bash")
                 .arg(&installer)
-                .arg(&store)
                 .env("HOME", &home)
                 .status()
                 .unwrap()
@@ -2975,6 +3080,211 @@ mod tests {
         assert!(
             siblings >= 3,
             "sandbox-bootstrap.sh's three helpers were not found, so this checked nothing"
+        );
+    }
+
+    /// **Everything a box runs from skein as it starts, rather than from a hook, is a copy skein's
+    /// read-only plugin installs under `.skein`**, and nothing runs one out of the store, which
+    /// every box of the repo can write (SKEIN-1149).
+    ///
+    /// Every caller, read as the shell it is: the kit's provisioning script, Codex's setup, the
+    /// attach shell's guide refresh and screen observer, the tracker's install and refresh, and the
+    /// status line skein sets — fresh, and moved from the store-era default. Each path a caller
+    /// names for one of these helpers is resolved the way the box resolves it
+    /// (`${SKEIN_FLEET_ROOT:-/boxes}` is the fleet root; the kit's `$skein_probe` is its own
+    /// directory's `plugin-turn-state/probe`, and the fleet runs it from `.skein`) and has to be a
+    /// file [`plugin_install_under`] writes there.
+    ///
+    /// What would make it fail: any caller put back on `$store/skein/bin/…` or on the checkout's
+    /// `.claude/skein/bin/…` (the path does not resolve under `.skein`); a helper dropped from
+    /// [`start_helpers`] (the resolved path is not installed); the status line's upgrade removed
+    /// (the store-era command still runs the store's copy); or a helper nothing calls any more
+    /// (the last assertion, so the list cannot outlive its callers).
+    #[test]
+    fn every_start_helper_runs_from_the_read_only_plugin() {
+        let _g = env_lock();
+        let home = tempdir();
+        let root = "/fleet-root-example";
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &Path);
+        env.set("SKEIN_FLEET_ROOT", root);
+        let installed: std::collections::BTreeSet<String> = plugin_install_under(root)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        let probe_dir = format!(
+            "{}/{PLUGIN_PROBE_DIR}",
+            crate::runtime::turn_state_plugin_dir_under(root)
+        );
+
+        // The kit finds its helpers from where it runs, and the fleet runs it from `.skein`.
+        let kit_probe =
+            r#"skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe""#;
+        let kit = crate::kit::KIT_STARTUP_SH;
+        assert_eq!(
+            kit.lines()
+                .filter(|l| l.starts_with("skein_probe="))
+                .count(),
+            1,
+            "the kit no longer names its helpers' directory in one place"
+        );
+        assert!(
+            kit.lines().any(|l| l == kit_probe),
+            "the kit's helpers' directory is not its own directory's plugin-turn-state/probe"
+        );
+        let kit_at = crate::fleet::box_provision_path();
+        let kit_dir = kit_at.rsplit_once('/').expect("a directory").0;
+        assert_eq!(
+            kit_dir,
+            format!("{root}/.skein"),
+            "the fleet no longer runs the kit from .skein, so its own directory is not read-only"
+        );
+        let kit_probe_dir = format!(
+            "{kit_dir}/{}/{PLUGIN_PROBE_DIR}",
+            crate::runtime::TURN_STATE_PLUGIN
+        );
+        // Its code, without comments and without the settings merge, whose `/.claude/skein/bin/`
+        // is the pattern that RETIRES skein's store-era hooks from a repo's settings, not a path it runs.
+        let open = "merged=\"$(jq -s '";
+        let close = "' \"$rc/settings.json\" \"$store/settings.json\"";
+        let from = kit.find(open).expect("the kit's merge moved");
+        let to = from + kit[from..].find(close).expect("merge end");
+        let kit_code: String = format!("{}{}", &kit[..from], &kit[to..])
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let status_line = |existing: serde_json::Value| {
+            store_settings(&existing)["statusLine"]["command"]
+                .as_str()
+                .expect("a status line command")
+                .to_string()
+        };
+        let mut callers: Vec<(&str, String)> = start_invocations();
+        callers.extend([
+            ("the kit", kit_code),
+            (
+                "the tracker's forced refresh",
+                crate::tracking::sync_refresh_in_box(true),
+            ),
+            (
+                "a fresh store's status line",
+                status_line(serde_json::json!({})),
+            ),
+            (
+                "an upgraded store's status line",
+                status_line(serde_json::json!({
+                    "statusLine": { "type": "command", "command": STORE_ERA_STATUSLINE_CMD }
+                })),
+            ),
+        ]);
+
+        let mut helpers: Vec<&str> = start_helpers().iter().map(|(n, _)| *n).collect();
+        helpers.extend(["shared-home.sh", "agent-guide.sh"]);
+        let mut called = std::collections::BTreeSet::new();
+        for (caller, text) in &callers {
+            assert!(
+                !text.contains("skein/bin/"),
+                "{caller} still runs something out of the store: {text}"
+            );
+            let mut found = 0;
+            for helper in &helpers {
+                let mut from = 0;
+                while let Some(at) = text[from..].find(helper).map(|i| from + i) {
+                    from = at + helper.len();
+                    let start = text[..at]
+                        .rfind(['"', '\'', ' ', '=', ';', '\n'])
+                        .map_or(0, |i| i + 1);
+                    let named = &text[start..from];
+                    let resolved = named
+                        .replace("${SKEIN_FLEET_ROOT:-/boxes}", root)
+                        .replace("$skein_probe", &kit_probe_dir);
+                    assert!(
+                        resolved.starts_with(&format!("{root}/.skein/"))
+                            && installed.contains(&resolved),
+                        "{caller} runs {named}, which is not a file skein's plugin installs under \
+                         .skein (resolved to {resolved})"
+                    );
+                    called.insert(*helper);
+                    found += 1;
+                }
+            }
+            assert!(
+                found > 0,
+                "{caller} names no helper, so this checked nothing"
+            );
+        }
+        for helper in &helpers {
+            assert!(
+                called.contains(helper),
+                "nothing runs {helper} any more, so it has no business in start_helpers"
+            );
+        }
+
+        // Codex's wiring, which its installer reads from its own directory rather than the store.
+        assert!(
+            installed.contains(&format!("{probe_dir}/{CODEX_HOOKS_JSON}")),
+            "the plugin does not carry Codex's hooks beside their installer"
+        );
+        assert!(
+            INSTALL_CODEX_HOOKS_SH.contains(r#"source_hooks="$here/codex-hooks.json""#),
+            "the Codex installer reads its hooks from somewhere other than beside itself"
+        );
+        // And no helper runs anything out of the store in turn.
+        for (name, body) in start_helpers() {
+            for line in body.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                assert!(
+                    !line.contains("$store/skein/bin") && !line.contains("bash \"$store"),
+                    "{name} runs something from the store: {line}"
+                );
+            }
+        }
+    }
+
+    /// **skein's past default status line moves to the plugin's copy of the renderer, and a
+    /// status line a person set is kept exactly** (SKEIN-1149).
+    ///
+    /// What would make it fail: the upgrade removed (the store-era command survives, so every box
+    /// keeps running the store's copy, which a sibling can rewrite); the upgrade matching anything
+    /// looser than skein's exact old string (the person's own command below also names
+    /// `statusline-command.sh`, and it would be taken); or the upgrade replacing the object rather
+    /// than its command (the person-chosen interval on the old default would go).
+    #[test]
+    fn a_store_era_status_line_moves_to_the_plugin_and_a_persons_own_stays() {
+        let upgraded = store_settings(&serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": STORE_ERA_STATUSLINE_CMD,
+                "refreshIntervalMs": 5_000,
+                "padding": 1
+            }
+        }));
+        assert_eq!(
+            upgraded["statusLine"],
+            serde_json::json!({
+                "type": "command",
+                "command": statusline_cmd(),
+                "refreshIntervalMs": 5_000,
+                "padding": 1
+            }),
+            "skein's old default was not moved to the plugin's copy, or lost what was beside it"
+        );
+        assert_eq!(
+            store_settings(&upgraded),
+            upgraded,
+            "a second pass changed it"
+        );
+
+        let theirs = serde_json::json!({
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/tools/statusline-command.sh",
+            "padding": 2
+        });
+        let kept = store_settings(&serde_json::json!({ "statusLine": theirs.clone() }));
+        assert_eq!(
+            kept["statusLine"], theirs,
+            "a person's own status line was changed"
         );
     }
 }
