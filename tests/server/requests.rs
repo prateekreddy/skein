@@ -324,6 +324,14 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
         br#"[{"id":"probe","source":"https://github.com/acme/thing.git","store":"/nonexistent","agent":"claude"}]"#,
     )
     .unwrap();
+    // One configured work-tracking connection, so the ordinary tracking write below names one that
+    // exists: a choice naming no configured connection is refused on its own (SKEIN-1134), and
+    // without this the ordinary half would be refused for that instead of succeeding.
+    std::fs::write(
+        home.to_path_buf().join("connections.json"),
+        br#"[{"id":"plane","label":"plane","gateway_url":"https://plane.example"}]"#,
+    )
+    .unwrap();
 
     let (child, addr) = serving(
         Command::new(env!("CARGO_BIN_EXE_skein-server"))

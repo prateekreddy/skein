@@ -296,8 +296,9 @@ pub(super) async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Re
 mod tests {
     use super::*;
 
-    /// **A box's tracking choice that is not a connection id is refused with the value in the
-    /// answer, and clearing it with `""` still works** (SKEIN-538).
+    /// **A box's tracking choice that is not a connection id, or names none that is configured, is
+    /// refused with the value in the answer, and clearing it with `""` still works** (SKEIN-538,
+    /// SKEIN-1134).
     ///
     /// Both halves in one test because the guard is `is_empty() || valid_connection_id`, and the
     /// easy way to get it wrong is to drop the first half — which refuses the one legitimate
@@ -341,6 +342,40 @@ mod tests {
             "the refusal does not name the value it refused: {why}"
         );
         assert!(!file.exists(), "a refused choice was written anyway");
+
+        // Well-formed but naming no configured connection: refused too, and the answer lists the
+        // ones that exist (SKEIN-1134). Measured against a configured one that IS saved, so the
+        // refusal cannot be passing because nothing is ever saved.
+        std::fs::write(
+            home.join("connections.json"),
+            br#"[{"id":"plane","label":"plane","gateway_url":"https://plane.example"}]"#,
+        )
+        .unwrap();
+        let (status, why) = post("plane2");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a choice naming no configured connection was not refused as a bad request: {why}"
+        );
+        assert!(
+            why.contains("\"plane2\"") && why.contains("(plane)"),
+            "the refusal does not name the value and the connections that exist: {why}"
+        );
+        assert!(
+            !file.exists(),
+            "a choice naming no connection was written anyway"
+        );
+        let (status, why) = post("plane");
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "a configured connection was refused: {why}"
+        );
+        assert_eq!(
+            skein::tracking::box_tracking("probe-a").as_deref(),
+            Some("plane"),
+            "a configured connection was not recorded as the box's choice"
+        );
 
         let (status, why) = post("");
         assert_eq!(

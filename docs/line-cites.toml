@@ -172,10 +172,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/boxes.rs:548"]
-line = "Json(serde_json::json!({ \"ok\": true, \"resumed\": resumed, \"held\": held }))"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein-server/events.rs:25"]
 line = "\"too many live boards open — close one and retry\","
 cited_by = ["docs/recovery-survey.md"]
@@ -1740,37 +1736,37 @@ line = "return Err(format!("
 window = "if !users.is_empty() {\u000breturn Err(format!(\u000b\"{} still {} it — point {} at another connection first\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:683"]
+["src/tracking.rs:712"]
 line = "return Err(format!("
 window = "if base.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:772"]
+["src/tracking.rs:813"]
+line = "return Err(format!(\"{name} is not running\"));"
+window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/tracking.rs:801"]
 line = "return Err(format!("
 window = "if gateway.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:778"]
+["src/tracking.rs:807"]
 line = "return Err(format!("
 window = "if connection_token(&conn.id).is_none() {\u000breturn Err(format!(\u000b\"no Plane token stored for {} — add it in Settings → Work tracking\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:784"]
-line = "return Err(format!(\"{name} is not running\"));"
-window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/tracking.rs:825"]
+["src/tracking.rs:854"]
 line = "Err(format!("
 window = "let last = report.trim().lines().last().unwrap_or(\"\").trim();\u000bErr(format!(\u000b\"token written, but registration did not confirm{} — the box can still be registered by hand against {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:876"]
+["src/tracking.rs:905"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:972"]
+["src/tracking.rs:1001"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1939,10 +1935,6 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/box.js:27"]
 line = "}).catch(() => toast(\"destroy failed\"));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/app/box.js:39"]
-line = "if (!d.ok) { toast(\"continue failed\"); return; }"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/box.js:44"]
