@@ -5,12 +5,12 @@
 // Shared by `voice.mjs` and `tabs.mjs`. It lives here rather than being copied into each because it
 // is a brace matcher, and two copies of a subtle brace matcher is one that quietly drifts.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve as resolvePath, sep } from "node:path";
 import { safeHref } from "../../cockpit/src/links.mjs";
-import { endAbandoned, quiesceOnExit, testMarker } from "./harness/leaks.mjs";
+import { codeOnly, endAbandoned, quiesceOnExit, testMarker } from "./harness/leaks.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -202,6 +202,67 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
 }
 
+// Every file `src/`'s `include_str!`/`include_bytes!` sites embed out of `src/web/` — the pages and
+// scripts a running `skein-server` actually serves, and therefore the whole set a binary can be
+// STALE against (SKEIN-887).
+//
+// **Derived, the way `harness/leaks.mjs::fixturePrefixes` derives fixture prefixes, and for the same
+// reason.** A hand-written list of "index.html and cockpit.js" is current only until the next site is
+// added — `web/v2.html` (§11) already is not on that list, and a reader who copied it here would have
+// left this check blind to the one page the new board actually serves. So this walks every `.rs`
+// file under `src/`, reads each `include_str!("…")` / `include_bytes!("…")` call, resolves the
+// string relative to the file that contains it — exactly how rustc resolves it — and keeps the ones
+// that land inside `src/web/`. `codeOnly` cuts comments first, the same guard `fixturePrefixes` has
+// for the reason SKEIN-917 bought: `cockpit.rs`'s own doc comment says "one `include_str!`'d file",
+// which is prose about the mechanism and not a call site, and a scan that read comments would have
+// filed it as one.
+//
+// **Throws when it finds none**, for `fixturePrefixes`'s reason: a `0` here is only meaningful if
+// the scan actually found call sites to look through, and a rename this reader stops recognising
+// must fail loudly rather than silently stop checking anything.
+//
+// **Cutting comments first over the whole crate is too slow to run once per suite.** `codeOnly` is a
+// character-by-character parser, and `serverBinary()` calls this on every suite's own startup
+// (`harness/server.mjs::startServer`) — measured at 1.6s+ over the crate's 171 `.rs` files, 6.8MB,
+// almost all of which are irrelevant, and a synchronous 1.6s in every one of a dozen suites started
+// together is exactly the kind of self-inflicted load this file's neighbours (`tools/gates.sh`
+// exiting 3 mid-run, the CPU-budget rule in `CLAUDE.md`) exist to avoid adding. So a file is only
+// handed to `codeOnly` — comments cut, exactly as before — when a raw substring check says it
+// mentions the macro at all: cut to the 35 files that do, this runs in a few hundred ms instead.
+// That pre-filter can only shrink the candidate set, never mistake a real call site for nothing —
+// `include_str!(`/`include_bytes!(` is a fixed string a comment can quote as easily as code can
+// write it, so a file this rules out could not have matched the real regex either; only a file it
+// KEEPS is still open to being nothing but a comment, and that file still gets the full cut.
+export function embeddedWebAssets(repo = root) {
+  const webRoot = join(repo, "src", "web");
+  const srcRoot = join(repo, "src");
+  const found = new Set();
+  let sites = 0;
+  for (const rel of readdirSync(srcRoot, { recursive: true })) {
+    if (!rel.endsWith(".rs")) continue;
+    const full = join(srcRoot, rel);
+    let text;
+    try {
+      text = readFileSync(full, "utf8");
+    } catch {
+      continue;
+    }
+    if (!text.includes("include_str!(") && !text.includes("include_bytes!(")) continue;
+    for (const m of codeOnly(text, "rust").matchAll(/include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)/g)) {
+      sites++;
+      const target = resolvePath(dirname(full), m[1]);
+      if (target === webRoot || target.startsWith(webRoot + sep)) found.add(target);
+    }
+  }
+  if (!found.size) {
+    throw new Error(`embeddedWebAssets derived no src/web/ file from an include_str!/include_bytes! \
+site under src/ (it read ${sites} such site(s) in all, none of them resolving under src/web/) — \
+either those sites moved out of src/, or src/web assets stopped being embedded that way. Fix this \
+reader; do not list the files by hand.`);
+  }
+  return [...found].sort();
+}
+
 // The `skein-server` binary the browser suites drive — one resolver, because the build policy is
 // the part that must not drift between them.
 //
@@ -233,12 +294,93 @@ function alive(pid) {
 // `skein` beside it. Run by hand, the same tree failed. Proven by copying `skein-server` alone into
 // an empty directory and pointing `SKEIN_SERVER_BIN` at it: the same two checks fail, with the same
 // empty terminal, and nothing else changes.
-export function serverBinary() {
+//
+// **A third way this silently drifted, and it needed no missing binary at all** (SKEIN-887). A
+// `$SKEIN_SERVER_BIN` that exists and runs can still have been built before the last edit to
+// `src/web/index.html`, and it then serves that OLD markup while `node tests/ui/<suite>.mjs` checks
+// it against the tree on disk — a check that is not wrong so much as its evidence is: `usage.mjs`
+// stayed green against a sabotaged page for exactly this reason, and was only caught because that
+// sabotage was EXPECTED to go red. `tests/browser_suites.rs` never hits this — see below — so the
+// refusal below is for the loop this variable exists to speed up: run by hand, pointed at a binary
+// from an earlier build.
+//
+// `repo` defaults to this checkout, exactly as [`embeddedWebAssets`]'s own default does, and every
+// production caller (`harness/server.mjs::startServer`, `restart.mjs`) calls this with no argument
+// and is unaffected. It exists so a test can point the staleness check at a fixture tree it built
+// and controls the mtimes of, rather than at files this repository ships — SKEIN-887's follow-up
+// plant (`assets.slice(0, 1)` inside [`refuseIfStale`]) went unnoticed because every real embedded
+// asset here was checked out within the same second, so "older than the newest" and "older than the
+// FIRST derived asset" were indistinguishable on this tree; they are not indistinguishable on one a
+// test builds by hand.
+export function serverBinary(repo = root) {
   const given = process.env.SKEIN_SERVER_BIN;
-  if (given) return given;
-  const build = spawnSync("cargo", ["build", "--bin", "skein-server", "--bin", "skein"], { cwd: root, stdio: "inherit" });
+  if (given) return refuseIfStale(given, repo);
+  const build = spawnSync("cargo", ["build", "--bin", "skein-server", "--bin", "skein"], { cwd: repo, stdio: "inherit" });
   if (build.status !== 0) throw new Error("cargo build failed");
   return join(targetDir(), "debug", "skein-server");
+}
+
+// `bin` when it is not older than anything [`embeddedWebAssets`] says it serves, or a refusal
+// naming which file it is older than and the rebuild command — never a silent pass.
+//
+// **Not `<=`.** A build finished in the same filesystem-mtime tick as the last edit to a page it
+// embeds is not refused: that is what a correct build-right-after-a-save produces, and treating a
+// tie as staleness would refuse the ordinary case along with the stale one. `statSync(...).mtimeMs`
+// is read at whatever precision the filesystem reports — sub-second on ext4/xfs — rather than
+// truncated to whole seconds, so an edit and a rebuild a filesystem CAN tell apart are not folded
+// into a false tie by this check; what remains a tie is a build that really did happen at the same
+// instant, which is correctly not stale.
+//
+// **Cannot false-refuse under `cargo test --test browser_suites`.** That path only ever calls this
+// with `env!("CARGO_BIN_EXE_skein-server")` — the binary `cargo test`'s own build phase produces, in
+// the same invocation, strictly before any suite runs (`common::skein_server_for_the_browser_suites`,
+// `tests/common/mod.rs:1155`). Two things hold because of that:
+//
+//   - cargo rebuilds `skein-server` whenever a file it tracks as an input — `src/web/index.html`
+//     among them, because `include_str!` makes it one — carries a newer mtime than the last build
+//     recorded, so a freshly built binary cannot be older than a page whose CONTENT changed since.
+//     A page whose mtime moved with no content change (a checkout, `git submodule update`, a rebase
+//     touching it) is exactly the case cargo's own mtime-keyed fingerprint also treats as "rebuild",
+//     so that path produces a binary stamped after the touch too — never one this check would call
+//     stale against it;
+//   - nothing runs between that build finishing and this function being called that could touch
+//     `src/web/`. The worktree is assembled once, before `cargo build` starts, and `tools/gates.sh`
+//     itself exits 3 if the tree changes mid-run — so the cargo path has no window in which a page
+//     could become newer than the binary that already embeds it.
+//
+// A binary a person points `$SKEIN_SERVER_BIN` at by hand carries none of that ordering, which is
+// the whole reason this exists: nothing stops them running it a week after the last `cargo build`.
+function refuseIfStale(bin, repo = root) {
+  const assets = embeddedWebAssets(repo);
+  let binMtime;
+  try {
+    binMtime = statSync(bin).mtimeMs;
+  } catch (e) {
+    throw new Error(`$SKEIN_SERVER_BIN names ${bin}, which cannot be read (${e.code}) — build it \
+first: cargo build --bin skein-server --bin skein`);
+  }
+  console.log(`serverBinary: $SKEIN_SERVER_BIN=${bin} checked against ${assets.length} embedded \
+web asset(s) derived from src/**/*.rs:`);
+  const stale = [];
+  for (const asset of assets) {
+    const label = relative(repo, asset);
+    let assetMtime;
+    try {
+      assetMtime = statSync(asset).mtimeMs;
+    } catch {
+      console.log(`  ${label}  (missing on disk, skipped)`);
+      continue;
+    }
+    const older = binMtime < assetMtime;
+    console.log(`  ${label}${older ? "  ← newer than the binary" : ""}`);
+    if (older) stale.push(label);
+  }
+  if (stale.length) {
+    throw new Error(`$SKEIN_SERVER_BIN (${bin}) is older than ${stale.join(", ")} — it was built \
+before the page it now serves, so a check run against it is checking bytes not in this tree. \
+Rebuild it: cargo build --bin skein-server --bin skein`);
+  }
+  return bin;
 }
 
 // The socket a suite's `skein-server` is served on — opened here and handed to the child, never
