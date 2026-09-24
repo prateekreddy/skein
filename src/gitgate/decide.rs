@@ -299,6 +299,17 @@ pub fn decide(
             }
         )
     })?;
+    // The answer the box can believe (SKEIN-1142): one message in its own read-only inbox, after
+    // the record above and never instead of it. Best-effort, because the decision is made and
+    // recorded either way; a lost answer leaves the request reading as waiting in the box, which
+    // is the direction that is not a lie.
+    if let Err(e) = crate::mailbox::send_answer(&rendered.box_name, "write", &rendered.id, approve)
+    {
+        eprintln!(
+            "skein: the answer to write request {} did not reach {}'s inbox: {e}",
+            rendered.id, rendered.box_name
+        );
+    }
     // Courtesy only, and it must stay that way: the box reads its own file to learn what happened,
     // and skein never reads that answer back — [`list`] takes the state from the record above.
     // Best-effort, because a box that deletes its request has changed nothing that matters.
@@ -341,6 +352,78 @@ mod tests {
     /// And the swap is worse than "a different repository". `refresh_tokens` writes the minted
     /// installation token into the box the grant names, so a request rewritten between render and
     /// click puts a live write credential in a box of the requester's choosing.
+    /// Every message file in each box's owner inbox under `home`, as `(box, message)`.
+    fn inbox_messages(home: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+        let mut out = Vec::new();
+        let Ok(boxes) = std::fs::read_dir(home.join("boxes")) else {
+            return out;
+        };
+        for b in boxes.flatten() {
+            let Ok(files) = std::fs::read_dir(b.path().join("inbox")) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let body = std::fs::read_to_string(f.path()).unwrap();
+                out.push((
+                    b.file_name().to_string_lossy().into_owned(),
+                    serde_json::from_str(&body).unwrap(),
+                ));
+            }
+        }
+        out
+    }
+
+    /// **Deciding a write request writes exactly one answer, to the box that asked and to no
+    /// other box's inbox**, worded as the owner approved: `write request <id>, granted` or
+    /// `…, denied` (SKEIN-1142).
+    ///
+    /// What would make it fail: `decide` not calling `send_answer`; it sending to `broadcast` or to
+    /// another box (a message in the neighbour's inbox, which exists beforehand); the body drifting
+    /// from the approved words; or the kind being anything but `answer`.
+    #[test]
+    fn a_decision_answers_the_asking_box_once_and_no_other() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("boxes/other-box/inbox")).unwrap();
+        std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
+
+        for (id, approve, word) in [
+            ("20260924-100000-1", true, "granted"),
+            ("20260924-100000-2", false, "denied"),
+        ] {
+            let rendered = Request {
+                id: id.into(),
+                box_name: "web-main".into(),
+                repo: "acme/web".into(),
+                state: "pending".into(),
+                ..Default::default()
+            };
+            decide("no-such-sandbox", &rendered, approve, Some(24)).expect("decided");
+            let now = inbox_messages(&home);
+            let mine: Vec<_> = now
+                .iter()
+                .filter(|(_, m)| m["body"].as_str().unwrap_or("").contains(id))
+                .collect();
+            assert_eq!(mine.len(), 1, "{id}: not exactly one answer: {now:?}");
+            let (to, m) = mine[0];
+            assert_eq!(
+                to, "web-main",
+                "{id}: answered in another box's inbox: {now:?}"
+            );
+            assert_eq!(m["kind"], "answer", "{m}");
+            assert_eq!(m["to"], "web-main", "{m}");
+            assert_eq!(m["body"], format!("write request {id}, {word}"), "{m}");
+        }
+        assert!(
+            inbox_messages(&home).iter().all(|(to, _)| to == "web-main"),
+            "{:?}",
+            inbox_messages(&home)
+        );
+    }
+
     #[test]
     fn the_grant_recorded_is_the_one_that_was_shown() {
         let _g = crate::testutil::env_lock();

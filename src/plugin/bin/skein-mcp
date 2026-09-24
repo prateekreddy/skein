@@ -275,13 +275,21 @@ def inbox_answers():
     return out
 
 
-def answer_for(request_id, answers):
-    """The newest answer that names this request's id as a word of its own."""
-    word = re.compile(r"(?<![A-Za-z0-9._-])" + re.escape(request_id) + r"(?![A-Za-z0-9_-])")
+def answer_for(queue, request_id, answers):
+    """The newest answer to this request, and what it was: `granted` or `denied`.
+
+    The body is the one skein writes (`mailbox::send_answer`), matched whole: `<queue> request <id>,
+    granted` or `…, denied`. So a package answer never answers a write request that happens to
+    carry the same id, and an id is never matched as the prefix of a longer one.
+    """
+    shape = re.compile(
+        r"^" + re.escape(queue) + r" request " + re.escape(request_id) + r", (granted|denied)$"
+    )
     for a in answers:
-        if word.search(a["body"]):
-            return a
-    return None
+        m = shape.match(a["body"])
+        if m:
+            return a, m.group(1)
+    return None, None
 
 
 def requests(_args):
@@ -314,8 +322,8 @@ def requests(_args):
                     row[field] = r[field]
             # **Never `r["state"]`.** The box wrote this file and can write `granted` into it; the
             # only answer is one found in the inbox, which it cannot write.
-            answer = answer_for(rid, answers)
-            row["state"] = "answered" if answer else "waiting"
+            answer, decision = answer_for(kind, rid, answers)
+            row["state"] = decision or "waiting"
             row["answer"] = answer
             out.append(row)
     out.sort(key=lambda r: r["asked"])

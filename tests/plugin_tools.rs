@@ -75,11 +75,15 @@ impl Box_ {
 
     /// Run the server over one conversation and return every reply, in order.
     fn talk(&self, box_name: &str, messages: &[Value]) -> Vec<Value> {
+        self.talk_in(&self.at("state"), box_name, messages)
+    }
+
+    fn talk_in(&self, state: &std::path::Path, box_name: &str, messages: &[Value]) -> Vec<Value> {
         let mut child = Command::new("python3")
             .arg(self.at("skein-mcp"))
             .current_dir(self.at("checkout"))
             .env("SKEIN_TOOLS_FAKE_ROOT", self.at("root"))
-            .env("SKEIN_STATE", self.at("state"))
+            .env("SKEIN_STATE", state)
             .env("SKEIN_FLEET_ROOT", self.at("fleet"))
             .env("SKEIN_HOME", self.at("home"))
             .env("SKEIN_BOX", box_name)
@@ -108,7 +112,13 @@ impl Box_ {
 
     /// Call one tool and return what it said, parsed.
     fn call(&self, box_name: &str, tool: &str, args: Value) -> Value {
-        let replies = self.talk(
+        self.call_in(&self.at("state"), box_name, tool, args)
+    }
+
+    /// The same, with `$SKEIN_STATE` at `state`: the directory skein's own code wrote into.
+    fn call_in(&self, state: &std::path::Path, box_name: &str, tool: &str, args: Value) -> Value {
+        let replies = self.talk_in(
+            state,
             box_name,
             &[json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                      "params":{"name":tool,"arguments":args}})],
@@ -242,15 +252,16 @@ fn top_says_which_processes_have_no_parent_and_how_old_they_are() {
 }
 
 /// **A `state: granted` a box wrote into its own request is never reported as an answer**, in
-/// either queue; an answer in the owner's inbox is.
+/// either queue; an answer in the owner's inbox, in the shape skein writes it, is.
 ///
 /// Both request files say `granted` with a `decided` time, as the host's courtesy write-back would
 /// leave them and as a box can write them itself. Only the inbox, bound read-only into the box, can
-/// say the owner answered.
+/// say the owner answered, and there the answer is `mailbox::send_answer`'s body, matched whole.
 ///
 /// What would make it fail: `requests` carrying the file's `state` (or `decided`) into its answer;
-/// matching an inbox note of another kind (`fleet-disk`) as an answer; or matching an answer to a
-/// request whose id is only a prefix of the one it names.
+/// matching an inbox note of another kind (`fleet-disk`) as an answer; matching an answer to a
+/// request whose id is only a prefix of the one it names; or a package answer answering a write
+/// request that carries the same id.
 #[test]
 fn a_box_written_granted_is_never_an_answer() {
     let b = Box_::new("skein-tools-it-requests");
@@ -264,14 +275,19 @@ fn a_box_written_granted_is_never_an_answer() {
         r#"{"id":"20260924-101500-9","box":"example","repo":"thing/example","reason":"a fix",
             "asked":"2026-09-24T10:15:00Z","state":"granted","decided":"2026-09-24T10:16:00Z"}"#,
     );
-    // Not answers: a note of another kind naming the id, and an answer naming a longer id.
+    // Not answers: a note of another kind in the answer's own words; an answer naming a longer id;
+    // and a PACKAGE answer naming the write request's id.
     b.put(
         "state/inbox/1-skein.json",
-        r#"{"from":"skein","kind":"fleet-disk","body":"20260924-101200-7 granted","ts":"2026-09-24T10:20:00Z"}"#,
+        r#"{"from":"skein","kind":"fleet-disk","body":"package request 20260924-101200-7, granted","ts":"2026-09-24T10:20:00Z"}"#,
     );
     b.put(
         "state/inbox/2-skein.json",
-        r#"{"from":"skein","kind":"answer","body":"request 20260924-101500-90 is granted","ts":"2026-09-24T10:21:00Z"}"#,
+        r#"{"from":"skein","kind":"answer","body":"write request 20260924-101500-90, granted","ts":"2026-09-24T10:21:00Z"}"#,
+    );
+    b.put(
+        "state/inbox/3-skein.json",
+        r#"{"from":"skein","kind":"answer","body":"package request 20260924-101500-9, granted","ts":"2026-09-24T10:21:30Z"}"#,
     );
 
     let got = b.call("example", "skein_requests", json!({}));
@@ -282,31 +298,86 @@ fn a_box_written_granted_is_never_an_answer() {
     for r in rows {
         assert_eq!(
             r["state"], "waiting",
-            "a box-written state was reported: {r}"
+            "reported as answered with no answer of its own in the inbox: {r}"
         );
         assert!(r["answer"].is_null(), "{r}");
         assert!(r.get("decided").is_none(), "{r}");
     }
-    assert!(
-        !got.to_string().contains("\"granted\""),
-        "a box-written state reached the tool's output: {got}"
-    );
     assert_eq!(rows[0]["packages"], json!(["libnss3"]), "{got}");
     assert_eq!(rows[1]["repo"], "thing/example", "{got}");
 
-    // The owner's answer, where only the host can put it.
+    // The owner's answer, where only the host can put it, and it is the opposite of what the box
+    // wrote into its own file.
     b.put(
-        "state/inbox/3-skein.json",
-        r#"{"from":"skein","kind":"answer","body":"request 20260924-101200-7 is approved","ts":"2026-09-24T10:22:00Z"}"#,
+        "state/inbox/4-skein.json",
+        r#"{"from":"skein","kind":"answer","body":"package request 20260924-101200-7, denied","ts":"2026-09-24T10:22:00Z"}"#,
     );
     let got = b.call("example", "skein_requests", json!({}));
     let rows = got["requests"].as_array().unwrap();
-    assert_eq!(rows[0]["state"], "answered", "{got}");
+    assert_eq!(rows[0]["state"], "denied", "{got}");
     assert_eq!(
-        rows[0]["answer"]["body"], "request 20260924-101200-7 is approved",
+        rows[0]["answer"]["body"], "package request 20260924-101200-7, denied",
         "{got}"
     );
     assert_eq!(rows[1]["state"], "waiting", "{got}");
+}
+
+/// **A decision the owner makes is the answer `skein_requests` reports**, end to end: the real
+/// `substrate::decide` and `gitgate::decide`, the real inbox they write into, and the shipped
+/// server reading it back as the box would (SKEIN-1142).
+///
+/// Each request file says `granted`, as a box can write it. The owner denies the package and
+/// grants the write, so a tool that believed the file would report the package wrong.
+///
+/// What would make it fail: either decide not writing to the inbox (that request stays
+/// `waiting`); the body drifting from the shape the server matches; or the server reading the
+/// file's `state` (the package would read `granted`).
+#[test]
+fn a_decision_is_the_answer_skein_requests_reports() {
+    let _lock = common::env_lock();
+    let b = Box_::new("skein-tools-it-decided");
+    let mut env = common::env_pins();
+    env.set("SKEIN_HOME", b.at("home"));
+    env.set("SKEIN_FLEET_ROOT", b.at("fleet"));
+    b.put(
+        "fleet/.skein/substrate/requests/example/20260924-101200-7.json",
+        r#"{"id":"20260924-101200-7","box":"example","kind":"apt","packages":["libnss3"],
+            "asked":"2026-09-24T10:12:00Z","state":"granted"}"#,
+    );
+    b.put(
+        "fleet/.skein/gitgate/requests/example/20260924-101500-9.json",
+        r#"{"id":"20260924-101500-9","box":"example","repo":"thing/example","reason":"a fix",
+            "asked":"2026-09-24T10:15:00Z","state":"granted"}"#,
+    );
+    let package = skein::substrate::Request {
+        id: "20260924-101200-7".into(),
+        box_name: "example".into(),
+        kind: "apt".into(),
+        packages: vec!["libnss3".into()],
+        state: "pending".into(),
+        ..Default::default()
+    };
+    let write = skein::gitgate::Request {
+        id: "20260924-101500-9".into(),
+        box_name: "example".into(),
+        repo: "thing/example".into(),
+        state: "pending".into(),
+        ..Default::default()
+    };
+    // No sandbox: the courtesy write-back into the box's file fails and is ignored.
+    skein::substrate::decide("no-such-sandbox", &package, false, false).expect("decided");
+    skein::gitgate::decide("no-such-sandbox", &write, true, Some(24)).expect("decided");
+
+    let state = b.at("home/boxes/example");
+    let got = b.call_in(&state, "example", "skein_requests", json!({}));
+    let rows = got["requests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{got}"));
+    assert_eq!(rows.len(), 2, "{got}");
+    assert_eq!(rows[0]["id"], "20260924-101200-7", "{got}");
+    assert_eq!(rows[0]["state"], "denied", "{got}");
+    assert_eq!(rows[1]["id"], "20260924-101500-9", "{got}");
+    assert_eq!(rows[1]["state"], "granted", "{got}");
 }
 
 /// **Only this box's queue is read.** A neighbour's request, in the queue root every box can

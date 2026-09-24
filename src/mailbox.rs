@@ -123,6 +123,30 @@ fn read_into(dir: &Path, arrived: &str, out: &mut Vec<Message>) {
     }
 }
 
+/// The owner's answer to one of a box's own requests, into **that box's** inbox and no other
+/// (SKEIN-1142).
+///
+/// `queue` is `package` or `write`, `id` is the request's own id, and the body is the owner's
+/// approved shape, word for word: `package request <id>, granted` and its three siblings. The box's
+/// `mailbox.sh` shows it as `• [answer] from you: …`, and the `skein_requests` tool
+/// (`src/plugin/bin/skein-mcp`) reads `kind: "answer"` as the answer to the request it names. That
+/// is the only answer a box can believe: the `state` skein writes back into the box's own request
+/// file is a courtesy, and the box can write that file itself.
+///
+/// Refuses anything that would reach more than one inbox. `send_message` reads `""` and
+/// `broadcast` as every box, and an answer is one box's.
+pub fn send_answer(box_name: &str, queue: &str, id: &str, granted: bool) -> Result<(), String> {
+    if !crate::util::valid_name(box_name) || box_name == "broadcast" {
+        return Err(format!("unusable box name {box_name:?}"));
+    }
+    let outcome = if granted { "granted" } else { "denied" };
+    send_message(
+        box_name,
+        "answer",
+        &format!("{queue} request {id}, {outcome}"),
+    )
+}
+
 /// Post a message (from `skein`) in the shape mailbox.sh writes so each box's `inbox` picks it up.
 /// `to` is a vmid or "broadcast". Routed to the right store: a specific box → its repo's store; a
 /// broadcast → every store (so boxes of every repo see it).
@@ -377,6 +401,41 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **An answer reaches one box or none**: `send_answer` refuses the two names `send_message`
+    /// reads as every box, and a name that is not a box name.
+    ///
+    /// What would make it fail: dropping the guard, so `send_answer("broadcast", …)` or
+    /// `send_answer("", …)` writes the owner's answer to one box into every box's inbox.
+    #[test]
+    fn an_answer_is_never_a_broadcast() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        // Two registered boxes, so a broadcast has somewhere to land: without them `send_message`
+        // refuses a broadcast on its own and this test could not fail.
+        let store = home.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(
+            store.join("sandboxes.json"),
+            r#"{"web-main":{"at":"x"},"other-box":{"at":"x"}}"#,
+        )
+        .unwrap();
+        env.set("SKEIN_REGISTRY", store.join("sandboxes.json"));
+        // The control: a broadcast here does reach both boxes.
+        super::send_message("broadcast", "note", "control").unwrap();
+        assert!(home.join("boxes/other-box/inbox").exists());
+        std::fs::remove_dir_all(home.join("boxes")).unwrap();
+        for to in ["broadcast", "", "../other"] {
+            assert!(
+                super::send_answer(to, "write", "20260924-1-1", true).is_err(),
+                "an answer to {to:?} was accepted"
+            );
+        }
+        assert!(!home.join("boxes").exists(), "an inbox was written");
+    }
     use super::*;
     #[allow(unused_imports)]
     use crate::kit::ensure_store;

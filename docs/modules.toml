@@ -415,10 +415,15 @@ depends_on = [
 # carrying an `id` read as success, and a live token read as one that had lost its push rights), it
 # spent the request body on argv, and it knew nothing of the rate-limit hold. One client, and this
 # is the edge that says so.
+#
+# `mailbox` for one call: `send_answer`, which puts the owner's answer to a write request in the
+# asking box's read-only inbox (SKEIN-1142). The box's own request file cannot carry the answer,
+# because the box can write it; the inbox is the one place in a box that only the host writes.
 depends_on = [
   "config",
   "fleet",
   "github",
+  "mailbox",
   "place",
   "repos",
   "secret",
@@ -677,7 +682,9 @@ depends_on = ["digest", "registry", "util"]
 depends_on = ["board", "config", "util"]
 
 [current.substrate]
-depends_on = ["config", "fleet", "place", "util"]
+# `mailbox` for one call: `send_answer`, the owner's answer to a package request put in the asking
+# box's read-only inbox (SKEIN-1142), for the reason `gitgate` gives for the same edge.
+depends_on = ["config", "fleet", "mailbox", "place", "util"]
 
 [current.takeover]
 # `warden_client` for an audit entry and nothing else (§9.5 R6): a takeover hands one agent another
