@@ -322,6 +322,110 @@ fn a_box_written_granted_is_never_an_answer() {
     assert_eq!(rows[1]["state"], "waiting", "{got}");
 }
 
+/// **An install and a revoke are answers too, in the owner's approved words**: `package request
+/// <id>, installed`, `package request <id>, not installed: <why>` (the state reads `not installed`
+/// and `why` carries the reason), and `write request <id>, revoked`.
+///
+/// What would make it fail: the server's outcome words missing `installed`, `not installed: …` or
+/// `revoked` (that request keeps its earlier `granted`); `why` not split out of the body; a
+/// revocation written in the same second as its grant reading as the grant (the tie must go to the
+/// later file); or an outcome of the other queue counting (`revoked` on a package, `installed` on a
+/// write), which the newer bogus lines below would otherwise win with.
+#[test]
+fn an_install_and_a_revoke_are_answers_skein_requests_reports() {
+    let b = Box_::new("skein-tools-it-outcomes");
+    for (id, pkg) in [
+        ("20260924-130000-1", "libnss3"),
+        ("20260924-130000-2", "libgbm1"),
+    ] {
+        b.put(
+            &format!("fleet/.skein/substrate/requests/example/{id}.json"),
+            &format!(
+                r#"{{"id":"{id}","box":"example","kind":"apt","packages":["{pkg}"],"asked":"2026-09-24T13:00:0{}Z"}}"#,
+                &id[id.len() - 1..]
+            ),
+        );
+    }
+    b.put(
+        "fleet/.skein/gitgate/requests/example/20260924-130000-3.json",
+        r#"{"id":"20260924-130000-3","box":"example","repo":"thing/example","reason":"a fix","asked":"2026-09-24T13:00:03Z"}"#,
+    );
+    let answer = |n: u32, body: &str, ts: &str| {
+        b.put(
+            &format!("state/inbox/{n}-skein.json"),
+            &format!(r#"{{"from":"skein","kind":"answer","body":"{body}","ts":"{ts}"}}"#),
+        );
+    };
+    answer(
+        1,
+        "package request 20260924-130000-1, granted",
+        "2026-09-24T13:01:00Z",
+    );
+    answer(
+        2,
+        "package request 20260924-130000-2, granted",
+        "2026-09-24T13:01:00Z",
+    );
+    answer(
+        3,
+        "write request 20260924-130000-3, granted",
+        "2026-09-24T13:02:00Z",
+    );
+    answer(
+        4,
+        "package request 20260924-130000-1, installed",
+        "2026-09-24T13:03:00Z",
+    );
+    answer(
+        5,
+        "package request 20260924-130000-2, not installed: E: Unable to locate package libgbm1",
+        "2026-09-24T13:03:00Z",
+    );
+    // The same second as the grant: only the file name says which came last.
+    answer(
+        6,
+        "write request 20260924-130000-3, revoked",
+        "2026-09-24T13:02:00Z",
+    );
+    // Newer, and each in the other queue's words: not answers.
+    answer(
+        7,
+        "package request 20260924-130000-1, revoked",
+        "2026-09-24T13:09:00Z",
+    );
+    answer(
+        8,
+        "write request 20260924-130000-3, installed",
+        "2026-09-24T13:09:00Z",
+    );
+
+    let got = b.call("example", "skein_requests", json!({}));
+    let rows = got["requests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{got}"));
+    let row = |id: &str| {
+        rows.iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no row for {id}: {got}"))
+    };
+    let ok = row("20260924-130000-1");
+    assert_eq!(ok["state"], "installed", "{got}");
+    assert_eq!(
+        ok["answer"]["body"], "package request 20260924-130000-1, installed",
+        "{got}"
+    );
+    assert!(ok.get("why").is_none(), "{ok}");
+    let bad = row("20260924-130000-2");
+    assert_eq!(bad["state"], "not installed", "{got}");
+    assert_eq!(bad["why"], "E: Unable to locate package libgbm1", "{got}");
+    let write = row("20260924-130000-3");
+    assert_eq!(write["state"], "revoked", "{got}");
+    assert_eq!(
+        write["answer"]["body"], "write request 20260924-130000-3, revoked",
+        "{got}"
+    );
+}
+
 /// **A decision the owner makes is the answer `skein_requests` reports**, end to end: the real
 /// `substrate::decide` and `gitgate::decide`, the real inbox they write into, and the shipped
 /// server reading it back as the box would (SKEIN-1142).

@@ -72,6 +72,36 @@ pub fn decision_path(box_name: &str, id: &str) -> Option<std::path::PathBuf> {
     })
 }
 
+/// The ids of every request of this box's that the owner granted for `repo`, from the host's own
+/// decision records ([`decision_path`]), never from the box's queue.
+///
+/// What [`revoke`] answers. A grant is kept per box and repository, not per request, so the grant
+/// it takes away is the one every granted request for that pair is reading as `granted`; each gets
+/// its `revoked`. Oldest first, by the id, which starts with when it was asked.
+pub(super) fn granted_request_ids(box_name: &str, repo: &str) -> Vec<String> {
+    if !crate::util::valid_name(box_name) {
+        return Vec::new();
+    }
+    let dir = crate::config::skein_home().join("gitgate").join(box_name);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            crate::util::read_json_or_why::<Request>(&e.path())
+                .ok()
+                .flatten()
+        })
+        .filter(|d| d.state == "granted" && same_repo(&d.repo, repo))
+        .filter(|d| decision_path(box_name, &d.id).is_some())
+        .map(|d| d.id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// Where a box finds the token for a repository it may write.
 ///
 /// Inside the box's own host-mounted state directory, which is the whole reason this design needs no
@@ -303,8 +333,12 @@ pub fn decide(
     // the record above and never instead of it. Best-effort, because the decision is made and
     // recorded either way; a lost answer leaves the request reading as waiting in the box, which
     // is the direction that is not a lie.
-    if let Err(e) = crate::mailbox::send_answer(&rendered.box_name, "write", &rendered.id, approve)
-    {
+    if let Err(e) = crate::mailbox::send_answer(
+        &rendered.box_name,
+        "write",
+        &rendered.id,
+        if approve { "granted" } else { "denied" },
+    ) {
         eprintln!(
             "skein: the answer to write request {} did not reach {}'s inbox: {e}",
             rendered.id, rendered.box_name
@@ -341,37 +375,6 @@ pub fn fleet_decide(
 mod tests {
     use super::*;
     use crate::gitgate::testkit::*;
-
-    /// The grant that gets recorded is the one that was on screen — box included.
-    ///
-    /// "The approving side writes the artifact" was already true here: `record` writes the grant on
-    /// the host. It was still wrong, because the grant was built from a **re-read by id** at click
-    /// time, and the window that opened is not approve-to-install but render-to-click — a person
-    /// reading a card, seconds to minutes.
-    ///
-    /// And the swap is worse than "a different repository". `refresh_tokens` writes the minted
-    /// installation token into the box the grant names, so a request rewritten between render and
-    /// click puts a live write credential in a box of the requester's choosing.
-    /// Every message file in each box's owner inbox under `home`, as `(box, message)`.
-    fn inbox_messages(home: &std::path::Path) -> Vec<(String, serde_json::Value)> {
-        let mut out = Vec::new();
-        let Ok(boxes) = std::fs::read_dir(home.join("boxes")) else {
-            return out;
-        };
-        for b in boxes.flatten() {
-            let Ok(files) = std::fs::read_dir(b.path().join("inbox")) else {
-                continue;
-            };
-            for f in files.flatten() {
-                let body = std::fs::read_to_string(f.path()).unwrap();
-                out.push((
-                    b.file_name().to_string_lossy().into_owned(),
-                    serde_json::from_str(&body).unwrap(),
-                ));
-            }
-        }
-        out
-    }
 
     /// **Deciding a write request writes exactly one answer, to the box that asked and to no
     /// other box's inbox**, worded as the owner approved: `write request <id>, granted` or
@@ -424,6 +427,113 @@ mod tests {
         );
     }
 
+    /// **Revoking a repository's grant tells the box, once per write request that grant answered**:
+    /// `write request <id>, revoked`, in the approved words, to that box only (SKEIN-1142).
+    ///
+    /// What would make it fail: `revoke` not calling `send_answer`, or with another word; it naming
+    /// a request that was denied or that asked for another repository (`…-3` and `…-4` here); it
+    /// answering in another box's inbox; or it answering again when there was no grant left to take
+    /// away (the second revoke below must add nothing).
+    #[test]
+    fn a_revoke_answers_each_granted_request_for_that_repo_and_only_once() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        std::fs::create_dir_all(home.join("boxes/other-box/inbox")).unwrap();
+        std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
+
+        for (id, repo, approve) in [
+            ("20260924-120000-1", "acme/web", true),
+            ("20260924-120000-2", "acme/web", true),
+            ("20260924-120000-3", "acme/web", false),
+            ("20260924-120000-4", "acme/other", true),
+        ] {
+            let rendered = Request {
+                id: id.into(),
+                box_name: "web-main".into(),
+                repo: repo.into(),
+                state: "pending".into(),
+                ..Default::default()
+            };
+            decide("no-such-sandbox", &rendered, approve, Some(24)).expect("decided");
+        }
+        let revoked = |home: &std::path::Path| -> Vec<(String, String)> {
+            inbox_messages(home)
+                .into_iter()
+                .filter(|(_, m)| m["body"].as_str().unwrap_or("").ends_with(", revoked"))
+                .map(|(to, m)| (to, m["body"].as_str().unwrap().to_string()))
+                .collect()
+        };
+        assert!(revoked(&home).is_empty(), "{:?}", inbox_messages(&home));
+
+        revoke("web-main", "acme/web").expect("revoked");
+        let want = vec![
+            (
+                "web-main".to_string(),
+                "write request 20260924-120000-1, revoked".to_string(),
+            ),
+            (
+                "web-main".to_string(),
+                "write request 20260924-120000-2, revoked".to_string(),
+            ),
+        ];
+        let mut got = revoked(&home);
+        got.sort();
+        assert_eq!(got, want, "{:?}", inbox_messages(&home));
+        assert!(
+            inbox_messages(&home)
+                .iter()
+                .all(|(to, m)| to == "web-main" && m["kind"] == "answer"),
+            "{:?}",
+            inbox_messages(&home)
+        );
+
+        let before = inbox_messages(&home).len();
+        revoke("web-main", "acme/web").expect("a second revoke is still Ok");
+        assert_eq!(
+            inbox_messages(&home).len(),
+            before,
+            "answered a revoke that took nothing away: {:?}",
+            inbox_messages(&home)
+        );
+    }
+
+    /// Every message file in each box's owner inbox under `home`, as `(box, message)`.
+    fn inbox_messages(home: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+        let mut out: Vec<(String, String, serde_json::Value)> = Vec::new();
+        let Ok(boxes) = std::fs::read_dir(home.join("boxes")) else {
+            return Vec::new();
+        };
+        for b in boxes.flatten() {
+            let Ok(files) = std::fs::read_dir(b.path().join("inbox")) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let body = std::fs::read_to_string(f.path()).unwrap();
+                out.push((
+                    b.file_name().to_string_lossy().into_owned(),
+                    f.file_name().to_string_lossy().into_owned(),
+                    serde_json::from_str(&body).unwrap(),
+                ));
+            }
+        }
+        // In the order they were written: skein names each message by its nanosecond.
+        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        out.into_iter().map(|(b, _, m)| (b, m)).collect()
+    }
+
+    /// The grant that gets recorded is the one that was on screen — box included.
+    ///
+    /// "The approving side writes the artifact" was already true here: `record` writes the grant on
+    /// the host. It was still wrong, because the grant was built from a **re-read by id** at click
+    /// time, and the window that opened is not approve-to-install but render-to-click — a person
+    /// reading a card, seconds to minutes.
+    ///
+    /// And the swap is worse than "a different repository". `refresh_tokens` writes the minted
+    /// installation token into the box the grant names, so a request rewritten between render and
+    /// click puts a live write credential in a box of the requester's choosing.
     #[test]
     fn the_grant_recorded_is_the_one_that_was_shown() {
         let _g = crate::testutil::env_lock();

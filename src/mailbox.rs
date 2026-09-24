@@ -126,20 +126,25 @@ fn read_into(dir: &Path, arrived: &str, out: &mut Vec<Message>) {
 /// The owner's answer to one of a box's own requests, into **that box's** inbox and no other
 /// (SKEIN-1142).
 ///
-/// `queue` is `package` or `write`, `id` is the request's own id, and the body is the owner's
-/// approved shape, word for word: `package request <id>, granted` and its three siblings. The box's
+/// `queue` is `package` or `write`, `id` is the request's own id, and `outcome` is what happened to
+/// it, in the owner's approved words: `granted` or `denied` when it is decided, `installed` or
+/// `not installed: <why>` when a granted package has been installed or not, and `revoked` when a
+/// granted write is withdrawn. The body is `<queue> request <id>, <outcome>`. The box's
 /// `mailbox.sh` shows it as `• [answer] from you: …`, and the `skein_requests` tool
 /// (`src/plugin/bin/skein-mcp`) reads `kind: "answer"` as the answer to the request it names. That
 /// is the only answer a box can believe: the `state` skein writes back into the box's own request
 /// file is a courtesy, and the box can write that file itself.
 ///
 /// Refuses anything that would reach more than one inbox. `send_message` reads `""` and
-/// `broadcast` as every box, and an answer is one box's.
-pub fn send_answer(box_name: &str, queue: &str, id: &str, granted: bool) -> Result<(), String> {
+/// `broadcast` as every box, and an answer is one box's. And an outcome of more than one line,
+/// because the box's inbox shows an answer as one line.
+pub fn send_answer(box_name: &str, queue: &str, id: &str, outcome: &str) -> Result<(), String> {
     if !crate::util::valid_name(box_name) || box_name == "broadcast" {
         return Err(format!("unusable box name {box_name:?}"));
     }
-    let outcome = if granted { "granted" } else { "denied" };
+    if outcome.is_empty() || outcome.contains('\n') {
+        return Err(format!("unusable outcome {outcome:?}"));
+    }
     send_message(
         box_name,
         "answer",
@@ -430,7 +435,7 @@ mod tests {
         std::fs::remove_dir_all(home.join("boxes")).unwrap();
         for to in ["broadcast", "", "../other"] {
             assert!(
-                super::send_answer(to, "write", "20260924-1-1", true).is_err(),
+                super::send_answer(to, "write", "20260924-1-1", "granted").is_err(),
                 "an answer to {to:?} was accepted"
             );
         }

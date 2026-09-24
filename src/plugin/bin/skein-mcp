@@ -270,26 +270,38 @@ def inbox_answers():
             continue
         if not isinstance(m, dict) or m.get("kind") != "answer":
             continue
-        out.append({"body": str(m.get("body", "")), "ts": str(m.get("ts", ""))})
-    out.sort(key=lambda m: m["ts"], reverse=True)
+        out.append({"body": str(m.get("body", "")), "ts": str(m.get("ts", "")), "_name": name})
+    # Newest first. `ts` is to the second, and a grant and its revocation can share one, so the file
+    # name breaks the tie: skein names each message by the nanosecond it was written.
+    out.sort(key=lambda m: (m["ts"], m.pop("_name")), reverse=True)
     return out
 
 
-def answer_for(queue, request_id, answers):
-    """The newest answer to this request, and what it was: `granted` or `denied`.
+# What each queue's answer can say, in the owner's words (`mailbox::send_answer`): a decision, then
+# for a package whether it installed, and for a write whether its grant was taken back.
+OUTCOMES = {
+    "package": r"granted|denied|installed|not installed: (?P<why>.+)",
+    "write": r"granted|denied|revoked",
+}
 
-    The body is the one skein writes (`mailbox::send_answer`), matched whole: `<queue> request <id>,
-    granted` or `…, denied`. So a package answer never answers a write request that happens to
-    carry the same id, and an id is never matched as the prefix of a longer one.
+
+def answer_for(queue, request_id, answers):
+    """The newest answer to this request: (the message, its state, why it did not install).
+
+    The body is the one skein writes, matched whole: `<queue> request <id>, <outcome>`. So a package
+    answer never answers a write request that happens to carry the same id, an id is never matched
+    as the prefix of a longer one, and an outcome of the other queue's is no answer at all.
     """
     shape = re.compile(
-        r"^" + re.escape(queue) + r" request " + re.escape(request_id) + r", (granted|denied)$"
+        r"^" + re.escape(queue) + r" request " + re.escape(request_id)
+        + r", (?P<outcome>" + OUTCOMES[queue] + r")$"
     )
     for a in answers:
         m = shape.match(a["body"])
         if m:
-            return a, m.group(1)
-    return None, None
+            why = m.groupdict().get("why")
+            return a, ("not installed" if why else m.group("outcome")), why
+    return None, None, None
 
 
 def requests(_args):
@@ -322,9 +334,11 @@ def requests(_args):
                     row[field] = r[field]
             # **Never `r["state"]`.** The box wrote this file and can write `granted` into it; the
             # only answer is one found in the inbox, which it cannot write.
-            answer, decision = answer_for(kind, rid, answers)
+            answer, decision, why = answer_for(kind, rid, answers)
             row["state"] = decision or "waiting"
             row["answer"] = answer
+            if why:
+                row["why"] = why
             out.append(row)
     out.sort(key=lambda r: r["asked"])
     return {"box": box, "requests": out}
