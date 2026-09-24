@@ -41,7 +41,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/parity.md:147"]
+["docs/parity.md:153"]
 line = "stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -172,6 +172,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server/boxes.rs:548"]
+line = "Json(serde_json::json!({ \"ok\": true, \"resumed\": resumed, \"held\": held }))"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server/events.rs:25"]
 line = "\"too many live boards open — close one and retry\","
 cited_by = ["docs/recovery-survey.md"]
@@ -294,13 +298,8 @@ line = "///"
 window = "/// Update skein's app settings — MERGED onto what is stored, never replacing it.\u000b///\u000b/// Every field of `Config` has a serde default, so deserializing a partial body into one silently"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:8"]
-line = "/// Named rather than spelled inside [`PTY_LIMIT`] because the refusal quotes it. A person told"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server/terminal.rs:47"]
-line = "if !origin_ok(&headers) {"
-window = ") -> Response {\u000bif !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
+["src/bin/skein-server/terminal.rs:15"]
+line = "static PTY_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(PTY_MAX);"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server/terminal.rs:48"]
@@ -310,6 +309,11 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server/terminal.rs:77"]
 line = "mut socket: WebSocket,"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/terminal.rs:89"]
+line = "let _permit = match PTY_LIMIT.try_acquire() {"
+window = "// without being clicked.\u000blet _permit = match PTY_LIMIT.try_acquire() {\u000bOk(p) => PtySlot(Some(p)),"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server/terminal.rs:92"]
@@ -991,6 +995,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"the fleet sandbox {sandbox} is already being created — that started {} ago and takes \\"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet/create.rs:764"]
+line = "return Err(\"invalid fleet sandbox name\".into());"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/fleet/create.rs:787"]
 line = "if fleet_exists(sandbox) != Some(true) {"
 cited_by = ["docs/recovery-survey.md"]
@@ -1020,6 +1028,11 @@ line = "return Err(format!(\"unusable box name {name:?}\"));"
 window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet/declared.rs:62"]
+line = "return Err(format!(\"unusable box name {name:?}\"));"
+window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/fleet/declared.rs:145"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
@@ -1045,6 +1058,10 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet/disk.rs:309"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/disk.rs:386"]
+line = "return Err(format!(\"unusable box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet/fleetlogin.rs:281"]
@@ -1091,12 +1108,21 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: could not pin SSH host keys in {name} ({e}); pushing over SSH from it will fail host key verification\");"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet/install.rs:291"]
+line = "return Err(format!(\"invalid session name {session:?}\"));"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/fleet/model.rs:215"]
 line = "/// Vertex is not on the subscription either. `ANTHROPIC_BASE_URL` is deliberately NOT here — a"
 cited_by = ["docs/prose-symbols.toml"]
 
 ["src/fleet/resize.rs:185"]
 line = "true => census_placed_boxes(&sandbox)"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/resize.rs:204"]
+line = "return Err(format!("
+window = "if !valid_name(name) {\u000breturn Err(format!(\u000b\"{name:?} is not a box name — nothing was copied out\""
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet/resize.rs:205"]
@@ -1207,6 +1233,10 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet/start.rs:530"]
 line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:547"]
+line = "return Err(format!(\"invalid box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet/start.rs:558"]
@@ -1809,10 +1839,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:265"]
-line = "method:\"POST\", headers:{\"Content-Type\":\"application/json\"}, body:JSON.stringify({ runtime })"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/web/app/board.js:269"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
@@ -1913,6 +1939,14 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/box.js:27"]
 line = "}).catch(() => toast(\"destroy failed\"));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:39"]
+line = "if (!d.ok) { toast(\"continue failed\"); return; }"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/box.js:44"]
+line = "}).catch(() => toast(\"continue failed\"));"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/box.js:66"]

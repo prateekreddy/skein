@@ -23,6 +23,12 @@ whitespace-separated word, so `86)` was never a number to anything (SKEIN-986). 
 inside a reproduction block is worse than one in prose, because the block is what a reader checks
 the prose against.
 
+**A count outside this block is not written as a count** (SKEIN-874). Nothing reproduces a number
+in a sentence: §5 said "seven panes" while the page had eight, and no test could have said so. So
+the prose below names what it would have counted, or points at the one place that holds the list,
+or says which commit the number was true at. A new count that matters goes in this block, with
+its check in `tests/parity_numbers.rs`.
+
 ```sh
 grep -c '\.route('  src/bin/skein-server/main.rs               # 98   (NOT '.route("' — that gives 87, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 162 unique, 165 occurrences
@@ -62,8 +68,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
   *add* a hold.
 - **The board's state taxonomy** — `GROUPS`, in `cockpit/src/groups.mjs` since the pure functions
-  moved there (`9116043`), with node tests of its own: eight ranked groups over ~14 states,
-  plus `NEEDS_YOU` and `labelOf`. Its comment records a shipped defect: three copies of "owed to you"
+  moved there (`9116043`), with node tests of its own: ranked groups, each naming the states it
+  takes, plus `NEEDS_YOU` and `labelOf`. Its comment records a shipped defect: three copies of "owed to you"
   disagreed, so the title said "3 need you" while the mouth stayed shut. **One definition, or the bug
   returns.**
 - **The standing-debt announcer** — `announceStandingDebt` / `settledOwed` in `index.html`, with the sentence itself in
@@ -256,8 +262,9 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   the sizing decision at all — the same failure `proposed_fleet_size` refuses to make with
   `configured_field`. Sizing a new fleet therefore needs a person's number or the host's, which is
   §7's entry on the rebuild control.
-- **`ensure_probe_all` / `ensure_kit` / fleet healing** — skein installs 19 probe scripts and hook
-  wiring into every registered repo's store on every start, and repairs a running fleet to match the
+- **`ensure_probe_all` / `ensure_kit` / fleet healing** — skein installs its probe scripts
+  (`src/probe/`), the store kit beside them (`src/store/`) and hook wiring into every registered
+  repo's store on every start, and repairs a running fleet to match the
   binary. **Without these there is no turn state at all.**
 
 ## 5. Cross-cutting
@@ -269,7 +276,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   and the off-loopback bind warning.
 - The event stream; mailbox including **broadcast to all boxes** and the **cross-project relay**
   (host-side, because a box only mounts its own project's store).
-- Settings: eight panes, ~45 controls, save-on-blur, unsaved-changes indicator, diagnostics pane,
+- Settings: a pane each for boxes, fleet, GitHub, keys, tracking, update, usage and diagnostics (the
+  set-pane elements of the page), save-on-blur, unsaved-changes indicator,
   host-capacity measurement (of whichever machine skein stands on — see above), and refusal to
   save when config is unparseable.
 - **Settings → Usage** — what the fleet has cost, read from each box's own transcripts where they
@@ -304,7 +312,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 
 ## 5a. Found in the third audit, and previously missing
 
-- **The voice command grammar** — six verb groups, longest-phrase-first matching, and `voiceTarget`
+- **The voice command grammar** — one verb table (`VOICE_VERBS`), longest-phrase-first matching,
+  and `voiceTarget`
   resolution (named box → last spoken → selected → the only one owed an answer). Including
   **`tell it <words>` / `tell <box> <words>`, which posts a free-form prompt to the agent verbatim** —
   a second write path into a box, by voice.
@@ -566,7 +575,8 @@ itself, it *advises somebody else to*. `cockpit_port_advice` is where it lives n
 `ensure_fleet` reports through it: on a fresh fleet it prints either the recipe or the §9.4 refusal,
 and never the recipe when the stamp says the doorway is not there.
 
-Of the fourteen tests in `tests/fleet_move.rs`, **two go and twelve stay**. The two are the stdin
+Of the fourteen tests `tests/fleet_move.rs` held before `7b39014`, **two go and twelve stay**. The
+two are the stdin
 carrier's own: a binary replaced while the old one is still executing (`ETXTBSY`, which is a
 property of writing onto a live ELF from outside), and the cross-build refusal. A third was two
 tests welded into one body — the install-then-start-then-publish ordering, which only existed
@@ -784,8 +794,8 @@ Three verdicts, and the middle one is the load-bearing one:
 **What `/v2` is today**: the queue, the three states said in words (`cockpit/src/tone.mjs`), the
 change view (`cockpit/src/change.mjs`, §11.1), a box's terminal, and setting up — add a repository,
 make a box (§11's fifth job, *one action, no configuration exercise*). **What it is not**: the fleet
-controls, and a settings screen — deliberately, since `Config` has twenty-four fields and rendering
-them all is one of the things this board is a reaction to. What is left reads *not yet asked* above,
+controls, and a settings screen — deliberately, since rendering every field of `Config` is one
+of the things this board is a reaction to. What is left reads *not yet asked* above,
 and each is one item's worth of work rather than a question anybody still has to answer.
 
 **The box is made as an Act**, which is what that machinery was for: the answer is an id, the work
@@ -810,7 +820,7 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
 
 - The 265 JavaScript functions were sampled, not enumerated one by one. This is the largest
   remaining hole and the only honest way to close it is to walk them.
-- Settings controls were counted from the UI. The count mismatch against `Config`'s 24 fields is
+- Settings controls were counted from the UI. That there are more controls than `Config` has fields is
   explained, not outstanding: repo and connection settings are not `Config` at all.
 - **Two rounds of this document invented capabilities.** Treat any entry with no file reference
   beside it as unverified until someone greps for it.

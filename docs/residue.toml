@@ -29,7 +29,7 @@
 [hosts]
 "100.128.0.1" = "just outside the /10, which the guard must refuse"
 "100.64.0.1" = "the bottom of Tailscale's CGNAT /10, which the guard accepts"
-"100.64.0.30" = "an address inside that /10, in the same test — see the note in [banned]"
+"100.64.0.30" = "an address inside that /10, in the same test — it stands in for a real box's tailnet address that the history rewrite removed, and stays inside the /10 because the test asserts a CGNAT origin is allowed and a public one is not, so a documentation address would have inverted it"
 "127.0.0.1" = "the cockpit binds loopback; the address appears in every doc that says so"
 "192.168.1.10" = "an ordinary LAN address the guard must refuse"
 "8.8.8.8" = "a public address the guard must refuse"

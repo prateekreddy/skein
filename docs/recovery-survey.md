@@ -675,7 +675,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/bin/skein-server.rs:4253` | skein: too many terminals open — close one and retry | **R** — hold 24 PTY permits (`PTY_LIMIT`, `src/bin/skein-server/terminal.rs:8`), then open a 25th terminal | opening a box terminal with every `PTY_LIMIT` permit held | partly — "close one and retry" is manual · **reworded by SKEIN-702 — `pty_limit_reached` says what to do, so y now; §5's note re-reads this row's letter as C** | **yes, the cleanest in the tree** — a permit freeing. `try_acquire` is deliberate (`src/bin/skein-server/terminal.rs:47`); a bounded wait would recover with nobody involved | W |
+| `src/bin/skein-server.rs:4253` | skein: too many terminals open — close one and retry | **R** — hold 24 PTY permits (`PTY_LIMIT`, `src/bin/skein-server/terminal.rs:15`), then open a 25th terminal | opening a box terminal with every `PTY_LIMIT` permit held | partly — "close one and retry" is manual · **reworded by SKEIN-702 — `pty_limit_reached` says what to do, so y now; §5's note re-reads this row's letter as C** | **yes, the cleanest in the tree** — a permit freeing. `try_acquire` is deliberate (`src/bin/skein-server/terminal.rs:89`); a bounded wait would recover with nobody involved | W |
 | `src/bin/skein-server/terminal.rs:149` | skein: box {name} does not exist … Run `skein start {name} --branch <branch>` on the host to try again. Do not run `sbx create` … | **R** — open `/terminal/<name>` for a box with no placement record — a stale bookmark, or one just destroyed | opening a terminal for a box with no placement | y — the best recovery sentence in the tree, and it names an anti-command too | yes — `shared_record` becoming `Some`; the browser already reconnects | W |
 | `src/bin/skein-server/terminal.rs:110` | skein: handoff brief failed: {e} | **R** — open a handoff terminal for a box with no recorded session digest, or whose shared store will not resolve | opening a terminal with `?handoff=1` when `prepare_handoff` errors | n — and the session then proceeds *without* the brief | not established — what recovery would mean here is unclear from the code | N |
 | `src/bin/skein-server/terminal.rs:117` | skein: handoff task failed: {e} | **?** — only on a `JoinError` from the handoff `spawn_blocking` (`src/bin/skein-server/terminal.rs:77`). `src/handoff.rs:23-63` propagates with `?` and has no visible panic; settled by auditing its callees for one | same, on a join error | n | not established | N |
@@ -735,7 +735,7 @@ after `REV_STALE_TRIES`. Everything below either copies those or does not.
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
 | `src/web/app/board.js:729` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
-| `src/web/app/board.js:258`, `src/web/app/board.js:265`, `src/web/app/box.js:17`, `src/web/app/box.js:27` | continue failed: {server error} · restart failed · stop failed · destroy failed | **R** — any of the five resume/restart/stop/destroy POSTs answering non-ok | the row action buttons on the fleet board | **n** — verb plus "failed", in a 3.5s toast | yes — the box's own state on `/api/events`: a stop that failed leaves the box running | N |
+| `src/web/app/board.js:258`, `src/web/app/board.js:272`, `src/web/app/box.js:17`, `src/web/app/box.js:27` | continue failed: {server error} · restart failed · stop failed · destroy failed | **R** — any of the four resume/restart/stop/destroy POSTs answering non-ok | the row action buttons on the fleet board. **Not** the other `continue failed` pair, at `src/web/app/box.js:39` and `src/web/app/box.js:44`, which is a different surface (SKEIN-891): the header's Continue N (`#contall`) or saying "continue all", one POST to `/api/resume-batch` for several boxes. Its first arm cannot run — `api_resume_batch` answers `ok: true` on every path (`src/bin/skein-server/boxes.rs:548`) — and a batch that fails inside the server toasts "continuing 0" as a success, so it was not surveyed as a failure message at all | **n** — verb plus "failed", in a 3.5s toast | yes — the box's own state on `/api/events`: a stop that failed leaves the box running | N |
 | `src/web/app/voice.js:126` | send failed | **R** — `POST /api/mailbox` failing | Mailbox → Send with a failing POST | **n** — two words. The typed text survives, and nothing says so | yes — the HTTP status distinguishes a safely re-sendable 5xx from a 4xx | N |
 | `src/web/app/panels.js:563` | could not run the test | **R** — the git-probe POST failing | Settings → GitHub & keys → test writes | **n** | yes — `health.gitgate` already carries the same fact on the 15s poll | N |
 | `src/web/app/box.js:497` | could not load diff | **R** — the diff GET failing with the Diff tab open | box → Diff tab when the endpoint rejects | **n** — the ok path distinguishes causes in `d.note`; this one does not | yes — the box's run state | N |
@@ -862,9 +862,22 @@ the reason: the input-validation one-liners guarding `pub(crate)` writers, whose
 `src/repos/list.rs:147`, `src/repos/boxes.rs:121`, `src/repos/boxes.rs:125`;
 `src/gitgate/scope.rs:70`, `src/gitgate/scope.rs:63`, `src/gitgate/credentials.rs:188`,
 `src/gitgate/credentials.rs:213`, `src/gitgate/credentials.rs:237`; `src/files.rs:60`,
-`src/files.rs:67`, `src/files.rs:74`, `src/files.rs:263`, `src/files.rs:315`. For
-`src/fleet/declared.rs:27`, `src/fleet/declared.rs:145`, `src/fleet/declared.rs:154` and
-`src/fleet/server.rs:137`, **cannot tell** — the callers are in-crate and were not all traced.
+`src/files.rs:67`, `src/files.rs:74`, `src/files.rs:263`, `src/files.rs:315`. For the name guards
+in `src/fleet/` — `src/fleet/declared.rs:27`, `src/fleet/declared.rs:62`,
+`src/fleet/declared.rs:145`, `src/fleet/declared.rs:154`, `src/fleet/disk.rs:386`,
+`src/fleet/create.rs:764`, `src/fleet/start.rs:547`, `src/fleet/install.rs:291` and
+`src/fleet/server.rs:137` — **cannot tell**: the callers are in-crate and were not all traced.
+
+That list is derived, not carried (SKEIN-877). This prints those nine and `src/fleet/resize.rs:204`,
+whose sentence is person-facing and has its own row below:
+
+```sh
+grep -rn -A1 'valid_name(' src/fleet/ | grep 'return Err('
+```
+
+This paragraph used to name four addresses in the old `src/fleet.rs`, and two
+of them held doc comments on the day they were written, so what was meant by them cannot be
+recovered; naming every guard of the kind replaces the guess.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|

@@ -310,6 +310,20 @@ numbers the ledger can still resolve, and `--record` anchors citations the merge
 `misanchored` is the one that is not: it means no relocation names the row's words, so a person
 reads the row (see the verdict guide the tool prints).
 
+**A green `line-cite-check` says a citation still names the line it was anchored to — not that it
+was the right line to begin with** (SKEIN-949). The anchor records whatever the line held on the
+day the citation was written, so an address that was wrong that day is anchored wrong and relocated
+wrong for ever. `docs/recovery-survey.md` said "`try_acquire` is deliberate" and cited an origin
+check 42 lines above the `try_acquire` call, through every relocation, until an ambiguity made a
+person read it. Where a sentence names a symbol beside a citation, look for the symbol at the line.
+A check that does that for you was measured and not yet built: over the 650 citations in `docs/`
+on 2026-09-23, 56 had a backticked identifier right before them, 22 of those had it nowhere within
+ten lines of the cited one, and of seven read by hand four were wrong addresses and three were
+right (a call cited inside its caller, a doc comment above its item). A gate that is wrong about
+three in seven teaches people to read past it, so the 22 are to be triaged first and the check
+built with a per-row exemption after that (SKEIN-1131) — and the anchor is not to be widened to
+cover it, since stability across churn is the job it does well.
+
 Where a gate is python, it is python because Rust cannot express what it checks. "This module may not depend on that
 one" has no compiler behind it, so `module-check.py` **is** the compiler; the same argument makes
 `source-check.py` the compiler for "nothing reaches anything except through a declared Source". A
@@ -329,8 +343,8 @@ happened, and a push cannot be unseen. Four of its five
 rules are about *shape* — a host, a home directory, an email address, a credential prefix — each
 with an allow-list in `docs/residue.toml` carrying a reason per entry, so a new host is a line in a
 diff that somebody decided on. **It reads `git ls-files`**, so a file you have written but not
-staged is invisible to it: `git add` first, or it will be green about a tree that does not include
-your change.
+staged is invisible to it: `git add -N` it first (rule 5 below says why not a plain `git add`), or it
+will be green about a tree that does not include your change.
 
 The fifth rule is a literal denylist, and it is the one whose list is **not in this repository**.
 Publishing the strings that were removed from every commit, each with a sentence saying whose it
@@ -457,6 +471,30 @@ argue with — a prohibition on its own is just something to route around.
    test above is worth little beside `tests/isolation_bwrap/`, which runs actual bwrap and reads
    the resulting paths back.
 
+   **The sabotage itself goes quiet in three ways**, each met in this repository, and an `md5sum`
+   passes all three:
+
+   * **A snapshot older than your own edits restores too little.** `git restore` takes too much;
+     a copy taken before you went on editing takes too little, and restoring from it reverts your
+     own later work without a word. An agent snapshotted `src/fleet.rs`, reworded prose in it to
+     satisfy `prose-check`, then sabotaged and restored — and 13 lines of the rewording were gone
+     (SKEIN-810). The file compiled and the tests passed, because what was lost was words. `git
+     status` caught it: the file read modified when it should have read clean. So **take the
+     snapshot again after every intentional edit**, and after restoring check the file against
+     what you expect, `git diff` or an md5 of the version you meant, not merely against the snapshot.
+   * **A snapshot in `/tmp` can vanish, and then the restore empties the file.** A lane's snapshot
+     directory under `/tmp` was gone minutes after it was written and md5-checked; nothing of the
+     lane's had removed it, and `/tmp` on a fleet box is shared by every lane and the fleet itself.
+     The restore is `cat snapshot > file`, so a missing or recreated snapshot truncates the working
+     file (SKEIN-948). Snapshot into your own session scratchpad, with `cat src > dst` rather than
+     `cp`, which has produced all-NUL copies of the right size on this fleet's shared mounts.
+   * **A changed md5 proves the file changed, not that the change you named applied.** A two-part
+     plant computed its first span with `s.index(…)`, which matched an earlier handler, so the span
+     came back empty and the replacement was a no-op; the second part applied, the md5 moved, the
+     test passed, and the reading was "the lane's claim does not reproduce" — false, about correct
+     work (SKEIN-948). Assert on the artefact, once per part: `grep -c` the text that must now be
+     absent and the text that must now be present, and refuse to run the test if a count is wrong.
+
 4. **Never send a field you did not mean to change.** Read-modify-write, or omit the field —
    placeholder values in a write call are how records get erased. An attempt to clear one work
    item's parent sent `{"parent": null, "name": "…", "description_html": "unchanged"}`, because the
@@ -479,6 +517,35 @@ argue with — a prohibition on its own is just something to route around.
    The code was right at `HEAD` afterwards and only the authorship was wrong, which is luck rather
    than design. **Stage and commit in one breath**, or use `git add -N`, which lets the gate see a
    new file without its content entering the index.
+
+   **A path on the command line means the working tree, not what you staged** — on a plain commit
+   and on `--amend` alike (SKEIN-671). `git commit -- <path>` and `git commit --amend --only --
+   <path>` both re-read that path from disk, and whatever another author has written into the file
+   goes with it. It happened twice in one repair: a two-line doc fix committed its file whole and
+   carried 65 lines of another agent's unfinished work, and the correction — the right blob put
+   into the index with `git hash-object -w` and `git update-index --cacheinfo`, then `git commit
+   --amend --no-edit --only -- <paths>` — re-read the same four files from disk and produced a
+   commit identical to the one it was fixing, reporting success. Measured in a throwaway repository
+   on git 2.53: with `-- <path>`, with or without `--only`, the amend commits the working-tree file;
+   a bare `git commit --amend --no-edit` commits the index as it stands. So to correct one file in a
+   commit **without touching the working file**, which matters when another agent may be writing it
+   that second: `hash-object -w`, `update-index --cacheinfo`, and a bare `--amend`. And after any
+   commit that names a file somebody else may hold, read `git show --stat` and compare its line
+   count with the lines you changed: `74 ++++` for a three-line edit is how this was caught.
+
+   **And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence
+   is a promise not to rewrite. Twelve commits were rebased here to move one out of the middle of the
+   chain; every sha changed, and several agents had already filed tracker completions citing the old
+   ones, which then named commits that were not on `master`. On the same day an agent told to amend
+   its own commit to add a trailer found two other agents' commits already on top of it, landed in
+   the previous two minutes and not yet cited, and stopped rather than rewrite them — waiting for
+   them to finish would only have moved the damage later, because their shas change whether the
+   rewrite comes before or after they cite them. The commit went without the trailer. So: amend
+   only a commit nothing sits on and nothing has cited; do not rebase unpushed history while
+   other agents are committing to the same branch; and a commit that cannot be pushed stays at the
+   tip from the start rather than being found in the way later. No gate enforces this — the
+   citations it protects are in the tracker, which no gate reads; `citation-check` catches the
+   same breakage only where a sha is cited in `docs/`.
 
 6. **Structural cuts: snapshot, match at the symbol's own indent, check the delta.** Before deleting
    a function or a block: copy the file somewhere of your own first (not git — you will want the
