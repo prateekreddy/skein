@@ -127,9 +127,7 @@ const plural = (n, one, many) => `${fmtExact(n)} ${Number(n) === 1 ? one : many}
 // The section, above "By box" where it cannot collide with a box that happens to be called skein.
 //
 // **The per-thing figures cover the same span as the headline total** (the owner's decision on
-// SKEIN-1075): everything this reading counted. The per-item figure is fleet-wide only, and it is
-// never a number today — skein keeps no record of when a tracker item was finished, so it says
-// which of the two reasons applies rather than inventing a divisor.
+// SKEIN-1075): everything this reading counted.
 export function ownHtml(own, esc) {
   const e = esc || (s => String(s));
   const o = own || {};
@@ -142,9 +140,9 @@ export function ownHtml(own, esc) {
   } else if (Number(r.unfinished) > 0) {
     lines.push(`no reading finished in this span, so there is nothing to divide by — ${usd(r.cost)} went on ${fmtExact(r.unfinished)} that did not`);
   }
-  lines.push(o.tracker_connected
-    ? "skein does not record when a tracker item was finished, so there is no per-item figure"
-    : "work tracking is not connected, so skein cannot tell when an item was finished (Settings → Work tracking)");
+  // The dollars per completed tracker item return here, fleet-wide only, once SKEIN-1139 gives skein
+  // a record of when a box held and finished an item. Until then the owner's decision (2026-09-24)
+  // is that no tracker line of any kind is drawn — not a reason, not a placeholder.
   if (o.unlabelled_in_boxes) {
     lines.push("calls made before skein labelled its own are counted under the box they ran in");
   }

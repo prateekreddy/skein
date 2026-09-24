@@ -402,10 +402,8 @@ pub struct OwnSpend {
     /// One row per call site that made a call, most expensive first.
     pub sites: Vec<SiteRow>,
     pub readings: Readings,
-    /// Whether any work-tracking connection is usable. skein keeps no record of when a tracker
-    /// item was finished either way, so there is no per-item figure; this only decides which of the
-    /// two sentences saying so is true.
-    pub tracker_connected: bool,
+    // The per-tracker-item figure belongs here, fleet-wide, once SKEIN-1139 gives skein a record of
+    // when a box held and finished an item. Nothing stands in for it until then.
     /// A box holds a session skein derived that the ledger does not know: a call made before skein
     /// labelled its own, still counted under that box.
     pub unlabelled_in_boxes: bool,
@@ -1096,7 +1094,6 @@ pub fn refresh() -> Result<UsageReport, String> {
     report.own.readings.finished = ledger.readings_finished;
     report.own.readings.unfinished = ledger.readings_unfinished;
     report.own.readings.divide();
-    report.own.tracker_connected = crate::tracking::sync_status().ready;
     report.own.unlabelled_in_boxes = unlabelled_in_boxes;
     cache.read_at_unix = read_at_unix;
     write_json(digest_path(), &cache)?;

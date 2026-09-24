@@ -237,7 +237,6 @@ const OWN = {
   ],
   readings: { finished: 38, unfinished: 4, cost: 35.72, tokens: 8071200,
               per_finished: 0.94, tokens_per_finished: 212400 },
-  tracker_connected: false,
   unlabelled_in_boxes: true,
 };
 
@@ -273,11 +272,20 @@ test("with no finished reading there is nothing to divide by, and the page says 
   assert.doesNotMatch(html, /per completed pull-request reading/);
 });
 
-test("the tracker figure says why it cannot be given, and old unlabelled calls are said to be under their box", () => {
-  // Fails if either sentence is dropped: a missing per-item line reads as "not measured" and an
-  // unmentioned box share reads as skein costing less than it did.
+test("no tracker line of any kind is drawn until skein has a source for it (SKEIN-1139)", () => {
+  // The owner's decision, 2026-09-24: hidden entirely, not explained. Fails if any tracker sentence
+  // renders — the old "not connected" reason, a placeholder, or a per-item figure — in any state
+  // of the payload, including one that still carries the retired `tracker_connected` field.
+  for (const own of [OWN, { ...OWN, tracker_connected: true }, { ...OWN, tracker_connected: false },
+                     { calls: 0, sites: [], readings: {} }]) {
+    const html = visible(usageHtml({ ...READING, own }, NOW, esc));
+    assert.doesNotMatch(html, /tracker|work tracking|per completed tracker item/i);
+  }
+});
+
+test("old unlabelled calls are said to be under their box", () => {
+  // Fails if the sentence is dropped: an unmentioned box share reads as skein costing less than it did.
   const html = visible(usageHtml({ ...READING, own: OWN }, NOW, esc));
-  assert.match(html, /work tracking is not connected, so skein cannot tell when an item was finished \(Settings → Work tracking\)/);
   assert.match(html, /calls made before skein labelled its own are counted under the box they ran in/);
   const clean = visible(usageHtml({ ...READING, own: { ...OWN, unlabelled_in_boxes: false } }, NOW, esc));
   assert.doesNotMatch(clean, /calls made before skein labelled/);
