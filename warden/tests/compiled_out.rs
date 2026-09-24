@@ -8,7 +8,42 @@
 //!
 //! It builds into its own target directory. A nested `cargo` sharing the outer one blocks on the
 //! build lock the test harness is already holding, which is a deadlock rather than a slow test.
+//!
+//! **`have`, `skip` and `Scratch` are the ones `tests/common/mod.rs` already has, not copies of
+//! them.** This file is `warden/tests/compiled_out.rs` — a different Cargo package from `skein`,
+//! built with its own `CARGO_MANIFEST_DIR` — so `mod common;` cannot resolve there the way it does
+//! inside `tests/isolation_bwrap/main.rs` or `tests/fleet_launch/main.rs`. `#[path]` resolves
+//! against the FILE, not the package, so it reaches across the crate boundary anyway: SKEIN-556
+//! found that `tests/common/mod.rs` depends on nothing but `std` (`tests/common/mod.rs:22-24`, its
+//! only `use` lines), so there is no `skein` library to pull in and no blast radius for
+//! §14's empty depends-on column to protect against — this is the exact one file the boundary was
+//! never about. Before this, the scratch directory below was a bare `temp_dir().join(..)` removed
+//! by hand on the success path only, on the far side of most of this test's `assert!`s and
+//! `.expect()`s — so a panic anywhere before that line leaked it, and a passing run removed it
+//! BEFORE the assertions that follow, which is backwards for a scratch directory that would have
+//! been the evidence had one of them failed. `Scratch` fixes both: kept on panic, removed
+//! on success, swept by pid on the next run, and `$SKEIN_TESTS_KEEP_SCRATCH` and
+//! `$SKEIN_TESTS_NO_SKIP` now mean the same thing here as everywhere else in the suite.
+//!
+//! **What is not shared, and why.** `common::REQUIREMENTS` and the cross-checks that hold it
+//! against the code (`tests/platform_gates.rs`, `tools/noskip-check.py::attribute`) walk
+//! `tests/*.rs` under `env!("CARGO_MANIFEST_DIR")` — the `skein` package's own test directory —
+//! and `tools/noskip-check.py`'s `test` gate is `cargo test --all`, which does run this binary, but
+//! its `attribute()` maps only `src/**` and `tests/<name>.rs`; a site in `warden/tests/*.rs` matches
+//! neither and comes back attributed to no binary. So a skip here still panics under
+//! `$SKEIN_TESTS_NO_SKIP=1` — `common::skip` does not care which package called it — but
+//! `noskip-check.py`'s per-binary report cannot yet say "declares `cargo`, and this machine has
+//! it", only that an unattributed refusal happened, in the "reported, not counted" half of its
+//! output rather than the "no excuse for this" half. Making the workspace's second package visible
+//! to those two files' own self-checks (`integration_sources`, `capability_probes`, and the rest of
+//! `tests/platform_gates.rs`, each of which asserts its list is exactly the files in `tests/`) is a
+//! change to shared, heavily cross-checked machinery well past this one binary, and is filed as
+//! SKEIN-1148 rather than done here without the room to prove it against every one of those checks.
 
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
+use common::{have, skip, Scratch};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -34,15 +69,6 @@ fn port_it_bound(said: &str) -> Option<u16> {
         .ok()
 }
 
-fn have(tool: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {tool} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// One request, one reply, connection closed — the only shape this warden speaks.
 fn ask(port: u16, method: &str, path: &str, body: &str, secret: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the warden");
@@ -64,12 +90,13 @@ fn ask(port: u16, method: &str, path: &str, body: &str, secret: &str) -> String 
 #[test]
 fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
     if !have("cargo") {
-        eprintln!("skipping: no cargo on PATH, so a second warden cannot be built");
-        return;
+        return skip("no cargo on PATH, so a second warden cannot be built");
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let target =
-        std::env::temp_dir().join(format!("skein-warden-nodestroy-{}", std::process::id()));
+    // `Scratch::temp`, not a bare `temp_dir().join(..)`: kept on a panic (this test has several
+    // below the build, any of which used to leak this directory), removed on success, swept by
+    // pid on the next run — see the module doc comment.
+    let target = Scratch::temp("skein-warden-nodestroy");
 
     let built = Command::new("cargo")
         .args([
@@ -183,7 +210,10 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
         &secret,
     );
     drop(child); // explicit, though `Reaped` would do it at the end of the scope either way
-    let _ = std::fs::remove_dir_all(&target);
+
+    // `target`'s directory is no longer removed here. The assertions below can still fail, and
+    // `Scratch`'s `Drop` is what now decides what happens to the directory when they do: kept,
+    // with a line on stderr saying where, rather than gone before anyone could look at it.
 
     // It says what it has, and what it has is what was linked.
     assert!(
