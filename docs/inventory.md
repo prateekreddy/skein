@@ -283,6 +283,7 @@ been derived from:
 | `ensure_fleet` | **sandbox root** (apt replay). It no longer creates anything: the create moved to `request_fleet_create`, the explicit act (SKEIN-576) |
 | `request_fleet_create`, `create_fleet_operation` | **the warden**, over `http`, with the `sbx create` line printed when none answers |
 | `publish_cockpit_port`, `cockpit_port_advice` | **nobody** — the cockpit's mapping is a recipe a person runs; §9.4's stamp guard decides whether it is even offered (SKEIN-576). The warden has a `publish` doer (SKEIN-1130), performed only after the person types the operation id, and this caller does not ask it (SKEIN-1140) |
+| `ask_warden_to_publish_cockpit_port_at_start` | **the warden**, over `http`, once per `skein-server` start on a thread of its own; silent when no warden answers (SKEIN-1130) |
 | `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
 | `ensure_substrate` | **sandbox root** (`apt-get`) |
 | `ensure_fleet_door` | in-sandbox, unprivileged — the doorway that holds the cockpit port across restarts, and the server behind it |

@@ -548,16 +548,22 @@ pub fn stop_serving(sandbox: &str) -> Result<String, String> {
 pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation, String> {
     let port = server_sandbox_port();
     if !door_holds_port(sandbox, port) {
-        return Err(format!(
-            "the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \
-             it. Either the doorway could not start (check `{look}` in the sandbox, or that \
-             python3 is present), or something else in the fleet is already on :{port} — which \
-             is architecture §9.4's squat, and a mapping published to it hands the browser and its \
-             token to whatever holds it. Nothing takes that back afterwards.",
-            look = doorway_pane_command(),
-        ));
+        return Err(door_refusal(sandbox, port));
     }
     Ok(publish_cockpit_port(sandbox))
+}
+
+/// Why the cockpit's port is not to be published while the doorway does not hold it — the one
+/// refusal both [`cockpit_port_advice`] and [`ask_warden_to_publish_cockpit_port_at_start`] give.
+fn door_refusal(sandbox: &str, port: u16) -> String {
+    format!(
+        "the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \
+         it. Either the doorway could not start (check `{look}` in the sandbox, or that \
+         python3 is present), or something else in the fleet is already on :{port} — which \
+         is architecture §9.4's squat, and a mapping published to it hands the browser and its \
+         token to whatever holds it. Nothing takes that back afterwards.",
+        look = doorway_pane_command(),
+    )
 }
 
 /// **Publishing the cockpit's port, as an Operation a person performs** (§2.4, SKEIN-576).
@@ -577,9 +583,10 @@ pub fn cockpit_port_advice(sandbox: &str) -> Result<crate::operation::Operation,
 /// drives this operation. The owner's decision (SKEIN-1140, "keep Publish for repair") makes a
 /// publish a repair: `sbx create` publishes this port itself (`-p` in `create_argv`), and the
 /// warden looks at `sbx ports` before it asks. Skein has nothing that observes a missing mapping
-/// (this function is the only reader, and it cannot read in-fleet), so there is no caller to drive
-/// it from. [`crate::operation::Operation::may_drive`] is false here, and the recipe is what skein
-/// prints.
+/// (this function is the only reader, and it cannot read in-fleet), so this operation is not
+/// driven: the repair is asked of the warden once per server start instead, by
+/// [`ask_warden_to_publish_cockpit_port_at_start`]. [`crate::operation::Operation::may_drive`] is
+/// false here, and the recipe is what skein prints.
 ///
 /// **The check is three-valued because the honest answer usually is.** In the fleet `sbx` cannot be
 /// run at all, so [`existing_forwards`] returns `None` and this is `unknown` — not "no mapping",
@@ -659,8 +666,8 @@ fn cockpit_port_operation(
         recipe,
         class: Class::Idempotent,
         // Nothing drives this operation, though the warden has a `publish` doer (SKEIN-1130). See
-        // `publish_cockpit_port`'s doc: a publish is a repair, and skein cannot observe a missing
-        // mapping from in-fleet (SKEIN-1140).
+        // `publish_cockpit_port`'s doc: a publish is a repair, asked of the warden once per server
+        // start rather than through this operation (SKEIN-1140).
         doer: None,
     }
 }
@@ -681,6 +688,128 @@ fn cockpit_settled(port: u16) -> bool {
         }
     }
     false
+}
+
+/// Whether this process has asked the warden to publish the cockpit's port yet.
+static ASKED_AT_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long an ask may take before the server log says it is waiting on a person.
+///
+/// A warden that finds the mapping in place answers within a `sbx ports`, so an ask still open
+/// after this is almost always one sitting at the warden's terminal.
+const ASK_QUIETLY_FOR: Duration = Duration::from_secs(5);
+
+/// **Ask the warden, once per server start, to publish the cockpit's port** (SKEIN-1130).
+///
+/// The owner's trigger (2026-09-24). `sbx create` publishes this port itself (`-p` in
+/// `create_argv`), so a publish is a repair, and skein cannot see a missing mapping from in-fleet
+/// ([`existing_forwards`] is `None` here). A server start is the moment that repair is asked for:
+/// the warden looks at `sbx ports` first, so the usual answer is `already` and nobody is asked.
+///
+/// **Spawned, and never waited on.** The warden's approval blocks on its terminal until a person
+/// types, so the ask runs on its own thread and holds nothing the server needs; the call returns
+/// as soon as that thread exists. The client's own reply budget (half an hour) is the timeout, and
+/// a timed-out ask is logged as the prompt it becomes and not retried until the next start.
+///
+/// What the log gets:
+/// - no warden answering: nothing, as before this existed;
+/// - the doorway does not hold the port: [`door_refusal`], and nothing is asked (§9.4);
+/// - `already`: nothing, unless the waiting line was already written, when the warden's own line
+///   closes it — so the log never ends on a wait that ended;
+/// - an ask still open after [`ASK_QUIETLY_FOR`]: the waiting line, then the published line once
+///   the person approves;
+/// - declined, refused or timed out: the prompt a person would be shown, [`Prompt::render`].
+///
+/// [`Prompt::render`]: crate::warden_client::Prompt::render
+pub fn ask_warden_to_publish_cockpit_port_at_start() {
+    let sandbox = fleet_sandbox();
+    let port = server_sandbox_port();
+    let door = sandbox.clone();
+    let _ = ask_at_start(
+        &ASKED_AT_START,
+        crate::warden_client::Warden::configured(),
+        sandbox,
+        port,
+        ASK_QUIETLY_FOR,
+        move || match door_holds_port(&door, port) {
+            true => Ok(()),
+            false => Err(door_refusal(&door, port)),
+        },
+        |line: &str| eprintln!("skein: {line}"),
+    );
+}
+
+/// [`ask_warden_to_publish_cockpit_port_at_start`], with everything it reads handed to it, so a
+/// test can put a fake warden, a door and a log behind it. Returns the thread asking, if this call
+/// started one.
+fn ask_at_start(
+    asked: &'static std::sync::atomic::AtomicBool,
+    warden: crate::warden_client::Warden,
+    sandbox: String,
+    port: u16,
+    quietly_for: Duration,
+    door: impl FnOnce() -> Result<(), String> + Send + 'static,
+    say: impl Fn(&str) + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>> {
+    use crate::warden_client::{perform_through, Act, Answered, Performed};
+    if asked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    std::thread::Builder::new()
+        .name("warden-publish".into())
+        .spawn(move || {
+            // No warden answering is today's behaviour at a server start: nothing to say, and no
+            // terminal to say it to. Only a warden that answers is asked to do anything.
+            if warden.glance().is_err() {
+                return;
+            }
+            if let Err(refused) = door() {
+                say(&refused);
+                return;
+            }
+            let act = Act::Publish {
+                sandbox,
+                host_port: port,
+                sandbox_port: port,
+            };
+            // The ask on a thread of its own, so this one can tell a quick answer from a person
+            // being asked. A thread that cannot be had, or one that dies, leaves nothing to report.
+            let (sent, answer) = std::sync::mpsc::channel();
+            let asking = std::thread::Builder::new()
+                .name("warden-publish-ask".into())
+                .spawn(move || {
+                    let _ = sent.send(perform_through(&warden, &act));
+                });
+            if asking.is_err() {
+                return;
+            }
+            let mut waited = false;
+            let performed = match answer.recv_timeout(quietly_for) {
+                Ok(performed) => performed,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    say("waiting on the warden to approve the port…");
+                    waited = true;
+                    match answer.recv() {
+                        Ok(performed) => performed,
+                        Err(_) => return,
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            };
+            match performed {
+                Performed::Warden(already @ Answered::Already(_)) => {
+                    if waited {
+                        say(already.detail());
+                    }
+                }
+                Performed::Warden(_) => say(&format!(
+                    "the cockpit's port is published — 127.0.0.1:{port} reaches it now."
+                )),
+                Performed::Prompt(prompt) => say(&prompt.render()),
+                Performed::Uncertain(answered) => say(answered.detail()),
+            }
+        })
+        .ok()
 }
 
 /// The mount set for a fleet whose sandbox will host the server: [`fleet_mounts`] plus the volume
@@ -1251,5 +1380,237 @@ mod tests {
         // property this function had before the fix and must not lose to it.
         assert!(command.contains("has-session"));
         std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
+    /// A warden on a port of its own: `/v1/fleet` answers, `/v1/publish` answers with whatever
+    /// `publish` returns (`None` holds the request open for good), and every publish is counted.
+    fn warden_at_start(
+        publish: impl Fn() -> Option<(u16, String)> + Send + Sync + 'static,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let publishes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = publishes.clone();
+        let publish = std::sync::Arc::new(publish);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let (counted, publish) = (counted.clone(), publish.clone());
+                std::thread::spawn(move || {
+                    let mut raw = [0u8; 8192];
+                    let read = stream.read(&mut raw).unwrap_or(0);
+                    let asked = String::from_utf8_lossy(&raw[..read]).to_string();
+                    let (code, body) = match asked.split_whitespace().nth(1).unwrap_or("") {
+                        "/v1/fleet" => {
+                            (200, r#"{"sandboxes":[],"capabilities":["publish"]}"#.into())
+                        }
+                        "/v1/publish" => {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            match publish() {
+                                Some(answer) => answer,
+                                None => loop {
+                                    std::thread::sleep(Duration::from_secs(3600));
+                                },
+                            }
+                        }
+                        _ => (404, r#"{"error":"no such endpoint"}"#.into()),
+                    };
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 {code} Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                });
+            }
+        });
+        (port, publishes)
+    }
+
+    /// A once-per-start flag of the test's own, since the real one is the process's.
+    fn fresh_start() -> &'static std::sync::atomic::AtomicBool {
+        Box::leak(Box::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    /// Asks the warden at `port` as a server start would, collecting what the log is given.
+    fn start_asking(
+        asked: &'static std::sync::atomic::AtomicBool,
+        port: u16,
+        quietly_for: Duration,
+    ) -> (
+        Option<std::thread::JoinHandle<()>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = said.clone();
+        let asking = ask_at_start(
+            asked,
+            crate::warden_client::Warden::at("127.0.0.1", port),
+            "skein-test-fleet".into(),
+            7878,
+            quietly_for,
+            || Ok(()),
+            move |line: &str| log.lock().unwrap().push(line.to_string()),
+        );
+        (asking, said)
+    }
+
+    const RAN: &str = r#"{"state":"ran","ok":true,"said":"published"}"#;
+
+    /// A warden nobody answers at does not hold the server's start, and the log says why it waits.
+    ///
+    /// **What makes this fail**: the ask run on the caller's thread, or its thread joined before
+    /// returning — the start then waits as long as the warden's terminal does.
+    #[test]
+    fn a_warden_that_never_answers_does_not_hold_the_server_start() {
+        let (port, publishes) = warden_at_start(|| None);
+        let (returned, came_back) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = returned.send(start_asking(fresh_start(), port, Duration::from_millis(200)).1);
+        });
+        let said = came_back
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the server start waited on a warden that never answers");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while said.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the log never said it was waiting"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *said.lock().unwrap(),
+            vec!["waiting on the warden to approve the port…".to_string()]
+        );
+    }
+
+    /// The published line follows the waiting line only after the person approves.
+    #[test]
+    fn an_ask_a_person_approves_is_waited_on_and_then_announced() {
+        let (port, _) = warden_at_start(|| {
+            std::thread::sleep(Duration::from_millis(800));
+            Some((200, RAN.into()))
+        });
+        let (asking, said) = start_asking(fresh_start(), port, Duration::from_millis(100));
+        asking
+            .expect("the first ask of a start was not made")
+            .join()
+            .unwrap();
+        assert_eq!(
+            *said.lock().unwrap(),
+            vec![
+                "waiting on the warden to approve the port…".to_string(),
+                "the cockpit's port is published — 127.0.0.1:7878 reaches it now.".to_string(),
+            ]
+        );
+    }
+
+    /// One start asks once, however many times it is told to.
+    ///
+    /// **What makes this fail**: the once-per-start flag not consulted, so a second call asks the
+    /// warden again — and a person at its terminal is asked twice about one port.
+    #[test]
+    fn a_server_start_asks_the_warden_exactly_once() {
+        let (port, publishes) = warden_at_start(|| Some((200, RAN.into())));
+        let asked = fresh_start();
+        let (first, _) = start_asking(asked, port, Duration::from_secs(30));
+        let (second, _) = start_asking(asked, port, Duration::from_secs(30));
+        for asking in [first, second].into_iter().flatten() {
+            asking.join().unwrap();
+        }
+        assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A mapping the warden found in place is the usual start, and it leaves the log alone.
+    ///
+    /// **What makes this fail**: `already` read as a publish that ran, which announces a mapping
+    /// nobody made at every start.
+    #[test]
+    fn a_mapping_already_in_place_is_asked_about_and_announces_nothing() {
+        let (port, publishes) = warden_at_start(|| {
+            Some((
+                200,
+                r#"{"state":"already","ok":true,"said":"7878:7878/tcp is already published for skein-test-fleet, so nothing was asked and nothing ran"}"#.into(),
+            ))
+        });
+        let (asking, said) = start_asking(fresh_start(), port, Duration::from_secs(30));
+        asking
+            .expect("the first ask of a start was not made")
+            .join()
+            .unwrap();
+        assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*said.lock().unwrap(), Vec::<String>::new());
+    }
+
+    /// A refusal is logged as the prompt a person would be shown, naming what the warden said.
+    #[test]
+    fn a_refused_ask_logs_the_prompt_and_is_not_repeated() {
+        let (port, publishes) = warden_at_start(|| {
+            Some((
+                409,
+                r#"{"state":"refused","error":"the person declined"}"#.into(),
+            ))
+        });
+        let asked = fresh_start();
+        let (asking, said) = start_asking(asked, port, Duration::from_secs(30));
+        asking
+            .expect("the first ask of a start was not made")
+            .join()
+            .unwrap();
+        assert!(start_asking(asked, port, Duration::from_secs(30))
+            .0
+            .is_none());
+        let said = said.lock().unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("The warden was asked first: the person declined"),
+            "{said:?}"
+        );
+        assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// With no warden answering, a start asks nothing and says nothing — today's behaviour.
+    ///
+    /// **What makes this fail**: asking without first seeing a warden there, which turns the
+    /// transport error into a prompt block in the log of every start on a machine with no warden.
+    #[test]
+    fn with_no_warden_a_server_start_asks_nothing_and_says_nothing() {
+        // A port that was just bound and let go, so nothing is listening on it.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (asking, said) = start_asking(fresh_start(), port, Duration::from_secs(30));
+        asking
+            .expect("the first ask of a start was not made")
+            .join()
+            .unwrap();
+        assert_eq!(*said.lock().unwrap(), Vec::<String>::new());
+    }
+
+    /// A doorway that does not hold the port refuses the ask before the warden is asked (§9.4).
+    #[test]
+    fn a_port_the_doorway_does_not_hold_is_not_asked_for() {
+        let (port, publishes) = warden_at_start(|| Some((200, RAN.into())));
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = said.clone();
+        ask_at_start(
+            fresh_start(),
+            crate::warden_client::Warden::at("127.0.0.1", port),
+            "skein-test-fleet".into(),
+            7878,
+            Duration::from_secs(30),
+            || Err("not held".to_string()),
+            move |line: &str| log.lock().unwrap().push(line.to_string()),
+        )
+        .expect("the first ask of a start was not made")
+        .join()
+        .unwrap();
+        assert_eq!(*said.lock().unwrap(), vec!["not held".to_string()]);
+        assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

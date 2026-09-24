@@ -20,7 +20,7 @@
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:1756"]
+["docs/architecture.md:1757"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -37,7 +37,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:465"]
+["docs/modules.toml:466"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -239,35 +239,35 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:167"]
+["src/bin/skein-server/main.rs:168"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:180"]
+["src/bin/skein-server/main.rs:181"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:237"]
+["src/bin/skein-server/main.rs:238"]
 line = "// Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:275"]
+["src/bin/skein-server/main.rs:276"]
 line = "\"skein: {}\\n {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:570"]
+["src/bin/skein-server/main.rs:571"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:580"]
+["src/bin/skein-server/main.rs:581"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:671"]
+["src/bin/skein-server/main.rs:672"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:677"]
+["src/bin/skein-server/main.rs:678"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1220,7 +1220,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:552"]
+["src/fleet/server.rs:560"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1832,7 +1832,7 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1165"]
+["src/warden_client.rs:1168"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 

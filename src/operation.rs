@@ -211,7 +211,8 @@ mod tests {
     /// idempotent, so the class does not withhold it, and on a host the check answers `unsatisfied`
     /// rather than `unknown`, so the check does not either. What withholds it is `doer: None`. The
     /// warden has a `publish` doer since SKEIN-1130, asked only with the person typing the
-    /// operation id, but a publish is a repair and nothing drives this one (SKEIN-1140). Without
+    /// operation id, but a publish is a repair and nothing drives this one (SKEIN-1140); a server start
+    /// asks the warden for it directly instead. Without
     /// this clause `may_drive` grants permission for an operation nobody is to drive, and the caller then has
     /// to invent a performer, which is `sbx` — the exact fallback
     /// `docs/delivery.md` says must not exist, "because that fallback would be taken on exactly the

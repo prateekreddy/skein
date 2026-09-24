@@ -236,6 +236,9 @@ pub enum Answered {
     Ran(Reply),
     /// It happened before, under this same operation id.
     Replayed(Reply),
+    /// What was asked for already held, so the warden asked nobody and ran nothing: a publish that
+    /// found its mapping in `sbx ports` (SKEIN-1130).
+    Already(Reply),
     /// It ran and failed, or a person refused it.
     Failed(Reply),
     /// Accepted and never settled — the warden died between running and recording.
@@ -277,7 +280,7 @@ impl Answered {
     /// `Unknown`, and a caller that treats those as `false` is the bug this whole path is about.
     pub fn happened(&self) -> Option<bool> {
         match self {
-            Answered::Ran(_) | Answered::Replayed(_) => Some(true),
+            Answered::Ran(_) | Answered::Replayed(_) | Answered::Already(_) => Some(true),
             Answered::Failed(_) => Some(false),
             Answered::Undecided(_) | Answered::Unknown(_) => None,
         }
@@ -298,6 +301,7 @@ impl Answered {
         match self {
             Answered::Ran(r)
             | Answered::Replayed(r)
+            | Answered::Already(r)
             | Answered::Failed(r)
             | Answered::Undecided(r)
             | Answered::Unknown(r) => r,
@@ -462,7 +466,7 @@ impl Warden {
     /// here: this is asked to fill in a line on the health panel, every fifteen seconds, and a
     /// warden that needs longer than a couple of seconds to say what it can see is one the panel
     /// should describe as not answering.
-    fn glance(&self) -> Result<Sighting, String> {
+    pub(crate) fn glance(&self) -> Result<Sighting, String> {
         let (code, said) = self.send_within("GET", "/v1/fleet", "", GLANCE)?;
         if code != 200 {
             return Err(refusal(code, &said));
@@ -713,8 +717,7 @@ fn read_answer(code: u16, said: &str, operation: &str) -> Result<Answered, Strin
     };
     match (code, parsed.state.as_str()) {
         (200, "replayed") => Ok(Answered::Replayed(reply(detail))),
-        // `already` is a publish that found its mapping in place and ran nothing (SKEIN-1130). What
-        // was asked for holds, so it is read as having happened, the same as `ran`.
+        (200, "already") => Ok(Answered::Already(reply(detail))),
         (200, _) => Ok(Answered::Ran(reply(detail))),
         (_, "undecided") => Ok(Answered::Undecided(reply(format!(
             "{operation} was accepted at {} and never settled — it may have happened. Ask the \
@@ -1714,8 +1717,11 @@ mod tests {
 
     /// A warden that finds the mapping already there answers `already`, and that counts as done.
     ///
-    /// **What makes this fail**: `read_answer` treating a 200 it does not know the state of as
-    /// anything but `Ran`, which would turn a mapping that holds into a prompt to make it again.
+    /// It is read as its own answer, `Already`, because the server's start-up ask says nothing about
+    /// it where a publish that ran is announced.
+    ///
+    /// **What makes this fail**: `read_answer` not reading `already` as `Already`, which would
+    /// announce a mapping nobody made or turn one that holds into a prompt to make it again.
     #[test]
     fn a_mapping_the_warden_found_in_place_is_done_and_nobody_is_asked_to_make_it() {
         let port = fake_warden(|_| {
@@ -1726,7 +1732,13 @@ mod tests {
             )
         });
         match perform_through(&Warden::at("127.0.0.1", port), &publishing()) {
-            Performed::Warden(answered) => assert_eq!(answered.happened(), Some(true)),
+            Performed::Warden(answered) => {
+                assert_eq!(answered.happened(), Some(true));
+                assert!(
+                    matches!(answered, Answered::Already(_)),
+                    "a mapping found in place was read as one that was made: {answered:?}"
+                );
+            }
             other => panic!("a mapping already in place was put to a person: {other:?}"),
         }
     }

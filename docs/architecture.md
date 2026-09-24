@@ -278,7 +278,8 @@ SKEIN-1130. Publishing opens a host port into the network namespace every box sh
 it stays a prompted act: the warden performs it only after the person types the operation id at its
 terminal, so the person stays in the decision. The cockpit port's operation still names no doer.
 A publish is a repair (SKEIN-1140): the create already publishes the port, and nothing skein can
-observe says a mapping is missing. Without the
+observe says a mapping is missing, so the repair is asked of the warden once per server start
+rather than through this operation. Without the
 third refusal `may_drive` grants permission for an operation nobody is to drive, and the caller
 then has to invent a performer — which is `sbx`, the fallback `docs/delivery.md` says must not exist "because that fallback would be taken on exactly the
 day something was wrong". `Doer` names who may act rather than carrying a closure; the performing

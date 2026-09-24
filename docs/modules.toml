@@ -362,7 +362,8 @@ depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 # `operation` since SKEIN-576, for the cockpit's port. Skein no longer publishes it, so what used to
 # be a publish loop is `publish_cockpit_port`, an Operation whose recipe a person runs. The warden
 # has a `publish` doer since SKEIN-1130, performed only after the person types the operation id,
-# and nothing drives this Operation, because a publish is a repair (SKEIN-1140). The edge is what
+# and nothing drives this Operation, because a publish is a repair (SKEIN-1140): a server start asks
+# the warden for it directly, once. The edge is what
 # stops that being a bare `String` message: the tri-state check is why "I cannot see the host from
 # here" does not read as "nothing forwards this port".
 depends_on = [

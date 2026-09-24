@@ -567,7 +567,9 @@ What a person loses, in order of how much they will notice it:
   the operation id at its terminal, so the person stays in the decision. The owner decided that a
   publish is a repair (SKEIN-1140): the create already publishes the port with `-p`, so the
   post-create line is gone, and the warden reads `sbx ports` before it asks. Nothing in skein
-  observes a missing mapping, so nothing asks the warden yet. This is `docs/delivery.md`'s
+  observes a missing mapping, so the owner chose the trigger: every `skein-server` start asks the
+  warden once, on its own thread (`ask_warden_to_publish_cockpit_port_at_start`), and the usual
+  answer is `already`. The Operation itself is still not driven. This is `docs/delivery.md`'s
   rule at a second site: an unreachable doer does not fall back to running `sbx`, "because that
   fallback would be taken on exactly the day something was wrong".
 - **The two-candidate retry.** A publish that does not settle is a person's to notice now. What it
