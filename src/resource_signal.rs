@@ -279,13 +279,13 @@ pub struct Ask {
     pub crossing_id: String,
     /// The words of the held command.
     pub hold: String,
-    /// The SessionStart line. `None` where no approved text exists for this ask.
+    /// The SessionStart line. Every live ask has one.
     #[serde(default)]
     pub start: Option<String>,
-    /// The UserPromptSubmit reminder. `None` where no approved text exists for this ask.
+    /// The UserPromptSubmit reminder. Every live ask has one.
     #[serde(default)]
     pub remind: Option<String>,
-    /// The monitor's line on entering the band. `None` where no approved text exists.
+    /// The monitor's line on entering the band. Every live ask has one.
     #[serde(default)]
     pub enter: Option<String>,
 }
@@ -523,9 +523,10 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 /// see this; the next will run." stays. No field a box can write reaches any of them: every
 /// argument is a number skein measured.
 ///
-/// Where the approved set has no text for a case, the field is `None` and the plugin shows
-/// nothing, rather than a sentence nobody approved. The one exception is how (1a) reads when fewer
-/// than two other boxes were asked; see [`others_asked`].
+/// Every live ask carries all four: a hold, a start line (4), a reminder (5) and an entering line
+/// (6). The texts for the cases the first draft did not cover — (4), (5) and (6) for every disk
+/// case, memory and the process count, and (1a) with fewer than two other boxes — were approved by
+/// the owner on 2026-09-24, as were (4) without its `skein_resources` sentence until SKEIN-1059.
 mod words {
     use super::*;
 
@@ -549,10 +550,9 @@ mod words {
         gib(b / (1024 * 1024))
     }
 
-    /// The end of (1a)'s second sentence. The approved text shows two other boxes: "; 2 other
-    /// boxes have been asked for the rest". **One and none are not in the approved set** and are
-    /// flagged for sign-off: "1 other boxes" is not English, and "0 other boxes have been asked for
-    /// the rest" says there is a rest to ask for when this box covers all of it.
+    /// The end of (1a)'s second sentence: "; 2 other boxes have been asked for the rest", with one
+    /// other box in the singular and no clause at all when this box was asked alone (owner,
+    /// 2026-09-24): "0 other boxes have been asked for the rest" would say there is a rest.
     fn others_asked(n: usize) -> String {
         match n {
             0 => String::new(),
@@ -579,7 +579,7 @@ mod words {
                     others = others_asked(s.others),
                 ),
                 // (4) without its last sentence, "`skein_resources` shows where this box stands.":
-                // that tool ships with SKEIN-1059, the same as `skein_top`. Flagged for sign-off.
+                // that tool ships with SKEIN-1059, the same as `skein_top` (owner, 2026-09-24).
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear {free} of storage it is \
                      not using. The fleet's disk is {over} over what it can spare and this box \
@@ -600,7 +600,7 @@ mod words {
                 )),
                 ..Default::default()
             },
-            // (1b). No approved (4), (5) or (6) for it.
+            // (1b), (4), (5), (6).
             DiskAsk::EveryBox(s) => Ask {
                 kind: "disk".into(),
                 why: "fleet-every-box".into(),
@@ -612,10 +612,25 @@ mod words {
                     holds = gib(s.holds),
                     over = gib(s.over_by),
                 ),
+                start: Some(format!(
+                    "skein: before you start, this box is asked to clear what it can of the \
+                     {holds} it holds. The fleet's disk is {over} over what it can spare, and \
+                     every box has been asked.",
+                    holds = gib(s.holds),
+                    over = gib(s.over_by),
+                )),
+                remind: Some(format!(
+                    "skein: still asked of this box: clear what you can of the {} it holds.",
+                    gib(s.holds)
+                )),
+                enter: Some(format!(
+                    "skein: the fleet's disk is over its line; this box is asked to clear what it \
+                     can of the {} it holds.",
+                    gib(s.holds)
+                )),
                 ..Default::default()
             },
-            // (1c) and (5). No approved (4) or (6): (6)'s disk line says the fleet is over its
-            // line, which is not why this box is asked.
+            // (1c), (4), (5), (6). Its own (6): the fleet's line is not why this box is asked.
             DiskAsk::Allowance {
                 excess,
                 holds,
@@ -631,17 +646,31 @@ mod words {
                     gib(*holds),
                     gib(*limit),
                 ),
+                start: Some(format!(
+                    "skein: before you start, this box is asked to clear {} of storage it is not \
+                     using. It holds {} against its {} share of the fleet's disk.",
+                    gib(*excess),
+                    gib(*holds),
+                    gib(*limit),
+                )),
                 remind: Some(format!(
                     "skein: still asked of this box: clear {} of storage (it holds {}).",
                     gib(*excess),
                     gib(*holds)
+                )),
+                enter: Some(format!(
+                    "skein: this box holds {} against its {} share of the fleet's disk; clear {} \
+                     it is not using.",
+                    gib(*holds),
+                    gib(*limit),
+                    gib(*excess),
                 )),
                 ..Default::default()
             },
         }
     }
 
-    /// (2) without its `skein_top` sentence, and (6). No approved (4) or (5).
+    /// (2) without its `skein_top` sentence, (4), (5) and (6).
     pub(super) fn memory(rate: f64, anon: u64, high: u64) -> Ask {
         let rate = rate.round() as u64;
         Ask {
@@ -655,6 +684,17 @@ mod words {
                 bytes(anon),
                 bytes(high),
             ),
+            start: Some(format!(
+                "skein: before you start, this box is being slowed for memory ({} throttles a \
+                 minute) and holds {}; stop processes you no longer need before you start more.",
+                count(rate),
+                bytes(anon),
+            )),
+            remind: Some(format!(
+                "skein: still asked of this box: stop processes you no longer need (slowed for \
+                 memory, {} throttles a minute).",
+                count(rate)
+            )),
             enter: Some(format!(
                 "skein: this box is being slowed for memory ({} throttles a minute); stop \
                  processes you no longer need.",
@@ -664,7 +704,7 @@ mod words {
         }
     }
 
-    /// (3) without its `skein_top` sentence, and (6). No approved (4) or (5).
+    /// (3) without its `skein_top` sentence, (4), (5) and (6).
     pub(super) fn pids(pids: u64, max: u64) -> Ask {
         Ask {
             kind: "pids".into(),
@@ -676,6 +716,17 @@ mod words {
                 count(pids),
                 count(max),
             ),
+            start: Some(format!(
+                "skein: before you start, this box is running {} of its {} processes; end the \
+                 ones you no longer need.",
+                count(pids),
+                count(max)
+            )),
+            remind: Some(format!(
+                "skein: still asked of this box: end processes you no longer need ({} of {}).",
+                count(pids),
+                count(max)
+            )),
             enter: Some(format!(
                 "skein: this box is running {} of its {} processes; end the ones you no longer \
                  need.",
@@ -1076,59 +1127,227 @@ mod tests {
         );
     }
 
-    /// The approved (1a), (1b), (2) and the lines around them, figure for figure.
+    /// **Every text of every live ask is the approved text, figure for figure**: the hold, the
+    /// start line (4), the reminder (5) and the entering line (6), for each of the three disk
+    /// cases, memory and the process count, and (1a) with two, one and no other boxes asked.
     ///
-    /// Fails on any change to a word of them. The texts are the owner's, from SKEIN-1055, with the
-    /// `skein_top` sentences left out as the owner decided.
+    /// The approvals are SKEIN-1055 (1a)–(6) and the owner's texts of 2026-09-24 for the cases the
+    /// first draft had none for. Fails on any change to a word of any of them, and on any of the
+    /// four being `None`.
     #[test]
     fn the_words_are_the_approved_words_with_the_figures_filled_in() {
-        let a = words::disk(&DiskAsk::Share(share(2, false)));
-        assert_eq!(
-            a.hold,
-            "skein: clear 2.3G of storage you are not using before you continue — build outputs, \
-             caches, and any containers or volumes you started. The fleet's disk is 4.1G over what \
-             it can spare, and this box holds 9.4G of it; 2 other boxes have been asked for the \
-             rest. This one command was held so you would see this; the next will run."
-        );
-        assert_eq!(
-            a.remind.as_deref(),
-            Some("skein: still asked of this box: clear 2.3G of storage (it holds 9.4G).")
-        );
-        assert_eq!(
-            a.enter.as_deref(),
-            Some(
-                "skein: the fleet's disk is over its line; this box is asked to clear 2.3G it is \
-                 not using."
+        const HELD: &str = "This one command was held so you would see this; the next will run.";
+        let four = |a: Ask| [Some(a.hold), a.start, a.remind, a.enter];
+        let share_start = "skein: before you start, this box is asked to clear 2.3G of storage \
+                           it is not using. The fleet's disk is 4.1G over what it can spare and \
+                           this box holds 9.4G.";
+        let share_remind = "skein: still asked of this box: clear 2.3G of storage (it holds 9.4G).";
+        let share_enter =
+            "skein: the fleet's disk is over its line; this box is asked to clear 2.3G it is not \
+             using.";
+        let share_hold = |others: &str| {
+            format!(
+                "skein: clear 2.3G of storage you are not using before you continue — build \
+                 outputs, caches, and any containers or volumes you started. The fleet's disk is \
+                 4.1G over what it can spare, and this box holds 9.4G of it{others}. {HELD}"
             )
-        );
-        let b = words::disk(&DiskAsk::EveryBox(Share {
-            over_by: 6144,
-            ..share(3, true)
-        }));
+        };
+        let cases: Vec<(&str, Ask, [String; 4])> = vec![
+            (
+                "(1a), two others",
+                words::disk(&DiskAsk::Share(share(2, false))),
+                [
+                    share_hold("; 2 other boxes have been asked for the rest"),
+                    share_start.into(),
+                    share_remind.into(),
+                    share_enter.into(),
+                ],
+            ),
+            (
+                "(1a), one other",
+                words::disk(&DiskAsk::Share(share(1, false))),
+                [
+                    share_hold("; 1 other box has been asked for the rest"),
+                    share_start.into(),
+                    share_remind.into(),
+                    share_enter.into(),
+                ],
+            ),
+            (
+                "(1a), alone",
+                words::disk(&DiskAsk::Share(share(0, false))),
+                [
+                    share_hold(""),
+                    share_start.into(),
+                    share_remind.into(),
+                    share_enter.into(),
+                ],
+            ),
+            (
+                "(1b)",
+                words::disk(&DiskAsk::EveryBox(Share {
+                    over_by: 6144,
+                    ..share(3, true)
+                })),
+                [
+                    format!(
+                        "skein: clear what you can of the 9.4G this box holds before you continue \
+                         — build outputs, caches, and any containers or volumes you started. The \
+                         fleet's disk is 6.0G over what it can spare, and every box has been \
+                         asked. {HELD}"
+                    ),
+                    "skein: before you start, this box is asked to clear what it can of the 9.4G \
+                     it holds. The fleet's disk is 6.0G over what it can spare, and every box has \
+                     been asked."
+                        .into(),
+                    "skein: still asked of this box: clear what you can of the 9.4G it holds."
+                        .into(),
+                    "skein: the fleet's disk is over its line; this box is asked to clear what it \
+                     can of the 9.4G it holds."
+                        .into(),
+                ],
+            ),
+            (
+                "(1c)",
+                words::disk(&DiskAsk::Allowance {
+                    excess: 2355,
+                    holds: 12595,
+                    limit: 10240,
+                }),
+                [
+                    format!(
+                        "skein: clear 2.3G of storage you are not using before you continue. This \
+                         box holds 12.3G against its 10.0G share of the fleet's disk. {HELD}"
+                    ),
+                    "skein: before you start, this box is asked to clear 2.3G of storage it is \
+                     not using. It holds 12.3G against its 10.0G share of the fleet's disk."
+                        .into(),
+                    "skein: still asked of this box: clear 2.3G of storage (it holds 12.3G)."
+                        .into(),
+                    "skein: this box holds 12.3G against its 10.0G share of the fleet's disk; \
+                     clear 2.3G it is not using."
+                        .into(),
+                ],
+            ),
+            (
+                "(2)",
+                words::memory(84.0, 11 * GIB + GIB / 5, 12 * GIB),
+                [
+                    format!(
+                        "skein: stop processes you no longer need before you start more. This box \
+                         is being slowed for memory, 84 times a minute, and holds 11.2G; the \
+                         kernel slows it above 12.0G. {HELD}"
+                    ),
+                    "skein: before you start, this box is being slowed for memory (84 throttles \
+                     a minute) and holds 11.2G; stop processes you no longer need before you \
+                     start more."
+                        .into(),
+                    "skein: still asked of this box: stop processes you no longer need (slowed \
+                     for memory, 84 throttles a minute)."
+                        .into(),
+                    "skein: this box is being slowed for memory (84 throttles a minute); stop \
+                     processes you no longer need."
+                        .into(),
+                ],
+            ),
+            (
+                "(3)",
+                words::pids(6410, 8192),
+                [
+                    format!(
+                        "skein: end processes you started and no longer need before you start \
+                         more. This box is running 6,410 processes against a limit of 8,192, and \
+                         past that nothing in it can start a new one. {HELD}"
+                    ),
+                    "skein: before you start, this box is running 6,410 of its 8,192 processes; \
+                     end the ones you no longer need."
+                        .into(),
+                    "skein: still asked of this box: end processes you no longer need (6,410 of \
+                     8,192)."
+                        .into(),
+                    "skein: this box is running 6,410 of its 8,192 processes; end the ones you no \
+                     longer need."
+                        .into(),
+                ],
+            ),
+        ];
+        for (what, ask, want) in cases {
+            let got = four(ask);
+            for (n, (field, want)) in ["hold", "start", "remind", "enter"]
+                .iter()
+                .zip(want)
+                .enumerate()
+            {
+                assert_eq!(
+                    got[n].as_deref(),
+                    Some(want.as_str()),
+                    "{what}: the {field} text is not the approved one"
+                );
+            }
+        }
+    }
+
+    /// **No live ask of any kind is without a start line (4).**
+    ///
+    /// Driven through [`next`] rather than the templates, so it covers every ask the file can
+    /// actually carry: each disk case, memory and the process count. The start line is what makes
+    /// SessionStart count as shown; an ask without one would hold the first command of every new
+    /// session for a crossing the session could have been told about.
+    ///
+    /// Fails if any template's `start` goes back to `None`.
+    #[test]
+    fn every_live_ask_has_a_start_line() {
+        let disk = |fleet: FleetDisk, mb: u64, limit: Option<u64>| Reading {
+            fleet,
+            disk_mb: Some(mb),
+            disk_limit_mb: limit,
+            ..reading(0, Some(calm()))
+        };
+        let mut live: Vec<Ask> = Vec::new();
+        for r in [
+            disk(FleetDisk::Asked(share(2, false)), 9626, None),
+            disk(FleetDisk::Asked(share(0, true)), 9626, None),
+            disk(FleetDisk::NotAsked { over_by: 0 }, 12595, Some(10240)),
+            reading(
+                0,
+                Some(Cgroup {
+                    pids: 7000,
+                    ..calm()
+                }),
+            ),
+        ] {
+            live.extend(next(None, &r).asks);
+        }
+        let hot = run(&[
+            reading(0, Some(hot(0, 84))),
+            reading(1, Some(hot(1, 84))),
+            reading(2, Some(hot(2, 84))),
+        ]);
+        live.extend(hot[2].asks.clone());
+
+        let whys: Vec<String> = live
+            .iter()
+            .map(|a| format!("{}/{}", a.kind, a.why))
+            .collect();
         assert_eq!(
-            b.hold,
-            "skein: clear what you can of the 9.4G this box holds before you continue — build \
-             outputs, caches, and any containers or volumes you started. The fleet's disk is 6.0G \
-             over what it can spare, and every box has been asked. This one command was held so \
-             you would see this; the next will run."
+            whys,
+            vec![
+                "disk/fleet",
+                "disk/fleet-every-box",
+                "disk/allowance",
+                "pids/",
+                "memory/"
+            ],
+            "the readings no longer raise one ask of each case"
         );
-        assert_eq!(b.start, None, "no approved SessionStart line for (1b)");
-        let m = words::memory(84.0, 11 * GIB + GIB / 5, 12 * GIB);
-        assert_eq!(
-            m.hold,
-            "skein: stop processes you no longer need before you start more. This box is being \
-             slowed for memory, 84 times a minute, and holds 11.2G; the kernel slows it above \
-             12.0G. This one command was held so you would see this; the next will run."
-        );
-        assert_eq!(
-            m.enter.as_deref(),
-            Some(
-                "skein: this box is being slowed for memory (84 throttles a minute); stop \
-                 processes you no longer need."
-            )
-        );
-        assert_eq!(m.start, None);
-        assert_eq!(m.remind, None);
+        for a in &live {
+            assert!(
+                a.start.as_deref().is_some_and(|s| !s.is_empty()),
+                "a live {}/{} ask has no start line: {a:?}",
+                a.kind,
+                a.why
+            );
+        }
     }
 
     /// Nothing an agent is shown says or implies a kill (owner's answer 3).
@@ -1432,8 +1651,10 @@ mod tests {
     ///
     /// * A disk share ask has an approved start line: the session is told at start and its first
     ///   command runs. Fails if the SessionStart hook does not record what it printed.
-    /// * A process-count ask has none: nothing is printed at start, so the first command is held.
-    ///   Fails if the SessionStart hook records ids it did not print.
+    /// * An ask with no start line — which skein no longer writes (see
+    ///   [`every_live_ask_has_a_start_line`]), so it is put in the file by hand here — prints
+    ///   nothing at start, so the first command is held. Fails if the SessionStart hook records
+    ///   ids it did not print.
     #[test]
     fn the_start_line_counts_as_shown_and_nothing_else_does() {
         let h = hooked();
@@ -1463,7 +1684,10 @@ mod tests {
         );
 
         let g = hooked();
-        g.write(0, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        let mut file = g.write(0, with_pids(7000), FleetDisk::NotAsked { over_by: 0 });
+        file.asks[0].start = None;
+        file.asks[0].remind = None;
+        std::fs::write(signal_path(&g.state), serde_json::to_vec(&file).unwrap()).unwrap();
         assert_eq!(g.context("session-start", "s1"), None);
         assert!(
             g.tool("s1").is_some(),
