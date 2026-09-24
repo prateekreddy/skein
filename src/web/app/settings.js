@@ -194,6 +194,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-onedisk").checked = !!settings.fleet_one_disk;
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
+    document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
@@ -646,6 +647,7 @@ function settingsPayload() {
     fleet_one_disk: document.getElementById("set-onedisk").checked,
     scope_git_to_repo: document.getElementById("set-gitscope").checked,
     github_app_id: document.getElementById("set-ghappid").value.trim(),
+    review_identity: document.getElementById("set-review-identity").value,
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.
