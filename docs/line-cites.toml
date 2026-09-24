@@ -16,9 +16,41 @@
 # an exemption that was thought about from one that was pasted.
 
 
+[".cargo/config.toml:13"]
+line = "[env]"
+cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
+
+["CONTRIBUTING.md:492"]
+line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
+cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
+
+["CONTRIBUTING.md:506"]
+line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
+cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
+
+["CONTRIBUTING.md:537"]
+line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
+cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
+
+["README.md:100"]
+line = "**Nothing is built or run on the host.** You download one file and hand it to `sbx`; the sandbox"
+cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
+
+["README.md:131"]
+line = "**If the sandbox dies**, re-run all three. `sbx create` on a name that exists is refused rather than"
+cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
+
 ["cockpit/src/saved.mjs:22"]
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
+
+["docs/architecture.md:614"]
+line = "## 8. The host warden"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
+
+["docs/architecture.md:665"]
+line = "### 8.3 Capabilities are compiled"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
 
 ["docs/architecture.md:1757"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
@@ -289,6 +321,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Ok(Err(why)) => ("
 window = "// person to different places.\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/bin/skein-server/review.rs:819"]
+line = "/// you and reach GitHub not at all, while `approve`, `request-changes`, `comment` and `merge` act"
+cited_by = ["docs/decisions/one-identity.md"]
 
 ["src/bin/skein-server/review.rs:998"]
 line = "/// owned by a task the executor may park, which is `clippy::await_holding_lock` and a real"
@@ -753,6 +789,10 @@ cited_by = ["docs/threat-model.md"]
 line = "overlay_paths=(\".local\")"
 cited_by = ["docs/threat-model.md"]
 
+["src/box-session.sh:998"]
+line = "login_life() {"
+cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
+
 ["src/box-session.sh:1164"]
 line = "merge_login \"$mine\" \"$canon\""
 cited_by = ["docs/threat-model.md"]
@@ -837,6 +877,10 @@ cited_by = ["docs/threat-model.md"]
 ["src/box-session.sh:2741"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
+
+["src/config.rs:25"]
+line = "pub fn skein_home() -> PathBuf {"
+cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
 ["src/config.rs:469"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
@@ -984,6 +1028,10 @@ cited_by = ["docs/architecture.md"]
 line = "for path in [repo.store.clone()] {"
 cited_by = ["docs/architecture.md"]
 
+["src/fleet/create.rs:467"]
+line = "Performed::Prompt(prompt) => Err(prompt.render()),"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
+
 ["src/fleet/create.rs:472"]
 line = "\"creating fleet sandbox {sandbox}: {}\","
 cited_by = ["docs/recovery-survey.md"]
@@ -1048,6 +1096,14 @@ line = "return Err(format!(\"unusable box name {name:?}\"));"
 window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet/disk.rs:165"]
+line = "// ──────────── the substrate: what skein installs beside the boxes, and what nobody claims ────────"
+cited_by = ["docs/decisions/build-output-stays-in-the-worktree.md"]
+
+["src/fleet/disk.rs:167"]
+line = "// `<fleet root>/.skein` is the one entry in the fleet root that is not a box, and on 2026-09-05 it"
+cited_by = ["docs/decisions/build-output-stays-in-the-worktree.md"]
+
 ["src/fleet/disk.rs:303"]
 line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
 cited_by = ["docs/recovery-survey.md"]
@@ -1086,6 +1142,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: could not restore the {rel} login into {sandbox}: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/fleet/fleetlogin.rs:433"]
+line = "// **Presence decides the direction; expiry is only ever allowed to guard it** (SKEIN-349)."
+cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
+
 ["src/fleet/fleetlogin.rs:504"]
 line = "code => Err(format!(\"login in {sandbox} exited {code}\")),"
 cited_by = ["docs/recovery-survey.md"]
@@ -1097,6 +1157,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/fleet/fleetlogin.rs:556"]
 line = "\"logged in, but could not hand it to the boxes already running ({why}) — they pick it \\"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/fleetlogin.rs:876"]
+line = "fn an_expired_credential_propagates_exactly_as_far_as_a_live_one() {"
+cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
 
 ["src/fleet/heal.rs:60"]
 line = "\"skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \\"
@@ -1117,6 +1181,34 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/fleet/install.rs:291"]
 line = "return Err(format!(\"invalid session name {session:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/login.rs:125"]
+line = "pub(super) fn carries_login(bytes: &[u8]) -> bool {"
+cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
+
+["src/fleet/login.rs:144"]
+line = "/// That was the right question for propagation (a dead token still seeds boxes — a heal can replace"
+cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
+
+["src/fleet/login.rs:162"]
+line = "/// **`refreshTokenExpiresAt`, not `expiresAt`** — the same eyes as the launcher's heal script"
+cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
+
+["src/fleet/login.rs:205"]
+line = "/// One runtime's login as the host reports it. Reporting only — nothing that seeds or heals reads"
+cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
+
+["src/fleet/login.rs:282"]
+line = "# WHICH COPY IS THE FLEET'S LOGIN, and which of the others have to be given it."
+cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
+
+["src/fleet/login.rs:290"]
+line = "# `expiresAt` decides WHICH CANDIDATE WINS, and that half was missing. It is the only evidence IN"
+cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
+
+["src/fleet/login.rs:1198"]
+line = "fn the_two_elections_agree_on_which_login_is_best() {"
+cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
 ["src/fleet/model.rs:215"]
 line = "/// Vertex is not on the subscription either. `ANTHROPIC_BASE_URL` is deliberately NOT here — a"
@@ -1183,6 +1275,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/fleet/resize.rs:601"]
 line = "\"could not check what Docker is holding ({why}), and a resize destroys \\"
 cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/resize.rs:679"]
+line = "match crate::warden_client::perform(&crate::warden_client::Act::Destroy {"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
 
 ["src/fleet/resize.rs:694"]
 line = "// A destroy that may have happened is the one answer no command can be offered for: running"
@@ -1480,6 +1576,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "_ => HealthCheck::unknown(format!("
 cited_by = ["docs/recovery-survey.md"]
 
+["src/kit/skein-startup.sh:283"]
+line = "# case 2: repo ships its own .claude directory — merge, don't skip"
+cited_by = ["docs/decisions/harness-as-a-plugin.md"]
+
 ["src/knock.rs:82"]
 line = "/// Arrival order. Monotonic, so \"oldest\" is a `first_key_value` and never a scan."
 cited_by = ["docs/prose-symbols.toml"]
@@ -1512,9 +1612,29 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if !out.status.success() {"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/prq/credentials.rs:147"]
+line = "/// Public because the workflow tick acts as you — a label, a merge, a deleted branch are all things"
+cited_by = ["docs/decisions/one-identity.md"]
+
+["src/prq/credentials.rs:151"]
+line = "pub fn host_token() -> Result<crate::secret::Secret, String> {"
+cited_by = ["docs/decisions/one-identity.md"]
+
 ["src/prq/fixtures.rs:125"]
 line = "pub(super) fn wired(base: &str) -> impl Drop {"
 cited_by = ["docs/env-lock.toml"]
+
+["src/prq/mod.rs:13"]
+line = "//! **Identity lives on the host.** Every call here runs as *you*, on your own login — not on a"
+cited_by = ["docs/decisions/one-identity.md"]
+
+["src/prq/mod.rs:14"]
+line = "//! box's scoped installation token. That is the deliberate opposite of [`crate::gitgate`], which"
+cited_by = ["docs/decisions/one-identity.md"]
+
+["src/prq/write.rs:1"]
+line = "//! What skein can do to a pull request, as you."
+cited_by = ["docs/decisions/one-identity.md"]
 
 ["src/prwork/acts.rs:56"]
 line = "/// GraphQL, because REST cannot rebase: `PUT …/update-branch` takes `expected_head_sha` and merges,"
@@ -1596,6 +1716,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub(crate) fn registrable_source(source: &str) -> bool {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
+["src/review/asking.rs:153"]
+line = "\"\\n(cut for size: {} more file{} not shown — {}{})\\n\","
+cited_by = ["docs/decisions/pr-summary-calibration.md"]
+
 ["src/review/asking.rs:622"]
 line = "// five planted defects and two red herrings; read twice at head `d2abd03`, from a cold"
 cited_by = ["docs/citations.toml"]
@@ -1604,9 +1728,29 @@ cited_by = ["docs/citations.toml"]
 line = "// What the gate leaves behind: a reading OF `9c1de07`, filed under `4f2ab1c`."
 cited_by = ["docs/citations.toml"]
 
+["src/review/mod.rs:9"]
+line = "//! [`crate::ai`] states it: **AI may only add scrutiny, never remove it.** Every other AI feature in"
+cited_by = ["docs/decisions/pr-summary-calibration.md"]
+
+["src/review/summary.rs:35"]
+line = "pub enum Depth {"
+cited_by = ["docs/decisions/pr-summary-calibration.md"]
+
+["src/review/summary.rs:51"]
+line = "/// One sentence. Empty when [`Depth::Unread`]."
+cited_by = ["docs/decisions/pr-summary-calibration.md"]
+
+["src/review/summary.rs:71"]
+line = "/// Mechanical evidence from [`crate::contracts`] — what moved, found in the diff rather than"
+cited_by = ["docs/decisions/pr-summary-calibration.md"]
+
 ["src/review/summary.rs:295"]
 line = "/// `critique_because`, and the rule for which of them meant what. There is no review beside it"
 cited_by = ["docs/prose-symbols.toml"]
+
+["src/runtime.rs:57"]
+line = "pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &["
+cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
 ["src/sandbox.rs:283"]
 line = "return Err(\"drop path too deep\".into());"
@@ -1682,6 +1826,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/server-doorway.py:218"]
 line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
 cited_by = ["docs/architecture.md"]
+
+["src/store/sandbox-bootstrap.sh:275"]
+line = "if [ -n \"$wanted\" ] && [ \"$wanted\" != \"$(cat \"$marker\" 2>/dev/null || true)\" ] \\"
+cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
 ["src/store/sync/UPSTREAM.md:7"]
 line = "Last synced from: **`e113f18`**, 2026-08-10."
@@ -1780,6 +1928,14 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if sandbox.is_empty() || !believed_running() {"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/util.rs:39"]
+line = "pub fn in_test() -> bool {"
+cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
+
+["src/util.rs:66"]
+line = "pub fn fleet_root() -> String {"
+cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
+
 ["src/util.rs:1183"]
 line = "pub(crate) fn invalidate(&self) {"
 cited_by = ["docs/recovery-survey.md"]
@@ -1829,9 +1985,29 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/warden_client.rs:1014"]
+line = "pub struct Prompt {"
+cited_by = ["docs/decisions/install-is-one-sandbox-command.md", "docs/decisions/warden-or-prompt.md"]
+
+["src/warden_client.rs:1060"]
+line = "/// **The rule**: for each privileged act, a warden that has that capability performs it; otherwise"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
+
+["src/warden_client.rs:1069"]
+line = "/// **Selection is detection, not configuration.** There is no setting and no first-run question: a"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
+
+["src/warden_client.rs:1091"]
+line = "pub fn perform(act: &Act) -> Performed {"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
+
 ["src/warden_client.rs:1168"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
+
+["src/warden_client.rs:1648"]
+line = "fn every_prompt_says_the_command_why_it_is_wanted_and_what_declining_costs() {"
+cited_by = ["docs/decisions/warden-or-prompt.md"]
 
 ["src/web/app/board.js:154"]
 line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }"
@@ -2153,6 +2329,15 @@ cited_by = ["docs/recovery-survey.md"]
 ["tests/ui/updatepane.mjs:128"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
+
+["tools/gates.sh:708"]
+line = "--verify)"
+cited_by = ["docs/decisions/commit-before-the-gates.md"]
+
+["tools/gates.sh:1222"]
+line = "exit 3"
+window = "echo \" Run it again on a tree nobody else is writing to.\"\u000bexit 3\u000bfi"
+cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
 ["tools/prose-check.py:1832"]
 line = "\"Written long ago. Citations in this document name lines as they stood at `abc1234`.\\n\""
