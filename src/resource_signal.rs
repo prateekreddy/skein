@@ -527,12 +527,15 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 /// Every live ask carries all four: a hold, a start line (4), a reminder (5) and an entering line
 /// (6). The texts for the cases the first draft did not cover — (4), (5) and (6) for every disk
 /// case, memory and the process count, and (1a) with fewer than two other boxes — were approved by
-/// the owner on 2026-09-24. Those gap-fillers were approved without the `skein_resources`
-/// sentence, and carry none; only (1a)'s own (4) does.
+/// the owner on 2026-09-24, and on the same day he decided that every start line (4), not only
+/// (1a)'s, ends with "`skein_resources` shows where this box stands." ([`words::WHERE`]).
 mod words {
     use super::*;
 
     const HELD: &str = "This one command was held so you would see this; the next will run.";
+
+    /// The last sentence of every start line (4), whatever the ask (owner, 2026-09-24).
+    pub(super) const WHERE: &str = "`skein_resources` shows where this box stands.";
 
     /// A count as a person reads it: `8,192`.
     pub(super) fn count(n: u64) -> String {
@@ -581,11 +584,12 @@ mod words {
                     others = others_asked(s.others),
                 ),
                 // (4) as approved, with its last sentence: `skein_resources` shipped with
-                // SKEIN-1059, which is when the owner said it could be restored (2026-09-24).
+                // SKEIN-1059, which is when the owner said it could be restored (2026-09-24). Every
+                // other start line ends with the same sentence, by the owner's decision that day.
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear {free} of storage it is \
                      not using. The fleet's disk is {over} over what it can spare and this box \
-                     holds {holds}. `skein_resources` shows where this box stands.",
+                     holds {holds}. {WHERE}",
                     free = gib(s.free),
                     over = gib(s.over_by),
                     holds = gib(s.holds),
@@ -617,7 +621,7 @@ mod words {
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear what it can of the \
                      {holds} it holds. The fleet's disk is {over} over what it can spare, and \
-                     every box has been asked.",
+                     every box has been asked. {WHERE}",
                     holds = gib(s.holds),
                     over = gib(s.over_by),
                 )),
@@ -650,7 +654,7 @@ mod words {
                 ),
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear {} of storage it is not \
-                     using. It holds {} against its {} share of the fleet's disk.",
+                     using. It holds {} against its {} share of the fleet's disk. {WHERE}",
                     gib(*excess),
                     gib(*holds),
                     gib(*limit),
@@ -688,7 +692,8 @@ mod words {
             ),
             start: Some(format!(
                 "skein: before you start, this box is being slowed for memory ({} throttles a \
-                 minute) and holds {}; stop processes you no longer need before you start more.",
+                 minute) and holds {}; stop processes you no longer need before you start more. \
+                 {WHERE}",
                 count(rate),
                 bytes(anon),
             )),
@@ -720,7 +725,7 @@ mod words {
             ),
             start: Some(format!(
                 "skein: before you start, this box is running {} of its {} processes; end the \
-                 ones you no longer need.",
+                 ones you no longer need. {WHERE}",
                 count(pids),
                 count(max)
             )),
@@ -1135,8 +1140,9 @@ mod tests {
     /// cases, memory and the process count, and (1a) with two, one and no other boxes asked.
     ///
     /// The approvals are SKEIN-1055 (1a)–(6) and the owner's texts of 2026-09-24 for the cases the
-    /// first draft had none for. Fails on any change to a word of any of them, and on any of the
-    /// four being `None`.
+    /// first draft had none for. Fails on any change to a word of any of them, on any of the four
+    /// being `None`, and on any start line that does not end "`skein_resources` shows where this
+    /// box stands." (the owner's rule for every start line, 2026-09-24).
     #[test]
     fn the_words_are_the_approved_words_with_the_figures_filled_in() {
         const HELD: &str = "This one command was held so you would see this; the next will run.";
@@ -1201,7 +1207,7 @@ mod tests {
                     ),
                     "skein: before you start, this box is asked to clear what it can of the 9.4G \
                      it holds. The fleet's disk is 6.0G over what it can spare, and every box has \
-                     been asked."
+                     been asked. `skein_resources` shows where this box stands."
                         .into(),
                     "skein: still asked of this box: clear what you can of the 9.4G it holds."
                         .into(),
@@ -1223,7 +1229,8 @@ mod tests {
                          box holds 12.3G against its 10.0G share of the fleet's disk. {HELD}"
                     ),
                     "skein: before you start, this box is asked to clear 2.3G of storage it is \
-                     not using. It holds 12.3G against its 10.0G share of the fleet's disk."
+                     not using. It holds 12.3G against its 10.0G share of the fleet's disk. \
+                     `skein_resources` shows where this box stands."
                         .into(),
                     "skein: still asked of this box: clear 2.3G of storage (it holds 12.3G)."
                         .into(),
@@ -1244,7 +1251,7 @@ mod tests {
                     ),
                     "skein: before you start, this box is being slowed for memory (84 throttles \
                      a minute) and holds 11.2G; stop processes you no longer need before you \
-                     start more."
+                     start more. `skein_resources` shows where this box stands."
                         .into(),
                     "skein: still asked of this box: stop processes you no longer need (slowed \
                      for memory, 84 throttles a minute)."
@@ -1265,7 +1272,8 @@ mod tests {
                          with no parent. {HELD}"
                     ),
                     "skein: before you start, this box is running 6,410 of its 8,192 processes; \
-                     end the ones you no longer need."
+                     end the ones you no longer need. `skein_resources` shows where this box \
+                     stands."
                         .into(),
                     "skein: still asked of this box: end processes you no longer need (6,410 of \
                      8,192)."
@@ -1278,6 +1286,15 @@ mod tests {
         ];
         for (what, ask, want) in cases {
             let got = four(ask);
+            // Stated on its own as well as inside each text above, because it is a rule about
+            // every start line rather than a fact about one (owner, 2026-09-24).
+            assert!(
+                got[1].as_deref().is_some_and(
+                    |start| start.ends_with(". `skein_resources` shows where this box stands.")
+                ),
+                "{what}: the start line does not end by pointing at skein_resources: {:?}",
+                got[1]
+            );
             for (n, (field, want)) in ["hold", "start", "remind", "enter"]
                 .iter()
                 .zip(want)
