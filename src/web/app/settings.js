@@ -195,6 +195,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
     document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
+    renderReviewIdentityNote();
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.

@@ -1839,7 +1839,10 @@
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
             <!-- Whose identity a pull-request review acts with (SKEIN-516). Words approved by the owner on
                  SKEIN-516, verbatim; "app" hands a review no token at all until an App is configured. -->
-            <label class="set-field narrow"><span class="set-title">Reviews act as</span><select id="set-review-identity"><option value="me">you (your GitHub token)</option><option value="app">the skein GitHub App (team installs)</option></select></label>
+            <label class="set-field narrow"><span class="set-title">Reviews act as</span><select id="set-review-identity" onchange="renderReviewIdentityNote()"><option value="me">you (your GitHub token)</option><option value="app">the skein GitHub App (team installs)</option></select></label>
+            <!-- Owner-approved on SKEIN-516, verbatim. Shown by `renderReviewIdentityNote` from the server's
+                 `app_ready`, which is the same `gitgate::app_credentials()` a review's credential is chosen by. -->
+            <p class="set-note warn" id="set-review-identity-note" hidden>Reviews act as the skein App, but no App is set up — nothing will be posted.</p>
             <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
             <div id="gq-probe-rows"></div>
 
@@ -9430,7 +9433,20 @@ function gitCredRow(c) {
 // The pane's own status line. No single control can give this answer: the scope switch can be on
 // while nothing is scoped, which is precisely the state worth naming — and the one a switch drawn
 // "on" would otherwise misreport.
+// **"app" chosen with no App to act as** (SKEIN-516). The answer is the server's: `app_ready` in
+// `/api/fleet/git-grants` is `gitgate::app_credentials().is_ok()`, the very check
+// `review::asking::acting_credential` hands `choose_acting` — so this cannot say "no App" about a
+// fleet whose reviews would in fact act as one. Hidden until that payload has answered at all
+// (`app_ready` absent), rather than flashing the warning while it is in flight.
+function renderReviewIdentityNote() {
+  const note = document.getElementById("set-review-identity-note");
+  const chosen = document.getElementById("set-review-identity");
+  if (!note || !chosen) return;
+  note.hidden = !(chosen.value === "app" && gitLast.app_ready === false);
+}
+
 function renderGitState(d) {
+  renderReviewIdentityNote();
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
@@ -9984,6 +10000,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
     document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
+    renderReviewIdentityNote();
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.

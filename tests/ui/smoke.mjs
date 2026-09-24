@@ -585,6 +585,17 @@ await check("Reviews act as is one choice on GitHub & keys, defaulting to you, a
   if (row.value !== "me") throw new Error(`it must default to you, got "${row.value}"`);
   const before = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
   if (before.review_identity !== "me") throw new Error(`the stored default should be "me", got ${before.review_identity}`);
+  // Nothing to act as: this fixture configures no App, so choosing it must say so, in the owner's
+  // approved words, and choosing yourself again must take the sentence away. What would make it
+  // fail: the note not repainted on change, painted from anything but the server's `app_ready`
+  // (which this fixture answers false), or its words drifting.
+  const noApp = "Reviews act as the skein App, but no App is set up — nothing will be posted.";
+  if (await page.isVisible("#set-review-identity-note")) throw new Error("the no-App sentence shows while you are chosen");
+  await page.selectOption("#set-review-identity", "app");
+  const warned = await mustSee("#set-review-identity-note", "the no-App sentence under Reviews act as");
+  if ((await warned.textContent()).trim() !== noApp) throw new Error(`not the approved sentence: "${await warned.textContent()}"`);
+  await page.selectOption("#set-review-identity", "me");
+  if (await page.isVisible("#set-review-identity-note")) throw new Error("the no-App sentence stayed after choosing you again");
   await page.selectOption("#set-review-identity", "app");
   await page.click("#set-go");
   await settle(600);
@@ -597,6 +608,7 @@ await check("Reviews act as is one choice on GitHub & keys, defaulting to you, a
   await settle(300);
   const shown = await page.$eval("#set-review-identity", e => e.value);
   if (shown !== "app") throw new Error(`the choice reopened on "${shown}", though "app" is stored`);
+  if (!(await page.isVisible("#set-review-identity-note"))) throw new Error("reopened on the App with no App set up, and said nothing");
   await page.selectOption("#set-review-identity", "me");
   await page.click("#set-go");
   await settle(600);
