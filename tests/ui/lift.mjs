@@ -10,7 +10,7 @@ import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { safeHref } from "../../cockpit/src/links.mjs";
-import { quiesceOnExit, testMarker } from "./harness/leaks.mjs";
+import { endAbandoned, quiesceOnExit, testMarker } from "./harness/leaks.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -163,7 +163,8 @@ export function fixtureRoot() {
 }
 
 // A fixture directory stamped with the pid that made it, having first removed the ones whose
-// maker is gone. Returns the new directory.
+// maker is gone — or, where that maker left something running out of one, ended what it left and
+// kept the directory (SKEIN-1133). Returns the new directory.
 //
 // **The sweep has to be keyed on the pid, and an age rule will not do** (SKEIN-590). These suites
 // keep their fixture when they fail, deliberately — it is the only evidence a failure leaves — and
@@ -187,6 +188,9 @@ export function freshFixture(dir, prefix) {
     const pid = Number(name.slice(prefix.length + 1).split("-")[0]);
     if (!Number.isInteger(pid) || pid <= 0) continue;   // not ours to reason about
     if (alive(pid)) continue;
+    // What its maker left running is ended, and a fixture anything was running out of is KEPT as
+    // the evidence (SKEIN-1133) — see `endAbandoned`.
+    if (endAbandoned(join(dir, name)).running.length) continue;
     try { rmSync(join(dir, name), { recursive: true, force: true }); } catch {}
   }
   return mkdtempSync(join(dir, `${prefix}-${process.pid}-`));

@@ -496,19 +496,26 @@ impl Drop for Scratch {
 /// state, independent of whichever binary leaked in the first place — `tests/fleet_launch/` fixed
 /// its own producer and `Scratch` is shared by every binary here.
 ///
-/// **So the directory is kept, and the reason is said out loud**, rather than the processes being
-/// killed. A kept directory is then the evidence that identifies the orphan — the name carries the
-/// pid of the run that made it — which is exactly what the deletion was destroying.
+/// **So the directory is kept, and the reason is said out loud.** A kept directory is then the
+/// evidence that identifies the orphan — the name carries the pid of the run that made it — which is
+/// exactly what the deletion was destroying.
+///
+/// **And what that dead run left running is ENDED, where it can be attributed to it** (SKEIN-1133,
+/// the owner's option (b)). Keeping the directory alone kept something worse alive with it:
+/// `fleet::start_server`'s supervisor is `while [ -f <fixture>/…/server-doorway.py ]`, so a fixture
+/// kept as evidence is a loop restarting a python for as long as nobody deletes it. `Scratch`'s
+/// quiesce stops it on every way out of a test that runs a `Drop` — and a SIGKILLed test process
+/// runs none, which is how SKEIN-1019's loop outlived the fix for SKEIN-645 by days. This sweep is
+/// the next thing that looks at that directory, so it is where the end has to come from. It reverses
+/// only the "kill nothing" half of SKEIN-900; the directory stays. [`end_abandoned`] carries the
+/// rules for what it may end, and they are narrower than "names the directory".
 ///
 /// **The line between "a leak" and "a run in flight", which is the part that is easy to get wrong.**
-/// [`processes_under`]'s caller in `tests/fleet_launch/fixture.rs` exempts a live DESCENDANT
-/// of the test process, because an environment is inherited and killing one of those ends a sibling
-/// test's own child. This sweep exempts **nothing**, and the difference is not an inconsistency: the
-/// question there is *what may be killed* and the question here is *what may be deleted*. Deleting
-/// the directory out from under a process is the same harm whoever owns that process, including
-/// this one — so ownership is never asked, and the sweep is safe to run across runs precisely
-/// because it never kills anything. The cost of being wrong is one stale directory surviving one
-/// more sweep while saying why, which is the cheap direction.
+/// The DELETE question exempts nothing: deleting the directory out from under a process is the same
+/// harm whoever owns that process, so ownership is never asked, and a directory anything at all is
+/// running out of is kept. The KILL question is the opposite and exempts almost everything — see
+/// [`end_abandoned`] — because a wrong kill ends somebody's work, and a wrong keep costs one stale
+/// directory surviving one more sweep while saying why, which is the cheap direction.
 ///
 /// Returns what it kept and why, `(directory, the processes still running out of it)`, so that the
 /// stderr notice below and the decision cannot drift apart — and so a test can read the decision
@@ -577,16 +584,200 @@ pub fn sweep_abandoned(root: &Path) -> Vec<(PathBuf, Vec<(u32, String)>)> {
             let _ = std::fs::remove_dir_all(&dir);
             continue;
         }
-        eprintln!(
-            "kept {} — the run that owned it is gone, but {} process(es) are still running out of \
-             it, and removing it would leave them with nothing naming what they belong to. \
-             End them by pid (never `pkill -f`): {running:#?}",
-            dir.display(),
-            running.len()
-        );
+        end_abandoned(&dir);
+        let left: Vec<(u32, String)> = named_in(&process_table(), &dir);
+        // Counted as what was running and is not now, rather than taken from `end_abandoned`'s own
+        // list: ending a tmux server takes its panes with it, and none of those was signalled here.
+        let ended: Vec<&(u32, String)> = running
+            .iter()
+            .filter(|(pid, _)| !left.iter().any(|(still, _)| still == pid))
+            .collect();
+        if !ended.is_empty() {
+            eprintln!(
+                "kept {} — the run that owned it is gone, and so is what it left running: ended \
+                 {} process(es) by pid, and kept the directory as the evidence: {ended:#?}",
+                dir.display(),
+                ended.len()
+            );
+        }
+        if !left.is_empty() {
+            eprintln!(
+                "kept {} — the run that owned it is gone, but {} process(es) are still running out \
+                 of it, and removing it would leave them with nothing naming what they belong to. \
+                 End them by pid (never `pkill -f`): {left:#?}",
+                dir.display(),
+                left.len()
+            );
+        }
         kept.push((dir, running));
     }
     kept
+}
+
+/// End what a dead run left running out of `dir`, **and only what can be attributed to that run.**
+/// Returns what it ended. The directory is not touched.
+///
+/// Called by [`sweep_abandoned`] only for a directory whose owner pid is already out of `/proc`,
+/// so "has its run gone" is settled before this starts, by the name, and is not asked of `ppid`
+/// — which cannot answer it: a fixture's tmux server is `ppid=1` from its first second, healthy
+/// or not (SKEIN-990). What is asked here is the other half of that question: **is anything
+/// alive still holding this process?**
+///
+///   1. **Every tmux server whose socket is inside `dir` is told to end.** The socket is in a dead
+///      run's fixture, so its server is that run's; ending it ends its panes, which is the only
+///      thing that reaches a pane that `exec`ed and has no name left to be found by. Sockets are
+///      found by walking the directory, never spelled, since a literal would quietly stop matching
+///      the day one moves (SKEIN-529).
+///   2. **Then every process that names `dir`, is not an ancestor of this one, and hangs off
+///      nothing alive outside the fixture** is `SIGKILL`ed by pid, in rounds, because the loop
+///      being ended respawns and a `/proc` scan is a sample. "Hangs off nothing alive outside" is
+///      [`session_top`]: walk the parents up to the one whose parent is init, and that topmost
+///      process must itself name `dir`. A tmux server, its supervisor loop and the doorway under
+///      it all top out at the tmux server; a SIGKILLed test's own children top out at themselves.
+///      A shell somebody `cd`ed into the kept directory to read it, a test's child that carries
+///      the path in an inherited variable, another lane's `cargo` — all top out at a terminal or
+///      an agent's tmux, which names nothing here, and are left alone.
+///
+/// **What names `dir` is [`named_in`] over [`process_table`]**: argv, environment and cwd, with
+/// `OLDPWD` taken out of the environment. That variable is where a process has BEEN — the `cd`
+/// another lane's agent made on its way into its own worktree was the only mention of this tree
+/// in the tmux that took `node tests/ui/harness/leaks.mjs` red for SKEIN-990 — and a breadcrumb
+/// is no grounds for a kill.
+///
+/// Never `pkill -f`: a pattern kill on this box is how one lane killed another lane's run
+/// mid-flight. And it never panics, because it runs before the first scratch directory of every
+/// test binary; a fixture that will not let go is left to the notice in [`sweep_abandoned`].
+pub fn end_abandoned(dir: &Path) -> Vec<(u32, String)> {
+    let mine = ancestry(std::process::id());
+    let mut ended = Vec::new();
+    for sock in sockets_under(dir, 6) {
+        let _ = bounded(
+            Command::new("tmux")
+                .arg("-S")
+                .arg(&sock)
+                .arg("kill-server")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+            std::time::Duration::from_secs(5),
+        );
+    }
+    for _ in 0..3 {
+        let naming = named_in(&process_table(), dir);
+        let pids: std::collections::HashSet<u32> = naming.iter().map(|(pid, _)| *pid).collect();
+        let doomed: Vec<(u32, String)> = naming
+            .into_iter()
+            .filter(|(pid, _)| !mine.contains(pid))
+            .filter(|(pid, _)| session_top(*pid).is_some_and(|top| pids.contains(&top)))
+            .collect();
+        if doomed.is_empty() {
+            break;
+        }
+        for (pid, argv) in doomed {
+            // SAFETY: `kill(2)` with a pid read out of `/proc` a moment ago and a constant signal.
+            // A pid that has gone since answers ESRCH, which is the outcome wanted anyway.
+            if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+                ended.push((pid, argv));
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline
+            && ended
+                .iter()
+                .any(|(pid, _)| Path::new(&format!("/proc/{pid}")).exists() && !is_zombie(*pid))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    ended
+}
+
+/// The parent of `pid`, from field 4 of `/proc/<pid>/stat`, counted from past the LAST `)` because
+/// `comm` may itself hold spaces and parentheses.
+fn parent_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after_comm) = stat.rsplit_once(") ")?;
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Whether `pid` is a zombie: dead, and waiting only for a parent to reap it. `SIGKILL` has done
+/// all it can to one of those.
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+/// `pid` and each of its parents, up to but not including init.
+fn ancestry(mut pid: u32) -> Vec<u32> {
+    let mut chain = Vec::new();
+    for _ in 0..64 {
+        if pid <= 1 {
+            break;
+        }
+        chain.push(pid);
+        match parent_of(pid) {
+            Some(parent) => pid = parent,
+            None => break,
+        }
+    }
+    chain
+}
+
+/// The topmost ancestor of `pid` below init — the process whose parent is pid 1 (or 0) — or `None`
+/// when the walk could not finish, which the caller reads as "do not touch it". Bounded, because
+/// the tree changes while it is being walked; running out of depth answers `None` too.
+fn session_top(pid: u32) -> Option<u32> {
+    let mut at = pid;
+    for _ in 0..64 {
+        let parent = parent_of(at)?;
+        if parent <= 1 {
+            return Some(at);
+        }
+        at = parent;
+    }
+    None
+}
+
+/// Every unix socket under `dir`, to `depth` levels, without following links out of it.
+fn sockets_under(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_socket() {
+            found.push(entry.path());
+        } else if kind.is_dir() && depth > 0 {
+            found.extend(sockets_under(&entry.path(), depth - 1));
+        }
+    }
+    found
+}
+
+/// Run `cmd` for at most `within`, killing it past that. A wedged tmux server must not turn the
+/// sweep at the head of every test binary into a hang.
+fn bounded(cmd: &mut Command, within: std::time::Duration) -> Option<std::process::ExitStatus> {
+    let mut child = cmd.spawn().ok()?;
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -606,7 +797,8 @@ pub fn sweep_abandoned(root: &Path) -> Vec<(PathBuf, Vec<(u32, String)>)> {
 /// box's pane runs `exec sleep 400`, and `exec` replaces the image: its `cmdline` is the two bare
 /// words `sleep 400` while its environment carries the fixture path six times over. A process whose
 /// environment this user may not read is matched on its command line alone, the same concession
-/// `tests/ui/harness/leaks.mjs` makes and announces.
+/// `tests/ui/harness/leaks.mjs` makes and announces. The working directory is read as a third
+/// surface, and `OLDPWD` is left out of the second, for the reasons [`process_table`] gives.
 ///
 /// This process is never in the answer. It is not an orphan from its own point of view, and every
 /// test that pins `$SKEIN_FLEET_ROOT` would otherwise find itself. Ancestry beyond that is the
@@ -636,7 +828,22 @@ fn process_table() -> Vec<(u32, String, String)> {
                 .unwrap_or_default()
         };
         let argv = read("cmdline").trim().to_string();
-        let haystack = format!("{argv} {}", read("environ"));
+        // `OLDPWD` is where a process has BEEN, not what it is using: it named this repository's
+        // tree in another lane's tmux for no reason but the `cd` that lane's agent made on its way
+        // into its own worktree (SKEIN-990). Everything else in the environment stays.
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        let environ = environ
+            .split(|b| *b == 0)
+            .filter(|var| !var.starts_with(b"OLDPWD="))
+            .map(String::from_utf8_lossy)
+            .collect::<Vec<_>>()
+            .join(" ");
+        // And where it is standing, which a process that names the fixture nowhere else — a shell
+        // `cd`ed into it — carries only here.
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let haystack = format!("{argv} {environ} {cwd}");
         table.push((pid, argv, haystack));
     }
     table
