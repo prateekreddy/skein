@@ -151,7 +151,7 @@ evidence, for whoever takes it on. SKEIN-708 is that work."""
 # 129 in `src/web/vendor/xterm.min.js`, and the rest decimal numbers that happen to be valid hex —
 # a gibibyte, a mebibyte, the mount-namespace inode numbers quoted in `src/fleet/stop.rs`. Four of
 # the 141 are genuine, and all four are the same shape: a sha as an argument inside a quoted
-# `git log` recipe, at `CHANGELOG.md:28,175` and the two recipes citing the commit CONTRIBUTING.md
+# `git log` recipe, at `CHANGELOG.md:29,173` and the two recipes citing the commit CONTRIBUTING.md
 # pins for its commit-type census, under its "Commit messages" section (the self-check below is
 # why this paragraph does not spell that commit's hash; `grep -n '02ad7cfb' CONTRIBUTING.md` finds
 # both recipes — no line number either, because this file is outside `docs/`, so nothing re-anchors
