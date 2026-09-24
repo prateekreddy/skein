@@ -382,6 +382,11 @@ depends_on = [
   "kit",
   "operation",
   "place",
+  # `probes` for one call: `install_launcher` writes skein's box plugin, and the plugin's turn-state
+  # hooks are the probe's own wiring (SKEIN-1062). `probes::plugin_install` gives the bytes of both
+  # plugin variants; `runtime` keeps only the directories, which the argv names. Asking `runtime`
+  # for the bytes instead would make `runtime` depend on `probes`, which already depends on it.
+  "probes",
   "repos",
   # `runtime` for one question, and only to REFUSE with: is this word a runtime skein has an adapter
   # for (SKEIN-405). The fleet-wide version check reads lines out of a script it ran in the sandbox,

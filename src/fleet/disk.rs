@@ -1168,6 +1168,7 @@ mod tests {
         "detached",
         "gitgate",
         "plugin",
+        "plugin-turn-state",
         "private",
         "src",
         "substrate",

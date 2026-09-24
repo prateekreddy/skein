@@ -254,56 +254,9 @@ pub(crate) fn turn_state_plugin_dir() -> String {
     format!("{}/.skein/plugin-turn-state", fleet_root())
 }
 
-/// Every file of both plugin variants as `fleet::install_launcher` writes them: (absolute path,
-/// bytes). The full plugin is [`PLUGIN_FILES`] with the turn-state hooks added to its
-/// `hooks/hooks.json`; the narrow one is the same manifest with the turn-state hooks alone. Both
-/// sets of hooks come from [`crate::probes::turn_state_hooks`], so the two cannot drift apart.
-pub(crate) fn plugin_install() -> Vec<(String, String)> {
-    let turn_state = crate::probes::turn_state_hooks();
-    let pretty = |v: &serde_json::Value| {
-        serde_json::to_string_pretty(v).expect("a hooks value serialises") + "\n"
-    };
-    let full = plugin_dir();
-    let mut out: Vec<(String, String)> = PLUGIN_FILES
-        .iter()
-        .map(|(rel, body)| {
-            let body = match *rel {
-                "hooks/hooks.json" => pretty(&with_turn_state(body, &turn_state)),
-                _ => body.to_string(),
-            };
-            (format!("{full}/{rel}"), body)
-        })
-        .collect();
-    let narrow = turn_state_plugin_dir();
-    for (rel, body) in PLUGIN_FILES {
-        if *rel == ".claude-plugin/plugin.json" {
-            out.push((format!("{narrow}/{rel}"), body.to_string()));
-        }
-    }
-    out.push((format!("{narrow}/hooks/hooks.json"), pretty(&turn_state)));
-    out
-}
-
-/// A plugin `hooks.json` with every turn-state entry appended after its own, event by event.
-fn with_turn_state(own: &str, turn_state: &serde_json::Value) -> serde_json::Value {
-    let mut merged: serde_json::Value =
-        serde_json::from_str(own).expect("the plugin's own hooks.json parses");
-    let into = merged["hooks"]
-        .as_object_mut()
-        .expect("the plugin's hooks.json has a hooks object");
-    for (event, groups) in turn_state["hooks"].as_object().into_iter().flatten() {
-        into.entry(event.clone())
-            .or_insert_with(|| serde_json::json!([]))
-            .as_array_mut()
-            .expect("a hook event is an array")
-            .extend(groups.as_array().into_iter().flatten().cloned());
-    }
-    merged
-}
-
 /// The plugin's files, relative to [`plugin_dir`], as the build carries them. `src/plugin/` is the
-/// source; `fleet::install_launcher` writes them beside the launcher through [`plugin_install`],
-/// which adds skein's turn-state hooks to `hooks/hooks.json`.
+/// source; `fleet::install_launcher` writes them beside the launcher through
+/// `probes::plugin_install`, which adds skein's turn-state hooks to `hooks/hooks.json`.
 pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     (
         ".claude-plugin/plugin.json",
@@ -453,87 +406,10 @@ mod tests {
         );
     }
 
-    /// **skein's turn-state hooks load whichever way the fleet's switch is set**, and off drops
-    /// only the resource holds, the monitor and the `skein_*` tools (the owner's decision on
-    /// SKEIN-1057, carried out by SKEIN-1062).
-    ///
-    /// Follows the argv to the bytes: for each switch value, the directory `for_box` names, then
-    /// the files [`plugin_install`] puts there. What would make it fail: off dropping the flag
-    /// (no directory is named, so no turn-state hook loads); the turn-state variant not installed,
-    /// or installed without its hooks; either variant missing any of the 24 entries; the full one
-    /// losing its resource hooks; or the narrow one carrying the holds, the monitor or the tools.
-    #[test]
-    fn turn_state_hooks_load_whichever_way_the_switch_is_set() {
-        let _lock = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
-        env.set("SKEIN_HOME", &home);
-        let claude = runtime_adapter("claude").unwrap();
-        let installed = plugin_install();
-        let file = |dir: &str, rel: &str| {
-            let path = format!("{dir}/{rel}");
-            installed
-                .iter()
-                .find(|(p, _)| *p == path)
-                .map(|(_, body)| body.clone())
-        };
-        let turn_state = crate::probes::turn_state_hooks();
-        let groups = |hooks: &serde_json::Value, event: &str| -> Vec<serde_json::Value> {
-            hooks["hooks"][event]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-        };
-        for switch in ["on", "off"] {
-            env.set("SKEIN_BOX_PLUGIN", switch);
-            let resolved = for_box(claude.interactive_start, "web-main");
-            let dir = resolved
-                .split_once("--plugin-dir '")
-                .and_then(|(_, rest)| rest.split_once('\''))
-                .map(|(dir, _)| dir.to_string())
-                .unwrap_or_else(|| panic!("switch {switch}: the argv names no plugin: {resolved}"));
-
-            let manifest = file(&dir, ".claude-plugin/plugin.json")
-                .unwrap_or_else(|| panic!("switch {switch}: no plugin is installed at {dir}"));
-            let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-            assert_eq!(manifest["name"], "skein", "switch {switch}");
-            let hooks: serde_json::Value = serde_json::from_str(
-                &file(&dir, "hooks/hooks.json")
-                    .unwrap_or_else(|| panic!("switch {switch}: {dir} has no hooks")),
-            )
-            .unwrap();
-            let mut count = 0;
-            for (event, wanted) in turn_state["hooks"].as_object().unwrap() {
-                let have = groups(&hooks, event);
-                for group in wanted.as_array().unwrap() {
-                    assert!(
-                        have.contains(group),
-                        "switch {switch}: {dir} does not load {event} {group}"
-                    );
-                    count += 1;
-                }
-            }
-            assert_eq!(count, 24, "switch {switch}");
-
-            let resources = hooks.to_string().contains("bin/skein-resources");
-            let tools = file(&dir, ".mcp.json").is_some();
-            let monitor = file(&dir, "monitors/monitors.json").is_some();
-            match switch {
-                "on" => assert!(resources && tools && monitor, "on lost the holds or tools"),
-                _ => assert!(
-                    !resources && !tools && !monitor,
-                    "off still loads a hold ({resources}), the tools ({tools}) or the monitor \
-                     ({monitor})"
-                ),
-            }
-        }
-    }
-
     /// **The plugin the build carries is the one its argv names**: a manifest, the three resource
     /// hooks the design gives it and no others, a monitor, and the in-box tools' MCP server. These
     /// are its own files in `src/plugin/`; the turn-state hooks join them at install
-    /// ([`plugin_install`], tested by `turn_state_hooks_load_whichever_way_the_switch_is_set`).
+    /// (`probes::plugin_install`, tested by `turn_state_hooks_load_whichever_way_the_switch_is_set`).
     ///
     /// What would make it fail: a plugin file missing from `PLUGIN_FILES` (the install would put a
     /// plugin with no hooks under `.skein`), a resource hook event added or dropped, or the

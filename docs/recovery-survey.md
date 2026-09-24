@@ -58,7 +58,7 @@ repo` said seven and is thirteen, and `usage: skein` said eight subcommands and 
 | **U** — says what to do, and it cannot be watched | 12 | the act is off this machine, or it is a person's deliberate "no" |
 
 Two further rows carry no verdict. The Write token row (§7, SKEIN-812) is the one documented
-exception to SKEIN-752, added after the 2026-09-09 measurement; and `src/fleet/disk.rs:303` is a
+exception to SKEIN-752, added after the 2026-09-09 measurement; and `src/fleet/disk.rs:305` is a
 well-written refusal that `src/health/disk.rs:162` swallows, so nobody ever reads it.
 
 **Requirement 1 is met almost everywhere and requirement 3 almost nowhere.** 100 rows say what to
@@ -405,7 +405,7 @@ one of them now says which line of this table it belongs to.
 | `save_boxes`'s copy of the same | gone before this pass | SKEIN-756 |
 | `ensure_fleet`'s `!= Some(true)` refusal | `src/fleet/create.rs:820` | kept — a guard with a residual path, and the module's own tests assert on it |
 | the five inside `resize_fleet_inner` | `src/fleet/resize.rs:545` | kept — still production-dead, and SKEIN-575's to remove |
-| `substrate_strays`'s two refusals | `src/fleet/disk.rs:299` onwards | kept — `expect_err` assertions are about exactly these strings |
+| `substrate_strays`'s two refusals | `src/fleet/disk.rs:301` onwards | kept — `expect_err` assertions are about exactly these strings |
 
 **Two deletions out of the twelve `N` rows is the honest yield, and the other ten are the more
 interesting half.** Four were already gone, which is what a three-day-old survey looks like, and six
@@ -848,7 +848,7 @@ their `where` column instead, which is exactly what blinded the misanchor gate t
 | `src/fleet/start.rs:600` | the fleet sandbox cannot see {store}, so box {name} would come up with no store. | **R** — `skein start` for a repo registered after the sandbox's mounts were fixed | `skein start` for a repo whose store is outside the mounts | y — renders the create line and says why remaking is the fix | no — a host act | U |
 | `src/fleet/start.rs:741` | {why} — {name} IS running … but it has no hooks or kit, so the board cannot see its turns. Run `skein restart {name}` again{…} | **R** — the provisioning `exec` failing after the session is already up | `skein start` / Launch whose provisioning failed | y — and `what_to_look_at` appends kill-vs-timeout-specific advice | yes — `box_is_ready`, a poll skein already has | W |
 | `src/fleet/resize.rs:382` (`room_to_copy_out`) | copying the boxes out needs about {n} MiB and the host has {m} MiB free … | **R** — `skein save` with host free space below `boxes + boxes/5` MiB | `skein save`, cockpit Save | y — "Freeing space, or `skein stop`ping boxes you do not need, makes room." | yes — free space crossing the threshold; a numeric poll | W |
-| `src/fleet/disk.rs:304` (`stray_advice`) | N directories in {dir} … are neither skein's own nor any box's … if they are yours to delete: rm -rf {paths} | **R** — `skein doctor` above `DISK_FULL_PCT` with orphaned `target-<name>` directories present | `skein doctor` disk section, above `DISK_FULL_PCT` | y — a literal command | yes — the percentage dropping | C |
+| `src/fleet/disk.rs:306` (`stray_advice`) | N directories in {dir} … are neither skein's own nor any box's … if they are yours to delete: rm -rf {paths} | **R** — `skein doctor` above `DISK_FULL_PCT` with orphaned `target-<name>` directories present | `skein doctor` disk section, above `DISK_FULL_PCT` | y — a literal command | yes — the percentage dropping | C |
 | `src/fleet/server.rs:560` (`door_refusal`, for `cockpit_port_advice` and the server-start ask) | the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish it … | **R** — a sandbox image without python3, so the doorway never starts | the cockpit port-publish flow | y — "check `tmux -S {sock} capture-pane -p -t {session}` in the sandbox, or that python3 is present" | yes — `door_settles` at `src/fleet/server.rs:362` is literally that poll, already written | W |
 | `src/fleet/fleetlogin.rs:556` (`share_outcome`) | logged in, but could not hand it to the boxes already running ({why}) — they pick it up when their session next starts | **R** — `skein login` while the sandbox is too busy to answer the share `exec` | `skein login` tail | y — **and it is self-healing by design**, saying so | yes — already | C |
 | `src/fleet/resize.rs:217` | there is no box named {name} in {sandbox} — {root} holds no checkout, and an archive of nothing reads exactly like a save. Nothing was copied out. | **R** — `skein save <box>` for a name with a placement but no tree | `skein save <box>` | partly — explains, names no verb | yes — the checkout appearing | N |
@@ -875,7 +875,7 @@ their `where` column instead, which is exactly what blinded the misanchor gate t
 | `src/fleet/resize.rs:533` | {root} holds N checkout(s) that {dir} has no placement record for, so nothing could carry {them} out: {names} | **R** — **not** dead, and this is why reachability is per call site rather than per function: `census_placed_boxes` has two other live callers, `destroy_costs` (row 146's always-run path) and `save_boxes`. Trigger: an untracked checkout under the fleet root, then `skein save` | gated on the resize path, but `census_placed_boxes` also runs under `destroy_costs` and `save_boxes`, where a person does see it | **n** | yes — a placement record appearing for each named checkout | N |
 | `src/fleet/resize.rs:601` | could not check what Docker is holding ({why}), and a resize destroys /var/lib/docker — resize aborted with the sandbox untouched. | **X** — same dead body as row 174. **Dequeued by SKEIN-777 — code KEPT**; same re-verification, same owner (SKEIN-575) | not reachable today | y — "Restart the daemon and try again, or pass --drop-docker to resize anyway and lose whatever is in there." | yes — dockerd answering | W |
 | `src/fleet/resize.rs:206` (`docker_refusal`) | a resize destroys /var/lib/docker, and it is holding N thing(s) nothing can put back … | **X** — `docker_refusal`'s only production call site is inside that dead body; its other two are in `mod tests`. **Dequeued by SKEIN-777 — code KEPT**; same re-verification, same owner (SKEIN-575) | not reachable today | y — a full `docker save` line and a `docker run … tar` line, plus "--drop-docker" | yes — `docker_state_at_risk` emptying | W |
-| `src/fleet/disk.rs:303`, `src/fleet/disk.rs:311` | skein could not work out which directories under {dir} are its own … · skein can see no boxes at all … | **X** — confirmed against the survey's own note: `substrate_strays`'s one production reader is `src/health/disk.rs:236`, which does `strays().ok()` and drops the `Err` string. Every other caller is in `mod tests`. **Dequeued by SKEIN-777 — code KEPT**: both `Err`s are the subject of `expect_err` assertions in the module's own tests, so deleting them would delete what a test is about. The row was never on the queue anyway — it carries no verdict | **nobody** — `src/health/disk.rs:162` states outright that "an `Err` from `strays` is silence, not a sentence" | n/a | n/a | — |
+| `src/fleet/disk.rs:305`, `src/fleet/disk.rs:313` | skein could not work out which directories under {dir} are its own … · skein can see no boxes at all … | **X** — confirmed against the survey's own note: `substrate_strays`'s one production reader is `src/health/disk.rs:236`, which does `strays().ok()` and drops the `Err` string. Every other caller is in `mod tests`. **Dequeued by SKEIN-777 — code KEPT**: both `Err`s are the subject of `expect_err` assertions in the module's own tests, so deleting them would delete what a test is about. The row was never on the queue anyway — it carries no verdict | **nobody** — `src/health/disk.rs:162` states outright that "an `Err` from `strays` is silence, not a sentence" | n/a | n/a | — |
 
 ## 10. The rest of `src/`
 
@@ -888,7 +888,7 @@ the reason: the input-validation one-liners guarding `pub(crate)` writers, whose
 `src/gitgate/credentials.rs:213`, `src/gitgate/credentials.rs:237`; `src/files.rs:60`,
 `src/files.rs:67`, `src/files.rs:74`, `src/files.rs:263`, `src/files.rs:315`. For the name guards
 in `src/fleet/` — `src/fleet/declared.rs:27`, `src/fleet/declared.rs:62`,
-`src/fleet/declared.rs:145`, `src/fleet/declared.rs:154`, `src/fleet/disk.rs:388`,
+`src/fleet/declared.rs:145`, `src/fleet/declared.rs:154`, `src/fleet/disk.rs:390`,
 `src/fleet/create.rs:797`, `src/fleet/start.rs:547`, `src/fleet/install.rs:291` and
 `src/fleet/server.rs:137` — **cannot tell**: the callers are in-crate and were not all traced.
 

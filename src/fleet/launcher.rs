@@ -215,7 +215,7 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
     // skein's box plugin, beside the launcher and under the same read-only `.skein`, so the plugin
     // every box loads is always this build's (box-plugin §2.1, SKEIN-1056). Both of its variants,
     // the full one and the turn-state one a fleet with the switch off loads (SKEIN-1062).
-    for (path, body) in crate::runtime::plugin_install() {
+    for (path, body) in crate::probes::plugin_install() {
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
         let script = format!(
             "mkdir -p {} && cat > {} && chmod 755 {}",
@@ -367,7 +367,7 @@ mod tests {
                 ))
             })
             .collect();
-        for (path, body) in crate::runtime::plugin_install() {
+        for (path, body) in crate::probes::plugin_install() {
             let landed = writes
                 .iter()
                 .find(|(argv, _)| argv.contains(&format!("cat > {}", sh_quote(&path))))

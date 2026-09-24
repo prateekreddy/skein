@@ -37,7 +37,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:474"]
+["docs/modules.toml:479"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1048,24 +1048,25 @@ line = "return Err(format!(\"unusable box name {name:?}\"));"
 window = "if !crate::util::valid_name(name) {\u000breturn Err(format!(\"unusable box name {name:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:299"]
+["src/fleet/disk.rs:301"]
 line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:303"]
+["src/fleet/disk.rs:305"]
 line = "return Err(format!("
 window = "if installed.is_empty() {\u000breturn Err(format!(\u000b\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:304"]
+["src/fleet/disk.rs:306"]
 line = "\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:311"]
+["src/fleet/disk.rs:313"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
+window = "return Err(format!(\u000b\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\\u000bin {places} — so every directory under {dir} would read as belonging to nobody. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:388"]
+["src/fleet/disk.rs:390"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
