@@ -51,7 +51,7 @@ function revComposeHtml(pr) {
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
     <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
-      oninput="revComposing.text = this.value; revComposeSave()">${esc(c.text)}</textarea>
+      oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
     ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
     <div class="revacts">
       ${asking
@@ -59,8 +59,40 @@ function revComposeHtml(pr) {
         : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
            <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
+      <span class="dim revkeys">${asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept"}</span>
     </div>
   </div>`;
+}
+
+/// **⌘↵ presses the composer's primary button, and Esc presses cancel** (SKEIN-606).
+///
+/// The primary button is the one drawn `.go`: **post to GitHub** for a comment or a request for
+/// changes — the same `revAct` the chip calls, so the same 8-second undo receipt, not a shortcut
+/// past it — and **ask** for an ask. Esc is **cancel**, `revComposeClose`, which takes the composer
+/// off the screen and leaves the words where every keystroke already saved them, so reopening it
+/// brings them back. That is what the hint beside the buttons promises.
+///
+/// **While the composer is busy both keys are ignored**, and swallowed rather than passed on: a
+/// second press of the primary button mid-answer would ask twice, and an Esc mid-answer would close
+/// the composer an answer is about to be painted into. The chips are `disabled` in that state for
+/// the same reason. Ctrl as well as ⌘, because the keyboard a reader has is not the one the hint
+/// draws.
+///
+/// On the textarea rather than on the page's keymap: `shortcutFor` returns nothing while a field
+/// has focus (the guard), so this is the only handler that sees these keys here, and it stops them
+/// there so nothing behind the composer ever does.
+function revComposeKey(ev) {
+  const c = revComposing;
+  if (!c) return;
+  const send = ev.key === "Enter" && (ev.metaKey || ev.ctrlKey);
+  const close = ev.key === "Escape";
+  if (!send && !close) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (c.busy) return;
+  if (close) { revComposeClose(); return; }
+  if (c.kind === "ask") revAsk(c.number);
+  else revAct(c.repo, c.number, c.kind);
 }
 
 /// Ask, privately. The answer replaces nothing and is posted nowhere.

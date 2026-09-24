@@ -441,7 +441,7 @@ review pane has the dock, which is exactly the bug.
 | `j` `k` | next / previous **hunk** (not line — a line-at-a-time diff at 30/day is a scroll wheel with extra steps) | walks the queue's rows: `rev-next` / `rev-previous`, the table above |
 | `]` `[` | next / previous file | refuses, and says where the diff went — *skein does not show the diff — g h opens the change on GitHub* |
 | `c` | comment on the focused hunk's line; composer opens focused | refuses, naming the chip: *comment… is a chip on the row — ↵ opens it* |
-| `⌘↵` | save the comment | nothing here. It is `openComposer`'s binding, and `openComposer` belongs to the **box** diff pane, which is a different surface and still has it; the row's own composer (`rev-compose`) has no key at all — SKEIN-606 |
+| `⌘↵` | save the comment | in the row's own composer (`rev-compose`), presses its primary button — **post to GitHub** for a comment or a request for changes, with the usual 8 s undo, and **ask** for an ask; `Esc` there presses **cancel**, and your words are kept. Both are ignored while the composer is busy. The composer says so beside its buttons: *⌘↵ posts · Esc closes — your words are kept*, or *⌘↵ asks · Esc closes* — SKEIN-606 (`revComposeKey`, `src/web/app/review-keys.js`) |
 | `a` | approve — posts the verdict *with* the pending line comments | refuses, naming the chip: *approve is a chip on the row — ↵ opens it* |
 | `r` | request changes — opens the composer, focused, posts on `⌘↵` | refuses, naming the chip: *request changes… is a chip on the row — ↵ opens it* |
 | `e` | set aside | unchanged — `rev-aside`, on the selected row |
