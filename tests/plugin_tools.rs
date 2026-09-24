@@ -793,12 +793,14 @@ fn a_question_is_answered_only_from_the_inbox() {
 }
 
 /// **`skein_request_package` files through the launcher's own entry point, into this box's own
-/// drop-box, and answers with the id and the launcher's sentence**; and it is capped at five
-/// waiting like a question.
+/// drop-box, with the agent's `why` on the request, and answers with the id and the launcher's
+/// sentence**; and it is capped at five waiting, with the ending the owner chose for this queue:
+/// "granted or denied", where a question's is "answered or dismissed".
 ///
 /// What would make it fail: the tool writing the file itself (no launcher sentence, and a second
-/// copy of the package-name rules); the id not parsed from what the launcher said; the cap not
-/// applied to this queue.
+/// copy of the package-name rules); the id not parsed from what the launcher said; `--why` not
+/// passed, or not written into the request by `request_package`; the cap not applied to this
+/// queue, or its sentence ending as a question's does.
 #[test]
 fn a_package_request_goes_through_the_launcher_and_is_capped() {
     if !have("jq") {
@@ -813,7 +815,7 @@ fn a_package_request_goes_through_the_launcher_and_is_capped() {
     let (got, said) = b.call_said(
         "example",
         "skein_request_package",
-        json!({"manager": "apt", "packages": ["libnss3"]}),
+        json!({"manager": "apt", "packages": ["libnss3"], "why": "chromium needs it to start"}),
     );
     let id = got["id"].as_str().unwrap_or_else(|| panic!("{got} {said}"));
     assert_eq!(got["state"], "waiting", "{got}");
@@ -831,6 +833,8 @@ fn a_package_request_goes_through_the_launcher_and_is_capped() {
     )
     .unwrap();
     assert_eq!(filed["packages"], json!(["libnss3"]));
+    assert_eq!(filed["why"], "chromium needs it to start", "{filed}");
+    let id = id.to_string();
 
     // Four more waiting, filed by hand in the launcher's shape, make five.
     for n in 1..5 {
@@ -844,11 +848,62 @@ fn a_package_request_goes_through_the_launcher_and_is_capped() {
     let (got, said) = b.call_said(
         "example",
         "skein_request_package",
-        json!({"manager": "npm", "packages": ["left-pad"]}),
+        json!({"manager": "npm", "packages": ["left-pad"], "why": "the build script wants it"}),
     );
     assert_eq!(got["error"], "at-cap", "{got} {said}");
-    assert!(
-        said.starts_with("skein: you already have 5 waiting: "),
-        "{said}"
+    assert_eq!(
+        said,
+        format!(
+            "skein: you already have 5 waiting: 20260101-000000-1, 20260102-000000-1, \
+             20260103-000000-1, 20260104-000000-1, {id}. Ask again once one is granted or denied. \
+             skein_requests lists them."
+        )
+    );
+}
+
+/// **A package request without a `why` is refused, and nothing is filed**: missing, blank, not
+/// text, or more than one line.
+///
+/// What would make it fail: the tool not checking `why` before it calls the launcher — the
+/// launcher files a request with or without one, because the sudo shim never has one, so only the
+/// tool can require it.
+#[test]
+fn a_package_request_without_a_why_is_refused() {
+    if !have("jq") {
+        return skip("no jq, so the launcher cannot file a package request");
+    }
+    let b = Box_::new("skein-tools-it-askwhy");
+    b.put(
+        "fleet/.skein/box-session.sh",
+        include_str!("../src/box-session.sh"),
+    );
+    fs::create_dir_all(b.at("fleet/.skein/substrate/requests/example")).unwrap();
+    for (what, args) in [
+        (
+            "missing",
+            json!({"manager": "apt", "packages": ["libnss3"]}),
+        ),
+        (
+            "blank",
+            json!({"manager": "apt", "packages": ["libnss3"], "why": "  "}),
+        ),
+        (
+            "not text",
+            json!({"manager": "apt", "packages": ["libnss3"], "why": 7}),
+        ),
+        (
+            "two lines",
+            json!({"manager": "apt", "packages": ["libnss3"], "why": "a\nb"}),
+        ),
+    ] {
+        let got = b.call("example", "skein_request_package", args);
+        assert_eq!(got["error"], "why-must-be-text", "{what}: {got}");
+    }
+    assert_eq!(
+        fs::read_dir(b.at("fleet/.skein/substrate/requests/example"))
+            .unwrap()
+            .count(),
+        0,
+        "a request with no why was filed"
     );
 }

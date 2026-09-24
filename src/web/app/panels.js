@@ -253,12 +253,16 @@ const subqShown = new Map();
 function subqCard(r) {
   const pending = r.state === "pending";
   const log = (r.log || "").trim();
+  // The box's own words for what it wants the package for, drawn the way the write card draws its
+  // reason. A request the sudo shim filed has none, and gets no line rather than an empty one.
+  const why = (r.why || "").trim();
   const key = (r.box || "") + "/" + r.id;
   if (pending) subqShown.set(key, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
       <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc((r.asked || "").replace("T", " ").replace("Z", ""))}</div>
+      ${why ? `<div class="sq-log">why: ${esc(why)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
@@ -392,7 +396,7 @@ function loadAskq() {
 
 function sendAskq(key, body) {
   const shown = askqShown.get(key);
-  if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
+  if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }
   const id = key.slice(key.indexOf("/") + 1);
   return fetch("/api/fleet/asks/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
@@ -404,7 +408,7 @@ function sendAskq(key, body) {
 // `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
 function answerAskq(key, i) {
   const shown = askqShown.get(key);
-  if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
+  if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }
   let answer;
   if (i >= 0) answer = shown.options[i];
   else {

@@ -401,8 +401,18 @@ request_package() {
   # generation time, outside the namespace, from the launcher's own argv. `$SKEIN_BOX` is the
   # fallback for a call typed by hand inside a box, where the attach shell has it and the caller
   # would otherwise have to know its own name.
-  local box="${1:-${SKEIN_BOX:-}}" tool="" verb="" kind="" arg
+  local box="${1:-${SKEIN_BOX:-}}" tool="" verb="" kind="" arg why=""
   shift
+  # `--why <text>`: what the box wants it for, from the `skein_request_package` tool (SKEIN-1061).
+  # First and only first, so it is never mistaken for one of sudo's own options below. The sudo shim
+  # never passes it, and a request without one is filed exactly as before. One line, because the card
+  # shows it as one: the tool refuses anything else, and a line break typed here by hand is folded
+  # into a space rather than refused, so this path says nothing it was not already saying.
+  if [ "${1-}" = "--why" ]; then
+    why="${2-}"
+    shift 2 2>/dev/null || shift $#
+    why="${why//[$'\r\n']/ }"
+  fi
   # sudo's own options are not the command's. Everything up to the first bare word belongs to sudo.
   while [ $# -gt 0 ]; do
     case "$1" in -*) shift ;; *) break ;; esac
@@ -509,9 +519,9 @@ request_package() {
   tmp="$(mktemp "$dir/.tmp.XXXXXX")" || return 4
   # `--args` puts the packages in as a JSON array of strings rather than a string that has to be
   # split again later. Nothing downstream re-parses this, which is the point.
-  if ! jq -n --arg id "$id" --arg box "$box" --arg kind "$kind" \
+  if ! jq -n --arg id "$id" --arg box "$box" --arg kind "$kind" --arg why "$why" \
        --arg asked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-       '{id:$id, box:$box, kind:$kind, packages:$ARGS.positional,
+       '{id:$id, box:$box, kind:$kind, packages:$ARGS.positional, why:$why,
          asked:$asked, state:"pending", decided:"", remember:true, log:""}' \
        --args "${packages[@]}" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"

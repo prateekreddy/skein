@@ -381,10 +381,13 @@ def at_cap(kind, queue):
     waiting = waiting_in(kind, queue, inbox_answers())
     if len(waiting) < CAP:
         return None
+    # The ending names what frees a slot in THIS queue: the owner answers or dismisses a question,
+    # and grants or denies a package or a write (the owner's words, SKEIN-1061).
+    frees = "answered or dismissed" if kind == "question" else "granted or denied"
     return reply(
         {"error": "at-cap", "waiting": waiting},
-        "skein: you already have %d waiting: %s. Ask again once one is answered or dismissed. "
-        "skein_requests lists them." % (CAP, ", ".join(waiting)),
+        "skein: you already have %d waiting: %s. Ask again once one is %s. "
+        "skein_requests lists them." % (CAP, ", ".join(waiting), frees),
     )
 
 
@@ -490,8 +493,12 @@ def file_through_launcher(kind, queue, argv):
 def request_package(args):
     manager = args.get("manager")
     packages = args.get("packages")
+    why = args.get("why")
     if manager not in ("apt", "npm"):
         return {"error": "manager-must-be-apt-or-npm"}
+    # Required, and one line: the owner reads it on the card as "why: <text>".
+    if not isinstance(why, str) or not why.strip() or "\n" in why or "\r" in why:
+        return {"error": "why-must-be-text"}
     if (
         not isinstance(packages, list)
         or not packages
@@ -499,7 +506,9 @@ def request_package(args):
     ):
         return {"error": "packages-must-be-a-list-of-names"}
     tool = "apt-get" if manager == "apt" else "npm"
-    return file_through_launcher("package", "substrate", ["--request-package", tool, "install"] + packages)
+    return file_through_launcher(
+        "package", "substrate", ["--request-package", "--why", why.strip(), tool, "install"] + packages
+    )
 
 
 def request_write(args):
@@ -624,8 +633,9 @@ TOOLS = [
             "properties": {
                 "manager": {"type": "string", "enum": ["apt", "npm"]},
                 "packages": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "why": {"type": "string"},
             },
-            "required": ["manager", "packages"],
+            "required": ["manager", "packages", "why"],
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
