@@ -108,11 +108,11 @@ depends_on = ["state", "operation", "act", "signal", "box", "fleet", "warden-cli
 
 [[cycle]]
 modules = [
-  "ai", "config", "diff", "digest", "fleet", "gitgate", "kit", "mailbox", "place", "probes",
+  "ai", "asks", "config", "diff", "digest", "fleet", "gitgate", "kit", "mailbox", "place", "probes",
   "registry", "repos", "runtime", "sandbox", "sbx", "signals", "substrate", "tracking",
 ]
 why = """
-Eighteen modules in one strongly connected component — two thirds of the crate. It is not a
+Nineteen modules in one strongly connected component — two thirds of the crate. It is not a
 mistake anyone made in one place: it is what a single 7,400-line crate root looked like once it was
 split, and the mutual references were function calls inside one file until then. `kit` calls
 `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads `repos` to find
@@ -125,6 +125,11 @@ The `place -> fleet` reference that used to be named here is gone (SKEIN-22), an
 change size — `place` is still in it through `config -> runtime -> repos -> place`. Worth knowing
 before anyone spends a day on a single edge: in a component this dense, removing one is a local
 tidy, not a structural change.
+
+`asks` joined with SKEIN-1061, by one edge the other way from its own: `fleet -> asks`, so that
+destroying a box removes its ask drop-box with its package and write drop-boxes (`fleet::disk`'s
+`box_side_state`). It is in for the reason `substrate` and `gitgate` are: a queue a box writes is
+removed with the box, and the one spelling of its path is the queue module's.
 """
 item = "SKEIN-1"
 
@@ -311,7 +316,7 @@ depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "flee
 #
 # `resource_signal` for one spawn: the loop that writes each box's signal file once a minute, for
 # the reason the disk announcement runs here rather than behind a cockpit connection (SKEIN-1054).
-depends_on = ["act", "ai", "announce", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
+depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -375,6 +380,9 @@ depends_on = [
   # the server kept declining model calls over a credential that had just been renewed. The
   # dependency is the fix: whoever completes a login is the one holding the memory that must forget.
   "ai",
+  # `asks` for one path: the box's ask drop-box, removed with the box as the other two queues' are
+  # (`disk::box_side_state`, SKEIN-1061).
+  "asks",
   "attempt",
   "config",
   "dockerd",
@@ -688,6 +696,13 @@ depends_on = ["digest", "registry", "util"]
 # client-side delta: a mark in a tab dies on reload, and a mark per tab makes two tabs disagree.
 depends_on = ["board", "config", "util"]
 
+[current.asks]
+# A box's questions for the fleet's owner (SKEIN-1061), shaped as `gitgate`'s write requests are:
+# `fleet` for where the queue is, `place` to read it in the sandbox, `config` for where the answers
+# are kept on the host, and `mailbox` for one call, `send_question_answer`, the answer in the asking
+# box's read-only inbox.
+depends_on = ["config", "fleet", "mailbox", "place", "util"]
+
 [current.substrate]
 # `mailbox` for one call: `send_answer`, the owner's answer to a package request put in the asking
 # box's read-only inbox (SKEIN-1142), for the reason `gitgate` gives for the same edge.
@@ -702,7 +717,7 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # Nothing, and that is the claim rather than an accident — but the claim this row makes is a
 # different one from `assets`, `knock` or `doorway` above, and it is worth saying which.
 #
-# **This whole unit is test code.** `src/lib.rs:75` is `mod testutil;` under the `#[cfg(test)]` on
+# **This whole unit is test code.** `src/lib.rs:76` is `mod testutil;` under the `#[cfg(test)]` on
 # the line above it, so
 # not one byte of `src/testutil.rs` is in a release build. The other empty rows say "this module
 # reaches nothing"; this one says "this module is not in the architecture", which is the same rule
@@ -720,7 +735,7 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # `#[cfg(test)] mod tests` block.
 #
 # Empty rather than deleted, so the argument stays where the module is and the failure stays loud:
-# take the `#[cfg(test)]` off `src/lib.rs:75`'s declaration and `place` and `registry` come back,
+# take the `#[cfg(test)]` off `src/lib.rs:76`'s declaration and `place` and `registry` come back,
 # with nothing here allowing them.
 depends_on = []
 

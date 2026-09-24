@@ -135,8 +135,11 @@ const NODE_SUITES: [&str; 29] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 12] = [
+const BROWSER_SUITES: [&str; 13] = [
     "actfail",
+    // A box's question in the questions panel: its text and its offered answers shown as plain
+    // text, and each answer, typed line and dismissal reaching the box's inbox (SKEIN-1061).
+    "asks",
     "connections",
     // A write request answered twice from the panel: the server's refusal in the toast, and the row
     // redrawn in its real state (SKEIN-1034).

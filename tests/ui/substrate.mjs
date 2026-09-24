@@ -226,4 +226,25 @@ check(
     card.includes(`E: &lt;b&gt;bad&lt;/b&gt; &amp; &quot;quoted&quot; &amp; &#39;quoted&#39;`), true);
 }
 
+
+// --- why the box wants it: its own words, escaped, and only when it gave some -----------------
+//
+// `skein_request_package` requires a `why` (SKEIN-1061) and the card shows it as the line
+// "why: <text>", the way the write card shows its reason. It is the box's words like everything else
+// here, so it is escaped. A request the sudo shim filed has no `why` at all, and must still be drawn
+// — with no why line rather than an empty one.
+//
+// Fails on: the why drawn without `esc` (the first two checks); the line drawn whether or not there
+// is a why (the last two).
+{
+  const card = T.subqCard(ask("w1", { why: "chromium needs <b>libnss3</b> to start" }));
+  check("a why is shown as the line `why: <text>`, escaped",
+    card.includes(`<div class="sq-log">why: chromium needs &lt;b&gt;libnss3&lt;/b&gt; to start</div>`), true);
+  check("and `<b>` in it never reaches the page as markup", card.includes("<b>libnss3</b>"), false);
+  const old = T.subqCard(ask("w2"));
+  check("a request filed with no why is still drawn, with its buttons", /libnss3/.test(old) && /Approve/.test(old), true);
+  check("with no why line", /why:/.test(old), false);
+  check("and no empty box where one would be", (old.match(/class="sq-log"/g) || []).length, 0);
+}
+
 done();

@@ -224,12 +224,12 @@ impl Fleet {
             "ghp_review\n",
         )
         .unwrap();
-        // The two request queues, one drop-box per box. A box may write its OWN and no other's,
+        // The three request queues, one drop-box per box. A box may write its OWN and no other's,
         // which is architecture §8.4's per-box request path — the step that was skipped when the
         // queues were unmasked, leaving every box a writable path to every other box's pending
         // requests and a way to file one in a neighbour's name (ISO-7). A file in each, because
         // the probe reports an empty directory as `empty` and never gets as far as writing to it.
-        for queue in ["substrate", "gitgate"] {
+        for queue in ["substrate", "gitgate", "asks"] {
             for owner in ["web-main", "other-main"] {
                 let drop = f
                     .fleet_root
@@ -449,6 +449,9 @@ done
             self.fleet_root.join(".skein/gitgate/requests"),
             self.fleet_root.join(".skein/gitgate/requests/web-main"),
             self.fleet_root.join(".skein/gitgate/requests/other-main"),
+            self.fleet_root.join(".skein/asks/requests"),
+            self.fleet_root.join(".skein/asks/requests/web-main"),
+            self.fleet_root.join(".skein/asks/requests/other-main"),
         ];
         if let Some(volume) = &self.volume {
             paths.extend([

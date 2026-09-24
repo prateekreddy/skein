@@ -253,12 +253,16 @@ const subqShown = new Map();
 function subqCard(r) {
   const pending = r.state === "pending";
   const log = (r.log || "").trim();
+  // The box's own words for what it wants the package for, drawn the way the write card draws its
+  // reason. A request the sudo shim filed has none, and gets no line rather than an empty one.
+  const why = (r.why || "").trim();
   const key = (r.box || "") + "/" + r.id;
   if (pending) subqShown.set(key, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
       <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc((r.asked || "").replace("T", " ").replace("Z", ""))}</div>
+      ${why ? `<div class="sq-log">why: ${esc(why)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
@@ -337,6 +341,104 @@ function pollSubq() {
     }
     subqPrimed = true;
     if (document.getElementById("subq").classList.contains("open")) loadSubq();
+  }).catch(() => {});
+}
+
+// ---------- questions (a box asks the person, box-plugin §2.3 and §4) ----------
+//
+// An agent asks with `skein_ask_person`; its question is a file in its own drop-box, so every word
+// on this card is the box's, shown escaped as plain text under "its own words, unverified". No
+// link, no markdown, and no button made from its content except the offered answers, whose labels
+// are escaped. The answer goes back host-side and lands in the box's inbox (`asks::answer`).
+//
+// What each card was rendered from, keyed by box AND id, for `subqShown`'s reason: the answer is
+// sent back from what was on screen, not looked up again, and an id is the box's to choose.
+const askqShown = new Map();
+function openAskq() { const o = document.getElementById("askq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadAskq(); }
+function closeAskq() { const o = document.getElementById("askq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
+
+function askqCard(a) {
+  const key = (a.box || "") + "/" + a.id;
+  const k = esc(JSON.stringify(key));
+  const options = a.options || [];
+  let row;
+  if (a.state === "waiting") {
+    askqShown.set(key, { box: a.box || "", question: a.question || "", options });
+    // The buttons carry the option's INDEX, never its text: a label is the box's words, and the
+    // only place they go is inside the escaped button face.
+    row = (options.length
+      ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})">${esc(o)}</button>`).join("")
+      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
+      + `<button class="kbtn ghost" onclick="dismissAskq(${k})">Dismiss</button>`;
+  } else if (a.state === "answered") {
+    row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc((a.decided || "").slice(11, 16))}</span>`;
+  } else {
+    row = `<span class="sq-meta">dismissed without an answer · ${esc((a.decided || "").slice(11, 16))}</span>`;
+  }
+  return `
+    <div class="msg">
+      <div class="sq-meta">question · asked by <b>${esc(a.box || "?")}</b> — its own words, unverified · ${esc((a.asked || "").replace("T", " ").replace("Z", "").slice(0, 16))}</div>
+      <div class="aq-body">${esc(a.question || "")}</div>
+      <div class="sq-row">${row}</div>
+    </div>`;
+}
+
+function loadAskq() {
+  const list = document.getElementById("askq-list");
+  return fetch("/api/fleet/asks").then(r => r.json()).then(asks => {
+    if (!asks.length) {
+      list.innerHTML = `<div class="note">no questions — a box asks with the <code>skein_ask_person</code> tool</div>`;
+      return;
+    }
+    list.innerHTML = asks.slice().reverse().map(askqCard).join("");
+  }).catch(() => { list.innerHTML = `<div class="note">could not load questions</div>`; });
+}
+
+function sendAskq(key, body) {
+  const shown = askqShown.get(key);
+  if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }
+  const id = key.slice(key.indexOf("/") + 1);
+  return fetch("/api/fleet/asks/" + encodeURIComponent(id), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...shown, ...body }),
+  }).then(r => { if (!r.ok) throw 0; askqShown.delete(key); loadAskq(); pollAskq(); })
+    .catch(() => toast("could not record that decision"));
+}
+
+// `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
+function answerAskq(key, i) {
+  const shown = askqShown.get(key);
+  if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }
+  let answer;
+  if (i >= 0) answer = shown.options[i];
+  else {
+    const field = document.getElementById("aq-reply-" + key);
+    answer = field ? field.value.trim() : "";
+    if (!answer) { if (field) field.focus(); return; }
+  }
+  return sendAskq(key, { answer });
+}
+
+// Always offered: it frees the box's slot without answering, and the box is told so.
+function dismissAskq(key) { return sendAskq(key, { dismiss: true }); }
+
+function paintAskqBadge(n) {
+  const btn = document.getElementById("askqbtn");
+  if (!btn) return;
+  const had = btn.querySelector(".badge");
+  if (had) had.remove();
+  if (n > 0) {
+    const b = document.createElement("span");
+    b.className = "badge";
+    b.textContent = String(n);
+    btn.appendChild(b);
+  }
+}
+
+function pollAskq() {
+  return fetch("/api/fleet/asks").then(r => r.json()).then(asks => {
+    paintAskqBadge(asks.filter(a => a.state === "waiting").length);
+    if (document.getElementById("askq").classList.contains("open")) loadAskq();
   }).catch(() => {});
 }
 

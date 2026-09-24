@@ -3,14 +3,27 @@
 # `.mcp.json` (box-plugin §2.3, SKEIN-1059).
 #
 # It runs INSIDE the box, as the box's uid, and its whole reach is the box's own reach. It holds no
-# token and opens no socket: it reads a handful of files and answers on stdin/stdout. Three tools,
-# all read-only:
+# token and opens no socket: it reads a handful of files, writes into the box's own request
+# drop-boxes, and answers on stdin/stdout. Three tools read:
 #
 #   skein_resources   the box's signal file, `$SKEIN_STATE/signals/resources.json`, as skein wrote it.
 #   skein_top         this box's largest processes by memory or CPU, or the largest directories of
 #                     its checkout. It never offers to stop anything: the kernel's limits are the
 #                     ceiling, and this is only how the agent sees what it is holding.
-#   skein_requests    the box's own package and git-write requests, and the owner's answers.
+#   skein_requests    the box's own package and git-write requests and questions, and the owner's
+#                     answers.
+#
+# and three ask (SKEIN-1061), each into the box's own drop-box and nowhere else:
+#
+#   skein_request_package  `box-session.sh --request-package`, the path the sudo shim takes.
+#   skein_request_write    `box-session.sh --request-write`, the path the git shim takes.
+#   skein_ask_person       one file in `<fleet root>/.skein/asks/requests/<box>/`, a question for the
+#                          fleet's owner, answered from the cockpit into the box's inbox.
+#
+# Each of the three refuses a box's sixth waiting request in its queue (`CAP`), and a question is at
+# most 2 KB, text and options together (`MAX_ASK_BYTES`). The cap is the tool's courtesy to the
+# agent; the cockpit enforces its own (`asks::list`), because a box can write its drop-box without
+# this file.
 #
 # Two rules carry the security of this file, and each has a test that fails without it
 # (`tests/plugin_tools.rs`):
@@ -43,6 +56,10 @@ BOX_NAME = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
 
 TOP_DEFAULT = 10
 TOP_MAX = 50
+
+# The owner's numbers (box-plugin.md answer 2; feature-wording.md, SKEIN-1060).
+CAP = 5
+MAX_ASK_BYTES = 2048
 
 # Tests only: the directory standing in for `/`, so `/proc` and `/sys` can be a fake tree. It moves
 # nothing a box cannot already read.
@@ -243,6 +260,7 @@ def top(args):
 QUEUES = (
     ("package", "substrate", ("kind", "packages")),
     ("write", "gitgate", ("repo", "reason")),
+    ("question", "asks", ("question", "options")),
 )
 
 
@@ -286,12 +304,25 @@ OUTCOMES = {
 
 
 def answer_for(queue, request_id, answers):
-    """The newest answer to this request: (the message, its state, why it did not install).
+    """The newest answer to this request: (the message, its state, why it did not install, or the
+    owner's answer to a question).
 
-    The body is the one skein writes, matched whole: `<queue> request <id>, <outcome>`. So a package
-    answer never answers a write request that happens to carry the same id, an id is never matched
-    as the prefix of a longer one, and an outcome of the other queue's is no answer at all.
+    The body is the one skein writes, matched whole: `<queue> request <id>, <outcome>`, or for a
+    question `question <id>, "<answer>"` and `question <id> was dismissed without an answer`
+    (`mailbox::send_question_answer`). So a package answer never answers a write request that
+    happens to carry the same id, an id is never matched as the prefix of a longer one, and an
+    outcome of the other queue's is no answer at all.
     """
+    if queue == "question":
+        said = re.compile(r"^question " + re.escape(request_id) + r', "(?P<answer>.*)"$')
+        dismissed = "question " + request_id + " was dismissed without an answer"
+        for a in answers:
+            if a["body"] == dismissed:
+                return a, "dismissed", None
+            m = said.match(a["body"])
+            if m:
+                return a, "answered", m.group("answer")
+        return None, None, None
     shape = re.compile(
         r"^" + re.escape(queue) + r" request " + re.escape(request_id)
         + r", (?P<outcome>" + OUTCOMES[queue] + r")$"
@@ -302,6 +333,62 @@ def answer_for(queue, request_id, answers):
             why = m.groupdict().get("why")
             return a, ("not installed" if why else m.group("outcome")), why
     return None, None, None
+
+
+def own_queue(queue):
+    """This box's own drop-box in one queue, or None when `$SKEIN_BOX` is not a box name.
+
+    The name only chooses which directory to try. What makes it this box's is the mount: the
+    launcher binds this one directory read-write and every other box's read-only, so a name that is
+    not this box's is a write that fails.
+    """
+    box = os.environ.get("SKEIN_BOX", "")
+    if not BOX_NAME.match(box) or ".." in box:
+        return None
+    fleet = os.environ.get("SKEIN_FLEET_ROOT") or "/boxes"
+    return os.path.join(fleet, ".skein", queue, "requests", box)
+
+
+def waiting_in(kind, queue, answers):
+    """The ids of this box's requests in one queue that nobody has answered, oldest first.
+
+    Answered is the inbox's word, never the file's, as in `requests` below.
+    """
+    d = own_queue(queue)
+    try:
+        names = sorted(os.listdir(d)) if d else []
+    except OSError:
+        return []
+    rows = []
+    for name in names:
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                r = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or name[: -len(".json")])
+        if answer_for(kind, rid, answers)[0] is None:
+            rows.append((str(r.get("asked", "")), rid))
+    return [rid for _, rid in sorted(rows)]
+
+
+def at_cap(kind, queue):
+    """The refusal for a box that already has `CAP` waiting in this queue, or None."""
+    waiting = waiting_in(kind, queue, inbox_answers())
+    if len(waiting) < CAP:
+        return None
+    # The ending names what frees a slot in THIS queue: the owner answers or dismisses a question,
+    # and grants or denies a package or a write (the owner's words, SKEIN-1061).
+    frees = "answered or dismissed" if kind == "question" else "granted or denied"
+    return reply(
+        {"error": "at-cap", "waiting": waiting},
+        "skein: you already have %d waiting: %s. Ask again once one is %s. "
+        "skein_requests lists them." % (CAP, ", ".join(waiting), frees),
+    )
 
 
 def requests(_args):
@@ -337,11 +424,171 @@ def requests(_args):
             answer, decision, why = answer_for(kind, rid, answers)
             row["state"] = decision or "waiting"
             row["answer"] = answer
-            if why:
+            if why is not None and kind == "question":
+                row["answered"] = why
+            elif why:
                 row["why"] = why
             out.append(row)
     out.sort(key=lambda r: r["asked"])
     return {"box": box, "requests": out}
+
+
+# ------------------------------------------------------------------------------------------------
+# skein_request_package, skein_request_write, skein_ask_person
+# ------------------------------------------------------------------------------------------------
+
+
+class Reply(dict):
+    """A tool's answer with a sentence for the agent after it, as the second content block."""
+
+    def __init__(self, result, said):
+        super().__init__(result)
+        self.said = said
+
+
+def reply(result, said):
+    return Reply(result, said)
+
+
+def launcher():
+    """The launcher every box's shims call, where `fleet::box_session_path` installs it."""
+    return os.path.join(os.environ.get("SKEIN_FLEET_ROOT") or "/boxes", ".skein", "box-session.sh")
+
+
+def file_through_launcher(kind, queue, argv):
+    """Run one of the launcher's two filing entry points, and say what it said.
+
+    The launcher does the filing, so there is one path per queue: the same validation, the same
+    collapse of a repeated ask, the same drop-box, and the same sentences the shims print. Its exit
+    codes are its vocabulary: 0 filed (or already asked), 3 refused for the name, 4 not recorded.
+    """
+    box = os.environ.get("SKEIN_BOX", "")
+    if not BOX_NAME.match(box) or ".." in box:
+        return {"error": "no-box-name"}
+    refused = at_cap(kind, queue)
+    if refused is not None:
+        return refused
+    try:
+        done = subprocess.run(
+            ["bash", launcher()] + argv[:1] + [box] + argv[1:],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"error": "launcher-failed"}
+    said = (done.stdout + done.stderr).strip()
+    if done.returncode == 3:
+        return reply({"error": "refused"}, said)
+    if done.returncode != 0:
+        return reply({"error": "not-recorded"}, said)
+    m = re.search(r"[Rr]equest (\S+) is ", done.stdout)
+    if not m:
+        return reply({"error": "not-recorded"}, said)
+    rid = m.group(1)
+    _answer, decision, _why = answer_for(kind, rid, inbox_answers())
+    return reply({"id": rid, "state": decision or "waiting"}, said)
+
+
+def request_package(args):
+    manager = args.get("manager")
+    packages = args.get("packages")
+    why = args.get("why")
+    if manager not in ("apt", "npm"):
+        return {"error": "manager-must-be-apt-or-npm"}
+    # Required, and one line: the owner reads it on the card as "why: <text>".
+    if not isinstance(why, str) or not why.strip() or "\n" in why or "\r" in why:
+        return {"error": "why-must-be-text"}
+    if (
+        not isinstance(packages, list)
+        or not packages
+        or not all(isinstance(p, str) and p and not p.startswith("-") for p in packages)
+    ):
+        return {"error": "packages-must-be-a-list-of-names"}
+    tool = "apt-get" if manager == "apt" else "npm"
+    return file_through_launcher(
+        "package", "substrate", ["--request-package", "--why", why.strip(), tool, "install"] + packages
+    )
+
+
+def request_write(args):
+    repo = args.get("repo")
+    why = args.get("why", "")
+    if not isinstance(repo, str) or not repo:
+        return {"error": "repo-must-be-owner/name"}
+    if not isinstance(why, str):
+        return {"error": "why-must-be-text"}
+    return file_through_launcher("write", "gitgate", ["--request-write", repo] + ([why] if why else []))
+
+
+def kb(n):
+    """Bytes as the approved sentence prints them: KB, one decimal, rounded up so 2049 bytes is
+    never "2.0 KB" beside a limit of 2 KB."""
+    tenths = -(-n * 10 // 1024)
+    return "%d.%d" % (tenths // 10, tenths % 10)
+
+
+def ask_person(args):
+    question = args.get("question")
+    options = args.get("options", [])
+    if not isinstance(question, str) or not question.strip():
+        return {"error": "question-must-be-text"}
+    if not isinstance(options, list) or not all(
+        isinstance(o, str) and o.strip() and "\n" not in o and "\r" not in o for o in options
+    ):
+        return {"error": "options-must-be-one-line-each"}
+    size = len(question.encode("utf-8")) + sum(len(o.encode("utf-8")) for o in options)
+    if size > MAX_ASK_BYTES:
+        return reply(
+            {"error": "too-long", "bytes": size},
+            "skein: a question is at most 2 KB and this one is %s KB. Shorten it and ask again." % kb(size),
+        )
+    d = own_queue("asks")
+    if d is None:
+        return {"error": "no-box-name"}
+    refused = at_cap("question", "asks")
+    if refused is not None:
+        return refused
+    # The launcher made this directory outside the box and bound it in; in a box it exists already.
+    # Writability is asked, not assumed, for `request_package`'s reason: `makedirs` succeeds on a
+    # neighbour's directory that exists and is read-only here.
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    if not os.access(d, os.W_OK):
+        return {"error": "not-recorded", "queue": d}
+    answers = inbox_answers()
+    for _ in range(20):
+        rid = "q-" + os.urandom(4).hex()
+        if not os.path.exists(os.path.join(d, rid + ".json")) and answer_for("question", rid, answers)[0] is None:
+            break
+    else:
+        return {"error": "not-recorded", "queue": d}
+    body = {
+        "id": rid,
+        "box": os.environ.get("SKEIN_BOX", ""),
+        "question": question,
+        "options": options,
+        "asked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    tmp = os.path.join(d, ".tmp." + rid)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+        # Named only once complete: the cockpit reads this directory, and a half-written ask is a
+        # parse error there rather than a question that arrives a moment later.
+        os.replace(tmp, os.path.join(d, rid + ".json"))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return {"error": "not-recorded", "queue": d}
+    return reply(
+        {"id": rid, "state": "waiting"},
+        "skein: asked the person (question %s). The answer arrives in your inbox; nothing is answered yet." % rid,
+    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -372,14 +619,65 @@ TOOLS = [
     },
     {
         "name": "skein_requests",
-        "description": "This box's own package and repository-write requests, and the owner's "
-        "answer to each, from the inbox only the owner can write.",
+        "description": "This box's own package and repository-write requests and questions, and "
+        "the owner's answer to each, from the inbox only the owner can write.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    {
+        "name": "skein_request_package",
+        "description": "Ask the fleet's owner to install a system package for every box. Nothing "
+        "is installed until they approve it in the cockpit; the answer arrives in your inbox.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "manager": {"type": "string", "enum": ["apt", "npm"]},
+                "packages": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "why": {"type": "string"},
+            },
+            "required": ["manager", "packages", "why"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "skein_request_write",
+        "description": "Ask the fleet's owner for write access to a repository that is not this "
+        "box's own (owner/name), and say why. The answer arrives in your inbox.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"repo": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["repo", "why"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "skein_ask_person",
+        "description": "Ask the fleet's owner a question, at most 2 KB, optionally with the answers "
+        "to choose from. They see it in the cockpit as your own words; the answer arrives in your "
+        "inbox. At most 5 may wait at once.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "options": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
 ]
 
-HANDLERS = {"skein_resources": resources, "skein_top": top, "skein_requests": requests}
+HANDLERS = {
+    "skein_resources": resources,
+    "skein_top": top,
+    "skein_requests": requests,
+    "skein_request_package": request_package,
+    "skein_request_write": request_write,
+    "skein_ask_person": ask_person,
+}
 
 
 def call(params):
@@ -389,10 +687,11 @@ def call(params):
     if handler is None or not isinstance(args, dict):
         return {"content": [{"type": "text", "text": json.dumps({"error": "unknown-tool"})}], "isError": True}
     result = handler(args)
-    return {
-        "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
-        "isError": "error" in result,
-    }
+    content = [{"type": "text", "text": json.dumps(dict(result), indent=1)}]
+    said = getattr(result, "said", "")
+    if said:
+        content.append({"type": "text", "text": said})
+    return {"content": content, "isError": "error" in result}
 
 
 def answer(msg):

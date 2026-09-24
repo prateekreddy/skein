@@ -64,6 +64,11 @@ pub struct Request {
     pub kind: String,
     #[serde(default)]
     pub packages: Vec<String>,
+    /// What the box said it wants the package for, in its own words (`skein_request_package`,
+    /// SKEIN-1061). Free text, shown to the approver escaped and never executed. Empty for a request
+    /// filed by the sudo shim, which has nothing to say why with.
+    #[serde(default)]
+    pub why: String,
     #[serde(default)]
     pub asked: String,
     /// `pending` → `approved` → `installed` | `failed`, or `denied`.
@@ -300,7 +305,13 @@ fn decided_over(asked: Vec<Request>) -> Vec<Request> {
     asked
         .into_iter()
         .map(|asked| match decision(&asked.box_name, &asked.id) {
-            Some(host) => host,
+            // The host's record, with the box's `why` beside it: the reason is the part of the ask
+            // only the box can know, and the decision never records it — `gitgate`'s `reason`, kept
+            // the same way.
+            Some(mut host) => {
+                host.why = asked.why;
+                host
+            }
             None => undecided(asked),
         })
         .collect()
@@ -1058,6 +1069,31 @@ mod tests {
         // DEFAULT read this one's temp directory instead.
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A decided request still shows why the box asked** (SKEIN-1061). The host's record of the
+    /// decision replaces everything a decision owns, but it never records the `why` — that is the
+    /// box's own word, the part of the ask only it knows — so the card would lose its "why:" line
+    /// the moment the owner pressed a button.
+    ///
+    /// What would make it fail: `decided_over` returning the host's record alone.
+    #[test]
+    fn a_decided_request_still_shows_why_the_box_asked() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+
+        let rendered = req("apt", &["libnss3"]);
+        decide("no-such-sandbox", &rendered, false, false).expect("decided");
+        let asked = Request {
+            why: "chromium needs it to start".into(),
+            ..rendered.clone()
+        };
+        let shown = decided_over(vec![asked]);
+        assert_eq!(shown[0].state, "denied", "{shown:?}");
+        assert_eq!(shown[0].why, "chromium needs it to start", "{shown:?}");
     }
 
     /// **One box's decision does not answer another box's request that carries the same id.**

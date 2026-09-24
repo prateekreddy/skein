@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::Scratch;
+use common::{have, skip, Scratch};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
@@ -113,6 +113,29 @@ impl Box_ {
     /// Call one tool and return what it said, parsed.
     fn call(&self, box_name: &str, tool: &str, args: Value) -> Value {
         self.call_in(&self.at("state"), box_name, tool, args)
+    }
+
+    /// Call one tool and return what it said, parsed, and the sentence it said to the agent after
+    /// it (the second content block), or "" when there was none.
+    fn call_said(&self, box_name: &str, tool: &str, args: Value) -> (Value, String) {
+        let replies = self.talk(
+            box_name,
+            &[json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                     "params":{"name":tool,"arguments":args}})],
+        );
+        let content = &replies[0]["result"]["content"];
+        let json = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+        (json, content[1]["text"].as_str().unwrap_or("").to_string())
+    }
+
+    /// The owner's answer to one question, where skein puts it: the box's read-only inbox, in
+    /// `mailbox::send_question_answer`'s words.
+    fn answered(&self, n: u32, body: &str) {
+        self.put(
+            &format!("state/inbox/{n}-skein.json"),
+            &json!({"from":"skein","kind":"answer","body":body,"ts":"2026-09-24T11:00:00Z"})
+                .to_string(),
+        );
     }
 
     /// The same, with `$SKEIN_STATE` at `state`: the directory skein's own code wrote into.
@@ -530,8 +553,8 @@ fn resources_returns_the_signal_file() {
 }
 
 /// **The server speaks MCP over stdio**: it answers `initialize`, is silent on a notification,
-/// lists exactly its three read-only tools, and answers an unknown method with an error rather
-/// than exiting.
+/// lists exactly its six tools, the three that only read marked read-only, and answers an unknown
+/// method with an error rather than exiting.
 ///
 /// What would make it fail: a reply to `notifications/initialized` (the client would read it as a
 /// reply to its next request), a tool added or renamed without this list, or one bad line ending
@@ -563,10 +586,20 @@ fn it_speaks_mcp_over_stdio() {
         .collect();
     assert_eq!(
         names,
-        vec!["skein_resources", "skein_top", "skein_requests"]
+        vec![
+            "skein_resources",
+            "skein_top",
+            "skein_requests",
+            "skein_request_package",
+            "skein_request_write",
+            "skein_ask_person"
+        ]
     );
+    // The three that read say so, and the three that ask do not claim to.
     for t in replies[1]["result"]["tools"].as_array().unwrap() {
-        assert_eq!(t["annotations"]["readOnlyHint"], true, "{t}");
+        let reads = !t["name"].as_str().unwrap().starts_with("skein_request_")
+            && t["name"] != "skein_ask_person";
+        assert_eq!(t["annotations"]["readOnlyHint"], reads, "{t}");
     }
     assert_eq!(replies[2]["error"]["code"], -32601);
     assert!(replies[3]["result"].is_object());
@@ -598,7 +631,279 @@ fn it_imports_nothing_that_reaches_the_network() {
     for m in &found {
         assert!(allowed.contains(&m.as_str()), "the server imports {m}");
     }
-    // The one subprocess is `du`, over the box's own checkout.
-    assert_eq!(SERVER.matches("subprocess.run(").count(), 1);
+    // The two subprocesses are `du`, over the box's own checkout, and the launcher's own filing
+    // entry points, which write into the box's own drop-boxes.
+    assert_eq!(SERVER.matches("subprocess.run(").count(), 2);
     assert!(SERVER.contains(r#"["du", "-x", "-k", "--max-depth=1", where]"#));
+    assert!(SERVER.contains(r#"["bash", launcher()] + argv[:1] + [box] + argv[1:]"#));
+}
+
+/// **The sixth waiting question is refused, with the approved words and the five it is waiting
+/// on**; and an answered or dismissed question frees its slot.
+///
+/// The cap is counted from the box's own drop-box, with "answered" taken from the inbox only, as
+/// `skein_requests` takes it — so a box cannot free a slot by writing `answered` into its own file,
+/// and the owner's answer does free one.
+///
+/// What would make it fail: the question tool filing without checking the cap (the sixth is
+/// filed); `CAP` other than 5; the sentence drifting from feature-wording.md's; a waiting count that believes the
+/// file's own `state`, or one that ignores the inbox (the seventh ask after an answer would be
+/// refused).
+#[test]
+fn the_sixth_waiting_question_is_refused_in_the_approved_words() {
+    let b = Box_::new("skein-tools-it-askcap");
+    fs::create_dir_all(b.at("fleet/.skein/asks/requests/example")).unwrap();
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        let (got, said) = b.call_said(
+            "example",
+            "skein_ask_person",
+            json!({"question": format!("question {n}?"), "options": ["Drop it", "Keep it"]}),
+        );
+        let id = got["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{got}"))
+            .to_string();
+        assert_eq!(got["state"], "waiting", "{got}");
+        assert_eq!(
+            said,
+            format!(
+                "skein: asked the person (question {id}). The answer arrives in your inbox; \
+                 nothing is answered yet."
+            )
+        );
+        ids.push(id);
+        // One second apart in `asked`, so "oldest first" is a fact about the files and not about
+        // the order `listdir` happens to return.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    // A box that writes `answered` into its own file frees nothing.
+    let first = b.at(&format!(
+        "fleet/.skein/asks/requests/example/{}.json",
+        ids[0]
+    ));
+    let mut forged: Value = serde_json::from_str(&fs::read_to_string(&first).unwrap()).unwrap();
+    forged["state"] = json!("answered");
+    fs::write(&first, forged.to_string()).unwrap();
+
+    let (got, said) = b.call_said(
+        "example",
+        "skein_ask_person",
+        json!({"question": "a sixth?"}),
+    );
+    assert_eq!(
+        got["error"], "at-cap",
+        "the sixth waiting question was filed: {got}"
+    );
+    assert_eq!(
+        said,
+        format!(
+            "skein: you already have 5 waiting: {}. Ask again once one is answered or dismissed. \
+             skein_requests lists them.",
+            ids.join(", ")
+        )
+    );
+    let files = fs::read_dir(b.at("fleet/.skein/asks/requests/example"))
+        .unwrap()
+        .count();
+    assert_eq!(files, 5, "a refused ask still left a file");
+
+    // The owner dismisses one: its slot is free, and the next ask is filed.
+    b.answered(
+        1,
+        &format!("question {} was dismissed without an answer", ids[2]),
+    );
+    let (got, _) = b.call_said("example", "skein_ask_person", json!({"question": "now?"}));
+    assert_eq!(
+        got["state"], "waiting",
+        "a dismissal did not free the slot: {got}"
+    );
+}
+
+/// **A question over 2 KB is refused in the approved words**, counting its options with its text,
+/// and nothing is filed.
+///
+/// What would make it fail: the size check dropped or counting the question alone (the options
+/// below carry it over), or the sentence's size printed as "2.0 KB" for a question just over.
+#[test]
+fn a_question_over_two_kilobytes_is_refused() {
+    let b = Box_::new("skein-tools-it-asksize");
+    fs::create_dir_all(b.at("fleet/.skein/asks/requests/example")).unwrap();
+    let (got, said) = b.call_said(
+        "example",
+        "skein_ask_person",
+        json!({"question": "x".repeat(2040), "options": ["123456789"]}),
+    );
+    assert_eq!(got["error"], "too-long", "{got}");
+    assert_eq!(
+        said,
+        "skein: a question is at most 2 KB and this one is 2.1 KB. Shorten it and ask again."
+    );
+    assert_eq!(
+        fs::read_dir(b.at("fleet/.skein/asks/requests/example"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+/// **`skein_requests` lists a question with the owner's answer, from the inbox only**: answered
+/// with the chosen label, dismissed, or waiting whatever the file says.
+///
+/// What would make it fail: the `question` queue missing from `QUEUES`; the answer read from the
+/// file's `state` or `answer`; the approved inbox shapes not matched, or matched as a prefix of a
+/// longer id.
+#[test]
+fn a_question_is_answered_only_from_the_inbox() {
+    let b = Box_::new("skein-tools-it-askanswer");
+    for (id, at) in [("q-1", "10:00"), ("q-2", "10:01"), ("q-3", "10:02")] {
+        b.put(
+            &format!("fleet/.skein/asks/requests/example/{id}.json"),
+            &json!({"id": id, "question": "keep it?", "options": ["Drop it", "Keep it"],
+                    "asked": format!("2026-09-24T{at}:00Z"),
+                    "state": "answered", "answer": "Drop it"})
+            .to_string(),
+        );
+    }
+    b.answered(1, r#"question q-1, "Keep it""#);
+    b.answered(2, "question q-2 was dismissed without an answer");
+    b.answered(3, r#"question q-30, "Drop it""#);
+    let got = b.call("example", "skein_requests", json!({}));
+    let rows: Vec<(String, String, Value)> = got["requests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{got}"))
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["state"].as_str().unwrap().to_string(),
+                r["answered"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("q-1".into(), "answered".into(), json!("Keep it")),
+            ("q-2".into(), "dismissed".into(), Value::Null),
+            ("q-3".into(), "waiting".into(), Value::Null),
+        ],
+        "{got}"
+    );
+}
+
+/// **`skein_request_package` files through the launcher's own entry point, into this box's own
+/// drop-box, with the agent's `why` on the request, and answers with the id and the launcher's
+/// sentence**; and it is capped at five waiting, with the ending the owner chose for this queue:
+/// "granted or denied", where a question's is "answered or dismissed".
+///
+/// What would make it fail: the tool writing the file itself (no launcher sentence, and a second
+/// copy of the package-name rules); the id not parsed from what the launcher said; `--why` not
+/// passed, or not written into the request by `request_package`; the cap not applied to this
+/// queue, or its sentence ending as a question's does.
+#[test]
+fn a_package_request_goes_through_the_launcher_and_is_capped() {
+    if !have("jq") {
+        return skip("no jq, so the launcher cannot file a package request");
+    }
+    let b = Box_::new("skein-tools-it-askpkg");
+    b.put(
+        "fleet/.skein/box-session.sh",
+        include_str!("../src/box-session.sh"),
+    );
+    fs::create_dir_all(b.at("fleet/.skein/substrate/requests/example")).unwrap();
+    let (got, said) = b.call_said(
+        "example",
+        "skein_request_package",
+        json!({"manager": "apt", "packages": ["libnss3"], "why": "chromium needs it to start"}),
+    );
+    let id = got["id"].as_str().unwrap_or_else(|| panic!("{got} {said}"));
+    assert_eq!(got["state"], "waiting", "{got}");
+    assert!(
+        said.starts_with(&format!(
+            "skein: asked the fleet for apt (libnss3). Request {id} is pending approval."
+        )),
+        "{said}"
+    );
+    let filed: Value = serde_json::from_str(
+        &fs::read_to_string(b.at(&format!(
+            "fleet/.skein/substrate/requests/example/{id}.json"
+        )))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(filed["packages"], json!(["libnss3"]));
+    assert_eq!(filed["why"], "chromium needs it to start", "{filed}");
+    let id = id.to_string();
+
+    // Four more waiting, filed by hand in the launcher's shape, make five.
+    for n in 1..5 {
+        b.put(
+            &format!("fleet/.skein/substrate/requests/example/2026010{n}-000000-1.json"),
+            &json!({"id": format!("2026010{n}-000000-1"), "kind": "apt", "packages": [format!("p{n}")],
+                    "asked": format!("2026-01-0{n}T00:00:00Z"), "state": "pending"})
+            .to_string(),
+        );
+    }
+    let (got, said) = b.call_said(
+        "example",
+        "skein_request_package",
+        json!({"manager": "npm", "packages": ["left-pad"], "why": "the build script wants it"}),
+    );
+    assert_eq!(got["error"], "at-cap", "{got} {said}");
+    assert_eq!(
+        said,
+        format!(
+            "skein: you already have 5 waiting: 20260101-000000-1, 20260102-000000-1, \
+             20260103-000000-1, 20260104-000000-1, {id}. Ask again once one is granted or denied. \
+             skein_requests lists them."
+        )
+    );
+}
+
+/// **A package request without a `why` is refused, and nothing is filed**: missing, blank, not
+/// text, or more than one line.
+///
+/// What would make it fail: the tool not checking `why` before it calls the launcher — the
+/// launcher files a request with or without one, because the sudo shim never has one, so only the
+/// tool can require it.
+#[test]
+fn a_package_request_without_a_why_is_refused() {
+    if !have("jq") {
+        return skip("no jq, so the launcher cannot file a package request");
+    }
+    let b = Box_::new("skein-tools-it-askwhy");
+    b.put(
+        "fleet/.skein/box-session.sh",
+        include_str!("../src/box-session.sh"),
+    );
+    fs::create_dir_all(b.at("fleet/.skein/substrate/requests/example")).unwrap();
+    for (what, args) in [
+        (
+            "missing",
+            json!({"manager": "apt", "packages": ["libnss3"]}),
+        ),
+        (
+            "blank",
+            json!({"manager": "apt", "packages": ["libnss3"], "why": "  "}),
+        ),
+        (
+            "not text",
+            json!({"manager": "apt", "packages": ["libnss3"], "why": 7}),
+        ),
+        (
+            "two lines",
+            json!({"manager": "apt", "packages": ["libnss3"], "why": "a\nb"}),
+        ),
+    ] {
+        let got = b.call("example", "skein_request_package", args);
+        assert_eq!(got["error"], "why-must-be-text", "{what}: {got}");
+    }
+    assert_eq!(
+        fs::read_dir(b.at("fleet/.skein/substrate/requests/example"))
+            .unwrap()
+            .count(),
+        0,
+        "a request with no why was filed"
+    );
 }

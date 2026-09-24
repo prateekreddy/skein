@@ -152,6 +152,27 @@ pub fn send_answer(box_name: &str, queue: &str, id: &str, outcome: &str) -> Resu
     )
 }
 
+/// The owner's answer to one of a box's questions (`crate::asks`), into that box's inbox and no
+/// other, in the approved words (feature-wording.md, SKEIN-1060): `question <id>, "<label>"` for an
+/// answer, `question <id> was dismissed without an answer` for a dismissal. The question is not
+/// echoed: the id and the label are enough, and both stay inside the box's own session.
+///
+/// Refuses what [`send_answer`] refuses, for its reasons: a name that reaches more than one inbox,
+/// and a label of more than one line.
+pub fn send_question_answer(box_name: &str, id: &str, label: Option<&str>) -> Result<(), String> {
+    if !crate::util::valid_name(box_name) || box_name == "broadcast" {
+        return Err(format!("unusable box name {box_name:?}"));
+    }
+    let body = match label {
+        Some(l) if l.is_empty() || l.contains('\n') || l.contains('\r') => {
+            return Err(format!("unusable answer {l:?}"))
+        }
+        Some(l) => format!("question {id}, \"{l}\""),
+        None => format!("question {id} was dismissed without an answer"),
+    };
+    send_message(box_name, "answer", &body)
+}
+
 /// Post a message (from `skein`) in the shape mailbox.sh writes so each box's `inbox` picks it up.
 /// `to` is a vmid or "broadcast". Routed to the right store: a specific box → its repo's store; a
 /// broadcast → every store (so boxes of every repo see it).

@@ -221,6 +221,8 @@ fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
         skein_toolchain_path(),
         crate::substrate::substrate_dir(),
         crate::gitgate::gitgate_dir(),
+        // A box's questions for its owner (SKEIN-1061), the third request queue.
+        crate::asks::asks_dir(),
         // skein's box plugin, installed beside the launcher (SKEIN-1056), and its turn-state
         // variant (SKEIN-1062).
         crate::runtime::plugin_dir(),
@@ -350,11 +352,12 @@ pub fn substrate_strays() -> Result<Vec<Stray>, String> {
 ///   box's name read `privileged` and came up as the workshop box — every isolation bind skipped
 ///   and the fleet agent's token readable — because a file four directories away still said `1`.
 ///   It goes first so a drop-box that will not delete cannot leave it behind.
-/// * the substrate and gitgate **drop-boxes**, `requests/<box>/`, made by the launcher outside the
-///   box's mount namespace at every start (`src/box-session.sh`, the `for asking in substrate
-///   gitgate` loop) and bound read-write into that box alone. Addressed through
-///   [`crate::substrate::box_requests_dir`] and [`crate::gitgate::box_requests_dir`] rather than
-///   spelled again here, so there is one path per queue and not two.
+/// * the substrate, gitgate and asks **drop-boxes**, `requests/<box>/`, made by the launcher
+///   outside the box's mount namespace at every start (`src/box-session.sh`, the `for asking in
+///   substrate gitgate asks` loop) and bound read-write into that box alone. Addressed through
+///   [`crate::substrate::box_requests_dir`], [`crate::gitgate::box_requests_dir`] and
+///   [`crate::asks::box_requests_dir`] rather than spelled again here, so there is one path per
+///   queue and not two.
 ///
 /// **[`box_state`] is deliberately absent**, and that is a decision rather than an omission: it
 /// holds the box's conversation, and `sandbox::forget_box_files`' own doc says that must outlive
@@ -364,6 +367,7 @@ fn box_side_state(name: &str) -> Vec<std::path::PathBuf> {
         box_declared(name),
         std::path::PathBuf::from(crate::substrate::box_requests_dir(name)),
         std::path::PathBuf::from(crate::gitgate::box_requests_dir(name)),
+        std::path::PathBuf::from(crate::asks::box_requests_dir(name)),
     ]
 }
 
@@ -1165,6 +1169,7 @@ mod tests {
     /// `skeins_own_substrate_directories_are_never_offered_for_deletion` asserts the code still
     /// names the same set, so drift fails rather than hides.
     const SUBSTRATE_DIRS: &[&str] = &[
+        "asks",
         "detached",
         "gitgate",
         "plugin",
