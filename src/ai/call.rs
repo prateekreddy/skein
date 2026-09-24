@@ -431,7 +431,11 @@ pub(crate) fn claude_oneshot_telling(
 /// whole diff again on every round after it.
 ///
 /// **Only a refusal steps down.** A call that ran out of time was working, and retrying it twice
-/// more would spend three budgets on one reading. A missing binary or a refused login answers the
+/// more would spend three budgets on one reading. That includes a BOX that ran out of time
+/// ([`Unread::BoxSlow`], SKEIN-818): before it ended the call, the box's timeout fell through to a
+/// local spawn, whose `--resume` of a session that lives in the box answered with a refusal — and
+/// a refusal steps down, back into the box, for another full budget. Measured by
+/// `a_box_that_runs_out_of_time_is_asked_once_and_nothing_runs_here`. A missing binary or a refused login answers the
 /// same way whichever flag it is handed — and `ai`'s standing refusal makes the second and third
 /// attempts free — so stepping down there costs nothing and keeps the ladder one rule instead of a
 /// list of exceptions.
@@ -537,6 +541,19 @@ pub(crate) fn claude_in_turn(
                 github,
             ) {
                 Ok(ran) => return from_sandbox(ran, &bin, turn).map(Answered::as_addressed),
+                // **A box that ran out of time ends the call here** (SKEIN-818). Every other `Err`
+                // below cost nothing — no record, a spawn that failed on the spot — and is right to
+                // fall through at once. This one has already spent the whole budget, and falling
+                // through handed the local spawn THE SAME budget again; the owner's decision is
+                // that spending it again is the reader's call, not skein's. Not remembered as a
+                // standing refusal: it is a fact about this box and this moment, not the setup.
+                Err(why) if box_ran_out_of_time(&why) => {
+                    eprintln!(
+                        "skein: {name} did not answer within its budget, so the call stops here \
+                         rather than spend it again outside the box — {why}"
+                    );
+                    return Err(Unread::BoxSlow(timeout));
+                }
                 Err(why) => {
                     // Still said here, because the whole string belongs in a log: the PATH skein
                     // had, the errno, the program's own name. What goes to the reader is the
@@ -1590,6 +1607,102 @@ mod tests {
             "a refusal found by `doctor` was remembered and answered the next real call"
         );
 
+        forget_refusal();
+    }
+
+    /// **A box that runs out of time is asked once, and nothing runs here after it** (SKEIN-818).
+    ///
+    /// The whole ladder is driven — [`claude_in_conversation`], not one [`claude_in_turn`] — because
+    /// the spend the item is about was the ladder's as much as the fall-through's. Every crossing
+    /// into the box and every local spawn appends one line to the same log, so the assertion is on
+    /// what actually ran, in order, and not on what a function returned.
+    ///
+    /// The local stand-in refuses a named conversation the way the real CLI does when the session
+    /// lives in the box and not here (`No conversation found`, exit 1) and answers a turn that names
+    /// none. That is the shape the design agent read out of the code: the box times out, the local
+    /// `--resume` refuses, a refusal steps down — back into the box. Seen when the fall-through was
+    /// put back (the sabotage recorded in the commit): the log read `box local box local box local`,
+    /// three full box budgets and three local spawns for one call, and the call SUCCEEDED from the
+    /// third local one, so nothing on the answer would have said any of it happened.
+    ///
+    /// **What makes it fail:** the `box_ran_out_of_time` arm in `claude_in_turn` removed (the log
+    /// gains `local`, and the box line repeats); or the ladder stepping down on `BoxSlow` (a second
+    /// `box`).
+    #[cfg(unix)]
+    #[test]
+    fn a_box_that_runs_out_of_time_is_asked_once_and_nothing_runs_here() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home);
+        env.set("SKEIN_AI", "on");
+        // Unset, so the box branch is reachable; the local binary is named through the seam.
+        env::remove_var("SKEIN_CLAUDE_BIN");
+        crate::testutil::placed("review-box");
+        let log = home.join("ran.log");
+
+        let stub = home.join("local-claude.sh");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho local >> '{log}'\n\
+                 case \" $* \" in *' --resume '*|*' --session-id '*) \
+                 echo 'No conversation found with session ID: x'; exit 1;; esac\n\
+                 printf 'the local reading'\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        let _local = seam::stand_in(stub.to_string_lossy().into_owned());
+
+        // The box: it is entered, says so, and never answers inside the budget.
+        let entered = format!("echo box >> '{}'; exec sleep 5", log.display());
+        let _at = crate::place::seam::install(Box::new(move |_: &[String]| {
+            Some(vec!["sh".to_string(), "-c".into(), entered.clone()])
+        }));
+
+        let budget = Duration::from_millis(300);
+        let began = std::time::Instant::now();
+        let got = claude_in_conversation(
+            "hi",
+            None,
+            budget,
+            "3f1c9a52-0000-4000-8000-000000000818",
+            home,
+            None,
+            Machine::Box("review-box"),
+        );
+        let ran = fs::read_to_string(&log).unwrap_or_default();
+        let ran: Vec<&str> = ran.lines().collect();
+
+        assert_eq!(
+            ran,
+            ["box"],
+            "a box that ran out of time was followed by more spending — a local call, or a second \
+             trip into the box — where the owner decided the call stops: {ran:?}"
+        );
+        assert_eq!(
+            got,
+            Err(Unread::BoxSlow(budget)),
+            "the call did not end on the box's own timeout"
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "the box's budget was not enforced, so this is not the timeout arm at all"
+        );
+        assert!(
+            Unread::BoxSlow(Duration::from_secs(900))
+                .say()
+                .starts_with("its box did not answer within 15m, and skein stopped there"),
+            "the row's sentence is not the approved one"
+        );
+
+        crate::place::forget_place("review-box");
         forget_refusal();
     }
 }

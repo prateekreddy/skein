@@ -389,6 +389,149 @@ await check("the row offers every verdict, and a way out to the change", async (
 });
 
 console.log("\nacts");
+// **The composer is finished from the keyboard** (SKEIN-606, the owner's option A, approved as
+// drafted). ⌘↵ presses the primary button — **ask** for an ask, **post to GitHub** for a comment,
+// through the same 8-second undo — Esc presses cancel and keeps the words, and while the composer
+// is busy both keys are ignored. Ctrl stands in for ⌘ here, as the handler says it must.
+//
+// Fails on: the `onkeydown` dropped from `#rev-compose` (no answer arrives, the composer stays
+// open), the busy guard dropped (an Esc mid-answer closes it, or a second ask is sent), Esc
+// clearing what was typed, the chord posting past the undo window, or either hint reworded.
+const composerKey = () => page.evaluate(() => revComposing && revComposeStore(revComposing));
+await check("⌘↵ in an ask presses ask, and the composer says so", async () => {
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
+  await until(() => !!document.getElementById("rev-compose"), null, "pressing ask drew no composer");
+  const hint = await page.$eval("#revpane .revcompose .revacts .revkeys", e => e.textContent.trim());
+  if (hint !== "⌘↵ asks · Esc closes") throw new Error(`the ask composer's hint is not the approved one: ${JSON.stringify(hint)}`);
+  await page.fill("#rev-compose", "why 5 seconds?");
+  await page.focus("#rev-compose");
+  await page.keyboard.press("Control+Enter");
+  await page.waitForSelector("#revpane .revanswer", { timeout: 15000 })
+    .catch(() => { throw new Error("⌘↵ in the ask composer asked nothing"); });
+  await mustSee("#revpane .revanswer", "the answer the chord asked for");
+});
+await check("while it is busy both keys are ignored, and Esc then closes it with the words kept", async () => {
+  const acts = [];
+  const seen = r => { if (/\/review\/\d+\/act$/.test(r.url())) acts.push(r.url()); };
+  page.on("request", seen);
+  try {
+    await page.fill("#rev-compose", "a question still being typed");
+    await page.evaluate(() => { revComposing.busy = true; renderReviewNow(); });
+    await page.focus("#rev-compose");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Control+Enter");
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    if (!(await page.$("#rev-compose"))) throw new Error("Esc closed a busy composer");
+    if (acts.length) throw new Error(`⌘↵ on a busy composer sent ${acts.length} request(s)`);
+  } finally {
+    page.off("request", seen);
+    await page.evaluate(() => { if (revComposing) { revComposing.busy = false; renderReviewNow(); } });
+  }
+  await page.focus("#rev-compose");
+  await page.keyboard.press("Escape");
+  await until(() => !document.querySelector("#revpane .revcompose"), null, "Esc did not close the composer");
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
+  await until(() => !!document.getElementById("rev-compose"), null, "the ask composer would not reopen");
+  const kept = await page.$eval("#rev-compose", e => e.value);
+  if (kept !== "a question still being typed") throw new Error(`Esc lost the words: ${JSON.stringify(kept)}`);
+  // Leave the next check the composer it was written against: closed, and nothing remembered.
+  const key = await composerKey();
+  await page.click("#revpane .revcompose .revchip:has-text('cancel')");
+  await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, key);
+  await until(() => !document.querySelector("#revpane .revcompose"), null, "cancel left the composer open");
+});
+await check("⌘↵ in a comment posts it through the undo window, not past it", async () => {
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
+  await until(() => !!document.getElementById("rev-compose"), null, "pressing comment drew no composer");
+  const hint = await page.$eval("#revpane .revcompose .revacts .revkeys", e => e.textContent.trim());
+  if (hint !== "⌘↵ posts · Esc closes — your words are kept")
+    throw new Error(`the comment composer's hint is not the approved one: ${JSON.stringify(hint)}`);
+  const key = await composerKey();
+  const rowKey = await page.evaluate(() => revComposing.repo + "#" + revComposing.number);
+  await page.fill("#rev-compose", "a comment sent from the keyboard");
+  await page.focus("#rev-compose");
+  await page.keyboard.press("Control+Enter");
+  await until(() => !document.querySelector("#revpane .revcompose"), null, "⌘↵ left the comment composer open");
+  const held = await page.evaluate(k => { const p = revPending.get(k); return p && { kind: p.kind, state: p.state }; }, rowKey);
+  if (!held || held.kind !== "comment" || held.state !== "waiting")
+    throw new Error(`the chord did not hold a comment in its undo window: ${JSON.stringify(held)}`);
+  // Taken back inside the window, so nothing reaches GitHub and the checks below meet the row as
+  // they were written against it.
+  await page.evaluate(k => revUndo(k), rowKey);
+  await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, key);
+  await settle();
+});
+// **An answer or a draft from outside its box says so above itself** (SKEIN-819, the owner's option
+// A; wording as corrected by the owner on 2026-09-24, because the fall-through still stands in the
+// box's checkout and loses only the earlier reading). The server puts `outside` on the act's answer when the turn fell
+// through to a local call; the fixture's `claude` is named by SKEIN_CLAUDE_BIN, which skips the box
+// altogether, so the route is answered here instead — what is under test is what the composer DOES
+// with `outside`, and the Rust side (`acted`) is tested where it is built.
+//
+// Fails on: the line not drawn, drawn in other words, not surviving the composer being closed and
+// reopened (which is the reload path: both restore from `revComposeSave`'s copy), not retired by an
+// answer from inside the box, the draft's line drawn below the text it is about, or "draft again"
+// drafting from the draft instead of from the notes.
+const OUTSIDE_WHY = "skein has no record of where that box is, so it was never started or it is gone";
+await check("an answer or a draft from outside its box says so above it, and asking again can retire it", async () => {
+  const sent = [];
+  let outside = OUTSIDE_WHY;
+  await page.route("**/review/*/act", route => {
+    const body = JSON.parse(route.request().postData() || "{}");
+    sent.push(body);
+    const text = body.kind === "ask" ? "an answer from here" : "COMMENT drafted here";
+    return route.fulfill({ contentType: "application/json",
+      body: JSON.stringify(outside ? { ok: true, text, outside } : { ok: true, text }) });
+  });
+  const line = () => page.$eval("#revpane .revcompose .outsidebox b", e => e.textContent.trim()).catch(() => null);
+  try {
+    await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
+    await until(() => !!document.getElementById("rev-compose"), null, "pressing ask drew no composer");
+    await page.fill("#rev-compose", "is this safe?");
+    await page.click("#revpane .revcompose .revchip:has-text('ask')");
+    await page.waitForSelector("#revpane .revanswer", { timeout: 15000 });
+    const want = `Answered outside its box — ${OUTSIDE_WHY}. It did not have its earlier reading of this pull request, so this answer comes from your question and the code alone.`;
+    if ((await line()) !== want) throw new Error(`the ask's line is not the approved one: ${JSON.stringify(await line())}`);
+    await mustSee("#revpane .revcompose .outsidebox .revchip:has-text('ask again')", "the ask-again button");
+    // Closed and reopened: the copy a reload restores from.
+    await page.evaluate(() => { const c = revComposing; revComposeClose(); revCompose(c.repo, c.number, c.kind); });
+    await until(() => !!document.querySelector("#revpane .revcompose .outsidebox"), null,
+      "the line did not survive the composer being reopened, so a reload loses the warning and keeps the answer");
+    outside = "";
+    await page.click("#revpane .revcompose .outsidebox .revchip:has-text('ask again')");
+    await until(() => !document.querySelector("#revpane .revcompose .outsidebox"), null,
+      "an answer from inside the box left the outside line standing");
+    const askKey = await page.evaluate(() => revComposeStore(revComposing));
+    await page.click("#revpane .revcompose .revchip:has-text('cancel')");
+    await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, askKey);
+
+    outside = OUTSIDE_WHY;
+    await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
+    await until(() => !!document.getElementById("rev-compose"), null, "pressing comment drew no composer");
+    await page.fill("#rev-compose", "the notes the draft is made from");
+    await page.click("#revpane .revcompose .revchip:has-text('draft with skein')");
+    await until(() => !!document.querySelector("#revpane .revcompose .outsidebox"), null, "a draft from outside its box drew no line");
+    const drafted = `Drafted outside its box — ${OUTSIDE_WHY}. It did not have its earlier reading of this change, so check every claim about the code before you post it.`;
+    if ((await line()) !== drafted) throw new Error(`the draft's line is not the approved one: ${JSON.stringify(await line())}`);
+    const above = await page.evaluate(() => {
+      const l = document.querySelector("#revpane .revcompose .outsidebox"), t = document.getElementById("rev-compose");
+      return !!(l.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    if (!above) throw new Error("the draft's line is not above the draft it is about");
+    sent.length = 0;
+    await page.click("#revpane .revcompose .outsidebox .revchip:has-text('draft again')");
+    for (let i = 0; i < 50 && !sent.length; i++) await new Promise(r => setTimeout(r, 50));
+    if (!sent.length || sent[0].kind !== "draft" || sent[0].body !== "the notes the draft is made from")
+      throw new Error(`"draft again" did not draft from the notes: ${JSON.stringify(sent)}`);
+    await page.waitForFunction(() => revComposing && !revComposing.busy, null, { timeout: 5000 });
+    const draftKey = await page.evaluate(() => revComposeStore(revComposing));
+    await page.click("#revpane .revcompose .revchip:has-text('cancel')");
+    await page.evaluate(k => { try { localStorage.removeItem(k); } catch {} }, draftKey);
+    await until(() => !document.querySelector("#revpane .revcompose"), null, "cancel left the composer open");
+  } finally {
+    await page.unroute("**/review/*/act");
+  }
+});
 // Private by construction: an answer that might be published is a different, more careful, less
 // useful answer — so asking must never look like a step on the way to posting.
 await check("asking a question keeps the answer off GitHub", async () => {

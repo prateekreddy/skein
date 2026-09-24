@@ -5172,7 +5172,8 @@ function revFetchSummary(id, number, how) {
   // name. The merged queue holds every repo at once, so there is no "current repo" to fall back
   // on, which is what used to send the pump to `/api/repos/undefined/…`.
   if (!id || !revHeld) return;
-  const force = how === "force" || how === true;
+  // "here" is "read it here instead" (SKEIN-818): a forced read, outside the pull request's box.
+  const force = how === "force" || how === true || how === "here";
   // **`redraft=1`: read it again, and draft a NEW review from that reading** (SKEIN-293, the
   // owner's "go with one control"). It implies a forced read — a cached reading returns from
   // `review::visit` before anything is drafted, so a redraft honouring the cache would be a press
@@ -5193,7 +5194,7 @@ function revFetchSummary(id, number, how) {
   // neither label said so. Both the check and the drafting are gone (skein stores no review), so
   // there is one press buying one reading; `?redraft=1` is what is left of the distinction, and it
   // now means only `review::Review::Always` — read it even where skein would not read unasked.
-  const q = force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
+  const q = how === "here" ? "?redraft=1&here=1" : force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
   const key = id + "#" + number;
   // **A second read of the same row, started before the first landed** (SKEIN-366). `revReadWaits`
   // is keyed by pull request, so the entry about to be written would replace an outstanding one and
@@ -6080,6 +6081,12 @@ function revDetail(pr) {
   // and it told them to give up while the collapsed row was still drawing them a button
   // (`revReadAgain` counts depth === "unread"): the pane and the row disagreeing about whether
   // there was anything left to do. §law 1 — never a statement without the move it implies.
+  // **Its box did not answer in time, and skein stopped there** (SKEIN-818). The owner's wording,
+  // and the owner's decision: spending the budget again is the reader's call, so the row offers
+  // both ways on — the box again, or here instead — and presses neither by itself.
+  if (s.depth === "unread" && s.stopped_at_box) return `<div class="revnosum boxslow">Not read — ${esc(s.unread_because || "")}
+    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>
+      <button type="button" class="revchip" onclick="revFetchSummary(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'here')">read it here instead</button></div></div>`;
   if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")}
     <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div></div>`;
   // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
@@ -6261,12 +6268,22 @@ function revComposeStore(c) { return `skein.revdraft.${c.repo}#${c.number}.${c.k
 /// caret, and it must still be KEPT.
 function revComposeSave(c = revComposing) {
   if (!c) return;
-  try { localStorage.setItem(revComposeStore(c), JSON.stringify({ text: c.text, answer: c.answer })); } catch {}
+  // `outside` and `draftedFrom` too (SKEIN-819): the line saying an answer or a draft came from
+  // outside its box has to survive a reload exactly as the text it is about does, or a reload is a
+  // way to lose the warning and keep the words it warns about.
+  try {
+    localStorage.setItem(revComposeStore(c), JSON.stringify({
+      text: c.text, answer: c.answer, outside: c.outside || "", draftedFrom: c.draftedFrom || "",
+    }));
+  } catch {}
 }
 function revCompose(repo, number, kind) {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(revComposeStore({ repo, number, kind })) || "null"); } catch {}
-  revComposing = { repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "", busy: false };
+  revComposing = {
+    repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "",
+    outside: (saved && saved.outside) || "", draftedFrom: (saved && saved.draftedFrom) || "", busy: false,
+  };
   renderReviewNow();
   setTimeout(() => document.getElementById("rev-compose")?.focus(), 30);
 }
@@ -6281,8 +6298,12 @@ function revComposeHtml(pr) {
     : "Request changes — posted to GitHub under your name, and moves this out of your lane.";
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
+    ${!asking && c.outside ? `<div class="revstale outsidebox"><b>Drafted outside its box — ${esc(c.outside)}. It did not have its earlier reading of this change, so check every claim about the code before you post it.</b>
+      <button type="button" class="revchip" onclick="revDraftAgain(${pr.number})"${c.busy ? " disabled" : ""}>draft again</button></div>` : ""}
     <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
-      oninput="revComposing.text = this.value; revComposeSave()">${esc(c.text)}</textarea>
+      oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
+    ${c.answer && c.outside ? `<div class="revstale outsidebox"><b>Answered outside its box — ${esc(c.outside)}. It did not have its earlier reading of this pull request, so this answer comes from your question and the code alone.</b>
+      <button type="button" class="revchip" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>ask again</button></div>` : ""}
     ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
     <div class="revacts">
       ${asking
@@ -6290,8 +6311,40 @@ function revComposeHtml(pr) {
         : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
            <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
+      <span class="dim revkeys">${asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept"}</span>
     </div>
   </div>`;
+}
+
+/// **⌘↵ presses the composer's primary button, and Esc presses cancel** (SKEIN-606).
+///
+/// The primary button is the one drawn `.go`: **post to GitHub** for a comment or a request for
+/// changes — the same `revAct` the chip calls, so the same 8-second undo receipt, not a shortcut
+/// past it — and **ask** for an ask. Esc is **cancel**, `revComposeClose`, which takes the composer
+/// off the screen and leaves the words where every keystroke already saved them, so reopening it
+/// brings them back. That is what the hint beside the buttons promises.
+///
+/// **While the composer is busy both keys are ignored**, and swallowed rather than passed on: a
+/// second press of the primary button mid-answer would ask twice, and an Esc mid-answer would close
+/// the composer an answer is about to be painted into. The chips are `disabled` in that state for
+/// the same reason. Ctrl as well as ⌘, because the keyboard a reader has is not the one the hint
+/// draws.
+///
+/// On the textarea rather than on the page's keymap: `shortcutFor` returns nothing while a field
+/// has focus (the guard), so this is the only handler that sees these keys here, and it stops them
+/// there so nothing behind the composer ever does.
+function revComposeKey(ev) {
+  const c = revComposing;
+  if (!c) return;
+  const send = ev.key === "Enter" && (ev.metaKey || ev.ctrlKey);
+  const close = ev.key === "Escape";
+  if (!send && !close) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (c.busy) return;
+  if (close) { revComposeClose(); return; }
+  if (c.kind === "ask") revAsk(c.number);
+  else revAct(c.repo, c.number, c.kind);
 }
 
 /// Ask, privately. The answer replaces nothing and is posted nowhere.
@@ -6302,7 +6355,9 @@ function revAsk(number) {
   revPost(c.repo, number, "ask", c.text).then(d => {
     c.busy = false;
     // `c`, named — not whatever composer is open by the time this runs (SKEIN-841).
-    if (d.ok) { c.answer = d.text; revComposeSave(c); } else toast(d.error || "no answer");
+    // `outside` is the server's reason this answer did not come from the box (SKEIN-819) — empty,
+    // and so cleared, when it did, which is what makes "ask again" able to retire the line.
+    if (d.ok) { c.answer = d.text; c.outside = d.outside || ""; revComposeSave(c); } else toast(d.error || "no answer");
     revComposePaint(c);
   });
 }
@@ -6313,12 +6368,29 @@ function revDraft(number) {
   const c = revComposing;
   if (!c || !c.text.trim()) { toast("say roughly what you want to tell them"); return; }
   c.busy = true; renderReviewNow();
+  // The notes this draft is made FROM, kept so "draft again" drafts from them rather than from
+  // the draft that replaced them in the box (SKEIN-819).
+  const notes = c.text;
   revPost(c.repo, number, "draft", c.text).then(d => {
     c.busy = false;
     // `c`, named — the identical shape, and the identical loss (SKEIN-841).
-    if (d.ok) { c.text = d.text; revComposeSave(c); } else toast(d.error || "could not draft");
+    if (d.ok) {
+      c.text = d.text; c.outside = d.outside || ""; c.draftedFrom = notes;
+      revComposeSave(c);
+    } else toast(d.error || "could not draft");
     revComposePaint(c);
   });
+}
+
+/// "draft again", on the line that says a draft was written outside its box (SKEIN-819): the same
+/// press as "draft with skein", from the notes the draft was made from. What is in the box now is
+/// the draft itself, and drafting from a draft would be a model rewording its own words about a
+/// change it did not see.
+function revDraftAgain(number) {
+  const c = revComposing;
+  if (!c || c.busy) return;
+  if (c.draftedFrom) c.text = c.draftedFrom;
+  revDraft(number);
 }
 
 /// The answer to a composer's own press, painted NOW (SKEIN-416).

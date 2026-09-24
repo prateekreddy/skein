@@ -166,6 +166,14 @@ pub struct Summary {
     /// (see [`Trigger`]). Omitted from the JSON when false, so older clients see no new key.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub budget_stopped: bool,
+    /// **The reading stopped because its box did not answer in time** (SKEIN-818) — the
+    /// machine-readable half of [`crate::ai::Unread::BoxSlow`]'s sentence, for the same reason
+    /// `budget_stopped` is the machine-readable half of its own: the pane keys a control on it.
+    /// Here that is the second of the row's two ways on, "read it here instead", which is a
+    /// deliberate spend outside the box that skein declined to make by itself. Omitted from the
+    /// JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_at_box: bool,
     /// **Did the sweep run to the end on this reading?** — the only evidence in the tree that a
     /// pass covered the whole change (`docs/pr-review.md` §7c).
     ///
@@ -221,6 +229,7 @@ impl Summary {
             // `summarise_and_draft`, and the two failure arms of `summarise_in_stages`.
             computed: false,
             budget_stopped: false,
+            stopped_at_box: false,
             // No reading happened, so no sweep did either. Never `true` from here: this is the
             // constructor for every failure, and the failure direction is fixed.
             swept: false,

@@ -77,6 +77,23 @@ pub fn re_read_and_review(repo: &Repo, slug: &str, pr: &Pr, identities: &[String
     )
 }
 
+/// [`re_read_and_review`], **outside the pull request's box** — "read it here instead" (SKEIN-818).
+///
+/// Reached only from the row that says its box did not answer in time: skein stopped there rather
+/// than spend the same budget again outside the box, and this is the person deciding to. Everything
+/// else about the visit is the redraft's — forced, asked, reviewed.
+pub fn re_read_here_instead(repo: &Repo, slug: &str, pr: &Pr, identities: &[String]) -> Summary {
+    visit(
+        repo,
+        slug,
+        pr,
+        identities,
+        true,
+        Trigger::Asked,
+        Review::HereInstead,
+    )
+}
+
 /// Whether this visit must come back having reviewed as well as summarised.
 ///
 /// The distinction exists because a review can be **asked for directly** — the panel's redraft —
@@ -90,6 +107,14 @@ pub(super) enum Review {
     IfYours,
     /// Review it whatever `draft_due` would have answered. Somebody pressed for one.
     Always,
+    /// [`Review::Always`], **and read it outside its box** — the second of the two ways on that a
+    /// row offers when its box did not answer in time (SKEIN-818, "read it here instead"). The
+    /// person has been told the box already spent a whole budget and is choosing to spend another
+    /// here; skein never makes that choice by itself, so nothing but this press reaches it.
+    ///
+    /// A variant of this enum rather than a parameter beside it because it is only meaningful with
+    /// `Always` — a press — and because [`spend_a_visit`] is already at clippy's argument ceiling.
+    HereInstead,
 }
 
 /// **One reading, whichever half you asked for.** The summary and the review are different tasks
@@ -358,7 +383,7 @@ pub(super) fn spend_a_visit(
     // `computed` stays false, so saying this costs the day nothing.
     if trigger == Trigger::Unasked {
         if let Some(why) = read_tried(&repo.id).get(&format!("{}-{}", pr.number, pr.head_sha)) {
-            return Summary::unread(
+            let mut said = Summary::unread(
                 pr.number,
                 &pr.head_sha,
                 &format!(
@@ -366,6 +391,16 @@ pub(super) fn spend_a_visit(
                      another by itself. Press \"read it\" to try again."
                 ),
             );
+            // **A box that did not answer in time comes back as that row, not this one**
+            // (SKEIN-818). The note is the sentence and nothing else, so the reason is recognised
+            // from it; and the approved row IS the sentence — it already says skein stopped rather
+            // than spend again — so it goes unwrapped, and `stopped_at_box` puts both ways on
+            // beside it exactly as a fresh timeout does.
+            if crate::ai::says_its_box_did_not_answer(why) {
+                said.unread_because = why.clone();
+                said.stopped_at_box = true;
+            }
+            return said;
         }
     }
     // **A ROUND RUNS WHEN SOMEBODY ASKS FOR ONE, and GitHub already has a way to ask** (SKEIN-444).
@@ -481,7 +516,7 @@ pub(super) fn spend_a_visit(
     // read what is already on the pull request before it says anything, which is a better answer
     // to the same question than a file skein kept beside it.
     let draft_due = match review {
-        Review::Always => true,
+        Review::Always | Review::HereInstead => true,
         Review::IfYours => identities.first().is_some_and(|viewer| {
             worth_a_visit(pr)
                 && (pr.author == *viewer
@@ -502,6 +537,7 @@ pub(super) fn spend_a_visit(
         signals: &signals,
         fired: &fired,
         described: &described,
+        here: review == Review::HereInstead,
     };
     // **The purchase.** One analysed pull request = one unit, taken the moment before the model is
     // asked (a call that then fails still spent — the same boundary `computed` draws below), and
@@ -548,6 +584,9 @@ pub(super) struct Visit<'a> {
     fired: &'a [String],
     /// What the author said the change is for — the one statement of intent that exists.
     described: &'a str,
+    /// Read it on skein's own disk rather than in the pull request's box, because a person asked
+    /// for exactly that ([`Review::HereInstead`]). Only the merged call has a box to skip.
+    here: bool,
 }
 
 /// The summary-only ladder: one cheap call over the first [`STAGE1_BYTES`], and a second, longer
@@ -573,6 +612,9 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         signals,
         fired,
         described,
+        // The summary-only ladder asks no box — its calls are one-shots, `Machine::Wherever` —
+        // so there is nothing here to read outside of.
+        here: _,
     } = what;
     let (diff, cut) = truncate(full, STAGE1_BYTES);
     let raw = match crate::ai::claude_oneshot_telling(
@@ -619,6 +661,7 @@ pub(super) fn summarise_in_stages(what: Visit<'_>, full: &str, deep_cut: bool) -
         // Reached only by having run the model.
         computed: true,
         budget_stopped: false,
+        stopped_at_box: false,
         // The two-stage path has no second turn — `sweep` is called from the merged path alone —
         // so nothing has accounted for what this pass covered and it says so.
         swept: false,
@@ -713,6 +756,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         signals,
         fired,
         described,
+        here,
     } = what;
     let spent_unread = |why: &str| {
         let mut said = Summary::unread(pr.number, &pr.head_sha, why);
@@ -724,7 +768,14 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
     // coverage on a second turn, and a second turn needs the first one to have been named; naming
     // it after the pull request instead of after the moment means the next round resumes what this
     // one left rather than paying to be told the same change again.
-    let bench = conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref);
+    //
+    // **Unless a person asked for it here** (SKEIN-818): its box did not answer in time, skein
+    // stopped rather than spend the budget again, and "read it here instead" is the reader
+    // deciding to. Then the bench is the one a reading had before review boxes existed.
+    let bench = match here {
+        true => conversation_here(repo, pr.number, &pr.head_sha, &pr.base_ref),
+        false => conversation_of(repo, pr.number, &pr.head_sha, &pr.base_ref),
+    };
     let (talk, at, standing) = (&bench.talk, &bench.at, &bench.standing);
     // The review's byte budget, not the summary's: the review is the reader that cannot say
     // anything about a file it never saw, so the merged call gets the most diff either consumer
@@ -789,7 +840,14 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
             }
             return narrower;
         }
-        Err(unread) => return spent_unread(&unread.say()),
+        // **A box that did not answer in time is the reader's to spend again** (SKEIN-818). The
+        // row says so in the variant's own words and offers both ways on: read it again (the
+        // box), or read it here instead. The flag is what tells the pane to draw the second.
+        Err(unread) => {
+            let mut said = spent_unread(&unread.say());
+            said.stopped_at_box = matches!(unread, crate::ai::Unread::BoxSlow(_));
+            return said;
+        }
     };
     // **Taken off the answer before anything else makes a model call** (SKEIN-799). `sweep` below
     // is one, and it answers for itself; this is the reading's own reason and there is exactly one
@@ -830,6 +888,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
         depth: if expand { Depth::Expanded } else { Depth::Line },
         computed: true,
         budget_stopped: false,
+        stopped_at_box: false,
         // The second turn's outcome, carried rather than dropped: this is the one reading in the
         // tree a sweep speaks for, and `crate::prwork::facts_of_in` reads it back off this file.
         swept,
@@ -872,7 +931,7 @@ pub(super) fn summarise_and_draft(what: Visit<'_>, slug: &str, raw_diff: &str) -
 /// The separation from [`draft_comment`] is the point: most questions are for your own
 /// understanding, and an answer that might be published is a different, more careful, less useful
 /// answer. Posting is a second, deliberate act.
-pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<String, String> {
+pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<Composed, String> {
     if !summaries_enabled() {
         return Err(
             "reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
@@ -917,18 +976,37 @@ Their question: {question}"#,
         acting_credential().as_ref(),
         bench.machine(),
     )
-    // The answer only. A question answered outside its box is a downgrade nobody has decided how
-    // to say yet — SKEIN-799 settled the wording for the review row, and this is a different
-    // surface with a different reader. Captured rather than silently dropped: see the item.
-    .map(|a| a.said)
+    // The answer, and whether it came from outside the box (SKEIN-819): the composer says so above
+    // it, in the owner's words, with a way to ask again.
+    .map(|a| Composed {
+        text: a.said,
+        outside: a.outside_box,
+    })
     .map_err(|unread| unread.say())
+}
+
+/// **What a composer is handed back: the text, and whether it came from outside the box**
+/// (SKEIN-819).
+///
+/// [`ask`] and [`draft_comment`] are addressed to the pull request's own review box, and fall
+/// through to a local call when it cannot take the turn. That call still stands in the box's
+/// checkout (`ai::tried` runs in `turn.at()`, the box's tree), so it can read the code; what it
+/// loses is the conversation that read the change — the earlier reading. `outside` is [`crate::ai::outside_box_because`]'s reason, carried from
+/// [`crate::ai::Answered`] rather than dropped, so the composer can say so above the text with a
+/// way to ask or draft again. `None` whenever the turn ran in its box, or there was no box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composed {
+    /// The answer, or the drafted comment's body.
+    pub text: String,
+    /// Why this did not run in its box, in words for a reader. `None` when it did.
+    pub outside: Option<String>,
 }
 
 /// Draft a comment for a PR from your rough intent. Returns text to **edit**, never to post.
 ///
 /// The posting is a separate call for the reason you gave: the agent drafts, you correct it, then it
 /// goes. A draft that could post itself would be a different feature with a different risk.
-pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<String, String> {
+pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<Composed, String> {
     if !summaries_enabled() {
         return Err("reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes.".into());
     }
@@ -968,7 +1046,12 @@ Their notes: {intent}"#,
         acting_credential().as_ref(),
         bench.machine(),
     )
-    .map(|a| drafted_body(&a.said))
+    // The body, and where it was written (SKEIN-819) — a draft written outside the box goes out
+    // under a person's name without the earlier reading behind it, so the composer says so.
+    .map(|a| Composed {
+        text: drafted_body(&a.said),
+        outside: a.outside_box,
+    })
     .map_err(|unread| unread.say())
 }
 #[cfg(test)]
@@ -1092,6 +1175,75 @@ mod tests {
         assert!(
             diff < charged,
             "the day was charged before the diff was even fetched"
+        );
+    }
+
+    /// **A box timeout the background pass wrote down comes back as the approved row**
+    /// (SKEIN-818).
+    ///
+    /// An unattended reading that hits `Unread::BoxSlow` leaves a tried-note carrying the row's
+    /// sentence and nothing more, and every later unattended load of the row is answered from that
+    /// note. It used to come back wrapped — "… — skein already spent a reading on this commit…" —
+    /// with no `stopped_at_box`, so the page drew the generic row with one button instead of the
+    /// owner's sentence and both ways on.
+    ///
+    /// **What makes it fail:** the `says_its_box_did_not_answer` branch in `spend_a_visit` removed
+    /// (the row comes back wrapped and without the flag). The control — a note for an ordinary
+    /// timeout — fails if the branch fires for every note.
+    #[test]
+    fn a_box_timeout_the_background_pass_noted_still_offers_both_ways_on() {
+        let _g = crate::testutil::env_lock();
+        let _crossing = crate::place::seam::doing_nothing();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.set("SKEIN_REVIEW_AI", "on");
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "boxslow", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "", "read_prs": true,
+        }))
+        .unwrap();
+        let unasked = |pr: &Pr| {
+            summarise(
+                &repo,
+                "acme/thing",
+                pr,
+                &["me".into()],
+                false,
+                Trigger::Unasked,
+            )
+        };
+
+        let box_slow = crate::ai::Unread::BoxSlow(Duration::from_secs(900)).say();
+        let pr = budget_pr(5, "def");
+        note_tried(&repo.id, pr.number, &pr.head_sha, &box_slow);
+        let row = unasked(&pr);
+        assert!(matches!(row.depth, Depth::Unread), "{row:?}");
+        assert!(
+            row.stopped_at_box,
+            "a box timeout loaded from its note lost `stopped_at_box`, so the row offers one button \
+             instead of the box again or here instead: {row:?}"
+        );
+        assert_eq!(
+            row.unread_because, box_slow,
+            "a box timeout loaded from its note is not the approved sentence"
+        );
+        assert!(!row.computed, "answering from the note spent nothing");
+
+        // The control: any other noted failure keeps the generic row.
+        let slow = crate::ai::Unread::Slow(Duration::from_secs(900)).say();
+        let other = budget_pr(6, "fed");
+        note_tried(&repo.id, other.number, &other.head_sha, &slow);
+        let row = unasked(&other);
+        assert!(
+            !row.stopped_at_box,
+            "an ordinary timeout was offered \"read it here instead\": {row:?}"
+        );
+        assert!(
+            row.unread_because.contains("already spent a reading"),
+            "an ordinary noted failure lost its wrapper: {row:?}"
         );
     }
 
