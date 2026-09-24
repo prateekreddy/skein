@@ -689,7 +689,7 @@ mod tests {
         // removed — and from `Drop`, so they go back on the failing path too.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
-            .set("GH_TOKEN", "gho_test")
+            .set("GH_TOKEN", "skein-test-gho")
             .unset("GITHUB_TOKEN");
         let (base, asked) = routing_github();
         env.set("SKEIN_GITHUB_API", &base);
@@ -848,7 +848,7 @@ mod tests {
         // removed — and from `Drop`, so they go back on the failing path too.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
-            .set("GH_TOKEN", "gho_test")
+            .set("GH_TOKEN", "skein-test-gho")
             .unset("GITHUB_TOKEN");
         let down = std::sync::Arc::new(std::sync::Mutex::new(true));
         let (base, asked) = flaky_rename_github(down.clone());
@@ -1124,7 +1124,7 @@ mod tests {
         // removed — and from `Drop`, so they go back on the failing path too.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
-            .set("GH_TOKEN", "gho_test")
+            .set("GH_TOKEN", "skein-test-gho")
             .unset("GITHUB_TOKEN");
         let (base, asked) = trunk_github();
         env.set("SKEIN_GITHUB_API", &base);
@@ -1236,7 +1236,7 @@ mod tests {
 
         // And it is LAST. Asking `gh` can unlock a system keyring, so anything already stored has
         // to win — otherwise every board poll pays for a credential skein was already holding.
-        crate::gitgate::set_read_pat("github_pat_read").unwrap();
+        crate::gitgate::set_read_pat("skein-test-pat-read").unwrap();
         forget_host_token();
         seen.lock().unwrap().clear();
         assert_eq!(viewer().unwrap().0, "me");
@@ -1327,7 +1327,7 @@ mod tests {
 
         // The person now does what the cockpit told them to do. Nothing restarts, and nothing
         // in the server calls `forget_host_token` — that is the point.
-        crate::gitgate::set_read_pat("github_pat_read").unwrap();
+        crate::gitgate::set_read_pat("skein-test-pat-read").unwrap();
 
         assert_eq!(
             host_token_source(),
@@ -1336,7 +1336,7 @@ mod tests {
         );
         assert_eq!(
             host_token().expect("no token after storing one").expose(),
-            "github_pat_read",
+            "skein-test-pat-read",
             "the source moved but the credential handed to GitHub did not"
         );
 
@@ -1356,7 +1356,7 @@ mod tests {
         env.set("SKEIN_GITHUB_API", &base);
 
         // A read token: the credential someone stores when they want cross-repo reads without an App.
-        crate::gitgate::set_read_pat("github_pat_read").unwrap();
+        crate::gitgate::set_read_pat("skein-test-pat-read").unwrap();
         forget_host_token();
         assert_eq!(viewer().unwrap().0, "me");
         assert_eq!(host_token_source(), GhToken::ReadToken);
@@ -1364,7 +1364,7 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .iter()
-                .any(|h| h == "bearer github_pat_read"),
+                .any(|h| h == "bearer skein-test-pat-read"),
             "the token the user chose never reached GitHub: {:?}",
             seen.lock().unwrap()
         );
@@ -1373,7 +1373,7 @@ mod tests {
         // who that person is. Nothing else is asked for.
         crate::gitgate::set_read_pat("").unwrap();
         crate::gitgate::set_write_credential("mine", "mine", &["me/repo".into()]).unwrap();
-        crate::gitgate::set_credential_token("mine", "github_pat_write").unwrap();
+        crate::gitgate::set_credential_token("mine", "skein-test-pat-write").unwrap();
         forget_host_token();
         seen.lock().unwrap().clear();
         assert_eq!(viewer().unwrap().0, "me");
@@ -1382,10 +1382,10 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|h| h == "bearer github_pat_write"));
+            .any(|h| h == "bearer skein-test-pat-write"));
 
         // The environment wins over both, for headless and CI.
-        std::env::set_var("GH_TOKEN", "gho_exported");
+        std::env::set_var("GH_TOKEN", "skein-test-gho-exported");
         forget_host_token();
         seen.lock().unwrap().clear();
         let _ = viewer();
@@ -1394,7 +1394,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|h| h == "bearer gho_exported"));
+            .any(|h| h == "bearer skein-test-gho-exported"));
 
         // With nothing at all, the queue says what is missing — and says which credential cannot
         // cover it, because an App is the one path that genuinely cannot.

@@ -856,7 +856,7 @@ are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 throug
   ```sh
   curl -s -o /dev/null -w '%{http_code}\n' https://api.github.com/user                # 200
   curl -s -o /dev/null -w '%{http_code}\n' \
-    -H 'Authorization: Bearer not-a-real-token' https://api.github.com/user            # 200
+    -H 'Authorization: Bearer skein-test-not-a-real-token' https://api.github.com/user            # 200
   curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' https://api.github.com/user  # 401
   ```
 

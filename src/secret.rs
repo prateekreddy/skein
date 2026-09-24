@@ -328,7 +328,7 @@ mod tests {
     /// `Debug`, which is the way it would actually happen.
     #[test]
     fn a_secret_prints_as_a_placeholder_everywhere() {
-        let secret = Secret::new("ghp_the_actual_credential");
+        let secret = Secret::new("skein-test-the-actual-credential");
         let displayed = format!("{secret}");
         let debugged = format!("{secret:?}");
         // A struct that holds one, because a derived `Debug` on the ENCLOSING type is how a
@@ -344,12 +344,13 @@ mod tests {
         }
         let request = Request {
             url: "https://api.github.com",
-            token: Secret::new("ghp_the_actual_credential"),
+            token: Secret::new("skein-test-the-actual-credential"),
         };
         let enclosing = format!("{request:?}");
         // A panic message, which is the one place a value is printed by code nobody wrote.
-        let panicked = std::panic::catch_unwind(|| panic!("{}", Secret::new("ghp_in_a_panic")))
-            .expect_err("the panic did not happen, so nothing was formatted");
+        let panicked =
+            std::panic::catch_unwind(|| panic!("{}", Secret::new("skein-test-in-a-panic")))
+                .expect_err("the panic did not happen, so nothing was formatted");
         let panicked = panicked
             .downcast_ref::<String>()
             .cloned()
@@ -362,7 +363,7 @@ mod tests {
             ("a panic message", &panicked),
         ] {
             assert!(
-                !text.contains("ghp_"),
+                !text.contains("skein-test-"),
                 "{what} printed the credential itself: {text}"
             );
             assert!(text.contains("<secret>"), "{what} printed {text}");
@@ -423,7 +424,7 @@ mod tests {
         }
         let json = serde_json::to_string(&Stored {
             id: "mine",
-            token: Secret::new("ghp_the_actual_credential"),
+            token: Secret::new("skein-test-the-actual-credential"),
         })
         .unwrap();
         assert_eq!(json, r#"{"id":"mine"}"#);
@@ -448,11 +449,11 @@ mod tests {
 
         // And the finished article, through the public door.
         let placed = dir.join("api-token");
-        write(&placed, &Secret::new("ghp_written")).unwrap();
+        write(&placed, &Secret::new("skein-test-written")).unwrap();
         assert_eq!(mode_of(&placed), 0o600);
         assert_eq!(
             read(&placed).unwrap().unwrap().expose(),
-            "ghp_written",
+            "skein-test-written",
             "the bytes did not survive the temp and the rename"
         );
         // Nothing left behind: a temp nobody renames is a live credential nobody will clean up.
@@ -481,7 +482,7 @@ mod tests {
         let path = dir.join("api-token");
         std::os::unix::fs::symlink(&outside, &path).unwrap();
 
-        write(&path, &Secret::new("ghp_written")).unwrap();
+        write(&path, &Secret::new("skein-test-written")).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&outside).unwrap(),
@@ -489,7 +490,7 @@ mod tests {
             "the write followed the link and put a live credential outside the directory"
         );
         assert!(!path.is_symlink(), "the link survived the write");
-        assert_eq!(read(&path).unwrap().unwrap().expose(), "ghp_written");
+        assert_eq!(read(&path).unwrap().unwrap().expose(), "skein-test-written");
     }
 
     /// A symlink at the *temp* path is refused rather than written through.
@@ -556,7 +557,7 @@ mod tests {
 
         assert!(forget(&dir.join("nothing-here")).is_ok(), "absent is fine");
         let placed = dir.join("placed");
-        write(&placed, &Secret::new("ghp_x")).unwrap();
+        write(&placed, &Secret::new("skein-test-x")).unwrap();
         forget(&placed).unwrap();
         assert!(!placed.exists());
     }
@@ -593,16 +594,16 @@ mod tests {
     /// that CAN go wrong silently: the answers, and where the trimming does and does not happen.
     #[test]
     fn a_guess_is_refused_whatever_it_shares_with_the_secret() {
-        let secret = Secret::new("0123456789abcdef");
-        assert!(secret.same("0123456789abcdef"));
+        let secret = Secret::new("skein-test-0123456789abcdef");
+        assert!(secret.same("skein-test-0123456789abcdef"));
         assert!(
             !secret.same("0123456789abcde"),
             "a prefix is not the secret"
         );
-        assert!(!secret.same("0123456789abcdefg"));
+        assert!(!secret.same("skein-test-0123456789abcdefg"));
         assert!(!secret.same(""));
         assert!(
-            !secret.same(" 0123456789abcdef "),
+            !secret.same(" skein-test-0123456789abcdef "),
             "`same` trims nothing; the caller decides what its own input may carry"
         );
         let mut early = secret.expose().to_string().into_bytes();
@@ -628,7 +629,7 @@ mod tests {
     /// to be greppable.
     #[test]
     fn dropping_a_secret_scrubs_its_buffer() {
-        let mut secret = Secret::new("ghp_the_actual_credential");
+        let mut secret = Secret::new("skein-test-the-actual-credential");
         let before = secret.expose().as_ptr();
         let len = secret.expose().len();
         secret.scrub();
@@ -644,7 +645,7 @@ mod tests {
         );
 
         let counted = SCRUBS.load(std::sync::atomic::Ordering::SeqCst);
-        drop(Secret::new("ghp_another"));
+        drop(Secret::new("skein-test-another"));
         assert!(
             SCRUBS.load(std::sync::atomic::Ordering::SeqCst) > counted,
             "dropping a Secret did not scrub it — the `Drop` impl is gone or no longer calls scrub"

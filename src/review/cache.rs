@@ -695,7 +695,7 @@ mod tests {
         // Bound after `home`, so the pin goes back before the directory it names is removed.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
-            .set("GH_TOKEN", "gho_test");
+            .set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
         // A GitHub that answers by number: #9 is closed, #8 is still open. Both are absent from the
         // lane below, which is the whole point — absence is the question, not the answer.
@@ -797,7 +797,7 @@ mod tests {
         // Bound after `home`, so the pin goes back before the directory it names is removed.
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
-            .set("GH_TOKEN", "gho_test")
+            .set("GH_TOKEN", "skein-test-gho")
             // Nothing listens here.
             .set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
         crate::prq::forget_host_token();

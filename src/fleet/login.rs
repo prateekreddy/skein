@@ -751,14 +751,22 @@ mod tests {
         };
         let (box_after, sandbox_after) = credential_sync(
             root,
-            Some(&with_mcp("sk-old", "sync|aaaa", "mcp-for-my-repo")),
-            Some(&with_mcp("sk-new", "sync|bbbb", "mcp-for-another-repo")),
+            Some(&with_mcp(
+                "skein-test-sk-old",
+                "sync|aaaa",
+                "mcp-for-my-repo",
+            )),
+            Some(&with_mcp(
+                "skein-test-sk-new",
+                "sync|bbbb",
+                "mcp-for-another-repo",
+            )),
             "sandbox",
         );
 
         // The login travels, which is the point of the sync.
         assert!(
-            box_after.contains("sk-new"),
+            box_after.contains("skein-test-sk-new"),
             "the newer login did not reach the box:\n{box_after}"
         );
         // And the box keeps its own gateway grant, which is the point of this test.
@@ -796,7 +804,7 @@ mod tests {
         let root = dir.as_ref() as &std::path::Path;
         // A real login, and the husk a logout leaves: identical structure, blanked tokens. The husk
         // is what the fleet actually had, so it is written as it was found rather than invented.
-        let login = r#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"sk-ref","expiresAt":1786308957532},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
+        let login = r#"{"claudeAiOauth":{"accessToken":"skein-test-sk-live","refreshToken":"skein-test-sk-ref","expiresAt":1786308957532},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
         let husk = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
         let run = |box_has: Option<&str>, sandbox_has: Option<&str>, newer: &str| {
             credential_sync(root, box_has, sandbox_has, newer)
@@ -805,40 +813,42 @@ mod tests {
         // The regression: a fresh logout must not overwrite an older, working login.
         let (box_side, sandbox_side) = run(Some(husk), Some(login), "box");
         assert!(
-            sandbox_side.contains("sk-live"),
+            sandbox_side.contains("skein-test-sk-live"),
             "a newer logout overwrote the sandbox's login — one box logs out the fleet:\n{sandbox_side}"
         );
         assert!(
-            box_side.contains("sk-live"),
+            box_side.contains("skein-test-sk-live"),
             "the logged-out box was not healed from the sandbox's login:\n{box_side}"
         );
 
         // And the same in the other direction: the sandbox being the one that went stale.
         let (box_side, sandbox_side) = run(Some(login), Some(husk), "sandbox");
         assert!(
-            box_side.contains("sk-live") && sandbox_side.contains("sk-live"),
+            box_side.contains("skein-test-sk-live") && sandbox_side.contains("skein-test-sk-live"),
             "a login was lost to a newer husk on the sandbox side:\nbox {box_side}\nsandbox {sandbox_side}"
         );
 
         // Two real logins still resolve by recency, which is what makes "log in anywhere" work.
-        let fresher = login.replace("sk-live", "sk-fresh");
+        let fresher = login.replace("skein-test-sk-live", "skein-test-sk-fresh");
         let (box_side, sandbox_side) = run(Some(login), Some(&fresher), "sandbox");
         assert!(
-            box_side.contains("sk-fresh") && sandbox_side.contains("sk-fresh"),
+            box_side.contains("skein-test-sk-fresh")
+                && sandbox_side.contains("skein-test-sk-fresh"),
             "the newer of two logins did not win:\nbox {box_side}\nsandbox {sandbox_side}"
         );
 
         // Two husks are nothing to choose between, and neither is worth copying anywhere.
         let (box_side, sandbox_side) = run(Some(husk), Some(husk), "box");
         assert!(
-            !box_side.contains("sk-live") && !sandbox_side.contains("sk-live"),
+            !box_side.contains("skein-test-sk-live")
+                && !sandbox_side.contains("skein-test-sk-live"),
             "invented a login from two logouts"
         );
 
         // A box that has never run seeds from the sandbox — the original "log in once".
         let (box_side, _) = run(None, Some(login), "sandbox");
         assert!(
-            box_side.contains("sk-live"),
+            box_side.contains("skein-test-sk-live"),
             "a new box did not inherit the login:\n{box_side}"
         );
     }
@@ -865,28 +875,28 @@ mod tests {
                 r#"{{"claudeAiOauth":{{"accessToken":"{tok}","refreshToken":"r","expiresAt":{exp}}}}}"#
             )
         };
-        let live = cred("sk-live", 1_900_000_000_000);
-        let stale = cred("sk-stale", 1_700_000_000_000);
+        let live = cred("skein-test-sk-live", 1_900_000_000_000);
+        let stale = cred("skein-test-sk-stale", 1_700_000_000_000);
 
         // Down: the fleet's longer-lived login reaches the box despite the box's newer write.
         let (box_side, sandbox_side) = credential_sync(root, Some(&stale), Some(&live), "box");
         assert!(
-            box_side.contains("sk-live"),
+            box_side.contains("skein-test-sk-live"),
             "a newer *write* of an expired token beat a live login:\nbox {box_side}"
         );
         assert!(
-            sandbox_side.contains("sk-live"),
+            sandbox_side.contains("skein-test-sk-live"),
             "the fleet's own copy was disturbed by a sync that had nothing to give it:\n{sandbox_side}"
         );
 
         // Up: it does not. The box keeps the better one; the fleet keeps what it had.
         let (box_side, sandbox_side) = credential_sync(root, Some(&live), Some(&stale), "sandbox");
         assert!(
-            box_side.contains("sk-live"),
+            box_side.contains("skein-test-sk-live"),
             "the box was handed the worse of the two:\nbox {box_side}"
         );
         assert!(
-            sandbox_side.contains("sk-stale"),
+            sandbox_side.contains("skein-test-sk-stale"),
             "a box wrote the fleet's login:\nsandbox {sandbox_side}"
         );
     }
@@ -905,17 +915,17 @@ mod tests {
     fn a_box_cannot_poison_the_fleets_login_with_an_expiry_it_made_up() {
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
-        let real = r#"{"claudeAiOauth":{"accessToken":"sk-real","refreshToken":"r","expiresAt":1750000000000}}"#;
+        let real = r#"{"claudeAiOauth":{"accessToken":"skein-test-sk-real","refreshToken":"r","expiresAt":1750000000000}}"#;
         // Year 10000, and a token the box chose.
-        let forged = r#"{"claudeAiOauth":{"accessToken":"sk-attacker","refreshToken":"r","expiresAt":253402300799000}}"#;
+        let forged = r#"{"claudeAiOauth":{"accessToken":"skein-test-sk-attacker","refreshToken":"r","expiresAt":253402300799000}}"#;
 
         let (_, sandbox_side) = credential_sync(root, Some(forged), Some(real), "box");
         assert!(
-            sandbox_side.contains("sk-real"),
+            sandbox_side.contains("skein-test-sk-real"),
             "a box replaced the fleet's login with one it made up:\n{sandbox_side}"
         );
         assert!(
-            !sandbox_side.contains("sk-attacker"),
+            !sandbox_side.contains("skein-test-sk-attacker"),
             "the forged token reached the copy every later box seeds from:\n{sandbox_side}"
         );
     }
@@ -930,13 +940,13 @@ mod tests {
     fn a_login_from_a_box_still_heals_a_fleet_that_has_none() {
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
-        let login = r#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r","expiresAt":1900000000000}}"#;
+        let login = r#"{"claudeAiOauth":{"accessToken":"skein-test-sk-live","refreshToken":"r","expiresAt":1900000000000}}"#;
         let husk = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}"#;
 
         for fleet_has in [None, Some(husk)] {
             let (_, sandbox_side) = credential_sync(root, Some(login), fleet_has, "sandbox");
             assert!(
-                sandbox_side.contains("sk-live"),
+                sandbox_side.contains("skein-test-sk-live"),
                 "a fleet with no login of its own was left without one:\n{sandbox_side}"
             );
         }
@@ -1052,7 +1062,7 @@ mod tests {
                 r#"{"tokens":{"access_token":"a","refresh_token":"b"}}"#,
                 true,
             ),
-            (r#"{"OPENAI_API_KEY":"sk-x"}"#, true),
+            (r#"{"OPENAI_API_KEY":"skein-test-sk-x"}"#, true),
             (r#"{}"#, false),
             ("not json at all", false),
         ];
@@ -1696,18 +1706,30 @@ for a in sys.argv[2:]:
         // The box that refreshed most recently: it holds the token the rotation left standing.
         let winner = put(
             boxes.join("web-main/home/.claude/.credentials.json"),
-            &cred("sk-current", now_ms + 5 * 3_600_000, "web-main-grant"),
+            &cred(
+                "skein-test-sk-current",
+                now_ms + 5 * 3_600_000,
+                "web-main-grant",
+            ),
         );
         // Superseded twelve hours ago and none the wiser. This is the logged-out box.
         let stale = put(
             boxes.join("api-worker/home/.claude/.credentials.json"),
-            &cred("sk-superseded", now_ms - 12 * 3_600_000, "api-worker-grant"),
+            &cred(
+                "skein-test-sk-superseded",
+                now_ms - 12 * 3_600_000,
+                "api-worker-grant",
+            ),
         );
         // And the sandbox's own copy, older still — the one `fleet-home` is written from, so a
         // fleet that stops here reports itself signed out with a working login two feet away.
         let canon = put(
             home.join(".claude/.credentials.json"),
-            &cred("sk-ancient", now_ms - 19 * 3_600_000, "sandbox-grant"),
+            &cred(
+                "skein-test-sk-ancient",
+                now_ms - 19 * 3_600_000,
+                "sandbox-grant",
+            ),
         );
 
         let run = |refused: Option<(&str, i64)>| {
@@ -1732,7 +1754,7 @@ for a in sys.argv[2:]:
         // assertion is here rather than in its own test because it is the same run: the box that
         // lost the rotation is healed in the same tick that leaves `$HOME` alone.
         assert!(
-            read(&canon).contains("sk-ancient"),
+            read(&canon).contains("skein-test-sk-ancient"),
             "a box's copy replaced the fleet's own on the strength of a field the box wrote: {}",
             read(&canon)
         );
@@ -1745,12 +1767,12 @@ for a in sys.argv[2:]:
         // that keeps working.
         let got = read(&stale);
         assert!(
-            got.contains("sk-current"),
+            got.contains("skein-test-sk-current"),
             "the logged-out box kept a credential the fleet has moved past — it claims two months \
              of life and has not been renewed since a sibling's refresh orphaned it: {got}"
         );
         assert!(
-            !got.contains("sk-superseded") && !got.contains("sk-ancient"),
+            !got.contains("skein-test-sk-superseded") && !got.contains("skein-test-sk-ancient"),
             "the logged-out box still carries the old token beside the new one: {got}"
         );
         // Its own identity at its own work-tracking gateway survives being healed. The donor's
@@ -1785,14 +1807,18 @@ for a in sys.argv[2:]:
         assert_eq!(mtime(&stale), mtime(&winner));
 
         // **Evidence skein produced, and now the fleet's copy moves.** A model call made with
-        // `sk-ancient` came back refused — something that HAPPENED, to a credential the sidecar
+        // `skein-test-sk-ancient` came back refused — something that HAPPENED, to a credential the sidecar
         // names — and that is the one thing a box cannot write, because a box cannot make skein's
         // call fail on skein's own behalf.
         assert!(
             run(Some(("claude", now_ms))).contains(&canon.display().to_string()),
             "the fleet's copy stayed put with a refusal recorded against the very credential in it"
         );
-        assert!(read(&canon).contains("sk-current"), "{}", read(&canon));
+        assert!(
+            read(&canon).contains("skein-test-sk-current"),
+            "{}",
+            read(&canon)
+        );
 
         // The evidence is durable and it names its subject, so it retires itself: the copy it was
         // about is gone, and the next tick must not go on treating the fleet's login as refused.
@@ -1804,7 +1830,11 @@ for a in sys.argv[2:]:
         // more — and it ranks below the box's, which is what makes this a question at all.
         let signed_in_again = put(
             home.join(".claude/.credentials.json"),
-            &cred("sk-relogin", now_ms - 19 * 3_600_000, "sandbox-grant"),
+            &cred(
+                "skein-test-sk-relogin",
+                now_ms - 19 * 3_600_000,
+                "sandbox-grant",
+            ),
         );
         assert_eq!(
             run(None),
@@ -1812,7 +1842,7 @@ for a in sys.argv[2:]:
             "evidence about a credential that is gone was still believed, so a box replaced the \
              one somebody had just signed in with"
         );
-        assert!(read(&signed_in_again).contains("sk-relogin"));
+        assert!(read(&signed_in_again).contains("skein-test-sk-relogin"));
     }
 
     /// Nothing is moved when every copy is dead, or when every copy is alive.

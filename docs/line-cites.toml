@@ -1082,19 +1082,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: could not save the {rel} login out of {sandbox} — the copy \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:381"]
+["src/fleet/fleetlogin.rs:387"]
 line = "eprintln!(\"skein: could not restore the {rel} login into {sandbox}: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:504"]
+["src/fleet/fleetlogin.rs:510"]
 line = "code => Err(format!(\"login in {sandbox} exited {code}\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:520"]
+["src/fleet/fleetlogin.rs:526"]
 line = "pub fn login_spawn_argv(runtime: &str) -> (&'static str, Vec<String>) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/fleetlogin.rs:556"]
+["src/fleet/fleetlogin.rs:562"]
 line = "\"logged in, but could not hand it to the boxes already running ({why}) — they pick it \\"
 cited_by = ["docs/recovery-survey.md"]
 

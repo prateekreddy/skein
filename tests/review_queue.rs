@@ -201,7 +201,7 @@ fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     pins.set("SKEIN_FLEET_ROOT", path.join("boxes"));
     // A token, because the queue refuses to run without one now — the credential is skein's rather
     // than `gh`'s, so the test has to supply it the way a fleet would.
-    pins.set("GH_TOKEN", "test-token");
+    pins.set("GH_TOKEN", "skein-test-token");
     skein::prq::forget_host_token();
     // The batch-width memo is per process and keyed by slug, like the rename and trunk memos
     // beside it — and every test here refreshes `acme/thing`. Without this, the test that proves

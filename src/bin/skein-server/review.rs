@@ -1117,7 +1117,7 @@ pub(super) mod review_routes {
         let mut env = env_pins();
         env.set("SKEIN_HOME", home);
         env.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
-        env.set("GH_TOKEN", "not-a-real-token");
+        env.set("GH_TOKEN", "skein-test-not-a-real-token");
         env
     }
 

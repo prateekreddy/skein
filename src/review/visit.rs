@@ -1298,7 +1298,7 @@ mod tests {
         // a review box, and opening one makes directories under whatever root it resolves.
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
         env.set("SKEIN_REVIEW_AI", "on");
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
 
         // A GitHub that serves a diff, so the visit reaches the model rather than stopping at the
@@ -1477,7 +1477,7 @@ mod tests {
         )
         .unwrap();
         env.set("SKEIN_CLAUDE_BIN", &claude);
-        env.set("GH_TOKEN", "gho_test");
+        env.set("GH_TOKEN", "skein-test-gho");
         crate::prq::forget_host_token();
 
         // A GitHub that answers: the diff for #5, and its changed files — one the CODEOWNERS
