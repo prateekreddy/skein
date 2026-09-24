@@ -12122,17 +12122,31 @@ const AGENTS_WORDS = {
   working: "working",
   workingMoves: "moves when this turn's session ends",
   button: now => `Restart on ${now}`,
-  offer: (box, rt, now) => `Stops ${rt} in ${box} and reopens its conversation on ${now}. ${box} is waiting for you, so no turn is cut off, and nothing is sent to it. Anything running in its agent's terminal stops with it.`,
+  offer: (box, rt, now) => `Stops ${rt} in ${box} and reopens its conversation on ${now}. ${box} is waiting for you, so no turn is cut off, and nothing is sent to it. What its agent's terminal was running stops with it; anything started to outlive the terminal (nohup, setsid) keeps running.`,
   restarting: "restarting…",
   done: (box, rt, now) => `${box} is on ${rt} ${now}`,
   refused: box => `Not restarted: ${box} started working after this list was drawn. It moves at its next session, and the button comes back when it is waiting again.`,
   failed: (box, why) => `Could not restart ${box}: ${why}`,
+  notRunning: now => `its agent is not running, so there is nothing to restart. Its next session starts on ${now}.`,
+  noReading: "skein has no recent reading of its agent, so it cannot tell that it is waiting.",
 };
 
 // The states a box can only reach from `waiting` by starting a turn — so a press refused in one of
-// them is truthfully "started working after this list was drawn". Any other refusal is reported
-// with the state the server found, in the Failed wording.
+// them is truthfully "started working after this list was drawn".
 const TURN_STARTED = new Set(["working", "compacting", "needs-input", "error", "done"]);
+// A refusal in any other state gets a plain reason in the Failed wording (the owner, 2026-09-24):
+// the agent has ended, or skein has no recent reading to tell waiting from anything else.
+const AGENT_NOT_RUNNING = new Set(["ended"]);
+const AGENT_NO_READING = new Set(["stale", "live", ""]);
+
+// What a refused press says, by the state the server read at the press. `idle` and `unknown` fit
+// neither plain reason and are the owner's to word; until then they are named as the state itself.
+function refusalText(box, state, now) {
+  if (TURN_STARTED.has(state)) return AGENTS_WORDS.refused(box);
+  if (AGENT_NOT_RUNNING.has(state)) return AGENTS_WORDS.failed(box, AGENTS_WORDS.notRunning(now));
+  if (AGENT_NO_READING.has(state)) return AGENTS_WORDS.failed(box, AGENTS_WORDS.noReading);
+  return AGENTS_WORDS.failed(box, state);
+}
 
 // A row reads left to right — box, state, what happens — rather than spread across the pane the way
 // a setting and its control are. Inline for the reason `renderUpdateStall` gives: a rule in the
@@ -12249,7 +12263,9 @@ async function pressRestartOntoUpdate(btn) {
     if (r.why === "not-waiting") for (const rt of agentsBehind || []) for (const b of rt.behind || []) if (b.name === box) b.state = r.state;
     agentsSaid.set(box, {
       refused,
-      text: refused ? AGENTS_WORDS.refused(box) : AGENTS_WORDS.failed(box, r.error || r.state || r.why),
+      text: r.why === "not-waiting"
+        ? refusalText(box, r.state || "", now)
+        : AGENTS_WORDS.failed(box, r.error || r.why),
     });
   }
   drawAgentsBehind();

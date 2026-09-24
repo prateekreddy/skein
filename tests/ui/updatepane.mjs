@@ -152,7 +152,9 @@ await page.waitForTimeout(600);
     one: "box-a is still running claude 2.1.278 and moves to 2.1.280 at its next session.",
     none: "every running box is on claude 2.1.280. Stopped boxes start on it.",
     unknown: "skein could not read when box-d's agent started, so it cannot say which claude it is running.",
-    offer: "Stops claude in box-a and reopens its conversation on 2.1.280. box-a is waiting for you, so no turn is cut off, and nothing is sent to it. Anything running in its agent's terminal stops with it.",
+    offer: "Stops claude in box-a and reopens its conversation on 2.1.280. box-a is waiting for you, so no turn is cut off, and nothing is sent to it. What its agent's terminal was running stops with it; anything started to outlive the terminal (nohup, setsid) keeps running.",
+    notRunning: "Could not restart box-a: its agent is not running, so there is nothing to restart. Its next session starts on 2.1.280.",
+    noReading: "Could not restart box-a: skein has no recent reading of its agent, so it cannot tell that it is waiting.",
     refused: "Not restarted: box-a started working after this list was drawn. It moves at its next session, and the button comes back when it is waiting again.",
     failed: "Could not restart box-a: box \"box-a\" is not running",
     done: "box-a is on claude 2.1.280",
@@ -214,6 +216,29 @@ await page.waitForTimeout(600);
   const back = await show(claude([behind("box-a", "waiting")]));
   check("the button comes back when it is waiting again, and the refusal goes with it",
     [back.flatMap(e => e.buttons), back.some(e => e.cls.includes("upd-agent-said"))], [["Restart on 2.1.280"], false]);
+
+  // Every state a refusal can come back with, and the sentence each one gets (the owner, 2026-09-24).
+  // **What would make this fail**: moving a state between the sets in boot.js — `ended` read as "no
+  // reading", `live` as not running, a turn state given a plain reason — or any drift in the two
+  // plain sentences.
+  const REFUSALS = [
+    ["working", W.refused], ["compacting", W.refused], ["needs-input", W.refused],
+    ["error", W.refused], ["done", W.refused],
+    ["ended", W.notRunning],
+    ["stale", W.noReading], ["live", W.noReading], ["", W.noReading],
+  ];
+  const saidFor = [];
+  for (const [state] of REFUSALS) {
+    await show(claude([behind("box-a", "waiting")]));
+    listed = claude([behind("box-a", state || "waiting")]);
+    answer = { ok: false, why: "not-waiting", state };
+    await page.click('#upd-agents button[data-box="box-a"]');
+    await page.waitForTimeout(300);
+    saidFor.push([state, await page.$eval("#upd-agents .upd-agent-said", e => e.textContent.trim()).catch(() => "")]);
+  }
+  check("each refused state gets its approved sentence", saidFor, REFUSALS);
+  pressed.length = 1;   // the table's presses are counted by its own check, not the tally below
+  await show(claude([behind("box-a", "waiting")]));
 
   answer = { ok: false, why: "failed", error: 'box "box-a" is not running' };
   await page.click('#upd-agents button[data-box="box-a"]');
