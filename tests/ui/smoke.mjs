@@ -528,6 +528,44 @@ await check("AI enrichment is a visible setting, not folklore in an env var", as
   await page.click('.set-navi[data-pane="repos"]');
   await settle(300);
 });
+await check("skein in every agent's session is one fleet-wide switch, on by default, and saving it reads back", async () => {
+  // SKEIN-1058. The launcher reads this value to decide whether a box's agent is started with
+  // skein's plugin; this is the only way a person changes it. What would make it fail: the control
+  // not wired into `settingsPayload` (the stored value never moves), the load reading an absent
+  // field as off (`!!` instead of `!== false`), or the approved after-Save line not shown when the
+  // value changed. The dialog is open on Repos, where the check before this one leaves it.
+  await page.click('.set-navi[data-pane="boxes"]');
+  await settle(300);
+  const box = await mustSee("#set-boxplugin", "the box plugin switch");
+  const title = await page.$eval("#set-boxplugin", e => e.closest(".set-row").querySelector(".set-title").textContent);
+  if (title !== "skein in every agent's session") throw new Error(`not the approved title: "${title}"`);
+  if (!(await box.isChecked())) throw new Error("it must default to on — a config with no value is a fleet that loads the plugin");
+  const before = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (before.box_plugin !== true) throw new Error(`the stored default should be on, got ${before.box_plugin}`);
+  await page.click("#set-boxplugin");
+  await page.click("#set-go");
+  await settle(600);
+  const off = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (off.box_plugin !== false) throw new Error("switching it off didn't persist");
+  const said = await text("#toast");
+  if (said !== "Saved. Boxes pick this up at their next session; the ones running now keep what they started with.")
+    throw new Error(`the after-Save line is not the approved one: "${said}"`);
+  // And back, read through the control this time: the pane shows what is stored.
+  await page.click('header .kbtn[aria-label^="Settings"]');
+  await settle();
+  await page.click('.set-navi[data-pane="boxes"]');
+  await settle(300);
+  if (await page.isChecked("#set-boxplugin")) throw new Error("the switch reopened on, though off is stored");
+  await page.click("#set-boxplugin");
+  await page.click("#set-go");
+  await settle(600);
+  const on = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (on.box_plugin !== true) throw new Error("switching it back on didn't persist");
+  await page.click('header .kbtn[aria-label^="Settings"]');
+  await settle();
+  await page.click('.set-navi[data-pane="repos"]');
+  await settle(300);
+});
 await check("the pane doesn't pretend Save applies to repo cards", async () => {
   const shown = await page.$$eval("#settings .set-foot .primary", els => els.filter(e => e.offsetParent).length);
   if (shown) throw new Error("Save is offered on a pane whose fields already saved themselves");

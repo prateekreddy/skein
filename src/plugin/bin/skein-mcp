@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+# skein's in-box tools: an MCP server over stdio, run by the agent's own CLI from the plugin's
+# `.mcp.json` (box-plugin §2.3, SKEIN-1059).
+#
+# It runs INSIDE the box, as the box's uid, and its whole reach is the box's own reach. It holds no
+# token and opens no socket: it reads a handful of files and answers on stdin/stdout. Three tools,
+# all read-only:
+#
+#   skein_resources   the box's signal file, `$SKEIN_STATE/signals/resources.json`, as skein wrote it.
+#   skein_top         this box's largest processes by memory or CPU, or the largest directories of
+#                     its checkout. It never offers to stop anything: the kernel's limits are the
+#                     ceiling, and this is only how the agent sees what it is holding.
+#   skein_requests    the box's own package and git-write requests, and the owner's answers.
+#
+# Two rules carry the security of this file, and each has a test that fails without it
+# (`tests/plugin_tools.rs`):
+#
+# * **top reads `/proc` only for the pids in this box's own `cgroup.procs`.** Which cgroup is "own"
+#   is the kernel's answer, `/proc/self/cgroup`, not an environment variable a box sets. A process
+#   that is not in a box cgroup (a box started without cgroup delegation) gets no process list at
+#   all, never the whole of `/proc`: the PID namespace is shared (SKEIN-964), so a fallback to
+#   `/proc` would list every box's processes, which is exactly what this tool must not add.
+# * **An answer is only ever read from the owner's inbox**, `$SKEIN_STATE/inbox/`, which the launcher
+#   binds read-only into the box, so nothing in a box can have written it (`src/mailbox.rs`,
+#   `owner_inbox`). The request files are the box's own, and every field in them is the box's word;
+#   the `state` the host writes back into them is a courtesy copy and is never read here, the rule
+#   `gitgate::decide` and `substrate::decide` keep on the host side.
+#
+# Python 3 standard library only, as `server-doorway.py` and `skein-resources` are: it runs in every
+# box and installs nothing.
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+PROTOCOL = "2025-06-18"
+
+# `valid_box` in `box-session.sh`: a box name is a path component before it is anything else.
+BOX_NAME = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]*$")
+
+TOP_DEFAULT = 10
+TOP_MAX = 50
+
+# Tests only: the directory standing in for `/`, so `/proc` and `/sys` can be a fake tree. It moves
+# nothing a box cannot already read.
+ROOT = os.environ.get("SKEIN_TOOLS_FAKE_ROOT", "")
+
+
+def real(path):
+    return ROOT + path if ROOT else path
+
+
+def read_text(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+# ------------------------------------------------------------------------------------------------
+# skein_resources
+# ------------------------------------------------------------------------------------------------
+
+
+def resources(_args):
+    state = os.environ.get("SKEIN_STATE", "")
+    if not state:
+        return {"error": "no-state", "state": None}
+    path = os.path.join(state, "signals", "resources.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return {"error": "no-signal-file", "path": path}
+    except ValueError:
+        return {"error": "unreadable-signal-file", "path": path}
+
+
+# ------------------------------------------------------------------------------------------------
+# skein_top
+# ------------------------------------------------------------------------------------------------
+
+
+def own_cgroup():
+    """This process's cgroup directory, from the kernel, or None when it is not a box's.
+
+    cgroup v2 writes one line, `0::/skein/<box>`. A box's cgroup is a leaf directly under `skein`
+    (`box-session.sh`), and `skein/containers` is Docker's, not a box's.
+    """
+    try:
+        lines = read_text(real("/proc/self/cgroup")).splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3 or parts[0] != "0":
+            continue
+        rel = parts[2].strip()
+        bits = rel.strip("/").split("/")
+        if len(bits) == 2 and bits[0] == "skein" and bits[1] != "containers" and BOX_NAME.match(bits[1]):
+            return real("/sys/fs/cgroup" + rel)
+    return None
+
+
+def own_pids(cgroup):
+    """The pids in this box's cgroup. None when the file cannot be read: no list, not everybody's."""
+    try:
+        text = read_text(os.path.join(cgroup, "cgroup.procs"))
+    except OSError:
+        return None
+    return sorted({int(p) for p in text.split() if p.isdigit()})
+
+
+def clock_ticks():
+    try:
+        return os.sysconf("SC_CLK_TCK") or 100
+    except (ValueError, OSError):
+        return 100
+
+
+def page_size():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") or 4096
+    except (ValueError, OSError):
+        return 4096
+
+
+def process(pid, uptime, hz, page):
+    """One process of this box, read from `/proc/<pid>`. None when it has gone since the listing."""
+    base = real("/proc/%d" % pid)
+    try:
+        stat = read_text(base + "/stat")
+        statm = read_text(base + "/statm").split()
+    except OSError:
+        return None
+    # `comm` is in parentheses and may itself hold spaces or parentheses; everything after the LAST
+    # `)` is space-separated, starting at field 3 (state).
+    close = stat.rfind(")")
+    if close < 0:
+        return None
+    rest = stat[close + 2 :].split()
+    try:
+        ppid = int(rest[1])
+        cpu = (int(rest[11]) + int(rest[12])) / hz
+        started = int(rest[19]) / hz
+        rss = int(statm[1]) * page
+    except (IndexError, ValueError):
+        return None
+    try:
+        raw = read_text(base + "/cmdline")
+        command = raw.replace("\0", " ").strip()
+    except OSError:
+        command = ""
+    if not command:
+        command = "[" + stat[stat.find("(") + 1 : close] + "]"
+    return {
+        "pid": pid,
+        "ppid": ppid,
+        "rss_bytes": rss,
+        "cpu_seconds": round(cpu, 1),
+        "age_seconds": max(0, int(uptime - started)),
+        # Reparented to init: its parent has exited and nothing is waiting on it. What a box that
+        # spawns and does not reap leaves behind (`box_cgroup_kill`'s doc in `src/fleet/limits.rs`).
+        "parentless": ppid <= 1,
+        "command": command[:300],
+    }
+
+
+def checkout():
+    """The top of the git checkout this server was started in, or its directory if there is none."""
+    here = os.getcwd()
+    d = here
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            return here
+        d = up
+
+
+def top_disk(n):
+    where = checkout()
+    try:
+        out = subprocess.run(
+            ["du", "-x", "-k", "--max-depth=1", where],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"by": "disk", "error": "du-failed", "checkout": where}
+    rows = []
+    for line in out.splitlines():
+        size, _, path = line.partition("\t")
+        if not size.isdigit() or not path or path == where:
+            continue
+        rows.append({"path": path, "bytes": int(size) * 1024})
+    rows.sort(key=lambda r: r["bytes"], reverse=True)
+    return {"by": "disk", "checkout": where, "dirs": rows[:n]}
+
+
+def top(args):
+    by = args.get("by", "memory")
+    if by not in ("memory", "cpu", "disk"):
+        return {"error": "by-must-be-memory-cpu-or-disk"}
+    try:
+        n = int(args.get("n", TOP_DEFAULT))
+    except (TypeError, ValueError):
+        n = TOP_DEFAULT
+    n = max(1, min(n, TOP_MAX))
+    if by == "disk":
+        return top_disk(n)
+    cgroup = own_cgroup()
+    if cgroup is None:
+        return {"by": by, "error": "not-in-a-box-cgroup"}
+    pids = own_pids(cgroup)
+    if pids is None:
+        return {"by": by, "error": "cgroup-unreadable"}
+    try:
+        uptime = float(read_text(real("/proc/uptime")).split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = time.monotonic()
+    hz, page = clock_ticks(), page_size()
+    procs = [p for p in (process(pid, uptime, hz, page) for pid in pids) if p]
+    key = "rss_bytes" if by == "memory" else "cpu_seconds"
+    procs.sort(key=lambda p: p[key], reverse=True)
+    return {
+        "by": by,
+        "processes_in_box": len(procs),
+        "parentless_in_box": sum(1 for p in procs if p["parentless"]),
+        "processes": procs[:n],
+    }
+
+
+# ------------------------------------------------------------------------------------------------
+# skein_requests
+# ------------------------------------------------------------------------------------------------
+
+# The two queues a box files into (`substrate_dir` and `gitgate_dir` in `box-session.sh`), and the
+# fields of each that are the ASK. `state`, `decided` and anything else are not carried over.
+QUEUES = (
+    ("package", "substrate", ("kind", "packages")),
+    ("write", "gitgate", ("repo", "reason")),
+)
+
+
+def inbox_answers():
+    """Every answer in the owner's inbox, newest first.
+
+    Only `kind: "answer"`: the inbox also carries notes such as `fleet-disk`, which answer nothing.
+    """
+    state = os.environ.get("SKEIN_STATE", "")
+    if not state:
+        return []
+    inbox = os.path.join(state, "inbox")
+    try:
+        names = sorted(os.listdir(inbox))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(inbox, name), encoding="utf-8") as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(m, dict) or m.get("kind") != "answer":
+            continue
+        out.append({"body": str(m.get("body", "")), "ts": str(m.get("ts", ""))})
+    out.sort(key=lambda m: m["ts"], reverse=True)
+    return out
+
+
+def answer_for(request_id, answers):
+    """The newest answer that names this request's id as a word of its own."""
+    word = re.compile(r"(?<![A-Za-z0-9._-])" + re.escape(request_id) + r"(?![A-Za-z0-9_-])")
+    for a in answers:
+        if word.search(a["body"]):
+            return a
+    return None
+
+
+def requests(_args):
+    box = os.environ.get("SKEIN_BOX", "")
+    if not BOX_NAME.match(box) or ".." in box:
+        return {"error": "no-box-name", "requests": []}
+    fleet = os.environ.get("SKEIN_FLEET_ROOT") or "/boxes"
+    answers = inbox_answers()
+    out = []
+    for kind, queue, fields in QUEUES:
+        d = os.path.join(fleet, ".skein", queue, "requests", box)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".json") or name.startswith("."):
+                continue
+            try:
+                with open(os.path.join(d, name), encoding="utf-8") as f:
+                    r = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(r, dict):
+                continue
+            rid = str(r.get("id") or name[: -len(".json")])
+            row = {"queue": kind, "id": rid, "asked": str(r.get("asked", ""))}
+            for field in fields:
+                if field in r:
+                    row[field] = r[field]
+            # **Never `r["state"]`.** The box wrote this file and can write `granted` into it; the
+            # only answer is one found in the inbox, which it cannot write.
+            answer = answer_for(rid, answers)
+            row["state"] = "answered" if answer else "waiting"
+            row["answer"] = answer
+            out.append(row)
+    out.sort(key=lambda r: r["asked"])
+    return {"box": box, "requests": out}
+
+
+# ------------------------------------------------------------------------------------------------
+# The protocol
+# ------------------------------------------------------------------------------------------------
+
+TOOLS = [
+    {
+        "name": "skein_resources",
+        "description": "This box's resource signal file as skein wrote it: its disk, memory, "
+        "throttle rate and process count against its limits, and anything skein asks of it.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "skein_top",
+        "description": "This box's largest processes by memory or CPU, with each one's age and "
+        "whether it has no parent, or the largest directories of its checkout by disk.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "by": {"type": "string", "enum": ["memory", "cpu", "disk"]},
+                "n": {"type": "integer", "minimum": 1, "maximum": TOP_MAX},
+            },
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "skein_requests",
+        "description": "This box's own package and repository-write requests, and the owner's "
+        "answer to each, from the inbox only the owner can write.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+]
+
+HANDLERS = {"skein_resources": resources, "skein_top": top, "skein_requests": requests}
+
+
+def call(params):
+    name = params.get("name")
+    args = params.get("arguments") or {}
+    handler = HANDLERS.get(name)
+    if handler is None or not isinstance(args, dict):
+        return {"content": [{"type": "text", "text": json.dumps({"error": "unknown-tool"})}], "isError": True}
+    result = handler(args)
+    return {
+        "content": [{"type": "text", "text": json.dumps(result, indent=1)}],
+        "isError": "error" in result,
+    }
+
+
+def answer(msg):
+    """The response to one message, or None for a notification."""
+    method = msg.get("method")
+    mid = msg.get("id")
+    if mid is None:
+        return None
+    params = msg.get("params") or {}
+    if method == "initialize":
+        result = {
+            "protocolVersion": params.get("protocolVersion") or PROTOCOL,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "skein", "version": "0.1.0"},
+        }
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        result = call(params)
+    elif method == "ping":
+        result = {}
+    else:
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "method not found"}}
+    return {"jsonrpc": "2.0", "id": mid, "result": result}
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
+        else:
+            if not isinstance(msg, dict):
+                continue
+            try:
+                reply = answer(msg)
+            except Exception:  # noqa: BLE001 - one bad call must not end the server
+                reply = {
+                    "jsonrpc": "2.0",
+                    "id": msg.get("id"),
+                    "error": {"code": -32603, "message": "internal error"},
+                }
+        if reply is not None:
+            sys.stdout.write(json.dumps(reply) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

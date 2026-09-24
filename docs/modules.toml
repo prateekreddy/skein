@@ -637,7 +637,11 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 depends_on = ["announce", "fleet", "health", "util"]
 
 [current.runtime]
-depends_on = ["repos", "util"]
+# `config` for one read: the fleet's box-plugin switch (SKEIN-1058). `for_box` is where every start
+# and resume of an agent is spelled, so it is the one place that can drop `--plugin-dir` for the
+# whole fleet; the value it reads is the Settings switch in `config.json`. Both modules were already
+# in the recorded knot above, so the edge joins no cycle.
+depends_on = ["config", "repos", "util"]
 
 [current.sandbox]
 # `warden_client` for one call and not for a doer: destroying a box is the most consequential thing

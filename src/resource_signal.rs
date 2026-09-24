@@ -518,15 +518,17 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 /// What an agent is shown, with integers filled in and nothing else.
 ///
 /// **The owner approved these texts on SKEIN-1055, 2026-09-24**, labelled (1a)–(6) in
-/// `feature-wording.md`. Two of the owner's decisions shape them: the `skein_top` sentence is left
-/// out until the tool ships (SKEIN-1059), and the closing "This one command was held so you would
-/// see this; the next will run." stays. No field a box can write reaches any of them: every
+/// `feature-wording.md`. Two of the owner's decisions shape them: the `skein_top` and
+/// `skein_resources` sentences were left out until those tools shipped, and are in now that they
+/// have (SKEIN-1059); and the closing "This one command was held so you would see this; the next
+/// will run." stays. No field a box can write reaches any of them: every
 /// argument is a number skein measured.
 ///
 /// Every live ask carries all four: a hold, a start line (4), a reminder (5) and an entering line
 /// (6). The texts for the cases the first draft did not cover — (4), (5) and (6) for every disk
 /// case, memory and the process count, and (1a) with fewer than two other boxes — were approved by
-/// the owner on 2026-09-24, as were (4) without its `skein_resources` sentence until SKEIN-1059.
+/// the owner on 2026-09-24. Those gap-fillers were approved without the `skein_resources`
+/// sentence, and carry none; only (1a)'s own (4) does.
 mod words {
     use super::*;
 
@@ -578,12 +580,12 @@ mod words {
                     holds = gib(s.holds),
                     others = others_asked(s.others),
                 ),
-                // (4) without its last sentence, "`skein_resources` shows where this box stands.":
-                // that tool ships with SKEIN-1059, the same as `skein_top` (owner, 2026-09-24).
+                // (4) as approved, with its last sentence: `skein_resources` shipped with
+                // SKEIN-1059, which is when the owner said it could be restored (2026-09-24).
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear {free} of storage it is \
                      not using. The fleet's disk is {over} over what it can spare and this box \
-                     holds {holds}.",
+                     holds {holds}. `skein_resources` shows where this box stands.",
                     free = gib(s.free),
                     over = gib(s.over_by),
                     holds = gib(s.holds),
@@ -670,7 +672,7 @@ mod words {
         }
     }
 
-    /// (2) without its `skein_top` sentence, (4), (5) and (6).
+    /// (2), (4), (5) and (6).
     pub(super) fn memory(rate: f64, anon: u64, high: u64) -> Ask {
         let rate = rate.round() as u64;
         Ask {
@@ -679,7 +681,7 @@ mod words {
             hold: format!(
                 "skein: stop processes you no longer need before you start more. This box is being \
                  slowed for memory, {} times a minute, and holds {}; the kernel slows it above {}. \
-                 {HELD}",
+                 `skein_top` lists this box's largest processes. {HELD}",
                 count(rate),
                 bytes(anon),
                 bytes(high),
@@ -704,7 +706,7 @@ mod words {
         }
     }
 
-    /// (3) without its `skein_top` sentence, (4), (5) and (6).
+    /// (3), (4), (5) and (6).
     pub(super) fn pids(pids: u64, max: u64) -> Ask {
         Ask {
             kind: "pids".into(),
@@ -712,7 +714,7 @@ mod words {
             hold: format!(
                 "skein: end processes you started and no longer need before you start more. This \
                  box is running {} processes against a limit of {}, and past that nothing in it \
-                 can start a new one. {HELD}",
+                 can start a new one. `skein_top` lists the ones with no parent. {HELD}",
                 count(pids),
                 count(max),
             ),
@@ -1075,7 +1077,8 @@ mod tests {
             files[1].asks[0].hold,
             "skein: end processes you started and no longer need before you start more. This box \
              is running 6,144 processes against a limit of 8,192, and past that nothing in it can \
-             start a new one. This one command was held so you would see this; the next will run."
+             start a new one. `skein_top` lists the ones with no parent. This one command was held \
+             so you would see this; the next will run."
         );
         assert_eq!(
             files[2].cleared.get("pids").map(String::as_str),
@@ -1140,7 +1143,7 @@ mod tests {
         let four = |a: Ask| [Some(a.hold), a.start, a.remind, a.enter];
         let share_start = "skein: before you start, this box is asked to clear 2.3G of storage \
                            it is not using. The fleet's disk is 4.1G over what it can spare and \
-                           this box holds 9.4G.";
+                           this box holds 9.4G. `skein_resources` shows where this box stands.";
         let share_remind = "skein: still asked of this box: clear 2.3G of storage (it holds 9.4G).";
         let share_enter =
             "skein: the fleet's disk is over its line; this box is asked to clear 2.3G it is not \
@@ -1236,7 +1239,8 @@ mod tests {
                     format!(
                         "skein: stop processes you no longer need before you start more. This box \
                          is being slowed for memory, 84 times a minute, and holds 11.2G; the \
-                         kernel slows it above 12.0G. {HELD}"
+                         kernel slows it above 12.0G. `skein_top` lists this box's largest \
+                         processes. {HELD}"
                     ),
                     "skein: before you start, this box is being slowed for memory (84 throttles \
                      a minute) and holds 11.2G; stop processes you no longer need before you \
@@ -1257,7 +1261,8 @@ mod tests {
                     format!(
                         "skein: end processes you started and no longer need before you start \
                          more. This box is running 6,410 processes against a limit of 8,192, and \
-                         past that nothing in it can start a new one. {HELD}"
+                         past that nothing in it can start a new one. `skein_top` lists the ones \
+                         with no parent. {HELD}"
                     ),
                     "skein: before you start, this box is running 6,410 of its 8,192 processes; \
                      end the ones you no longer need."

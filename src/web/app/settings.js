@@ -203,6 +203,8 @@ function openSettings(pane = "repos") {
     // predates the field must read as on, not as off.
     document.getElementById("set-prai").checked = settings.review_summaries !== false;
     document.getElementById("set-review-model").value = settings.review_model || "";
+    // Defaults ON, so `!== false` for the reason `set-prai` gives above.
+    document.getElementById("set-boxplugin").checked = settings.box_plugin !== false;
     // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
     // is not on PATH" is the state a checkbox alone can never show.
     fetch("/api/health").then(r => r.json()).then(h => {
@@ -651,6 +653,7 @@ function settingsPayload() {
     ai_enrichment: document.getElementById("set-ai").checked,
     review_summaries: document.getElementById("set-prai").checked,
     review_model: document.getElementById("set-review-model").value.trim(),
+    box_plugin: document.getElementById("set-boxplugin").checked,
   };
 }
 // Work-tracking connections are deliberately NOT in the payload: they carry a credential, and it
@@ -661,10 +664,17 @@ function saveSettingsQuiet() {
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
     .then(s => { settings = s; return s; });
 }
+// The box plugin's own after-Save line, approved with its switch (SKEIN-1057): said only when the
+// value changed, because it is about what the change does to running boxes.
+const BOX_PLUGIN_SAVED = "Saved. Boxes pick this up at their next session; the ones running now keep what they started with.";
 function saveSettings() {
+  const pluginWas = settings.box_plugin !== false;
   saveSettingsQuiet()
     .then(() => loadSync())
-    .then(() => { renderDockbar(); closeSettings(); toast("settings saved"); })
+    .then(() => {
+      renderDockbar(); closeSettings();
+      toast((settings.box_plugin !== false) !== pluginWas ? BOX_PLUGIN_SAVED : "settings saved");
+    })
     .catch(e => toast(`couldn't save: ${e.message}`));
 }
 // A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole

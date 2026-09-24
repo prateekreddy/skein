@@ -204,10 +204,33 @@ pub(crate) fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
 ///
 /// `{plugin}` is resolved here too, to [`plugin_dir`] shell-quoted, for the same reason: it is a
 /// path under the fleet root, which the host knows and a fresh crossing into the box need not.
+///
+/// **And `--plugin-dir {plugin}` is dropped here when the fleet's switch is off** ([`box_plugin_on`]).
 pub(crate) fn for_box(command: &str, name: &str) -> String {
+    // The Settings switch's read site (SKEIN-1058). Today "off" drops the whole flag, because the
+    // plugin holds only the resource holds and the `skein_*` tools. **The owner's rule for when
+    // that stops being true:** once SKEIN-1062 moves the turn-state hooks into the plugin, off must
+    // still load those hooks and drop only the holds and the tools — so this line must then stop
+    // removing the flag and pass something narrower, not keep removing it.
+    let command = match box_plugin_on() {
+        true => command.to_string(),
+        false => command.replace(" --plugin-dir {plugin}", ""),
+    };
     command
         .replace("{box}", name)
         .replace("{plugin}", &sh_quote(&plugin_dir()))
+}
+
+/// Whether the fleet loads skein's plugin into agents' sessions: `$SKEIN_BOX_PLUGIN` when it is set
+/// to a yes or a no, else the Settings switch ([`crate::config::Config::box_plugin`]). The same
+/// precedence `ai::ai_enabled` gives `$SKEIN_AI`, which is what the Settings footer's
+/// "`$SKEIN_*` env vars override these" promises. Read in skein-server, on the host.
+pub(crate) fn box_plugin_on() -> bool {
+    match std::env::var("SKEIN_BOX_PLUGIN").ok().as_deref() {
+        Some("on" | "1" | "true" | "yes") => true,
+        Some("off" | "0" | "false" | "no") => false,
+        _ => crate::config::load_config().box_plugin,
+    }
 }
 
 /// A runtime's headless command for one box, with `prompt` (already shell-quoted) in place.
@@ -238,6 +261,10 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         "bin/skein-resources",
         include_str!("plugin/bin/skein-resources"),
     ),
+    // The in-box tools (box-plugin §2.3, SKEIN-1059): an MCP server over stdio, registered by the
+    // plugin's own `.mcp.json`, so it loads and unloads with the plugin.
+    (".mcp.json", include_str!("plugin/.mcp.json")),
+    ("bin/skein-mcp", include_str!("plugin/bin/skein-mcp")),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
@@ -279,6 +306,8 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
         env.set("SKEIN_HOME", "/skein-home-example");
+        // The switch at its default: no `config.json` there, and no override.
+        env.unset("SKEIN_BOX_PLUGIN");
         let resolved = for_box(claude.interactive_resume, "web-main");
         assert!(!resolved.contains("{plugin}"), "{resolved}");
         assert_eq!(
@@ -292,13 +321,80 @@ mod tests {
         );
     }
 
+    /// **The fleet's switch decides whether a session's argv carries the plugin**, for all three
+    /// starts, and `$SKEIN_BOX_PLUGIN` overrides the stored value either way (SKEIN-1058).
+    ///
+    /// Written through the real `config.json` in a pinned `$SKEIN_HOME`, the file the Settings
+    /// route writes. What would make it fail: `for_box` not reading the value (every "off" case
+    /// still carries the flag); the value's default flipped to off (the file with no key would
+    /// lose it); the env override not consulted, or consulted the wrong way round; or off leaving
+    /// half a flag behind (`--plugin-dir` with no path, which `claude` would reject).
+    #[test]
+    fn the_fleets_switch_decides_whether_the_argv_carries_the_plugin() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
+        env.set("SKEIN_HOME", &home);
+        env.unset("SKEIN_BOX_PLUGIN");
+        let claude = runtime_adapter("claude").unwrap();
+        let starts = [
+            claude.interactive_start,
+            claude.interactive_resume,
+            claude.headless_resume,
+        ];
+        let config = |body: &str| {
+            std::fs::write(home.join("config.json"), body).unwrap();
+        };
+        let carries = |command: &str| {
+            let resolved = for_box(command, "web-main");
+            let flags = resolved.matches("--plugin-dir").count();
+            let dirs = resolved
+                .matches("--plugin-dir '/fleet-root-example/.skein/plugin'")
+                .count();
+            assert_eq!(flags, dirs, "half a flag left behind: {resolved}");
+            assert!(!resolved.contains("{plugin}"), "{resolved}");
+            flags
+        };
+        for (body, env_value, on) in [
+            ("{}", None, true),
+            (r#"{"box_plugin": true}"#, None, true),
+            (r#"{"box_plugin": false}"#, None, false),
+            (r#"{"box_plugin": true}"#, Some("off"), false),
+            (r#"{"box_plugin": false}"#, Some("on"), true),
+        ] {
+            config(body);
+            match env_value {
+                Some(v) => env.set("SKEIN_BOX_PLUGIN", v),
+                None => env.unset("SKEIN_BOX_PLUGIN"),
+            };
+            for command in starts {
+                let halves = command.split("||").count();
+                assert_eq!(
+                    carries(command),
+                    if on { halves } else { 0 },
+                    "config {body}, $SKEIN_BOX_PLUGIN {env_value:?}: {}",
+                    for_box(command, "web-main")
+                );
+            }
+        }
+        // Off leaves the rest of the command as it was.
+        config(r#"{"box_plugin": false}"#);
+        env.unset("SKEIN_BOX_PLUGIN");
+        assert_eq!(
+            for_box(claude.interactive_resume, "web-main"),
+            "claude --name 'web-main' --continue || claude --name 'web-main'"
+        );
+    }
+
     /// **The plugin the build carries is the one its argv names**: a manifest, the three hooks
-    /// the design gives it and no others, and a monitor.
+    /// the design gives it and no others, a monitor, and the in-box tools' MCP server.
     ///
     /// What would make it fail: a plugin file missing from `PLUGIN_FILES` (the install would put a
     /// plugin with no hooks under `.skein`), a hook event added or dropped, or the `PreToolUse`
     /// matcher losing `Bash`. It also keeps the plugin away from `Stop`, which the store's own
-    /// `mailbox.sh stop-check` owns and which this plugin leaves as it is.
+    /// `mailbox.sh stop-check` owns and which this plugin leaves as it is. And it fails if
+    /// `.mcp.json` names a server other than the shipped `bin/skein-mcp`.
     #[test]
     fn the_plugin_carries_its_three_hooks_and_its_monitor() {
         let file = |rel: &str| {
@@ -351,5 +447,16 @@ mod tests {
             monitors[0]
         );
         assert!(file("bin/skein-resources").starts_with("#!/usr/bin/env python3"));
+
+        // The tools: registered by the plugin, and run from the plugin's own copy.
+        let mcp: serde_json::Value = serde_json::from_str(file(".mcp.json")).unwrap();
+        let servers = mcp["mcpServers"].as_object().expect("no mcpServers");
+        assert_eq!(servers.len(), 1, "{mcp}");
+        let args = servers["skein"]["args"].as_array().unwrap();
+        assert_eq!(
+            args[0], "${CLAUDE_PLUGIN_ROOT}/bin/skein-mcp",
+            "the tools run something the plugin does not ship: {mcp}"
+        );
+        assert!(file("bin/skein-mcp").starts_with("#!/usr/bin/env python3"));
     }
 }

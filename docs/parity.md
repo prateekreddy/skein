@@ -31,7 +31,7 @@ its check in `tests/parity_numbers.rs`.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server/main.rs               # 99   (NOT '.route("' — that gives 87, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 162 unique, 165 occurrences
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 163 unique, 166 occurrences
 grep -c 'function ' src/web/index.html                          # 441
 grep -o 'const CHECKED = \[[^]]*\]' src/web/index.html | grep -o '"[a-z_]*"' | wc -l   # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
