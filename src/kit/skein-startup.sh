@@ -255,19 +255,33 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
   echo "[skein-kit] restored replacement snapshot from $handoff_dir"
 fi
 
+# The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
+# store is writable by every box of the repo, so a helper run from there is one a sibling box can
+# rewrite and this box then runs as it starts. They are installed with this script, under the fleet
+# root's `.skein`, in the plugin variant every box loads whichever way the fleet's switch is set, and
+# the launcher binds that directory read-only into every box. Found from this script's own path,
+# which is where the fleet runs it from (`fleet::box_provision_path`). A per-VM sandbox runs its
+# copy from ~/.local/bin, has no `.skein`, and so goes without these.
+skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe"
+
 # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
 # Three cases — and every one leaves a boot report, because a silent miss here is the #1 way
 # a box ends up with zero hooks while looking perfectly healthy:
 #   1. no .claude in the clone  → symlink the whole store (the original path);
-#   2. the repo SHIPS a real .claude/ (committed settings/commands — common!) → the old code
-#      silently skipped the link and the box ran hookless forever. Now: link the store's
-#      skein/ into the repo's .claude (probe scripts resolve the true store through that
-#      link) and MERGE the store's hook wiring into the repo's own settings.json (additive,
-#      dedup by whole entry, repo's own hooks preserved — jq, which the apt step above ensures).
-#      The same pass RETIRES every skein hook a past merge copied there: skein's turn-state hooks
-#      load from its read-only plugin now (SKEIN-1062), and a copy left here would fire each of them
-#      twice. "skein's" is the rule `takeover::sanitized_user_hooks` uses: a command that runs
-#      something under `/.claude/skein/bin/`, skein's own namespace in the store;
+#   2. the repo SHIPS a real .claude/ (committed settings/commands — common!) → link the store's
+#      skein/ into the repo's .claude (probe scripts resolve the true store through that link),
+#      and write skein's settings into `.claude/settings.local.json`: untracked, this box's own,
+#      and never the repo's `settings.json`, which the repo may track and which is left exactly as
+#      it is (SKEIN-1048). What goes in is skein's `tui` and `statusLine` defaults, read from the
+#      plugin's read-only `settings-defaults.json` and never from the store's `settings.json`,
+#      which every box of the repo can write: copying from there is how one box's hook or status
+#      line reached a sibling that started after it (SKEIN-1153). Each default goes in only where
+#      neither file sets one, except the status line a past merge copied into `settings.json`,
+#      which ran the store's renderer and which the local file now overrides. The same pass
+#      RETIRES every skein hook a past merge copied into either file: skein's turn-state hooks
+#      load from its read-only plugin now (SKEIN-1062), and a copy left here would fire each of
+#      them twice. "skein's" is the rule `takeover::sanitized_user_hooks` uses: a command that
+#      runs something under `/.claude/skein/bin/`, skein's own namespace in the store;
 #   3. .claude is already the store symlink → nothing to do.
 link_state="failed"
 if [ ! -d "$store" ]; then
@@ -282,31 +296,49 @@ elif [ ! -e "$clone_root/.claude" ]; then
 else
   # case 2: repo ships its own .claude directory — merge, don't skip
   rc="$clone_root/.claude"
+  defaults="$skein_probe/settings-defaults.json"
   [ -e "$rc/skein" ] || ln -s "$store/skein" "$rc/skein" 2>/dev/null || true
-  if [ -L "$rc/skein" ] && command -v jq >/dev/null 2>&1; then
-    [ -f "$rc/settings.json" ] || echo '{}' > "$rc/settings.json"
-    merged="$(jq -s '
-      def unskein: with_entries(.value |= (if type == "array" then
+  if [ -L "$rc/skein" ] && [ -r "$defaults" ] && command -v jq >/dev/null 2>&1; then
+    retire='def unskein: with_entries(.value |= (if type == "array" then
           map(if (.hooks | type) == "array"
             then .hooks |= map(select((.command // "" | tostring | contains("/.claude/skein/bin/")) | not))
             else . end)
           | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
         else . end))
         | with_entries(select((.value | type) != "array" or (.value | length) > 0));
-      (.[0] | if (.hooks | type) == "object" then .hooks |= unskein else . end) as $c
-      | .[1] as $s | ($c.hooks // {}) as $ch |
-      $c
-      | .hooks = (($s.hooks // {}) | to_entries
-          | reduce .[] as $e ($ch;
-              .[$e.key] = ((.[$e.key] // []) + ($e.value | map(. as $x
-                | select(((($ch[$e.key]) // []) | index($x)) == null))))))
-      | (if .tui == null and $s.tui != null then .tui = $s.tui else . end)
-      | (if .statusLine == null and $s.statusLine != null then .statusLine = $s.statusLine else . end)
-    ' "$rc/settings.json" "$store/settings.json" 2>/dev/null)"
+      def retire: if (.hooks | type) == "object" then .hooks |= unskein else . end;'
+    shared="/dev/null"
+    [ -f "$rc/settings.json" ] && shared="$rc/settings.json"
+    [ -f "$rc/settings.local.json" ] || echo '{}' > "$rc/settings.local.json"
+    merged="$(jq -s "$retire"'
+      (.[0] | if type == "object" then . else {} end | retire) as $l
+      | .[1] as $d | (.[2] // {}) as $s
+      | $d.settings.statusLine as $line
+      | $l
+      | (if .tui == null and $s.tui == null then .tui = $d.settings.tui else . end)
+      | (if .statusLine.command == $d.storeEraStatusLine then .statusLine.command = $line.command
+         elif .statusLine == null and ($s.statusLine == null or $s.statusLine.command == $d.storeEraStatusLine)
+         then .statusLine = (($s.statusLine // $line) + {command: $line.command})
+         else . end)
+    ' "$rc/settings.local.json" "$defaults" "$shared" 2>/dev/null)"
     if [ -n "$merged" ]; then
-      tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
-        && printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$rc/settings.json" \
-        && link_state="merged"
+      if [ "$(printf '%s' "$merged" | jq -S -c .)" = "$(jq -S -c . "$rc/settings.local.json" 2>/dev/null)" ]; then
+        link_state="merged"
+      else
+        tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
+          && printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$rc/settings.local.json" \
+          && link_state="merged"
+      fi
+    fi
+    # The repo's own settings file is rewritten only to take out a hook a past merge copied in, and
+    # never merely reformatted: a file the repo tracks is otherwise left byte for byte.
+    if [ "$shared" != "/dev/null" ]; then
+      retired="$(jq "$retire"' retire' "$shared" 2>/dev/null)"
+      if [ -n "$retired" ] \
+        && [ "$(printf '%s' "$retired" | jq -S -c .)" != "$(jq -S -c . "$shared")" ]; then
+        tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
+          && printf '%s\n' "$retired" > "$tmp" && mv "$tmp" "$shared"
+      fi
     fi
   fi
   [ "$link_state" = "merged" ] \
@@ -314,22 +346,29 @@ else
 fi
 # The mounted store is infrastructure, never a worktree change. Exclude it immediately;
 # waiting for SessionStart is too late when a runtime blocks on first-run trust.
+#
+# What is excluded is what skein put there, and only that (SKEIN-1049). Where `.claude` is the store
+# link, that is the whole of it. Where the repo ships a real `.claude/`, it is the `skein` link and
+# this box's `settings.local.json`: excluding the directory would hide a file a contributor adds
+# there, such as a new skill, from `git status` and `git add`. A clone that was the first shape and
+# is now the second loses the old `/.claude` line.
 git_dir="$(git -C "$clone_root" rev-parse --git-dir 2>/dev/null || true)"
 case "$git_dir" in "") ;; /*) ;; *) git_dir="$clone_root/$git_dir" ;; esac
 if [ -n "$git_dir" ]; then
   mkdir -p "$git_dir/info" 2>/dev/null || true
-  grep -qxF '/.claude' "$git_dir/info/exclude" 2>/dev/null \
-    || printf '/.claude\n' >> "$git_dir/info/exclude"
+  exclude="$git_dir/info/exclude"
+  if [ -d "$clone_root/.claude" ] && [ ! -L "$clone_root/.claude" ]; then
+    if grep -qxF '/.claude' "$exclude" 2>/dev/null; then
+      { grep -vxF '/.claude' "$exclude" || true; } > "$exclude.skein" \
+        && mv "$exclude.skein" "$exclude"
+    fi
+    for own in /.claude/skein /.claude/settings.local.json; do
+      grep -qxF "$own" "$exclude" 2>/dev/null || printf '%s\n' "$own" >> "$exclude"
+    done
+  else
+    grep -qxF '/.claude' "$exclude" 2>/dev/null || printf '/.claude\n' >> "$exclude"
+  fi
 fi
-
-# The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
-# store is writable by every box of the repo, so a helper run from there is one a sibling box can
-# rewrite and this box then runs as it starts. They are installed with this script, under the fleet
-# root's `.skein`, in the plugin variant every box loads whichever way the fleet's switch is set, and
-# the launcher binds that directory read-only into every box. Found from this script's own path,
-# which is where the fleet runs it from (`fleet::box_provision_path`). A per-VM sandbox runs its
-# copy from ~/.local/bin, has no `.skein`, and so goes without these.
-skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe"
 
 # Expose the project-scoped durable workspace without sharing literal HOME. The helper is
 # provider-neutral and refuses to overwrite a real HOME/shared path. Keep startup gated on its

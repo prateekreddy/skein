@@ -270,3 +270,239 @@ rm -f /tmp/skein-pane.web-two.lock
         );
     }
 }
+
+/// **A box cannot plant a hook or a status line that its sibling's Claude runs, where the repo
+/// ships its own `.claude/`** (SKEIN-1153, closed by SKEIN-1048).
+///
+/// Until SKEIN-1048 the kit's case 2 copied hooks, `tui` and `statusLine` from the store's
+/// `settings.json` into the repo's own `.claude/settings.json` at every start. Every box of the
+/// repo can write the store, so box A could put a command there and box B ran it after its next
+/// start. The kit now writes only skein's defaults, read from the plugin's read-only
+/// `settings-defaults.json`, and only into B's own `settings.local.json`.
+///
+/// Box A (`web-main`) tries to overwrite `settings-defaults.json` in the plugin, then plants a hook
+/// and a status line in every settings file of the store's: `settings.json`,
+/// `settings.local.json`, and a `skein/settings-defaults.json` beside the store's other copies,
+/// which it can. That write succeeding is what makes the rest a statement about the plugin rather
+/// than about a box that can write nothing. Box B (`web-two`) then starts under the same cover:
+/// the kit, then every hook command and the status line of both settings files Claude Code reads
+/// in B's checkout, each run through a shell the way Claude Code runs one. A plant that runs
+/// leaves a marker in the store.
+///
+/// **The workshop box is the control**: A's write to the plugin lands, B's start carries A's
+/// status line into its local settings, and running it leaves the marker. So the marker's absence
+/// in the covered box is an absence something could have filled.
+///
+/// Not covered, and why: a repo with no `.claude/` of its own. There `.claude` IS the store's link,
+/// so the store's `settings.json` is B's project settings and A's plant there runs in B. That case
+/// is open (docs/threat-model.md, the store row).
+///
+/// **What would make this fail**:
+/// - `--bind` in place of `--ro-bind` for `.skein`: A's write to the plugin lands (the first
+///   assertion);
+/// - the kit reading its defaults from the store (`defaults="$store/skein/settings-defaults.json"`):
+///   B runs A's status line (a marker appears);
+/// - the kit as it was at bd85fd5, merging the store's `settings.json` into the repo's: B's
+///   `settings.json` carries A's hook, which runs (a marker appears), and B's tree is dirty.
+#[test]
+fn a_box_cannot_plant_a_hook_or_status_line_its_siblings_claude_runs() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create a user namespace here, so whether a box can plant a setting its \
+             siblings' Claude runs was NOT exercised",
+        );
+    }
+    if !common::have("jq") || !common::have("tmux") || !common::have("git") {
+        return skip(
+            "no jq, tmux or git here, and the kit refuses to provision a box without the first \
+             two, so whether a box can plant a setting its siblings' Claude runs was NOT exercised",
+        );
+    }
+    // A: the plugin's defaults at $1, then the store at $2. One line per attempt.
+    let attack = r##"
+defaults="$1"; store="$2"
+plant() {
+  printf '{"tui":"default","statusLine":{"type":"command","command":"touch %s/planted-%s-line"},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch %s/planted-%s-hook"}]}]}}\n' \
+    "$store" "$1" "$store" "$1"
+}
+( printf '{"settings":%s,"storeEraStatusLine":""}\n' "$(plant plugin)" > "$defaults" ) 2>/dev/null \
+  && echo "overwrote" || echo "kept"
+for name in settings.json settings.local.json skein/settings-defaults.json; do
+  tag="$(printf '%s' "$name" | tr -c 'a-z' '-')"
+  case "$name" in
+    skein/*) body="$(printf '{"settings":%s,"storeEraStatusLine":""}' "$(plant "$tag")")" ;;
+    *) body="$(plant "$tag")" ;;
+  esac
+  ( printf '%s\n' "$body" > "$store/$name" ) 2>/dev/null && echo "planted $name" || echo "unplanted $name"
+done
+"##;
+    // B, starting: the kit as the fleet runs it, then every command its Claude would run from the
+    // settings in its checkout.
+    let start = r#"
+tree="$1"; store="$2"; root="$3"
+export HOME="$tree/../home-b"; m="$tree/../tmp-b"; mkdir -p "$HOME" "$m"
+SKEIN_STARTUP_MARKERS="$m" SKEIN_PROVISION=1 SKEIN_BOX=web-two SKEIN_STORE="$store" \
+  WORKSPACE_DIR="$tree" bash "$root/.skein/skein-startup.sh" </dev/null >"$m/kit.out" 2>&1
+echo "kit $?"
+cd "$tree" || exit 1
+for file in .claude/settings.json .claude/settings.local.json; do
+  [ -f "$file" ] || continue
+  jq -r '[.statusLine.command // empty] + [.hooks // {} | .[] | .[] | .hooks // [] | .[] | .command // empty] | .[]' "$file" \
+    | while IFS= read -r command; do
+        printf '{}' | CLAUDE_PROJECT_DIR="$tree" SKEIN_BOX=web-two bash -c "$command" >/dev/null 2>&1
+      done
+done
+echo "status [$(git status --porcelain | tr '\n' ' ')]"
+"#;
+
+    for born in [Born::Covered, Born::Workshop] {
+        let fleet = Fleet::make("startsettings");
+        let root = fleet.fleet_root.to_string_lossy().into_owned();
+        let kit = fs::read_to_string(script("kit/skein-startup.sh")).unwrap();
+        // Everything the fleet installs but the tracker's installer, which the kit starts detached
+        // and which has nothing to do with settings.
+        let mut install = skein::probes::plugin_install_under(&root);
+        install.retain(|(path, _)| !path.ends_with("/sync-install.sh"));
+        install.push((format!("{root}/.skein/skein-startup.sh"), kit));
+        for (path, body) in install {
+            let path = Path::new(&path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let defaults = format!(
+            "{}/probe/settings-defaults.json",
+            skein::runtime::turn_state_plugin_dir_under(&root)
+        );
+        let original = fs::read(&defaults).expect("the plugin installs no settings-defaults.json");
+
+        let store = fleet.store();
+        fs::create_dir_all(store.join("skein/launch")).unwrap();
+        fs::write(
+            store.join("skein/runtimes.tsv"),
+            "claude\tClaude\tclaude\t.claude/CLAUDE.md\t\n",
+        )
+        .unwrap();
+        fs::write(store.join("skein/SHARED-HOME.md"), "the guide\n").unwrap();
+        fs::write(
+            store.join("skein/launch/web-two.json"),
+            "{\"agent\":\"claude\",\"branch\":\"\"}\n",
+        )
+        .unwrap();
+        // B's checkout, whose repo tracks a `.claude/settings.json` of its own.
+        let tree = fleet.fleet_root.join("web-main/tree");
+        let tracked = "{ \"model\": \"example-model\" }\n";
+        fs::create_dir_all(tree.join(".claude")).unwrap();
+        fs::write(tree.join(".claude/settings.json"), tracked).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["add", ".claude/settings.json"],
+            &["commit", "-qm", "the repo ships its own .claude"],
+        ] {
+            let out = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=example",
+                    "-c",
+                    "user.email=example@example.com",
+                ])
+                .arg("-C")
+                .arg(&tree)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+
+        let said: Vec<String> = String::from_utf8_lossy(&fleet.in_box(
+            born,
+            attack,
+            &[defaults.clone(), store.to_string_lossy().into_owned()],
+        ))
+        .lines()
+        .map(str::to_string)
+        .collect();
+        let started = String::from_utf8_lossy(&fleet.in_box(
+            born,
+            start,
+            &[
+                tree.to_string_lossy().into_owned(),
+                store.to_string_lossy().into_owned(),
+                root.clone(),
+            ],
+        ))
+        .into_owned();
+        let ran: Vec<String> = fs::read_dir(&store)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with("planted-"))
+            .collect();
+        let planted: Vec<String> = [
+            "settings.json",
+            "settings.local.json",
+            "skein/settings-defaults.json",
+        ]
+        .iter()
+        .map(|n| format!("planted {n}"))
+        .collect();
+
+        if born == Born::Workshop {
+            assert_eq!(
+                said[0], "overwrote",
+                "the control could not write the plugin either, so the covered box's refusal \
+                 proves nothing"
+            );
+            assert_eq!(
+                said[1..],
+                planted[..],
+                "the control could not write the store"
+            );
+            assert!(
+                ran.contains(&"planted-plugin-line".to_string()),
+                "the control's start did not run the status line A planted in the plugin, so this \
+                 test cannot see a sibling running a plant: ran {ran:?}\n{started}"
+            );
+            continue;
+        }
+
+        assert_eq!(
+            said,
+            [vec!["kept".to_string()], planted].concat(),
+            "a box can change the settings its sibling's start reads, or cannot write the store at \
+             all"
+        );
+        assert_eq!(
+            fs::read(&defaults).unwrap(),
+            original,
+            "settings-defaults.json, which a sibling's start reads, is not the one skein installed"
+        );
+        assert_eq!(
+            started.trim(),
+            "kit 0\nstatus []",
+            "the sibling's start failed, or left its tree dirty"
+        );
+        assert!(
+            ran.is_empty(),
+            "the sibling's Claude runs a setting another box planted: {ran:?}"
+        );
+        // And B's start worked: skein's own defaults are in its local settings.
+        let local: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(tree.join(".claude/settings.local.json"))
+                .expect("the sibling's start wrote no local settings"),
+        )
+        .unwrap();
+        let skeins: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        assert_eq!(
+            local["statusLine"], skeins["settings"]["statusLine"],
+            "{local}"
+        );
+        assert_eq!(
+            fs::read_to_string(tree.join(".claude/settings.json")).unwrap(),
+            tracked,
+            "the sibling's start changed the settings its repo tracks"
+        );
+    }
+}

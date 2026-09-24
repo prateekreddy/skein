@@ -197,6 +197,25 @@ pub fn start_invocations() -> Vec<(&'static str, String)> {
 /// Beside the installer in the read-only plugin (SKEIN-1149); it used to be the store's
 /// `skein/codex-hooks.json`, which a sibling box could rewrite.
 const CODEX_HOOKS_JSON: &str = "codex-hooks.json";
+/// The settings the kit writes into a box's own `.claude/settings.local.json` when the repo ships a
+/// `.claude/` of its own (SKEIN-1048), beside the kit's other helpers in the read-only plugin. See
+/// [`settings_defaults`].
+const SETTINGS_DEFAULTS_JSON: &str = "settings-defaults.json";
+
+/// What the kit's case 2 (`kit/skein-startup.sh`) reads to set skein's settings in a box: `settings`
+/// is skein's `tui` and `statusLine` defaults, exactly what [`store_settings`] gives a store that
+/// sets neither, and `storeEraStatusLine` is the past default the kit copied into a repo's own
+/// `settings.json`, which the box's local file now overrides.
+///
+/// **From here and not from the store's `settings.json`** (SKEIN-1153): every box of the repo can
+/// write the store, so a merge that copied from it carried one box's hook or status line into every
+/// sibling that started after it. The plugin is bound read-only into every box.
+pub(crate) fn settings_defaults() -> serde_json::Value {
+    serde_json::json!({
+        "settings": store_settings(&serde_json::json!({})),
+        "storeEraStatusLine": STORE_ERA_STATUSLINE_CMD,
+    })
+}
 
 /// The scripts installed into each plugin variant's [`PLUGIN_PROBE_DIR`]: every script a turn-state
 /// hook runs, Claude's or Codex's, and every script one of those runs in turn. A script left out of
@@ -642,6 +661,10 @@ pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
     out.push((
         format!("{narrow}/{PLUGIN_PROBE_DIR}/{CODEX_HOOKS_JSON}"),
         pretty(&codex_hooks_with_probe()),
+    ));
+    out.push((
+        format!("{narrow}/{PLUGIN_PROBE_DIR}/{SETTINGS_DEFAULTS_JSON}"),
+        pretty(&settings_defaults()),
     ));
     out
 }
@@ -2817,8 +2840,8 @@ mod tests {
     /// merged the store's hooks into the repo's settings file additively, so every such box
     /// carries all 24; with the plugin running them too, each would fire twice.
     ///
-    /// Runs the kit's own jq program, cut out of the shipped script, over the settings a box of
-    /// that kind has today. What would make it fail: the `unskein` pass dropped from that program
+    /// Runs the kit's own `retire` jq definitions, cut out of the shipped script, over the settings
+    /// a box of that kind has today. What would make it fail: the `unskein` pass dropped from them
     /// (all 24 stay); or it matching anything outside skein's namespace (the repo's hook goes).
     #[test]
     fn a_repo_shipped_settings_file_loses_skeins_copied_hooks() {
@@ -2826,12 +2849,8 @@ mod tests {
             crate::testutil::skip("no jq here, and the kit's merge is jq");
             return;
         }
-        let script = crate::kit::KIT_STARTUP_SH;
-        let open = "merged=\"$(jq -s '";
-        let close = "' \"$rc/settings.json\" \"$store/settings.json\"";
-        assert_eq!(script.matches(open).count(), 1, "the kit's merge moved");
-        let from = script.find(open).unwrap() + open.len();
-        let program = &script[from..from + script[from..].find(close).expect("merge end")];
+        let (from, to) = kit_retire_span();
+        let program = format!("{} retire", &crate::kit::KIT_STARTUP_SH[from..to]);
 
         // What the kit copied was the store's hooks, so the store-era commands (SKEIN-1144).
         let mut repo = hooks_json(store_era_entries());
@@ -2841,17 +2860,13 @@ mod tests {
             .push(serde_json::json!({ "hooks": [ { "type": "command", "command": "repo-own-stop.sh" } ] }));
         repo["model"] = serde_json::json!("example-model");
         assert_eq!(commands(&repo).len(), 25, "the fixture did not build");
-        let store = store_settings(&serde_json::json!({}));
 
         let dir = tempdir();
-        let (a, b) = (dir.join("repo.json"), dir.join("store.json"));
+        let a = dir.join("repo.json");
         fs::write(&a, repo.to_string()).unwrap();
-        fs::write(&b, store.to_string()).unwrap();
         let out = Command::new("jq")
-            .arg("-s")
-            .arg(program)
+            .arg(&program)
             .arg(&a)
-            .arg(&b)
             .output()
             .expect("jq");
         assert!(out.status.success(), "{out:?}");
@@ -2862,7 +2877,19 @@ mod tests {
             "{merged}"
         );
         assert_eq!(merged["model"], "example-model");
-        assert_eq!(merged["statusLine"], store["statusLine"], "{merged}");
+    }
+
+    /// Where the kit's `retire` jq definitions are in the shipped script: (start, end) of the
+    /// program text between `retire='` and its closing quote. Their `/.claude/skein/bin/` is the
+    /// pattern that RETIRES skein's store-era hooks, not a path the kit runs.
+    fn kit_retire_span() -> (usize, usize) {
+        let kit = crate::kit::KIT_STARTUP_SH;
+        let open = "retire='";
+        let close = "end;'\n";
+        assert_eq!(kit.matches(open).count(), 1, "the kit's retire moved");
+        let from = kit.find(open).unwrap() + open.len();
+        let to = from + kit[from..].find(close).expect("the retire's end") + "end;".len();
+        (from, to)
     }
 
     /// **skein's turn-state hooks load whichever way the fleet's switch is set**, and off drops
@@ -3143,12 +3170,9 @@ mod tests {
             "{kit_dir}/{}/{PLUGIN_PROBE_DIR}",
             crate::runtime::TURN_STATE_PLUGIN
         );
-        // Its code, without comments and without the settings merge, whose `/.claude/skein/bin/`
+        // Its code, without comments and without the settings retire, whose `/.claude/skein/bin/`
         // is the pattern that RETIRES skein's store-era hooks from a repo's settings, not a path it runs.
-        let open = "merged=\"$(jq -s '";
-        let close = "' \"$rc/settings.json\" \"$store/settings.json\"";
-        let from = kit.find(open).expect("the kit's merge moved");
-        let to = from + kit[from..].find(close).expect("merge end");
+        let (from, to) = kit_retire_span();
         let kit_code: String = format!("{}{}", &kit[..from], &kit[to..])
             .lines()
             .filter(|l| !l.trim_start().starts_with('#'))
