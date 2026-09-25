@@ -10,10 +10,12 @@ __pycache__/
 # macOS Finder droppings. `src/.DS_Store` was tracked from 2026-06-30 to SKEIN-520.
 .DS_Store
 
-# `.claude` in a working checkout is a symlink into the owner's live store — another repository's
-# data, mounted here for the agent's benefit. It is not this repository's and must never be
-# committed from it.
-/.claude
+# `.claude/` is tracked: its README, an empty settings file and the change-discipline skill. What
+# skein adds there in a box is not: the link to the store, the box's own settings, and an old
+# untracked settings file skein moved aside (SKEIN-1053).
+/.claude/skein
+/.claude/settings.local.json
+/.claude/settings.json.skein-old
 
 # **Belt-and-braces since SKEIN-551, and it used to be the only defence.** `kit::ensure_store`
 # scaffolded a store wherever it was pointed, an empty `"store"` in `repos.json` pointed it at
