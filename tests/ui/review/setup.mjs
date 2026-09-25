@@ -18,6 +18,34 @@ import { openDoor } from "../lift.mjs";
 import { erring, finding, ledger, seeing, settler } from "../harness/browser.mjs";
 import { stub } from "../harness/github.mjs";
 import { startServer } from "../harness/server.mjs";
+import { fileURLToPath } from "node:url";
+
+// ---------- refuse to run as anything but `review.mjs` ----------
+/** **A part is not a suite, and run as one it can only fail and then never end.**
+ *
+ *  The parts under `tests/ui/review/` inherit the queue as the one before them left it, and only
+ *  `tests/ui/review.mjs` ends a run: it reports, closes the browser and calls `process.exit`. So
+ *  `node review/row.mjs` fails every check that needed the pane `queue.mjs` opens — "no gist cells
+ *  at all", `revQueue` null — and then, with a live server and a live chromium keeping its event
+ *  loop open and nothing left to close them, waits for ever. It was run that way on 2026-09-25,
+ *  and it hung for nine hours before somebody stopped it.
+ *
+ *  So this module, which every part imports, refuses before it builds anything: a fixture, a server
+ *  or a browser started here would be the very thing that keeps the process alive. It asks what the
+ *  entry script is, rather than trusting a flag the entry sets, because the failure is precisely an
+ *  entry that sets nothing. */
+// Both through `realpath`: node resolves `import.meta.url` through symlinks and leaves `argv[1]` as
+// it was typed, so a checkout reached through a link would otherwise be refused its own suite.
+const real = p => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+const entry = process.argv[1] ? real(process.argv[1]) : "";
+const suite = real(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "review.mjs"));
+if (entry !== suite) {
+  console.error(
+    `${path.relative(process.cwd(), entry) || entry} is a part of the review suite, not a suite: it ` +
+    `needs the queue the parts before it leave, and nothing but review.mjs ends the run.\n` +
+    `Run the whole suite instead: node ${path.relative(process.cwd(), suite)}`);
+  process.exit(2);
+}
 
 
 // ---------- fixture ----------
