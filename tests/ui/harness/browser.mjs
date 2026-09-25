@@ -16,11 +16,25 @@
 // ends with a bounded block carrying the count and the first few failures WITH their reasons, and
 // the tail is guaranteed to hold it however many checks failed.
 
+/** **How long one check may wait before it is a failure** (SKEIN-516's row.mjs hang, 2026-09-25).
+ *
+ *  A check is an `await`, and an `await` on something that never settles — a route held open, a
+ *  promise nobody resolves, a page that never answers — used to hold the suite for as long as
+ *  whoever ran it would wait: nine hours, once. Every other wait here has its own timeout and throws
+ *  when it expires; this is the one that covers a wait somebody forgot to bound. Generous on
+ *  purpose: the whole of `review.mjs` runs in about a minute, so a single check this slow is broken
+ *  rather than slow, and the point is that the run ends and says which check it was.
+ *
+ *  The work a timed-out check started is not cancelled — nothing can cancel an arbitrary promise —
+ *  so a suite goes on against whatever state it left, and its later failures are the first one's
+ *  consequences. The report's "first few failures" rule already reads them that way. */
+const CHECK_DEADLINE_MS = 300_000;
+
 /** A run's checks, and the report that names the ones that failed.
  *
  * `whole` prints a failure's entire message rather than its first line — what a suite about what a
  * first run SAYS wants, since the evidence is usually the part after the colon. */
-export function ledger({ whole = false } = {}) {
+export function ledger({ whole = false, deadline = CHECK_DEADLINE_MS } = {}) {
   const results = [];
   const say = e => {
     const text = String((e && e.message) || e);
@@ -34,8 +48,15 @@ export function ledger({ whole = false } = {}) {
      * point of failure, which for a long suite is hundreds of lines above the end, and [`report`]
      * needs it again to put a diagnosis inside the window a reader actually sees. */
     async check(name, fn) {
-      try { await fn(); results.push([true, name]); console.log(`  ok    ${name}`); }
+      let timer;
+      const overdue = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `still waiting after ${deadline / 1000}s — a wait that never ends fails its check rather than holding the suite open`)),
+          deadline);
+      });
+      try { await Promise.race([fn(), overdue]); results.push([true, name]); console.log(`  ok    ${name}`); }
       catch (e) { const why = say(e); results.push([false, name, why]); console.log(`  FAIL  ${name}\n${why}`); }
+      finally { clearTimeout(timer); }
     },
     /** The value form: what was got, what was wanted, compared as JSON. */
     value(name, got, want) {
