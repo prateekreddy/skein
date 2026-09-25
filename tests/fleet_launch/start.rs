@@ -191,16 +191,17 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "shared home must point into the mounted store, got {link:?}"
     );
 
-    // And the store is reachable from the checkout, which is what makes hooks and the probe work.
+    // And the store is reachable from the checkout, which is what makes hooks and the probe work:
+    // through `.claude/skein`, in the directory of the box's own that `.claude` is (SKEIN-1053).
     let claude = boxed
         .exec(
-            &format!("readlink -f {tree}/.claude || true"),
+            &format!("readlink -f {tree}/.claude/skein || true"),
             Duration::from_secs(30),
         )
         .expect("resolve .claude");
     assert!(
         claude.trim().starts_with(store.to_str().unwrap()),
-        "the box's .claude must resolve into the store, got {claude:?}"
+        "the box's .claude/skein must resolve into the store, got {claude:?}"
     );
 
     // ---- the sandbox cycles: the tree survives, the session does not ----
