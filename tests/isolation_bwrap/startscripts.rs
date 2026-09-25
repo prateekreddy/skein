@@ -271,8 +271,8 @@ rm -f /tmp/skein-pane.web-two.lock
     }
 }
 
-/// **A box cannot plant a hook or a status line that its sibling's Claude runs, where the repo
-/// ships its own `.claude/`** (SKEIN-1153, closed by SKEIN-1048).
+/// **A box cannot plant a hook or a status line that its sibling's Claude runs** (SKEIN-1153,
+/// closed by SKEIN-1048 and SKEIN-1053).
 ///
 /// Until SKEIN-1048 the kit's case 2 copied hooks, `tui` and `statusLine` from the store's
 /// `settings.json` into the repo's own `.claude/settings.json` at every start. Every box of the
@@ -293,9 +293,10 @@ rm -f /tmp/skein-pane.web-two.lock
 /// status line into its local settings, and running it leaves the marker. So the marker's absence
 /// in the covered box is an absence something could have filled.
 ///
-/// Not covered, and why: a repo with no `.claude/` of its own. There `.claude` IS the store's link,
-/// so the store's `settings.json` is B's project settings and A's plant there runs in B. That case
-/// is open (docs/threat-model.md, the store row).
+/// Both layouts (SKEIN-1053): a repo that ships `.claude/`, and one that tracks nothing there,
+/// whose box B still has `.claude` as the store's own link — the layout every box had before —
+/// and converts it as it starts, under the cover. After that, `.claude` is a directory of B's own
+/// with the store's entries linked in and its settings files left out.
 ///
 /// **What would make this fail**:
 /// - `--bind` in place of `--ro-bind` for `.skein`: A's write to the plugin lands (the first
@@ -303,7 +304,9 @@ rm -f /tmp/skein-pane.web-two.lock
 /// - the kit reading its defaults from the store (`defaults="$store/skein/settings-defaults.json"`):
 ///   B runs A's status line (a marker appears);
 /// - the kit as it was at bd85fd5, merging the store's `settings.json` into the repo's: B's
-///   `settings.json` carries A's hook, which runs (a marker appears), and B's tree is dirty.
+///   `settings.json` carries A's hook, which runs (a marker appears), and B's tree is dirty;
+/// - the kit leaving `.claude` as the store's link where the repo ships none: B's
+///   `.claude/settings.json` is the store's, and A's plant in it runs (a marker appears).
 #[test]
 fn a_box_cannot_plant_a_hook_or_status_line_its_siblings_claude_runs() {
     if !bwrap_works() {
@@ -356,7 +359,12 @@ done
 echo "status [$(git status --porcelain | tr '\n' ' ')]"
 "#;
 
-    for born in [Born::Covered, Born::Workshop] {
+    for (born, ships) in [
+        (Born::Covered, true),
+        (Born::Covered, false),
+        (Born::Workshop, true),
+        (Born::Workshop, false),
+    ] {
         let fleet = Fleet::make("startsettings");
         let root = fleet.fleet_root.to_string_lossy().into_owned();
         let kit = fs::read_to_string(script("kit/skein-startup.sh")).unwrap();
@@ -391,15 +399,21 @@ echo "status [$(git status --porcelain | tr '\n' ' ')]"
             "{\"agent\":\"claude\",\"branch\":\"\"}\n",
         )
         .unwrap();
-        // B's checkout, whose repo tracks a `.claude/settings.json` of its own.
+        // B's checkout. Either its repo tracks a `.claude/settings.json` of its own, or it tracks
+        // nothing under `.claude` and B still has the layout every box had before SKEIN-1053:
+        // `.claude` is the store's own link, which B's start converts under the cover.
         let tree = fleet.fleet_root.join("web-main/tree");
         let tracked = "{ \"model\": \"example-model\" }\n";
-        fs::create_dir_all(tree.join(".claude")).unwrap();
-        fs::write(tree.join(".claude/settings.json"), tracked).unwrap();
+        let (file, message) = match ships {
+            true => (".claude/settings.json", "the repo ships its own .claude"),
+            false => ("README.md", "a repo"),
+        };
+        fs::create_dir_all(tree.join(file).parent().unwrap()).unwrap();
+        fs::write(tree.join(file), tracked).unwrap();
         for args in [
             &["init", "-q"][..],
-            &["add", ".claude/settings.json"],
-            &["commit", "-qm", "the repo ships its own .claude"],
+            &["add", file],
+            &["commit", "-qm", message],
         ] {
             let out = Command::new("git")
                 .args([
@@ -415,6 +429,10 @@ echo "status [$(git status --porcelain | tr '\n' ' ')]"
                 .output()
                 .unwrap();
             assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+        if !ships {
+            std::os::unix::fs::symlink(&store, tree.join(".claude")).unwrap();
+            fs::write(tree.join(".git/info/exclude"), "/.claude\n").unwrap();
         }
 
         let said: Vec<String> = String::from_utf8_lossy(&fleet.in_box(
@@ -482,7 +500,8 @@ echo "status [$(git status --porcelain | tr '\n' ' ')]"
         );
         assert!(
             ran.is_empty(),
-            "the sibling's Claude runs a setting another box planted: {ran:?}"
+            "the sibling's Claude runs a setting another box planted (repo ships .claude: {ships}): \
+             {ran:?}"
         );
         assert_eq!(
             started.trim(),
@@ -500,10 +519,19 @@ echo "status [$(git status --porcelain | tr '\n' ' ')]"
             local["statusLine"], skeins["settings"]["statusLine"],
             "{local}"
         );
-        assert_eq!(
-            fs::read_to_string(tree.join(".claude/settings.json")).unwrap(),
-            tracked,
-            "the sibling's start changed the settings its repo tracks"
-        );
+        if ships {
+            assert_eq!(
+                fs::read_to_string(tree.join(".claude/settings.json")).unwrap(),
+                tracked,
+                "the sibling's start changed the settings its repo tracks"
+            );
+        } else {
+            assert!(
+                !tree.join(".claude").is_symlink()
+                    && tree.join(".claude/skein").is_symlink()
+                    && !tree.join(".claude/settings.json").exists(),
+                "the sibling's .claude is still the store's, or loads the store's settings"
+            );
+        }
     }
 }

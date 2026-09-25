@@ -9,7 +9,7 @@ projects" below for the one exception).
 **You don't have to put anything here for it to work.** skein installs and maintains
 all the machinery itself (under `skein/`): provider-neutral probes, runtime hook adapters, a startup
 bootstrap that bridges memory and surfaces mailbox hand-offs, the mailbox, and a
-default status line — all wired into `settings.json` automatically. An empty folder
+default status line, set in each box's own `.claude/settings.local.json`. An empty folder
 comes up fully working.
 
 Skein installs `jq` during box setup as the single JSON dependency. It does not install Python or a
@@ -78,9 +78,10 @@ What you *optionally* add is your own project content:
                    the file is seeded once into shared-rw/ (a writable store dir) and
                    symlinked from there instead — edits persist there and are shared
                    live across the project's boxes. Default (no suffix) is read-only.
-    settings.json  skein adds its probe hooks, SessionStart bootstrap, a statusLine,
-                   and fullscreen TUI. Add your own statusLine / enabledPlugins / hooks
-                   here — skein only fills what's missing and never clobbers yours.
+    settings.json  NOT loaded as a box's settings. Every box of the repo can write this
+                   folder, so a hook or status line set here could run in every other
+                   box; each box's settings are its own `.claude/settings.local.json`
+                   instead. A box's start still reads `enabledPlugins` from here.
 
 Managed by skein (don't edit):
 
@@ -111,7 +112,8 @@ Managed by skein (don't edit):
     skein/handoff-snapshots/ immutable replacement snapshots: Git bundle, staged/unstaged patches,
                    untracked archive, shared memory/skills/hooks backup, transcript export, manifest.
     skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found,
-                   how .claude was linked (linked | merged | no-store | failed), whether shared-home
+                   how .claude was linked (linked | merged | no-store | failed), what that start
+                   changed in .claude if anything (claude_note), whether shared-home
                    and durable agent guidance were installed, jq/tmux presence, and branch.
     shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.
 
