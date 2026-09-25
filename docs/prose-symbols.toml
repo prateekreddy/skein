@@ -55,7 +55,7 @@ F_SETFL = "an `fcntl(2)` command, the kernel's. `src/doorway.rs` names it in `a_
 # ---- named in the past tense, deliberately -------------------------------------------------
 pick_path = "SKEIN-106 deleted the route, the handler and `health::pick_path`. parity.md's row RECORDS that deletion, so it has to be able to say the name."
 read_anchor = "architecture.md §9 describes what the old anchor read and why the box could write it. The paragraph is the argument for the current design and needs the former name to make it."
-SKEIN_KIT = "one of the `$SKEIN_REPO`/`$SKEIN_KIT`/`$SKEIN_STORE` triple the retired per-VM launch mode read. Same record as `persistent_launch_command`: self-sufficient.md quotes the old path in order to say what replaced it."
+SKEIN_KIT = "one of the `$SKEIN_REPO`/`$SKEIN_KIT`/`$SKEIN_STORE` triple the retired per-VM launch mode read. `src/sandbox.rs` names it in the past tense, in its account of how a box used to be created outside repos.json and why that path is gone."
 transcript_is_vm_local = "a parameter of the per-VM model, 'that only a migration ever set true'. `src/fleet/checkout.rs:423` says in as many words that the flag is gone with the model, and a name in a claim about what is gone still has to be spelled right."
 INITIAL_SETUP_WAIT = "the agent launch's setup wait as it was NAMED when the three deadlines were last inverted. `src/fleet/start.rs:1774-1778` is the account of that inversion; the live reading is `setup_wait_secs()`, which the test beneath it calls."
 draft_critique = "the second drafter, removed with its own prompt and its own diff download. `visit`'s doc says 'there used to be' and `docs/parity.md:153` records the cut — the argument for one reading needs the name of the two."
@@ -107,8 +107,6 @@ revSettled = "the page's own copy of the hour a pull request had to be quiet bef
 revStackRun = "the ONE global that held the stack read in progress, before `revStackRuns` made it a map keyed by stack (SKEIN-353). Named in the PAST TENSE by `tests/ui/stackread.mjs`, which is the account of the reported defect: a second press overwrote the global, `revStackPump` read it, and the first stack's queue never advanced again. A note explaining what a per-stack run bought has to be able to name the thing it replaced."
 
 # ---- proposed, not built -------------------------------------------------------------------
-SKEIN_BRANCH = "self-sufficient.md proposes passing the branch on `sbx run` under this name rather than deriving it by stripping the box name. Nothing sets it yet."
-ssh_remote_warning = "self-sufficient.md's proposed add-time check for an SSH `origin`, with the HTTPS-switch command. Not written."
 observed_at = "a field of the signal shape architecture.md §2.2 designs (the table at :84). Nothing carries it yet — `src/signal.rs` is the taxonomy, and its `//!` at :35 is arguing about where the answering Source belongs in that same design."
 
 ensure_fleet_server = "the host-side move — install the server over stdin, reload the doorway, publish the port — deleted with host-driven skein (SKEIN-576, architecture \u00a713a). `bootstrap.sh` installs and starts the server INSIDE the sandbox and a person publishes the port. Named in the PAST TENSE by `src/fleet/server.rs`'s account of where \u00a79.4's guard went (it moved to `cockpit_port_advice`, because the person who now runs `sbx ports --publish` is acting on what skein told them) and by `tests/fleet_move.rs`, which records which driver each retargeted test used to have."

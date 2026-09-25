@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:494"]
+["CONTRIBUTING.md:495"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:508"]
+["CONTRIBUTING.md:509"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:539"]
+["CONTRIBUTING.md:540"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -1580,6 +1580,10 @@ cited_by = ["docs/recovery-survey.md"]
 line = "_ => HealthCheck::unknown(format!("
 cited_by = ["docs/recovery-survey.md"]
 
+["src/kit/skein-startup.sh:8"]
+line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
+cited_by = ["docs/delivery.md"]
+
 ["src/kit/skein-startup.sh:283"]
 line = "# case 2: repo ships its own .claude directory — merge, don't skip"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
@@ -2334,16 +2338,16 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
-["tools/gates.sh:709"]
+["tools/gates.sh:710"]
 line = "--verify)"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
-["tools/gates.sh:1223"]
+["tools/gates.sh:1224"]
 line = "exit 3"
 window = "echo \" Run it again on a tree nobody else is writing to.\"\u000bexit 3\u000bfi"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
-["tools/prose-check.py:1832"]
+["tools/prose-check.py:1865"]
 line = "\"Written long ago. Citations in this document name lines as they stood at `abc1234`.\\n\""
 cited_by = ["docs/citations.toml"]
 

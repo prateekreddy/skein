@@ -216,6 +216,12 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner
+      # The public CLAUDE.md, which every agent in a checkout reads first: no tracker id, no tracker
+      # project id, nothing on the residue register, AGENTS.md a symlink to it, and sync's installer
+      # leaving it byte-identical. That last rule runs the installer's own doc step, because a
+      # renamed `## Work tracking` heading would otherwise append the owner's tracker section to a
+      # tracked file on every box with sync, and nothing else would say so (SKEIN-1158).
+      - run: tools/gates.sh run claude-md-check
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.

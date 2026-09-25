@@ -6,7 +6,7 @@
 //! wiring since SKEIN-1062 ([`turn_state_hooks`]), the scripts since SKEIN-1144
 //! ([`plugin_install`]). So do the helpers a box runs as it starts (SKEIN-1149). The store still
 //! gets copies, for an agent that runs `mailbox.sh` by hand; nothing skein starts runs them. See
-//! `docs/self-sufficient.md`.
+//! `docs/inventory.md` §8.1.
 //!
 //! This is still the highest-blast-radius write in the system — it edits a settings file the user
 //! also edits, in every store, on every upgrade, to take skein's past hooks back out and to keep the

@@ -662,6 +662,11 @@ per call, which is the actual requirement.
 - **Pane files collided across the fleet** — every box's screen observer wrote one filename, so no box
   had a fresh observation. Same shape as cgroup name reuse.
 - **The registry self-heals a stray leading brace**, seen in the wild and repaired on read.
+- **The sbx kit resolver rejects a dollar-brace it does not know.** It scans a kit's files for
+  `${…}` placeholders and supports only its own, so a shell expansion written the ordinary way
+  fails the kit rather than expanding. The startup script reads its environment through `printenv`
+  instead (`src/kit/skein-startup.sh:8`), and `ensure_store_and_kit_provision_layout` fails if the
+  kit's spec carries one.
 - **Terminal scrollback is carried over by hand on reconnect** — tmux repaints only the visible pane,
   so without it a server restart wiped everything you had already read.
 
