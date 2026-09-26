@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The public `CLAUDE.md` is tracker-neutral, `AGENTS.md` is the same file, and `sync` leaves it be.
+"""The public `CLAUDE.md` is tracker-neutral, `AGENTS.md` is the same file, and `sync` leaves it be;
+and the skills the repository ships are tracker-neutral too.
 
 `CLAUDE.md` is the one document every agent in a checkout of this repository reads before anything
 else, and since the repository went public it is also read by strangers. It used to carry the
@@ -25,6 +26,13 @@ comment in a shell script (SKEIN-1158). So, four rules:
              a tracked file on the next start of every such box, and show up only as somebody's
              unexplained diff. This runs the script's own doc step, cut out of the script rather
              than rewritten here, over a copy of this file with `AGENTS.md` a symlink beside it.
+
+The first three rules — tracker, project, banned — apply as well to every TRACKED Markdown file
+under `.claude/skills/`, with the same matchers. A shipped skill is read by every agent in a
+checkout, as `CLAUDE.md` is, and the change-discipline skill had to be scrubbed the same way after
+it was moved into the repository. The set is read from `git ls-files`, not from a list here, so a
+new skill is checked from the commit that adds it; and a set that comes back empty refuses rather
+than passing, because a rename of the directory would otherwise turn this half into a silent green.
 
 Plus the shape of `AGENTS.md`: tracked as a symlink (mode 120000) whose target is `CLAUDE.md`, so
 Codex, which reads `AGENTS.md`, reads the same words. A copy would drift.
@@ -52,6 +60,8 @@ TWIN = "AGENTS.md"
 HEADING = "## Work tracking"
 SYNC = os.path.join("src", "store", "sync-install.sh")
 BLOCK_DIR = os.path.join("src", "store", "sync")
+
+SKILLS = os.path.join(".claude", "skills")
 
 TRACKER_ID = re.compile(r"\b[A-Z][A-Z0-9]*-[0-9]+\b")
 UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
@@ -89,6 +99,20 @@ def text_findings(text, banned):
         for h in banned.find(line):
             out.append((n, "banned", f"{banned.describe(h)} is on the residue register"))
     return out
+
+
+def skill_docs():
+    """Every tracked Markdown file under `.claude/skills/`, as a path relative to the root."""
+    try:
+        listed = subprocess.run(["git", "-C", ROOT, "ls-files", "-z", "--", SKILLS],
+                                capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise Refused(f"git could not list {SKILLS}: {exc}")
+    docs = sorted(p for p in listed.split("\0") if p.endswith(".md"))
+    if not docs:
+        raise Refused(f"git lists no Markdown file under {SKILLS}, so the skills would be checked "
+                      f"against nothing; if the directory moved, point `SKILLS` in this script at it")
+    return docs
 
 
 def twin_findings():
@@ -183,8 +207,13 @@ def main():
         with open(path, "rb") as fh:
             doc_bytes = fh.read()
         text = doc_bytes.decode("utf-8")
-        found = [f"{DOC}:{n}: {what} ({rule})" for n, rule, what in
-                 text_findings(text, residue_matcher())]
+        banned = residue_matcher()
+        found = [f"{DOC}:{n}: {what} ({rule})" for n, rule, what in text_findings(text, banned)]
+        skills = skill_docs()
+        for rel in skills:
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+                found += [f"{rel}:{n}: {what} ({rule})" for n, rule, what in
+                          text_findings(fh.read(), banned)]
         found += twin_findings()
         found += sync_findings(doc_bytes)
     except Refused as exc:
@@ -198,8 +227,9 @@ def main():
     if found:
         print(f"claude-md-check: {len(found)} finding(s)", file=sys.stderr)
         return 1
-    print(f"claude-md-check: {DOC} names no tracker id, project id or banned string, {TWIN} is a "
-          f"symlink to it, and sync's doc step leaves it byte-identical")
+    print(f"claude-md-check: {DOC} and the {len(skills)} tracked skill file(s) under {SKILLS} name "
+          f"no tracker id, project id or banned string, {TWIN} is a symlink to {DOC}, and sync's "
+          f"doc step leaves it byte-identical")
     return 0
 
 
