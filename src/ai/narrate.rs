@@ -77,8 +77,18 @@ pub(crate) fn ai_says_hold(name: &str) -> Option<bool> {
         text.chars().take(2000).collect::<String>()
     );
     let ans = ai_cached(&key, || as_site(Site::HoldGate, || claude_oneshot(&prompt)))?;
-    // err toward HOLD: only an explicit ROUTINE clears a box for auto-continue
-    Some(!ans.to_uppercase().contains("ROUTINE"))
+    Some(!answer_is_routine(&ans))
+}
+
+/// Whether the hold gate's answer clears a box for auto-continue. The prompt asks for ONE word, so
+/// only an answer that IS that word clears it: "ROUTINE" or "Routine.", with surrounding whitespace
+/// and punctuation ignored. Anything else holds — "not ROUTINE", "ROUTINE? no, DECISION", a
+/// sentence, an empty or garbled reply — because a box wrongly held costs a question and a box
+/// wrongly continued costs a decision the human never saw (SKEIN-1161). A test for a word inside
+/// the answer cleared "DECISION, not ROUTINE", the one answer that should never clear anything.
+fn answer_is_routine(ans: &str) -> bool {
+    ans.trim_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .eq_ignore_ascii_case("ROUTINE")
 }
 
 #[cfg(test)]
@@ -86,6 +96,55 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use std::{env, fs};
+
+    /// Each answer the hold gate can get back, and whether it clears the box. Named so a failure
+    /// says which answer was misread.
+    fn clears(ans: &str) -> bool {
+        answer_is_routine(ans)
+    }
+
+    #[test]
+    fn the_bare_word_routine_clears_a_box() {
+        assert!(clears("ROUTINE"), "\"ROUTINE\" must clear");
+    }
+
+    #[test]
+    fn routine_in_any_case_with_a_full_stop_clears_a_box() {
+        assert!(clears("Routine."), "\"Routine.\" must clear");
+        assert!(clears("  routine\n"), "\"  routine\\n\" must clear");
+    }
+
+    #[test]
+    fn decision_not_routine_holds() {
+        assert!(
+            !clears("DECISION — not ROUTINE"),
+            "\"DECISION — not ROUTINE\" must hold"
+        );
+    }
+
+    #[test]
+    fn not_routine_holds() {
+        assert!(!clears("not routine"), "\"not routine\" must hold");
+        assert!(!clears("NOT ROUTINE"), "\"NOT ROUTINE\" must hold");
+    }
+
+    #[test]
+    fn routine_followed_by_a_retraction_holds() {
+        assert!(
+            !clears("ROUTINE? no — HOLD"),
+            "\"ROUTINE? no — HOLD\" must hold"
+        );
+        assert!(!clears("ROUTINE, but check the migration first"));
+    }
+
+    #[test]
+    fn an_empty_or_garbled_answer_holds() {
+        assert!(!clears(""), "\"\" must hold");
+        assert!(!clears("   \n"), "whitespace must hold");
+        assert!(!clears("ROUTIN"), "\"ROUTIN\" must hold");
+        assert!(!clears("ROUTINELY"), "\"ROUTINELY\" must hold");
+        assert!(!clears("DECISION"), "\"DECISION\" must hold");
+    }
 
     #[test]
     #[cfg(unix)]
