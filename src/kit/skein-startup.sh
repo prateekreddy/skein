@@ -255,73 +255,6 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
   echo "[skein-kit] restored replacement snapshot from $handoff_dir"
 fi
 
-# Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
-# Three cases — and every one leaves a boot report, because a silent miss here is the #1 way
-# a box ends up with zero hooks while looking perfectly healthy:
-#   1. no .claude in the clone  → symlink the whole store (the original path);
-#   2. the repo SHIPS a real .claude/ (committed settings/commands — common!) → the old code
-#      silently skipped the link and the box ran hookless forever. Now: link the store's
-#      skein/ into the repo's .claude (probe scripts resolve the true store through that
-#      link) and MERGE the store's hook wiring into the repo's own settings.json (additive,
-#      dedup by whole entry, repo's own hooks preserved — jq, which the apt step above ensures).
-#      The same pass RETIRES every skein hook a past merge copied there: skein's turn-state hooks
-#      load from its read-only plugin now (SKEIN-1062), and a copy left here would fire each of them
-#      twice. "skein's" is the rule `takeover::sanitized_user_hooks` uses: a command that runs
-#      something under `/.claude/skein/bin/`, skein's own namespace in the store;
-#   3. .claude is already the store symlink → nothing to do.
-link_state="failed"
-if [ ! -d "$store" ]; then
-  link_state="no-store"
-  echo "[skein-kit] no store found — probes will not report; check the launch spec mount" >&2
-elif [ -L "$clone_root/.claude" ]; then
-  link_state="linked"
-elif [ ! -e "$clone_root/.claude" ]; then
-  if ln -s "$store" "$clone_root/.claude" 2>/dev/null; then link_state="linked"; else
-    echo "[skein-kit] could not link $store -> $clone_root/.claude" >&2
-  fi
-else
-  # case 2: repo ships its own .claude directory — merge, don't skip
-  rc="$clone_root/.claude"
-  [ -e "$rc/skein" ] || ln -s "$store/skein" "$rc/skein" 2>/dev/null || true
-  if [ -L "$rc/skein" ] && command -v jq >/dev/null 2>&1; then
-    [ -f "$rc/settings.json" ] || echo '{}' > "$rc/settings.json"
-    merged="$(jq -s '
-      def unskein: with_entries(.value |= (if type == "array" then
-          map(if (.hooks | type) == "array"
-            then .hooks |= map(select((.command // "" | tostring | contains("/.claude/skein/bin/")) | not))
-            else . end)
-          | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
-        else . end))
-        | with_entries(select((.value | type) != "array" or (.value | length) > 0));
-      (.[0] | if (.hooks | type) == "object" then .hooks |= unskein else . end) as $c
-      | .[1] as $s | ($c.hooks // {}) as $ch |
-      $c
-      | .hooks = (($s.hooks // {}) | to_entries
-          | reduce .[] as $e ($ch;
-              .[$e.key] = ((.[$e.key] // []) + ($e.value | map(. as $x
-                | select(((($ch[$e.key]) // []) | index($x)) == null))))))
-      | (if .tui == null and $s.tui != null then .tui = $s.tui else . end)
-      | (if .statusLine == null and $s.statusLine != null then .statusLine = $s.statusLine else . end)
-    ' "$rc/settings.json" "$store/settings.json" 2>/dev/null)"
-    if [ -n "$merged" ]; then
-      tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
-        && printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$rc/settings.json" \
-        && link_state="merged"
-    fi
-  fi
-  [ "$link_state" = "merged" ] \
-    || echo "[skein-kit] repo ships .claude/ and the settings merge failed — probes will not report" >&2
-fi
-# The mounted store is infrastructure, never a worktree change. Exclude it immediately;
-# waiting for SessionStart is too late when a runtime blocks on first-run trust.
-git_dir="$(git -C "$clone_root" rev-parse --git-dir 2>/dev/null || true)"
-case "$git_dir" in "") ;; /*) ;; *) git_dir="$clone_root/$git_dir" ;; esac
-if [ -n "$git_dir" ]; then
-  mkdir -p "$git_dir/info" 2>/dev/null || true
-  grep -qxF '/.claude' "$git_dir/info/exclude" 2>/dev/null \
-    || printf '/.claude\n' >> "$git_dir/info/exclude"
-fi
-
 # The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
 # store is writable by every box of the repo, so a helper run from there is one a sibling box can
 # rewrite and this box then runs as it starts. They are installed with this script, under the fleet
@@ -330,6 +263,163 @@ fi
 # which is where the fleet runs it from (`fleet::box_provision_path`). A per-VM sandbox runs its
 # copy from ~/.local/bin, has no `.skein`, and so goes without these.
 skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe"
+
+# Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
+# `.claude` is a directory of this box's own in both layouts (SKEIN-1053), and every run leaves a
+# boot report, because a silent miss here is the #1 way a box ends up with zero hooks while
+# looking perfectly healthy:
+#   1. the repo tracks nothing under .claude/ → skein makes the directory and links each of the
+#      store's entries into it, one by one — memory/, skills/, mailbox/, skein/ and the rest — and
+#      leaves out the store's `settings.json` and `settings.local.json`. Every box of the repo can
+#      write the store, so a settings file read from there is one where a box plants a hook or a
+#      status line that its siblings run (SKEIN-1153);
+#   2. the repo tracks files under .claude/ (committed settings, commands, skills) → link only the
+#      store's skein/ into it (the probes resolve the true store through that link). A link an
+#      earlier start made for layout 1 goes, the link and never what it points at.
+# In both, skein's settings go into `.claude/settings.local.json`: untracked, this box's own, and
+# never the repo's `settings.json`, which the repo may track and which is left exactly as it is
+# (SKEIN-1048). What goes in is skein's `tui` and `statusLine` defaults, read from the plugin's
+# read-only `settings-defaults.json` and never from the store. Each default goes in only where
+# neither file sets one, except the status line a past merge copied into `settings.json`, which ran
+# the store's renderer and which the local file now overrides. The same pass RETIRES every skein
+# hook a past merge copied into either file: skein's turn-state hooks load from its read-only
+# plugin now (SKEIN-1062), and a copy left here would fire each of them twice. "skein's" is the
+# rule `takeover::sanitized_user_hooks` uses: a command that runs something under
+# `/.claude/skein/bin/`, skein's own namespace in the store.
+#
+# A clone whose `.claude` is still the store's own link — every box skein made before SKEIN-1053 —
+# is converted: the link is removed, never the store it points at, and the layout above is built in
+# its place. Everything the box reached through the link it still reaches, through the entries
+# linked one by one, except the store's two settings files. In layout 2, an untracked
+# `settings.json` a past merge created is moved aside to `settings.json.skein-old`, once, which
+# Claude does not load; nothing is deleted.
+link_state="failed"
+claude_note=""
+rc="$clone_root/.claude"
+if [ ! -d "$store" ]; then
+  link_state="no-store"
+  echo "[skein-kit] no store found — probes will not report; check the launch spec mount" >&2
+else
+  store_real="$(cd "$store" 2>/dev/null && pwd -P)"
+  converted="false"
+  if [ -L "$rc" ] && [ "$(cd "$rc" 2>/dev/null && pwd -P)" = "$store_real" ]; then
+    rm -f "$rc" && converted="true"
+  fi
+  if [ -L "$rc" ]; then
+    # A link to somewhere other than this repo's store is somebody's own choice, and stays.
+    link_state="linked"
+  else
+    tracked="$(git -C "$clone_root" ls-files -- .claude 2>/dev/null | head -n 1)"
+    mkdir -p "$rc" 2>/dev/null || true
+    if [ "$converted" = "true" ]; then
+      claude_note="converted .claude from the store's link to a directory of this box's own; the store's entries are linked into it, except settings.json and settings.local.json, which are now this box's own"
+      # The files the repo tracks there, which the link stood in the way of.
+      git -C "$clone_root" ls-files -z --deleted -- .claude 2>/dev/null \
+        | xargs -0 -r git -C "$clone_root" checkout -- 2>/dev/null || true
+    fi
+    if [ -n "$tracked" ]; then
+      for entry in "$rc"/*; do
+        name="$(basename "$entry")"
+        [ "$name" != "skein" ] && [ -L "$entry" ] && [ "$(readlink "$entry")" = "$store/$name" ] \
+          && rm -f "$entry"
+      done
+      if [ -f "$rc/settings.json" ] && [ ! -L "$rc/settings.json" ] \
+        && [ ! -e "$rc/settings.json.skein-old" ] \
+        && ! git -C "$clone_root" ls-files --error-unmatch -- .claude/settings.json >/dev/null 2>&1; then
+        if mv "$rc/settings.json" "$rc/settings.json.skein-old" 2>/dev/null; then
+          moved="moved an untracked .claude/settings.json aside to .claude/settings.json.skein-old, which Claude does not load; nothing was deleted"
+          if [ -n "$claude_note" ]; then claude_note="$claude_note; $moved"; else claude_note="$moved"; fi
+        fi
+      fi
+      [ -e "$rc/skein" ] || [ -L "$rc/skein" ] || ln -s "$store/skein" "$rc/skein" 2>/dev/null || true
+    else
+      for entry in "$store"/*; do
+        [ -e "$entry" ] || continue
+        name="$(basename "$entry")"
+        case "$name" in settings.json|settings.local.json) continue ;; esac
+        [ -e "$rc/$name" ] || [ -L "$rc/$name" ] || ln -s "$store/$name" "$rc/$name" 2>/dev/null || true
+      done
+    fi
+    defaults="$skein_probe/settings-defaults.json"
+    if [ -L "$rc/skein" ] && [ -r "$defaults" ] && command -v jq >/dev/null 2>&1; then
+      retire='def unskein: with_entries(.value |= (if type == "array" then
+            map(if (.hooks | type) == "array"
+              then .hooks |= map(select((.command // "" | tostring | contains("/.claude/skein/bin/")) | not))
+              else . end)
+            | map(select((.hooks | type) != "array" or (.hooks | length) > 0))
+          else . end))
+          | with_entries(select((.value | type) != "array" or (.value | length) > 0));
+        def retire: if (.hooks | type) == "object" then .hooks |= unskein else . end;'
+      shared="/dev/null"
+      [ -f "$rc/settings.json" ] && shared="$rc/settings.json"
+      [ -f "$rc/settings.local.json" ] || echo '{}' > "$rc/settings.local.json"
+      merged="$(jq -s "$retire"'
+        (.[0] | if type == "object" then . else {} end | retire) as $l
+        | .[1] as $d | (.[2] // {}) as $s
+        | $d.settings.statusLine as $line
+        | $l
+        | (if .tui == null and $s.tui == null then .tui = $d.settings.tui else . end)
+        | (if .statusLine.command == $d.storeEraStatusLine then .statusLine.command = $line.command
+           elif .statusLine == null and ($s.statusLine == null or $s.statusLine.command == $d.storeEraStatusLine)
+           then .statusLine = (($s.statusLine // $line) + {command: $line.command})
+           else . end)
+      ' "$rc/settings.local.json" "$defaults" "$shared" 2>/dev/null)"
+      if [ -n "$merged" ]; then
+        if [ "$(printf '%s' "$merged" | jq -S -c .)" = "$(jq -S -c . "$rc/settings.local.json" 2>/dev/null)" ]; then
+          link_state="merged"
+        else
+          tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
+            && printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$rc/settings.local.json" \
+            && link_state="merged"
+        fi
+      fi
+      # The repo's own settings file is rewritten only to take out a hook a past merge copied in, and
+      # never merely reformatted: a file the repo tracks is otherwise left byte for byte.
+      if [ "$shared" != "/dev/null" ]; then
+        retired="$(jq "$retire"' retire' "$shared" 2>/dev/null)"
+        if [ -n "$retired" ] \
+          && [ "$(printf '%s' "$retired" | jq -S -c .)" != "$(jq -S -c . "$shared")" ]; then
+          tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
+            && printf '%s\n' "$retired" > "$tmp" && mv "$tmp" "$shared"
+        fi
+      fi
+    fi
+    if [ -n "$tracked" ]; then
+      [ "$link_state" = "merged" ] \
+        || echo "[skein-kit] repo ships .claude/ and the settings merge failed — probes will not report" >&2
+    elif [ -L "$rc/skein" ]; then
+      link_state="linked"
+    else
+      link_state="failed"
+      echo "[skein-kit] could not link $store -> $clone_root/.claude" >&2
+    fi
+  fi
+fi
+# The mounted store is infrastructure, never a worktree change. Exclude it immediately;
+# waiting for SessionStart is too late when a runtime blocks on first-run trust.
+#
+# What is excluded is what skein put there, and only that (SKEIN-1049). Where the repo tracks
+# nothing under `.claude`, that is the whole of it. Where it does, it is the `skein` link, this box's
+# `settings.local.json` and a `settings.json.skein-old` moved aside: excluding the directory would
+# hide a file a contributor adds there, such as a new skill, from `git status` and `git add`. A clone
+# that was the first shape and is now the second loses the old `/.claude` line.
+git_dir="$(git -C "$clone_root" rev-parse --git-dir 2>/dev/null || true)"
+case "$git_dir" in "") ;; /*) ;; *) git_dir="$clone_root/$git_dir" ;; esac
+if [ -n "$git_dir" ]; then
+  mkdir -p "$git_dir/info" 2>/dev/null || true
+  exclude="$git_dir/info/exclude"
+  if [ -n "$(git -C "$clone_root" ls-files -- .claude 2>/dev/null | head -n 1)" ]; then
+    if grep -qxF '/.claude' "$exclude" 2>/dev/null; then
+      { grep -vxF '/.claude' "$exclude" || true; } > "$exclude.skein" \
+        && mv "$exclude.skein" "$exclude"
+    fi
+    for own in /.claude/skein /.claude/settings.local.json /.claude/settings.json.skein-old; do
+      grep -qxF "$own" "$exclude" 2>/dev/null || printf '%s\n' "$own" >> "$exclude"
+    done
+  else
+    grep -qxF '/.claude' "$exclude" 2>/dev/null || printf '/.claude\n' >> "$exclude"
+  fi
+fi
 
 # Expose the project-scoped durable workspace without sharing literal HOME. The helper is
 # provider-neutral and refuses to overwrite a real HOME/shared path. Keep startup gated on its
@@ -409,8 +499,8 @@ if [ -d "$store" ]; then
     done < "$store/skein/runtimes.tsv"
   fi
   revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
-  printf '{"ts":"%s","claude_link":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
+  printf '{"ts":"%s","claude_link":"%s","claude_note":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$claude_note" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
     > "$store/skein/boot/$vmid.json" 2>/dev/null || true
 fi
 [ "$tools_ok" = "true" ] || exit 1

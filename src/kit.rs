@@ -689,4 +689,753 @@ mod tests {
         );
         env::remove_var("SKEIN_HOME");
     }
+
+    /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather
+    /// than a piece of it: skein's plugin and the kit installed under the fleet root's `.skein`
+    /// (`probes::plugin_install_under`'s bytes, the way `fleet::install_launcher` writes them), a
+    /// store `ensure_store` scaffolded, and the box's own clone. The tracker's installer is left
+    /// out, so the kit's detached network step has nothing to run.
+    struct KitBox {
+        dir: TempDir,
+        root: PathBuf,
+        store: PathBuf,
+        tree: PathBuf,
+        home: PathBuf,
+    }
+
+    impl KitBox {
+        /// `ships`: the bytes of a `.claude/settings.json` the repo tracks (the kit's case 2), or
+        /// `None` for a repo with no `.claude` at all (case 1). Call with `$SKEIN_HOME` pinned:
+        /// `ensure_store` reads `repos.json` through it.
+        fn new(agent: &str, ships: Option<&str>) -> KitBox {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempdir();
+            let root = dir.join("fleet");
+            let store = dir.join("repos/web/store/.claude");
+            let tree = root.join("web-main/tree");
+            let home = dir.join("home");
+            let mut install = crate::probes::plugin_install_under(&root.to_string_lossy());
+            install.retain(|(path, _)| !path.ends_with("/sync-install.sh"));
+            install.push((
+                root.join(".skein/skein-startup.sh")
+                    .to_string_lossy()
+                    .into_owned(),
+                KIT_STARTUP_SH.to_string(),
+            ));
+            for (path, body) in install {
+                let path = Path::new(&path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, body).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            ensure_store(&store).unwrap();
+            fs::write(
+                store.join("skein/launch/web-main.json"),
+                format!("{{\"agent\":\"{agent}\",\"branch\":\"\"}}\n"),
+            )
+            .unwrap();
+            fs::create_dir_all(&tree).unwrap();
+            fs::create_dir_all(&home).unwrap();
+            let kit = KitBox {
+                dir,
+                root,
+                store,
+                tree,
+                home,
+            };
+            kit.git(&["init", "-q"]);
+            fs::write(kit.tree.join("README.md"), "a repo\n").unwrap();
+            kit.git(&["add", "README.md"]);
+            kit.git(&["commit", "-qm", "a repo"]);
+            if let Some(settings) = ships {
+                fs::create_dir_all(kit.tree.join(".claude")).unwrap();
+                fs::write(kit.tree.join(".claude/settings.json"), settings).unwrap();
+                kit.git(&["add", ".claude/settings.json"]);
+                kit.git(&["commit", "-qm", "the repo ships its own .claude"]);
+            }
+            kit
+        }
+
+        /// Git in the clone, with nothing of the machine's own configuration in it: no global
+        /// excludes file can hide or show anything these tests ask about.
+        fn git(&self, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=example",
+                    "-c",
+                    "user.email=example@example.com",
+                ])
+                .arg("-C")
+                .arg(&self.tree)
+                .args(args)
+                .env("HOME", &self.home)
+                .env("XDG_CONFIG_HOME", self.home.join(".config"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+
+        /// The kit, as the fleet runs it for this box.
+        fn start(&self) {
+            let out = Command::new("bash")
+                .arg(self.root.join(".skein/skein-startup.sh"))
+                .env("HOME", &self.home)
+                .env("XDG_CONFIG_HOME", self.home.join(".config"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("SKEIN_HOME", self.dir.join("skein-home"))
+                .env("SKEIN_FLEET_ROOT", &self.root)
+                .env("SKEIN_PROVISION", "1")
+                .env("SKEIN_BOX", "web-main")
+                .env("SKEIN_STORE", &self.store)
+                .env("WORKSPACE_DIR", &self.tree)
+                .env("SKEIN_STARTUP_MARKERS", self.dir.join("markers"))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "the kit failed: {out:?}");
+        }
+
+        fn claude(&self, rel: &str) -> PathBuf {
+            self.tree.join(".claude").join(rel)
+        }
+
+        fn json(&self, rel: &str) -> serde_json::Value {
+            let text =
+                fs::read_to_string(self.claude(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{rel}: {e}: {text}"))
+        }
+
+        fn boot(&self) -> serde_json::Value {
+            serde_json::from_str(
+                &fs::read_to_string(self.store.join("skein/boot/web-main.json")).unwrap(),
+            )
+            .unwrap()
+        }
+
+        fn exclude(&self) -> Vec<String> {
+            fs::read_to_string(self.tree.join(".git/info/exclude"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    fn have_jq() -> bool {
+        Command::new("jq").arg("--version").output().is_ok()
+    }
+
+    /// **A repo that tracks `.claude/settings.json` stays clean when a box starts in it, and skein's
+    /// settings go into the box's own `settings.local.json`** (SKEIN-1048).
+    ///
+    /// Until SKEIN-1048 the kit's case 2 merged skein's settings into the repo's `settings.json`, so
+    /// every box's tree was dirty from its first start (the 582d017 class). The repo's file here is
+    /// deliberately not in jq's own formatting, so a pass that only reformats it shows as well.
+    ///
+    /// What would make it fail: the kit's write put back on `$rc/settings.json` (the file's bytes
+    /// change and `git status` lists it); the defaults not reaching the local file (its `tui` and
+    /// `statusLine` are missing); a second start changing anything (the last two assertions).
+    #[test]
+    fn a_repo_that_tracks_its_settings_stays_clean_and_skeins_settings_go_to_the_local_file() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let tracked = "{ \"model\": \"example-model\" }\n";
+        let kit = KitBox::new("claude", Some(tracked));
+
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(kit.claude("settings.json")).unwrap(),
+            tracked,
+            "the kit changed the settings file the repo tracks"
+        );
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "",
+            "the box's tree is dirty"
+        );
+        assert_eq!(kit.boot()["claude_link"], "merged", "{}", kit.boot());
+        let local = kit.json("settings.local.json");
+        let defaults = crate::probes::settings_defaults();
+        assert_eq!(local["tui"], defaults["settings"]["tui"], "{local}");
+        assert_eq!(
+            local["statusLine"], defaults["settings"]["statusLine"],
+            "{local}"
+        );
+
+        let first = fs::read(kit.claude("settings.local.json")).unwrap();
+        kit.start();
+        assert_eq!(
+            fs::read(kit.claude("settings.local.json")).unwrap(),
+            first,
+            "a second start changed the local settings"
+        );
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "",
+            "a second start dirtied the tree"
+        );
+    }
+
+    /// **The default status line a past merge copied into a repo's `settings.json` is overridden
+    /// in the box's local file, without touching the repo's file; a status line or `tui` the repo
+    /// chose itself is left to win** (SKEIN-1153's first case).
+    ///
+    /// The past default runs the store's copy of the renderer, which a sibling box can rewrite.
+    /// `settings.local.json` outranks `settings.json` in Claude Code, so setting skein's current
+    /// default there replaces it with no diff in a file the repo may have committed.
+    ///
+    /// What would make it fail: the past default not recognised (the local file gets no status
+    /// line, and the store's renderer keeps running); the interval the person set beside it lost;
+    /// or skein's defaults set whenever the local file has none (the repo's own status line and
+    /// `tui` are then overridden: the last assertion).
+    #[test]
+    fn a_past_default_status_line_is_overridden_locally_and_a_repos_own_is_kept() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let defaults = crate::probes::settings_defaults();
+        let past = serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": defaults["storeEraStatusLine"],
+                "refreshIntervalMs": 5_000
+            }
+        })
+        .to_string();
+        let kit = KitBox::new("claude", Some(&past));
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(kit.claude("settings.json")).unwrap(),
+            past
+        );
+        assert_eq!(
+            kit.json("settings.local.json")["statusLine"],
+            serde_json::json!({
+                "type": "command",
+                "command": defaults["settings"]["statusLine"]["command"],
+                "refreshIntervalMs": 5_000
+            }),
+            "the past default status line was not overridden with skein's current one"
+        );
+
+        let own = "{\"tui\":\"default\",\"statusLine\":{\"type\":\"command\",\"command\":\"bash tools/line.sh\"}}\n";
+        let kit = KitBox::new("claude", Some(own));
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(kit.claude("settings.json")).unwrap(),
+            own
+        );
+        assert_eq!(
+            kit.json("settings.local.json"),
+            serde_json::json!({}),
+            "the box's local settings override what the repo chose"
+        );
+    }
+
+    /// **A file a contributor adds under a tracked `.claude/` shows in `git status`, and what skein
+    /// puts there does not** (SKEIN-1049). The clone starts with the `/.claude` line an earlier
+    /// start wrote when `.claude` was the store's link, which has to go too.
+    ///
+    /// What would make it fail: the kit excluding `/.claude` in case 2 (the new skill is hidden);
+    /// the stale line left in place (hidden the same way); either of the two exclusions missing
+    /// (`.claude/skein` or `settings.local.json` is listed).
+    #[test]
+    fn a_contributors_new_file_under_a_tracked_claude_shows_in_git_status() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("claude", Some("{}\n"));
+        fs::write(
+            kit.tree.join(".git/info/exclude"),
+            "# git's own\n*.example\n/.claude\n",
+        )
+        .unwrap();
+
+        kit.start();
+        assert!(
+            kit.claude("skein").is_symlink() && kit.claude("settings.local.json").is_file(),
+            "the kit put neither of the two things it excludes into .claude"
+        );
+        fs::create_dir_all(kit.claude("skills/new")).unwrap();
+        fs::write(kit.claude("skills/new/SKILL.md"), "a new skill\n").unwrap();
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "?? .claude/skills/\n",
+            "a contributor's new skill is hidden, or something of skein's is listed"
+        );
+        assert_eq!(
+            kit.exclude(),
+            [
+                "*.example",
+                "/.claude/skein",
+                "/.claude/settings.local.json",
+                "/.claude/settings.json.skein-old"
+            ],
+            "the clone's exclude is not what skein put in .claude"
+        );
+    }
+
+    /// Every store entry a box whose repo tracks nothing under `.claude` reaches through it, and the
+    /// two it must not: each is a link to the store's own, and the settings files are absent.
+    fn assert_store_linked_in(kit: &KitBox) {
+        assert!(
+            !kit.tree.join(".claude").is_symlink() && kit.tree.join(".claude").is_dir(),
+            "the kit left .claude as the store's link"
+        );
+        let mut linked = 0;
+        for entry in fs::read_dir(&kit.store).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let here = kit.claude(&name);
+            if name == "settings.json" || name == "settings.local.json" {
+                assert!(
+                    !here.is_symlink(),
+                    "the store's {name}, which every box can write, is linked into this box"
+                );
+                continue;
+            }
+            assert_eq!(
+                fs::read_link(&here).unwrap_or_else(|e| panic!(".claude/{name}: {e}")),
+                kit.store.join(&name),
+                ".claude/{name} is not the store's"
+            );
+            linked += 1;
+        }
+        assert!(
+            linked > 5,
+            "the store had almost nothing to link, so this checked little"
+        );
+    }
+
+    /// The memory directory Claude's memory tool writes, as the bootstrap bridged it for this box.
+    fn memory_bridge(kit: &KitBox) -> PathBuf {
+        let projects = kit.home.join(".claude/projects");
+        let slugs: Vec<_> = fs::read_dir(&projects)
+            .unwrap_or_else(|e| panic!("no bridge at all: {e}"))
+            .flatten()
+            .collect();
+        assert_eq!(slugs.len(), 1, "one checkout, one bridge");
+        slugs[0].path().join("memory")
+    }
+
+    fn bootstrap(kit: &KitBox) {
+        let out = Command::new("bash")
+            .arg(kit.store.join("skein/bin/sandbox-bootstrap.sh"))
+            .env("CLAUDE_PROJECT_DIR", &kit.tree)
+            .env("HOME", &kit.home)
+            .env("SKEIN_BOX", "web-main")
+            .env("SKEIN_FLEET_ROOT", &kit.root)
+            .env_remove("SKEIN_SOURCE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    /// What must outlive a conversion, byte for byte: every file under the store's `memory/` and
+    /// `skills/`, and its settings file.
+    fn store_digest(kit: &KitBox) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.push((path.clone(), fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&kit.store.join("memory"), &mut out);
+        walk(&kit.store.join("skills"), &mut out);
+        out.push((
+            kit.store.join("settings.json"),
+            fs::read(kit.store.join("settings.json")).unwrap(),
+        ));
+        out.sort();
+        out
+    }
+
+    /// The layout every box skein made before SKEIN-1053: `.claude` is the store's own link, the
+    /// clone excludes it, and the bootstrap has bridged memory through it. With a memory and a
+    /// skill of the person's in the store, so there is something to lose.
+    fn old_layout(kit: &KitBox) {
+        fs::write(kit.store.join("memory/a-note.md"), "remember this\n").unwrap();
+        fs::create_dir_all(kit.store.join("skills/theirs")).unwrap();
+        fs::write(kit.store.join("skills/theirs/SKILL.md"), "a skill\n").unwrap();
+        std::os::unix::fs::symlink(&kit.store, kit.tree.join(".claude")).unwrap();
+        fs::write(kit.tree.join(".git/info/exclude"), "/.claude\n").unwrap();
+        bootstrap(kit);
+    }
+
+    /// **A box whose repo tracks nothing under `.claude` gets a directory of its own, with each of
+    /// the store's entries linked into it and the store's settings files left out** (SKEIN-1053,
+    /// the owner's answer to SKEIN-1153). What would make it fail: `.claude` linked to the store
+    /// whole, as before (the first assertion); either settings file linked; an entry not linked;
+    /// the directory not excluded (`git status` lists it).
+    #[test]
+    fn a_repo_with_no_claude_gets_a_directory_of_its_own_with_the_store_linked_in() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("claude", None);
+        kit.start();
+        assert_store_linked_in(&kit);
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "",
+            "what skein put in .claude is listed"
+        );
+        assert_eq!(kit.exclude(), ["/.claude"]);
+        assert_eq!(kit.boot()["claude_link"], "linked", "{}", kit.boot());
+        assert_eq!(kit.boot()["claude_note"], "", "{}", kit.boot());
+        let defaults = crate::probes::settings_defaults();
+        assert_eq!(
+            kit.json("settings.local.json")["statusLine"],
+            defaults["settings"]["statusLine"]
+        );
+    }
+
+    /// **A box whose `.claude` is the store's link is converted, and keeps everything it reached
+    /// through it but the store's two settings files** (SKEIN-1053).
+    ///
+    /// What a converted box keeps, each asserted below: every entry of the store, linked one by one
+    /// (memory, skills, the mailbox, skein's machinery and the rest); every byte of the store's
+    /// memory and skills and its settings file, since the conversion removes a link and never
+    /// what it points at; the memory Claude's memory tool writes, whose bridge resolves into the
+    /// store both before the next session's bootstrap and after it; a clean tree. What it no
+    /// longer loads: the store's `settings.json` and `settings.local.json`.
+    ///
+    /// The boot report says so on the start that converted, and not on the next.
+    ///
+    /// What would make it fail: the kit leaving the link in place (the first assertion of
+    /// `assert_store_linked_in`); a conversion that removed through the link rather than the link
+    /// (the store's files change); the note missing, or repeated on the second start.
+    #[test]
+    fn a_box_whose_claude_is_the_store_link_is_converted_and_keeps_everything() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("claude", None);
+        old_layout(&kit);
+        let before = store_digest(&kit);
+        let bridge = memory_bridge(&kit);
+        assert_eq!(
+            fs::canonicalize(&bridge).unwrap(),
+            fs::canonicalize(kit.store.join("memory")).unwrap(),
+            "the fixture's old layout did not bridge memory into the store"
+        );
+
+        kit.start();
+        assert_store_linked_in(&kit);
+        assert_eq!(
+            store_digest(&kit),
+            before,
+            "the conversion changed the store"
+        );
+        assert_eq!(
+            fs::read_to_string(bridge.join("a-note.md")).unwrap(),
+            "remember this\n",
+            "the converted box's memory is not the store's"
+        );
+        assert_eq!(
+            fs::read_to_string(kit.claude("skills/theirs/SKILL.md")).unwrap(),
+            "a skill\n"
+        );
+        assert_eq!(kit.git(&["status", "--porcelain"]), "", "the tree is dirty");
+        assert_eq!(
+            kit.boot()["claude_note"],
+            "converted .claude from the store's link to a directory of this box's own; the \
+             store's entries are linked into it, except settings.json and settings.local.json, \
+             which are now this box's own",
+            "{}",
+            kit.boot()
+        );
+
+        bootstrap(&kit);
+        assert_eq!(
+            fs::canonicalize(memory_bridge(&kit)).unwrap(),
+            fs::canonicalize(kit.store.join("memory")).unwrap(),
+            "the next session's bootstrap bridged memory somewhere other than the store"
+        );
+        kit.start();
+        assert_eq!(
+            kit.boot()["claude_note"],
+            "",
+            "the conversion was reported twice"
+        );
+        assert_eq!(store_digest(&kit), before);
+    }
+
+    /// **A converted box that then pulls a commit tracking `.claude/` ends up with the repo's files
+    /// and the store's skein link, and nothing of the store's is touched** (SKEIN-1053's landmine).
+    ///
+    /// The pull replaces the links the repo's paths need: git overwrites an ignored path, and
+    /// `/.claude` is excluded. The next start takes the rest of the layout-1 links out, links
+    /// skein, and narrows the exclude, so the tree is clean and `git ls-files .claude` is exactly
+    /// the repo's three files.
+    ///
+    /// What would make it fail: the layout-1 links left in place (they are listed by `git status`
+    /// once the exclude narrows); a pull or start that wrote into the store (its files change).
+    #[test]
+    fn a_converted_box_pulls_a_tracked_claude_and_the_store_is_untouched() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("claude", None);
+        old_layout(&kit);
+        let before = store_digest(&kit);
+        kit.start();
+
+        // Upstream starts tracking `.claude/`, from a checkout of its own.
+        let origin = kit.dir.join("origin.git");
+        let work = kit.dir.join("work");
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=example",
+                    "-c",
+                    "user.email=example@example.com",
+                ])
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .env("HOME", &kit.home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(
+            &kit.dir,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                &kit.tree.to_string_lossy(),
+                "origin.git",
+            ],
+        );
+        git(
+            &kit.dir,
+            &["clone", "-q", &origin.to_string_lossy(), "work"],
+        );
+        for (rel, body) in [
+            (".claude/README.md", "the folder\n"),
+            (".claude/settings.json", "{}\n"),
+            (".claude/skills/change-discipline/SKILL.md", "the checks\n"),
+        ] {
+            fs::create_dir_all(work.join(rel).parent().unwrap()).unwrap();
+            fs::write(work.join(rel), body).unwrap();
+        }
+        git(&work, &["add", ".claude"]);
+        git(&work, &["commit", "-qm", "track .claude"]);
+        git(&work, &["push", "-q", "origin", "HEAD"]);
+        kit.git(&["pull", "-q", &origin.to_string_lossy(), "HEAD"]);
+
+        kit.start();
+        assert_eq!(
+            kit.git(&["ls-files", ".claude"]),
+            ".claude/README.md\n.claude/settings.json\n.claude/skills/change-discipline/SKILL.md\n"
+        );
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "",
+            "the tree is dirty after the repo started tracking .claude"
+        );
+        assert_eq!(
+            fs::read_link(kit.claude("skein")).unwrap(),
+            kit.store.join("skein")
+        );
+        assert_eq!(
+            fs::read_to_string(kit.claude("skills/change-discipline/SKILL.md")).unwrap(),
+            "the checks\n"
+        );
+        assert_eq!(store_digest(&kit), before, "the store changed");
+        bootstrap(&kit);
+        assert_eq!(
+            fs::read_to_string(memory_bridge(&kit).join("a-note.md")).unwrap(),
+            "remember this\n",
+            "the box's memory is not the store's"
+        );
+    }
+
+    /// **An untracked `.claude/settings.json` in a repo that ships `.claude/` is moved aside once,
+    /// and nothing is deleted** (the owner's answer to SKEIN-1049's behaviour question). An older
+    /// kit created that file where the repo tracked other files under `.claude/` but not that one;
+    /// with the exclude narrowed it would be listed, and Claude would keep loading what an older
+    /// merge copied into it from the store.
+    ///
+    /// What would make it fail: the file left in place (`git status` lists it); the file moved and
+    /// changed, or deleted; the move reported on a start that did not move anything; a second
+    /// file of that name moved over the first.
+    #[test]
+    fn an_untracked_settings_file_under_a_shipped_claude_is_moved_aside_once() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("claude", None);
+        fs::create_dir_all(kit.claude("commands")).unwrap();
+        fs::write(kit.claude("commands/go.md"), "go\n").unwrap();
+        kit.git(&["add", ".claude/commands/go.md"]);
+        kit.git(&["commit", "-qm", "a tracked command"]);
+        let old = "{\"statusLine\":{\"type\":\"command\",\"command\":\"an old copy\"}}\n";
+        fs::write(kit.claude("settings.json"), old).unwrap();
+
+        kit.start();
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "",
+            "the old file is listed"
+        );
+        assert!(
+            !kit.claude("settings.json").exists(),
+            "the old file is still loaded"
+        );
+        assert_eq!(
+            fs::read_to_string(kit.claude("settings.json.skein-old")).unwrap(),
+            old,
+            "the old file was not kept as it was"
+        );
+        assert_eq!(
+            kit.boot()["claude_note"],
+            "moved an untracked .claude/settings.json aside to .claude/settings.json.skein-old, \
+             which Claude does not load; nothing was deleted",
+            "{}",
+            kit.boot()
+        );
+
+        fs::write(kit.claude("settings.json"), "{\"a\":\"second\"}\n").unwrap();
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(kit.claude("settings.json.skein-old")).unwrap(),
+            old,
+            "a second file was moved over the first"
+        );
+        assert_eq!(kit.boot()["claude_note"], "", "{}", kit.boot());
+    }
+
+    /// **Every `.claude` or `$HOME` path the guide skein writes into a box names is there, in both
+    /// layouts and for both runtimes** (SKEIN-1050).
+    ///
+    /// The guide is the kit's own output, read back from the runtime's instruction file after the
+    /// kit ran. A path is every backticked token starting `.claude`, `$HOME/` or the fleet root
+    /// every box is passed (`${SKEIN_FLEET_ROOT:-/boxes}/`, read as this fixture's); a bare `name/`
+    /// after a backticked directory on the same line is read inside it, which is how the guide
+    /// named the store's folders until SKEIN-1050 ("under `.claude`: `memory/` …"). Other paths,
+    /// such as `docs/decisions/`, are the repository's to have or not, so they are not asked about.
+    ///
+    /// The mailbox it names is the plugin's read-only copy, not the store's `skein/bin/`, which a
+    /// sibling box can rewrite: `plugin_probe_scripts_are_every_script_a_hook_runs` holds the
+    /// guide's script to that, because the guide is one of the plugin's scripts.
+    ///
+    /// What would make it fail: the guide naming `.claude/mailbox/` or `.claude/memory/` again,
+    /// which a repo that ships its own `.claude/` does not have (case 2); a path misspelt, in
+    /// either case; the guide not written at all ("names no path").
+    #[test]
+    fn every_path_the_agent_guide_names_exists_in_both_layouts() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        for (agent, file) in [
+            ("claude", ".claude/CLAUDE.md"),
+            ("codex", ".codex/AGENTS.md"),
+        ] {
+            for ships in [None, Some("{}\n")] {
+                let kit = KitBox::new(agent, ships);
+                kit.start();
+                let guide = fs::read_to_string(kit.home.join(file))
+                    .unwrap_or_else(|e| panic!("{agent} got no guide: {e}"));
+                let mut named = Vec::new();
+                for line in guide.lines() {
+                    let mut dir: Option<&str> = None;
+                    for (i, token) in line.split('`').enumerate() {
+                        if i % 2 == 0 {
+                            continue;
+                        }
+                        let path = if let Some(rest) = token.strip_prefix("$HOME/") {
+                            Some(kit.home.join(rest))
+                        } else if let Some(rest) =
+                            token.strip_prefix("${SKEIN_FLEET_ROOT:-/boxes}/")
+                        {
+                            Some(kit.root.join(rest.split(' ').next().unwrap()))
+                        } else if token.starts_with(".claude") {
+                            let path = token.split(' ').next().unwrap();
+                            dir = Some(path);
+                            Some(kit.tree.join(path))
+                        } else if let (Some(d), false) =
+                            (dir, token.trim_end_matches('/').contains('/'))
+                        {
+                            token.ends_with('/').then(|| kit.tree.join(d).join(token))
+                        } else {
+                            None
+                        };
+                        if let Some(path) = path {
+                            named.push((token.to_string(), path));
+                        }
+                    }
+                }
+                assert!(!named.is_empty(), "{agent}'s guide names no path: {guide}");
+                for (token, path) in named {
+                    assert!(
+                        path.exists(),
+                        "{agent}'s guide names `{token}`, which a box whose repo {} does not have",
+                        if ships.is_some() {
+                            "ships its own .claude/"
+                        } else {
+                            "has no .claude"
+                        }
+                    );
+                }
+            }
+        }
+    }
 }

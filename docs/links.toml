@@ -26,6 +26,8 @@
 "src/health.rs" = "past tense: the barrier that was never there had been copied into this file before anybody checked. SKEIN-1099 made it `src/health/`; the copy was made into the file."
 
 ["docs/delivery.md"]
+".claude/hooks/slice-gate.sh" = "somebody else's: the paragraph says in as many words that this hook is in another repository's store, not in this one. It only looks like one of this tree's paths since this repository started tracking `.claude/` (SKEIN-1053)."
+".claude/hooks/wf-journal.sh" = "somebody else's: the same sentence, the other of that repository's two hooks."
 "src/deployment.rs" = "past tense: the module that carried `SKEIN_IN_FLEET` and its enumerated list, deleted by SKEIN-521 and SKEIN-576. The paragraph is the record of how the migration arrived."
 
 ["docs/parity.md"]
@@ -35,6 +37,12 @@
 "src/bin/skein-server.rs" = "past tense: the survey (2026-09-09) names the six refusal paths it found in this file as Offender 1, before SKEIN-1103 split it into `src/bin/skein-server/`. Its `path:line` citations of the same file are declared historical in `docs/line-cites.toml`; this is the plain mention beside them."
 "src/fleet.rs" = "past tense: rows and notes the survey measured in this file before SKEIN-934 split it, one sentence saying so in as many words, and the SKEIN-756 guards that were gone before the pass. Its line citations are historical in `docs/line-cites.toml`."
 "src/health.rs" = "past tense: a cell recording where the survey looked for a panic site on the day it was measured, before SKEIN-1099 made it `src/health/`. Restating it against the directory would claim a search nobody ran."
+
+["docs/threat-model.md"]
+".claude/settings.local.json" = "somebody else's: a box's own settings file, which the kit writes in each box's checkout at runtime and `.gitignore` keeps out of this tree (SKEIN-1048)."
+
+["src/store/README.md"]
+".claude/settings.local.json" = "somebody else's: the same runtime file, named from the store's README as where a box's settings are (SKEIN-1048)."
 
 ["src/store/sync/UPSTREAM.md"]
 "docs/onboarding.md" = "somebody else's: the Upstream column of this table names paths in the sync repository (the `upstream/sync` submodule), not in this one."

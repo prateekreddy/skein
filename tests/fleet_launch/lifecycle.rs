@@ -477,12 +477,18 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             Duration::from_secs(120),
         )
         .expect("provision the box");
+    // `.claude` is a directory of the box's own, with the store's entries linked into it and its
+    // settings files left out (SKEIN-1053); `skein` is the link the probes find the store through.
     assert_eq!(
         boxed
-            .exec("readlink .claude", Duration::from_secs(30))
+            .exec(
+                "[ -d .claude ] && [ ! -L .claude ] && [ ! -e .claude/settings.json ] \
+                 && readlink .claude/skein",
+                Duration::from_secs(30)
+            )
             .unwrap()
             .trim(),
-        store.to_string_lossy(),
+        store.join("skein").to_string_lossy(),
         "the store link is what makes hooks, skills and the probe resolve at all"
     );
     // `shared` is scoped to a REPO, not to a sandbox — the two were one object when a box WAS a
