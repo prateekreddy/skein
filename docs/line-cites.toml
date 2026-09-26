@@ -1932,7 +1932,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/update.rs:433"]
+["src/update.rs:488"]
 line = "if sandbox.is_empty() || !believed_running() {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2098,28 +2098,28 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1100"]
+["src/web/app/boot.js:1104"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1126"]
+["src/web/app/boot.js:1130"]
 line = "updateTail = setTimeout(step, 1500);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1143"]
+["src/web/app/boot.js:1147"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1217"]
+["src/web/app/boot.js:1221"]
 line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1371"]
+["src/web/app/boot.js:1375"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1379"]
+["src/web/app/boot.js:1383"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2334,7 +2334,7 @@ cited_by = ["docs/env-lock.toml"]
 line = "!body.contains(\"resize_fleet(\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["tests/ui/updatepane.mjs:128"]
+["tests/ui/updatepane.mjs:168"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 

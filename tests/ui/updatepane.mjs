@@ -28,13 +28,23 @@ function makeFixture() {
   return { root };
 }
 
-// A GitHub the size of what THIS pane asks: one route. `update::ask_github` (src/update.rs:198)
-// reads `/repos/{slug}/commits/{reference}` and wants a `sha` back — everything else it might ask
-// (auth, rate limit) it never touches, since `available()` treats "no token" as the ordinary case
-// (src/update.rs:159-163). The other GitHub-touching suites stand up the shared queue-shaped stub
-// on the same seam; this pane needs one route, so it answers one.
-const createGitHub = sha => stub(({ url, send }) =>
-  /^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/.test(url) && send(200, { sha }));
+// A GitHub the size of what THIS pane asks: one route. `update::ask_github` reads
+// `/repos/{slug}/commits/{reference}` and wants a `sha` back. The other GitHub-touching suites
+// stand up the shared queue-shaped stub on the same seam; this pane needs one route, so it answers
+// one.
+//
+// **And it answers the way GitHub did on 2026-09-26 to a rotated token** (SKEIN-1172): a 401 "Bad
+// credentials" to any `Authorization` at all, and the commit to a request carrying none. The server
+// below is given a stored token, so every reading this suite sees has been refused once and asked
+// again without it — and `heard` keeps each request's `Authorization`, or "" for none, to prove it.
+const heard = [];
+const createGitHub = sha => stub(({ url, req, send }) => {
+  if (!/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+$/.test(url)) return false;
+  const auth = req.headers.authorization || "";
+  heard.push(auth);
+  return auth ? send(401, { message: "Bad credentials", status: "401" }) : send(200, { sha });
+});
+const STORED_TOKEN = "skein-test-rotated-token";
 
 const { value: check, report } = ledger();
 
@@ -59,6 +69,8 @@ await startServer({
     // fixture instead, so the request never leaves the machine.
     SKEIN_GITHUB_API: github.url,
     SKEIN_SOURCE_URL: "https://github.com/acme/skein.git",
+    // The stored token, and the stub above refuses it (SKEIN-1172).
+    GH_TOKEN: STORED_TOKEN,
   },
 });
 const browser = await chromium.launch();
@@ -115,6 +127,34 @@ await page.waitForTimeout(600);
   check("GitHub answered with the fixture's sha", api?.skein?.remote, REMOTE_SHA);
   check("and the pane shows it rather than staying on the first empty reading",
     !!api?.skein?.remote && api.skein.remote.startsWith(cell.replace(/…/g, "")) && cell !== "unknown", true);
+}
+
+// --- a stored token GitHub refuses: the check asks again without it, and the pane says so -----------
+//
+// (SKEIN-1172.) The sha above came through the refusal, which the first check here makes sure of:
+// the stub heard the stored token and then a request with no `Authorization`. The note is the
+// owner's sentence, verbatim.
+//
+// **What would make these fail**: `update::ask` returning the 401 instead of asking again — the
+// sha check above fails and so does the first here, since nothing arrives bare; `github::config`
+// sending `Authorization: Bearer ` for no token, which the stub refuses too; the note's line
+// dropped from `renderUpdate`, or any drift in `UPDATE_WORDS.tokenRefused`, fails the second; a
+// note drawn whatever `token_refused` says fails the third.
+{
+  const TOKEN_WORDS = "your stored GitHub token was refused — replace it under Settings → GitHub & keys";
+  check("the stored token was tried, refused, and the answer came from an ask without it",
+    [heard[0], heard.includes("")], [`Bearer ${STORED_TOKEN}`, true]);
+  check("the pane says the stored token was refused, in the owner's words",
+    await page.$eval("#upd-token", e => e.textContent.trim()).catch(() => ""), TOKEN_WORDS);
+  const without = await page.evaluate(() => {
+    updateState.skein.token_refused = false;
+    renderUpdate();
+    const shown = !!document.getElementById("upd-token");
+    updateState.skein.token_refused = true;
+    renderUpdate();
+    return shown;
+  });
+  check("and says nothing of the kind when the token was not refused", without, false);
 }
 
 // --- a revision is abbreviated by cutting the SHA, never the string --------------------------------
