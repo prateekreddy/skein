@@ -63,7 +63,7 @@ set -uo pipefail
 # claim than "does not, by construction".
 #
 # The narrow fix — resolving one binary against a fixed PATH — was already here, for `tmux`, and
-# the twelve `sudo` calls, the two `python3` calls and the `bwrap` below went on resolving through
+# the thirteen `sudo` calls, the two `python3` calls and the `bwrap` below went on resolving through
 # the inherited one. A single export is the only spelling that covers the ones nobody thought of,
 # including the ones a later edit adds.
 #
