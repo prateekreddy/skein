@@ -16,10 +16,10 @@ corrected.** Not sloppiness in the edit — a wrong premise, confidently impleme
 ## The seven rules
 
 They live in `CONTRIBUTING.md`, under **"Before you change anything"** — one copy, inside the gates,
-readable by anyone who clones this repository rather than only by an agent with the store mounted
-(SKEIN-597). Each one names the incident that bought it; that reasoning is the part worth your time,
-and it is not repeated here, because two copies of it is how this file went stale — it listed six
-rules for as long as CONTRIBUTING had seven (SKEIN-1127).
+readable by anyone who clones this repository, not only by an agent that happens to have this skill
+loaded. Each one names the incident that bought it; that reasoning is the part worth your time, and
+it is not repeated here, because two copies of it is how this file went stale — it listed six rules
+for as long as CONTRIBUTING had seven.
 
 `CONTRIBUTING.md` is the source of truth. Where it and this file disagree, believe it and fix this
 one. The lines below are an index into it, not a summary of it:
@@ -41,16 +41,18 @@ one. The lines below are an index into it, not a summary of it:
 
 **`tools/gates.sh` is the one list** — `tools/gates.sh --list` prints it, and `CONTRIBUTING.md`'s
 "The gates" says what each one enforces. This file used to carry its own copy of the commands, and
-when it was rewritten that copy ran eleven of the nineteen (SKEIN-1127), so it names the script
-instead.
+when it was rewritten that copy ran eleven of the nineteen the script ran at the time, so it names
+the script instead. Run `tools/gates.sh --list` for the list as it stands rather than trusting a
+count written here.
 
-What the script cannot tell you, because it is about this fleet rather than the repository:
+What the script cannot tell you, because it is about your machine rather than the repository. The
+commands assume `cargo` and `node` are on your `PATH`; if your toolchain lives somewhere unusual,
+export that before anything else, or a gate reports `cargo: command not found` as if it were a
+finding.
 
 ```sh
-# The toolchain is NOT under $HOME on a skein box.
-export CARGO_HOME=/boxes/.skein/toolchain/cargo RUSTUP_HOME=/boxes/.skein/toolchain/rustup
-export PATH="$CARGO_HOME/bin:$PATH"
-# In a worktree, build somewhere of your own — never under /boxes/.skein.
+# In a worktree, build inside the worktree — a build directory outside every checkout has no owner
+# and no lifetime: nothing removes it when the worktree goes.
 export CARGO_TARGET_DIR="$PWD/.target"
 # A unix socket path cannot exceed 108 bytes, and an agent worktree path is longer than that
 # before the browser fixture appends anything.
