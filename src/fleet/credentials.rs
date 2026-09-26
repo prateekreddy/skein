@@ -240,9 +240,17 @@ mod tests {
     ///
     /// The audit wait was never the race: `reported` is synchronous, and the fake warden hands
     /// the entry to the channel before it closes the connection the client reads to EOF.
+    ///
+    /// **`$SKEIN_HOME` is pinned to this test's own directory.** `Place::write` asks
+    /// `place::fleet_sandbox`, which reads `config.json` under it. Unpinned, this passed under
+    /// `cargo test` only because the box's own `$SKEIN_HOME` answered — reading the owner's real
+    /// settings — and panicked in `config::skein_home` under `tools/alone-check.py`, which scrubs it.
     #[test]
     fn handing_the_owners_token_to_a_review_is_reported_with_the_box_and_the_pull_request() {
         let _env = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", &*home);
         let _crossing = crate::place::seam::install(Box::new(|_argv: &[String]| {
             Some(vec!["sh".into(), "-c".into(), "cat >/dev/null".into()])
         }));
