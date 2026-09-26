@@ -1639,6 +1639,153 @@ mod tests {
         }
     }
 
+    /// **Only a 401 is a refused token** (SKEIN-1172). A token ask that fails for any other
+    /// reason — GitHub's own 5xx, a 403 about the repository — is returned exactly as it came, with
+    /// no second ask and no word about the token, because "your stored GitHub token was refused" would
+    /// then be false.
+    ///
+    /// The failures are GitHub's real ones through `github::get_json`, so the sentences are the ones
+    /// that function actually writes: `GitHub said 500: …` from a JSON `message`, and
+    /// `GitHub answered 502: …` from a body that is not JSON. A 403 rate limit is left out on
+    /// purpose: it engages the process-wide hold in `github`, which would refuse every later GitHub
+    /// call in this test binary.
+    ///
+    /// **What would make it fail:** `ask` retrying on any error (`Err(_why) => Asked { …` in place of
+    /// the `refused_credentials` guard). The second ask then answers with the sha, and the first
+    /// assertion fails naming the status it swallowed.
+    #[test]
+    fn a_token_ask_that_fails_for_another_reason_is_returned_as_it_came_and_asked_once() {
+        let _g = crate::testutil::env_lock();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_SOURCE_URL", "https://github.com/acme/skein.git");
+        env.set("SKEIN_SOURCE_REF", "");
+        for (status, body, said) in [
+            (
+                "500 Internal Server Error",
+                r#"{"message":"Server Error"}"#,
+                "GitHub said 500: Server Error",
+            ),
+            (
+                "502 Bad Gateway",
+                "<html>bad gateway</html>",
+                "GitHub answered 502: <html>bad gateway</html>",
+            ),
+            (
+                "403 Forbidden",
+                r#"{"message":"Resource not accessible by personal access token"}"#,
+                "GitHub said 403: Resource not accessible by personal access token",
+            ),
+        ] {
+            let (base, heard) = answering_github(status, body);
+            env.set("SKEIN_GITHUB_API", &base);
+            let asked = ask(
+                Some(crate::secret::Secret::new("skein-test-some-token")),
+                ask_github,
+            );
+            assert_eq!(
+                asked.answer,
+                Err(said.to_string()),
+                "a {status} to the token ask was not returned as it came"
+            );
+            assert!(
+                !asked.token_refused,
+                "a {status} was reported as a refused token"
+            );
+            let said = heard.lock().unwrap().clone();
+            assert_eq!(
+                said,
+                vec!["Bearer skein-test-some-token".to_string()],
+                "a {status} was followed by a second ask"
+            );
+        }
+    }
+
+    /// **Every way `github::get_json` words a 401 is recognised as one** (SKEIN-1172): a JSON
+    /// `message` (`GitHub said 401: …`), a body that is not JSON (`GitHub answered 401: …`), and no
+    /// body at all (`GitHub answered 401 with an empty body`). The sentences are produced by the
+    /// real function against a GitHub that answers each way, not written out here.
+    ///
+    /// **What would make it fail:** `refused_credentials` dropping either prefix; the case it no
+    /// longer matches then fails by name. And the non-401 answers, worded by the same function, must
+    /// not match — a prefix loosened to `GitHub said 4` fails the second assertion.
+    #[test]
+    fn every_wording_get_json_gives_a_401_is_a_refused_token_and_no_other_status_is() {
+        let _g = crate::testutil::env_lock();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_SOURCE_URL", "https://github.com/acme/skein.git");
+        env.set("SKEIN_SOURCE_REF", "");
+        let mut worded = |status: &'static str, body: &'static str| {
+            let (base, _) = answering_github(status, body);
+            env.set("SKEIN_GITHUB_API", &base);
+            ask_github(&crate::secret::Secret::new("skein-test-some-token"))
+                .expect_err("the fake GitHub answered a failure")
+        };
+        for (status, body) in [
+            ("401 Unauthorized", r#"{"message":"Bad credentials"}"#),
+            ("401 Unauthorized", "<html>unauthorized</html>"),
+            ("401 Unauthorized", ""),
+        ] {
+            let why = worded(status, body);
+            assert!(
+                refused_credentials(&why),
+                "get_json's 401 wording {why:?} (body {body:?}) was not read as a refused token"
+            );
+        }
+        for (status, body) in [
+            ("404 Not Found", r#"{"message":"Not Found"}"#),
+            ("403 Forbidden", r#"{"message":"Must have admin rights"}"#),
+            ("500 Internal Server Error", ""),
+        ] {
+            let why = worded(status, body);
+            assert!(
+                !refused_credentials(&why),
+                "get_json's {status} wording {why:?} was read as a refused token"
+            );
+        }
+    }
+
+    /// A GitHub that answers `status` with `body` to any request carrying `Authorization`, and the
+    /// commit to one carrying none. Records each request's `Authorization`, or "" for none.
+    fn answering_github(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let auth = said
+                    .lines()
+                    .find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                            .map(|(_, v)| v.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(auth.clone());
+                let (status, answer) = match auth.is_empty() {
+                    true => ("200 OK", format!(r#"{{"sha":"{TOKEN_GITHUB_SHA}"}}"#)),
+                    false => (status, body.to_string()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, heard)
+    }
+
     const TOKEN_GITHUB_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
     /// A GitHub with opinions about credentials: `skein-test-good-token` and no `Authorization`
