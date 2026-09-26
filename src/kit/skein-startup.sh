@@ -79,13 +79,69 @@ vmid="$(printf '%s' "$vmid" | tr / -)"
 # An explicit override wins outright: the fleet path knows the store exactly, and there the scan
 # below would find nothing to scan — a box's store is not a mount of its own, it is a directory
 # inside the one workspace the whole sandbox mounts.
+#
+# Only the provision passes $SKEIN_STORE, and only a box whose store is bound back to it
+# (box-session.sh's `--bind "$SKEIN_BOX_STORE"`) has the store as a mount point. The workshop box
+# has neither on a restart: it is exempt from the cover, so its store is a directory inside the
+# workspace mount. So after those two, in this order:
+#   * the `.claude/skein` link an earlier start made — its target's parent is the store, which is
+#     how sandbox-bootstrap.sh and box-status.sh find it too;
+#   * a store under any mount, at `<mount>/*/store/.claude` or `<mount>/repos/*/store/.claude`,
+#     holding this box's launch spec. This is what finds it on the first start after git replaced
+#     the old `.claude` link with the directory the repo tracks.
+# A box never adopts another repository's store. When the clone names a repo's mirror as a remote
+# (`fleet::clone_script` clones from `<repo>/mirror`), only that repo's store is taken; when it names
+# none, one store with this box's launch spec is taken and several are refused.
 store="$(printenv SKEIN_STORE 2>/dev/null || true)"
 [ -n "$store" ] && [ -d "$store" ] || store=""
+store_note=""
+if [ -z "$store" ] && [ -L "$clone_root/.claude/skein" ]; then
+  linked="$(readlink "$clone_root/.claude/skein")"
+  case "$linked" in /*) ;; *) linked="$clone_root/.claude/$linked" ;; esac
+  linked="$(dirname "$linked")"
+  [ -d "$linked" ] && store="$linked"
+fi
 if [ -z "$store" ] && [ -r /proc/self/mountinfo ]; then
   while read -r mp; do
     [ -n "$mp" ] || continue
     if [ -f "$mp/skein/launch/$vmid.json" ]; then store="$mp"; break; fi
   done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null | sort -u)
+fi
+if [ -z "$store" ] && [ -r /proc/self/mountinfo ]; then
+  specs=""
+  while read -r mp; do
+    [ "$mp" = / ] && mp=""
+    for cand in "$mp"/*/store/.claude "$mp"/repos/*/store/.claude; do
+      [ -f "$cand/skein/launch/$vmid.json" ] && specs="$specs$cand
+"
+    done
+  done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null | sort -u)
+  specs="$(printf '%s' "$specs" | sort -u)"
+  remotes="$(git -C "$clone_root" remote -v 2>/dev/null | awk '{print $2}' | sort -u)"
+  # Every repo, spec or not, whose mirror this clone was made from: the one store it may adopt.
+  mine=""
+  while read -r mp; do
+    [ "$mp" = / ] && mp=""
+    for cand in "$mp"/*/store/.claude "$mp"/repos/*/store/.claude; do
+      [ -d "$cand" ] || continue
+      printf '%s\n' "$remotes" | grep -qxF "$(dirname "$(dirname "$cand")")/mirror" \
+        && mine="$cand"
+    done
+  done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null | sort -u)
+  others="$(printf '%s\n' "$specs" | grep -vxF "$mine" | grep . | tr '\n' ' ' | sed 's/ $//')"
+  if [ -n "$mine" ]; then
+    if printf '%s\n' "$specs" | grep -qxF "$mine"; then
+      store="$mine"
+      [ -z "$others" ] \
+        || store_note="found this box's store by its launch spec, beside the mirror this clone was made from; not adopted, because they are another repository's: $others"
+    elif [ -n "$others" ]; then
+      echo "[skein-kit] not adopting another repository's store: this clone was made from $(dirname "$(dirname "$mine")")/mirror, and $vmid's launch spec is only in $others" >&2
+    fi
+  elif [ -n "$specs" ] && [ "$(printf '%s\n' "$specs" | grep -c .)" = 1 ]; then
+    store="$specs"
+  elif [ -n "$specs" ]; then
+    echo "[skein-kit] more than one repository's store has a launch spec for $vmid, and this clone names none of their mirrors, so none is adopted: $others" >&2
+  fi
 fi
 # Last resort: the thing-style sibling convention.
 [ -n "$store" ] && [ -d "$store" ] || store="$(dirname "$clone_root")/store/.claude"
@@ -499,6 +555,9 @@ if [ -d "$store" ]; then
     done < "$store/skein/runtimes.tsv"
   fi
   revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
+  if [ -n "$store_note" ]; then
+    if [ -n "$claude_note" ]; then claude_note="$store_note; $claude_note"; else claude_note="$store_note"; fi
+  fi
   printf '{"ts":"%s","claude_link":"%s","claude_note":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$claude_note" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
     > "$store/skein/boot/$vmid.json" 2>/dev/null || true
