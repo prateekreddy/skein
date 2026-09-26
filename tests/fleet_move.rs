@@ -2182,8 +2182,7 @@ impl Install {
     /// is therefore the real one, and nothing is ever sent to github.com: git's request goes to
     /// the address in `origin`, whatever the helper was told.
     fn with_real_git(&self, origin: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::remove_file(self.root.join("bin/git")).expect("the stub git was there to remove");
+        self.use_real_git();
         let git = |args: &[&str]| {
             let ok = Command::new("git")
                 .args(args)
@@ -2205,7 +2204,13 @@ impl Install {
             "origin",
             origin,
         ]);
+    }
 
+    /// [`Install::with_real_git`] without the checkout: the stub `git` swapped for this machine's
+    /// own and skein's real credential helper configured, so a run has to CLONE.
+    fn use_real_git(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::remove_file(self.root.join("bin/git")).expect("the stub git was there to remove");
         let helper_dir = self.root.join("helper");
         fs::create_dir_all(&helper_dir).unwrap();
         let wrapper = helper_dir.join("git-credential-skein");
@@ -2273,20 +2278,27 @@ fn stated_size() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// **The Update button's fetch, for a remote that wants a login and gets none, ends in seconds
-/// with the reason in the pane's log — it does not sit at a password prompt nobody can see**
-/// (SKEIN-1032).
+/// The one line the log carries for a remote that wanted a login — the owner's sentence, verbatim
+/// (SKEIN-1171), for the address that was being fetched.
+fn refused_line(url: &str) -> String {
+    format!(
+        "skein: GitHub refused to let this sandbox fetch {url} without a login — the repository is \
+         private, or the address is wrong"
+    )
+}
+
+/// **The Update button's fetch, for a remote that wants a login, ends in seconds with the owner's
+/// sentence in the pane's log — it does not sit at a password prompt nobody can see**
+/// (SKEIN-1032, SKEIN-1171).
 ///
-/// This is the path that stranded the owner on 2026-09-22. git prompts only when NO credential
-/// came from a helper — measured on git 2.53: a helper's token that is refused ends at once in
-/// "Authentication failed", prompt setting or none, while a remote that asks and gets nothing
-/// prints `Username for …` on the terminal and waits. So the `Username for 'https://github.com':`
-/// on the live pane means the helper handed git nothing; the refused-token case is the next test.
+/// This is the path that stranded the owner on 2026-09-22 and again on 2026-09-26: GitHub refused
+/// the fetch, and git printed `Username for 'https://github.com':` on the pane's terminal and
+/// waited.
 ///
 /// **What would make it fail:** removing `export GIT_TERMINAL_PROMPT=0` from bootstrap.sh. git then
 /// prompts on the run's terminal, the runner kills it at the deadline, and the first assertion
 /// fails by name with the prompt quoted — bounded, so the suite does not hang with it. Dropping the
-/// explanation instead fails the log assertion; dropping the `exit 1` the marker assertion.
+/// sentence from remote_git fails the log assertion; dropping its `exit 1` the marker assertion.
 #[test]
 fn the_updates_fetch_for_a_remote_that_wants_a_login_fails_fast_instead_of_prompting() {
     let _env = env_lock();
@@ -2296,9 +2308,8 @@ fn the_updates_fetch_for_a_remote_that_wants_a_login_fails_fast_instead_of_promp
     let root = scratch();
     let fleet = Install::new(&root);
     let (port, heard) = refusing_remote();
-    fleet.with_real_git(&format!(
-        "http://127.0.0.1:{port}/skein-test-owner/thing.git"
-    ));
+    let origin = format!("http://127.0.0.1:{port}/skein-test-owner/thing.git");
+    fleet.with_real_git(&origin);
     let tokens = root.join("tokens");
     let mut env = stated_size();
     env.push(("SKEIN_GIT_TOKENS", tokens.to_string_lossy().into_owned()));
@@ -2329,32 +2340,23 @@ fn the_updates_fetch_for_a_remote_that_wants_a_login_fails_fast_instead_of_promp
         ran.log
     );
     assert!(
-        ran.log.contains(
-            "asked for a login to read skein-test-owner/thing and this update had no token"
-        ) && ran
-            .log
-            .contains(&format!("{}/skein-test-owner%2Fthing", tokens.display()))
-            && ran.log.contains("press Update skein again"),
-        "the pane's log does not say, in the owner's terms, that no token reached the fetch, \
-         where skein looked for one, and what to do next:\n{}",
+        ran.log.lines().any(|l| l == refused_line(&origin)),
+        "the pane's log does not carry the owner's sentence for {origin}:\n{}",
         ran.log
     );
 }
 
-/// **A stored token the remote refuses is named — by the file it came from, never by its contents
-/// — and the run ends in seconds with a failed marker** (SKEIN-1032).
+/// **The fetch sends no credential, even when skein's helper has one to give** (SKEIN-1171).
 ///
-/// The token is read by skein's real credential helper out of `read/<owner>`, the file a host
-/// places for a box, and sent: the remote's own record of the `Authorization` header is checked
-/// first, so this cannot pass on a helper that answered nothing.
+/// A token sits in `read/<owner>`, the file a host places for a box, and skein's real credential
+/// helper is configured to hand it out. The remote records the `Authorization` header of every
+/// request, so this asserts what went on the wire rather than what the log says.
 ///
-/// **What would make it fail:** bootstrap.sh's token_file_for naming nothing (or the wrong file) fails the path
-/// assertion; printing the token fails the contents assertion; losing the `exit 1` fails the
-/// marker. Removing `GIT_TERMINAL_PROMPT=0` does NOT fail this one, and that is measured rather
-/// than overlooked: git never prompts after a helper's token is refused. The test above is the one
-/// that sabotage fails.
+/// **What would make it fail:** dropping `-c credential.helper=` from remote_git. The helper then
+/// answers, the remote hears `Basic …` for the stored token and the first assertion fails with it;
+/// git ends in "Authentication failed", so the sentence assertion fails too.
 #[test]
-fn the_updates_fetch_names_the_file_whose_token_was_refused() {
+fn the_updates_fetch_sends_no_stored_token_even_when_a_helper_has_one() {
     let _env = env_lock();
     if cannot_hold_a_door() {
         return;
@@ -2362,12 +2364,14 @@ fn the_updates_fetch_names_the_file_whose_token_was_refused() {
     let root = scratch();
     let fleet = Install::new(&root);
     let (port, heard) = refusing_remote();
-    fleet.with_real_git(&format!(
-        "http://127.0.0.1:{port}/skein-test-owner/thing.git"
-    ));
+    let origin = format!("http://127.0.0.1:{port}/skein-test-owner/thing.git");
+    fleet.with_real_git(&origin);
     let tokens = root.join("tokens");
-    let file = tokens.join("read/skein-test-owner");
-    fs::write(&file, "skein-test-refused-token\n").unwrap();
+    fs::write(
+        tokens.join("read/skein-test-owner"),
+        "skein-test-stored-token\n",
+    )
+    .unwrap();
     let mut env = stated_size();
     env.push(("SKEIN_GIT_TOKENS", tokens.to_string_lossy().into_owned()));
 
@@ -2379,42 +2383,100 @@ fn the_updates_fetch_names_the_file_whose_token_was_refused() {
          log:\n{}",
         ran.tty, ran.log
     );
-    // `printf 'x-access-token:skein-test-refused-token' | base64` — what the helper sends.
+    let said = heard.lock().unwrap().clone();
     assert!(
-        heard
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|a| a == "Basic eC1hY2Nlc3MtdG9rZW46c2tlaW4tdGVzdC1yZWZ1c2VkLXRva2Vu"),
-        "the stored token never reached the remote, so nothing here was refused — the fixture is \
-         wrong, not the update. The remote heard {:?}",
-        heard.lock().unwrap()
-    );
-    assert_eq!(
-        ran.marker.as_deref(),
-        Some("1"),
-        "a refused token did not end the run as a failed update:\n{}",
+        !said.is_empty() && said.iter().all(|a| a.is_empty()),
+        "the fetch presented a credential to the remote (or never asked it): {said:?}\n{}",
         ran.log
     );
     assert!(
-        ran.log
-            .contains("refused the stored token for skein-test-owner/thing")
-            && ran.log.contains("press Update skein again"),
-        "the pane's log does not say the stored token was refused, for which repository, and \
-         what to do:\n{}",
+        ran.log.lines().any(|l| l == refused_line(&origin)),
+        "the pane's log does not carry the owner's sentence for {origin}:\n{}",
         ran.log
     );
     assert!(
-        ran.log.contains(&format!(
-            "The token git sent is the one in {}.",
-            file.display()
-        )),
-        "the log does not name the file the refused token came from:\n{}",
-        ran.log
-    );
-    assert!(
-        !ran.log.contains("skein-test-refused-token"),
+        !ran.log.contains("skein-test-stored-token"),
         "the log printed the token itself:\n{}",
+        ran.log
+    );
+}
+
+/// **A first install's clone, refused a login, names the address it was given** (SKEIN-1171).
+///
+/// With no checkout yet, bootstrap clones `$SKEIN_SOURCE_URL` rather than fetching `origin`, and
+/// the sentence names that address.
+///
+/// **What would make it fail:** calling the clone as a bare `git clone` rather than through
+/// remote_git — the run then carries on past the failed clone, and the marker assertion fails
+/// before the sentence one could; passing remote_git anything but `$url` fails the sentence.
+#[test]
+fn the_updates_clone_of_a_remote_that_wants_a_login_names_the_address_it_was_given() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let (port, heard) = refusing_remote();
+    fleet.use_real_git();
+    let url = format!("http://127.0.0.1:{port}/skein-test-owner/fork.git");
+    let env = stated_size();
+
+    let limit = Duration::from_secs(30);
+    let ran = fleet.update_under("bbbb222", limit, &url, &env, &[]);
+    assert!(
+        ran.finished && !heard.lock().unwrap().is_empty(),
+        "the clone did not end by itself within {limit:?}, or never asked the remote; its \
+         terminal says:\n{}\nand the log:\n{}",
+        ran.tty,
+        ran.log
+    );
+    assert!(
+        ran.log.contains(&format!("cloning {url}")),
+        "the run fetched instead of cloning — the fixture left a checkout behind:\n{}",
+        ran.log
+    );
+    assert_eq!(ran.marker.as_deref(), Some("1"), "{}", ran.log);
+    assert!(
+        ran.log.lines().any(|l| l == refused_line(&url)),
+        "the pane's log does not carry the owner's sentence for {url}:\n{}",
+        ran.log
+    );
+}
+
+/// **A failure that is not a login keeps git's own words, and gets no sentence it did not earn**
+/// (SKEIN-1171).
+///
+/// A remote that is not there at all — nothing listening on the port — fails the fetch in git's
+/// words ("Failed to connect"), and the log must not say GitHub refused a login.
+///
+/// **What would make it fail:** printing the sentence for every failure of remote_git (or matching
+/// on anything git says after "fatal:"); the second assertion then fails.
+#[test]
+fn the_updates_fetch_that_fails_for_another_reason_keeps_gits_own_error() {
+    let _env = env_lock();
+    if cannot_hold_a_door() {
+        return;
+    }
+    let root = scratch();
+    let fleet = Install::new(&root);
+    let origin = format!(
+        "http://127.0.0.1:{}/skein-test-owner/thing.git",
+        free_port()
+    );
+    fleet.with_real_git(&origin);
+    let env = stated_size();
+
+    let limit = Duration::from_secs(30);
+    let ran = fleet.update("bbbb222", limit, &env);
+    assert!(
+        ran.finished && ran.marker.as_deref() == Some("1"),
+        "a fetch from nothing did not end as a failed update within {limit:?}:\n{}",
+        ran.log
+    );
+    assert!(
+        ran.log.contains("Failed to connect") && !ran.log.contains("without a login"),
+        "the log does not keep git's own error, or blames a login for it:\n{}",
         ran.log
     );
 }

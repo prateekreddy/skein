@@ -733,6 +733,7 @@ function renderUpdate() {
 
   box.innerHTML = `
     <div class="set-note ${esc(state)}">${esc(said)}</div>
+    ${u.token_refused ? `<div class="set-note warn" id="upd-token">${esc(UPDATE_WORDS.tokenRefused)}</div>` : ""}
     <table class="set-revs">
       <tr><th>running</th><td>${rev(u.running)}</td><td class="dim">the binary answering this page${u.dirty ? " — built from an edited tree" : ""}</td></tr>
       <tr><th>checkout</th><td>${rev(u.source)}</td><td class="dim">what a rebuild would compile</td></tr>
@@ -859,6 +860,9 @@ const UPDATE_WORDS = {
   cancelledToast: "update cancelled — the log shows where it stopped",
   cancelledNote: "You cancelled the update. The log below shows where it stopped; press Update skein to try again.",
   cancelFailed: why => `could not cancel the update: ${why}`,
+  // GitHub refused the stored token and the check asked again without it (SKEIN-1172) — shown
+  // whatever that second answer was, because the token needs replacing either way.
+  tokenRefused: "your stored GitHub token was refused — replace it under Settings → GitHub & keys",
 };
 
 // The "no progress" notice, drawn into its own element so a poll can update it without redrawing

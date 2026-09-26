@@ -131,7 +131,7 @@ subject = "feat(warden): a flood cannot buy an approval, or block one"
 date = "2026-08-21T11:39:36Z"
 
 [citations."89cf36b"]
-external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:128 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
+external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:168 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
 sites = ["docs/line-cites.toml", "tests/ui/updatepane.mjs"]
 
 [citations."8d7206c"]

@@ -59,8 +59,7 @@ use std::time::{Duration, Instant};
 /// told about a commit from six hours ago is the failure mode there.
 const REMOTE_FRESH: Duration = Duration::from_secs(10 * 60);
 
-static REMOTE: std::sync::Mutex<Option<(Instant, Result<String, String>)>> =
-    std::sync::Mutex::new(None);
+static REMOTE: std::sync::Mutex<Option<(Instant, Asked)>> = std::sync::Mutex::new(None);
 static ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What the Update pane draws.
@@ -91,6 +90,18 @@ pub struct Available {
     /// bring it up. Compared as whole stamps: a `-dirty` build and a clean one of the same commit
     /// are different binaries, and the page confirms the restart by the same exact comparison.
     pub restartable: bool,
+    /// GitHub refused the stored token with a 401, so `remote` (or `why`) is the answer to the
+    /// same question asked without it (SKEIN-1172). True whatever that second answer was: the
+    /// token needs replacing even when the check itself came out fine.
+    pub token_refused: bool,
+}
+
+/// One reading of the remote: what GitHub said, and whether the stored token was refused on the
+/// way to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Asked {
+    answer: Result<String, String>,
+    token_refused: bool,
 }
 
 /// Everything the pane needs, with the remote taken from the last reading rather than asked now.
@@ -101,7 +112,9 @@ pub struct Available {
 pub fn available(token: Option<crate::secret::Secret>) -> Available {
     let running = crate::health::BUILD_REVISION.to_string();
     let source = source_revision();
-    let (remote, why) = match remembered(token) {
+    let asked = remembered(token);
+    let token_refused = asked.token_refused;
+    let (remote, why) = match asked.answer {
         Ok(sha) => (sha, String::new()),
         Err(why) => (String::new(), why),
     };
@@ -109,6 +122,7 @@ pub fn available(token: Option<crate::secret::Secret>) -> Available {
     let installed = installed_revision();
     Available {
         restartable: differs(&installed, &running),
+        token_refused,
         installed,
         behind: known(&remote, &source) && !same_revision(&remote, &source),
         // The stamp is `git describe --always --dirty`, so it is the source revision with a suffix
@@ -300,7 +314,7 @@ fn source_revision() -> String {
 }
 
 /// The last reading of the remote, refreshing behind the caller when it has gone stale.
-fn remembered(token: Option<crate::secret::Secret>) -> Result<String, String> {
+fn remembered(token: Option<crate::secret::Secret>) -> Asked {
     let known = REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let due = match &known {
         Some((at, _)) => at.elapsed() >= REMOTE_FRESH,
@@ -308,17 +322,58 @@ fn remembered(token: Option<crate::secret::Secret>) -> Result<String, String> {
     };
     if due && !ASKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         std::thread::spawn(move || {
-            // No credential is the ordinary case here — the repository is public — so an empty
-            // `Secret` stands in for one, exactly as the empty `&str` used to.
-            let answer = ask_github(&token.unwrap_or_else(|| crate::secret::Secret::new("")));
+            let answer = ask(token, ask_github);
             *REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), answer));
             ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
     match known {
-        Some((_, answer)) => answer,
-        None => Err("not asked yet".to_string()),
+        Some((_, asked)) => asked,
+        None => Asked {
+            answer: Err("not asked yet".to_string()),
+            token_refused: false,
+        },
     }
+}
+
+/// Ask with the stored token, and once more without it when GitHub refuses the token (SKEIN-1172).
+///
+/// No credential is the ordinary case here — the repository is public — so an empty `Secret`
+/// stands in for none, and `github::call` sends no `Authorization` header for it. A token that
+/// GitHub answers with a 401 is one that was rotated or revoked at GitHub, and a public repository
+/// does not need it: the anonymous answer is the one used, and `token_refused` is what tells the
+/// pane the token needs replacing. Only a 401 does this. A 403 or 404 is an answer about the
+/// repository or the quota, which asking without a credential could only make worse.
+///
+/// `github` is [`ask_github`], passed in so a test can stand a GitHub up behind it.
+fn ask(
+    token: Option<crate::secret::Secret>,
+    github: impl Fn(&crate::secret::Secret) -> Result<String, String>,
+) -> Asked {
+    let none = crate::secret::Secret::new("");
+    let token = token.filter(|t| !t.expose().is_empty());
+    let Some(token) = token else {
+        return Asked {
+            answer: github(&none),
+            token_refused: false,
+        };
+    };
+    match github(&token) {
+        Err(why) if refused_credentials(&why) => Asked {
+            answer: github(&none),
+            token_refused: true,
+        },
+        answer => Asked {
+            answer,
+            token_refused: false,
+        },
+    }
+}
+
+/// Whether `why` is `github::get_json` reporting a 401 — the status GitHub gives a credential it
+/// does not accept, in either of the two sentences that module words a non-2xx with.
+fn refused_credentials(why: &str) -> bool {
+    why.starts_with("GitHub said 401:") || why.starts_with("GitHub answered 401")
 }
 
 /// `owner/repo` out of whatever `SKEIN_SOURCE_URL` is set to.
@@ -1505,6 +1560,130 @@ mod tests {
             "/repos/acme/skein%3Fx%3D1/commits/release%232",
             "the source URL and ref did not reach GitHub as encoded segments: {line}"
         );
+    }
+
+    /// **A stored token GitHub refuses is dropped for one more ask, and the pane is told**
+    /// (SKEIN-1172).
+    ///
+    /// The fake GitHub answers exactly as the real one did on 2026-09-26: a 401 "Bad credentials"
+    /// to a rotated token, and the commit to a request with no `Authorization` header at all.
+    ///
+    /// **What would make each assertion fail:** `ask` returning the first answer instead of asking
+    /// again fails the sha assertion with "GitHub said 401: Bad credentials"; `github::config`
+    /// sending `Authorization: Bearer ` for the empty token (as it did) makes the second ask a 401
+    /// too, and fails the same assertion and the header one; `token_refused: false` on that arm
+    /// fails the flag.
+    #[test]
+    fn a_refused_stored_token_is_asked_again_without_it_and_the_pane_is_told() {
+        let _g = crate::testutil::env_lock();
+        let (base, heard) = token_github();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_SOURCE_URL", "https://github.com/acme/skein.git");
+        env.set("SKEIN_SOURCE_REF", "");
+
+        let asked = ask(
+            Some(crate::secret::Secret::new("skein-test-rotated-token")),
+            ask_github,
+        );
+        assert_eq!(
+            asked.answer,
+            Ok(TOKEN_GITHUB_SHA.to_string()),
+            "the check did not come back with the anonymous answer"
+        );
+        assert!(asked.token_refused, "the refused token was not reported");
+        assert_eq!(
+            heard.lock().unwrap().clone(),
+            vec![
+                "Bearer skein-test-rotated-token".to_string(),
+                String::new()
+            ],
+            "the token was not tried first, or the second ask still carried an Authorization header"
+        );
+        // And the pane reads it by this name.
+        let drawn = serde_json::to_value(Available {
+            token_refused: asked.token_refused,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(drawn["token_refused"], serde_json::json!(true));
+    }
+
+    /// **Only a refused token is reported** (SKEIN-1172): a token GitHub accepts, and no token at
+    /// all, are one ask each and no word to the pane.
+    ///
+    /// **What would make it fail:** setting `token_refused` whenever a token was present, or on
+    /// every answer; or asking twice regardless, which the request count catches.
+    #[test]
+    fn a_token_github_accepts_and_no_token_at_all_are_one_ask_and_no_warning() {
+        let _g = crate::testutil::env_lock();
+        let (base, heard) = token_github();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_GITHUB_API", &base);
+        env.set("SKEIN_SOURCE_URL", "https://github.com/acme/skein.git");
+        env.set("SKEIN_SOURCE_REF", "");
+
+        for token in [
+            Some(crate::secret::Secret::new("skein-test-good-token")),
+            None,
+        ] {
+            heard.lock().unwrap().clear();
+            let asked = ask(token, ask_github);
+            assert_eq!(asked.answer, Ok(TOKEN_GITHUB_SHA.to_string()));
+            assert!(
+                !asked.token_refused,
+                "a token that was not refused was reported"
+            );
+            let said = heard.lock().unwrap().clone();
+            assert_eq!(said.len(), 1, "{said:?}");
+        }
+    }
+
+    const TOKEN_GITHUB_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A GitHub with opinions about credentials: `skein-test-good-token` and no `Authorization`
+    /// header get the commit, and any other token a 401 "Bad credentials". Records each request's
+    /// `Authorization` value, or an empty string when it carried none.
+    fn token_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let auth = said
+                    .lines()
+                    .find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                            .map(|(_, v)| v.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(auth.clone());
+                let (status, answer) = match auth.as_str() {
+                    "" | "Bearer skein-test-good-token" => {
+                        ("200 OK", format!(r#"{{"sha":"{TOKEN_GITHUB_SHA}"}}"#))
+                    }
+                    _ => (
+                        "401 Unauthorized",
+                        r#"{"message":"Bad credentials","status":"401"}"#.to_string(),
+                    ),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, heard)
     }
 
     /// A GitHub that records the request line and answers one canned commit.

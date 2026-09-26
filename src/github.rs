@@ -381,15 +381,23 @@ pub(crate) fn repo_path(slug: &str) -> String {
 /// can only be built from one. [`call`] is where the conversion happens — see the note there for
 /// why the public entry points are still `&str`.
 fn config(token: &crate::secret::Secret, accept: &str) -> String {
+    // **No credential is no header** (SKEIN-1172). An empty token used to go out as
+    // `Authorization: Bearer ` — measured against api.github.com on 2026-09-26, that is a 401 "Bad
+    // credentials", where the same request with no header at all is an anonymous read.
+    let auth = match token.expose().is_empty() {
+        true => String::new(),
+        false => format!(
+            "header = \"Authorization: Bearer {}\"\n",
+            // A PAT is alphanumeric and a JWT is base64url segments, so neither can hold a quote
+            // or a newline — but this is the line that would become an injected curl option if
+            // that ever stopped being true, so it is enforced rather than assumed.
+            token.expose().replace(['"', '\n', '\\'], "")
+        ),
+    };
     format!(
-        "header = \"Authorization: Bearer {}\"\n\
-         header = \"Accept: {accept}\"\n\
+        "{auth}header = \"Accept: {accept}\"\n\
          header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
-         header = \"User-Agent: skein\"\n",
-        // A PAT is alphanumeric and a JWT is base64url segments, so neither can hold a quote or a
-        // newline — but this is the line that would become an injected curl option if that ever
-        // stopped being true, so it is enforced rather than assumed.
-        token.expose().replace(['"', '\n', '\\'], "")
+         header = \"User-Agent: skein\"\n"
     )
 }
 

@@ -99,7 +99,8 @@ say() { printf 'skein: %s\n' "$1" >&2; }
 #   * ssh, which none of the above reaches, is told `BatchMode=yes` further down, where there is a
 #     git to ask what ssh command it would otherwise have used.
 #
-# A refused credential then fails in seconds, and remote_git below says which one and what to do.
+# A remote that wants a login then fails in seconds, and remote_git below, which sends no
+# credential at all, says so.
 export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=
 export GCM_INTERACTIVE=never
@@ -535,53 +536,35 @@ host_of() {
   printf '%s' "$1" | sed -E 's#^[a-z+]+://([^/@]*@)?([^/:]*).*#\2#; s#^[^/@:]+@([^:]+):.*#\1#'
 }
 
-# Whether git's credential helper is skein's own, `src/git-credential-skein.sh` — the only helper
-# whose files this can name.
-skein_helper() {
-  case "$(git config --get-all credential.helper 2>/dev/null)" in
-    *git-credential-skein*) return 0 ;;
-  esac
-  return 1
+# `scheme://host[:port]` out of a URL, with any `user@` dropped — the part git names when it asks
+# for a login. Only ever used to tell whose login git was asking for.
+site_of() {
+  printf '%s' "$1" | sed -E 's#^([a-z+]+://)([^/@]*@)?([^/]*).*#\1\3#'
 }
 
-# The files skein's helper reads a token from for `$1` (owner/name), in the order it reads them:
-# the same lookup as `src/git-credential-skein.sh`, narrowest first.
-token_candidates() {
-  printf '%s\n' \
-    "$SKEIN_GIT_TOKENS/${1%%/*}%2F${1#*/}" \
-    "$SKEIN_GIT_TOKENS/read/${1%%/*}" \
-    "$SKEIN_GIT_TOKENS/read/_any"
-}
-
-# The file skein's helper handed git a token from for `$1`, or nothing: the first readable non-empty
-# candidate, as the helper takes it. Only asked when that helper is the one configured, because only
-# then is the answer about the token git actually sent.
-# `the_updates_fetch_names_the_file_whose_token_was_refused` runs the real helper and checks this
-# names the file it read.
-token_file_for() {
-  skein_helper && [ -n "${SKEIN_GIT_TOKENS:-}" ] || return 0
-  token_candidates "$1" | while IFS= read -r candidate; do
-    if [ -r "$candidate" ] && [ -s "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      break
-    fi
-  done
-}
-
-# Run a git that talks to the remote `$1`; on failure, say why in the owner's terms and stop.
+# Run `git "$@"` against the remote `$1` with no credential; on failure, say why and stop.
 #
-# git's own words are passed through first, whole — they are the evidence. What is added is what
-# git cannot say: that this was a credential, which one, where it lives, and what to do. The two
-# cases are git's two sentences for them. "Authentication failed" is a credential that was SENT and
-# refused (git says it only after a helper answered); "could not read Username" is none at all, for
-# a remote that wanted one. A failure that is neither is not guessed at.
+# **No credential, ever** (SKEIN-1171). The source is public, so the fetch needs none, and the owner
+# decided on 2026-09-23 that the Update fetch gets no credential plumbing (SKEIN-1036). A helper that
+# handed git something was the one way left for this to go wrong quietly — a stale token sent and
+# refused, or a helper with prompts of its own. `-c credential.helper=` empties git's helper list,
+# URL-scoped helpers included (measured on git 2.53: a `credential "http://host/o"` helper is not
+# asked once this is on the command line). With no helper and the prompts closed at the top of this
+# file, a remote that wants a login gets none, and git ends at once.
+#
+# git's own words are passed through first, whole — they are the evidence. The one thing added is
+# the owner's sentence for a login refused, and only when git says so about THIS remote:
+# "could not read Username for '<site>'" is the line git writes when the remote answered 401 and it
+# had nothing to send. A failure that is not that keeps git's own error, and is not guessed at.
+# What this cannot tell apart: a proxy between here and the remote that demands a login of its own
+# on CONNECT — git 2.53 words that 407 exactly as it words the remote's 401, naming the remote.
 remote_git() {
   remote="$1"
   shift
   # git's stderr is kept in a variable, not a file, and its stdout passes through on descriptor 4:
   # no `mktemp`, `cat` or `rm`, none of which this file may assume before it has a build to run.
   exec 4>&1
-  said=$("$@" 2>&1 1>&4 4>&-) && rc=0 || rc=$?
+  said=$(git -c credential.helper= "$@" 2>&1 1>&4 4>&-) && rc=0 || rc=$?
   exec 4>&-
   [ -z "$said" ] || printf '%s\n' "$said" >&2
   [ "$rc" = 0 ] && return 0
@@ -590,37 +573,11 @@ remote_git() {
   host=$(host_of "$remote")
   if [ "$host" = github.com ]; then who=GitHub; else who="$host"; fi
   case "$said" in
-    *"Authentication failed"*)
-      file=$(token_file_for "$slug")
-      say ""
-      say "$who refused the stored token for $slug, so the $what stopped here instead of waiting at a"
-      say "password prompt nobody can see."
-      if [ -n "$file" ]; then
-        say "The token git sent is the one in $file."
-        say "Replace that token (or the stored GitHub token it is a copy of) with one that can read"
-        say "$slug, then $again."
-      else
-        helpers=$(git config --get-all credential.helper 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
-        say "git got that token from its credential helper (${helpers:-none configured}), and skein"
-        say "cannot tell which file it read."
-        say "Replace that token with one that can read $slug, then $again."
-      fi
-      ;;
-    *"could not read Username"* | *"could not read Password"*)
-      say ""
-      say "$who asked for a login to read $slug and this $what had no token for it, so it stopped"
-      say "here instead of waiting at a password prompt nobody can see."
-      if skein_helper && [ -n "${SKEIN_GIT_TOKENS:-}" ]; then
-        say "skein's credential helper looked for one in these files and found none:"
-        token_candidates "$slug" | sed 's/^/skein:     /' >&2
-        say "Put a token that can read $slug in the first of them, then $again."
-      elif skein_helper; then
-        say "skein's credential helper is configured, but this $what was given no SKEIN_GIT_TOKENS"
-        say "directory, so it had nowhere to look for a token."
-        say "Store a token that can read $slug where skein keeps GitHub tokens, then $again."
-      else
-        say "Store a token that can read $slug where git's credential helper will find it, then"
-        say "$again."
+    *"could not read Username for '"* | *"could not read Password for '"*)
+      asked=${said#*"could not read "*" for '"}
+      asked=${asked%%"'"*}
+      if [ "$(site_of "$asked")" = "$(site_of "$remote")" ]; then
+        say "GitHub refused to let this sandbox fetch $remote without a login — the repository is private, or the address is wrong"
       fi
       ;;
     *"Permission denied (publickey"* | *"Host key verification failed"*)
@@ -646,14 +603,14 @@ if [ -d "$src/.git" ]; then
   say "fetching ${ref:-the default branch}"
   # `HEAD` is a ref the remote always has, and it is the same thing a bare clone would take.
   remote_git "$(git -C "$src" remote get-url origin 2>/dev/null || printf '%s' "$url")" \
-    git -C "$src" fetch --depth 1 origin "${ref:-HEAD}"
+    -C "$src" fetch --depth 1 origin "${ref:-HEAD}"
   git -C "$src" checkout -f FETCH_HEAD
 else
   say "cloning $url at ${ref:-the default branch}"
   if [ -n "$ref" ]; then
-    remote_git "$url" git clone --depth 1 --branch "$ref" "$url" "$src"
+    remote_git "$url" clone --depth 1 --branch "$ref" "$url" "$src"
   else
-    remote_git "$url" git clone --depth 1 "$url" "$src"
+    remote_git "$url" clone --depth 1 "$url" "$src"
   fi
 fi
 
