@@ -259,7 +259,7 @@ tools/gates.sh --list | wc -l                        # → 22
 | `continuation-check` | no `\`-continuation collapsed into a run of spaces | a `// continuation-ok:` marker, with its reason |
 | `residue-check` | no identifier from before this repository | `docs/residue.toml`, `docs/residue-banned.txt` |
 | `secret-check` | the four secrets rules: one writer for a 0600 credential, no credential on argv, every credential header built from a `Secret`, credential files under `private/`, and every test credential starting `skein-test-` | `WRITERS`, `EXPOSED`, `NOT_CREDENTIALS` and `PLACEMENT` in `tools/secret-check.py` |
-| `claude-md-check` | `CLAUDE.md` names no tracker id, project id or registered name, `AGENTS.md` is a symlink to it, and `sync`'s installer leaves it byte-identical | — |
+| `claude-md-check` | `CLAUDE.md` and every tracked Markdown file under `.claude/skills/` name no tracker id, project id, registered name or path under the fleet root, and it refuses when git lists no skill; `AGENTS.md` is a symlink to `CLAUDE.md`, and `sync`'s installer leaves it byte-identical | — |
 | `cockpit-tests` | the cockpit's pure functions | — |
 | `cockpit-bundle` | the committed bundle is not stale | — |
 | `fixture-root-check` | every browser suite that drives a real server builds its fixture under the fixture root, not `os.tmpdir()` | — |
