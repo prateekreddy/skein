@@ -353,6 +353,19 @@ impl Fleet {
     /// Run one `/bin/sh -c` probe inside the namespace the launcher's isolation block builds, and
     /// return its stdout. `args` become `$1`, `$2`, … inside it.
     pub(super) fn in_box(&self, born: Born, probe: &str, args: &[String]) -> Vec<u8> {
+        self.in_box_mounting(born, &[], probe, args)
+    }
+
+    /// [`Fleet::in_box`], with each of `mounts` made a mount point of its own before the launcher's
+    /// block runs: the mounts the sandbox itself makes, such as the workspace holding every repo's
+    /// store, which `bwrap --dev-bind / /` alone does not reproduce.
+    pub(super) fn in_box_mounting(
+        &self,
+        born: Born,
+        mounts: &[PathBuf],
+        probe: &str,
+        args: &[String],
+    ) -> Vec<u8> {
         let block = isolation_block();
         let quoted: Vec<String> = args.iter().map(|a| skein::util::sh_quote(a)).collect();
         let record_bind = format!(
@@ -370,6 +383,10 @@ impl Fleet {
                     .as_ref()
             ),
         );
+        let record_bind = mounts.iter().fold(record_bind, |acc, m| {
+            let m = skein::util::sh_quote(m.to_string_lossy().as_ref());
+            format!("{acc} --bind {m} {m}")
+        });
         let runner = format!(
             "set -uo pipefail\n\
              binds=({record})\n\
