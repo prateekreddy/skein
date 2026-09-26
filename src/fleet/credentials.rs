@@ -226,10 +226,26 @@ mod tests {
     ///
     /// The concrete change that fails it: delete the `reported` call in [`github_export`], and the
     /// sink hears nothing. A report made outside the `review_of` check fails the second half.
+    ///
+    /// **The stand-in reads its stdin, and `seam::doing_nothing` does not** (SKEIN-1167). This is a
+    /// [`Place::write`], and a write succeeds only if the body goes into the pipe while something
+    /// holds the read end. `sh -c :` exits without reading, so the write raced the shell's exit:
+    /// the body lands in the pipe buffer if the writer thread runs first, and fails with `EPIPE`
+    /// if the shell has already gone — `github_export` then returns no path and reports nothing.
+    /// A loaded box delays the writer thread past the shell's lifetime, which is why this failed
+    /// under a full `--lib` run and never alone. `cat` holds the read end until the writer closes
+    /// it, so there is no order in which the write can lose. Proved by planting a 300 ms sleep at
+    /// the top of `Place::write`'s writer thread: with `doing_nothing` this failed at the
+    /// `handed.path` assertion in 0.3s every time, and with this stand-in it passes.
+    ///
+    /// The audit wait was never the race: `reported` is synchronous, and the fake warden hands
+    /// the entry to the channel before it closes the connection the client reads to EOF.
     #[test]
     fn handing_the_owners_token_to_a_review_is_reported_with_the_box_and_the_pull_request() {
         let _env = crate::testutil::env_lock();
-        let _crossing = crate::place::seam::doing_nothing();
+        let _crossing = crate::place::seam::install(Box::new(|_argv: &[String]| {
+            Some(vec!["sh".into(), "-c".into(), "cat >/dev/null".into()])
+        }));
         let (_warden, _warden_home, heard) = crate::testutil::audit_sink();
         let place = Place {
             name: "example".into(),
@@ -258,7 +274,12 @@ mod tests {
 
         // Outside a review of the owner's (an App's token, or any other caller), and with no token
         // at all inside one: nothing of the owner's was handed, so nothing is said.
-        github_export(&place, Some(&token));
+        // Asserted, because a write that failed also reports nothing, and this half would then
+        // pass without having handed anything over.
+        assert!(
+            github_export(&place, Some(&token)).path.is_some(),
+            "the write outside a review was meant to succeed"
+        );
         super::super::as_review_of("example-org/thing#7", || github_export(&place, None));
         let quiet = crate::testutil::audit_entries(&heard, wait);
         assert!(
