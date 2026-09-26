@@ -31,6 +31,10 @@ const source = [
   "gitqGrantRow", "revokeGitq", "gitCredRow", "editGitCred", "credId", "credFor", "storeGitCred",
   "addGitCred", "removeGitCred", "renderGitState", "nameable", "slugFromPath", "repoSlug",
   "nonGitHubHost", "repoTokenRow", "arApplySettings",
+  // `renderGitState` repaints the "Reviews act as" note first (SKEIN-516), and that note reads the
+  // last payload from `gitLast`. Without these two the suite died at its first `renderGitState`
+  // with `ReferenceError: renderReviewIdentityNote is not defined`.
+  "gitLast", "renderReviewIdentityNote",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -46,6 +50,8 @@ const scope = new Function(`
   let form = { plane: { value: "" }, conn: { value: "" }, review: { value: "false" }, token: { value: "" } };
   let state = { className: "", innerHTML: "" };
   let scoped = { checked: true };
+  let identity = { value: "me" };
+  let identityNote = { hidden: true };
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
   let failing = null;
   ${grab("esc")}
@@ -61,6 +67,8 @@ const scope = new Function(`
       if (id === "set-c-token") return fields.token;
       if (id === "set-gitstate") return state;
       if (id === "set-gitscope") return scoped;
+      if (id === "set-review-identity") return identity;
+      if (id === "set-review-identity-note") return identityNote;
       if (id === "ar-plane") return form.plane;
       if (id === "ar-conn") return form.conn;
       if (id === "ar-review") return form.review;
@@ -100,6 +108,9 @@ const scope = new Function(`
     state: () => state,
     setCreds: c => { gitqCreds = c; },
     setScoped: v => { scoped.checked = v; },
+    setIdentity: v => { identity.value = v; },
+    setGitLast: d => { gitLast = d; },
+    identityNote: () => identityNote,
     failOn: u => { failing = u; },
     sent: () => sent,
     notes: () => notes,
@@ -116,6 +127,9 @@ const scope = new Function(`
       form = { plane: { value: "" }, conn: { value: "" }, review: { value: "false" }, token: { value: "" } };
       state = { className: "", innerHTML: "" };
       scoped = { checked: true };
+      identity = { value: "me" };
+      identityNote = { hidden: true };
+      gitLast = { credentials: [], ready: false };
       gitqCreds = [];
     },
   };
@@ -400,6 +414,17 @@ T.renderGitState({ ready: true, app_ready: false, credentials: [
   { id: "c", repo: "", has_token: true, problem: "names 2 repositories" },
 ] });
 check("only usable tokens are counted", T.state().innerHTML.includes("1 repository token"), true);
+
+// The payload that says there is no App also repaints the "Reviews act as" note (SKEIN-516): with
+// "app" chosen, the note that no App is set up is shown. `loadGitCreds` keeps the payload in
+// `gitLast` before it paints, and the note reads it from there. Fails if `renderGitState` stops
+// calling `renderReviewIdentityNote`, because the note then keeps the `hidden` it opened with.
+T.reset();
+T.setIdentity("app");
+const noApp = { ready: false, app_ready: false, app_problem: "no App configured", credentials: [] };
+T.setGitLast(noApp);
+T.renderGitState(noApp);
+check("with reviews acting as the App and no App set up, the status repaint shows the note", T.identityNote().hidden, false);
 
 // --- which repository a source names --------------------------------------------------------------
 // Every row here is a case `gitgate::slug_from_url` handles; the two must not disagree.
