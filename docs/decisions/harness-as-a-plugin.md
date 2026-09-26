@@ -41,5 +41,5 @@ malformed-settings outage.
 
 **Rules out.** Starting a plugin port before both blockers are tested.
 
-**Enforced at.** Nothing; this is research. The kit is where the hooks are merged into a store's
-settings today (`src/kit/skein-startup.sh:283`).
+**Enforced at.** Nothing; this is research. The kit is where skein's settings are merged into a
+box's own untracked `settings.local.json` today (`src/kit/skein-startup.sh:356`).

@@ -1584,8 +1584,8 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:283"]
-line = "# case 2: repo ships its own .claude directory — merge, don't skip"
+["src/kit/skein-startup.sh:356"]
+line = "merged=\"$(jq -s \"$retire\"'"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
 ["src/knock.rs:82"]
