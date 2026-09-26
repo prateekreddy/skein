@@ -351,7 +351,7 @@ fn ask(
     github: impl Fn(&crate::secret::Secret) -> Result<String, String>,
 ) -> Asked {
     let none = crate::secret::Secret::new("");
-    let token = token.filter(|t| !t.expose().is_empty());
+    let token = token.filter(|t| !t.is_empty());
     let Some(token) = token else {
         return Asked {
             answer: github(&none),
