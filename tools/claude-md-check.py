@@ -7,7 +7,7 @@ else, and since the repository went public it is also read by strangers. It used
 owner's work-tracker ids, the tracker's project id and the names of the owner's machines; the
 scrub (SKEIN-1051) took them out and kept the lessons. Nothing stopped them walking back in, and
 the one rule that kept the scrub working at all — the heading below — was held by nothing but a
-comment in a shell script (SKEIN-1158). So, four rules:
+comment in a shell script (SKEIN-1158). So, five rules:
 
   tracker    No work-tracker id: nothing shaped like a run of capitals, a hyphen and a number.
              A SHAPE, not this tracker's prefix, for the reason `tools/residue-check.py` gives for
@@ -19,6 +19,17 @@ comment in a shell script (SKEIN-1158). So, four rules:
              are. The matcher is `tools/residue-check.py`'s own, imported, so this holds no list;
              `residue-check` would also refuse such a string anywhere in the tree, and this says
              so about the one file where it matters most, in its own words.
+  fleet      No path under the fleet root: the default `util::fleet_root` falls back to, read out
+             of `src/util.rs` rather than written here. A box name is caught by `banned`, but a
+             path like the fleet root's toolchain directory names no box and matched nothing, and
+             it is exactly what had to be scrubbed out of the change-discipline skill by hand
+             (SKEIN-1164). It is an instruction that only works on the owner's fleet, handed to
+             every agent in every checkout. The rule is here and not in `residue-check`, which was
+             the other choice (SKEIN-1166): the code, its tests and the docs about the fleet name
+             that root on purpose, in 88 tracked files when it was decided (`git grep -l` on the
+             root), so a tree-wide rule would be an allow-list of nearly every file that mentions
+             it. It is only in the documents an agent obeys that the path is wrong. Say
+             `$SKEIN_FLEET_ROOT`, or "the main checkout", instead.
   sync       `src/store/sync-install.sh` leaves a checkout's `CLAUDE.md` byte-identical and
              records no `block` in its manifest. The script appends the owner's tracker section to
              any `CLAUDE.md` or `AGENTS.md` that lacks a `## Work tracking` heading, on every box
@@ -27,8 +38,8 @@ comment in a shell script (SKEIN-1158). So, four rules:
              unexplained diff. This runs the script's own doc step, cut out of the script rather
              than rewritten here, over a copy of this file with `AGENTS.md` a symlink beside it.
 
-The first three rules — tracker, project, banned — apply as well to every TRACKED Markdown file
-under `.claude/skills/`, with the same matchers. A shipped skill is read by every agent in a
+The first four rules — tracker, project, banned, fleet — apply as well to every TRACKED Markdown
+file under `.claude/skills/`, with the same matchers. A shipped skill is read by every agent in a
 checkout, as `CLAUDE.md` is, and the change-discipline skill had to be scrubbed the same way after
 it was moved into the repository. The set is read from `git ls-files`, not from a list here, so a
 new skill is checked from the commit that adds it; and a set that comes back empty refuses rather
@@ -40,9 +51,10 @@ Codex, which reads `AGENTS.md`, reads the same words. A copy would drift.
 The sync rule is checked against itself before it is trusted: the same step is run over a copy with
 the heading renamed, and it must append there. A step that does not append when it should is a
 harness that is not running the script, and a green from it would mean nothing — so that refuses
-(exit 2) rather than passing. It also refuses when the step cannot be found in the script, or when
-the residue matcher has no hashes to match with. `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` are pinned to
-the scratch directory for the step, as every test here pins them.
+(exit 2) rather than passing. It also refuses when the step cannot be found in the script, when
+the residue matcher has no hashes to match with, or when the fleet root's default cannot be read.
+`$SKEIN_HOME` and `$SKEIN_FLEET_ROOT` are pinned to the scratch directory for the step, as every
+test here pins them.
 
 Exit 0 clean, 1 on a finding, 2 when it could not check.
 """
@@ -60,6 +72,7 @@ TWIN = "AGENTS.md"
 HEADING = "## Work tracking"
 SYNC = os.path.join("src", "store", "sync-install.sh")
 BLOCK_DIR = os.path.join("src", "store", "sync")
+UTIL = os.path.join("src", "util.rs")
 
 SKILLS = os.path.join(".claude", "skills")
 
@@ -88,8 +101,25 @@ def residue_matcher():
     return mod.Banned(listed[0], listed[1])
 
 
-def text_findings(text, banned):
-    """(line, rule, what) for every tracker id, project id and banned string in `text`."""
+def fleet_matcher():
+    """A pattern for the fleet root's default and any path under it, the default read out of the
+    string literal `util::fleet_root` returns when `$SKEIN_FLEET_ROOT` is unset."""
+    try:
+        with open(os.path.join(ROOT, UTIL), encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError as exc:
+        raise Refused(f"could not read {UTIL} for the fleet root's default: {exc}")
+    body = re.search(r"^pub fn fleet_root\(\) -> String \{\n(.*?)^\}", source, re.M | re.S)
+    found = re.findall(r'^\s*"(/[^"]+)"\.to_string\(\)\s*$', body.group(1), re.M) if body else []
+    if len(found) != 1:
+        raise Refused(f"{UTIL}'s `fleet_root` no longer ends in one `\"/...\".to_string()` default "
+                      f"(found {len(found)}), so the fleet rule would match nothing")
+    return re.compile(r"(?<![\w./-])" + re.escape(found[0])
+                      + r"(?![\w-])(?!\.\w)(?:/[^\s`'\")\]]*)?")
+
+
+def text_findings(text, banned, fleet):
+    """(line, rule, what) for every tracker id, project id, banned string and fleet path."""
     out = []
     for n, line in enumerate(text.split("\n"), 1):
         for m in TRACKER_ID.finditer(line):
@@ -98,6 +128,9 @@ def text_findings(text, banned):
             out.append((n, "project", f"`{m.group()}` is shaped like a tracker project id"))
         for h in banned.find(line):
             out.append((n, "banned", f"{banned.describe(h)} is on the residue register"))
+        for m in fleet.finditer(line):
+            path = m.group().rstrip(".,;:")
+            out.append((n, "fleet", f"`{path}` is a path on the owner's fleet, not in a checkout"))
     return out
 
 
@@ -208,12 +241,14 @@ def main():
             doc_bytes = fh.read()
         text = doc_bytes.decode("utf-8")
         banned = residue_matcher()
-        found = [f"{DOC}:{n}: {what} ({rule})" for n, rule, what in text_findings(text, banned)]
+        fleet = fleet_matcher()
+        found = [f"{DOC}:{n}: {what} ({rule})"
+                 for n, rule, what in text_findings(text, banned, fleet)]
         skills = skill_docs()
         for rel in skills:
             with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
                 found += [f"{rel}:{n}: {what} ({rule})" for n, rule, what in
-                          text_findings(fh.read(), banned)]
+                          text_findings(fh.read(), banned, fleet)]
         found += twin_findings()
         found += sync_findings(doc_bytes)
     except Refused as exc:
@@ -228,8 +263,8 @@ def main():
         print(f"claude-md-check: {len(found)} finding(s)", file=sys.stderr)
         return 1
     print(f"claude-md-check: {DOC} and the {len(skills)} tracked skill file(s) under {SKILLS} name "
-          f"no tracker id, project id or banned string, {TWIN} is a symlink to {DOC}, and sync's "
-          f"doc step leaves it byte-identical")
+          f"no tracker id, project id, banned string or fleet path, {TWIN} is a symlink to "
+          f"{DOC}, and sync's doc step leaves it byte-identical")
     return 0
 
 
