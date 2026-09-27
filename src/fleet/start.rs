@@ -1679,7 +1679,9 @@ mod tests {
             }
             if let Some(function) = line.strip_suffix("() {") {
                 let named = !function.is_empty()
-                    && function.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    && function
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
                 let called = || {
                     script.lines().any(|other| {
                         !other.trim().starts_with('#')
