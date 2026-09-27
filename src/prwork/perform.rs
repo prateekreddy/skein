@@ -648,10 +648,12 @@ fn post_verdict(
         body: &body,
         comments: &[],
         drafted_at: pr.head_sha,
-        // `perform`'s own token, which is the one every other act here is given. It is
-        // `prq::host_token` either way today — the tick sources it from the same function — and
-        // that is the point of passing it rather than the reason not to: the credential a verdict
-        // is posted under is now visible at the call site instead of reached for two modules away.
+        // `perform`'s own token, which is the one every other act here is given: the tick's
+        // `prq::token_for(slug, Need::Write)`, the person's own credential for this repository.
+        // Passing it is the point: the credential a verdict is posted under is visible at the call
+        // site instead of reached for two modules away. **Not `review_identity`** — that setting
+        // chooses whose name a reading's own comment review carries, and a verdict stays yours
+        // under "app" too (the owner, 2026-09-27; pinned by SKEIN-1178's test).
         token,
     }) {
         Ok(_) => VerdictStep::Did(format!(
@@ -1894,6 +1896,91 @@ mod tests {
              this repository with `auto_review`, or lower `auto_review_ceiling` to keep verdicts \
              waiting for a person.",
             "this is the text a stranger reads under your name on their pull request"
+        );
+    }
+
+    /// **A workflow's verdict posts as you even when reviews act as the skein App** (SKEIN-1178,
+    /// the owner's decision of 2026-09-27).
+    ///
+    /// `review_identity = "app"` chooses whose name a reading's own comment review carries. A
+    /// verdict the workflow posts — the approval that may discharge a protected branch's review —
+    /// is posted with `perform`'s token, which the tick resolves as yours for this repository
+    /// (`prq::token_for`), and an approval that is not the person's "is worth nothing on a protected
+    /// branch" (`docs/decisions/one-identity.md`). Here there is no App at all, so a verdict that
+    /// followed the setting would have nothing to post with.
+    ///
+    /// **What would make it fail:** `post_verdict` choosing its credential by `review_identity` —
+    /// asking `gitgate::mint_token` under "app" — instead of posting with the token it was given.
+    /// No App mints nothing, the verdict fails, and `the verdict went out` fails.
+    #[test]
+    fn a_workflows_verdict_posts_as_you_even_when_reviews_act_as_the_app() {
+        use std::io::{Read, Write};
+        let _g = crate::testutil::env_lock();
+        let _warden = crate::testutil::no_warden();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let mut env = a_fleet_where_workflows_run(home);
+        env.unset("GH_TOKEN").unset("GITHUB_TOKEN");
+        std::fs::write(home.join("config.json"), br#"{"review_identity":"app"}"#).unwrap();
+        assert!(
+            crate::config::load_config().reviews_as_app(),
+            "the fixture did not switch reviews to the App, so this proves nothing about it"
+        );
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let auth = said
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("authorization:")
+                            .map(|a| a.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                seen.lock().unwrap().push((head, auth));
+                let answer = r#"{"id":1}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        env.set("SKEIN_GITHUB_API", &base);
+
+        let repo = crate::repos::Repo {
+            auto_review_ceiling: crate::repos::Ceiling::Approve,
+            ..a_repo_that_may_be_read()
+        };
+        let pr = pr_at("abc1234");
+        let out = perform(
+            &readable(&repo, &pr, "abc1234", &woken_and_mine()),
+            &flow(),
+            &chosen(Act::PostApproval),
+            &fixture_token(),
+        );
+        assert!(
+            matches!(out, Outcome::Did(_)),
+            "the verdict went out: {out:?}"
+        );
+        let heard = heard.lock().unwrap().clone();
+        let (_, auth) = heard
+            .iter()
+            .find(|(head, _)| head.starts_with("POST") && head.contains("/reviews"))
+            .unwrap_or_else(|| panic!("no review was posted: {heard:?}"));
+        assert_eq!(
+            auth, "bearer skein-test-github-token",
+            "the verdict was posted with something other than the token the tick resolved as yours"
         );
     }
 

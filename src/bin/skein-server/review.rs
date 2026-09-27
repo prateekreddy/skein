@@ -914,7 +914,7 @@ pub(super) async fn api_review_act(
                     // The person's own credential, which is what a review is posted as. Sourced
                     // here rather than inside, so the one rule this route has to honour is written
                     // where somebody reading the route can see it.
-                    token: &skein::prq::host_token()?,
+                    token: &skein::prq::token_for(&slug, skein::prq::Need::Write)?,
                 })?
             }
             (Some(v), _) => skein::prq::submit_review(&slug, number, v, &req.body)?,

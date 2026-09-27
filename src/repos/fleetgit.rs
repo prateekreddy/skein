@@ -67,8 +67,9 @@ pub(super) struct FleetGit {
     /// `None` for anything else — a directory, a remote on some other host — which no stored PAT
     /// covers and which it would therefore be wrong to blame a missing PAT for.
     slug: Option<String>,
-    /// The credential file whose token was handed to git, if one was.
-    sent: Option<PathBuf>,
+    /// Where the token handed to git came from, if one was — a stored file's path, or the name of
+    /// the source that is not a file (`$GH_TOKEN`, the host's `gh` login).
+    sent: Option<String>,
     /// The remote git was pointed at, as the repo records it. Named in an ssh refusal, where the
     /// remote is the thing a person has to go and fix and the repo id is not.
     remote: String,
@@ -90,11 +91,14 @@ pub(super) struct FleetGit {
 /// missing token: `start_box_inner` prints a warning and brings the box up from the mirror it
 /// already has when [`fetch_mirror`] returns `Err`. Refusing turns a dead fleet into a line of text.
 ///
-/// **The credential is chosen by the repository it covers, not by being first in the file.**
-/// `github-pats.json` records the `owner/name` each stored token is good for, so
-/// [`crate::gitgate::credential_for`] can pick the one that can actually reach this remote. A
-/// read-only PAT is the fallback and not the preference: it is broad by design, so it may well not
-/// have been granted the private repository in question, while a per-repo token covers exactly the
+/// **The credential is chosen by the repository it covers, not by being first in the file** — and
+/// by the same resolver every GitHub API call about this repository uses,
+/// [`crate::gitgate::credential_for_repo`] (SKEIN-953), so the mirror, the queue and the verdict of
+/// one repository cannot disagree about which token reaches it. `github-pats.json` records the
+/// `owner/name` each stored token is good for, and that one comes first; then `$GH_TOKEN`, then the
+/// read-only PAT, then the host's `gh` login. A fetch is a read, so the read token may answer it.
+/// It is a fallback and not the preference: it is broad by design, so it may well not have been
+/// granted the private repository in question, while a per-repo token covers exactly the
 /// repository being fetched or it would not be filed under it.
 ///
 /// Nothing is sent to a remote skein cannot key a credential to — see [`FleetGit::slug`]. A token
@@ -116,9 +120,29 @@ pub(super) fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
             ssh,
         };
     };
-    let found = crate::gitgate::credential_for(&slug)
-        .map(|(c, token)| (stored_credential_path(&c.id), token))
-        .or_else(|| crate::gitgate::read_pat().map(|token| (read_credential_path(), token)));
+    let (source, token) = crate::gitgate::credential_for_repo(&slug, crate::gitgate::Need::Read);
+    let found = token.map(|token| {
+        let from = match source {
+            // The file is named, because a refusal sends a person to it. Looked up again for the
+            // id rather than returned by the resolver, which answers for every caller and has no
+            // business carrying a path only this one prints.
+            crate::gitgate::GhToken::WritePat => format!(
+                "the token stored at {}",
+                crate::gitgate::credential_for(&slug)
+                    .map(|(c, _)| stored_credential_path(&c.id))
+                    .unwrap_or_else(stored_credentials_path)
+                    .display()
+            ),
+            crate::gitgate::GhToken::ReadToken => {
+                format!(
+                    "the read-only token stored at {}",
+                    read_credential_path().display()
+                )
+            }
+            other => other.label().to_string(),
+        };
+        (from, token)
+    });
     let Some((path, token)) = found else {
         return FleetGit {
             slug: Some(slug),
@@ -290,16 +314,16 @@ pub(super) fn git_refusal(doing: &str, stderr: &str, auth: &FleetGit) -> String 
         return format!("{doing}: {stderr}");
     }
     let account = match (&auth.slug, &auth.sent) {
-        (_, Some(path)) => format!(
-            "skein sent the token stored at {}, and it was refused — so it has expired, or it does \
-             not cover this repository",
-            path.display()
+        (_, Some(from)) => format!(
+            "skein sent {from}, and it was refused — so it has expired, or it does not cover this \
+             repository"
         ),
         (Some(slug), None) => format!(
             "skein had no GitHub credential to send for {slug}, which is exactly how a private \
              repository answers. It looks in {} for a stored token naming {slug} (the token itself \
-             is then at {}), and for a read-only token at {}; neither had one. Store one under \
-             GitHub in the cockpit's settings",
+             is then at {}), at $GH_TOKEN and $GITHUB_TOKEN, for a read-only token at {}, and at \
+             the host's `gh` login; none had one. Store a token for {slug} on its card under \
+             Settings → Repositories",
             stored_credentials_path().display(),
             stored_credential_path("<id>").display(),
             read_credential_path().display(),
@@ -332,6 +356,31 @@ mod tests {
             "agent": "claude",
         }))
         .unwrap()
+    }
+
+    /// **No credential reaches these tests from the machine running them.** Fleet-side git asks the
+    /// same resolver as every GitHub call (SKEIN-953), which reads `$GH_TOKEN`/`$GITHUB_TOKEN` and
+    /// the host's `gh` login — so on a machine that has either, a test about "no credential" would
+    /// hand git a real token, and a recorded environment would print it. Both are removed, and a
+    /// `gh` with no login goes first on `$PATH`.
+    fn no_host_credential(home: &Path, env: &mut crate::testutil::EnvPins) {
+        use std::os::unix::fs::PermissionsExt;
+        env.unset("GH_TOKEN").unset("GITHUB_TOKEN");
+        let bin = home.join("no-gh-login");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(
+            bin.join("gh"),
+            "#!/bin/sh
+exit 1
+",
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+        env.set(
+            "PATH",
+            format!("{}:{}", bin.display(), env::var("PATH").unwrap_or_default()),
+        );
+        crate::gitgate::forget_gh_login();
     }
 
     /// A `git` on `$PATH` that records the environment it was spawned with and then answers exactly
@@ -396,6 +445,7 @@ mod tests {
         let mut env = env_pins();
         env.set("SKEIN_HOME", &home);
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        no_host_credential(&home, &mut env);
         let log = recording_git(&home, &mut env);
 
         let repo = at_github(&home, "acme/thing");
@@ -470,6 +520,7 @@ mod tests {
         let mut env = env_pins();
         env.set("SKEIN_HOME", &home);
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        no_host_credential(&home, &mut env);
 
         fs::create_dir_all(home.join("github-pats")).unwrap();
         fs::write(
@@ -511,7 +562,10 @@ mod tests {
         let auth = fleet_git(&mut command, &repo);
         assert_eq!(
             auth.sent,
-            Some(stored_credential_path("second")),
+            Some(format!(
+                "the token stored at {}",
+                stored_credential_path("second").display()
+            )),
             "skein did not choose the credential filed under the repo it is fetching"
         );
 
@@ -538,6 +592,44 @@ mod tests {
         );
     }
 
+    /// **Fleet-side git asks the same resolver as every GitHub call about the repository**
+    /// (SKEIN-953): with no token stored for it, `$GH_TOKEN` comes before the read-only token —
+    /// exactly as it does for that repository's queue — so the mirror and the queue cannot reach
+    /// one private repository with two different credentials, or one of them with none.
+    ///
+    /// **What would make it fail:** `fleet_git` choosing by its own list again (stored token, then
+    /// read token, and nothing else) — the read-only token is then what is sent, and `fleet-side git
+    /// sent $GH_TOKEN` fails.
+    #[test]
+    fn fleet_side_git_picks_by_the_same_order_as_every_github_call() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        no_host_credential(&home, &mut env);
+        env.set("GH_TOKEN", "skein-test-env");
+        crate::secret::write(
+            &read_credential_path(),
+            &crate::secret::Secret::new("skein-test-fleet-wide-read-token"),
+        )
+        .unwrap();
+
+        let repo = at_github(&home, "acme/thing");
+        let mut command = Command::new("git");
+        let auth = fleet_git(&mut command, &repo);
+        let token = command
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(FLEET_TOKEN_VAR))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(
+            (auth.sent.as_deref(), token.as_deref()),
+            (Some("$GH_TOKEN"), Some("skein-test-env")),
+            "fleet-side git sent $GH_TOKEN, as the queue for this repository would"
+        );
+    }
+
     /// **A remote skein cannot key a credential to is sent no credential at all.**
     ///
     /// `github-pats` tokens belong to a person and are filed by `owner/name`. Offering one to a host
@@ -555,6 +647,7 @@ mod tests {
         let mut env = env_pins();
         env.set("SKEIN_HOME", &home);
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        no_host_credential(&home, &mut env);
         crate::secret::write(
             &read_credential_path(),
             &crate::secret::Secret::new("skein-test-fleet-wide-read-token"),
@@ -628,6 +721,7 @@ mod tests {
         let mut env = env_pins();
         env.set("SKEIN_HOME", &home);
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        no_host_credential(&home, &mut env);
 
         // The real git, found BEFORE the shim goes on `$PATH`, for the credential half.
         let real = Command::new("sh")
@@ -789,6 +883,7 @@ mod tests {
         let mut env = env_pins();
         env.set("SKEIN_HOME", &home);
         env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        no_host_credential(&home, &mut env);
         env.unset("GIT_SSH_COMMAND");
         env.unset("GIT_SSH");
         let gitconfig = home.join("gitconfig");

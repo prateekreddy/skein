@@ -131,7 +131,7 @@ subject = "feat(warden): a flood cannot buy an approval, or block one"
 date = "2026-08-21T11:39:36Z"
 
 [citations."89cf36b"]
-external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:168 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
+external = "an illustrative example, not a citation of a specific commit: tests/ui/updatepane.mjs:192 works arithmetic on a 7-char sha plus \"-dirty\" (13 chars) truncated to 12, to show `git describe --always --dirty` losing the dirty marker rather than a sha digit. Could not confirm this is (or is not) a real build's actual describe output, so treated as SKEIN-708's fixture-text class rather than guessed at."
 sites = ["docs/line-cites.toml", "tests/ui/updatepane.mjs"]
 
 [citations."8d7206c"]
@@ -174,7 +174,7 @@ subject = "refactor: lib.rs declares modules and nothing else"
 date = "2026-08-20T14:06:41Z"
 
 [citations."abc1234"]
-external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1406 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1865 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1408 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1865 (SELF_CHECK_DATED's own worked example). SKEIN-708."
 sites = ["docs/line-cites.toml", "src/prwork/perform.rs", "tools/prose-check.py"]
 
 [citations."abc6bbb"]
@@ -198,7 +198,7 @@ subject = "fix(isolation): a box sees its own repo, and nothing the sandbox moun
 date = "2026-08-20T14:29:30Z"
 
 [citations."d2abd03"]
-external = "acme/testbed's own commit, not skein's — src/review/asking.rs:781 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
+external = "acme/testbed's own commit, not skein's — src/review/asking.rs:782 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/review/asking.rs"]
 
 [citations."dbe2318"]
@@ -212,7 +212,7 @@ subject = "refactor(review): the session posts its own review to GitHub, and ske
 date = "2026-08-27T14:48:33Z"
 
 [citations."def5678"]
-external = "the other half of src/prwork/perform.rs:1406's invented pair — see `abc1234`. SKEIN-708."
+external = "the other half of src/prwork/perform.rs:1408's invented pair — see `abc1234`. SKEIN-708."
 sites = ["docs/line-cites.toml", "src/prwork/perform.rs"]
 
 [citations."df48daa"]

@@ -177,8 +177,9 @@ pub(super) fn truncate(text: &str, limit: usize) -> (String, bool) {
 
 /// **The credential a review call may act on GitHub with, and whose it is** — or nothing.
 ///
-/// By default the owner's own: the same token the queue reads with (`crate::prq::host_token`), and
-/// deliberately not a second, quieter one. That function's doc states the rule this inherits —
+/// By default the owner's own: the token a verdict on this pull request would post with
+/// (`crate::prq::token_for(slug, Need::Write)` — this repository's stored token first, never the
+/// read token, SKEIN-953/1176), and deliberately not a second, quieter one. That function's doc states the rule this inherits —
 /// "everything skein does on its own is done as you, and shows up in the repository's history under
 /// your name where you can see it". The owner's decision, asked and answered on 2026-08-27: the
 /// session gets the token.
@@ -201,7 +202,7 @@ pub(super) fn acting_credential(slug: &str, number: u64) -> Acting {
         || crate::gitgate::credential_for(slug).is_some(),
         || crate::gitgate::app_credentials().is_ok(),
         || crate::gitgate::mint_token(slug).ok(),
-        || crate::prq::host_token().ok(),
+        || crate::prq::token_for(slug, crate::prq::Need::Write).ok(),
     );
     Acting {
         token,
@@ -882,7 +883,7 @@ DETAIL:
                 slug = slug,
                 number = pr.number,
             ),
-            // No credential — `prq::host_token` had none, or the sandbox write failed. The findings
+            // No credential — `prq::token_for` had none, or the sandbox write failed. The findings
             // must not simply evaporate, so they go where the reader is already looking. This is
             // the whole fallback: one prompt, one parser, and nothing stored that a page would then
             // have to draw.

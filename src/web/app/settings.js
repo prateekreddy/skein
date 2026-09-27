@@ -507,13 +507,13 @@ function repoTokenRow(r) {
   }
   const c = credFor(slug);
   const state = c && !c.problem && c.has_token
-    ? `<span class="sq-state approved">token stored</span><span class="cwhy">this repo's boxes push with it; storing another replaces it</span>`
+    ? `<span class="sq-state approved">token stored</span><span class="cwhy">boxes push with it, and your queue, reviews and merges here run on it; storing another replaces it</span>`
       + `<button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>`
     : `<span class="sq-state">${c && c.problem ? "refused" : "from the App"}</span><span class="cwhy">${
         c && c.problem ? esc(c.problem)
         : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
   return `<label class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
-    + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else — what this repo's boxes push with. Stored 0600 on the host and never served back</span>`
+    + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
     + `<div class="set-cred">${state}</div>`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div></label>`;

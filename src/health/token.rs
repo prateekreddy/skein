@@ -36,9 +36,16 @@ pub(crate) fn renew_recipe(source: crate::prq::GhToken, fleet: &str) -> String {
              your HOST run:  sbx secret set github --sandbox {fleet}   — and again after any fleet \
              rebuild, because `sbx rm` deletes a sandbox-scoped secret along with the sandbox"
         ),
-        ReadToken | WritePat => "regenerate it on github.com with the same repositories and \
-                                 permissions, then paste it over the old one in Settings → GitHub \
-                                 & keys"
+        // Two places since the read token moved into "Your GitHub identity" (SKEIN-1179): each is
+        // replaced where it was stored, and a recipe naming the other would send somebody to a
+        // field that does not hold it.
+        ReadToken => "regenerate it on github.com with the same repositories and permissions, \
+                      then paste it over the old one under Settings → GitHub & keys → Your GitHub \
+                      identity"
+            .to_string(),
+        WritePat => "regenerate it on github.com for the same repository and permissions, then \
+                     paste it over the old one on the repository's card under Settings → \
+                     Repositories, or under Settings → GitHub & keys → Repository tokens"
             .to_string(),
         GhCli => "run `gh auth login` again on the host that holds this login".to_string(),
         // Unreachable from `credential_lives`, which lists only credentials it found. Written out
@@ -336,5 +343,18 @@ mod tests {
                 "a token stored in Settings must not be told to run an sbx command: {recipe}"
             );
         }
+        // And each stored token is sent to the field that holds it (SKEIN-1179): the read token
+        // lives in "Your GitHub identity", a repository's token on its card. Collapsing the two
+        // arms back into one sentence makes one of these fail.
+        let read = renew_recipe(GhToken::ReadToken, "thing-fleet");
+        assert!(
+            read.contains("Your GitHub identity") && !read.contains("Settings → Repositories"),
+            "the read token's recipe names somewhere else: {read}"
+        );
+        let repo = renew_recipe(GhToken::WritePat, "thing-fleet");
+        assert!(
+            repo.contains("Settings → Repositories") && !repo.contains("Your GitHub identity"),
+            "a repository token's recipe names somewhere else: {repo}"
+        );
     }
 }

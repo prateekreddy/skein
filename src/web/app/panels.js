@@ -586,12 +586,43 @@ function loadGitCreds() {
     // *running* on stored tokens must find them open. Folding away the credentials in use would
     // hide the thing the status line is talking about.
     const alt = document.getElementById("set-gitalt");
-    if (alt && (gitqCreds.length || gitReadPatSet)) alt.open = true;
+    if (alt && gitqCreds.length) alt.open = true;
+    renderIdentity(d.identity);
     renderGitState(d);
     // The repo cards show each repo's own token, so they follow whatever just changed here.
     renderRepoList();
     return d;
   }).catch(() => {});
+}
+
+// **Your GitHub identity, per repository** (SKEIN-1179): which of your credentials skein reads each
+// repository with, and which it posts, merges and labels with. Both answers are the server's —
+// `gitgate::credential_for_repo`, the resolver the calls themselves use — so this can only say what
+// a call would actually send. A repository nothing can act on is said as a warning with the fix,
+// because that is the row a verdict or a merge will fail on.
+const IDENTITY_WORDS = {
+  source: { repo: "this repo's token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
+  row: (reads, writes) => `reads with ${reads} · posts and merges with ${writes}`,
+  cannotAct: "cannot post, merge or label here — store a token for it on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
+  noRepos: "No GitHub repositories yet. Each one you add is listed here with the credential skein uses for it.",
+};
+function renderIdentity(identity) {
+  const el = document.getElementById("set-identity");
+  if (!el || !identity) return;
+  const named = key => IDENTITY_WORDS.source[key] || IDENTITY_WORDS.source.none;
+  const rows = identity.repos || [];
+  el.innerHTML = rows.length
+    ? rows.map(r => {
+      const acts = r.writes !== "none";
+      const state = acts ? "ok" : r.reads === "none" ? "none" : "read only";
+      return `
+      <div class="sq-row" data-identity="${esc(r.slug)}">
+        <span class="sq-state ${acts ? "approved" : ""}">${state}</span>
+        <span class="sq-pkgs">${esc(r.slug)}</span>
+        <span class="sq-meta">${esc(IDENTITY_WORDS.row(named(r.reads), named(r.writes)))}${acts ? "" : ` — ${esc(IDENTITY_WORDS.cannotAct)}`}</span>
+      </div>`;
+    }).join("")
+    : `<div class="set-desc">${esc(IDENTITY_WORDS.noRepos)}</div>`;
 }
 
 function saveReadPat() {

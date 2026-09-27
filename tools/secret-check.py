@@ -135,8 +135,8 @@ EXPOSED = {
     "src/bin/skein-server/main.rs::serve": "the cockpit URL, `?t=`, printed at start — the delivery "
     "channel Rule 4 says becomes a one-time exchange. That changes what a person opens, so it "
     "waits for the owner (SKEIN-516)",
-    "src/prq/credentials.rs::host_credential": "copied into a fresh Secret per caller, because "
-    "Secret has no Clone; it never becomes a String",
+    "src/gitgate/credentials.rs::gh_login": "the remembered `gh` login copied into a fresh Secret "
+    "per caller, because Secret has no Clone; it never becomes a String",
     "src/fleet/credentials.rs::github_export": "written into the box over the crossing's stdin and "
     "read back there from a 0600 file; never argv, never this process's environment",
     "src/ai/call.rs::tried": "the value of `Command::env` for GH_TOKEN and GITHUB_TOKEN two lines "

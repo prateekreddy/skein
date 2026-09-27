@@ -1,9 +1,9 @@
 //! What skein can do to a pull request, as you.
 //!
-//! A verdict, a merge, a resolved thread. Every call here runs on the host's own login, so what it
-//! does shows up in the repository's history under your name — and each one is written to be safe
-//! to press twice, because the failure that matters is a connection that dies after GitHub has
-//! already acted.
+//! A verdict, a merge, a resolved thread. Every call here runs on your own credential for the
+//! repository it is about (`token_for`), so what it does shows up in that repository's history
+//! under your name — and each one is written to be safe to press twice, because the failure that
+//! matters is a connection that dies after GitHub has already acted.
 
 use super::*;
 
@@ -36,7 +36,7 @@ pub enum Verdict {
 pub fn pr_is_open(slug: &str, number: u64) -> Option<bool> {
     let value = crate::github::get_json(
         &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
-        &host_token().ok()?,
+        &token_for(slug, Need::Read).ok()?,
     )
     .ok()?;
     Some(value.get("state").and_then(|s| s.as_str())? == "open")
@@ -67,7 +67,7 @@ pub fn submit_review(
     crate::github::send_json(
         "POST",
         &format!("{}/pulls/{number}/reviews", crate::github::repo_path(slug)),
-        &host_token()?,
+        &token_for(slug, Need::Write)?,
         &serde_json::json!({ "event": event, "body": body }),
     )?;
     Ok(match verdict {
@@ -161,7 +161,7 @@ pub fn re_anchor(
 pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
     let v = crate::github::get_json(
         &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
-        &host_token()?,
+        &token_for(slug, Need::Read)?,
     )?;
     v.pointer("/head/sha")
         .and_then(|s| s.as_str())
@@ -191,7 +191,7 @@ pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
 pub fn base_and_head(slug: &str, number: u64) -> Result<(String, String), String> {
     let v = crate::github::get_json(
         &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
-        &host_token()?,
+        &token_for(slug, Need::Read)?,
     )?;
     let at = |p: &str| {
         v.pointer(p)
@@ -248,7 +248,8 @@ pub struct ReviewPost<'a> {
     pub comments: &'a [ReviewComment],
     /// The head the comments were drafted against; empty means "assume current".
     pub drafted_at: &'a str,
-    /// The person's own credential — a review is posted as them, never as skein. See [`host_token`].
+    /// The person's own credential for this repository — a review is posted as them, never as
+    /// skein. See [`token_for`].
     ///
     /// A [`crate::secret::Secret`], like every credential that crosses a function boundary in this
     /// crate: a `&str` here would be printed by the `{:?}` of any struct that ever held one.
@@ -337,7 +338,7 @@ pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, Strin
             .collect();
     }
     // **Taken rather than looked up**, which every other write in this module already does
-    // (`add_label`, `merge_pr`, `update_branch`). It used to call `host_token` here, and nothing
+    // (`add_label`, `merge_pr`, `update_branch`). It used to reach for the host token here, and nothing
     // was wrong with the answer — `prwork`'s tick and the server's route both source the same one —
     // but a credential a function reaches for is one no caller can see. The test for a verdict step
     // had to set `GH_TOKEN` to make an assertion about a CEILING pass, which is the shape that says
@@ -345,7 +346,7 @@ pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, Strin
     //
     // The rule it enforced is unchanged and lives at the call site now: **a review is posted AS the
     // person**, so what arrives here is their own credential. There is deliberately no second,
-    // quieter credential for automation — see `host_token`.
+    // quieter credential for automation — see `token_for`.
     let path = format!("{}/pulls/{number}/reviews", crate::github::repo_path(slug));
     // **A dead connection here is ambiguous, and that is the whole difference from the read side**
     // (SKEIN-271). Posting a review is not idempotent: the peer cancels the stream after the
@@ -502,7 +503,7 @@ pub fn pr_body(slug: &str, number: u64) -> Result<String, String> {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { body } }
 }",
         serde_json::json!({ "owner": owner, "name": name, "number": number }),
-        &host_token()?,
+        &token_for(slug, Need::Read)?,
     )?;
     Ok(out
         .pointer("/repository/pullRequest/body")
@@ -514,7 +515,7 @@ pub fn pr_body(slug: &str, number: u64) -> Result<String, String> {
 
 /// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
 pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
-    let token = host_token()?;
+    let token = token_for(slug, Need::Read)?;
     match crate::github::get_text(
         &format!("{}/pulls/{number}", crate::github::repo_path(slug)),
         &token,
@@ -623,7 +624,7 @@ pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
             "{}/pulls/{number}/files?per_page=100",
             crate::github::repo_path(slug)
         ),
-        &host_token()?,
+        &token_for(slug, Need::Read)?,
         std::time::Duration::from_secs(120),
     )?
     .as_array()
@@ -683,7 +684,7 @@ pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, Str
     let out = crate::github::send_json(
         "PUT",
         &format!("{}/pulls/{number}/merge", crate::github::repo_path(slug)),
-        &host_token()?,
+        &token_for(slug, Need::Write)?,
         // `sha` is the head the person read. Same field, same reason, as `prwork::merge_pr`: GitHub
         // refuses with a 409 if the branch has moved, and a merge decided about code that is no
         // longer what would be merged is the one outcome this whole path exists to prevent.
@@ -780,7 +781,9 @@ pub(crate) fn refused_for_conflicts(said: &str) -> bool {
 /// Mark a review thread resolved on GitHub (SKEIN-305).
 ///
 /// `thread_id` is [`ReviewThread::id`] — GitHub's node id, which is exactly the argument
-/// `resolveReviewThread` takes, so this needs no lookup and no slug. That is why the whole
+/// `resolveReviewThread` takes, so this needs no lookup. `slug` is not sent anywhere: it is which
+/// repository the thread is in, so the credential that acts is the one for that repository
+/// ([`token_for`], SKEIN-953) and never the read token (SKEIN-1176). That is why the whole
 /// conversation carries thread ids: the panel draws a thread from its author, time and permalink,
 /// and the id is the one field on it that exists only so this call can be made.
 ///
@@ -794,14 +797,14 @@ pub(crate) fn refused_for_conflicts(said: &str) -> bool {
 /// inherit the ways a refresh fails (the SKEIN-272 lesson, in the form it takes here). Invalidating
 /// the cached queue afterwards is the caller's, on the same rule as every other act that touched
 /// GitHub.
-pub fn resolve_review_thread(thread_id: &str) -> Result<(), String> {
-    set_thread_resolved(thread_id, true)
+pub fn resolve_review_thread(slug: &str, thread_id: &str) -> Result<(), String> {
+    set_thread_resolved(slug, thread_id, true)
 }
 
 /// The inverse, so the panel's eight-second undo (SKEIN-162) is a real retraction rather than a
 /// row that redraws itself while GitHub still says resolved.
-pub fn unresolve_review_thread(thread_id: &str) -> Result<(), String> {
-    set_thread_resolved(thread_id, false)
+pub fn unresolve_review_thread(slug: &str, thread_id: &str) -> Result<(), String> {
+    set_thread_resolved(slug, thread_id, false)
 }
 
 /// The one mutation both directions send, with only its name and the state it asserts differing.
@@ -816,7 +819,7 @@ pub fn unresolve_review_thread(thread_id: &str) -> Result<(), String> {
 /// GitHub SAID is used, and what it did not say is not invented. `isResolved` coming back against
 /// what was asked is a write that did not take, and it is reported as one; `isResolved` absent is
 /// not a contradiction, so it is accepted.
-fn set_thread_resolved(thread_id: &str, resolved: bool) -> Result<(), String> {
+fn set_thread_resolved(slug: &str, thread_id: &str, resolved: bool) -> Result<(), String> {
     if thread_id.trim().is_empty() {
         return Err("no review thread was named, so there is nothing to resolve".into());
     }
@@ -832,7 +835,7 @@ fn set_thread_resolved(thread_id: &str, resolved: bool) -> Result<(), String> {
     let out = crate::github::graphql(
         &query,
         serde_json::json!({ "id": thread_id }),
-        &host_token()?,
+        &token_for(slug, Need::Write)?,
     )?;
     let said = out
         .get(field)
@@ -1822,8 +1825,9 @@ mod tests {
             ),
         ]);
         let _wired = wired(&api);
-        resolve_review_thread("PRRT_1").expect("GitHub said the thread is resolved");
-        unresolve_review_thread("PRRT_1").expect("GitHub said the thread is open again");
+        resolve_review_thread("acme/thing", "PRRT_1").expect("GitHub said the thread is resolved");
+        unresolve_review_thread("acme/thing", "PRRT_1")
+            .expect("GitHub said the thread is open again");
 
         let sent = seen.lock().unwrap().clone();
         assert_eq!(
@@ -1880,13 +1884,13 @@ mod tests {
             ),
         ]);
         let _wired = wired(&api);
-        let why =
-            resolve_review_thread("PRRT_1").expect_err("a GraphQL error is not a resolved thread");
+        let why = resolve_review_thread("acme/thing", "PRRT_1")
+            .expect_err("a GraphQL error is not a resolved thread");
         assert!(
             why.contains("global id"),
             "GitHub's own reason did not reach the caller: {why}"
         );
-        let why = resolve_review_thread("PRRT_1")
+        let why = resolve_review_thread("acme/thing", "PRRT_1")
             .expect_err("a thread GitHub reports as still open was not resolved");
         assert!(
             why.contains("still open"),
@@ -1894,7 +1898,7 @@ mod tests {
         );
         // And nothing is sent at all when there is no thread to name — a request GitHub would
         // answer with a schema complaint that reads as a skein bug.
-        assert!(resolve_review_thread("  ").is_err());
+        assert!(resolve_review_thread("acme/thing", "  ").is_err());
     }
 
     /// **A mutation whose connection dies is never sent twice** (SKEIN-271, SKEIN-305).
@@ -1912,7 +1916,7 @@ mod tests {
             ),
         ]);
         let _wired = wired(&api);
-        let why = resolve_review_thread("PRRT_1")
+        let why = resolve_review_thread("acme/thing", "PRRT_1")
             .expect_err("a dead connection on a mutation is an error, not a retry");
         assert!(!why.is_empty());
         assert_eq!(

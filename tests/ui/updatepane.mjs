@@ -132,20 +132,44 @@ await page.waitForTimeout(600);
 // --- a stored token GitHub refuses: the check asks again without it, and the pane says so -----------
 //
 // (SKEIN-1172.) The sha above came through the refusal, which the first check here makes sure of:
-// the stub heard the stored token and then a request with no `Authorization`. The note is the
-// owner's sentence, verbatim.
+// the stub heard the token and then a request with no `Authorization`.
+//
+// **The sentence names where THIS token is replaced** (SKEIN-1179). The fixture's token is
+// `$GH_TOKEN`, which Settings cannot replace — so the SKEIN-1172 sentence ("replace it under
+// Settings → GitHub & keys") was wrong for exactly this fixture. The server says which source the
+// check ran on (`token_source`, `GhToken::key`), and each source gets its own sentence.
 //
 // **What would make these fail**: `update::ask` returning the 401 instead of asking again — the
 // sha check above fails and so does the first here, since nothing arrives bare; `github::config`
-// sending `Authorization: Bearer ` for no token, which the stub refuses too; the note's line
-// dropped from `renderUpdate`, or any drift in `UPDATE_WORDS.tokenRefused`, fails the second; a
-// note drawn whatever `token_refused` says fails the third.
+// sending `Authorization: Bearer ` for no token, which the stub refuses too; the route no longer
+// reporting where the token came from fails the second; the pane going back to one sentence for
+// every source fails the third and the source loop; a note drawn whatever `token_refused` says
+// fails the last.
 {
-  const TOKEN_WORDS = "your stored GitHub token was refused — replace it under Settings → GitHub & keys";
+  const WORDS = {
+    env: "GitHub refused the token in $GH_TOKEN, so the check asked without it. Set a new one where skein-server gets its environment (for a fleet: sbx secret set github --sandbox <fleet> on your host), then restart skein.",
+    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories, or under Settings → GitHub & keys → Repository tokens.",
+    read: "GitHub refused your read token, so the check asked without it. Paste a new one under Settings → GitHub & keys → Your GitHub identity.",
+    gh: "GitHub refused the host's gh login, so the check asked without it. Run gh auth login again on the host, then restart skein.",
+  };
   check("the stored token was tried, refused, and the answer came from an ask without it",
     [heard[0], heard.includes("")], [`Bearer ${STORED_TOKEN}`, true]);
-  check("the pane says the stored token was refused, in the owner's words",
-    await page.$eval("#upd-token", e => e.textContent.trim()).catch(() => ""), TOKEN_WORDS);
+  const told = await page.evaluate(async () => (await (await fetch("/api/update")).json()).token_source);
+  check("the server says the check ran on $GH_TOKEN", told, "env");
+  check("the pane says $GH_TOKEN was refused, and where to replace it",
+    await page.$eval("#upd-token", e => e.textContent.trim()).catch(() => ""), WORDS.env);
+  for (const [source, words] of Object.entries(WORDS)) {
+    const said = await page.evaluate(source => {
+      const was = updateState.token_source;
+      updateState.token_source = source;
+      renderUpdate();
+      const text = document.getElementById("upd-token")?.textContent.trim() || "";
+      updateState.token_source = was;
+      renderUpdate();
+      return text;
+    }, source);
+    check(`a refused token from ${source} is sent where that one is replaced`, said, words);
+  }
   const without = await page.evaluate(() => {
     updateState.skein.token_refused = false;
     renderUpdate();

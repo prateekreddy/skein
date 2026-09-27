@@ -296,14 +296,6 @@ pub fn sweep() -> Vec<String> {
     if flows.is_empty() {
         return Vec::new();
     }
-    let token = match crate::prq::host_token() {
-        Ok(token) => token,
-        Err(why) => {
-            eprintln!("skein: workflows are on, and there is no GitHub token to act with — {why}");
-            return Vec::new();
-        }
-    };
-
     let mut did = Vec::new();
     // Across every repo, not per repo: the thing being protected is the pass, and a pass that
     // spent a minute on repo A's reading has that minute gone whether repo B reads anything.
@@ -358,6 +350,25 @@ pub fn sweep() -> Vec<String> {
             .into_iter()
             .filter_map(|train| train.front.map(|front| (train.flow, front)))
             .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        // **This repository's own credential, per repository** (SKEIN-953). It was one token for
+        // the whole pass, and that token was the host's — the first repository token in the file,
+        // whichever repository it covered — so every repo but one had its labels, merges and
+        // verdicts sent with a token GitHub refuses there. A write, so never the read token
+        // (SKEIN-1176): a repo that has only that is said here, once a pass, and passed over.
+        let token = match crate::prq::token_for(&queue.slug, crate::prq::Need::Write) {
+            Ok(token) => token,
+            Err(why) => {
+                eprintln!(
+                    "skein: workflows are on for {}, and there is no GitHub token to act with — \
+                     {why}",
+                    repo.id
+                );
+                continue;
+            }
+        };
         let mut acted_in_repo = false;
         for (pr, facts, name) in &rows {
             let Some(flow) = flows.iter().find(|f| &f.name == name) else {
@@ -610,6 +621,164 @@ mod tests {
 
         crate::prq::forget_host_token();
         crate::prq::forget_trunks();
+    }
+
+    /// **The tick acts on each repository with that repository's own token — and as you, even when
+    /// reviews act as the skein App** (SKEIN-953, SKEIN-1178; the owner's decisions of 2026-09-27).
+    ///
+    /// Two repositories, each with a token stored for it, `acme/one`'s first in the file, and a
+    /// third with none, which `$GH_TOKEN` covers. The tick used to take one token for the whole
+    /// pass, and that token was the first stored one, so `acme/two`'s merge went out with a token
+    /// scoped to `acme/one`. And `review_identity = "app"` is set, with no App: that setting
+    /// chooses whose name a reading's own comment review carries, and nothing the tick does — its
+    /// verdicts included, which go out with this same token through `perform` — follows it.
+    ///
+    /// **What would make it fail:** the tick resolving one token for the pass again (`acme/two`'s
+    /// merge then carries `skein-test-one`, and `each repository's merge carries its own token`
+    /// fails); or the tick's credential following `review_identity` (`acme/three` has no stored
+    /// token and there is no App, so it is not merged and `the tick acted on every repository`
+    /// fails — a stored token would hide this, because under "app" it is still yours).
+    #[test]
+    fn the_tick_acts_on_each_repository_with_its_own_token_and_as_you_under_app() {
+        let _g = crate::testutil::env_lock();
+        let _warden = crate::testutil::no_warden();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home)
+            .set("SKEIN_PR_WORKFLOWS", "on")
+            .set("GH_TOKEN", "skein-test-you")
+            .unset("GITHUB_TOKEN");
+        // A `gh` with no login first on `$PATH`, so the machine running this cannot lend it one.
+        let bin = home.join("no-gh-login");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        env.set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+        crate::prq::forget_renames();
+
+        std::fs::write(home.join("config.json"), br#"{"review_identity":"app"}"#).unwrap();
+        assert!(
+            crate::config::load_config().reviews_as_app(),
+            "the fixture did not switch reviews to the App, so this proves nothing about it"
+        );
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"ship-mine","matches":["mine"],"steps":[
+              {"when":["approved","mergeable","checks:passing"],"do":"merge:squash"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"one","source":"https://github.com/acme/one.git","source_tree":"","store":""},
+                 {"id":"two","source":"https://github.com/acme/two.git","source_tree":"","store":""},
+                 {"id":"three","source":"https://github.com/acme/three.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+        for (slug, token) in [
+            ("acme/one", "skein-test-one"),
+            ("acme/two", "skein-test-two"),
+        ] {
+            let id = slug.replace('/', "-");
+            crate::gitgate::set_write_credential(&id, slug, &[slug.to_string()]).unwrap();
+            crate::gitgate::set_credential_token(&id, token).unwrap();
+        }
+
+        let merges = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = merges.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let auth = said
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("authorization:")
+                            .map(|a| a.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/one HTTP") {
+                    r#"{"full_name":"acme/one","default_branch":"main"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/two HTTP") {
+                    r#"{"full_name":"acme/two","default_branch":"main"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/three HTTP") {
+                    r#"{"full_name":"acme/three","default_branch":"main"}"#.to_string()
+                } else if head.contains("/merge") {
+                    seen.lock().unwrap().push((head.clone(), auth));
+                    r#"{"merged":true}"#.to_string()
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"q0":{"nodes":[{"number":7,"title":"t","url":"u",
+                      "isDraft":false,"author":{"login":"me"},"headRefName":"feat",
+                      "headRefOid":"abc","baseRefName":"main",
+                      "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
+                      "mergeable":"MERGEABLE","labels":{"nodes":[]},
+                      "latestReviews":{"nodes":[]},
+                      "commits":{"nodes":[{"commit":{"committedDate":"2026-08-23T00:00:00Z",
+                        "statusCheckRollup":{"contexts":{"nodes":[
+                          {"status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}]},
+                      "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                        .to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        env.set("SKEIN_GITHUB_API", &base);
+
+        let did = sweep();
+        let merges = merges.lock().unwrap().clone();
+        assert_eq!(
+            merges.len(),
+            3,
+            "the tick acted on every repository — it did: {did:?}, and merged: {merges:?}"
+        );
+        for (slug, token) in [
+            ("acme/one", "bearer skein-test-one"),
+            ("acme/two", "bearer skein-test-two"),
+            ("acme/three", "bearer skein-test-you"),
+        ] {
+            let (head, auth) = merges
+                .iter()
+                .find(|(head, _)| head.contains(&format!("/repos/{slug}/pulls/7/merge")))
+                .unwrap_or_else(|| panic!("{slug} was not merged: {merges:?}"));
+            assert_eq!(
+                auth, token,
+                "each repository's merge carries its own token — {head} did not"
+            );
+        }
+
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+        crate::prq::forget_renames();
     }
 
     /// **A workflow that acted drops the queue the next pass would have decided from**
