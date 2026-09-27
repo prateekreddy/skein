@@ -936,10 +936,6 @@ pub(crate) fn run_capture_for_env(
     ))
 }
 
-pub(crate) fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
-    run_capture("sh", &["-c", cmd])
-}
-
 // ───────────────────────── asking the sandbox without making it worse ─────────────────────────
 //
 // Everything skein knows about a *running* fleet it learns by spawning a subprocess: `sbx ls` for

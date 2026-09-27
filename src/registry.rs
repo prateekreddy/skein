@@ -223,8 +223,16 @@ pub struct Sandbox {
     pub dir: String,
     #[serde(default, rename = "lastSeen")]
     pub last_seen: String,
-    /// Set by the box status hook (box-status.sh); usually empty until a box reports.
-    #[serde(default)]
+    /// The box's turn state, as the reader worked it out — [`crate::signals::turn_state`], filled in
+    /// by the board and the session digest before they ask [`Sandbox::state`].
+    ///
+    /// **Never read from `sandboxes.json`** (SKEIN-1201). This used to be the registry's own
+    /// `status` key, and the board and the digest fell back to it when the box had reported nothing.
+    /// Nothing writes that key: the two shell writers of the registry (`box-status.sh` and
+    /// `sandbox-bootstrap.sh`) merge in `branch`, `dir`, `lastSeen` and `started`, and a box's turn
+    /// state lives under `status/`. So the fallback could only ever show a value some older skein
+    /// left behind, and it is skipped when the file is read.
+    #[serde(skip)]
     pub status: String,
 }
 
@@ -290,6 +298,23 @@ mod tests {
     use super::*;
     use crate::repos::{branch_of, save_repos, write_launch_spec_for_agent, Repo, REPOS_CACHE};
     use crate::testutil::*;
+
+    /// A `status` left in `sandboxes.json` by an older skein is not a turn state. Nothing writes the
+    /// key now, so a value there is as old as that skein, and a board that showed it would say
+    /// `waiting` about a box that has not reported in months.
+    ///
+    /// **What would make this fail:** reading the key again (`#[serde(default)]` on
+    /// [`Sandbox::status`] in place of `skip`).
+    #[test]
+    fn a_status_left_in_the_registry_is_not_read() {
+        let sb: Sandbox =
+            serde_json::from_str(r#"{"branch":"b","dir":"/d","lastSeen":"","status":"waiting"}"#)
+                .unwrap();
+        assert_eq!(
+            sb.status, "",
+            "the registry's `status` key was read as the box's turn state"
+        );
+    }
 
     #[test]
     fn managed_registry_current_branch_beats_launch_branch() {

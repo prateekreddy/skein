@@ -470,8 +470,9 @@ impl Signal {
         match self {
             Signal::FleetListing => Cost::forks(
                 1,
-                "`sbx ls --json`, src/sbx.rs `fleet_boxes` — asked by `machine::sandboxes` when \
-                 somebody wants it, and by nothing on a tick",
+                "`$SKEIN_LS_CMD` through `sh -c`, src/sbx.rs `fleet_boxes` — asked by \
+                 `machine::sandboxes` when somebody wants it, and by nothing on a tick. Unset, as in \
+                 the fleet, nothing is spawned",
             ),
             // **Neither forks, and the reason is that neither reaches through a process.** Both
             // used to branch on the deployment, because the fork was the *transport* rather than

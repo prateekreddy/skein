@@ -15,11 +15,11 @@
 //! rather than quietly overwrite someone.
 
 use crate::kit::ensure_store;
+use crate::place::located;
 use crate::registry::all_stores;
 use crate::repos::{agent_for_box, load_repos};
 use crate::runtime::runtime_adapter;
 use crate::runtime::RUNTIME_ADAPTERS;
-use crate::sandbox::sbx_guest_output;
 use crate::util::sh_quote;
 use crate::util::valid_name;
 use crate::util::write_atomic;
@@ -958,7 +958,7 @@ pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
     let shell = format!(
         r#"set -o pipefail; {setup}; payload="$({input})"; [ -n "$payload" ] || exit 0; printf '%s\n' "$payload" | bash -c {renderer}"#
     );
-    let rendered = sbx_guest_output(name, &shell, Duration::from_secs(30))?;
+    let rendered = located(name)?.exec(&shell, Duration::from_secs(30))?;
     let rendered = rendered.trim_end_matches(['\r', '\n']).to_string();
     Ok((!rendered.is_empty()).then_some(rendered))
 }

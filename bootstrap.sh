@@ -11,10 +11,9 @@
 # wrapper script and no toolchain (SKEIN-312). `sbx exec` reads this on stdin, which is why it is a
 # script a person can read before they run it rather than a pipe into a shell.
 #
-# It is also **the one implementation of the build**. Fleet creation runs this same file with
-# SKEIN_BOOTSTRAP_STOP_AFTER=build, and the cockpit's Update button runs all of it, so an upgrade
-# from the cockpit and a first install cannot come out differently — a second copy in Rust would be
-# right on the day it was written.
+# It is also **the one implementation of the build**. The cockpit's Update button runs all of this
+# same file (`fleet::build_script_for_update`), so an upgrade from the cockpit and a first install
+# cannot come out differently — a second copy in Rust would be right on the day it was written.
 #
 # ## Why the toolchain is not the sandbox's own
 #
@@ -61,9 +60,9 @@ url="${SKEIN_SOURCE_URL:-https://github.com/prateekreddy/skein.git}"
 # clone (SKEIN-461). Set SKEIN_SOURCE_REF to build a branch, tag or sha instead.
 ref="${SKEIN_SOURCE_REF:-}"
 
-# `build` stops after the binary is installed and the revision printed — how fleet creation
-# (`fleet::build_server_in_sandbox`) reuses this file without restarting anything. Empty means go
-# all the way to a serving fleet, which is what a hand run and the cockpit's Update button both do.
+# `build` stops after the binary is installed and the revision printed, restarting nothing — for a
+# person who wants the binary and not the restart, and for this file's own tests. Empty means go all
+# the way to a serving fleet, which is what a hand run and the cockpit's Update button both do.
 stop_after="${SKEIN_BOOTSTRAP_STOP_AFTER:-}"
 
 # Who started this, so a message can say how to start it again. `update` is the cockpit's Update
@@ -220,28 +219,120 @@ command -v python3 >/dev/null 2>&1 || need="$need python3"
 # asks `command -v` the same way, and finding it already installed is the whole point.
 command -v jq      >/dev/null 2>&1 || need="$need jq"
 
+# >>> package-install.sh — a byte-for-byte copy of src/package-install.sh; edit that file, not this
+# skein's one package install. Every place skein installs a package runs these two functions:
+# the fleet sandbox's substrate at each launch and an approved package request
+# (src/fleet/substrate.rs, src/substrate.rs), a runtime update, a takeover's source box
+# (src/takeover.rs), a per-VM box's startup kit (src/kit/skein-startup.sh) and bootstrap.sh.
+#
+# The Rust callers embed this file with include_str! and put their own lines after it. The two
+# shell callers run before any skein binary exists, so they carry it byte for byte between the
+# `>>> package-install.sh` and `<<< package-install.sh` marker lines instead, and
+# `fleet::substrate`'s `every_package_install_runs_the_same_bytes` fails when either copy differs.
+# Edit this file, then paste it into both.
+#
+# They used to be five copies, and they had drifted: two lock waits, three install timeouts,
+# a retry in one, a log kept, deleted or thrown away, and npm run as root in all but one.
+#
+# POSIX sh, and definitions only: sourcing it runs nothing. Each function appends apt's or npm's
+# own output to the LOG it is given, because that output is the only thing that says whether the
+# mirror, the lock, sudo or the package name was the problem, and returns the tool's own status.
+# What a failure MEANS (a failed launch, a refused request, a warning) is the caller's decision.
+
+# skein_apt_install LOG PACKAGE...
+skein_apt_install() {
+  _skein_log=$1
+  shift
+  # A fresh sandbox or agent image runs its own first-boot apt, and apt refuses to run twice.
+  # Outlast it rather than fail on a race: measured on a real rebuild, where the retry landed on
+  # "Could not get lock ... held by process 281 (apt-get)". Two ways of seeing it, because each
+  # misses a case: `fuser` is absent from images without psmisc, and between its update and its
+  # install an image's own apt holds no lock at all while its process is still running. grep reads
+  # all of ps rather than `-q`, which can quit early and fail the pipe under `pipefail`. An image
+  # without `fuser`, `ps` or `grep` sees no lock through that one, and does not wait on it.
+  _skein_waited=0
+  while [ "$_skein_waited" -lt 120 ]; do
+    if sudo -n fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 \
+      || ps -eo comm= 2>/dev/null | grep -E '^[[:space:]]*(apt|apt-get|dpkg)[[:space:]]*$' >/dev/null 2>&1; then
+      sleep 3
+      _skein_waited=$((_skein_waited + 3))
+    else
+      break
+    fi
+  done
+  {
+    _skein_bounded 120 sudo -n apt-get update -qq
+    _skein_bounded 180 sudo -n apt-get install -y -qq "$@"
+  } >>"$_skein_log" 2>&1 && return 0
+  _skein_rc=$?
+  # A timeout is not retried: the same mirror gets the same time again and the caller's own
+  # deadline runs out first. Anything else, the lock race above most of all, gets one more install.
+  # The index is already fetched, so it is not fetched again.
+  [ "$_skein_rc" -eq 124 ] && return 124
+  sleep 5
+  _skein_bounded 180 sudo -n apt-get install -y -qq "$@" >>"$_skein_log" 2>&1
+}
+
+# Why these bounds, which every caller shares. `update` FIRST, every time: a fresh image ships an
+# empty index, where install reports "Package 'tmux' has no installation candidate", which reads as
+# a missing package and is a missing index. `;` rather than `&&` after it: one unreachable source
+# fails `update` for the whole index, and the packages wanted may well be on the sources that
+# answered. Install's status is the verdict.
+#
+# `sudo -n`: nothing here can answer a password prompt, and a prompt nobody answers waits out the
+# whole timeout before failing.
+#
+# The numbers are set by the tightest deadline around them, not by the slowest mirror: at worst
+# 120 waiting + 120 + 180 + 5 + 180 = 605s of apt, and the fleet's launch runs npm after it inside
+# one 900s `sbx exec`, so npm has 240 of what is left. Longer bounds here are a deadline that fires
+# on the caller's side instead, where it says nothing about apt. `fleet::start`'s
+# `the_provisioning_budget_outlasts_the_script` reads them out of the startup kit's copy.
+
+# `timeout SECS COMMAND...` where the image has `timeout`, and the command unbounded where it does
+# not. coreutils is essential on Debian, so that is rare, but bootstrap.sh runs on whatever image
+# the sandbox was made from and a missing `timeout` would otherwise fail every install on it.
+_skein_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$@"
+  else
+    shift
+    "$@"
+  fi
+}
+
+# skein_npm_install LOG PACKAGE...
+#
+# Into the prefix a box runs from, which is not the one `sudo npm` writes (SKEIN-968): root's
+# global prefix is /usr/local, while every box's PATH leads with the npm-global prefix, owned by
+# the sandbox's user. Installed as root, a runtime lands where no box looks, and `npm ls -g`,
+# asked as that user, says it is missing at every launch. Unprivileged when the configured
+# prefix is writable, `sudo -n` when it is not, as on a plain image with a root-owned prefix.
+skein_npm_install() {
+  _skein_log=$1
+  shift
+  _skein_prefix="$(npm config get prefix 2>/dev/null)"
+  case "$_skein_prefix" in undefined | null) _skein_prefix="" ;; esac
+  if [ -n "$_skein_prefix" ] && [ -w "$_skein_prefix" ]; then
+    _skein_bounded 240 npm install -g "$@" >>"$_skein_log" 2>&1
+  else
+    _skein_bounded 240 sudo -n npm install -g "$@" >>"$_skein_log" 2>&1
+  fi
+}
+# <<< package-install.sh
 if [ -n "$need" ]; then
   say "the image is missing$need — installing, once, into the sandbox"
-  # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run twice.
-  # Outlast it rather than failing the install on a race — the same wait, and for the same measured
-  # reason, as `SUBSTRATE_SCRIPT` in src/fleet/substrate.rs. A `fuser` the image does not have
-  # simply fails, which ends the wait, which is the right answer when there is no lock to see.
-  waited=0
-  while [ "$waited" -lt 120 ] \
-    && sudo -n fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; do
-    sleep 3
-    waited=$((waited + 3))
-  done
-  # `update` FIRST: a fresh image ships an empty index, where install reports "Package
-  # 'build-essential' has no installation candidate" — which reads as a missing package and is a
-  # missing index.
-  #
-  # And `|| true` on all of it, deliberately: apt's exit status is the wrong judge. What decides is
-  # whether the commands are on the PATH afterwards, which is what the check below asks. An install
-  # that exits non-zero over an unrelated warning must not end an install that in fact worked.
-  { sudo -n apt-get update -qq && sudo -n apt-get install -y -qq $need; } \
-    || { sleep 5; sudo -n apt-get update -qq && sudo -n apt-get install -y -qq $need; } \
-    || true
+  # `|| true`, deliberately: apt's exit status is the wrong judge. What decides is whether the
+  # commands are on the PATH afterwards, which is what the check below asks. An install that exits
+  # non-zero over an unrelated warning must not end an install that in fact worked.
+  # Its words are still shown when it fails, since the check below can only say what is missing.
+  # Kept, at one fixed name, as the fleet's own substrate log is: no `mktemp` or `rm`, which are
+  # more programs the image would have to have, and it is there to read if the check below fails.
+  apt_log=/tmp/skein-bootstrap-apt.log
+  : >"$apt_log"
+  skein_apt_install "$apt_log" $need || {
+    say "apt did not finish cleanly; the last of what it said (all of it is in $apt_log):"
+    tail -n 15 "$apt_log" | sed 's/^/  | /' >&2
+  }
 fi
 
 # Asked of the PATH, not of apt. `cc` and `git` only: they are what the lines below run, and the
@@ -334,9 +425,9 @@ declared_cpus="${SKEIN_FLEET_CPUS:-}"
 # Three sources, most specific first, because "state it" must not mean "state it again every time".
 #
 # `fleet-size` is what a previous run of THIS gate recorded after checking it, so it is a decision
-# that was already made and verified — which is what makes an upgrade silent. `build_script` re-runs
-# this file to upgrade a fleet and passes no size, so without this every upgrade would be refused
-# for a question that was answered at install.
+# that was already made and verified — which is what makes an upgrade silent. The Update button
+# (`build_script_for_update`) re-runs this file to upgrade a fleet and passes no size, so without
+# this every upgrade would be refused for a question that was answered at install.
 #
 # It is still checked against the sandbox below, so a recorded number does not become permission to
 # skip the check: a fleet rebuilt at a different size is caught on its next run rather than carrying
@@ -774,15 +865,79 @@ legacy_sock="$skein_dir/server.tmux"
 
 supervising() { tmux -S "$1" has-session -t skein-server 2>/dev/null; }
 
-# The doorway the stamp names — counted only when it is alive and IS this doorway, the same three
-# questions `fleet::door_holds_port` asks, because a pid on its own is a number that gets reused.
-stamped_door() {
-  read -r d_pid d_port <"$stamp" 2>/dev/null || return 1
-  [ "$d_port" = "$port" ] || return 1
-  kill -0 "$d_pid" 2>/dev/null || return 1
-  tr '\0' '\n' <"/proc/$d_pid/cmdline" 2>/dev/null | grep -qxF -- "$doorway" || return 1
-  printf '%s\n' "$d_pid"
+# The doorway the stamp names, and the reload: the same bytes `fleet::door_pid` and
+# `fleet::reload_server` run, so the two ways into a cockpit cannot pick different processes.
+# >>> door.sh — a byte-for-byte copy of src/door.sh; edit that file, not this
+# Finding the cockpit's doorway, and reloading it. One implementation for both of skein's ways in:
+# `fleet::door_pid` and `fleet::reload_server` (src/fleet/server.rs) embed this file with
+# include_str!, and bootstrap.sh's start-door.sh, which runs before any skein binary exists,
+# carries it byte for byte between the `>>> door.sh` and `<<< door.sh` marker lines.
+# `fleet::server`'s `the_doorway_is_found_one_way` fails when that copy differs. Edit this file,
+# then paste it there.
+#
+# Reload used to be two mechanisms: Rust sent `pkill -USR1 -f <pattern>`, a command-line match
+# the repository's own rules ban, and start-door.sh sent `kill -USR1` to the pid in the stamp.
+#
+# POSIX sh, and definitions only: sourcing it runs nothing.
+
+# skein_stamped_door STAMP PORT DOORWAY
+#
+# Print the pid of the doorway holding PORT by its stamp, or fail. A pid is a number that gets
+# reused, so it counts only when the process is alive AND is this doorway, which its command line
+# says exactly: one argument equal to DOORWAY. A stamp left by a doorway that was killed names a
+# dead pid and reads as no doorway, which is the honest answer.
+skein_stamped_door() {
+  read -r _door_pid _door_held <"$1" 2>/dev/null || return 1
+  [ "$_door_held" = "$2" ] || return 1
+  kill -0 "$_door_pid" 2>/dev/null || return 1
+  tr '\0' '\n' <"/proc/$_door_pid/cmdline" 2>/dev/null | grep -qxF -- "$3" || return 1
+  printf '%s\n' "$_door_pid"
 }
+
+# skein_supervised_door DOORWAY SOCKET...
+#
+# Print the pid of the doorway a cockpit supervisor runs, or fail: the child of the `skein-server`
+# session's pane, on any SOCKET given, whose command line is DOORWAY. Asked by the process tree
+# rather than by a pattern, so it cannot find anything a supervisor did not start.
+skein_supervised_door() {
+  _door_path=$1
+  shift
+  for _door_sock in "$@"; do
+    _door_pane=$(tmux -S "$_door_sock" list-panes -t skein-server -F '#{pane_pid}' 2>/dev/null | head -n 1)
+    [ -n "$_door_pane" ] || continue
+    for _door_status in $(grep -l "^PPid:[[:space:]]*$_door_pane\$" /proc/[0-9]*/status 2>/dev/null); do
+      _door_pid=${_door_status#/proc/}
+      _door_pid=${_door_pid%/status}
+      if tr '\0' '\n' <"/proc/$_door_pid/cmdline" 2>/dev/null | grep -qxF -- "$_door_path"; then
+        printf '%s\n' "$_door_pid"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# skein_door_reload STAMP PORT DOORWAY SOCKET...
+#
+# Send the doorway SIGUSR1, which ends the server behind it and re-execs the doorway across the
+# SAME listening socket, so the port is never free (architecture §9.4). Print the pid signalled,
+# or fail when there was no doorway to signal, which tells the caller to start one.
+#
+# The stamp's doorway first. When the stamp says nothing, the supervisor's: a doorway that is alive
+# but unstamped (the stamp deleted, or naming a pid that is not the doorway) is exactly the one a
+# re-exec repairs, because the fresh doorway stamps again across the same descriptor (SKEIN-226).
+skein_door_reload() {
+  _door_stamp=$1
+  _door_port=$2
+  _door_way=$3
+  shift 3
+  _door_target=$(skein_stamped_door "$_door_stamp" "$_door_port" "$_door_way") \
+    || _door_target=$(skein_supervised_door "$_door_way" "$@") \
+    || return 1
+  kill -USR1 "$_door_target" 2>/dev/null || return 1
+  printf '%s\n' "$_door_target"
+}
+# <<< door.sh
 
 # Is the doorway $2 the one the session on socket $1 runs? The supervisor loop is the pane's shell
 # and the doorway is its child.
@@ -805,7 +960,7 @@ retire() {
   done
 }
 
-door=$(stamped_door || true)
+door=$(skein_stamped_door "$stamp" "$port" "$doorway" || true)
 on_new=''
 on_old=''
 supervising "$sock" && on_new=yes
@@ -840,11 +995,10 @@ if [ -n "$on_new" ] || [ -n "$on_old" ]; then
   # SIGUSR1 re-execs the doorway across the SAME descriptor, so the socket is never closed and the
   # port is never free. Killing and restarting here would reopen exactly the window the doorway
   # exists to close (architecture §9.4).
-  if [ -n "$door" ]; then
-    kill -USR1 "$door" 2>/dev/null || true
-  else
-    say "no doorway holds :$port by its stamp at $stamp, so there is nothing to reload; the"
-    say "supervisor starts the doorway on disk the next time round its loop"
+  if ! skein_door_reload "$stamp" "$port" "$doorway" "$sock" "$legacy_sock" >/dev/null; then
+    say "no doorway holds :$port by its stamp at $stamp, and the supervisor is not running one, so"
+    say "there is nothing to reload; the supervisor starts the doorway on disk the next time round"
+    say "its loop"
   fi
 else
   # A socket file left by a sandbox that stopped is a file with no server behind it. tmux clears

@@ -448,8 +448,6 @@ can just run `skein` / `skein-server` with no prefix:
 | `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | the box's `skein-agent` tmux session (`agent_session_name`, `src/runtime.rs`) |
 | `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | the box's `skein-shell` tmux session (`shell_argv`, `src/sandbox.rs`) |
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | none: inside the fleet `sbx ls` cannot be asked, and boxes are read from their placement records (`src/sbx.rs`) |
-| `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; a test seam for a box skein has not placed. Non-destructive | none: skein stops a placed box itself (`stop_command`, `src/sandbox.rs`) |
-| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; a test seam, like `SKEIN_STOP_CMD` | none (`destroy_command`, `src/sandbox.rs`) |
 | `SKEIN_MERGE_METHOD` | merge strategy for a merge skein makes through GitHub's API: `squash`, `merge` or `rebase` | `squash` |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}`/`{runtime}` substituted | runtime adapter's native headless resume |
 | `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |

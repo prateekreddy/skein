@@ -4,9 +4,9 @@
 //! scrollback — while the runtime's JSONL record on the box's disk survives all three. This reads
 //! that, tail-first, so a huge session opens instantly and pages backwards on demand.
 
+use crate::place::located;
 use crate::place::shared_record;
 use crate::repos::agent_for_box;
-use crate::sandbox::sbx_guest_output;
 use crate::util::valid_name;
 use crate::util::*;
 use serde::Serialize;
@@ -261,7 +261,7 @@ pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String>
          printf '{TRANSCRIPT_HEADER}%s %s\\n' \"$(wc -c <\"$p\")\" \"$p\"; \
          tail -c {bytes} \"$p\""
     );
-    let raw = sbx_guest_output(name, &script, Duration::from_secs(60))?;
+    let raw = located(name)?.exec(&script, Duration::from_secs(60))?;
     let (header, body) = raw.split_once('\n').unwrap_or((raw.trim_end(), ""));
     if header.trim() == TRANSCRIPT_NONE {
         return Ok(empty(
@@ -303,8 +303,8 @@ pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String>
 // `feat: remove Verify, and tell a box who it commits as`, deleted it entire — "the module, the
 // chip, the dockbar button, the output modal, the per-repo check command and its global default,
 // the routes and the docs" — and this file's own section header outlived that deletion. Nothing
-// below implements or calls any of it; `sbx_guest_output` at the top of this file is unrelated
-// (it reads a box's conversation transcript, not a check's output).
+// below implements or calls any of it; the `exec` at the top of this file is unrelated (it reads
+// a box's conversation transcript, not a check's output).
 
 #[cfg(test)]
 mod tests {

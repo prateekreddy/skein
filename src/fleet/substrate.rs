@@ -7,7 +7,11 @@ use super::*;
 /// apt's output is kept, not discarded: when this step fails it is the only thing that says whether
 /// the mirror was unreachable, sudo refused, or the package simply isn't there — and "missing
 /// required tools: tmux" with the reason thrown away is a dead end.
-const SUBSTRATE_SCRIPT: &str = r#"need='';
+/// It begins with `src/package-install.sh`, the one package install every caller runs, and only
+/// decides here WHAT to install and what a failure means for a launch.
+const SUBSTRATE_SCRIPT: &str = concat!(
+    include_str!("../package-install.sh"),
+    r#"need='';
          command -v tmux >/dev/null 2>&1 || need="$need tmux";
          command -v jq   >/dev/null 2>&1 || need="$need jq";
          # What this fleet's owner has approved, replayed. A sandbox is rebuilt from an image that
@@ -43,24 +47,12 @@ const SUBSTRATE_SCRIPT: &str = r#"need='';
          npm="$want";
          apt_want="$need$extra";
          [ -n "$apt_want" ] || [ -n "$npm" ] || exit 0;
-         [ -n "$apt_want" ] || { timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true; exit 0; };
-         # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run
-         # twice. Outlast it rather than failing the launch on a race: measured on a real rebuild,
-         # where the retry landed on "Could not get lock ... held by process 281 (apt-get)".
-         waited=0;
-         while [ "$waited" -lt 120 ]; do
-           if sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; then
-             sleep 3; waited=$((waited + 3));
-           else break; fi;
-         done;
-         # update FIRST. A fresh image ships an empty index, where install reports "Package 'tmux'
-         # has no installation candidate" — which reads as a missing package and is a missing index.
-         { timeout 180 sudo apt-get update -qq; \
-           timeout 240 sudo apt-get install -y -qq $apt_want \
-             || { sleep 5; timeout 180 sudo apt-get update -qq; \
-                  timeout 240 sudo apt-get install -y -qq $apt_want; }; } >"$log" 2>&1;
+         : >"$log";
+         [ -z "$apt_want" ] || skein_apt_install "$log" $apt_want;
+         # npm's failure does not fail the launch: a runtime or an approved package that did not
+         # arrive is named by what later needs it, and a box that needs neither still starts.
          if [ -n "$npm" ] && command -v npm >/dev/null 2>&1; then
-           timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true;
+           skein_npm_install "$log" $npm || true;
          fi;
          missing=''; for t in $need; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done;
          [ -z "$missing" ] || {
@@ -68,7 +60,8 @@ const SUBSTRATE_SCRIPT: &str = r#"need='';
              echo "skein: apt said (tail of $log inside the sandbox):";
              tail -n 25 "$log" | sed 's/^/  | /';
              exit 1;
-         } >&2"#;
+         } >&2"#
+);
 
 /// An agent CLI the sandbox could be running a newer version of.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -722,7 +715,12 @@ fn parse_agent_start(out: Option<&str>) -> AgentStart {
 /// And it SAYS when the copy it installed is not the copy on the PATH, rather than leaving that to
 /// be inferred from a version that did not move. A shadowed install is the one failure here that
 /// looks exactly like success.
-const RUNTIME_UPDATE_SCRIPT: &str = r#"
+///
+/// The install itself is `skein_npm_install`, from `src/package-install.sh`: the prefix rule above
+/// is that function's now, so a launch and an approved request install where this does.
+const RUNTIME_UPDATE_SCRIPT: &str = concat!(
+    include_str!("../package-install.sh"),
+    r#"
          set -- $SKEIN_RUNTIME_PACKAGES;
          [ "$#" -gt 0 ] || { echo 'no agent runtimes are configured here, so there is nothing to update'; exit 0; };
          command -v npm >/dev/null 2>&1 || { echo 'this sandbox has no npm, so the agent CLIs cannot be updated in it' >&2; exit 1; };
@@ -730,9 +728,9 @@ const RUNTIME_UPDATE_SCRIPT: &str = r#"
          was_codex="$(codex --version 2>/dev/null | head -n 1)";
          prefix="$(npm config get prefix 2>/dev/null)";
          case "$prefix" in undefined|null) prefix="";; esac;
-         if [ -n "$prefix" ] && [ -w "$prefix" ]; then as=""; else as="sudo"; fi;
          log=/tmp/skein-runtime-update.log;
-         timeout 600 $as npm install -g "$@" >"$log" 2>&1 || {
+         : >"$log";
+         skein_npm_install "$log" "$@" || {
              echo 'npm could not install the agent runtimes. It said:' >&2;
              tail -n 15 "$log" | sed 's/^/  | /' >&2;
              exit 1;
@@ -750,7 +748,8 @@ const RUNTIME_UPDATE_SCRIPT: &str = r#"
              echo "$r: installed into $prefix but this sandbox runs $at, which every box runs too — the install is shadowed" >&2;
            fi;
          done;
-         [ "$moved" = 1 ] || echo 'nothing moved — every runtime here was already the newest npm has.'"#;
+         [ "$moved" = 1 ] || echo 'nothing moved — every runtime here was already the newest npm has.'"#
+);
 
 /// Install the tools a box needs in order to exist at all.
 ///
@@ -1274,7 +1273,7 @@ mod tests {
             );
         }
         assert!(
-            super::RUNTIME_UPDATE_SCRIPT.contains("npm install -g \"$@\""),
+            super::RUNTIME_UPDATE_SCRIPT.contains("skein_npm_install \"$log\" \"$@\""),
             "the update does not install the packages it was given"
         );
         assert!(
@@ -1299,7 +1298,7 @@ mod tests {
     fn an_approved_package_is_installed_without_being_mistaken_for_a_command() {
         let s = SUBSTRATE_SCRIPT;
         assert!(
-            s.contains("apt-get install -y -qq $apt_want"),
+            s.contains("skein_apt_install \"$log\" $apt_want"),
             "approved packages are never installed: {s}"
         );
         assert!(
@@ -1520,5 +1519,147 @@ mod tests {
         );
         assert!(t <= now, "a start in the future: {t} vs {now}");
         assert_eq!(absent, AgentStart::NoAgent, "a box with no agent session");
+    }
+
+    /// **Every package install skein runs is one set of bytes** (SKEIN-1198).
+    ///
+    /// There were five, and they had drifted: two ways of waiting out the dpkg lock, install
+    /// timeouts of 120, 240 and 600 seconds, a retry in one, output kept, deleted or thrown away,
+    /// and npm run as root — into a prefix no box runs from (SKEIN-968) — in all but one. So an
+    /// approved package could fail on its request and succeed at the next launch, or the reverse.
+    ///
+    /// Three claims, each broken by a different edit:
+    /// - a Rust caller that stops starting with the shared file — re-typing its own apt line —
+    ///   fails the first loop;
+    /// - an edit to `src/package-install.sh` not pasted into `bootstrap.sh` or the kit, or an edit
+    ///   made inside one of those copies, fails the second;
+    /// - a sixth copy written anywhere else under `src/` or in `bootstrap.sh` fails the third,
+    ///   which is how the five came about.
+    #[test]
+    fn every_package_install_runs_the_same_bytes() {
+        let shared = crate::substrate::PACKAGE_INSTALL_SH;
+        let rust: [(&str, String); 5] = [
+            (
+                "the fleet's substrate at each launch",
+                SUBSTRATE_SCRIPT.to_string(),
+            ),
+            ("a runtime update", RUNTIME_UPDATE_SCRIPT.to_string()),
+            (
+                "an approved apt request",
+                crate::substrate::install_script("apt", &["jq".into()]),
+            ),
+            (
+                "an approved npm request",
+                crate::substrate::install_script("npm", &["prettier".into()]),
+            ),
+            (
+                "a takeover's source box",
+                crate::takeover::source_takeover_tools_script(),
+            ),
+        ];
+        for (who, script) in &rust {
+            assert!(
+                script.starts_with(shared),
+                "{who} does not run src/package-install.sh, so it installs by rules of its own"
+            );
+        }
+
+        const BEGIN: &str = "# >>> package-install.sh";
+        const END: &str = "# <<< package-install.sh\n";
+        let bootstrap = include_str!("../../bootstrap.sh");
+        for (file, text) in [
+            ("bootstrap.sh", bootstrap),
+            ("src/kit/skein-startup.sh", crate::kit::KIT_STARTUP_SH),
+        ] {
+            assert_eq!(
+                text.matches(BEGIN).count(),
+                1,
+                "{file} must carry exactly one copy of src/package-install.sh"
+            );
+            let begin = text.find(BEGIN).unwrap();
+            let body = begin + text[begin..].find('\n').unwrap() + 1;
+            let end = text[body..]
+                .find(END)
+                .map(|e| body + e)
+                .unwrap_or_else(|| panic!("{file} opens its copy and never closes it"));
+            assert!(
+                text[body..end] == *shared,
+                "{file}'s copy of src/package-install.sh differs from the file. Edit \
+                 src/package-install.sh and paste it between the markers, whole."
+            );
+        }
+
+        // Anything else under src/ (and bootstrap.sh) that runs an install is a sixth copy.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = vec![root.join("bootstrap.sh")];
+        let mut dirs = vec![root.join("src")];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs" || x == "sh") {
+                    files.push(p);
+                }
+            }
+        }
+        assert!(files.len() > 100, "the walk found {} files", files.len());
+        let runs_an_install = |line: &str| {
+            let l = line.trim_start();
+            // A comment, or advice printed to a person, runs nothing.
+            if ["#", "//", "say ", "echo "]
+                .iter()
+                .any(|c| l.starts_with(c))
+            {
+                return false;
+            }
+            ["sudo ", "sudo -n ", "timeout ", "_skein_bounded "]
+                .iter()
+                .any(|lead| {
+                    l.match_indices(lead).any(|(i, _)| {
+                        let after =
+                            l[i + lead.len()..].trim_start_matches(|c: char| c.is_ascii_digit());
+                        let after = after
+                            .trim_start()
+                            .trim_start_matches("sudo -n ")
+                            .trim_start_matches("sudo ");
+                        after.starts_with("apt-get install -y")
+                            || (after.starts_with("npm install -g ")
+                                && !after["npm install -g ".len()..].starts_with('<'))
+                    })
+                })
+        };
+        let mut copies = Vec::new();
+        for f in &files {
+            let rel = f.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if rel == "src/package-install.sh" {
+                continue;
+            }
+            let text = std::fs::read_to_string(f).unwrap();
+            // The marked copy is checked above; everything outside it counts.
+            let outside = match (text.find(BEGIN), text.find(END)) {
+                (Some(b), Some(e)) => format!("{}{}", &text[..b], &text[e..]),
+                _ => text,
+            };
+            for line in outside.lines() {
+                if runs_an_install(line) {
+                    copies.push(format!("{rel}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(
+            // Spelled in two pieces so this line is not itself a line the scan finds.
+            runs_an_install(&format!(
+                "  timeout 600 sudo -n apt-get {} -y -qq tmux",
+                "install"
+            )),
+            "the scan cannot see the line it is looking for"
+        );
+        assert!(
+            copies.is_empty(),
+            "a package install outside src/package-install.sh — call skein_apt_install or \
+             skein_npm_install instead:\n{}",
+            copies.join("\n")
+        );
     }
 }

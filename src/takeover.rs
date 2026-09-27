@@ -13,13 +13,13 @@
 
 use crate::handoff::prepare_handoff_for;
 use crate::kit::{ensure_kit, ensure_store};
+use crate::place::located;
 use crate::place::{fleet_sandbox, place_of, placed_boxes};
 use crate::probes::ensure_probe_in;
 use crate::repos::{agent_for_box, box_name, load_repos, repo_for_box, Repo};
 use crate::runtime::{
     guarded_agent_command, runtime_adapter, valid_runtime, TMUX_AGENT_CONTRACT, TMUX_CONFIGURE,
 };
-use crate::sandbox::sbx_guest_output;
 use crate::sbx::fleet_boxes;
 use crate::util::valid_name;
 use crate::util::{bounded_output, slug, write_atomic};
@@ -213,9 +213,24 @@ fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
     fs::rename(&tmp, host).map_err(|e| format!("install {}: {e}", host.display()))
 }
 
+/// The shared package install (`src/package-install.sh`), then what this path wants of it: jq
+/// and tmux, apt's own words on stderr if they still are not there, and the package indexes
+/// removed afterwards, because they dwarf both tools and are useless after this one pass.
+pub(crate) fn source_takeover_tools_script() -> String {
+    format!(
+        r#"{}
+need=""; command -v jq >/dev/null 2>&1 || need="$need jq"; command -v tmux >/dev/null 2>&1 || need="$need tmux"; if [ -n "$need" ]; then command -v apt-get >/dev/null 2>&1 || {{ echo "missing required tools:$need and no supported package manager" >&2; exit 1; }}; log=$(mktemp); skein_apt_install "$log" $need || tail -n 25 "$log" >&2; rm -f "$log"; sudo -n rm -rf /var/lib/apt/lists/* 2>/dev/null || true; fi; command -v jq >/dev/null && command -v tmux >/dev/null"#,
+        include_str!("package-install.sh")
+    )
+}
+
 fn ensure_source_takeover_tools(name: &str) -> Result<(), String> {
-    let script = r#"need=""; command -v jq >/dev/null 2>&1 || need="$need jq"; command -v tmux >/dev/null 2>&1 || need="$need tmux"; if [ -n "$need" ]; then command -v apt-get >/dev/null 2>&1 || { echo "missing required tools:$need and no supported package manager" >&2; exit 1; }; waited=0; while ps -eo comm= 2>/dev/null | grep -Eq '^[[:space:]]*(apt|apt-get|dpkg)[[:space:]]*$' && [ "$waited" -lt 240 ]; do sleep 2; waited=$((waited + 2)); done; timeout 120 sudo apt-get install -y -qq $need 2>/dev/null || { timeout 120 sudo apt-get update -qq && timeout 120 sudo apt-get install -y -qq $need; }; sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true; fi; command -v jq >/dev/null && command -v tmux >/dev/null"#;
-    sbx_guest_output(name, script, Duration::from_secs(520)).map(|_| ())
+    // 900s, the deadline every other caller of the shared install gives it: its apt step alone
+    // may take 605s (src/package-install.sh says how), and the 520s this had was sized for a 120s
+    // install.
+    located(name)?
+        .exec(&source_takeover_tools_script(), Duration::from_secs(900))
+        .map(|_| ())
 }
 
 fn write_replacement_launch_spec(
@@ -391,14 +406,12 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
     ensure_kit()?;
     ensure_source_takeover_tools(source)?;
 
-    let branch = sbx_guest_output(
-        source,
-        "git rev-parse --abbrev-ref HEAD",
-        Duration::from_secs(30),
-    )?
-    .trim()
-    .to_string();
-    let head = sbx_guest_output(source, "git rev-parse HEAD", Duration::from_secs(30))?
+    let branch = located(source)?
+        .exec("git rev-parse --abbrev-ref HEAD", Duration::from_secs(30))?
+        .trim()
+        .to_string();
+    let head = located(source)?
+        .exec("git rev-parse HEAD", Duration::from_secs(30))?
         .trim()
         .to_string();
     if branch.is_empty() || branch == "HEAD" || head.is_empty() {
@@ -423,7 +436,7 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
     let build = format!(
         "set -e; root=\"$(git rev-parse --show-toplevel)\"; rm -rf {guest}; mkdir -p {guest}; git -C \"$root\" bundle create {guest}/repo.bundle HEAD; git -C \"$root\" diff --cached --binary HEAD > {guest}/index.patch; git -C \"$root\" diff --binary > {guest}/worktree.patch; git -C \"$root\" ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {guest}/untracked.list; if [ -s {guest}/untracked.list ]; then tar -C \"$root\" --null -T {guest}/untracked.list -czf {guest}/untracked.tgz; else tar -czf {guest}/untracked.tgz --files-from /dev/null; fi; shared=\"$root/.claude\"; if [ -L \"$shared/skein\" ]; then shared=\"$(dirname \"$(readlink \"$shared/skein\")\")\"; elif [ -L \"$shared\" ]; then shared=\"$(readlink -f \"$shared\")\"; fi; names=\"\"; for item in memory skills hooks settings.json; do [ -e \"$shared/$item\" ] && names=\"$names $item\"; done; if [ -n \"$names\" ]; then tar -C \"$shared\" -czf {guest}/shared-context.tgz $names; else tar -czf {guest}/shared-context.tgz --files-from /dev/null; fi; ({export}) > {guest}/context.md 2>/dev/null || true"
     );
-    sbx_guest_output(source, &build, Duration::from_secs(300))?;
+    located(source)?.exec(&build, Duration::from_secs(300))?;
     for file in [
         "repo.bundle",
         "index.patch",
@@ -434,7 +447,8 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
     ] {
         copy_guest_file(source, &format!("{guest}/{file}"), &snapshot.join(file))?;
     }
-    let _ = sbx_guest_output(source, &format!("rm -rf {guest}"), Duration::from_secs(30));
+    let _ =
+        located(source).and_then(|p| p.exec(&format!("rm -rf {guest}"), Duration::from_secs(30)));
     let context = fs::read(snapshot.join("context.md"))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
@@ -515,7 +529,9 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         ),
         configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} ")),
     );
-    sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
+    located(&replacement.target)?
+        .exec(&shell, Duration::from_secs(660))
+        .map(|_| ())
 }
 
 pub fn replace_box(source: &str, target_runtime: &str) -> Result<Replacement, String> {

@@ -109,10 +109,10 @@ depends_on = ["state", "operation", "act", "signal", "box", "fleet", "warden-cli
 [[cycle]]
 modules = [
   "ai", "asks", "config", "diff", "digest", "fleet", "gitgate", "kit", "mailbox", "place", "probes",
-  "registry", "repos", "runtime", "sandbox", "sbx", "signals", "substrate", "tracking",
+  "registry", "repos", "runtime", "sbx", "signals", "substrate", "tracking",
 ]
 why = """
-Nineteen modules in one strongly connected component — two thirds of the crate. It is not a
+Eighteen modules in one strongly connected component — two thirds of the crate. It is not a
 mistake anyone made in one place: it is what a single 7,400-line crate root looked like once it was
 split, and the mutual references were function calls inside one file until then. `kit` calls
 `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads `repos` to find
@@ -130,6 +130,10 @@ tidy, not a structural change.
 destroying a box removes its ask drop-box with its package and write drop-boxes (`fleet::disk`'s
 `box_side_state`). It is in for the reason `substrate` and `gitgate` are: a queue a box writes is
 removed with the box, and the one spelling of its path is the queue module's.
+
+`sandbox` left with SKEIN-1201, and not by anyone setting out to untangle it: running something in
+a box stopped going through its `sbx_guest_output` and `guest_write` wrappers and asks
+`place::located` instead, and with those callers gone nothing in the knot reaches back into it.
 """
 item = "SKEIN-1"
 
@@ -348,7 +352,7 @@ depends_on = ["runtime", "util"]
 [current.diff]
 # `source` for one word: the diff is computed inside the box, and the answer says so by naming the
 # reach that produced it. §2.2 requires a signal to carry that; §2.3 is where the word is defined.
-depends_on = ["answer", "config", "registry", "sandbox", "sbx", "source", "util"]
+depends_on = ["answer", "config", "place", "registry", "sbx", "source", "util"]
 
 [current.digest]
 depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
@@ -356,7 +360,7 @@ depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
 [current.files]
 # `source` for the same reason as `diff`: a listing says whether it was read by entering the box or
 # off the host's copy, and those are two different §2.3 reaches with two different failure modes.
-depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
+depends_on = ["answer", "place", "sbx", "source", "util"]
 
 [current.fleet]
 # `dockerd` for one call: `pressure` reads the kernel's counters from that module instead of asking
@@ -512,7 +516,7 @@ depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
 depends_on = ["config", "util"]
 
 [current.probes]
-depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]
+depends_on = ["kit", "place", "registry", "repos", "runtime", "tracking", "util"]
 
 [current.prq]
 # `secret` because the host GitHub credential is one. It is resolved once per process and held in a
@@ -693,7 +697,7 @@ depends_on = ["contracts", "moduledocs", "repos"]
 # `probes` for box-self.sh (SKEIN-1174): the import runs in a box and asks it which store is the
 # box's, the same bytes every script `probes` installs there asks, pasted in front of the import
 # rather than a second copy of the rule.
-depends_on = ["kit", "probes", "repos", "sandbox", "util"]
+depends_on = ["kit", "place", "probes", "repos", "util"]
 
 [current.signals]
 depends_on = ["digest", "registry", "util"]
@@ -723,7 +727,7 @@ depends_on = ["config", "fleet", "mailbox", "place", "util"]
 [current.takeover]
 # `warden_client` for an audit entry and nothing else (§9.5 R6): a takeover hands one agent another
 # agent's work, branch and credentials, which is a fact that belongs in a log skein cannot edit.
-depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sandbox", "sbx", "util", "warden_client"]
+depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.testutil]
 # Nothing, and that is the claim rather than an accident — but the claim this row makes is a
@@ -754,10 +758,10 @@ depends_on = []
 [current.tracking]
 # `secret` since a connection's Plane PAT became a `Secret`: it is written, read and put into the
 # environment of the two `curl` children that mint and revoke agent tokens, and nowhere else.
-depends_on = ["config", "repos", "sandbox", "sbx", "secret", "util"]
+depends_on = ["config", "place", "repos", "sbx", "secret", "util"]
 
 [current.transcript]
-depends_on = ["fleet", "place", "repos", "sandbox", "util"]
+depends_on = ["fleet", "place", "repos", "util"]
 
 [current.prwork]
 # The half with consequences: `workflow` for what was decided, `github` to do it, `prq` for where a

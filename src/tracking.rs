@@ -8,8 +8,8 @@
 //! and mints a real credential.
 
 use crate::config::*;
+use crate::place::located;
 use crate::repos::{load_repos, repo_for_box, save_repos, Repo};
-use crate::sandbox::{guest_write, sbx_guest_output};
 use crate::sbx::{box_liveness, Liveness};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
@@ -826,14 +826,15 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     );
     let script = "umask 077; mkdir -p \"$HOME/.config/sync\"; cat > \"$HOME/.config/sync/env\"; \
                   chmod 600 \"$HOME/.config/sync/env\"";
-    guest_write(name, script, &env_file, Duration::from_secs(30))?;
+    located(name)?.write(script, env_file.as_bytes(), Duration::from_secs(30))?;
 
     // Registration itself is the store installer's job, not a second copy of that logic here: it is
     // the thing that knows both runtimes, and it is the same script the kit runs at startup, so a
     // box wired up by hand and one wired up on creation cannot end up differently configured. FORCE
     // is exactly the "a new token has arrived" case it exists for. See [`SYNC_INSTALL_IN_BOX`].
-    let report =
-        sbx_guest_output(name, SYNC_INSTALL_IN_BOX, Duration::from_secs(60)).unwrap_or_default();
+    let report = located(name)
+        .and_then(|p| p.exec(SYNC_INSTALL_IN_BOX, Duration::from_secs(60)))
+        .unwrap_or_default();
     if report.contains("work tracking ready") {
         Ok(format!("{name} is tracking work as {}", minted.agent))
     } else {
@@ -918,7 +919,7 @@ pub fn sync_refresh_box(name: &str, force: bool) -> Result<String, String> {
     }
     let script = sync_refresh_in_box(force);
     // stderr deliberately not merged: stdout is the machine-readable report and stderr is the prose.
-    let report = sbx_guest_output(name, &script, Duration::from_secs(60))?;
+    let report = located(name)?.exec(&script, Duration::from_secs(60))?;
     Ok(describe_refresh(&report, force))
 }
 
@@ -2364,7 +2365,10 @@ mod tests {
             Some("skein-test-plane-secret"),
         )
         .unwrap();
-        env.set("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
+        // The box is placed and its teardown's crossing succeeds having done nothing, so what is
+        // under test is only what destroy asks the gateway.
+        crate::testutil::placed("gone");
+        let _crossing = crate::place::seam::doing_nothing();
         env.set("SKEIN_REGISTRY", dir.join("sandboxes.json"));
         fs::write(dir.join("sandboxes.json"), "{}").unwrap();
 

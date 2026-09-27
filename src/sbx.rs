@@ -70,10 +70,15 @@ pub fn forget_fleet_boxes() {
 /// How often skein is willing to spawn `sbx ls` while it is answering.
 const FLEET_FRESH: Duration = Duration::from_millis(1500);
 
-/// Enumerate the fleet from sbx. `None` when sbx can't be consulted (not installed, errored,
-/// unparseable, or hung past the timeout) *and* nothing was ever learned — callers then fall back to
-/// the registry. Override with `$SKEIN_LS_CMD` (run via `sh -c`; must emit the `sbx ls --json`
-/// shape). Micro-cached — see [`FLEET_GATE`].
+/// Enumerate the machine's sandboxes, **which only `$SKEIN_LS_CMD` can do** (run via `sh -c`; it
+/// must emit the `sbx ls --json` shape). Without it this is `None`, with the reason recorded for
+/// [`fleet_failure`]: skein runs inside the fleet, and `sbx ls` is a question about the host that
+/// only the warden can ask (`warden/src/sightings.rs`). `None` too when the command errs, times out
+/// or prints something that is not a listing — callers then fall back to the placement records.
+/// Micro-cached — see [`FLEET_GATE`].
+///
+/// There used to be a `Command::new("sbx")` arm here for when the variable was unset. The early
+/// return below made it unreachable, and it read as though this process could still ask `sbx`.
 pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
     // Zero: tests swap $SKEIN_LS_CMD per case and run in parallel — a process-wide gate would serve
     // one test's fleet to another. Prod (server/CLI) keeps it.
@@ -83,36 +88,22 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
         FLEET_FRESH
     };
     FLEET_GATE.get(fresh, || {
-        let asked = env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty());
-        // `sbx ls` is a question about the *machine*, and in-fleet skein is not standing on it.
-        // `None` already means "sbx could not be consulted, fall back to the registry", which is the
-        // right behaviour — but the reason has to be recorded or the board reports a broken sbx for
-        // a deployment where its absence is correct. An override still wins: a test or a proxy that
-        // can answer the question is answering it, whatever this process is running inside.
-        if asked.is_none() {
+        let Some(asked) = env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) else {
+            // `sbx ls` is a question about the *machine*, and in-fleet skein is not standing on it.
+            // `None` already means "sbx could not be consulted, fall back to the registry", which is the
+            // right behaviour — but the reason has to be recorded or the board reports a broken sbx for
+            // a deployment where its absence is correct. An override still wins: a test or a proxy that
+            // can answer the question is answering it, whatever this process is running inside.
             remember_fleet_failure(Some(
                 "skein is running inside the fleet, and `sbx ls` asks about the host's machine — \
                  which boxes exist is read from their placement records instead"
                     .into(),
             ));
             return None;
-        }
-        let label = format!(
-            "`{}`",
-            asked.clone().unwrap_or_else(|| "sbx ls --json".into())
-        );
-        let mut cmd = match asked {
-            Some(c) => {
-                let mut sh = Command::new("sh");
-                sh.arg("-c").arg(c);
-                sh
-            }
-            None => {
-                let mut sbx = Command::new("sbx");
-                sbx.args(["ls", "--json"]);
-                sbx
-            }
         };
+        let label = format!("`{asked}`");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&asked);
         // Bounded: a wedged sbx daemon used to hang this .output() forever — and with it every
         // fleet-snapshot task, accumulating stuck blocking threads until the board went permanently
         // blank. A timeout degrades to the registry fallback instead.
@@ -848,7 +839,18 @@ mod tests {
         fs::write(
             home.join("sandboxes.json"),
             format!(
-                r#"{{"demo-task":{{"branch":"b","dir":"/boxes/demo-task/tree","lastSeen":"{}","status":"waiting"}}}}"#,
+                r#"{{"demo-task":{{"branch":"b","dir":"/boxes/demo-task/tree","lastSeen":"{}"}}}}"#,
+                secs_ago(20)
+            ),
+        )
+        .unwrap();
+        // The box's own turn state, as its hooks write it. It used to be a `status` in the
+        // registry row, which nothing writes and the board no longer reads.
+        fs::create_dir_all(home.join("status")).unwrap();
+        fs::write(
+            home.join("status/demo-task.json"),
+            format!(
+                r#"{{"status":"waiting","ts":"{}","box":"demo-task"}}"#,
                 secs_ago(20)
             ),
         )

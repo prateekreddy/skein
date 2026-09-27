@@ -554,33 +554,29 @@ fn write_decision(path: &std::path::Path, req: &Request) -> Result<(), String> {
     crate::util::write_atomic(path, dir, &body)
 }
 
-/// The install itself, as a script.
+/// `src/package-install.sh`: the one package install, which every caller that installs anything
+/// runs — the fleet's substrate at each launch, this request, a runtime update, a takeover's source
+/// box, and the startup kit and `bootstrap.sh` as byte-for-byte copies, which `fleet::substrate`'s
+/// `every_package_install_runs_the_same_bytes` holds equal.
+pub(crate) const PACKAGE_INSTALL_SH: &str = include_str!("package-install.sh");
+
+/// The install itself, as a script: [`PACKAGE_INSTALL_SH`], then one call to it.
 ///
-/// It reuses `ensure_substrate`'s hard-won discipline rather than a fresh `apt-get install`, because
-/// every line of that discipline was paid for: `update` first (a fresh image's empty index reports a
-/// real package as having "no installation candidate"), the dpkg-lock wait (a sandbox still running
-/// its own first-boot apt refuses a second one), and keeping the log (without it a failure says
-/// "missing" and nothing about the mirror, the lock, or the name).
+/// It prints the tail of apt's or npm's own output on every exit, success or failure, because
+/// that is where the reason is — `install` reads it back through `attempt` (SKEIN-1143).
 pub fn install_script(kind: &str, packages: &[String]) -> String {
     let names = packages
         .iter()
         .map(|p| sh_quote(p))
         .collect::<Vec<_>>()
         .join(" ");
-    if kind == "npm" {
-        return format!(
-            "log=$(mktemp); timeout 300 sudo npm install -g {names} >\"$log\" 2>&1; rc=$?; \
-             tail -n 25 \"$log\"; rm -f \"$log\"; exit $rc"
-        );
-    }
+    let install = if kind == "npm" {
+        "skein_npm_install"
+    } else {
+        "skein_apt_install"
+    };
     format!(
-        "log=$(mktemp); waited=0; \
-         while [ \"$waited\" -lt 120 ]; do \
-           if sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; then \
-             sleep 3; waited=$((waited + 3)); else break; fi; \
-         done; \
-         {{ timeout 180 sudo apt-get update -qq; \
-            timeout 600 sudo apt-get install -y -qq {names}; }} >\"$log\" 2>&1; rc=$?; \
+        "{PACKAGE_INSTALL_SH}\nlog=$(mktemp); {install} \"$log\" {names}; rc=$?; \
          tail -n 25 \"$log\"; rm -f \"$log\"; exit $rc"
     )
 }
@@ -1628,24 +1624,29 @@ mod tests {
     #[test]
     fn every_package_reaches_the_install_command_quoted() {
         let s = install_script("apt", &["libnss3".into(), "g++".into()]);
-        assert!(s.contains("'libnss3'") && s.contains("'g++'"), "{s}");
+        // What runs is the shared install; what this module adds is the call, after it.
+        let call = s
+            .strip_prefix(PACKAGE_INSTALL_SH)
+            .expect("the request runs the shared package install");
         assert!(
-            s.contains("apt-get update"),
-            "the index is refreshed first: {s}"
-        );
-        assert!(
-            s.contains("lock-frontend"),
-            "the dpkg lock is waited out: {s}"
+            call.contains(r#"skein_apt_install "$log" 'libnss3' 'g++';"#),
+            "{call}"
         );
     }
 
     #[test]
     fn npm_installs_globally_or_it_has_not_installed_for_every_box() {
         let s = install_script("npm", &["prettier".into()]);
-        assert!(s.contains("npm install -g"), "{s}");
+        let call = s
+            .strip_prefix(PACKAGE_INSTALL_SH)
+            .expect("the request runs the shared package install");
         assert!(
-            !s.contains("apt-get"),
-            "an npm request must not run apt: {s}"
+            call.contains(r#"skein_npm_install "$log" 'prettier';"#),
+            "{call}"
+        );
+        assert!(
+            !call.contains("apt"),
+            "an npm request must not run apt: {call}"
         );
     }
 

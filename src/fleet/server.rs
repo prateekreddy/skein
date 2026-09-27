@@ -120,6 +120,9 @@ fn supervised(script: &str, body: &str) -> String {
 /// the squat window on every restart.
 const SERVER_DOORWAY_PY: &str = include_str!("../server-doorway.py");
 
+/// How the doorway is found and reloaded, the one copy `start-door.sh` also carries — see its header.
+const DOOR_SH: &str = include_str!("../door.sh");
+
 /// The tmux session the doorway (and through it the server) runs in. Its own socket file rather
 /// than the sandbox's default server, so `fleet-serve` in a test — where the "sandbox" is the
 /// machine itself — cannot collide with a real session, and so the pane is findable by path.
@@ -338,19 +341,19 @@ fn door_holds_port(sandbox: &str, port: u16) -> bool {
 /// port when a reload does not take — and a pid it re-derived some other way would be a second
 /// answer to the question this function already answers.
 pub fn door_pid(sandbox: &str, port: u16) -> Option<u32> {
-    let script = format!(
-        "read -r pid held < {stamp} 2>/dev/null || exit 1; \
-         [ \"$held\" = {port} ] || exit 1; \
-         kill -0 \"$pid\" 2>/dev/null || exit 1; \
-         tr '\\0' '\\n' < /proc/\"$pid\"/cmdline | grep -qxF -- {doorway} || exit 1; \
-         echo \"up $pid\"",
-        stamp = sh_quote(&server_door_stamp_path()),
-        doorway = sh_quote(&server_doorway_path()),
-    );
     let said = own_sandbox(sandbox)
-        .exec(&script, Duration::from_secs(20))
+        .exec(&door_pid_script(port), Duration::from_secs(20))
         .ok()?;
     said.trim().strip_prefix("up ")?.parse().ok()
+}
+
+/// [`door_pid`]'s question as a script: `src/door.sh`'s `skein_stamped_door`, answering `up <pid>`.
+fn door_pid_script(port: u16) -> String {
+    format!(
+        "{DOOR_SH}\npid=$(skein_stamped_door {stamp} {port} {doorway}) || exit 1; echo \"up $pid\"",
+        stamp = sh_quote(&server_door_stamp_path()),
+        doorway = sh_quote(&server_doorway_path()),
+    )
 }
 
 /// Wait, briefly, for the doorway to take the port and say so.
@@ -377,11 +380,15 @@ fn door_settles(sandbox: &str, port: u16) -> bool {
 /// `SIGUSR1` and not `SIGHUP`: tmux sends `SIGHUP` to a pane's processes when its session is
 /// killed, so a doorway that reloaded on `SIGHUP` would re-exec itself out of every stop.
 ///
+/// **Which process is signalled is `src/door.sh`'s `skein_door_reload`** — the doorway the stamp
+/// names, else the one a cockpit supervisor runs — and `start-door.sh` carries the same bytes.
+/// It was `pkill -USR1 -f` on a command-line pattern here while `start-door.sh` used the stamp:
+/// two answers to "which process is the doorway", and the pattern one is a `pkill -f`.
+///
 /// Returns whether a doorway was there to signal — false means there is nothing to reload and the
-/// caller must start one. `pkill` exits 0 only when it signalled something, which is what makes
-/// that answer readable rather than guessed at.
+/// caller must start one.
 pub fn reload_server(sandbox: &str) -> bool {
-    let script = format!("{} 2>/dev/null && echo reloaded", reload_command());
+    let script = format!("{} >/dev/null 2>&1 && echo reloaded", reload_command());
     own_sandbox(sandbox)
         .exec(&script, Duration::from_secs(30))
         .map(|out| out.trim() == "reloaded")
@@ -392,8 +399,12 @@ pub fn reload_server(sandbox: &str) -> bool {
 /// exact command when a reload it sent did not take (SKEIN-1029), rather than a paraphrase of it.
 pub fn reload_command() -> String {
     format!(
-        "pkill -USR1 -f {}",
-        sh_quote(&agent_pkill_pattern(&server_doorway_path()))
+        "{DOOR_SH}\nskein_door_reload {stamp} {port} {doorway} {sock} {old}",
+        stamp = sh_quote(&server_door_stamp_path()),
+        port = server_sandbox_port(),
+        doorway = sh_quote(&server_doorway_path()),
+        sock = sh_quote(&server_tmux_sock()),
+        old = sh_quote(&pre_move_server_tmux_sock()),
     )
 }
 
@@ -1612,5 +1623,215 @@ mod tests {
         .unwrap();
         assert_eq!(*said.lock().unwrap(), vec!["not held".to_string()]);
         assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// **The doorway is found, and reloaded, one way** (SKEIN-1199).
+    ///
+    /// Rust reloaded it with `pkill -USR1 -f` on a command-line pattern while `start-door.sh` sent
+    /// `kill -USR1` to the stamp's pid: two answers to "which process is the doorway". Both now run
+    /// `src/door.sh`. What each assertion catches:
+    /// - a Rust script that stops starting with `door.sh` — a reload re-typed beside it;
+    /// - `start-door.sh`'s copy edited, or `door.sh` edited and not pasted into it;
+    /// - a `SIGUSR1` sent from anywhere else under `src/` or in `bootstrap.sh`, `pkill` included.
+    ///
+    /// That the reload reaches the doorway at all, with and without its stamp, is
+    /// `tests/fleet_move.rs`, against a real doorway.
+    #[test]
+    fn the_doorway_is_found_one_way() {
+        // The scripts name fleet paths, which refuse to resolve in an unpinned test; nothing is
+        // run and nothing is written, so any directory that is not a live fleet will do.
+        let _g = crate::testutil::env_lock();
+        let tmp = crate::testutil::tempdir();
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", tmp.join("fleet"))
+            .set("SKEIN_HOME", tmp.join("home"));
+        for (who, script) in [
+            ("door_pid", door_pid_script(server_sandbox_port())),
+            ("reload_server", reload_command()),
+        ] {
+            assert!(
+                script.starts_with(DOOR_SH),
+                "{who} does not run src/door.sh, so it can pick a different process from start-door.sh"
+            );
+        }
+
+        const BEGIN: &str = "# >>> door.sh";
+        const END: &str = "# <<< door.sh\n";
+        let bootstrap = include_str!("../../bootstrap.sh");
+        assert_eq!(
+            bootstrap.matches(BEGIN).count(),
+            1,
+            "bootstrap.sh must carry exactly one copy of src/door.sh, inside start-door.sh"
+        );
+        let begin = bootstrap.find(BEGIN).unwrap();
+        let body = begin + bootstrap[begin..].find('\n').unwrap() + 1;
+        let end = body
+            + bootstrap[body..]
+                .find(END)
+                .expect("start-door.sh opens its copy of src/door.sh and never closes it");
+        assert!(
+            bootstrap[body..end] == *DOOR_SH,
+            "start-door.sh's copy of src/door.sh differs from the file. Edit src/door.sh and paste \
+             it between the markers, whole."
+        );
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = vec![root.join("bootstrap.sh")];
+        let mut dirs = vec![root.join("src")];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs" || x == "sh") {
+                    files.push(p);
+                }
+            }
+        }
+        assert!(files.len() > 100, "the walk found {} files", files.len());
+        // Spelled in two pieces so this line is not itself one the scan finds.
+        let signal = format!("kill -{}", "USR1");
+        let mut senders = Vec::new();
+        for f in &files {
+            let rel = f.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if rel == "src/door.sh" {
+                continue;
+            }
+            let text = std::fs::read_to_string(f).unwrap();
+            let outside = match (text.find(BEGIN), text.find(END)) {
+                (Some(b), Some(e)) => format!("{}{}", &text[..b], &text[e..]),
+                _ => text,
+            };
+            for line in outside.lines() {
+                let l = line.trim_start();
+                if l.starts_with('#') || l.starts_with("//") {
+                    continue;
+                }
+                if l.contains(&signal) {
+                    senders.push(format!("{rel}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(
+            senders.is_empty(),
+            "the doorway is signalled outside src/door.sh — call skein_door_reload instead:\n{}",
+            senders.join("\n")
+        );
+    }
+
+    /// A stamp is believed only about the doorway it names: the pid must be alive, the port its
+    /// own, AND its command line the doorway's. Run against the real src/door.sh, with the
+    /// supervisor's sockets absent, so the stamp is the only way to a pid.
+    ///
+    /// A pid is a number the kernel hands out again. A doorway killed without clearing its stamp
+    /// leaves one naming whatever process is given that pid next, and SIGUSR1's default action ends
+    /// most processes — so a reload trusting the pid alone kills a stranger.
+    ///
+    /// **What would make this fail:** deleting the command-line check from `skein_stamped_door`
+    /// (in both copies, so the copy test above stays green) — the stranger gets the signal. Or
+    /// deleting the port check — the doorway stamped for another port gets it. The last case is
+    /// the control: the same process, stamped for its own port, IS signalled, so the two refusals
+    /// are not a script that signals nothing.
+    #[test]
+    fn a_stale_stamp_does_not_signal_whatever_now_has_its_pid() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let tmp = crate::testutil::tempdir();
+        let doorway = tmp.join("server-doorway.py");
+        let stamp = tmp.join("server.door");
+        let absent = tmp.join("no-supervisor.tmux");
+        let port = 47917;
+
+        // A process that records SIGUSR1 instead of dying of it. `$0` is `name`, so its command
+        // line holds `name` as one argument: the doorway's path for a doorway, anything else for a
+        // stranger.
+        let spawn = |name: &std::path::Path, marker: &std::path::Path| {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "trap 'touch {m}' USR1; while :; do sleep 0.05; done",
+                    m = crate::util::sh_quote(&marker.to_string_lossy())
+                ))
+                .arg(name)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a stand-in")
+        };
+        let reload = || {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "{DOOR_SH}\nskein_door_reload {} {port} {} {}",
+                    crate::util::sh_quote(&stamp.to_string_lossy()),
+                    crate::util::sh_quote(&doorway.to_string_lossy()),
+                    crate::util::sh_quote(&absent.to_string_lossy()),
+                ))
+                .output()
+                .expect("run src/door.sh")
+        };
+        let signalled = |marker: &std::path::Path| {
+            let until = Instant::now() + Duration::from_millis(600);
+            while Instant::now() < until {
+                if marker.exists() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+
+        let stranger_marker = tmp.join("stranger.usr1");
+        let mut stranger = spawn(&tmp.join("not-the-doorway"), &stranger_marker);
+        let door_marker = tmp.join("doorway.usr1");
+        let mut door = spawn(&doorway, &door_marker);
+        let cases = || -> Result<(), String> {
+            // The stranger: alive, right port, not the doorway.
+            std::fs::write(&stamp, format!("{} {port}\n", stranger.id())).unwrap();
+            let out = reload();
+            if signalled(&stranger_marker) {
+                return Err(
+                    "a stamp naming a live pid whose command line is not the doorway was \
+                            believed, and that process was sent SIGUSR1"
+                        .into(),
+                );
+            }
+            if out.status.success() {
+                return Err(format!(
+                    "skein_door_reload reported a reload with no doorway to reload: {}",
+                    String::from_utf8_lossy(&out.stdout)
+                ));
+            }
+            // The doorway, stamped for a port it does not hold.
+            std::fs::write(&stamp, format!("{} {}\n", door.id(), port + 1)).unwrap();
+            let out = reload();
+            if signalled(&door_marker) || out.status.success() {
+                return Err(
+                    "a stamp for another port was believed, and its doorway was sent \
+                            SIGUSR1"
+                        .into(),
+                );
+            }
+            // The control: the same doorway, stamped for this port.
+            std::fs::write(&stamp, format!("{} {port}\n", door.id())).unwrap();
+            let out = reload();
+            if !signalled(&door_marker) || !out.status.success() {
+                return Err(format!(
+                    "the doorway holding this port by its stamp was not signalled, so the refusals \
+                     above prove nothing: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            Ok(())
+        };
+        let verdict = cases();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        let _ = door.kill();
+        let _ = door.wait();
+        if let Err(why) = verdict {
+            panic!("{why}");
+        }
     }
 }

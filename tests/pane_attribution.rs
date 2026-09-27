@@ -86,16 +86,20 @@ fn the_board_will_not_show_one_boxs_screen_as_another_boxs_turn_state() {
     let reg = root.join("sandboxes.json");
     let rows: Vec<String> = [OWNER, OTHER, LEGACY]
         .iter()
-        // A registry status of `waiting` is the fallback the row shows when the screen half
-        // contributes nothing — so "the misfiling was refused" and "the misfiling was believed"
-        // are two different visible answers, not one answer and a blank.
-        .map(|n| {
-            format!(
-                r#""{n}":{{"branch":"main","dir":"/nowhere","lastSeen":"1","status":"waiting"}}"#
-            )
-        })
+        .map(|n| format!(r#""{n}":{{"branch":"main","dir":"/nowhere","lastSeen":"1"}}"#))
         .collect();
     fs::write(&reg, format!("{{{}}}", rows.join(","))).unwrap();
+    // Each box's own edge says `waiting`, written ten minutes before the screens below. It is what
+    // the row shows when the screen half contributes nothing — so "the misfiling was refused" and
+    // "the misfiling was believed" are two different visible answers, not one answer and a blank.
+    let earlier = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    for n in [OWNER, OTHER, LEGACY] {
+        fs::write(
+            status.join(format!("{n}.json")),
+            serde_json::json!({"status": "waiting", "ts": earlier, "box": n}).to_string(),
+        )
+        .unwrap();
+    }
     pins.set("SKEIN_REGISTRY", &reg);
 
     let mut config = skein::config::load_config();
@@ -142,7 +146,7 @@ fn the_board_will_not_show_one_boxs_screen_as_another_boxs_turn_state() {
     );
 
     // The bug. Same bytes, one field different, and the row must fall back to the edge signal —
-    // `waiting`, from the registry — instead of borrowing the other box's turn.
+    // `waiting`, from the box's own hook — instead of borrowing the other box's turn.
     assert_eq!(
         row(OTHER).state,
         "waiting",

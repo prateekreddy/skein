@@ -25,9 +25,9 @@ use crate::repos::{branch_from_box, launch_spec_agent, launch_spec_branch, repo_
 use crate::runtime::{default_agent, valid_runtime};
 use crate::sbx::{box_liveness, git_branch_for, Liveness};
 use crate::signals::{
-    classify_message, classify_pane, current_status_detail, current_task, fuse_status, hook_health,
-    is_generic_wait, pane_usable, read_pane_raw, screen_health, session_signal, status_edge,
-    title_activity, title_is_fresh, Pause, Screen,
+    classify_message, current_status_detail, current_task, hook_health, is_generic_wait,
+    screen_health, session_signal, title_activity, title_is_fresh, turn_state, Pause, Screen,
+    TurnState,
 };
 use crate::tracking::sync_docs_available;
 use crate::util::{first_line, shorten};
@@ -106,36 +106,22 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // datum, lastSeen is only a fallback when sbx liveness is absent.
             // Turn-state: the level observation of the box's own screen, fused with the hook edges
             // (docs/architecture.md §2.2). With no observation this is exactly the edge signal, so a
-            // box running an older probe behaves as it always did.
-            //
-            // Every reason `screen_health` can give for the screen half not contributing has to be
-            // applied HERE too, or the row says "not reading the screen" in the badge and renders
-            // the screen's verdict in the status anyway. This spelled out one of the three by hand
-            // and so was missing the other two, which is why it is now `pane_usable` — the same
-            // predicate `read_pane` applies, named once so the two cannot drift again:
-            //   · `pane_is_ours` — the filename is a claim about whose screen this is, and until
-            //     the probe wrote the box name into the observation it was one nothing could
-            //     check. A misfiled observation classifies perfectly, which is what makes it bad.
-            //   · `pane_is_readable` — PANE_CONTRACT's own doc says a newer observation "is
-            //     treated as no observation, the board falls back to hook edges exactly as it does
-            //     for a box with no observer". The board disclosed it and then classified it.
-            // The raw observation is kept beside it because `screen_health` needs what was on disk
-            // to say WHICH of the three refused it.
-            let raw_pane = read_pane_raw(&name);
-            let pane = raw_pane.clone().filter(|obs| pane_usable(obs, &name));
-            let level = pane
-                .as_ref()
-                .map(|obs| (classify_pane(&agent, obs), obs.ts));
-            let (fused, blocked_kind, status_from) = fuse_status(status_edge(&name), level.clone());
+            // box running an older probe behaves as it always did. `turn_state` is the one reader:
+            // the session digest and the handoff brief ask it too, so they cannot disagree with this
+            // row about the same box.
+            let TurnState {
+                status: fused,
+                blocked_kind,
+                from: status_from,
+                raw_pane,
+                pane,
+                level,
+            } = turn_state(&name, &agent);
             let sb = Sandbox {
                 branch: branch.clone(),
                 dir: dir.clone(),
                 last_seen: r.map(|x| x.last_seen.clone()).unwrap_or_default(),
-                // the registry's own status remains the transitional fallback for unprobed boxes.
-                status: fused
-                    .or_else(|| r.map(|x| x.status.clone()))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_default(),
+                status: fused.unwrap_or_default(),
             };
             // Liveness through `box_liveness`, never straight off the `sbx ls` row — for a box in
             // the fleet the two disagree, and the row wins in the worst possible way.

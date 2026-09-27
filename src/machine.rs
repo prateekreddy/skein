@@ -12,7 +12,8 @@
 //! mitigated skein listing every sandbox on the host; the rewrite does not list sandboxes, so the
 //! confusion cannot arise." What survives is a different question, asked by a person: *what fleets
 //! are on this machine* — because somebody running more than one needs to see them. Same `sbx ls`
-//! call; different subject, and only one of the two survives.
+//! question; different subject, and only one of the two survives. In the fleet this process cannot
+//! ask it — see [`sandboxes`].
 //!
 //! So a sandbox is reported as a **sandbox**: it has a name and a run state, and it is or is not one
 //! of skein's fleets. It is not a box with an empty branch and no signals, which is what made the
@@ -42,7 +43,12 @@ pub struct Sandbox {
     pub ours: bool,
 }
 
-/// Every sandbox `sbx` knows about, said as sandboxes.
+/// Every sandbox `sbx` knows about, said as sandboxes — **when something can ask `sbx`**.
+///
+/// In the fleet nothing in this process can: [`crate::sbx::fleet_boxes`] answers only through
+/// `$SKEIN_LS_CMD`, so a deployed skein gets `Err` here, carrying the reason `fleet_boxes`
+/// recorded ("skein is running inside the fleet …"), and the route says that rather than listing
+/// nothing. The warden is what can ask the host (`warden/src/sightings.rs`).
 ///
 /// `Err` rather than an empty list when `sbx` cannot be asked. "Nothing else is here" and "I could
 /// not be told" are different answers and a caller renders them differently — collapsing them is how
