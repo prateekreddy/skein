@@ -1418,7 +1418,8 @@
   .away-row .tx { color:var(--dim); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
-  .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
+  .away-row.k-error .ad { background:var(--error); }
+  .away-row.k-ended .ad, .away-row.k-idle .ad, .away-row.k-stale .ad, .away-row.k-gone .ad { background:var(--faint); }
   .set-note { margin:6px 0 0; font-size:11.5px; line-height:1.55; color:var(--faint); }
   .set-note.ready { color:var(--done); }
   .set-note.gap { color:var(--waiting); }

@@ -76,8 +76,10 @@ use std::sync::Mutex;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 29] = [
+const NODE_SUITES: [&str; 30] = [
     "attach",
+    // The away digest's wiring: it reads the server's journal and moves the server's mark.
+    "away",
     "budget",
     // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
     // because the condition — a frame landing after the pump stopped reading, at a client that has

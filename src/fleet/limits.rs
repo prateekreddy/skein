@@ -41,9 +41,20 @@ pub struct MemoryPlan {
     pub reserve: u64,
 }
 
-/// The division above, or `None` when [`Config::fleet_memory`] names no number to divide.
+/// The division above, of the memory this sandbox has ([`sandbox_memory_mib`]), or `None` when
+/// there is no number to divide.
+///
+/// **Measured, not configured** (the owner, 2026-09-27). [`Config::fleet_memory`] is what the next
+/// create asks sbx for; the sandbox running now keeps the size it was made with, and a ceiling
+/// divided from a size it does not have bounds nothing.
+///
+/// **The setting is the fallback, when nothing could be measured**: a sandbox that has not
+/// answered yet, or a `/proc/meminfo` that printed nothing. That is still the size somebody
+/// stated, and the launcher shrinks what it is handed to the `MemTotal` it finds
+/// ([`fleet_limits`]), so a fallback larger than the machine is caught there rather than trusted.
+/// No plan at all would leave every box uncapped, which is the failure this exists to prevent.
 pub fn memory_plan() -> Option<MemoryPlan> {
-    let total = parse_mib(&load_config().fleet_memory)?;
+    let total = sandbox_memory_mib().or_else(|| parse_mib(&load_config().fleet_memory))?;
     // A fixed gigabyte plus 2%, because what this covers is mostly *fixed*: the VM's own services
     // do not grow with the size of the VM, and only the kernel's own structures (page tables,
     // per-cpu areas, slab) scale at all. A flat percentage therefore reserves far too much of a big
@@ -642,6 +653,45 @@ mod tests {
         .unwrap();
         assert!(box_limits().contains("max=4g"), "{}", box_limits());
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Ceilings are shares of the memory the sandbox has, not of the next create's size** (the
+    /// owner, 2026-09-27). A sandbox made at 40g, with Settings now saying 26g for the next one,
+    /// divides 40g: the 26g sandbox does not exist yet.
+    ///
+    /// What would make it fail: `memory_plan` dividing `Config::fleet_memory` again, ignoring
+    /// the measurement (`the plan divided the setting…`); or the fallback gone, so a sandbox that has
+    /// not answered leaves every box uncapped (`nothing measured…`).
+    #[test]
+    fn ceilings_divide_the_memory_the_sandbox_has_not_the_next_creates_size() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+
+        super::super::resources::MEASURED_MEMORY.with(|m| m.set(Some(40 * 1024)));
+        let plan = memory_plan().expect("a plan");
+        assert_eq!(
+            plan.boxes + plan.plumbing + plan.reserve,
+            40 * 1024,
+            "the plan divided the setting (26g) and not the 40g this sandbox has"
+        );
+        assert!(
+            fleet_limits().starts_with(&format!("total={}M,", 40 * 1024)),
+            "the launcher is handed the measured total: {}",
+            fleet_limits()
+        );
+
+        super::super::resources::MEASURED_MEMORY.with(|m| m.set(None));
+        let plan = memory_plan().expect("nothing measured, and the setting still sizes the plan");
+        assert_eq!(plan.boxes + plan.plumbing + plan.reserve, 26 * 1024);
     }
 
     /// The invariant a per-box ceiling never expressed and could not: what everything adds up to.

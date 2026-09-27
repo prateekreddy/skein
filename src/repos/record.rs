@@ -26,8 +26,21 @@ pub struct Repo {
     /// registry entry added for an unrelated reason cannot start costing money.
     #[serde(default)]
     pub read_prs: bool,
-    #[serde(default = "default_agent")]
-    pub agent: String, // runtime adapter id (see `supported_runtimes`)
+    /// The branch a new box of this repo starts from. Empty ⇒ whatever the remote calls its own
+    /// default.
+    ///
+    /// **Per repo** (the owner, 2026-09-27): it used to be one fleet-wide value, honoured only by
+    /// the repos whose remote had that branch. It is still not trusted on its own —
+    /// [`crate::fleet::base_branch`] asks the remote with `ls-remote --symref` and takes this only
+    /// if the remote has it, and `diff::diff_base_refs` leads its ladder with `origin/<value>`.
+    /// What reads the resolver is the clone a box comes up on (`fleet::clone_script`) and
+    /// `reviewbox::open_at`. A merge never reads it: it reads the pull request's own base.
+    #[serde(default)]
+    pub base_branch: String,
+    // No `agent` (the owner, 2026-09-27). A repo's own runtime was copied from the fleet default at
+    // add time, could not be edited afterwards, and outranked the default for every box of the repo.
+    // The runtime is the fleet's default plus a pick per box (`runtime::fleet_default_runtime`). An old
+    // `repos.json` that still carries the key reads fine: serde skips a field it does not know.
     /// The Plane project this repo's work is tracked in — a project URL or a bare uuid, kept
     /// verbatim so the cockpit can link to the board. Per-repo because a project is what an agent
     /// token binds to; empty ⇒ this repo's boxes get a tracker token with no default project, and

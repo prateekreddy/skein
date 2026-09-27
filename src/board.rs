@@ -22,7 +22,7 @@ use crate::fleet::{box_disk_limit, fleet_disk_usage};
 use crate::place::{fleet_sandbox, placed_boxes, shared_record};
 use crate::registry::{all_sandboxes, Sandbox};
 use crate::repos::{branch_from_box, launch_spec_agent, launch_spec_branch, repo_for_box};
-use crate::runtime::{default_agent, valid_runtime};
+use crate::runtime::valid_runtime;
 use crate::sbx::{box_liveness, git_branch_for, Liveness};
 use crate::signals::{
     classify_message, current_status_detail, current_task, hook_health, is_generic_wait,
@@ -83,15 +83,14 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 .unwrap_or_default();
             // The repo this box belongs to (if any), used for grouping + branch fallback.
             let repo = repo_for_box(&name);
-            // Runtime resolution mirrors branch resolution: the launch spec preserves an explicit
-            // per-box override, and the repo is the default. sbx used to lead this list with the
-            // agent that created the box's own sandbox — a box does not have one.
+            // Runtime resolution mirrors branch resolution: the launch spec records the per-box
+            // pick, and the fleet's default is the rest. sbx used to lead this list with the agent
+            // that created the box's own sandbox — a box does not have one.
             let agent = repo
                 .as_ref()
                 .and_then(|rp| launch_spec_agent(rp, &name))
-                .or_else(|| repo.as_ref().map(|rp| rp.agent.clone()))
                 .filter(|a| valid_runtime(a))
-                .unwrap_or_else(default_agent);
+                .unwrap_or_else(crate::runtime::fleet_default_runtime);
             // Branch resolution, most-authoritative first. Lifecycle probes refresh the per-store
             // registry after an in-box checkout. The launch spec is only the creation fallback; the
             // host clone is a different worktree (often on main) and must never override box state.

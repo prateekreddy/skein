@@ -31,8 +31,8 @@ its check in `tests/parity_numbers.rs`.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server/main.rs               # 103  (NOT '.route("' — that gives 90, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 171 unique, 174 occurrences
-grep -c 'function ' src/web/index.html                          # 460
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
+grep -c 'function ' src/web/index.html                          # 462
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -60,9 +60,10 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Signal provenance display**: the half-filled dot, and `hooks only` / `screen lost` /
   `screen unread`. This is the architecture's own level-versus-edge thesis, already shipped.
 - Per-box task line; search and filters; the needs strip.
-- **The away digest** — snapshot on `visibilitychange`, per-box deltas on return (needs a decision,
-  paused for you, finished with line count, back to work, +N lines, started, left the board),
-  priority-sorted, each row clicking through.
+- **The away digest** — the server's journal of state changes since the last time the board was
+  looked at (`/api/away`, marked by `/api/away/seen`), one line per box on where it ended up (needs
+  a decision, waiting for you, hit an error, finished, back to work, left the board),
+  priority-sorted, each row clicking through. It survives a reload and agrees across tabs.
 - Fleet gauges: load, resources, limits. **Per-box load view** (which box is eating CPU, memory,
   disk, ranked) and the per-box resource hover card and disk chip.
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
@@ -346,9 +347,12 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   than costed at nothing — the same rule, one level down.
 - `.env` loading, with a malformed file reported rather than silently truncated.
 - Sync connections and their tokens.
-- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `agent`, `store`
-  and a per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
-  `connections.json`, not `Config`, and save on blur — a different persistence contract.
+- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, `base_branch` (the
+  branch a new box starts from) and `read_prs` (Read ahead), plus `store` and a
+  per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
+  `connections.json`, not `Config`, and save on blur — a different persistence contract. A repo has
+  no runtime of its own: a box runs the fleet's **Default agent** or the one picked for it in the
+  New box dialog (the owner, 2026-09-27); an old `repos.json` that still names one reads fine.
 - **Four vendored asset routes** — xterm, xterm.css, addon-fit and marked served from the binary.
   "The cockpit works with no CDN and no network" is a capability, and these are the only other
   entries in `open_to_all`.
@@ -404,7 +408,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **The `open` scope tag** — badges a box holding the fleet-wide credential.
 - **Terminal scrollback carry-over on reconnect**, with its `── reconnected ──` marker.
 - **Fleet settings**: Docker shares the fleet disk (one disk vs two — "the two disks are also two
-  firewalls"), base branch for PRs, confirm-before-destroy as a *setting*, overwrite-token-on-startup.
+  firewalls"), confirm-before-destroy as a *setting*. The branch a new box starts from was a fleet
+  setting and is now each repo's own, on its card (the owner, 2026-09-27).
 - **The inherit/override grammar** in box settings — absent means inherit, empty means explicitly
   nothing, a value overrides — across tracking, identity, disk and git-scope, each default naming what
   inheriting currently means. And **disk is measured, not enforced**, said in the UI.
@@ -422,12 +427,20 @@ decision rather than an omission.
 
 Each is a decision, with its cost stated in the user's terms.
 
+**A repository no longer picks a runtime, and the Add-repository overlay's agent picker is gone**
+(the owner, 2026-09-27, SKEIN-1207). A runtime is one fleet default (Settings → Boxes → Default
+agent) plus a pick per box in the New box dialog. The cost: a person who wanted every box of one repo
+on Codex and every other repo on Claude now picks Codex for each of that repo's boxes, or makes Codex
+the default and picks Claude for the rest. What it removes is a third place the same choice could be
+made. `skein add --agent` is refused with where the
+choice lives now, and an old `repos.json` naming a runtime still loads.
+
 **Adopt-in-place is removed, and nothing replaced it: a repo is a remote.** This entry used to
 describe a replacement — "a local filesystem path is a valid git remote, so a repo with no server
 still works: skein clones it into the mirror and fetches from your path" — and that replacement was
 never built. It is true of git and false of skein. `registrable_source` (`src/repos/source.rs:28`) requires
 a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
-everything else before it clones anything (`src/repos/add.rs:63`), in the words *"is a path, and skein
+everything else before it clones anything (`src/repos/add.rs:46`), in the words *"is a path, and skein
 registers repos by remote"*.
 
 So the cost is larger than the old entry admitted, and it is stated here rather than in the future

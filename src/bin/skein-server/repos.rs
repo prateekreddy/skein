@@ -17,12 +17,20 @@ pub(super) struct RepoSettingsReq {
     auto_review: Option<bool>,
     /// how far it may go unattended: none | comment | changes | approve
     auto_review_ceiling: Option<String>,
+    /// the branch a new box of this repo starts from; empty = the remote's default
+    base_branch: Option<String>,
 }
 
 pub(super) async fn api_set_repo_settings(
     Path(id): Path<String>,
     Json(req): Json<RepoSettingsReq>,
 ) -> Response {
+    // First, so a branch that cannot be one refuses before anything else is written.
+    if let Some(branch) = &req.base_branch {
+        if let Err(error) = skein::repos::set_base_branch(&id, branch) {
+            return (StatusCode::BAD_REQUEST, error).into_response();
+        }
+    }
     match skein::repos::set_repo_settings(
         &id,
         req.plane_project.as_deref(),
@@ -139,8 +147,6 @@ pub(super) struct AddRepoReq {
     source: String,
     #[serde(default)]
     id: String,
-    #[serde(default)]
-    agent: String,
     /// **Read only so that it can be refused** (SKEIN-535). Kept on the struct rather than deleted
     /// because serde ignores a field it does not know: dropping it would make a request that names
     /// a store succeed while quietly getting skein's own, which is the one outcome worse than the
@@ -183,9 +189,8 @@ pub(super) async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     }
     let res = tokio::task::spawn_blocking(move || {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
-        let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
         // `None`, always: the only way past the refusal above is not to have named a store.
-        skein::repos::add_repo(r.source.trim(), id.as_deref(), agent.as_deref(), None)
+        skein::repos::add_repo(r.source.trim(), id.as_deref(), None)
     })
     .await;
     match res {

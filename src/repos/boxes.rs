@@ -125,7 +125,8 @@ pub fn repin_branch(name: &str, branch: &str) -> Result<(), String> {
         return Err("branch is empty".into());
     }
     let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
-    let agent = launch_spec_agent(&repo, name).unwrap_or_else(|| repo.agent.clone());
+    let agent =
+        launch_spec_agent(&repo, name).unwrap_or_else(crate::runtime::fleet_default_runtime);
     write_launch_spec_for_agent(name, branch, &repo, &agent)
 }
 
@@ -152,8 +153,7 @@ pub fn branch_of(name: &str) -> Option<String> {
 }
 
 /// Runtime configured for a box. Prefer sbx's live record, then the per-box launch spec (which
-/// preserves a New-box override), then the repo default. Unknown/legacy boxes remain Claude for
-/// backwards compatibility.
+/// records the New-box pick), then the fleet's default ([`crate::runtime::fleet_default_runtime`]).
 pub fn agent_for_box(name: &str) -> String {
     // Not for a box in the fleet. Migration leaves the old sandbox stopped but still listed under
     // the box's name, so `sbx ls` answers with a record from before the move — which would outrank
@@ -167,12 +167,9 @@ pub fn agent_for_box(name: &str) -> String {
             return agent;
         }
     }
-    if let Some(repo) = repo_for_box(name) {
-        return launch_spec_agent(&repo, name)
-            .or_else(|| (!repo.agent.is_empty()).then(|| repo.agent.clone()))
-            .unwrap_or_else(default_agent);
-    }
-    default_agent()
+    repo_for_box(name)
+        .and_then(|repo| launch_spec_agent(&repo, name))
+        .unwrap_or_else(crate::runtime::fleet_default_runtime)
 }
 
 #[cfg(test)]
@@ -192,7 +189,6 @@ mod tests {
                 id: "web".into(),
                 source: "s".into(),
                 store: "/s".into(),
-                agent: "claude".into(),
                 plane_project: String::new(),
                 sync_connection: String::new(),
                 review_queue: true,
@@ -204,7 +200,6 @@ mod tests {
                 id: "web-api".into(),
                 source: "s".into(),
                 store: "/s".into(),
-                agent: "claude".into(),
                 plane_project: String::new(),
                 sync_connection: String::new(),
                 review_queue: true,
@@ -223,6 +218,102 @@ mod tests {
         assert!(repo_for_box("other-x").is_none());
     }
 
+    /// **A box nobody picked a runtime for runs the fleet's Default agent, whatever an old repo
+    /// record says** (the owner, 2026-09-27: one fleet default plus a per-box pick).
+    ///
+    /// The record is written as an older skein wrote it, with the repo's own `agent` key, which
+    /// used to be copied from the default at add time and then outrank it for good.
+    ///
+    /// What would make it fail: `Repo` refusing a key it no longer has (`deny_unknown_fields`), so
+    /// an old `repos.json` stops parsing and every repo vanishes (`the old record still reads`); or
+    /// the fallback being the built-in `claude` rather than the setting, which is what the old
+    /// per-repo copy amounted to (`the fleet's default decides`).
+    #[test]
+    fn a_box_with_no_pick_runs_the_fleets_default_agent_not_an_old_repo_copy() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("st").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(
+            home.join("repos.json"),
+            serde_json::json!([{
+                "id": "thing",
+                "source": "https://example.com/thing.git",
+                "store": store.to_string_lossy(),
+                "agent": "claude",
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        crate::testutil::switch_on(|c| c.default_agent = "codex".into());
+
+        assert_eq!(
+            load_repos()
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thing"],
+            "the old record still reads"
+        );
+        let repo = &load_repos()[0];
+        // No pick recorded for this box, so re-pinning it writes whatever it would run.
+        repin_branch("thing-feat-x", "feat-x").unwrap();
+        assert_eq!(
+            launch_spec_agent(repo, "thing-feat-x").as_deref(),
+            Some("codex"),
+            "the fleet's default decides"
+        );
+        // And a pick, once made, is kept: it is the per-box half of the rule.
+        write_launch_spec_for_agent("thing-feat-y", "feat-y", repo, "claude").unwrap();
+        repin_branch("thing-feat-y", "feat-z").unwrap();
+        assert_eq!(
+            launch_spec_agent(repo, "thing-feat-y").as_deref(),
+            Some("claude")
+        );
+    }
+
+    /// **A box runs its own pick, not the fleet's default** (the owner, 2026-09-27: one fleet
+    /// default plus a per-box pick). `agent_for_box` is what every reconnect, resume and transcript
+    /// read asks (`sandbox::attach_argv`, `reopen_agent_session`, `transcript`), so a box created
+    /// as Codex on a Claude fleet has to answer Codex here or it comes back as Claude.
+    ///
+    /// What would make it fail: `agent_for_box` answering the fleet default without reading the
+    /// box's launch spec (planted by the coordinator; every other lib test stayed green).
+    #[test]
+    fn a_box_with_its_own_pick_runs_it_over_the_fleets_default() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = tempdir();
+        let mut env = env_pins();
+        // Both pinned before anything resolves a path (SKEIN-1213), and no `sbx ls` override, so
+        // the live-record branch reads nothing and the launch spec is what answers.
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        env.unset("SKEIN_LS_CMD");
+        let store = home.join("st").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+        save_repos(&[Repo {
+            id: "thing".into(),
+            source: "https://example.com/thing.git".into(),
+            store: store.to_string_lossy().into_owned(),
+            ..Default::default()
+        }])
+        .unwrap();
+        crate::testutil::switch_on(|c| c.default_agent = "claude".into());
+        let repo = &load_repos()[0];
+
+        write_launch_spec_for_agent("thing-picked", "picked", repo, "codex").unwrap();
+        assert_eq!(
+            agent_for_box("thing-picked"),
+            "codex",
+            "a box picked as codex answered the fleet default instead of its own pick"
+        );
+        // The control: with no pick recorded, the fleet's default is what it runs.
+        assert_eq!(agent_for_box("thing-unpicked"), "claude");
+    }
+
     #[test]
     fn repin_branch_rewrites_launch_spec_without_relaunch() {
         let _g = env_lock();
@@ -236,7 +327,6 @@ mod tests {
             id: "thing".into(),
             source: "s".into(),
             store: store.to_string_lossy().to_string(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

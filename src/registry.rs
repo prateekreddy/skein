@@ -341,7 +341,6 @@ mod tests {
             id: "demo".into(),
             source: work.display().to_string(),
             store: store.display().to_string(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

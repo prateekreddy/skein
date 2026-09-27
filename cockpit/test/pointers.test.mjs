@@ -78,10 +78,7 @@ const ELSEWHERE = [
 
 // Wrong pointers in files another lane owns while this was written (SKEIN-1188). Each is theirs to
 // fix; the entry is deleted when they do, and this test fails until it is.
-const PENDING = [
-  // src/bin/skein.rs (`skein doctor`): the "Overwrite token on startup" switch was deleted.
-  "Overwrite token on startup",
-];
+const PENDING = [];
 
 test("every Settings pointer names a pane, and a named place in it exists", () => {
   const known = panes();

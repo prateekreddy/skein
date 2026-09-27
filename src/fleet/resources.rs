@@ -212,18 +212,7 @@ fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
 /// account for, and on a filesystem the boxes do not share the number would be answering about
 /// somebody else's storage.
 pub fn fleet_resources() -> Option<FleetResources> {
-    let sandbox = fleet_sandbox();
-    let fresh = if cfg!(test) {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(30)
-    };
-    let mut resources = RESOURCE_GATE.get(fresh, move || {
-        let out = own_sandbox(&sandbox)
-            .exec(&resource_script(), Duration::from_secs(20))
-            .ok()?;
-        parse_resources(&out)
-    })?;
+    let mut resources = measured()?;
     // The ceilings come from the host's own config, not the guest, so they are always current even
     // when the figures beside them are the last ones that arrived.
     if let Some(plan) = memory_plan() {
@@ -231,6 +220,56 @@ pub fn fleet_resources() -> Option<FleetResources> {
     }
     resources.stale = RESOURCE_GATE.degraded();
     Some(resources)
+}
+
+/// The gated reading itself, before anything is worked out from it — shared by
+/// [`fleet_resources`] and [`sandbox_memory_mib`], so the ceilings and the gauge strip are one
+/// measurement. Split out because [`fleet_resources`] asks [`memory_plan`] for its ceiling, and
+/// [`memory_plan`] asks for this: through [`fleet_resources`] the two would call each other.
+fn measured() -> Option<FleetResources> {
+    let sandbox = fleet_sandbox();
+    let fresh = if cfg!(test) {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(30)
+    };
+    RESOURCE_GATE.get(fresh, move || {
+        let out = own_sandbox(&sandbox)
+            .exec(&resource_script(), Duration::from_secs(20))
+            .ok()?;
+        parse_resources(&out)
+    })
+}
+
+/// The memory this sandbox HAS, in MiB — the `mem_total` the Fleet pane's "This sandbox has" line
+/// draws — or `None` when it could not be read.
+///
+/// **The measured sandbox is the truth** (the owner, 2026-09-27): sbx fixes a sandbox's memory when
+/// it is created, so `Config::fleet_memory` describes the NEXT create, and ceilings divided from it
+/// on a sandbox made at another size bound a machine that does not exist. [`memory_plan`] divides
+/// this instead.
+///
+/// Measured where skein runs, which is inside the sandbox: [`own_sandbox`] adds no hop, so this is
+/// the process reading its own VM's `/proc/meminfo`, the server and a `skein start` alike. Behind
+/// the same 30-second gate as the gauge strip, so a box start costs at most one reading.
+#[cfg(not(test))]
+pub fn sandbox_memory_mib() -> Option<u64> {
+    measured().map(|r| r.mem_total).filter(|mib| *mib > 0)
+}
+
+/// Under test the reading is what the test says it is, and nothing when it says nothing. Measuring
+/// for real would read the memory of whatever machine runs the tests, so every ceiling a test
+/// works out from `fleet_memory` would depend on that machine. Per thread, because each test runs
+/// on its own and one test's sandbox must not size another's.
+#[cfg(test)]
+pub fn sandbox_memory_mib() -> Option<u64> {
+    MEASURED_MEMORY.with(|m| m.get())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MEASURED_MEMORY: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// The one shell [`fleet_resources`] runs, printing `key value` lines.

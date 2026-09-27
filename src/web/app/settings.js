@@ -109,8 +109,8 @@ function setPane(pane) {
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
   // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
   // not — most of Boxes has no override at all, and no other pane has ever had one. Dropped
-  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one now carries its own
-  // `.set-envnote` beside it instead, so the footer says nothing for a pane that has none.
+  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one carries its own
+  // `.set-envnote` beside it instead, filled only while the override is in force (`renderHeld`).
   const hint = document.getElementById("set-hint");
   if (hint) hint.innerHTML = pane === "repos"
     ? "each repo saves as you leave a field — these live in <code>repos.json</code>, not in this form"
@@ -128,17 +128,14 @@ function setPane(pane) {
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
 function openSettings(pane = "repos") {
-  // The host's own numbers, beside the ones being typed. Fetched with the rest so the pane never
-  // renders a size against a blank.
-  loadFleetPlan().then(() => {
-    renderFleetPlanNotes();
-    const el = document.getElementById("set-hostcap");
-    if (!el) return;
-    const host = fleetPlan?.host;
-    el.textContent = host
-      ? `${host.cpus} CPUs · ${gbOf(host.memory_mb)} memory · ${gbOf(host.disk_free_mb)} free on ${host.disk_path}`
-      : "could not be measured";
-  });
+  loadFleetPlan().then(renderFleetPlanNotes);
+  // What this sandbox HAS, measured inside it, above the three fields that are only what the next
+  // create asks for (`sandboxSize`). The same reading the gauge strip draws from.
+  fetch("/api/fleet/resources").then(r => r.status === 200 ? r.json() : null).catch(() => null)
+    .then(r => {
+      const el = document.getElementById("set-sandboxsize");
+      if (el) el.textContent = sandboxSize(r, fmtGb) || "not measured yet — the sandbox has not answered";
+    });
   // Synchronously, from the report the board poll already has. The fetch below re-applies it, but
   // it lands after the dialog is open — and "after the dialog is open" is precisely the window in
   // which a rebuild button that had not yet been hidden would be clickable.
@@ -152,7 +149,6 @@ function openSettings(pane = "repos") {
     if (ghalt && settings.seed_gh_secret === true) ghalt.open = true;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
     document.getElementById("set-agent").value = settings.default_agent || "";
-    document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
@@ -176,6 +172,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-review-model").value = settings.review_model || "";
     // Defaults ON, so `!== false` for the reason `set-prai` gives above.
     document.getElementById("set-boxplugin").checked = settings.box_plugin !== false;
+    renderHeld();
     // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
     // is not on PATH" is the state a checkbox alone can never show.
     fetch("/api/health").then(r => r.json()).then(h => {
@@ -197,6 +194,14 @@ function openSettings(pane = "repos") {
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
   });
+}
+// "held off by" a SKEIN_* variable beside a control, only while that variable is holding it — the server
+// says which (`settings.held`). A control with nothing holding it carries no note at all.
+function renderHeld() {
+  for (const el of settingsModal().querySelectorAll(".set-envnote[data-held]")) {
+    el.innerHTML = heldNote(el.dataset.held, settings.held);
+    el.hidden = !el.innerHTML;
+  }
 }
 // Work tracking. `syncStatus` is host state (which connections exist, and is each one usable?),
 // never a token itself — there is no route that reads one back, by design.
@@ -501,12 +506,23 @@ function renderRepoList() {
       + `<button type="button" class="rhead" aria-expanded="${openRepos.has(r.id)}"><span class="rid">${esc(r.id)}</span>`
       + `<span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>${tags}<span class="rchev">›</span></button>`
       + `<div class="rbody">`
+      // Per repo (the owner, 2026-09-27): it was one fleet-wide field, honoured only by the repos
+      // whose remote happened to have that branch.
+      + repoField(r, "base_branch", "Branch a new box starts from",
+          "blank starts from the remote's own default branch. A branch the remote does not have is ignored, and the box starts from the default",
+          "(the remote's default)")
       + repoField(r, "plane_project", "Plane project", "paste the project URL or its uuid — a box's tracker token binds to it, so its work lands on that board", "https://plane…/projects/<uuid>/issues")
       + repoSelect(r, "sync_connection", "Work tracking",
           conns.length
             ? `which backlog this repo's boxes claim work from — set up under <b>Work tracking</b>${conn && !conn.ready ? `. <b>${esc(conn.label)}</b> isn't usable yet: it needs both a gateway URL and a token` : ""}`
             : "no connections configured yet — add one under <b>Work tracking</b> and it'll appear here",
           [["", "Not tracked"], ...conns.map(c => [c.id, c.ready ? c.label : `${c.label} (not usable yet)`])])
+      // The per-repo half of "may skein read pull requests" (docs/pr-review.md §10, layer 1), on the
+      // card beside the queue it reads from. It had been reachable only from a chip in the review
+      // pane. Posted to its own route (`revSetReadingFor`), which is the one place it is written.
+      + repoSelect(r, "read_prs", "Read ahead",
+          "let skein read this repo's pull requests on its own: the ones waiting on your review and the ones you opened, one unit of the day's budget each. Off, it reads one only when you ask. Needs <b>Read pull requests</b>, the master switch in Settings → Boxes",
+          [["false", "Off"], ["true", "On"]])
       + repoSelect(r, "review_queue", "Review queue",
           "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
           [["true", "On"], ["false", "Off"]])
@@ -557,9 +573,19 @@ function saveRepoField(input) {
   // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
   // than one name because the second such field arrived (`auto_review`) and a comparison that
   // named one would have made the new one fail exactly that way, silently.
-  const BOOL_KEYS = ["review_queue", "auto_review"];
+  const BOOL_KEYS = ["review_queue", "auto_review", "read_prs"];
   const raw = input.value.trim();
   const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;
+  const saved = () => {
+    // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
+    const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
+    if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+  };
+  // Consent to read has its own route and its own writer, shared with the review pane's chip.
+  if (key === "read_prs") {
+    revSetReadingFor(id, value).then(ok => ok ? loadRepos().then(() => { renderRepoList(); saved(); }) : input.focus());
+    return;
+  }
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
@@ -606,7 +632,6 @@ function settingsPayload() {
     seed_gh_secret: document.getElementById("set-seedgh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
     default_agent: document.getElementById("set-agent").value,
-    base_branch: document.getElementById("set-base").value.trim(),
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     fleet_disk: document.getElementById("set-fleetdisk").value.trim(),
@@ -771,8 +796,8 @@ function fillRepoSelect() {
   const cur = nbRepo.value;
   nbRepo.innerHTML = repos.map(r => `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
   if (cur && repos.some(r => r.id === cur)) nbRepo.value = cur;
-  const repo = repos.find(r => r.id === nbRepo.value) || repos[0];
-  const wanted = repo?.agent || settings.default_agent;
+  // The fleet's default, the same for every repo: a repo no longer carries a runtime of its own.
+  const wanted = settings.default_agent;
   if (runtimes.some(runtime => runtime.id === wanted)) nbAgent.value = wanted;
 }
 // The repo id to prefix a new box with: the dialog selection, else the only/first repo, else a
@@ -1171,7 +1196,6 @@ function openAddRepo() {
   arRenderConns();
   loadSync().then(arRenderConns);
   arUpdateDerived();
-  if (runtimes.some(runtime => runtime.id === settings.default_agent)) document.getElementById("ar-agent").value = settings.default_agent;
   document.getElementById("ar-go").textContent = "Add →";
   arModal().classList.add("open");
   setTimeout(() => src.focus(), 0);
@@ -1220,7 +1244,6 @@ function submitAddRepo() {
     arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, "warn");
     return;
   }
-  const agent = document.getElementById("ar-agent").value;
   const go = document.getElementById("ar-go");
   // `add_repo` clones inline with a 300s bound, so this can sit here for minutes on a large repo.
   // A static "Adding…" for four of them is indistinguishable from a hang, and the honest reading of
@@ -1238,7 +1261,7 @@ function submitAddRepo() {
   const settle = () => { clearInterval(tick); go.disabled = false; };
   // No `store`: the route refuses one outright (SKEIN-535), and adopting an existing store is a
   // CLI-only affordance now — `skein add <git-url> --store <path>`.
-  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src, agent }) })
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src }) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       settle();
@@ -1327,13 +1350,13 @@ function addRepoPrompt() { openAddRepo(); }
 // so `fleet_exists` can only answer `Some(true)` about the fleet it is standing in — `exists ===
 // false` stopped being a state the wire could carry, and the dialog stopped being openable.
 //
-// What is left of the plan is prose and numbers the settings pane renders: the host's capacity
-// beside the fleet fields, why sbx could not be asked, and the `sbx` lines to run on the host in
-// place of the rebuild button (`renderFleetPlanNotes`).
+// What is left of the plan is prose the settings pane renders: why sbx could not be asked, and the
+// `sbx` lines to run on the host in place of the rebuild button (`renderFleetPlanNotes`). The
+// host's capacity it carries is not drawn: from inside the sandbox it reads as zeros
+// (`fleet::host_capacity`), and the size the pane shows is the sandbox's own, measured.
 let fleetPlan = null;
 async function loadFleetPlan() {
-  // In demo mode there is no host to measure, and a capacity line about a machine that does not
-  // exist is worse than a blank one.
+  // In demo mode there is no host to ask the lines for.
   if (DEMO) { fleetPlan = null; return null; }
   try {
     const r = await fetch("/api/fleet/plan");
@@ -1341,7 +1364,6 @@ async function loadFleetPlan() {
   } catch { fleetPlan = null; }
   return fleetPlan;
 }
-const gbOf = mb => mb ? `${Math.round(mb / 1024)} GB` : "unknown";
 
 function launchBox(branch) {
   branch = (branch||"").trim(); if (!branch) return;   // keep slashes — they belong to the branch

@@ -365,5 +365,5 @@ false, so on the plain reading the PR would leave the train one pass before its 
 review keeps the pull request when the answer is no, because asking somebody a question does not
 stop being your question when you dislike the answer.
 
-The kill switch is unchanged: workflows as a whole run only with `pr_workflows` on (Settings, or
-`$SKEIN_PR_WORKFLOWS=on`), and `flag`/stops halt a single PR until a person clears it.
+The kill switch is unchanged: workflows as a whole run only with `pr_workflows` on in Settings and
+not held off by `$SKEIN_PR_WORKFLOWS=off`, and `flag`/stops halt a single PR until a person clears it.

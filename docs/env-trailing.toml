@@ -13,9 +13,6 @@ vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 [leaks."src/ai/narrate::narrate_uses_stubbed_claude_and_respects_kill_switch"]
 vars = ["SKEIN_AI", "SKEIN_CLAUDE_BIN", "SKEIN_HOME", "SKEIN_REGISTRY"]
 
-[leaks."src/ai/switches::what_wants_the_model_names_every_switch_that_does"]
-vars = ["SKEIN_AI", "SKEIN_REVIEW_AI"]
-
 [leaks."src/ai/unread::a_model_call_that_fails_says_which_failure_it_was"]
 vars = ["SKEIN_HOME"]
 
@@ -50,9 +47,6 @@ vars = ["SKEIN_HOME"]
 vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
 
 [leaks."src/diff::git_range_handles_repo_and_nonrepo"]
-vars = ["SKEIN_HOME"]
-
-[leaks."src/diff::the_diff_base_ladder_prefers_the_configured_remote_branch"]
 vars = ["SKEIN_HOME"]
 
 [leaks."src/digest::read_journal_prefers_store_over_host_dir"]

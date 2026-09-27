@@ -151,7 +151,6 @@ fn repo(id: &str) -> skein::repos::Repo {
         read_prs: false,
         source: "https://github.com/acme/thing.git".into(),
         store: "/nonexistent".into(),
-        agent: "claude".into(),
         plane_project: String::new(),
         sync_connection: String::new(),
         review_queue: true,

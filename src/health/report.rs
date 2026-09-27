@@ -543,7 +543,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
             "no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \
              One build can reach the VM's memory, and with no swap the kernel picks a victim by \
              badness rather than by blame",
-            "skein resize 26g   (or Settings → Fleet → Fleet memory; it rebuilds the sandbox and carries \
+            "skein resize 26g   (or Settings → Fleet → Memory, at the next create; it rebuilds the sandbox and carries \
              every box's work across)",
         )
         .destroys(),
@@ -937,7 +937,6 @@ mod tests {
             id: "orphan".into(),
             source: "https://github.com/a/b".into(),
             store: home.join("gone/.claude").to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

@@ -931,7 +931,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
@@ -1133,7 +1133,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
@@ -1283,7 +1283,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         let (base, _heard) = github(200);
         env.set("SKEIN_GITHUB_API", &base);
 
@@ -1356,7 +1356,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         let (base, _heard) = github(409);
         env.set("SKEIN_GITHUB_API", &base);
 

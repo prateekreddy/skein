@@ -49,7 +49,7 @@ pub fn recent_commits(name: &str) -> Vec<String> {
     // Fall back to host-side git — useful for direct-mode boxes where the host dir IS the
     // box's working tree (box-diff.sh may not have run yet on a fresh box).
     if let Some(dir) = lookup_dir(name) {
-        if let Some(range) = git_range(&dir) {
+        if let Some(range) = git_range(name, &dir) {
             let r = format!("{range}..HEAD");
             let mut command = Command::new("git");
             command.args(["-C", &dir, "log", "--format=%s", "-n", "20", &r]);

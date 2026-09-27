@@ -1219,7 +1219,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         env.set("HOME", home);
 
         let log = home.join("attempts");
@@ -1329,7 +1329,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
 
         // A stub `claude` that answers with the HOME it was given.
         let bin = home.join("claude");
@@ -1444,7 +1444,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
 
         // A stub that answers with the auth source it was handed.
         let bin = home.join("claude");
@@ -1513,7 +1513,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
 
         // A stub `claude` that answers with the scratch directory it was handed.
         let bin = home.join("claude");
@@ -1655,7 +1655,7 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
         env.set("SKEIN_FLEET_ROOT", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         // Unset, so the box branch is reachable; the local binary is named through the seam.
         env::remove_var("SKEIN_CLAUDE_BIN");
         crate::testutil::placed("review-box");

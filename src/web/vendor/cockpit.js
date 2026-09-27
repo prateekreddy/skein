@@ -219,6 +219,58 @@ function noteFor(b, group) {
   return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
 }
 
+// ── away.mjs ──
+// What the away digest lists, from the server's journal of state changes (`GET /api/away`).
+//
+// The journal is the server's, and so is the mark it is read from (`src/stream.rs`): a delta kept in
+// a tab's memory dies on reload and disagrees with every other tab, which is why the page no longer
+// computes one of its own. What is left here is only the reading — several moments for one box
+// become one line about where it ended up.
+//
+// `groupOf` is an argument rather than an import because this module is concatenated into the page
+// beside `groups.mjs` (see cockpit/build.mjs), and a leaf takes its dependencies as arguments.
+
+// What a box that ENDED UP in each group did while you were away, and how high it sorts: what needs
+// you first, then what finished, then what merely moved.
+const SAID = {
+  attn: [0, "now needs a decision"],
+  waiting: [0, "is waiting for your next instruction"],
+  error: [0, "hit an error"],
+  done: [1, "finished"],
+  working: [3, "went back to work"],
+  ended: [2, "ended"],
+  idle: [3, "went idle"],
+  stale: [2, "stopped reporting"],
+};
+
+function awayItems(moments, boxes, groupOf) {
+  const now = new Map((boxes || []).map(b => [b.name, b]));
+  // Oldest first, as the server keeps them, so the first moment holds where a box started from and
+  // the last where it is now.
+  const by = new Map();
+  for (const m of moments || []) {
+    const seen = by.get(m.name);
+    if (seen) seen.to = m.to;
+    else by.set(m.name, { from: m.from, to: m.to });
+  }
+  const items = [];
+  for (const [name, { from, to }] of by) {
+    const box = now.get(name);
+    if (!box) {
+      items.push({ pri: 2, name, kind: "gone", text: "left the board (destroyed or merged)" });
+      continue;
+    }
+    const g = groupOf(to);
+    // A box that went somewhere and came back is where you left it, and saying otherwise is noise.
+    if (g === groupOf(from)) continue;
+    const [pri, text] = SAID[g] || SAID.stale;
+    const headline = box.headline ? ` — ${box.headline}` : "";
+    items.push({ pri, name, kind: g, text: text + (pri === 0 ? headline : "") });
+  }
+  items.sort((a, b) => a.pri - b.pri || a.name.localeCompare(b.name));
+  return items;
+}
+
 // ── change.mjs ──
 // The change view's decisions (§11.1): what a module's note is worth showing, and what a signal's
 // count is allowed to say.
@@ -362,6 +414,26 @@ function boardRows(all, rawFilter, foreign) {
   return text ? eligible.filter(b => matchesFilter(b, text)) : eligible;
 }
 
+// ── fleetsize.mjs ──
+// The size the fleet sandbox has, measured, for the Fleet pane (the owner, 2026-09-27, R1).
+//
+// The measured sandbox is the truth. `fleet_memory`, `fleet_cpus` and `fleet_disk` in config.json
+// are only what the NEXT create asks sbx for, and sbx fixes a sandbox's size when it is made, so the
+// two differ on any fleet whose settings were edited since. The pane shows both, each labelled for
+// what it is, and nothing here compares them: a difference is what editing the next size means, not
+// a fault.
+//
+// `r` is `/api/fleet/resources` (`FleetResources`, MiB throughout); `fmt` is the page's mebibyte
+// formatter, passed in because these modules are concatenated without imports.
+function sandboxSize(r, fmt) {
+  if (!r || !r.mem_total) return "";
+  return [
+    r.cpus ? `${r.cpus} CPUs` : "",
+    `${fmt(r.mem_total)} memory`,
+    r.disk_total ? `${fmt(r.disk_total)} disk` : "",
+  ].filter(Boolean).join(" · ");
+}
+
 // ── groups.mjs ──
 // Which group a box's state belongs to, and what "owed to you" means.
 //
@@ -392,6 +464,23 @@ const owedIn = list => list.filter(b => NEEDS_YOU.includes(groupOf(b.state)));
 
 const labelOf = s =>
   ["needs-input", "needs-decision", "blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
+
+// ── held.mjs ──
+// The note beside a Settings control that an environment variable is holding right now.
+//
+// Said only while it is true (the owner, 2026-09-27). `held` is the server's answer — which fields
+// a variable holds, and which variable (`config::held_by_env`) — so a note that is always there,
+// true or not, cannot come back: nothing held, nothing said.
+//
+// A switch can only be held OFF, because an environment variable may only turn things off
+// (`config::env_holds_off`); the review model is a value, so any value set holds it.
+const SWITCHES = ["pr_workflows", "ai_enrichment", "review_summaries", "box_plugin"];
+
+function heldNote(field, held) {
+  const name = held && held[field];
+  if (!name || !/^[A-Z0-9_]+$/.test(name)) return "";
+  return `${SWITCHES.includes(field) ? "held off by" : "held by"} <code>$${name}</code>`;
+}
 
 // ── keys.mjs ──
 // Which global shortcut a keystroke is, if any. The decision only — acting on it is the caller's,

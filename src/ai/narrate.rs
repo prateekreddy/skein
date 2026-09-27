@@ -178,7 +178,7 @@ mod tests {
         env::remove_var("SKEIN_AI"); // kill switch: off → no spend, None
         assert_eq!(narrate("thing-n"), None);
 
-        env::set_var("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         assert_eq!(
             narrate("thing-n").as_deref(),
             Some("It wired up the parser.")

@@ -458,6 +458,7 @@ function connect() {
       for (const b of (tick.boxes || [])) receivedAt.set(b.name, now);
       render(tick.boxes || []);
       for (const b of (tick.boxes || [])) retryWaiting("wait-box", b.name);
+      awayOnFirstBoard();
       return;
     }
     const by = new Map(boxes.map(b => [b.name, b]));

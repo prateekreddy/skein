@@ -12,6 +12,9 @@ pub(super) async fn api_workflow_file() -> Response {
     let flows = skein::workflow::load();
     Json(serde_json::json!({
         "enabled": skein::prwork::enabled(),
+        // The variable holding the switch off, if one is: the pause button cannot resume past it,
+        // and the panel says so rather than offering a press that changes nothing.
+        "held": skein::config::held_by_env().get("pr_workflows"),
         // A file that will not parse is reported as itself. The editor refuses to save over it,
         // because a person who has not seen what is there cannot mean to replace it.
         "error": flows.as_ref().err().cloned().unwrap_or_default(),
@@ -116,6 +119,7 @@ pub(super) async fn api_workflows(Path(id): Path<String>) -> Response {
             queue,
             serde_json::json!({
                 "enabled": skein::prwork::enabled(),
+                "held": skein::config::held_by_env().get("pr_workflows"),
                 "read_prs": repo.read_prs,
                 // `editor_shape`, NOT a hand-built copy: this route had the second of the two hand
                 // serializers that silently dropped `serial` — see workflow::editor_shape.

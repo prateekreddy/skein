@@ -47,11 +47,11 @@ named with a slug (`<repo>-feat-auth`, since sbx names can't contain `/`) while 
 checks out the real `feat/auth` branch.
 
 **Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): whether an unscoped box falls
-back to the account token (`seed_gh_secret`, read by `box_credential`), the default agent, the base
-branch for PRs (`base_branch`), and confirm-before-Destroy. Where the table below
-lists a matching `$SKEIN_*` variable, the environment still overrides the saved value for headless
-use; the base branch has none and is the saved value alone, which `fleet::base_branch` then checks
-against what the remote actually has (`git ls-remote --symref`) before using it.
+back to the account token (`seed_gh_secret`, read by `box_credential`), the default agent, and
+confirm-before-Destroy. Where the table below lists a matching `$SKEIN_*` variable, that variable
+can hold the matching switch off, and never on. The branch a new box starts from is per repo, on its
+card (`base_branch` in `repos.json`), and `fleet::base_branch` checks it against what the remote
+actually has (`git ls-remote --symref`) before using it.
 
 **Git auth inside boxes.** HTTPS remotes push with no setup. A scoped box reaches GitHub **direct**
 (the GitHub hosts are in `NO_PROXY`), so git presents the per-repo token skein placed and GitHub
@@ -223,7 +223,7 @@ sandbox is created — sbx has no resize — so changing either destroys and rec
 
 Two ceilings means guessing the split in advance and rebuilding when the guess is wrong. **Docker
 shares the fleet disk** (Settings) removes the guess: dockerd's data root moves to `<fleet-root>/.docker`,
-on the boxes' own filesystem, and `Fleet disk` sizes the lot. One generous number instead of two exact
+on the boxes' own filesystem, and the next create's disk (Settings → Fleet) sizes the lot. One generous number instead of two exact
 ones.
 
 The trade is real and worth stating. Two disks are also two firewalls — a runaway `docker build`
@@ -450,8 +450,8 @@ can just run `skein` / `skein-server` with no prefix:
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | none: inside the fleet `sbx ls` cannot be asked, and boxes are read from their placement records (`src/sbx.rs`) |
 | `SKEIN_MERGE_METHOD` | merge strategy for a merge skein makes through GitHub's API: `squash`, `merge` or `rebase` | `squash` |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}`/`{runtime}` substituted | runtime adapter's native headless resume |
-| `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
-| `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
+| `SKEIN_AI` | `off` holds AI enrichment off whatever Settings says; an environment variable can only turn a switch off, so `on` does nothing (Settings → Boxes switches it on) | unset |
+| `SKEIN_AI_MODEL` | model for every AI call, over Settings' **Review model** | `claude-haiku-4-5` |
 | `SKEIN_CLAUDE_BIN` | path to the `claude` CLI (for AI calls) | `claude` |
 
 > The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only

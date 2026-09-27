@@ -222,7 +222,7 @@ pub fn base_branch(repo: &Repo) -> String {
 
     // What this repo's base might be called. Only the configured one now — the user's own answer.
     let mut wanted: Vec<String> = Vec::new();
-    let configured = load_config().base_branch.trim().to_string();
+    let configured = repo.base_branch.trim().to_string();
     if !configured.is_empty() {
         wanted.push(configured);
     }
@@ -513,7 +513,6 @@ mod tests {
             id: "bridge".into(),
             source: origin.to_string_lossy().into_owned(),
             store: String::new(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
@@ -521,20 +520,18 @@ mod tests {
             ..Default::default()
         };
 
-        let mut config = load_config();
-        config.base_branch = String::new();
-        save_config(&config).unwrap();
         assert_eq!(
             base_branch(&repo),
             "master",
             "the remote's own default, never an assumed `main`"
         );
 
-        // A configured base the repo does not have must not be taken at face value: it is one
-        // setting shared by every repo, so trusting it blindly reintroduces the same failure.
-        let mut config = load_config();
-        config.base_branch = "main".into();
-        save_config(&config).unwrap();
+        // A configured base the repo does not have must not be taken at face value: a typo, or a
+        // branch since deleted, would otherwise make every new box fail to clone.
+        let repo = Repo {
+            base_branch: "main".into(),
+            ..repo
+        };
         assert_eq!(
             base_branch(&repo),
             "master",
@@ -544,9 +541,10 @@ mod tests {
         // A configured base the repo DOES have wins, ahead of the remote's default — once the
         // mirror has been told the branch exists.
         git(&origin, &["branch", "develop"]);
-        let mut config = load_config();
-        config.base_branch = "develop".into();
-        save_config(&config).unwrap();
+        let repo = Repo {
+            base_branch: "develop".into(),
+            ..repo
+        };
         // The staleness this question now has, stated rather than discovered: the answer comes from
         // the mirror, so a branch created since its last fetch is one the mirror has never heard of.
         // `start_box_inner` fetches before it asks, which is why this is a property and not a bug.

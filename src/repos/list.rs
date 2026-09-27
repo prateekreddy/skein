@@ -398,6 +398,70 @@ pub fn set_repo_settings(
     })
 }
 
+/// Set the branch a new box of this repo starts from ([`Repo::base_branch`]). Empty clears it,
+/// which means the remote's own default.
+///
+/// Refused only for what cannot be a branch at all. Whether the remote HAS it is asked where it
+/// matters, at the clone ([`crate::fleet::base_branch`]), because a branch can be created or
+/// deleted after this is saved and a check made now would be stale by then.
+pub fn set_base_branch(id: &str, branch: &str) -> Result<Repo, String> {
+    let branch = branch.trim();
+    if !branch.is_empty() && !could_be_a_branch(branch) {
+        return Err(format!(
+            "{branch:?} cannot be a branch name — leave it blank to start from the remote's default"
+        ));
+    }
+    update_repos(|repos| {
+        let repo = repos
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("no repo with id {id:?}"))?;
+        repo.base_branch = branch.to_string();
+        Ok(repo.clone())
+    })
+}
+
+/// What `git check-ref-format --branch` would refuse, for the cases a person can type: spaces,
+/// `..`, the characters git reserves, a leading `-` that `git` would read as an option.
+fn could_be_a_branch(branch: &str) -> bool {
+    !branch.starts_with('-')
+        && !branch.starts_with('/')
+        && !branch.ends_with('/')
+        && !branch.ends_with('.')
+        && !branch.ends_with(".lock")
+        && !branch.contains("..")
+        && !branch.contains("@{")
+        && !branch
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
+}
+
+/// Copy an older `config.json`'s fleet-wide base branch into every repo that names none, then
+/// clear it there (the owner, 2026-09-27: the branch a new box starts from is per repo).
+///
+/// Repos first, config second, so an interruption between the two leaves the old value in place
+/// and the next run finishes the job: a repo that already has one is never overwritten, so running
+/// this twice changes nothing the first run did. Returns how many repos took the value.
+pub fn adopt_fleet_base_branch() -> Result<usize, String> {
+    let fleet = load_config().base_branch.trim().to_string();
+    if fleet.is_empty() {
+        return Ok(0);
+    }
+    let adopted = update_repos(|repos| {
+        let mut adopted = 0;
+        for repo in repos.iter_mut().filter(|r| r.base_branch.trim().is_empty()) {
+            repo.base_branch = fleet.clone();
+            adopted += 1;
+        }
+        Ok(adopted)
+    })?;
+    update_config(|c| {
+        c.base_branch.clear();
+        Ok(())
+    })?;
+    Ok(adopted)
+}
+
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
 /// clone or store on disk (they may hold unpushed work / a clone-mode box's only copy) — only skein's
 /// registration is removed; report the paths so the user can delete them deliberately.
@@ -435,6 +499,88 @@ pub fn set_peer_messaging(id: &str, on: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
+
+    /// **An older config's fleet-wide base branch becomes each repo's own, once, and never over a
+    /// repo that already names one** (the owner, 2026-09-27).
+    ///
+    /// What would make it fail: the copy overwriting a repo's own value (`trunk` would become
+    /// `develop`); the config value left in place, so Settings and the repo card both claim it
+    /// (`the fleet-wide value is gone`); or a second run doing anything (`twice is once`).
+    #[test]
+    fn the_fleet_base_branch_moves_onto_each_repo_that_has_none() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        fs::write(home.join("config.json"), r#"{"base_branch":"develop"}"#).unwrap();
+        fs::write(
+            home.join("repos.json"),
+            serde_json::json!([
+                { "id": "plain", "source": "https://example.com/plain.git", "store": "/s", "agent": "claude" },
+                { "id": "own", "source": "https://example.com/own.git", "store": "/s", "base_branch": "trunk" },
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let bases = || {
+            load_repos()
+                .into_iter()
+                .map(|r| (r.id, r.base_branch))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(adopt_fleet_base_branch(), Ok(1));
+        assert_eq!(
+            bases(),
+            [
+                ("plain".into(), "develop".into()),
+                ("own".into(), "trunk".into())
+            ],
+            "each repo with none takes it, and one with its own keeps it"
+        );
+        let config = fs::read_to_string(home.join("config.json")).unwrap();
+        assert!(
+            !config.contains("base_branch"),
+            "the fleet-wide value is gone: {config}"
+        );
+
+        assert_eq!(adopt_fleet_base_branch(), Ok(0), "twice is once");
+        assert_eq!(bases()[0].1, "develop");
+    }
+
+    /// **The card's field takes a branch, clears to the remote's default, and refuses what cannot
+    /// be a branch** before writing anything.
+    ///
+    /// What would make it fail: a space or a leading `-` stored and later handed to
+    /// `git ls-remote`/`git clone` (`refused`); or empty refused rather than clearing.
+    #[test]
+    fn a_repos_base_branch_is_set_cleared_and_refused_when_it_cannot_be_one() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        save_repos(&[Repo {
+            id: "thing".into(),
+            source: "https://example.com/thing.git".into(),
+            store: "/s".into(),
+            ..Default::default()
+        }])
+        .unwrap();
+
+        assert_eq!(
+            set_base_branch("thing", " feat/x ").unwrap().base_branch,
+            "feat/x"
+        );
+        for bad in ["has space", "-x", "a..b", "x~1"] {
+            assert!(set_base_branch("thing", bad).is_err(), "refused: {bad:?}");
+        }
+        assert_eq!(
+            load_repos()[0].base_branch,
+            "feat/x",
+            "a refusal wrote nothing"
+        );
+        assert_eq!(set_base_branch("thing", "").unwrap().base_branch, "");
+    }
 
     /// **A pull request may be governed by its own trigger set** — `docs/pr-review.md` §10 says the
     /// triggers are "overridable per pull request", and until now only the workflow assignment was.
@@ -525,7 +671,6 @@ mod tests {
                                 id: format!("{who}{n}"),
                                 source: String::new(),
                                 store: String::new(),
-                                agent: "claude".into(),
                                 plane_project: String::new(),
                                 sync_connection: String::new(),
                                 review_queue: true,
@@ -687,7 +832,6 @@ mod tests {
             id: "web".into(),
             source: "/src/web".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
