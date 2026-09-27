@@ -889,7 +889,7 @@ the reason: the input-validation one-liners guarding `pub(crate)` writers, whose
 `src/files.rs:67`, `src/files.rs:74`, `src/files.rs:263`, `src/files.rs:315`. For the name guards
 in `src/fleet/` — `src/fleet/declared.rs:27`, `src/fleet/declared.rs:62`,
 `src/fleet/declared.rs:145`, `src/fleet/declared.rs:154`, `src/fleet/disk.rs:394`,
-`src/fleet/create.rs:797`, `src/fleet/start.rs:547`, `src/fleet/install.rs:291` and
+`src/fleet/create.rs:797`, `src/fleet/start.rs:547`, `src/fleet/install.rs:240` and
 `src/fleet/server.rs:140` — **cannot tell**: the callers are in-crate and were not all traced.
 
 That list is derived, not carried (SKEIN-877). This prints those nine and `src/fleet/resize.rs:204`,

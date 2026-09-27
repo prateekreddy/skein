@@ -1182,7 +1182,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: could not pin SSH host keys in {name} ({e}); pushing over SSH from it will fail host key verification\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/install.rs:291"]
+["src/fleet/install.rs:240"]
 line = "return Err(format!(\"invalid session name {session:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 

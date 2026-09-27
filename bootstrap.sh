@@ -11,10 +11,9 @@
 # wrapper script and no toolchain (SKEIN-312). `sbx exec` reads this on stdin, which is why it is a
 # script a person can read before they run it rather than a pipe into a shell.
 #
-# It is also **the one implementation of the build**. Fleet creation runs this same file with
-# SKEIN_BOOTSTRAP_STOP_AFTER=build, and the cockpit's Update button runs all of it, so an upgrade
-# from the cockpit and a first install cannot come out differently — a second copy in Rust would be
-# right on the day it was written.
+# It is also **the one implementation of the build**. The cockpit's Update button runs all of this
+# same file (`fleet::build_script_for_update`), so an upgrade from the cockpit and a first install
+# cannot come out differently — a second copy in Rust would be right on the day it was written.
 #
 # ## Why the toolchain is not the sandbox's own
 #
@@ -61,9 +60,9 @@ url="${SKEIN_SOURCE_URL:-https://github.com/prateekreddy/skein.git}"
 # clone (SKEIN-461). Set SKEIN_SOURCE_REF to build a branch, tag or sha instead.
 ref="${SKEIN_SOURCE_REF:-}"
 
-# `build` stops after the binary is installed and the revision printed — how fleet creation
-# (`fleet::build_server_in_sandbox`) reuses this file without restarting anything. Empty means go
-# all the way to a serving fleet, which is what a hand run and the cockpit's Update button both do.
+# `build` stops after the binary is installed and the revision printed, restarting nothing — for a
+# person who wants the binary and not the restart, and for this file's own tests. Empty means go all
+# the way to a serving fleet, which is what a hand run and the cockpit's Update button both do.
 stop_after="${SKEIN_BOOTSTRAP_STOP_AFTER:-}"
 
 # Who started this, so a message can say how to start it again. `update` is the cockpit's Update
@@ -423,9 +422,9 @@ declared_cpus="${SKEIN_FLEET_CPUS:-}"
 # Three sources, most specific first, because "state it" must not mean "state it again every time".
 #
 # `fleet-size` is what a previous run of THIS gate recorded after checking it, so it is a decision
-# that was already made and verified — which is what makes an upgrade silent. `build_script` re-runs
-# this file to upgrade a fleet and passes no size, so without this every upgrade would be refused
-# for a question that was answered at install.
+# that was already made and verified — which is what makes an upgrade silent. The Update button
+# (`build_script_for_update`) re-runs this file to upgrade a fleet and passes no size, so without
+# this every upgrade would be refused for a question that was answered at install.
 #
 # It is still checked against the sandbox below, so a recorded number does not become permission to
 # skip the check: a fleet rebuilt at a different size is caught on its next run rather than carrying

@@ -9,8 +9,8 @@
 //! to nothing**. A person found out they were behind by updating and noticing the string changed.
 //!
 //! The doing already existed: `bootstrap.sh` fetches, builds and installs, and
-//! [`crate::fleet::build_server_in_sandbox`] runs those exact bytes with
-//! `SKEIN_BOOTSTRAP_STOP_AFTER=build`. What was missing was the telling.
+//! [`crate::fleet::build_script_for_update`] is those exact bytes. What was missing was the
+//! telling.
 //!
 //! # Three revisions, because two of them are usually the same and the third is the question
 //!

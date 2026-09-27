@@ -220,57 +220,6 @@ pub fn skein_source_ref() -> String {
         .unwrap_or_default()
 }
 
-/// Build skein-server **in the sandbox**, from the sandbox's own checkout, and install it.
-///
-/// This is SKEIN-312's default path: the host holds one single-use file and never a toolchain, so
-/// the machine that runs the server is the machine that builds it. Minutes on a cold build, and
-/// that cost is accepted — what runs is what was published.
-///
-/// **Three placements carry the whole security argument**, and each is a path rather than a check:
-///
-///   * the checkout at [`skein_source_path`] and the toolchain at [`skein_toolchain_path`], both
-///     under the fleet root's `.skein`, which the launcher binds **read-only** into every box;
-///   * `CARGO_HOME`/`RUSTUP_HOME` pointed at that toolchain rather than the sandbox's own, which
-///     `share_paths` hands every box read-write (architecture §9.2);
-///   * the binary renamed into place at [`server_path`] rather than written over — a `cat >` onto a
-///     running ELF fails `ETXTBSY`, which is why an install renames into place rather than writing.
-///
-/// `--locked` because a build that silently resolved a different dependency tree than the one the
-/// revision pins is not "what was published"; it is whatever crates.io looked like this morning.
-pub fn build_server_in_sandbox(sandbox: &str) -> Result<String, String> {
-    // Long, because it is a cold Rust build on a fresh sandbox: rustup, the registry, and every
-    // dependency. A timeout short enough to feel "safe" here is a timeout that fails the install it
-    // is meant to protect, while the sandbox does exactly what it was asked to.
-    own_sandbox(sandbox)
-        .exec(&build_script(), Duration::from_secs(45 * 60))
-        .map(|out| out.trim().to_string())
-        .map_err(|e| format!("building skein in {sandbox}: {e}"))
-}
-
-/// The build, as the shell the sandbox runs — which is [`BOOTSTRAP_SH`] and not a second copy of
-/// it.
-///
-/// **One implementation, two entry points.** A person installing skein downloads `bootstrap.sh` and
-/// hands it to `sbx exec` (SKEIN-449); the cockpit upgrading itself runs the same bytes with
-/// `SKEIN_BOOTSTRAP_STOP_AFTER=build`, which stops after the binary is installed and the revision
-/// printed. This used to be a Rust transcription of those steps, and a transcription of a build is
-/// right on the day it is written: the two would have drifted at the first change to either, and
-/// the way that failure presents is an upgrade producing a different binary from an install.
-///
-/// The paths are passed as environment rather than interpolated, because the script must run with
-/// no skein to ask — it is the first thing that runs on a fresh sandbox.
-/// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` asserts the shell derives the
-/// same paths this module does, by running it.
-fn build_script() -> String {
-    build_script_stopping("SKEIN_BOOTSTRAP_STOP_AFTER=build\nexport SKEIN_BOOTSTRAP_STOP_AFTER\n")
-}
-
-/// ALL of `bootstrap.sh`, for [`crate::update`] (SKEIN-1031; `update::run_script` says why). Both
-/// are names for the one assembler below, not copies of it.
-pub fn build_script_for_update() -> String {
-    build_script_stopping("")
-}
-
 /// Stop the detached session named `session` and the process group it runs — nothing else — for
 /// the Update pane's Cancel (SKEIN-1037). `Ok` once the session is gone, whether this stopped it or
 /// it had already ended.
@@ -307,9 +256,26 @@ pub fn stop_detached(sandbox: &str, session: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
-fn build_script_stopping(stop: &str) -> String {
+/// ALL of `bootstrap.sh`, for [`crate::update`] (SKEIN-1031; `update::run_script` says why), with
+/// skein's own values for what it reads from the environment ahead of it.
+///
+/// **One implementation of the build.** A person installing skein downloads `bootstrap.sh` and
+/// hands it to `sbx exec` (SKEIN-449); the cockpit upgrading itself runs the same bytes. This used
+/// to be a Rust transcription of those steps, and a transcription of a build is right on the day it
+/// is written: the two would have drifted at the first change to either, and the way that failure
+/// presents is an upgrade producing a different binary from an install.
+///
+/// The paths are passed as environment rather than interpolated, because the script must run with
+/// no skein to ask — it is the first thing that runs on a fresh sandbox.
+/// `a_bootstrap_run_by_hand_puts_everything_where_skein_looks_for_it` asserts the shell derives the
+/// same paths this module does, by running it.
+///
+/// There was a second caller that stopped it at the build, for fleet creation. Nothing called it and
+/// it went (SKEIN-1201); `SKEIN_BOOTSTRAP_STOP_AFTER=build` is still `bootstrap.sh`'s own, for a hand
+/// run and for its tests.
+pub fn build_script_for_update() -> String {
     format!(
-        "{exports}\n{stop}{BOOTSTRAP_SH}",
+        "{exports}\n{BOOTSTRAP_SH}",
         exports = bootstrap_env()
             .iter()
             .map(|(k, v)| format!("{k}={}\nexport {k}", sh_quote(v)))
