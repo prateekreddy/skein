@@ -56,13 +56,63 @@ pub use sweep::*;
 ///
 /// **Off unless it is switched on.** Every other default in skein leans toward showing you more;
 /// this one leans the other way, because the thing being defaulted is not a reading but a merge.
-/// `$SKEIN_PR_WORKFLOWS=on|off` overrides, so it can be turned off from the command line that
-/// starts the server — no cockpit, no config edit, on a fleet that is doing something you want
-/// stopped now.
+/// `$SKEIN_PR_WORKFLOWS=off` holds it off from the command line that starts the server — no
+/// cockpit, no config edit, on a fleet that is doing something you want stopped now. It can only
+/// hold it off: `=on` does not beat the pause button ([`crate::config::env_holds_off`]).
 pub fn enabled() -> bool {
-    match std::env::var("SKEIN_PR_WORKFLOWS").ok().as_deref() {
-        Some("on" | "1" | "true" | "yes") => true,
-        Some("off" | "0" | "false" | "no") => false,
-        _ => crate::config::load_config().pr_workflows,
+    crate::config::load_config().pr_workflows && !crate::config::env_holds_off("SKEIN_PR_WORKFLOWS")
+}
+
+#[cfg(test)]
+mod switch_tests {
+    /// **`$SKEIN_PR_WORKFLOWS=on` does not beat the pause button** (the owner, 2026-09-27: an
+    /// environment variable may only turn things off). The pause posts `{pr_workflows: false}`,
+    /// which the Settings route merges into `config.json` with `update_config`; this does the same
+    /// and reads back what `GET /api/workflows` answers, `enabled()`.
+    ///
+    /// What would make it fail: `enabled()` reading `=on` as a yes again, which is the bug — the
+    /// button wrote false, the env read back true, the toast said "workflows resumed" and merges
+    /// carried on. And `held_by_env` naming the variable while it holds nothing, or not naming it
+    /// once `=off` does.
+    #[test]
+    fn a_yes_in_the_environment_does_not_beat_the_pause() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home).set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
+        assert!(
+            super::enabled(),
+            "switched on in Settings, and nothing holds it off"
+        );
+
+        // The pause, as the review panel sends it.
+        crate::config::update_config(|c| {
+            c.pr_workflows = false;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !super::enabled(),
+            "$SKEIN_PR_WORKFLOWS=on beat the pause: the person switched workflows off and they run"
+        );
+        assert_eq!(
+            crate::config::held_by_env().get("pr_workflows"),
+            None,
+            "a yes holds nothing, so Settings must not say it is held"
+        );
+
+        // And the one thing the variable is for: holding a switched-on fleet off.
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
+        env.set("SKEIN_PR_WORKFLOWS", "off");
+        assert!(
+            !super::enabled(),
+            "$SKEIN_PR_WORKFLOWS=off no longer stops the fleet"
+        );
+        assert_eq!(
+            crate::config::held_by_env().get("pr_workflows"),
+            Some(&"SKEIN_PR_WORKFLOWS"),
+            "held off by the environment, and Settings is not told which variable"
+        );
     }
 }

@@ -658,7 +658,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never crosses at all
         fs::write(
             home.join("config.json"),
@@ -959,7 +959,7 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
         env.set("SKEIN_FLEET_ROOT", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         // Unset, and that is what makes the box branch reachable at all.
         env::remove_var("SKEIN_CLAUDE_BIN");
         fs::write(

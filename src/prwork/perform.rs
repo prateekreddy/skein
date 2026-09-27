@@ -235,7 +235,8 @@ pub fn perform(
     // consequences. A caller that forgot to check would be a bug that merges pull requests.
     if !enabled() {
         return Outcome::Stopped(
-            "workflows are switched off for this fleet (Settings, or $SKEIN_PR_WORKFLOWS=on)"
+            "workflows are off for this fleet: switched off in Settings, or held off by \
+             $SKEIN_PR_WORKFLOWS=off"
                 .into(),
         );
     }
@@ -951,7 +952,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         let (base, heard) = github(409);
         env.set("SKEIN_GITHUB_API", &base);
 
@@ -1008,7 +1009,7 @@ mod tests {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
 
         // The documented train's first two steps, and its `matches` — docs/pr-workflow.md, "The
         // train, written down".
@@ -1157,7 +1158,8 @@ mod tests {
     /// Switch the workflow engine on in a home of this test's own.
     fn a_fleet_where_workflows_run(home: &std::path::Path) -> crate::testutil::EnvPins {
         let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", home).set("SKEIN_PR_WORKFLOWS", "on");
+        env.set("SKEIN_HOME", home);
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env
     }
 
@@ -1921,7 +1923,11 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = a_fleet_where_workflows_run(home);
         env.unset("GH_TOKEN").unset("GITHUB_TOKEN");
-        std::fs::write(home.join("config.json"), br#"{"review_identity":"app"}"#).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            br#"{"review_identity":"app","pr_workflows":true}"#,
+        )
+        .unwrap();
         assert!(
             crate::config::load_config().reviews_as_app(),
             "the fixture did not switch reviews to the App, so this proves nothing about it"
@@ -2100,7 +2106,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         a_merge_train(home);
 
         let looped = crate::repos::Repo {

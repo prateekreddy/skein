@@ -248,8 +248,25 @@ pub(super) async fn api_sync_refresh(
 }
 
 /// Read skein's app settings (the cockpit's toggles).
-pub(super) async fn api_settings() -> Json<skein::config::Config> {
-    Json(skein::config::load_config())
+pub(super) async fn api_settings() -> Json<serde_json::Value> {
+    Json(shown(&skein::config::load_config()))
+}
+
+/// The settings as the page reads them: the file, plus `held` — which of its fields an environment
+/// variable is holding right now, and which variable ([`skein::config::held_by_env`]). The page
+/// says "held by `$SKEIN_X`" beside exactly those, and nothing beside the rest.
+///
+/// `held` is not a setting and is never written: the save merges into a `Config`, which has no
+/// such field, so a page that posts it back loses nothing and keeps nothing.
+fn shown(c: &skein::config::Config) -> serde_json::Value {
+    let mut v = serde_json::to_value(c).unwrap_or_default();
+    if let Some(map) = v.as_object_mut() {
+        map.insert(
+            "held".into(),
+            serde_json::json!(skein::config::held_by_env()),
+        );
+    }
+    v
 }
 
 /// Update skein's app settings — MERGED onto what is stored, never replacing it.
@@ -287,7 +304,7 @@ pub(super) async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Re
         Err(_) => skein::config::Config::default(),
     };
     match saved.map(|_| ()) {
-        Ok(()) => Json(c).into_response(),
+        Ok(()) => Json(shown(&c)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }

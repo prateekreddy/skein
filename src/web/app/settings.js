@@ -109,8 +109,8 @@ function setPane(pane) {
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
   // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
   // not — most of Boxes has no override at all, and no other pane has ever had one. Dropped
-  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one now carries its own
-  // `.set-envnote` beside it instead, so the footer says nothing for a pane that has none.
+  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one carries its own
+  // `.set-envnote` beside it instead, filled only while the override is in force (`renderHeld`).
   const hint = document.getElementById("set-hint");
   if (hint) hint.innerHTML = pane === "repos"
     ? "each repo saves as you leave a field — these live in <code>repos.json</code>, not in this form"
@@ -176,6 +176,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-review-model").value = settings.review_model || "";
     // Defaults ON, so `!== false` for the reason `set-prai` gives above.
     document.getElementById("set-boxplugin").checked = settings.box_plugin !== false;
+    renderHeld();
     // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
     // is not on PATH" is the state a checkbox alone can never show.
     fetch("/api/health").then(r => r.json()).then(h => {
@@ -197,6 +198,14 @@ function openSettings(pane = "repos") {
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
   });
+}
+// "held off by `$SKEIN_X`" beside a control, only while that variable is holding it — the server
+// says which (`settings.held`). A control with nothing holding it carries no note at all.
+function renderHeld() {
+  for (const el of settingsModal().querySelectorAll(".set-envnote[data-held]")) {
+    el.innerHTML = heldNote(el.dataset.held, settings.held);
+    el.hidden = !el.innerHTML;
+  }
 }
 // Work tracking. `syncStatus` is host state (which connections exist, and is each one usable?),
 // never a token itself — there is no route that reads one back, by design.

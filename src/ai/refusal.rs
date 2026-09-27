@@ -444,7 +444,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         env.set("HOME", home);
         forget_refusal();
 

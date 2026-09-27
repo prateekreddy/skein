@@ -15,6 +15,9 @@ let revTrainOpen = new Set();   // "repo#number" whose journal timeline is unfol
 // pause/resume, or from the per-repo payloads as they land. null = never heard. The pause button
 // paints from this, never from its own click.
 let revFlowsOn = null;
+// The variable holding the fleet's switch off, when one is (`$SKEIN_PR_WORKFLOWS=off`). Resume
+// cannot get past it, so the panel names it instead of offering the press.
+let revFlowsHeld = null;
 
 // Is the switch known to be off? Read from what is already on hand, never a request of its own:
 // the train banner asks this on every counts poll.
@@ -39,7 +42,10 @@ function revTrainToggle(on) {
     .then(r => r.json())
     .then(d => {
       revFlowsOn = !!d.enabled;
-      toast(revFlowsOn ? "workflows resumed" : "workflows paused — nothing will act");
+      revFlowsHeld = d.held || null;
+      toast(revFlowsOn ? "workflows resumed"
+        : on && revFlowsHeld ? `still paused: $${revFlowsHeld}=off holds it — remove it where skein-server starts`
+        : "workflows paused — nothing will act");
       loadWorkflows();          // the per-repo payloads carry `enabled` too; keep them agreeing
       renderReview();
     })
@@ -166,8 +172,10 @@ function revTrainHtml() {
   return `<div class="revtrain${paused ? " off" : ""}">
     <div class="revtrain-state">
       <span>merge train — ${paused ? "paused" : "running"}</span>
-      <button type="button" class="revchip${paused ? " go" : ""}" onclick="revTrainToggle(${paused})">${paused ? "resume" : "pause"}</button>
-      ${paused ? `<span class="revtrain-off">paused — nothing will act</span>` : ""}
+      ${paused && revFlowsHeld
+        ? `<span class="revtrain-off">held off by <code>$${esc(revFlowsHeld)}</code> — nothing will act</span>`
+        : `<button type="button" class="revchip${paused ? " go" : ""}" onclick="revTrainToggle(${paused})">${paused ? "resume" : "pause"}</button>
+      ${paused ? `<span class="revtrain-off">paused — nothing will act</span>` : ""}`}
     </div>
     <div class="revtrain-body">${sections.join("")}</div>
   </div>`;

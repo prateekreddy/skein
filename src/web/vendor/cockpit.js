@@ -445,6 +445,23 @@ const owedIn = list => list.filter(b => NEEDS_YOU.includes(groupOf(b.state)));
 const labelOf = s =>
   ["needs-input", "needs-decision", "blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
 
+// ── held.mjs ──
+// The note beside a Settings control that an environment variable is holding right now.
+//
+// Said only while it is true (the owner, 2026-09-27). `held` is the server's answer — which fields
+// a variable holds, and which variable (`config::held_by_env`) — so a note that is always there,
+// true or not, cannot come back: nothing held, nothing said.
+//
+// A switch can only be held OFF, because an environment variable may only turn things off
+// (`config::env_holds_off`); the review model is a value, so any value set holds it.
+const SWITCHES = ["pr_workflows", "ai_enrichment", "review_summaries", "box_plugin"];
+
+function heldNote(field, held) {
+  const name = held && held[field];
+  if (!name || !/^[A-Z0-9_]+$/.test(name)) return "";
+  return `${SWITCHES.includes(field) ? "held off by" : "held by"} <code>$${name}</code>`;
+}
+
 // ── keys.mjs ──
 // Which global shortcut a keystroke is, if any. The decision only — acting on it is the caller's,
 // because moving the selection and opening a terminal need a DOM and this does not.

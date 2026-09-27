@@ -630,31 +630,34 @@ await check("the pane doesn't pretend Save applies to repo cards", async () => {
   await page.click('.set-navi[data-pane="repos"]');
   await settle(250);
 });
-await check("an env note names only the Boxes fields SKEIN_* really overrides (SKEIN-1141)", async () => {
-  // Boxes is the only pane with a real server-side override, and it names exactly the four fields
-  // `ai::ai_enabled`, `ai::summaries_enabled`, `runtime::box_plugin_on` and `review::asking::review_model`
-  // let an env var win over. The blanket footer used to say this of every pane, true or not; now a
-  // qualifying field carries its own note and nothing else claims one.
+await check("an env note is shown beside a Boxes field only while its SKEIN_* variable holds it", async () => {
+  // Boxes is the only pane with a real server-side override: the four fields `ai::ai_enabled`,
+  // `ai::summaries_enabled`, `runtime::box_plugin_on` and `review::asking::review_model` let an env
+  // var hold. Each carries a note slot in its own row, and the slot says something only while the
+  // server reports that variable holding it (`held` in /api/settings, the owner's rule of
+  // 2026-09-27). The note used to say "$SKEIN_AI overrides this" whether or not it was set.
   await page.click('.set-navi[data-pane="boxes"]');
   await settle(300);
   const boxesHint = await text("#set-hint");
   if (boxesHint !== "") throw new Error(`Boxes has no pane-level override to announce, got "${boxesHint}"`);
-  const notes = await page.$$eval('.set-pane[data-pane="boxes"] .set-envnote', els => els.map(e => e.textContent.trim()));
-  const want = [
-    "$SKEIN_AI overrides this",
-    "$SKEIN_REVIEW_AI overrides this",
-    "$SKEIN_BOX_PLUGIN overrides this",
-    "$SKEIN_REVIEW_MODEL overrides this",
-  ];
-  for (const w of want) if (!notes.includes(w)) throw new Error(`missing env note "${w}" on Boxes — got ${JSON.stringify(notes)}`);
-  if (notes.length !== want.length)
-    throw new Error(`Boxes shows ${notes.length} env notes, expected exactly ${want.length}: ${JSON.stringify(notes)}`);
-  // Each note has to actually be seen beside its field, not merely sit in the DOM.
-  for (const id of ["set-ai", "set-prai", "set-boxplugin", "set-review-model"]) {
-    const field = await mustSee(`#${id}`, `the ${id} control`);
-    const note = field.locator("xpath=ancestor::label[1]").locator(".set-envnote");
-    if (!(await note.count())) throw new Error(`#${id} has no .set-envnote in its own row`);
+  const held = await page.evaluate(() => fetch("/api/settings").then(r => r.json()).then(s => s.held));
+  if (!held || typeof held !== "object") throw new Error(`/api/settings says nothing about what is held: ${JSON.stringify(held)}`);
+  const slots = { "set-ai": "ai_enrichment", "set-prai": "review_summaries", "set-boxplugin": "box_plugin", "set-review-model": "review_model" };
+  for (const [id, field] of Object.entries(slots)) {
+    const control = await mustSee(`#${id}`, `the ${id} control`);
+    const note = control.locator("xpath=ancestor::label[1]").locator(`.set-envnote[data-held="${field}"]`);
+    // Fails if the slot moves out of its control's row, or the page stops giving it one.
+    if ((await note.count()) !== 1) throw new Error(`#${id} has no held note slot for ${field} in its own row`);
+    // Fails if the note is drawn while nothing holds the field, or not drawn while something does.
+    const shown = await note.isVisible();
+    if (shown !== !!held[field]) throw new Error(`#${id}: note ${shown ? "shown" : "hidden"} but the server says held=${JSON.stringify(held[field] ?? null)}`);
+    // And says nothing, not merely nothing visible: an always-there note is the thing this replaced.
+    const said = (await note.textContent()).trim();
+    if (!held[field] && said) throw new Error(`#${id}: nothing holds ${field}, but its note says "${said}"`);
+    if (held[field] && !said.includes("$" + held[field])) throw new Error(`#${id}: held by $${held[field]}, but its note says "${said}"`);
   }
+  const all = await page.$$('.set-pane[data-pane="boxes"] .set-envnote');
+  if (all.length !== 4) throw new Error(`Boxes has ${all.length} env note slots, expected exactly 4`);
   // A pane with no overridden field — Fleet has none — shows no hint and no env note at all.
   await page.click('.set-navi[data-pane="fleet"]');
   await settle(300);

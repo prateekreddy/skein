@@ -2621,7 +2621,7 @@ mod tests {
         );
         env::remove_var("SKEIN_REPO");
 
-        env::set_var("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         let out = resume_batch(&["box-route".to_string(), "box-decide".to_string()]);
         assert_eq!(out.resumed, vec!["box-route".to_string()]); // ROUTINE → continued
         assert_eq!(out.held, vec!["box-decide".to_string()]); // DECISION → held for the human

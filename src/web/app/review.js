@@ -1430,7 +1430,7 @@ function loadWorkflows() {
         if (!revHeld) return;
         // The payload names the fleet switch too; keeping `revFlowsOn` on the freshest answer is
         // what lets the train panel and banner say "paused" without a request of their own.
-        if (w.enabled !== undefined) revFlowsOn = !!w.enabled;
+        if (w.enabled !== undefined) { revFlowsOn = !!w.enabled; revFlowsHeld = w.held || null; }
         revFlows.set(id, w);
         renderReview();
         // This payload is where `read_prs` arrives, and the pump reads nothing in a repo whose

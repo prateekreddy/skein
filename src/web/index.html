@@ -1951,12 +1951,12 @@
             <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="set-envnote"><code>$SKEIN_AI</code> overrides this</span><span class="desc">Rationed Haiku calls on your Claude subscription (no API key) summarise boxes with no journal, and hold back a "proceed?" that is really a decision. <details><summary>why it is off by default</summary>spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</details></span></span><input type="checkbox" id="set-ai" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="set-envnote" data-held="ai_enrichment" hidden></span><span class="desc">Rationed Haiku calls on your Claude subscription (no API key) summarise boxes with no journal, and hold back a "proceed?" that is really a decision. <details><summary>why it is off by default</summary>spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</details></span></span><input type="checkbox" id="set-ai" class="switch"></label>
             <p class="set-note" id="set-ainote"></p>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Read pull requests</span><span class="set-envnote"><code>$SKEIN_REVIEW_AI</code> overrides this</span><span class="desc">Summarise each PR in the review queue, so most of it can be read from the row. <details><summary>why this one is on</summary>It spends on the opposite terms to AI enrichment above, which is why the defaults differ. Enrichment runs unasked over a board that already tells you what you need. A summary is only ever produced for a PR <b>already in your queue</b>, at most <b>once per head commit</b>, and cached — and without it the queue cannot do the job it exists for, which is to spare you reading thirty pull requests a day yourself. Turning it off is a supported state, not a broken one: every PR then reads <i>not summarised</i> and keeps your full attention. skein only ever lowers a PR's depth by having actually read it.</details></span></span><input type="checkbox" id="set-prai" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Read pull requests</span><span class="set-envnote" data-held="review_summaries" hidden></span><span class="desc">Summarise each PR in the review queue, so most of it can be read from the row. <details><summary>why this one is on</summary>It spends on the opposite terms to AI enrichment above, which is why the defaults differ. Enrichment runs unasked over a board that already tells you what you need. A summary is only ever produced for a PR <b>already in your queue</b>, at most <b>once per head commit</b>, and cached — and without it the queue cannot do the job it exists for, which is to spare you reading thirty pull requests a day yourself. Turning it off is a supported state, not a broken one: every PR then reads <i>not summarised</i> and keeps your full attention. skein only ever lowers a PR's depth by having actually read it.</details></span></span><input type="checkbox" id="set-prai" class="switch"></label>
             <!-- The box plugin, fleet-wide (SKEIN-1058). Words approved by the owner on SKEIN-1057, verbatim. -->
-            <label class="set-row"><span class="set-txt"><span class="set-title">skein in every agent's session</span><span class="set-envnote"><code>$SKEIN_BOX_PLUGIN</code> overrides this</span><span class="desc">Lets skein hold one command when a box is short of disk, memory or processes, and gives agents skein's own tools: their box's resources and largest processes, asking you a question, and requesting a package or a repo write. Off, agents get neither. Package and write requests still work from the shell, and a question for you has no other way in. A running agent keeps what it started with until its next session. <details><summary>what it does not do</summary>It never stops anything. The kernel's limits hold whether this is on or off. It is loaded from skein's own read-only build, so every box has the same one and no box can change or remove it. It is fleet-wide on purpose; there is no per-box setting.</details></span></span><input type="checkbox" id="set-boxplugin" class="switch"></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Review model</span><span class="set-envnote"><code>$SKEIN_REVIEW_MODEL</code> overrides this</span><span class="desc">Which model reads and reviews pull requests — summaries, questions, drafted comments and the actual review. Empty keeps each call's own default: summaries on the cheap model, everything that writes on the stronger one.</span></span><input type="text" id="set-review-model" list="set-review-models" placeholder="skein's default" spellcheck="false"><datalist id="set-review-models"></datalist></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">skein in every agent's session</span><span class="set-envnote" data-held="box_plugin" hidden></span><span class="desc">Lets skein hold one command when a box is short of disk, memory or processes, and gives agents skein's own tools: their box's resources and largest processes, asking you a question, and requesting a package or a repo write. Off, agents get neither. Package and write requests still work from the shell, and a question for you has no other way in. A running agent keeps what it started with until its next session. <details><summary>what it does not do</summary>It never stops anything. The kernel's limits hold whether this is on or off. It is loaded from skein's own read-only build, so every box has the same one and no box can change or remove it. It is fleet-wide on purpose; there is no per-box setting.</details></span></span><input type="checkbox" id="set-boxplugin" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Review model</span><span class="set-envnote" data-held="review_model" hidden></span><span class="desc">Which model reads and reviews pull requests — summaries, questions, drafted comments and the actual review. Empty keeps each call's own default: summaries on the cheap model, everything that writes on the stronger one.</span></span><input type="text" id="set-review-model" list="set-review-models" placeholder="skein's default" spellcheck="false"><datalist id="set-review-models"></datalist></label>
           </section>
           <section class="set-pane" data-pane="tracking">
             <p class="set-note" id="set-syncnote"></p>
@@ -4662,7 +4662,7 @@ function loadWorkflows() {
         if (!revHeld) return;
         // The payload names the fleet switch too; keeping `revFlowsOn` on the freshest answer is
         // what lets the train panel and banner say "paused" without a request of their own.
-        if (w.enabled !== undefined) revFlowsOn = !!w.enabled;
+        if (w.enabled !== undefined) { revFlowsOn = !!w.enabled; revFlowsHeld = w.held || null; }
         revFlows.set(id, w);
         renderReview();
         // This payload is where `read_prs` arrives, and the pump reads nothing in a repo whose
@@ -5026,6 +5026,9 @@ let revTrainOpen = new Set();   // "repo#number" whose journal timeline is unfol
 // pause/resume, or from the per-repo payloads as they land. null = never heard. The pause button
 // paints from this, never from its own click.
 let revFlowsOn = null;
+// The variable holding the fleet's switch off, when one is (`$SKEIN_PR_WORKFLOWS=off`). Resume
+// cannot get past it, so the panel names it instead of offering the press.
+let revFlowsHeld = null;
 
 // Is the switch known to be off? Read from what is already on hand, never a request of its own:
 // the train banner asks this on every counts poll.
@@ -5050,7 +5053,10 @@ function revTrainToggle(on) {
     .then(r => r.json())
     .then(d => {
       revFlowsOn = !!d.enabled;
-      toast(revFlowsOn ? "workflows resumed" : "workflows paused — nothing will act");
+      revFlowsHeld = d.held || null;
+      toast(revFlowsOn ? "workflows resumed"
+        : on && revFlowsHeld ? `still paused: $${revFlowsHeld}=off holds it — remove it where skein-server starts`
+        : "workflows paused — nothing will act");
       loadWorkflows();          // the per-repo payloads carry `enabled` too; keep them agreeing
       renderReview();
     })
@@ -5177,8 +5183,10 @@ function revTrainHtml() {
   return `<div class="revtrain${paused ? " off" : ""}">
     <div class="revtrain-state">
       <span>merge train — ${paused ? "paused" : "running"}</span>
-      <button type="button" class="revchip${paused ? " go" : ""}" onclick="revTrainToggle(${paused})">${paused ? "resume" : "pause"}</button>
-      ${paused ? `<span class="revtrain-off">paused — nothing will act</span>` : ""}
+      ${paused && revFlowsHeld
+        ? `<span class="revtrain-off">held off by <code>$${esc(revFlowsHeld)}</code> — nothing will act</span>`
+        : `<button type="button" class="revchip${paused ? " go" : ""}" onclick="revTrainToggle(${paused})">${paused ? "resume" : "pause"}</button>
+      ${paused ? `<span class="revtrain-off">paused — nothing will act</span>` : ""}`}
     </div>
     <div class="revtrain-body">${sections.join("")}</div>
   </div>`;
@@ -9961,8 +9969,8 @@ function setPane(pane) {
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
   // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
   // not — most of Boxes has no override at all, and no other pane has ever had one. Dropped
-  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one now carries its own
-  // `.set-envnote` beside it instead, so the footer says nothing for a pane that has none.
+  // (SKEIN-1141, owner's decision 2026-09-24); a field that really has one carries its own
+  // `.set-envnote` beside it instead, filled only while the override is in force (`renderHeld`).
   const hint = document.getElementById("set-hint");
   if (hint) hint.innerHTML = pane === "repos"
     ? "each repo saves as you leave a field — these live in <code>repos.json</code>, not in this form"
@@ -10028,6 +10036,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-review-model").value = settings.review_model || "";
     // Defaults ON, so `!== false` for the reason `set-prai` gives above.
     document.getElementById("set-boxplugin").checked = settings.box_plugin !== false;
+    renderHeld();
     // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
     // is not on PATH" is the state a checkbox alone can never show.
     fetch("/api/health").then(r => r.json()).then(h => {
@@ -10049,6 +10058,14 @@ function openSettings(pane = "repos") {
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
   });
+}
+// "held off by `$SKEIN_X`" beside a control, only while that variable is holding it — the server
+// says which (`settings.held`). A control with nothing holding it carries no note at all.
+function renderHeld() {
+  for (const el of settingsModal().querySelectorAll(".set-envnote[data-held]")) {
+    el.innerHTML = heldNote(el.dataset.held, settings.held);
+    el.hidden = !el.innerHTML;
+  }
 }
 // Work tracking. `syncStatus` is host state (which connections exist, and is each one usable?),
 // never a token itself — there is no route that reads one back, by design.

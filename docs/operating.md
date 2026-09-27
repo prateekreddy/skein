@@ -452,8 +452,8 @@ can just run `skein` / `skein-server` with no prefix:
 | `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; a test seam, like `SKEIN_STOP_CMD` | none (`destroy_command`, `src/sandbox.rs`) |
 | `SKEIN_MERGE_METHOD` | merge strategy for a merge skein makes through GitHub's API: `squash`, `merge` or `rebase` | `squash` |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}`/`{runtime}` substituted | runtime adapter's native headless resume |
-| `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
-| `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
+| `SKEIN_AI` | `off` holds AI enrichment off whatever Settings says; an environment variable can only turn a switch off, so `on` does nothing (Settings → Boxes switches it on) | unset |
+| `SKEIN_AI_MODEL` | model for every AI call, over Settings' **Review model** | `claude-haiku-4-5` |
 | `SKEIN_CLAUDE_BIN` | path to the `claude` CLI (for AI calls) | `claude` |
 
 > The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only

@@ -169,8 +169,8 @@ pub struct Config {
     /// summary for a box with no journal, and a conservative safety gate on **Continue N**.
     ///
     /// Off by default because skein runs inside a box where `claude` is logged in, so these calls
-    /// share the fleet's rate-limit window. `$SKEIN_AI=on|off` overrides. Lazy and cached per
-    /// turn-end when on — never a per-tick sweep. See [`crate::ai`].
+    /// share the fleet's rate-limit window. `$SKEIN_AI=off` holds it off, and nothing in the
+    /// environment can switch it on ([`env_holds_off`]). Lazy and cached per turn-end when on — never a per-tick sweep. See [`crate::ai`].
     #[serde(default)]
     pub ai_enrichment: bool,
     /// Read pull requests in the review queue, and answer questions about them.
@@ -182,7 +182,7 @@ pub struct Config {
     /// queue does not do the job it exists for: reading thirty PRs a day yourself is the thing being
     /// replaced.
     ///
-    /// `$SKEIN_REVIEW_AI=on|off` overrides. Off is not a broken state — every PR simply reads
+    /// `$SKEIN_REVIEW_AI=off` holds it off ([`env_holds_off`]). Off is not a broken state — every PR simply reads
     /// "not summarised" and stays at full attention. See [`crate::review`].
     #[serde(default = "default_true")]
     pub review_summaries: bool,
@@ -199,7 +199,7 @@ pub struct Config {
     /// Read on the host by [`crate::runtime::for_box`], which is what decides whether a start or
     /// resume passes `--plugin-dir`; a box cannot write this file, so a box cannot change it. It
     /// takes effect at a box's next session, because a running agent keeps the argv it started
-    /// with. `$SKEIN_BOX_PLUGIN=on|off` overrides, as the Settings footer promises.
+    /// with. `$SKEIN_BOX_PLUGIN=off` holds it off ([`env_holds_off`]).
     #[serde(default = "default_true")]
     pub box_plugin: bool,
     /// How many pull requests the review queue may ANALYSE per UTC day, across every repo — one
@@ -224,9 +224,10 @@ pub struct Config {
     /// fleet that starts merging because a config file was absent is not one anybody would trust
     /// twice.
     ///
-    /// `$SKEIN_PR_WORKFLOWS=on|off` overrides — so a fleet doing something you want stopped can be
+    /// `$SKEIN_PR_WORKFLOWS=off` holds it off — so a fleet doing something you want stopped can be
     /// stopped from the command line that starts the server, without the cockpit and without
-    /// finding the file. See [`crate::prwork`].
+    /// finding the file. It cannot hold it ON against the pause ([`env_holds_off`]). See
+    /// [`crate::prwork`].
     #[serde(default)]
     pub pr_workflows: bool,
     /// The one sbx sandbox that hosts every box. **Naming it is the only supported shape.**
@@ -467,6 +468,52 @@ pub fn config_error() -> Option<String> {
 }
 
 /// Load skein's app settings (defaults if the file is absent or unreadable).
+/// Does `$name` hold a switch off?
+///
+/// **An environment variable may only turn things off** (the owner, 2026-09-27). It exists so a
+/// fleet doing something you want stopped can be stopped from the command line that starts the
+/// server; it must never defeat a switch the person turned off. `$SKEIN_PR_WORKFLOWS=on` beating
+/// the pause button was the case that decided it: the button wrote `false`, the env read back
+/// `true`, and the cockpit said "workflows resumed" while merges carried on. So a yes in the
+/// environment means nothing, and each switch reads `setting && !env_holds_off(..)`.
+pub fn env_holds_off(name: &str) -> bool {
+    matches!(
+        env::var(name).ok().as_deref().map(str::trim),
+        Some("off" | "0" | "false" | "no")
+    )
+}
+
+/// The switches an environment variable can hold off, by the `Config` field each one holds.
+pub const ENV_SWITCHES: [(&str, &str); 4] = [
+    ("pr_workflows", "SKEIN_PR_WORKFLOWS"),
+    ("ai_enrichment", "SKEIN_AI"),
+    ("review_summaries", "SKEIN_REVIEW_AI"),
+    ("box_plugin", "SKEIN_BOX_PLUGIN"),
+];
+
+/// Which settings the environment is holding right now: `Config` field → the variable holding it.
+///
+/// Only what is **in force**, so Settings can say "held by `$SKEIN_X`" beside a control exactly
+/// when that control is not the one deciding, and say nothing otherwise. A note that is always
+/// there reads as boilerplate and is right only when the variable happens to be set (SKEIN-1141
+/// put one on each field; this makes it true).
+pub fn held_by_env() -> std::collections::BTreeMap<&'static str, &'static str> {
+    let mut held: std::collections::BTreeMap<&'static str, &'static str> = ENV_SWITCHES
+        .iter()
+        .filter(|(_, var)| env_holds_off(var))
+        .map(|&(field, var)| (field, var))
+        .collect();
+    // The review model is a value, not a switch, so any value set holds it. `$SKEIN_AI_MODEL` wins
+    // over `$SKEIN_REVIEW_MODEL` (`ai::binary_and_model`), so it is the one named when both are.
+    let set = |var: &str| env::var(var).is_ok_and(|v| !v.trim().is_empty());
+    if set("SKEIN_AI_MODEL") {
+        held.insert("review_model", "SKEIN_AI_MODEL");
+    } else if set("SKEIN_REVIEW_MODEL") {
+        held.insert("review_model", "SKEIN_REVIEW_MODEL");
+    }
+    held
+}
+
 pub fn load_config() -> Config {
     let mut cfg = read_or_default();
     // **A fleet always has a name** (SKEIN-484). The field carries a serde default, so an ABSENT

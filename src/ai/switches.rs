@@ -4,17 +4,13 @@ use super::*;
 
 /// skein runs *inside* an `sbx run` box where `claude` is logged in on the subscription, so every AI
 /// call rides the SAME rate-limit window as the fleet doing the real work. AI is therefore OFF unless
-/// you opt in with `$SKEIN_AI=on`, and even then it is lazy (on demand only), cached per turn-end, and
+/// you opt in with the Settings switch, and even then it is lazy (on demand only), cached per turn-end, and
 /// never a per-tick fleet sweep. The governing rule: AI may only *add* scrutiny, never remove it.
 pub fn ai_enabled() -> bool {
-    // `$SKEIN_AI` wins when set — same precedence as every other skein setting, and it is what
-    // lets the tests stub this without touching the user's config. Otherwise the toggle in
-    // Settings → Boxes decides, so the feature is discoverable rather than folklore.
-    match env::var("SKEIN_AI").ok().as_deref() {
-        Some("on" | "1" | "true" | "yes") => true,
-        Some("off" | "0" | "false" | "no") => false,
-        _ => load_config().ai_enrichment,
-    }
+    // The toggle in Settings → Boxes decides, so the feature is discoverable rather than folklore.
+    // `$SKEIN_AI=off` can hold it off; nothing in the environment can switch it on
+    // (`config::env_holds_off`).
+    load_config().ai_enrichment && !crate::config::env_holds_off("SKEIN_AI")
 }
 
 /// Whether skein may read a pull request you have already opened a queue to look at.
@@ -29,11 +25,7 @@ pub fn ai_enabled() -> bool {
 /// [`ai_enabled`], reported "off", and said nothing at all about a fleet whose summaries were
 /// switched ON and failing on every pull request.
 pub fn summaries_enabled() -> bool {
-    match env::var("SKEIN_REVIEW_AI").ok().as_deref() {
-        Some("on" | "1" | "true" | "yes") => true,
-        Some("off" | "0" | "false" | "no") => false,
-        _ => load_config().review_summaries,
-    }
+    load_config().review_summaries && !crate::config::env_holds_off("SKEIN_REVIEW_AI")
 }
 
 /// What, if anything, wants the model — named, so a report can say which switch it is talking about.
@@ -51,7 +43,6 @@ pub fn model_wanted() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     /// The health report asks about both switches, not one of them.
     ///
@@ -68,24 +59,49 @@ mod tests {
         // No deployment override here: this reads switches and calls no model. Setting one would be
         // a variable nothing in this test depends on, left behind for whichever test ran next —
         // which is what it was, and what broke `board`'s cover test in a parallel run.
-        env::set_var("SKEIN_AI", "off");
-        env::set_var("SKEIN_REVIEW_AI", "on");
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home)
+            .unset("SKEIN_AI")
+            .unset("SKEIN_REVIEW_AI");
         assert_eq!(
             model_wanted(),
             vec!["review summaries"],
-            "review summaries are on and the report does not mention them — which is exactly the \
-             fleet that reported every summary failing while health said `ai: off`"
+            "review summaries are on by default and the report does not mention them — which is \
+             exactly the fleet that reported every summary failing while health said `ai: off`"
         );
 
-        env::set_var("SKEIN_AI", "on");
+        crate::testutil::switch_on(|c| c.ai_enrichment = true);
         assert_eq!(model_wanted(), vec!["box summaries", "review summaries"]);
 
-        env::set_var("SKEIN_REVIEW_AI", "off");
+        env.set("SKEIN_REVIEW_AI", "off");
         assert_eq!(model_wanted(), vec!["box summaries"]);
 
-        env::set_var("SKEIN_AI", "off");
+        env.set("SKEIN_AI", "off");
         assert!(model_wanted().is_empty());
-        env::remove_var("SKEIN_AI");
-        env::remove_var("SKEIN_REVIEW_AI");
+    }
+
+    /// **An environment variable holds a switch off and never switches one on** (the owner,
+    /// 2026-09-27). What would make it fail: `$SKEIN_AI=on` or `$SKEIN_REVIEW_AI=on` read as a yes
+    /// again, so a switch the person turned off in Settings comes back on from the environment.
+    #[test]
+    fn a_yes_in_the_environment_does_not_switch_the_model_on() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        crate::testutil::switch_on(|c| {
+            c.ai_enrichment = false;
+            c.review_summaries = false;
+        });
+        env.set("SKEIN_AI", "on").set("SKEIN_REVIEW_AI", "on");
+        assert!(
+            !ai_enabled(),
+            "$SKEIN_AI=on beat AI enrichment switched off in Settings"
+        );
+        assert!(
+            !summaries_enabled(),
+            "$SKEIN_REVIEW_AI=on beat Read pull requests switched off in Settings"
+        );
     }
 }

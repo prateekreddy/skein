@@ -240,7 +240,8 @@ More attention helpers, all free unless noted:
   a routine "shall I proceed?" is held back if the model reads it as a real decision. The gate can only
   ever *add* a hold, never grant a continue, so a flaky or absent answer errs toward asking you. Off by
   default because these calls share the fleet's rate-limit window; lazy, on demand and cached per
-  turn-end when on — never a per-tick sweep. `$SKEIN_AI=on|off` overrides the setting, and `skein doctor`
+  turn-end when on — never a per-tick sweep. `$SKEIN_AI=off` holds it off whatever the setting says (an
+  environment variable can only turn things off), and `skein doctor`
   reports what would actually happen (including "on, but `claude` is not on PATH").
 
 The **diff** is computed **inside the box**, against the remote base branch — `origin/<your base

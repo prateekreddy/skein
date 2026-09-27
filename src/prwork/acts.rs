@@ -323,7 +323,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         let (base, heard) = github(200);
         env.set("SKEIN_GITHUB_API", &base);
 
@@ -378,7 +378,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         let (base, heard) = github(200);
         env.set("SKEIN_GITHUB_API", &base);
 
@@ -967,7 +967,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         // `merge_world` and not `github(405)`: this turns on GitHub's real 405 BODY, and the
         // blanket stub answers every path with `{"merged":true}`, which carries no `message` and
         // so cannot pose the answer under test.
@@ -1037,7 +1037,7 @@ mod tests {
         let home = crate::testutil::tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         let (base, heard) = github(200);
         env.set("SKEIN_GITHUB_API", &base);
 

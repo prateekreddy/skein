@@ -226,16 +226,12 @@ pub(crate) fn for_box(command: &str, name: &str) -> String {
         .replace("{plugin}", &sh_quote(&plugin))
 }
 
-/// Whether the fleet loads skein's plugin into agents' sessions: `$SKEIN_BOX_PLUGIN` when it is set
-/// to a yes or a no, else the Settings switch ([`crate::config::Config::box_plugin`]). The same
-/// precedence `ai::ai_enabled` gives `$SKEIN_AI`, which is what the Settings footer's
-/// "`$SKEIN_*` env vars override these" promises. Read in skein-server, on the host.
+/// Whether the fleet loads skein's plugin into agents' sessions: the Settings switch
+/// ([`crate::config::Config::box_plugin`]), which `$SKEIN_BOX_PLUGIN=off` can hold off and nothing
+/// in the environment can switch on ([`crate::config::env_holds_off`]). Read in skein-server, on
+/// the host.
 pub(crate) fn box_plugin_on() -> bool {
-    match std::env::var("SKEIN_BOX_PLUGIN").ok().as_deref() {
-        Some("on" | "1" | "true" | "yes") => true,
-        Some("off" | "0" | "false" | "no") => false,
-        _ => crate::config::load_config().box_plugin,
-    }
+    crate::config::load_config().box_plugin && !crate::config::env_holds_off("SKEIN_BOX_PLUGIN")
 }
 
 /// A runtime's headless command for one box, with `prompt` (already shell-quoted) in place.
@@ -356,14 +352,15 @@ mod tests {
     }
 
     /// **The fleet's switch decides which variant of the plugin a session's argv names**, for all
-    /// three starts, and `$SKEIN_BOX_PLUGIN` overrides the stored value either way (SKEIN-1058).
+    /// three starts, and `$SKEIN_BOX_PLUGIN=off` holds it off (SKEIN-1058) — but `=on` never beats
+    /// a switch the person turned off (`config::env_holds_off`).
     /// On names the full plugin; off names the turn-state one (SKEIN-1062). Every `claude` carries
     /// exactly one `--plugin-dir` either way.
     ///
     /// Written through the real `config.json` in a pinned `$SKEIN_HOME`, the file the Settings
     /// route writes. What would make it fail: `for_box` not reading the value (every "off" case
     /// still names the full plugin); the value's default flipped to off (the file with no key would
-    /// lose it); the env override not consulted, or consulted the wrong way round; off dropping
+    /// lose it); the env's off not consulted, or its on allowed to beat the file's off; off dropping
     /// the flag, as it did before the turn-state hooks moved into the plugin; or half a flag left
     /// behind (`--plugin-dir` with no path, which `claude` would reject).
     #[test]
@@ -402,7 +399,7 @@ mod tests {
             (r#"{"box_plugin": true}"#, None, true),
             (r#"{"box_plugin": false}"#, None, false),
             (r#"{"box_plugin": true}"#, Some("off"), false),
-            (r#"{"box_plugin": false}"#, Some("on"), true),
+            (r#"{"box_plugin": false}"#, Some("on"), false),
         ] {
             config(body);
             match env_value {

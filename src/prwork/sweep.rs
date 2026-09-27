@@ -483,7 +483,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
@@ -647,9 +647,9 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home)
-            .set("SKEIN_PR_WORKFLOWS", "on")
             .set("GH_TOKEN", "skein-test-you")
             .unset("GITHUB_TOKEN");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         // A `gh` with no login first on `$PATH`, so the machine running this cannot lend it one.
         let bin = home.join("no-gh-login");
         std::fs::create_dir_all(&bin).unwrap();
@@ -671,7 +671,11 @@ mod tests {
         crate::prq::forget_trunks();
         crate::prq::forget_renames();
 
-        std::fs::write(home.join("config.json"), br#"{"review_identity":"app"}"#).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            br#"{"review_identity":"app","pr_workflows":true}"#,
+        )
+        .unwrap();
         assert!(
             crate::config::load_config().reviews_as_app(),
             "the fixture did not switch reviews to the App, so this proves nothing about it"
@@ -810,7 +814,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
@@ -942,7 +946,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
@@ -1084,7 +1088,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
@@ -1238,7 +1242,7 @@ mod tests {
         let home = home.as_ref() as &std::path::Path;
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", home);
-        env.set("SKEIN_PR_WORKFLOWS", "on");
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
         env.set("GH_TOKEN", "skein-test-gho");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
