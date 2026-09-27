@@ -271,19 +271,25 @@ pub fn set_box_identity(name: &str, who: Option<(&str, &str)>) -> Result<(), Str
 /// Set that identity inside the box, so its first commit is not `Author identity unknown`.
 ///
 /// `--global` (the box's own HOME), not the repo: the checkout is re-cloned by a rebuild, a resize
-/// or a migration, and a repo-local setting goes with it every time. Only what is missing is
-/// written, so an identity someone set in the box by hand is never overwritten.
+/// or a migration, and a repo-local setting goes with it every time.
+///
+/// **Written on every start, over whatever is there** (the owner, 2026-09-27: an edit reaches a box
+/// at its next start). It used to write only what was missing — `--get … || git config …` — and a
+/// box's HOME survives restarts, so the first start's identity stuck for the life of the box and
+/// every later edit in Settings or the box panel was silently ignored while the panel showed it as
+/// the one in effect. An identity set by hand inside the box now lasts until the next start; the
+/// box panel's "commit as" is where one box keeps its own.
 pub(super) fn identity_script(name: &str, email: &str) -> String {
     let mut steps = Vec::new();
     if !name.trim().is_empty() {
         steps.push(format!(
-            "git config --global --get user.name >/dev/null 2>&1 || git config --global user.name {}",
+            "git config --global user.name {}",
             sh_quote(name.trim())
         ));
     }
     if !email.trim().is_empty() {
         steps.push(format!(
-            "git config --global --get user.email >/dev/null 2>&1 || git config --global user.email {}",
+            "git config --global user.email {}",
             sh_quote(email.trim())
         ));
     }
@@ -635,12 +641,14 @@ mod tests {
         assert_eq!(box_identity("web-main").0, "Fleet");
 
         // --global, because the checkout is re-cloned by every rebuild, resize and migration; and
-        // never over an identity already set inside the box.
+        // over whatever the box already has, because its HOME survives restarts and an edit must
+        // reach it at the next one (the owner, 2026-09-27). Fails if the `--get … ||` guard comes
+        // back: the first start's identity would then stick for the life of the box.
         let script = identity_script("Fleet", "fleet@example.com");
         assert!(script.contains("git config --global user.name 'Fleet'"));
         assert!(
-            script.contains("--get user.name >/dev/null 2>&1 ||"),
-            "only what is missing: an identity set in the box by hand is someone's choice: {script}"
+            !script.contains("--get"),
+            "an identity already in the box must not outlast an edit: {script}"
         );
         assert!(
             identity_script("", "").is_empty(),
@@ -671,6 +679,55 @@ mod tests {
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_CONFIG_GLOBAL");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **An identity edit reaches a box at its next start, over the one its HOME already holds**
+    /// (the owner, 2026-09-27). Run against a real `git` and a HOME that already has the first
+    /// start's identity in it, because the property is what `git` ends up saying, not the script's
+    /// text.
+    ///
+    /// What would make it fail: the `--get … ||` guard coming back, which is why an edit in Settings
+    /// or the box panel never reached a box that had started once — its HOME survives restarts.
+    #[test]
+    fn an_identity_edit_replaces_the_one_a_box_already_has() {
+        let home = tempdir();
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[user]\n\tname = First Start\n\temail = first@example.com\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .env("HOME", &home)
+                .env("XDG_CONFIG_HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("GIT_CONFIG_GLOBAL")
+                .env_remove("GIT_DIR")
+                .output()
+                .unwrap()
+        };
+        let next_start = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(identity_script("Edited Name", "edited@example.com"))
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GIT_DIR")
+            .status()
+            .unwrap();
+        assert!(next_start.success());
+        let said = |key: &str| {
+            String::from_utf8_lossy(&git(&["config", "--global", "--get", key]).stdout)
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            (said("user.name"), said("user.email")),
+            ("Edited Name".to_string(), "edited@example.com".to_string()),
+            "the box kept the identity its first start wrote, so the edit never reached it"
+        );
     }
 
     /// Memory has a kernel ceiling per box; disk has one filesystem and no ceiling at all. So the
