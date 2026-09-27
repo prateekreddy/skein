@@ -797,17 +797,17 @@ help sitting in a doc comment beside it.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/board.rs:317` | the word `error`, `ended` or `stale` in the state column | **R** — `skein stop` a box — `state_with` maps `Liveness::Stopped` to "stale" | looking at the board | **n** — one word | yes — `box_liveness` returning running, or a new hook edge | N |
-| `src/board.rs:344` | the reason the turn failed, verbatim from the box's own probe | **R** — the probe reporting an `error`/`ended` turn outcome — the ordinary turn lifecycle | looking at the board | **cannot tell** — the text originates in the probe and `signals`, not here | yes — a fresh non-outcome status | N |
-| `src/board.rs:350` | why the turn stopped | **R** — any paused agent — `classify_message` on an ordinary tick | looking at the board | n | yes — a new turn starting | N |
-| `src/board.rs:355` | `permission`, `question`, `trust` or `auth` | **R** — the agent's screen showing a permission, question, trust or auth dialog | a blocked agent | partly — the doc at `src/board.rs:353` says "each wants a different move from you, so the row names it instead of saying 'decision'". It names the *kind* of move, not the move | yes — the dialog clearing | N |
-| `src/board.rs:367` | `never`, `misfiled` or `stale` for hooks | **R** — a box just started (no hook file yet), a reused name, or a session predating the installed probe | a box whose signals are not arriving | partly — the doc at `src/board.rs:360` sends the reader to `hook_health` for "what each one asks of a person"; the row carries only the token | yes — a correctly-named signal appearing | N |
-| `src/board.rs:377` | `none`, `stale`, `unreadable`, `unsupported`, `newer`, `misfiled` | **R** — all six values are live branches of `screen_health`; the same drift as row 131 | a box blind to its own screen | **n** | yes — a fresh parseable observation, which `pane_usable` already computes | N |
-| `src/board.rs:372` | `screen`, `edge`, `edge-ahead` | **R** — the turn-state fusion's three rules, each with a real bug behind it (docs/architecture.md §2.2) | looking at the board | n | yes — the observer catching up | N |
-| `src/board.rs:395` | a sandbox skein did not place, hidden until the `foreign:` filter reveals it | **R** — type `foreign:` in the board filter with a sandbox `sbx` made directly | typing `foreign:` | n | yes — a placement record appearing | N |
-| `src/board.rs:430` | `older` — the box's isolation cover is out of date | **R** — upgrade the binary while an older-covered box is running | after an upgrade | n at the row; §1's `cover_health` carries the sentence and the cost | yes — `cover_is_current`, computed every tick | N |
-| `src/board.rs:445` | `uncapped no-cgroup-delegation` (or `no-limit-computed`, `could-not-join-cgroup`) | **R** — start a box on a host without cgroup v2 delegation — `box-session.sh` writes the reason | a box started outside the ceiling | partly — the doc at `src/board.rs:440` distinguishes the three, "need a different fleet rather than a different setting"; the row shows the token | yes — the launcher writing `capped` at the next start | N |
-| `src/board.rs:455` | this box's credential is not scoped to its own repo | **R** — a fleet that can scope credentials with a box whose token is not scoped yet | looking at the board | n | yes — `box_is_scoped` flipping | N |
+| `src/board.rs:307` | the word `error`, `ended` or `stale` in the state column | **R** — `skein stop` a box — `state_with` maps `Liveness::Stopped` to "stale" | looking at the board | **n** — one word | yes — `box_liveness` returning running, or a new hook edge | N |
+| `src/board.rs:334` | the reason the turn failed, verbatim from the box's own probe | **R** — the probe reporting an `error`/`ended` turn outcome — the ordinary turn lifecycle | looking at the board | **cannot tell** — the text originates in the probe and `signals`, not here | yes — a fresh non-outcome status | N |
+| `src/board.rs:340` | why the turn stopped | **R** — any paused agent — `classify_message` on an ordinary tick | looking at the board | n | yes — a new turn starting | N |
+| `src/board.rs:345` | `permission`, `question`, `trust` or `auth` | **R** — the agent's screen showing a permission, question, trust or auth dialog | a blocked agent | partly — the doc at `src/board.rs:343` says "each wants a different move from you, so the row names it instead of saying 'decision'". It names the *kind* of move, not the move | yes — the dialog clearing | N |
+| `src/board.rs:357` | `never`, `misfiled` or `stale` for hooks | **R** — a box just started (no hook file yet), a reused name, or a session predating the installed probe | a box whose signals are not arriving | partly — the doc at `src/board.rs:350` sends the reader to `hook_health` for "what each one asks of a person"; the row carries only the token | yes — a correctly-named signal appearing | N |
+| `src/board.rs:367` | `none`, `stale`, `unreadable`, `unsupported`, `newer`, `misfiled` | **R** — all six values are live branches of `screen_health`; the same drift as row 131 | a box blind to its own screen | **n** | yes — a fresh parseable observation, which `pane_usable` already computes | N |
+| `src/board.rs:362` | `screen`, `edge`, `edge-ahead` | **R** — the turn-state fusion's three rules, each with a real bug behind it (docs/architecture.md §2.2) | looking at the board | n | yes — the observer catching up | N |
+| `src/board.rs:385` | a sandbox skein did not place, hidden until the `foreign:` filter reveals it | **R** — type `foreign:` in the board filter with a sandbox `sbx` made directly | typing `foreign:` | n | yes — a placement record appearing | N |
+| `src/board.rs:420` | `older` — the box's isolation cover is out of date | **R** — upgrade the binary while an older-covered box is running | after an upgrade | n at the row; §1's `cover_health` carries the sentence and the cost | yes — `cover_is_current`, computed every tick | N |
+| `src/board.rs:435` | `uncapped no-cgroup-delegation` (or `no-limit-computed`, `could-not-join-cgroup`) | **R** — start a box on a host without cgroup v2 delegation — `box-session.sh` writes the reason | a box started outside the ceiling | partly — the doc at `src/board.rs:430` distinguishes the three, "need a different fleet rather than a different setting"; the row shows the token | yes — the launcher writing `capped` at the next start | N |
+| `src/board.rs:445` | this box's credential is not scoped to its own repo | **R** — a fleet that can scope credentials with a box whose token is not scoped yet | looking at the board | n | yes — `box_is_scoped` flipping | N |
 
 ## 9. `src/fleet/`
 
@@ -988,7 +988,7 @@ person.
 
 ## What could not be classified, and why
 
-- **`src/board.rs:344`** — the board's principal "why" field. Its text originates in the box's own
+- **`src/board.rs:334`** — the board's principal "why" field. Its text originates in the box's own
   probe and in `signals`, not in `board`, so whether it says what to do is a property of a surface
   this survey did not reach. It is the single largest unexamined text source in the product.
 - **`src/bin/skein-server/settings.rs:256`** — a person presses Save, the ssh key does not load, and the

@@ -11,10 +11,11 @@
 use crate::diff::{git_range, read_diffstat_file, DiffStat};
 use crate::registry::Sandbox;
 use crate::registry::{registry_entry_for_box, store_for_box};
+use crate::repos::agent_for_box;
 use crate::repos::branch_of;
 use crate::sbx::box_liveness;
 use crate::sbx::lookup_dir;
-use crate::signals::{classify_message, current_status, session_signal, Pause};
+use crate::signals::{classify_message, session_signal, turn_state, Pause};
 use crate::util::valid_name;
 use crate::util::{bounded_output, keep_tail};
 use serde::Serialize;
@@ -149,7 +150,10 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
             .as_ref()
             .map(|r| r.last_seen.clone())
             .unwrap_or_default(),
-        status: current_status(name)
+        // The board's own reader, fused with the screen, so this digest — and the session API and
+        // handoff brief built from it — says what the board's row for this box says.
+        status: turn_state(name, &agent_for_box(name))
+            .status
             .or_else(|| reg.as_ref().map(|r| r.status.clone()))
             .filter(|s| !s.is_empty())
             .unwrap_or_default(),

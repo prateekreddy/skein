@@ -5,7 +5,7 @@
 use super::*;
 
 /// 1s micro-cache over `repos.json`: a single `load_views` pass consults the repo list dozens of
-/// times per box (store_for_box, current_status, current_task, …) and each SSE tick repeats that
+/// times per box (store_for_box, turn_state, current_task, …) and each SSE tick repeats that
 /// per open browser tab — hundreds of disk reads every 2s on a busy fleet, all returning the same
 /// bytes. Cleared by `save_repos` so a mutation is visible immediately.
 pub(crate) static REPOS_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<Repo>)>> =

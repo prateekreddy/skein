@@ -118,10 +118,58 @@ pub fn current_task(name: &str) -> Option<String> {
     journal_next(name)
 }
 
-/// The agent turn-state skein's own probe (box-status.sh) records for a box, from
-/// `<store>/status/<name>.json` — the skein-owned replacement for the registry's `status` field.
-pub fn current_status(name: &str) -> Option<String> {
-    status_edge(name).map(|(status, _)| status)
+/// **A box's turn state, as every surface shows it**: the hook edge from
+/// `<store>/status/<name>.json`, corrected by the level observation of the box's own screen
+/// ([`fuse_status`]).
+///
+/// One function because there were two readers and only one of them fused. The board applied
+/// `fuse_status`; the session digest read the edge alone, so `/api/boxes/:name/session` and the
+/// handoff brief could still say `needs-input` twenty minutes after the prompt was answered while
+/// the board beside them said `working` — the exact case `fuse_status` exists for. An edge-only
+/// getter was the thing that made that mistake easy to write, so there is no longer one to call.
+pub(crate) struct TurnState {
+    /// The fused status key, or `None` when neither half says anything.
+    pub status: Option<String>,
+    /// The blocking kind when the screen shows one (`Screen::Blocked`), else empty.
+    pub blocked_kind: &'static str,
+    /// Where `status` came from; see [`StatusFrom`].
+    pub from: StatusFrom,
+    /// The last observation as written, refusals *not* applied — [`screen_health`] needs it to say
+    /// which refusal applied.
+    pub raw_pane: Option<PaneObs>,
+    /// The usable observation (`pane_usable`), which is what was classified.
+    pub pane: Option<PaneObs>,
+    /// What the usable observation classified as, with its timestamp.
+    pub level: Option<(Screen, i64)>,
+}
+
+/// See [`TurnState`]. `agent` is the box's runtime, which decides the screen grammar.
+pub(crate) fn turn_state(name: &str, agent: &str) -> TurnState {
+    // Every reason `screen_health` can give for the screen half not contributing has to be applied
+    // HERE too, or the row says "not reading the screen" in the badge and renders the screen's
+    // verdict in the status anyway. The board once spelled out one of the three by hand and so was
+    // missing the other two, which is why it is `pane_usable` — the same predicate `read_pane`
+    // applies, named once so the two cannot drift again:
+    //   · `pane_is_ours` — the filename is a claim about whose screen this is, and until the probe
+    //     wrote the box name into the observation it was one nothing could check. A misfiled
+    //     observation classifies perfectly, which is what makes it bad.
+    //   · `pane_is_readable` — PANE_CONTRACT's own doc says a newer observation "is treated as no
+    //     observation, the board falls back to hook edges exactly as it does for a box with no
+    //     observer". The board disclosed it and then classified it.
+    // The raw observation is kept beside it because `screen_health` needs what was on disk to say
+    // WHICH of the three refused it.
+    let raw_pane = read_pane_raw(name);
+    let pane = raw_pane.clone().filter(|obs| pane_usable(obs, name));
+    let level = pane.as_ref().map(|obs| (classify_pane(agent, obs), obs.ts));
+    let (status, blocked_kind, from) = fuse_status(status_edge(name), level.clone());
+    TurnState {
+        status,
+        blocked_kind,
+        from,
+        raw_pane,
+        pane,
+        level,
+    }
 }
 
 /// The same edge signal with the timestamp it was written at (epoch seconds), which the level/edge
