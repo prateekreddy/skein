@@ -440,6 +440,10 @@ line = "//"
 window = "// half-read, and never a second empty installation filling up beside the real one.\u000b//\u000b// Except for the two verbs that exist to *answer* a refusal. `repoint` is named by the one about"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein.rs:62"]
+line = "None => Err(\"usage: skein add <git-url> [--id <id>] [--store <path>]\".into()),"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein.rs:143"]
 line = "\"attach\" => match rest.first() {"
 cited_by = ["docs/recovery-survey.md"]
