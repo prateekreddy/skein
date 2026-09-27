@@ -1775,4 +1775,73 @@ mod tests {
         crate::gitgate::set_read_pat("").unwrap();
         forget_host_token();
     }
+
+    /// **The last step of the order: with nothing else, the host's `gh` login reads AND writes**
+    /// (the owner's decision of 2026-09-27), and `gh` is asked once however many calls follow.
+    ///
+    /// No stored token, no `$GH_TOKEN`, no read token — only a `gh` on `$PATH` that prints a login
+    /// and writes a line to a log each time it is asked. A read, a merge and a second read then
+    /// have to carry that login, and the log has to hold exactly one line: the memo in
+    /// `gitgate::gh_login` is the one thing this resolver is allowed to remember.
+    ///
+    /// **What would make it fail:** `credential_for_repo` ending in `(GhToken::None, None)` instead
+    /// of asking `gh_login()` — the read then refuses, and `a read with only the gh login answered`
+    /// fails. Dropping the memo instead asks `gh` on every call (five times here), and `gh is
+    /// asked once across calls` fails.
+    #[test]
+    fn with_only_a_gh_login_a_repository_is_read_and_written_with_it_and_gh_is_asked_once() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let (base, heard) = auth_github();
+        let mut env = with_no_host_credential(home, &base);
+        let bin = home.join("gh-login");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("gh-asked.log");
+        std::fs::write(
+            bin.join("gh"),
+            format!(
+                "#!/bin/sh\n[ \"$1 $2\" = \"auth token\" ] || exit 1\necho asked >> '{}'\necho skein-test-gh-login\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        env.set("PATH", format!("{}:{path}", bin.display()));
+        forget_host_token();
+
+        live_head_sha("acme/one", 1).expect("a read with only the gh login answered");
+        merge("acme/one", 1, "abc").expect("a merge with only the gh login went out");
+        live_head_sha("acme/one", 1).expect("a second read with only the gh login answered");
+
+        let heard = heard.lock().unwrap().clone();
+        assert!(
+            heard.iter().any(|h| h.method == "PUT" && h.path == "/repos/acme/one/pulls/1/merge"),
+            "the merge never reached GitHub, so the assertion below is about reads only: {heard:#?}"
+        );
+        for h in heard.iter().filter(|h| h.about("acme/one")) {
+            assert_eq!(
+                h.auth, "bearer skein-test-gh-login",
+                "every request about acme/one carries the gh login — {} {} did not",
+                h.method, h.path
+            );
+        }
+        assert_eq!(repo_token_source("acme/one", Need::Read), GhToken::GhCli);
+        assert_eq!(repo_token_source("acme/one", Need::Write), GhToken::GhCli);
+        let asked = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            asked.lines().count(),
+            1,
+            "gh is asked once across calls, and was asked {} times",
+            asked.lines().count()
+        );
+        forget_host_token();
+    }
 }
