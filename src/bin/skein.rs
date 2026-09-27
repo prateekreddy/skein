@@ -59,7 +59,7 @@ fn main() {
         "ls" | "status" => cmd_ls(),
         "add" => match rest.first() {
             Some(src) => cmd_add(src, &rest[1..]),
-            None => Err("usage: skein add <git-url> [--id <id>] [--agent <runtime>]".into()),
+            None => Err("usage: skein add <git-url> [--id <id>] [--store <path>]".into()),
         },
         "repos" => cmd_repos(),
         "remove" | "rm" => match rest.first() {
@@ -210,15 +210,24 @@ $SKEIN_SHARED/sandboxes.json\n  \
     );
 }
 
-/// `skein add <git-url> [--id <id>] [--agent <runtime>] [--store <shared-data-folder>]` — register
+/// `skein add <git-url> [--id <id>] [--store <shared-data-folder>]` — register
 /// a repo so skein can launch + observe boxes for it with zero repo-side setup. `--store` points the
 /// repo at an existing shared `.claude` folder (e.g. thing's `skein-shared/.claude`) so its
 /// memory/skills/mailbox/statusline are live across the repo's boxes; omit it to let skein manage one.
 fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
     let id = flag(opts, "--id");
-    let agent = flag(opts, "--agent");
+    // Refused rather than ignored: a flag that is accepted and then does nothing tells the person
+    // their choice was kept when it was not.
+    if flag(opts, "--agent").is_some() {
+        return Err(
+            "a repo has no runtime of its own any more: a box runs the fleet's Default agent \
+                    (Settings → Boxes), or the one you pick for it — `skein start <box> --agent \
+                    <runtime>`"
+                .into(),
+        );
+    }
     let store = flag(opts, "--store");
-    let repo = skein::repos::add_repo(source, id.as_deref(), agent.as_deref(), store.as_deref())?;
+    let repo = skein::repos::add_repo(source, id.as_deref(), store.as_deref())?;
     println!("{BOLD}added{RESET} {CYAN}{}{RESET}", repo.id);
     println!("  {DIM}source{RESET}  {}", repo.source);
     println!(
@@ -340,10 +349,7 @@ fn cmd_repos() -> Result<(), String> {
     }
     for r in &repos {
         // A repo says where it came from, and that is now always a remote.
-        println!(
-            "{BOLD}{CYAN}{}{RESET}  {DIM}{}{RESET}\n  {}",
-            r.id, r.agent, r.source
-        );
+        println!("{BOLD}{CYAN}{}{RESET}\n  {}", r.id, r.source);
     }
     println!("\n{DIM}{} repos{RESET}", repos.len());
     Ok(())
@@ -1758,4 +1764,34 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     skein::fleet::ensure_box_session(&attach_name)?;
     let dir = skein::sbx::lookup_dir(&attach_name).unwrap_or_default();
     run_attach(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))
+}
+
+#[cfg(test)]
+mod tests {
+    /// **`skein add --agent` is refused, and says where the runtime is chosen now** (the owner,
+    /// 2026-09-27: one fleet default plus a per-box pick). Refused before anything is cloned or
+    /// written, so this touches no home.
+    ///
+    /// What would make it fail: the flag read and dropped, so the add goes ahead and the person
+    /// believes their repo runs the runtime they named.
+    #[test]
+    fn add_refuses_a_runtime_for_the_repo_and_names_where_it_lives() {
+        // Pinned, so a regression that lets the add go ahead writes into this directory and not
+        // into whatever store the machine running the test has. Planting exactly that regression
+        // once, unpinned, scaffolded a store in the owner's live `~/.skein`.
+        let home = std::env::temp_dir().join(format!("skein-add-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_FLEET_ROOT", &home);
+        let why = super::cmd_add(
+            "https://example.com/thing.git",
+            &["--agent".to_string(), "codex".to_string()],
+        )
+        .expect_err("a repo has no runtime of its own to set");
+        assert!(
+            why.contains("Default agent") && why.contains("--agent <runtime>"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

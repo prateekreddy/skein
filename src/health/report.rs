@@ -937,7 +937,6 @@ mod tests {
             id: "orphan".into(),
             source: "https://github.com/a/b".into(),
             store: home.join("gone/.claude").to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

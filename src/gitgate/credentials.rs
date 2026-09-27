@@ -567,7 +567,6 @@ mod tests {
             id: name.into(),
             source: format!("https://github.com/{slug}.git"),
             store: String::new(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

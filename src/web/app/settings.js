@@ -780,8 +780,8 @@ function fillRepoSelect() {
   const cur = nbRepo.value;
   nbRepo.innerHTML = repos.map(r => `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
   if (cur && repos.some(r => r.id === cur)) nbRepo.value = cur;
-  const repo = repos.find(r => r.id === nbRepo.value) || repos[0];
-  const wanted = repo?.agent || settings.default_agent;
+  // The fleet's default, the same for every repo: a repo no longer carries a runtime of its own.
+  const wanted = settings.default_agent;
   if (runtimes.some(runtime => runtime.id === wanted)) nbAgent.value = wanted;
 }
 // The repo id to prefix a new box with: the dialog selection, else the only/first repo, else a
@@ -1180,7 +1180,6 @@ function openAddRepo() {
   arRenderConns();
   loadSync().then(arRenderConns);
   arUpdateDerived();
-  if (runtimes.some(runtime => runtime.id === settings.default_agent)) document.getElementById("ar-agent").value = settings.default_agent;
   document.getElementById("ar-go").textContent = "Add →";
   arModal().classList.add("open");
   setTimeout(() => src.focus(), 0);
@@ -1229,7 +1228,6 @@ function submitAddRepo() {
     arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, "warn");
     return;
   }
-  const agent = document.getElementById("ar-agent").value;
   const go = document.getElementById("ar-go");
   // `add_repo` clones inline with a 300s bound, so this can sit here for minutes on a large repo.
   // A static "Adding…" for four of them is indistinguishable from a hang, and the honest reading of
@@ -1247,7 +1245,7 @@ function submitAddRepo() {
   const settle = () => { clearInterval(tick); go.disabled = false; };
   // No `store`: the route refuses one outright (SKEIN-535), and adopting an existing store is a
   // CLI-only affordance now — `skein add <git-url> --store <path>`.
-  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src, agent }) })
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src }) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       settle();

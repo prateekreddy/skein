@@ -5,24 +5,7 @@ use super::*;
 /// Add a repo to skein: mirror its remote, provision its shared store and skein's kit, seed gh
 /// auth, and record it in `repos.json`. Returns the stored `Repo`. This is the whole
 /// `skein add <git-url>` flow; the box launch then needs nothing from the repo.
-pub fn add_repo(
-    source: &str,
-    id: Option<&str>,
-    agent: Option<&str>,
-    store: Option<&str>,
-) -> Result<Repo, String> {
-    if let Some(runtime) = agent.map(str::trim).filter(|value| !value.is_empty()) {
-        if !valid_runtime(runtime) {
-            return Err(format!(
-                "unsupported runtime {runtime:?}; available: {}",
-                supported_runtimes()
-                    .iter()
-                    .map(|r| r.id)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    }
+pub fn add_repo(source: &str, id: Option<&str>, store: Option<&str>) -> Result<Repo, String> {
     let id = id
         .map(|s| s.to_string())
         .unwrap_or_else(|| repo_id_from_source(source));
@@ -99,9 +82,6 @@ pub fn add_repo(
         // starting state, and the state a reviewer wants on a repo nobody has configured is the
         // one where a deletion is audited before it is approved.
         owed_checks: None,
-        agent: agent
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| load_config().default_agent),
         plane_project: String::new(),
         // One connection ⇒ adopt it, so a single-tracker fleet needs no ceremony per repo. Two or
         // more ⇒ leave it unset: which backlog this repo belongs to is not skein's guess to make,
@@ -252,13 +232,8 @@ mod tests {
         let checkout = tempdir();
         origin_repo(&checkout);
 
-        let why = add_repo(
-            &checkout.to_string_lossy(),
-            Some("proj"),
-            Some("claude"),
-            None,
-        )
-        .expect_err("a path must not register");
+        let why = add_repo(&checkout.to_string_lossy(), Some("proj"), None)
+            .expect_err("a path must not register");
         assert!(
             why.contains("registers repos by remote") && why.contains("remote get-url origin"),
             "the refusal does not say what to pass instead, so it cannot be acted on: {why}"
@@ -271,13 +246,8 @@ mod tests {
         // Non-vacuity, WITHOUT touching the network: a URL gets past the path check and fails
         // later, at the clone. What matters is which check rejected it — a bare `is_err()` here
         // would pass just as well if `add_repo` refused everything.
-        let later = add_repo(
-            "https://github.com/acme/thing.git",
-            Some("thing"),
-            Some("claude"),
-            None,
-        )
-        .expect_err("no such repository exists to clone");
+        let later = add_repo("https://github.com/acme/thing.git", Some("thing"), None)
+            .expect_err("no such repository exists to clone");
         assert!(
             !later.contains("registers repos by remote"),
             "a URL was rejected by the path check, so the refusal above proves nothing: {later}"
@@ -318,19 +288,19 @@ mod tests {
         };
 
         let pats = home.join("github-pats").to_string_lossy().into_owned();
-        let why = add_repo(source, Some("thing"), Some("claude"), Some(&pats))
+        let why = add_repo(source, Some("thing"), Some(&pats))
             .expect_err("a store among the credentials was accepted");
         assert_eq!(why, refusal(&pats, "is inside"));
 
         // Through `~` and `..`: shown as expanded, which is the path skein would have used.
         let typed = "~/.skein/../.skein/github-pats";
-        let why = add_repo(source, Some("thing"), Some("claude"), Some(typed))
+        let why = add_repo(source, Some("thing"), Some(typed))
             .expect_err("a store spelled through ~ and .. was accepted");
         assert_eq!(why, refusal(&expand_tilde(typed), "is inside"));
 
         // Textually under `repos/`, which the fleet mounts; really beside the credentials.
         let back_out = format!("{}/repos/../github-pats", home.display());
-        let why = add_repo(source, Some("thing"), Some("claude"), Some(&back_out))
+        let why = add_repo(source, Some("thing"), Some(&back_out))
             .expect_err("a store that .. walks out of repos/ was accepted");
         assert_eq!(why, refusal(&back_out, "is inside"));
 
@@ -341,13 +311,13 @@ mod tests {
             .join("link/github-pats")
             .to_string_lossy()
             .into_owned();
-        let why = add_repo(source, Some("thing"), Some("claude"), Some(&via_link))
+        let why = add_repo(source, Some("thing"), Some(&via_link))
             .expect_err("a store reached through a symlink into the volume was accepted");
         assert_eq!(why, refusal(&via_link, "is inside"));
 
         // A directory holding the volume.
         let above = user.to_string_lossy().into_owned();
-        let why = add_repo(source, Some("thing"), Some("claude"), Some(&above))
+        let why = add_repo(source, Some("thing"), Some(&above))
             .expect_err("a store holding the volume was accepted");
         assert_eq!(why, refusal(&above, "contains"));
 
@@ -373,7 +343,7 @@ mod tests {
         env.set("SKEIN_HOME", &home);
         let source = "https://127.0.0.1:1/thing.git";
 
-        let why = add_repo(source, Some("thing"), Some("claude"), None)
+        let why = add_repo(source, Some("thing"), None)
             .expect_err("nothing answers at that address, so the clone fails");
         assert!(
             !why.contains("skein's own volume") && home.join("repos/thing/store/.claude").is_dir(),
@@ -381,13 +351,8 @@ mod tests {
         );
 
         let elsewhere = tempdir().join("shared/.claude");
-        let why = add_repo(
-            source,
-            Some("other"),
-            Some("claude"),
-            Some(&elsewhere.to_string_lossy()),
-        )
-        .expect_err("nothing answers at that address, so the clone fails");
+        let why = add_repo(source, Some("other"), Some(&elsewhere.to_string_lossy()))
+            .expect_err("nothing answers at that address, so the clone fails");
         assert!(
             !why.contains("skein's own volume") && elsewhere.is_dir(),
             "a store outside the volume was refused, or not scaffolded: {why}"

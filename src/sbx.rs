@@ -798,7 +798,6 @@ mod tests {
             id: "web".into(),
             source: String::new(),
             store: String::new(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

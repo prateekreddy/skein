@@ -13,6 +13,20 @@ pub(crate) fn default_agent() -> String {
     "claude".into()
 }
 
+/// The runtime a box runs when nobody picked one for it: the fleet's **Default agent** setting.
+///
+/// **One fleet default plus a per-box pick** (the owner, 2026-09-27). A repo used to carry its own
+/// runtime, copied from this setting when the repo was added and never editable afterwards, and it
+/// outranked the setting — so changing the default changed nothing for any repo already added. A
+/// value this build does not know falls back to [`default_agent`] rather than launching nothing.
+pub(crate) fn fleet_agent() -> String {
+    let chosen = crate::config::load_config().default_agent;
+    match valid_runtime(&chosen) {
+        true => chosen,
+        false => default_agent(),
+    }
+}
+
 /// Public runtime metadata consumed by the CLI and cockpit. Runtime choices are deliberately
 /// discovered from the core instead of duplicated in every client; adding another adapter therefore
 /// makes it appear everywhere without another round of provider-specific UI conditionals.

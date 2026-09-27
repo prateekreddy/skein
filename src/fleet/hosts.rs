@@ -127,7 +127,6 @@ mod tests {
             // A path, the way a repos.json written before URLs-only still reads.
             source: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

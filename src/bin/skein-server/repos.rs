@@ -139,8 +139,6 @@ pub(super) struct AddRepoReq {
     source: String,
     #[serde(default)]
     id: String,
-    #[serde(default)]
-    agent: String,
     /// **Read only so that it can be refused** (SKEIN-535). Kept on the struct rather than deleted
     /// because serde ignores a field it does not know: dropping it would make a request that names
     /// a store succeed while quietly getting skein's own, which is the one outcome worse than the
@@ -183,9 +181,8 @@ pub(super) async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     }
     let res = tokio::task::spawn_blocking(move || {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
-        let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
         // `None`, always: the only way past the refusal above is not to have named a store.
-        skein::repos::add_repo(r.source.trim(), id.as_deref(), agent.as_deref(), None)
+        skein::repos::add_repo(r.source.trim(), id.as_deref(), None)
     })
     .await;
     match res {

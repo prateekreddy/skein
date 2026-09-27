@@ -112,8 +112,7 @@ pub(crate) fn repo_launch_command_as(
     let agent = agent_override
         .map(str::to_string)
         .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
-        .or_else(|| (!repo.agent.is_empty()).then(|| repo.agent.clone()))
-        .unwrap_or_else(|| "claude".into());
+        .unwrap_or_else(crate::runtime::fleet_agent);
     if let Err(e) = write_launch_spec_for_agent(name, &branch, repo, &agent) {
         eprintln!("skein: write_launch_spec: {e}");
     }
@@ -1193,7 +1192,6 @@ mod tests {
             id: "thing".into(),
             source: "s".into(),
             store: store.to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
@@ -1242,7 +1240,6 @@ mod tests {
             id: "skein".into(),
             source: "s".into(),
             store: home.join("store/.claude").to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
@@ -1336,7 +1333,6 @@ mod tests {
                 .join("repos/web/store/.claude")
                 .to_string_lossy()
                 .into(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
@@ -1393,7 +1389,6 @@ mod tests {
                 .join("repos/web/store/.claude")
                 .to_string_lossy()
                 .into(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
@@ -1624,7 +1619,6 @@ mod tests {
             id: "demo".into(),
             source: "s".into(),
             store: store.to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

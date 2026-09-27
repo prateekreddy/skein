@@ -504,7 +504,6 @@ mod tests {
             // `publish()` fetches from a path on disk instead of reaching for the network.
             source: work.display().to_string(),
             store: String::new(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

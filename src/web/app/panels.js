@@ -822,7 +822,7 @@ const nbAgent = document.getElementById("nb-agent");
 let repos = [];
 let settings = {};
 function fillRuntimeSelects() {
-  for (const id of ["nb-agent", "ar-agent", "set-agent"]) {
+  for (const id of ["nb-agent", "set-agent"]) {
     const select = document.getElementById(id);
     const current = select.value;
     select.innerHTML = runtimes.map(runtime =>

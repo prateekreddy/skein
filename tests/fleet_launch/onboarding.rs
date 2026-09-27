@@ -133,7 +133,6 @@ fn an_uncovered_box_is_refused_until_it_is_allowed_and_then_says_so_where_someon
         id: "demo".into(),
         source: remote.clone(),
         store: store.to_string_lossy().into_owned(),
-        agent: "claude".into(),
         plane_project: String::new(),
         sync_connection: String::new(),
         review_queue: true,

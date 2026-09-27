@@ -347,9 +347,11 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   than costed at nothing — the same rule, one level down.
 - `.env` loading, with a malformed file reported rather than silently truncated.
 - Sync connections and their tokens.
-- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `agent`, `store`
-  and a per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
-  `connections.json`, not `Config`, and save on blur — a different persistence contract.
+- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `store` and a
+  per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
+  `connections.json`, not `Config`, and save on blur — a different persistence contract. A repo has
+  no runtime of its own: a box runs the fleet's **Default agent** or the one picked for it in the
+  New box dialog (the owner, 2026-09-27); an old `repos.json` that still names one reads fine.
 - **Four vendored asset routes** — xterm, xterm.css, addon-fit and marked served from the binary.
   "The cockpit works with no CDN and no network" is a capability, and these are the only other
   entries in `open_to_all`.

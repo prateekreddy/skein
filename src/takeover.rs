@@ -728,7 +728,6 @@ mod tests {
             id: "web".into(),
             source: "/src/web".into(),
             store: home.join("store").to_string_lossy().into_owned(),
-            agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,

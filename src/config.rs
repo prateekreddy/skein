@@ -101,7 +101,8 @@ pub struct Config {
     /// nothing, until someone picks a path — which is why the first-run checklist asks.
     #[serde(default)]
     pub seed_gh_secret: bool,
-    /// Default agent for newly-added repos / boxes (the per-runtime seam). `claude` for now.
+    /// The runtime a box runs unless one was picked for it in the New box dialog
+    /// ([`crate::runtime::fleet_agent`]). The only default: a repo has no runtime of its own.
     #[serde(default = "default_agent")]
     pub default_agent: String,
     /// The branch a box's clone starts from, and the head of the diff's base-ref ladder. Empty ⇒
