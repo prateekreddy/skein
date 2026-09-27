@@ -480,6 +480,23 @@ await check("the branch a new box starts from is set on its repo's card, not fle
   if (stored !== "develop") throw new Error(`the typed branch should be what the repo stores, got ${JSON.stringify(stored)}`);
   if (await page.$("#set-base")) throw new Error("the fleet-wide base branch field is still in Settings");
 });
+await check("whether skein reads a repo's pull requests on its own is on its card, under the master switch", async () => {
+  // docs/pr-review.md §10, layers 0½ and 1 (the owner, 2026-09-27: keep both, show both). Fails if
+  // the card loses the switch, if choosing it does not reach the repo's consent (`read_prs`, through
+  // its own route), or if the fleet switch stops saying it is the master one.
+  const sel = '.rcard[data-card="smoke"] select[data-key="read_prs"]';
+  await mustSee(sel, "the repo's Read ahead switch");
+  await page.selectOption(sel, "true");
+  let stored;
+  for (let i = 0; i < 50 && stored !== true; i++) {
+    const saved = await fetch(`http://127.0.0.1:${port}/api/repos`, { headers: authHeader() }).then(r => r.json());
+    stored = saved.find(r => r.id === "smoke").read_prs;
+    if (stored !== true) await settle(100);
+  }
+  if (stored !== true) throw new Error(`Read ahead: On should be what the repo stores, got ${JSON.stringify(stored)}`);
+  const master = await page.locator("#set-prai").locator("xpath=ancestor::label[1]").locator(".set-title").textContent();
+  if (!/master switch/.test(master)) throw new Error(`the fleet switch is labelled "${master}"`);
+});
 await check("a connection in use is not removed out from under its repos", async () => {
   await page.click('.set-navi[data-pane="tracking"]');
   await settle(300);

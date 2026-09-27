@@ -520,6 +520,12 @@ function renderRepoList() {
             ? `which backlog this repo's boxes claim work from — set up under <b>Work tracking</b>${conn && !conn.ready ? `. <b>${esc(conn.label)}</b> isn't usable yet: it needs both a gateway URL and a token` : ""}`
             : "no connections configured yet — add one under <b>Work tracking</b> and it'll appear here",
           [["", "Not tracked"], ...conns.map(c => [c.id, c.ready ? c.label : `${c.label} (not usable yet)`])])
+      // The per-repo half of "may skein read pull requests" (docs/pr-review.md §10, layer 1), on the
+      // card beside the queue it reads from. It had been reachable only from a chip in the review
+      // pane. Posted to its own route (`revSetReadingFor`), which is the one place it is written.
+      + repoSelect(r, "read_prs", "Read ahead",
+          "let skein read this repo's pull requests on its own: the ones waiting on your review and the ones you opened, one unit of the day's budget each. Off, it reads one only when you ask. Needs <b>Read pull requests</b>, the master switch in Settings → Boxes",
+          [["false", "Off"], ["true", "On"]])
       + repoSelect(r, "review_queue", "Review queue",
           "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
           [["true", "On"], ["false", "Off"]])
@@ -570,9 +576,19 @@ function saveRepoField(input) {
   // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
   // than one name because the second such field arrived (`auto_review`) and a comparison that
   // named one would have made the new one fail exactly that way, silently.
-  const BOOL_KEYS = ["review_queue", "auto_review"];
+  const BOOL_KEYS = ["review_queue", "auto_review", "read_prs"];
   const raw = input.value.trim();
   const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;
+  const saved = () => {
+    // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
+    const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
+    if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+  };
+  // Consent to read has its own route and its own writer, shared with the review pane's chip.
+  if (key === "read_prs") {
+    revSetReadingFor(id, value).then(ok => ok ? loadRepos().then(() => { renderRepoList(); saved(); }) : input.focus());
+    return;
+  }
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })

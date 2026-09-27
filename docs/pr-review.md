@@ -394,8 +394,8 @@ overlaps `read_prs` or `review_queue` would give two places to look for why noth
 | # | the question it answers | switch | state |
 |---|---|---|---|
 | 0 | may **anything** act, anywhere in the fleet | `pr_workflows` / `SKEIN_PR_WORKFLOWS` | exists |
-| 0½ | may skein **read** pull requests at all, in any repo — the fleet-wide master switch over layer 1, and over a read you ask for as well | `review_summaries` / `SKEIN_REVIEW_AI` (Settings → Boxes, **Read pull requests**) | exists |
-| 1 | may skein **read** this repo's pull requests at all — the money door, per repo | `read_prs` | exists |
+| 0½ | may skein **read** pull requests at all, in any repo — the fleet-wide master switch over layer 1, and over a read you ask for as well | `review_summaries`, which `SKEIN_REVIEW_AI=off` can hold off (Settings → Boxes, **Read pull requests — master switch**) | exists |
+| 1 | may skein **read** this repo's pull requests at all — the money door, per repo | `read_prs` (the repo's card, **Read ahead**; also the review pane's read-ahead chip) | exists |
 | 2 | does this repo appear in **your queue** | `review_queue` | exists |
 | 3 | may the engine **act** on this repo | `auto_review` | **new** |
 | 4 | **which events** wake it | `auto_review_on` | **new** — built, `workflow::Wake` |
