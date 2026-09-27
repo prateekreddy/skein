@@ -151,16 +151,16 @@ quiet. The checklist's sign-in step and that `sign in` chip both open a login te
 cockpit. Claude and Codex are separate sign-ins, and both can be signed in.
 
 **Then add a repo, press + box**, name a branch, and an agent starts working on it. The board's
-first-run checklist says what is left — five steps, `firstRunHtml` in `src/web/app/settings.js` —
-and `skein doctor` diagnoses the environment if anything looks wrong.
+first-run checklist (`firstRunHtml` in `src/web/app/settings.js`) says what is left, and `skein doctor` diagnoses the environment if anything looks wrong.
 
 **Creating and destroying the sandbox stays yours.** It is the most privileged thing in skein, and
 skein inside the fleet cannot do it at all — there is no skein until the fleet exists. So the create
 above is a line you ran, and a later resize or recreate is a line the cockpit **shows you to run**,
-with what it is for and what declining costs. `skein-warden` is the optional other half of that: run
-it on the host and the cockpit asks it instead of asking you, still putting the command to a person
-before it runs. Without a warden nothing is blocked — you are simply the one who pastes the line —
-so the checklist's warden step is information, not a gate
+with what it is for and what declining costs. `skein-warden` is an optional helper on the host: an
+act it knows how to do, such as publishing the cockpit's port, is put to you in its terminal to
+approve instead of as a line to paste. A resize or recreate is always the line. Without a warden
+nothing is blocked — you are simply the one who pastes the line — so the checklist's warden step is
+information, not a gate
 ([`docs/decisions/warden-or-prompt.md`](docs/decisions/warden-or-prompt.md)).
 
 ## Web cockpit (the primary surface)
