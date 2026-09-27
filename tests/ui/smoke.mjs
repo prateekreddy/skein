@@ -462,6 +462,24 @@ await check("a repo picks a connection instead of restating half of one", async 
   if (saved.find(r => r.id === "smoke").sync_connection !== "smoke-example")
     throw new Error("the picked connection should be what's stored");
 });
+await check("the branch a new box starts from is set on its repo's card, not fleet-wide", async () => {
+  // Per repo (the owner, 2026-09-27). Fails if the card loses the field, if a change to it is not
+  // what the repo stores, or if the old fleet-wide field comes back in Settings → Boxes.
+  const sel = '.rcard[data-card="smoke"] input[data-key="base_branch"]';
+  const field = await mustSee(sel, "the repo's base branch field");
+  const title = await field.locator("xpath=ancestor::label[1]").locator(".set-title").textContent();
+  if (!/Branch a new box starts from/.test(title)) throw new Error(`the field is labelled "${title}"`);
+  await field.fill("develop");
+  await field.dispatchEvent("change");
+  let stored;
+  for (let i = 0; i < 50 && stored !== "develop"; i++) {
+    const saved = await fetch(`http://127.0.0.1:${port}/api/repos`, { headers: authHeader() }).then(r => r.json());
+    stored = saved.find(r => r.id === "smoke").base_branch;
+    if (stored !== "develop") await settle(100);
+  }
+  if (stored !== "develop") throw new Error(`the typed branch should be what the repo stores, got ${JSON.stringify(stored)}`);
+  if (await page.$("#set-base")) throw new Error("the fleet-wide base branch field is still in Settings");
+});
 await check("a connection in use is not removed out from under its repos", async () => {
   await page.click('.set-navi[data-pane="tracking"]');
   await settle(300);

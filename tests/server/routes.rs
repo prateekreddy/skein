@@ -348,7 +348,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
     let dir = doorway_stopped(Scratch::temp("skein-settings-it"));
     std::fs::write(
         dir.join("config.json"),
-        r#"{"fleet_sandbox":"skein-fleet","fleet_memory":"26g","base_branch":"trunk"}"#,
+        r#"{"fleet_sandbox":"skein-fleet","fleet_memory":"26g","git_name":"Example Person"}"#,
     )
     .unwrap();
     std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
@@ -386,7 +386,10 @@ fn saving_settings_leaves_untouched_fields_alone() {
         saved["fleet_sandbox"], "skein-fleet",
         "a field the screen never renders must survive a save — clearing this one unmakes the fleet"
     );
-    assert_eq!(saved["base_branch"], "trunk", "and so must every other one");
+    assert_eq!(
+        saved["git_name"], "Example Person",
+        "and so must every other one"
+    );
 }
 
 /// The repo list must name the GitHub repository the host will mint a token for — including for a

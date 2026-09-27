@@ -17,12 +17,20 @@ pub(super) struct RepoSettingsReq {
     auto_review: Option<bool>,
     /// how far it may go unattended: none | comment | changes | approve
     auto_review_ceiling: Option<String>,
+    /// the branch a new box of this repo starts from; empty = the remote's default
+    base_branch: Option<String>,
 }
 
 pub(super) async fn api_set_repo_settings(
     Path(id): Path<String>,
     Json(req): Json<RepoSettingsReq>,
 ) -> Response {
+    // First, so a branch that cannot be one refuses before anything else is written.
+    if let Some(branch) = &req.base_branch {
+        if let Err(error) = skein::repos::set_base_branch(&id, branch) {
+            return (StatusCode::BAD_REQUEST, error).into_response();
+        }
+    }
     match skein::repos::set_repo_settings(
         &id,
         req.plane_project.as_deref(),

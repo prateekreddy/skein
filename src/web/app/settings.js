@@ -152,7 +152,6 @@ function openSettings(pane = "repos") {
     if (ghalt && settings.seed_gh_secret === true) ghalt.open = true;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
     document.getElementById("set-agent").value = settings.default_agent || "";
-    document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
@@ -510,6 +509,11 @@ function renderRepoList() {
       + `<button type="button" class="rhead" aria-expanded="${openRepos.has(r.id)}"><span class="rid">${esc(r.id)}</span>`
       + `<span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>${tags}<span class="rchev">›</span></button>`
       + `<div class="rbody">`
+      // Per repo (the owner, 2026-09-27): it was one fleet-wide field, honoured only by the repos
+      // whose remote happened to have that branch.
+      + repoField(r, "base_branch", "Branch a new box starts from",
+          "blank starts from the remote's own default branch. A branch the remote does not have is ignored, and the box starts from the default",
+          "(the remote's default)")
       + repoField(r, "plane_project", "Plane project", "paste the project URL or its uuid — a box's tracker token binds to it, so its work lands on that board", "https://plane…/projects/<uuid>/issues")
       + repoSelect(r, "sync_connection", "Work tracking",
           conns.length
@@ -615,7 +619,6 @@ function settingsPayload() {
     seed_gh_secret: document.getElementById("set-seedgh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
     default_agent: document.getElementById("set-agent").value,
-    base_branch: document.getElementById("set-base").value.trim(),
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     fleet_disk: document.getElementById("set-fleetdisk").value.trim(),

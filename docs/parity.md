@@ -407,7 +407,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **The `open` scope tag** — badges a box holding the fleet-wide credential.
 - **Terminal scrollback carry-over on reconnect**, with its `── reconnected ──` marker.
 - **Fleet settings**: Docker shares the fleet disk (one disk vs two — "the two disks are also two
-  firewalls"), base branch for PRs, confirm-before-destroy as a *setting*, overwrite-token-on-startup.
+  firewalls"), confirm-before-destroy as a *setting*. The branch a new box starts from was a fleet
+  setting and is now each repo's own, on its card (the owner, 2026-09-27).
 - **The inherit/override grammar** in box settings — absent means inherit, empty means explicitly
   nothing, a value overrides — across tracking, identity, disk and git-scope, each default naming what
   inheriting currently means. And **disk is measured, not enforced**, said in the UI.

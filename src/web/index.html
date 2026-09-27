@@ -1952,7 +1952,6 @@
             <label class="set-field narrow"><span class="set-title">Offer old build output after</span><span class="desc">Days a compiler artefact may go untouched before a full disk offers it back. <b>0 turns the offer off.</b> <details><summary>why this one is a judgement and not a measurement</summary>Everything else skein offers to delete it can <b>prove</b> dead — a directory under <code>.skein</code> that belongs to neither skein nor any live box, or a build directory whose own dependency files name a source tree that is no longer on disk. Cargo's superseded generations cannot be proved dead at all: rebuild a crate under a changed feature set and the old <code>.rlib</code> stays beside the new one for ever, and nothing in either file says which is which — cargo's own fingerprint register does not either, because it keeps one per generation and removes none. The only handle left is how long since something read or wrote the file, and skein admits it <b>here and nowhere else</b> because of what being wrong costs: the artefact is regenerated from source nobody touched, so the price is a <b>slower rebuild and never lost work</b>. It is yours to set because its correctness is local — a fleet whose lanes run for a week is wrong to call five days dead. skein never deletes any of it; it names what it would remove, with the age and the size, and prints the command.</details></span><input id="set-staledays" type="number" min="0" step="1" placeholder="5" autocomplete="off" /></label>
             <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as. Blank reads it from the repo's host clone, which is usually already right — a box has a private HOME, so it inherits no gitconfig of its own.</span><input id="set-gitname" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
-            <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="set-envnote" data-held="ai_enrichment" hidden></span><span class="desc">Rationed Haiku calls on your Claude subscription (no API key) summarise boxes with no journal, and hold back a "proceed?" that is really a decision. <details><summary>why it is off by default</summary>spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</details></span></span><input type="checkbox" id="set-ai" class="switch"></label>
             <p class="set-note" id="set-ainote"></p>
@@ -10015,7 +10014,6 @@ function openSettings(pane = "repos") {
     if (ghalt && settings.seed_gh_secret === true) ghalt.open = true;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
     document.getElementById("set-agent").value = settings.default_agent || "";
-    document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
@@ -10373,6 +10371,11 @@ function renderRepoList() {
       + `<button type="button" class="rhead" aria-expanded="${openRepos.has(r.id)}"><span class="rid">${esc(r.id)}</span>`
       + `<span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>${tags}<span class="rchev">›</span></button>`
       + `<div class="rbody">`
+      // Per repo (the owner, 2026-09-27): it was one fleet-wide field, honoured only by the repos
+      // whose remote happened to have that branch.
+      + repoField(r, "base_branch", "Branch a new box starts from",
+          "blank starts from the remote's own default branch. A branch the remote does not have is ignored, and the box starts from the default",
+          "(the remote's default)")
       + repoField(r, "plane_project", "Plane project", "paste the project URL or its uuid — a box's tracker token binds to it, so its work lands on that board", "https://plane…/projects/<uuid>/issues")
       + repoSelect(r, "sync_connection", "Work tracking",
           conns.length
@@ -10478,7 +10481,6 @@ function settingsPayload() {
     seed_gh_secret: document.getElementById("set-seedgh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
     default_agent: document.getElementById("set-agent").value,
-    base_branch: document.getElementById("set-base").value.trim(),
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     fleet_disk: document.getElementById("set-fleetdisk").value.trim(),

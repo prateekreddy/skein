@@ -82,6 +82,8 @@ pub fn add_repo(source: &str, id: Option<&str>, store: Option<&str>) -> Result<R
         // starting state, and the state a reviewer wants on a repo nobody has configured is the
         // one where a deletion is audited before it is approved.
         owed_checks: None,
+        // The remote's default until somebody names another on the repo card.
+        base_branch: String::new(),
         plane_project: String::new(),
         // One connection ⇒ adopt it, so a single-tracker fleet needs no ceremony per repo. Two or
         // more ⇒ leave it unset: which backlog this repo belongs to is not skein's guess to make,

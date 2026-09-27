@@ -105,24 +105,14 @@ pub struct Config {
     /// ([`crate::runtime::fleet_agent`]). The only default: a repo has no runtime of its own.
     #[serde(default = "default_agent")]
     pub default_agent: String,
-    /// The branch a box's clone starts from, and the head of the diff's base-ref ladder. Empty ⇒
-    /// whatever the remote calls its own default.
+    /// **Moved to each repo** ([`crate::repos::Repo::base_branch`], the owner, 2026-09-27): the
+    /// branch a new box starts from is a fact about one repository, and one fleet-wide value for it
+    /// was honoured only by the repos whose remote happened to have that branch.
     ///
-    /// **The cockpit's Settings pane is the only way in** (SKEIN-649). This line used to call the
-    /// field the UI equivalent of an environment variable, and to say it was the base for
-    /// `gh pr create` and merge when a repo did not specify one. Every clause of that had stopped
-    /// being true: the variable went with the box-level PR tools and nothing in the tree reads it
-    /// any more, so setting it produced no error and no base branch; a merge reads the pull
-    /// request's own `base` from GitHub (`prq::base_and_head`) and never this; and a repo has no
-    /// base of its own to specify.
-    ///
-    /// The saved value is not trusted on its own. [`crate::fleet::base_branch`] asks the remote
-    /// with `ls-remote --symref` and honours this only if the remote really has such a branch,
-    /// which is how a base of `develop` is kept for the repos that have one without breaking the
-    /// repos that do not; `diff::diff_base_refs` leads its ladder with `origin/<value>` for the
-    /// same remote-first reason. Those two are what read this field; what reads the resolver is the
-    /// clone a box comes up on (`fleet::clone_script`) and `reviewbox::open_at`.
-    #[serde(default)]
+    /// Kept only so an older `config.json` that set it is not lost: nothing reads it but
+    /// [`crate::repos::adopt_fleet_base_branch`], which copies it into every repo that has none and
+    /// then clears it. Never written back once empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
     /// Confirm before a destructive **Destroy** (clone-mode boxes lose unpushed commits). The cockpit
     /// reads this to decide whether to prompt.

@@ -5,7 +5,6 @@
 //! different branch — a confidently wrong answer that looked exactly like a right one.
 
 use crate::answer::Answer;
-use crate::config::*;
 use crate::registry::{locate_registry, store_for_box};
 use crate::sandbox::sbx_guest_output;
 use crate::sbx::lookup_dir;
@@ -52,9 +51,12 @@ pub(crate) const DIFF_CAP: usize = 2_000_000;
 /// Remote-first is the point. The old host-side path measured against whatever the *host clone*
 /// had checked out, which for a clone-mode box is a different branch of a different checkout —
 /// a wrong answer that looked exactly like a right one.
-pub(crate) fn diff_base_refs() -> Vec<String> {
+pub(crate) fn diff_base_refs(repo: Option<&crate::repos::Repo>) -> Vec<String> {
     let mut refs = Vec::new();
-    let configured = load_config().base_branch.trim().to_string();
+    // The repo's own base (`Repo::base_branch`); a box of no registered repo has none.
+    let configured = repo
+        .map(|r| r.base_branch.trim().to_string())
+        .unwrap_or_default();
     if !configured.is_empty() {
         refs.push(format!("origin/{configured}"));
     }
@@ -109,7 +111,8 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
         return None;
     }
     if box_liveness(name) == Some(Liveness::Running) {
-        if let Ok(raw) = sbx_guest_output(name, &diff_script(&diff_base_refs()), DIFF_TIMEOUT) {
+        let refs = diff_base_refs(crate::repos::repo_for_box(name).as_ref());
+        if let Ok(raw) = sbx_guest_output(name, &diff_script(&refs), DIFF_TIMEOUT) {
             let (base, mut patch) = split_diff(&raw);
             if patch.len() > DIFF_CAP {
                 // Not `String::truncate`: it panics on a byte index inside a character, and a diff
@@ -161,11 +164,11 @@ pub(crate) fn git_ok(dir: &str, args: &[&str]) -> bool {
 /// Same ladder as the in-box diff, so the takeover brief's file list and the diff pane agree about
 /// what "the branch" means. With no common ancestor it falls back to `HEAD` (uncommitted only)
 /// rather than exploding into an unrelated-history diff.
-pub(crate) fn git_range(dir: &str) -> Option<String> {
+pub(crate) fn git_range(name: &str, dir: &str) -> Option<String> {
     if !Path::new(dir).join(".git").exists() {
         return None;
     }
-    let refs = diff_base_refs();
+    let refs = diff_base_refs(crate::repos::repo_for_box(name).as_ref());
     let base = refs
         .iter()
         .find(|b| git_ok(dir, &["rev-parse", "--verify", "-q", b]));
@@ -209,7 +212,7 @@ pub fn changed_files(name: &str) -> Vec<String> {
         return vec![];
     }
     if let Some(dir) = lookup_dir(name) {
-        if let Some(range) = git_range(&dir) {
+        if let Some(range) = git_range(name, &dir) {
             let mut command = Command::new("git");
             command.args(["-C", &dir, "diff", "--name-only", &range]);
             if let Ok(out) = bounded_output(
@@ -265,38 +268,35 @@ mod tests {
     // wrong answer for every clone-mode box.
     #[test]
     fn the_diff_base_ladder_prefers_the_configured_remote_branch() {
-        let _g = env_lock();
-        let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        save_config(&Config::default()).unwrap();
+        let repo = |base: &str| crate::repos::Repo {
+            base_branch: base.into(),
+            ..Default::default()
+        };
         assert_eq!(
-            diff_base_refs(),
+            diff_base_refs(None),
             ["origin/main", "origin/master", "main", "master"],
             "remote refs first; the local ones are a last resort for a repo with no remote"
         );
-        save_config(&Config {
-            base_branch: "develop".into(),
-            ..Default::default()
-        })
-        .unwrap();
         assert_eq!(
-            diff_base_refs().first().map(String::as_str),
+            diff_base_refs(Some(&repo(""))),
+            diff_base_refs(None),
+            "a repo that names no base is the remote defaults"
+        );
+        assert_eq!(
+            diff_base_refs(Some(&repo("develop")))
+                .first()
+                .map(String::as_str),
             Some("origin/develop"),
             "a repo whose base branch is `develop` must not be diffed against main"
         );
-        save_config(&Config {
-            base_branch: "main".into(),
-            ..Default::default()
-        })
-        .unwrap();
         assert_eq!(
-            diff_base_refs(),
+            diff_base_refs(Some(&repo("main"))),
             ["origin/main", "origin/master", "main", "master"],
             "configuring the default must not duplicate it in the ladder"
         );
         // The script names every ref it will try, so a base that never resolves is visible in the
         // command rather than being silently swallowed into `HEAD`.
-        let script = diff_script(&diff_base_refs());
+        let script = diff_script(&diff_base_refs(None));
         assert!(script.contains("origin/main"), "{script}");
         assert!(script.contains("merge-base"), "{script}");
         assert!(
@@ -360,11 +360,11 @@ mod tests {
         git(&["commit", "-q", "-m", "x"]);
         fs::write(dir.join("a.txt"), "hello world\n").unwrap();
         // A repo with no remote still yields a usable range — the local branch tail of the ladder.
-        let range = git_range(d).expect("a git repo yields a range");
+        let range = git_range("thing-x", d).expect("a git repo yields a range");
         assert!(!range.is_empty());
 
         let empty = tempdir(); // not a git repo → None, never explodes
-        assert!(git_range(empty.to_str().unwrap()).is_none());
+        assert!(git_range("thing-x", empty.to_str().unwrap()).is_none());
         env::remove_var("SKEIN_HOME");
     }
 

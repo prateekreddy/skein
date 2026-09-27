@@ -156,6 +156,10 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     if let Err(e) = skein::kit::ensure_kit() {
         eprintln!("skein: kit not installed ({e}); boxes will fail to provision");
     }
+    // An older config's fleet-wide base branch becomes each repo's own (the owner, 2026-09-27).
+    if let Err(e) = skein::repos::adopt_fleet_base_branch() {
+        eprintln!("skein: could not move the base branch from Settings onto each repo ({e}); new boxes start from each remote's default until it is set on the repo card");
+    }
     // Bring an existing fleet sandbox into line with this binary: it keeps the launcher and the
     // ceilings it was last given, and an upgrade that changes what skein passes the launcher stops
     // every box in that fleet starting until the copy out there is replaced. A restart is the only

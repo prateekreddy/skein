@@ -47,11 +47,11 @@ named with a slug (`<repo>-feat-auth`, since sbx names can't contain `/`) while 
 checks out the real `feat/auth` branch.
 
 **Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): whether an unscoped box falls
-back to the account token (`seed_gh_secret`, read by `box_credential`), the default agent, the base
-branch for PRs (`base_branch`), and confirm-before-Destroy. Where the table below
-lists a matching `$SKEIN_*` variable, the environment still overrides the saved value for headless
-use; the base branch has none and is the saved value alone, which `fleet::base_branch` then checks
-against what the remote actually has (`git ls-remote --symref`) before using it.
+back to the account token (`seed_gh_secret`, read by `box_credential`), the default agent, and
+confirm-before-Destroy. Where the table below lists a matching `$SKEIN_*` variable, that variable
+can hold the matching switch off, and never on. The branch a new box starts from is per repo, on its
+card (`base_branch` in `repos.json`), and `fleet::base_branch` checks it against what the remote
+actually has (`git ls-remote --symref`) before using it.
 
 **Git auth inside boxes.** HTTPS remotes push with no setup. A scoped box reaches GitHub **direct**
 (the GitHub hosts are in `NO_PROXY`), so git presents the per-repo token skein placed and GitHub
