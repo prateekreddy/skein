@@ -128,33 +128,40 @@ DOCKER_SANDBOXES_ROOT_SIZE=60g \
   "$HOME/.skein" "$HOME/work/some-repo" "$HOME/elsewhere/another"
 ```
 
-**If the sandbox dies**, re-run all three. `sbx create` on a name that exists is refused rather than
-destructive, and the bootstrap is idempotent — it fetches instead of cloning and reloads the cockpit
-across its own socket rather than restarting it. There is deliberately no `skein` on the host to
-repair a fleet with, so these lines are also the repair.
+**If the sandbox dies**, re-run the install lines. `sbx create` on a name that exists is refused
+rather than destructive, and the bootstrap is idempotent — it fetches instead of cloning and reloads
+the cockpit across its own socket rather than restarting it. There is deliberately no `skein` on the
+host to repair a fleet with, so these lines are also the repair.
 
-Then, in the cockpit: sign in once (every box inherits it), add a repo, and press **+ box**.
+Then three things, in this order: open the cockpit, sign an agent in, and add a repo.
 
-**Open the URL it prints**, not `127.0.0.1:7878` on its own — it carries the fleet's token
-(`http://127.0.0.1:7878/?t=…`) and your browser keeps it in a cookie, so it is a one-time step. A
-page opened without it says so and tells you where the token lives; see [Opening the
-cockpit](#opening-the-cockpit).
+**Open the cockpit with its token**, not `127.0.0.1:7878` on its own. On the host:
 
-Then press **+ box**, name a branch, and an agent starts working on it. The board's own first-run
-checklist tracks what is left (sbx answering, an agent signed in, a repo added), and `skein doctor`
-diagnoses the environment if anything looks wrong.
+```sh
+open "http://127.0.0.1:7878/?t=$(cat ~/.skein/api-token)"
+```
+
+(`xdg-open` on Linux.) Your browser keeps the token in a cookie, so this is a one-time step. A page
+opened without it says so and shows this same line; see [Opening the cockpit](#opening-the-cockpit).
+
+**Sign an agent in, and don't skip it.** It authenticates the agent runtime once inside the shared
+sandbox, and every box inherits that session. Without it each box comes up sitting at a login
+prompt, does nothing, and shows `sign in` on the board — the single most common way a first run goes
+quiet. The checklist's sign-in step and that `sign in` chip both open a login terminal in the
+cockpit. Claude and Codex are separate sign-ins, and both can be signed in.
+
+**Then add a repo, press + box**, name a branch, and an agent starts working on it. The board's
+first-run checklist says what is left — five steps, `firstRunHtml` in `src/web/app/settings.js` —
+and `skein doctor` diagnoses the environment if anything looks wrong.
 
 **Creating and destroying the sandbox stays yours.** It is the most privileged thing in skein, and
 skein inside the fleet cannot do it at all — there is no skein until the fleet exists. So the create
 above is a line you ran, and a later resize or recreate is a line the cockpit **shows you to run**,
 with what it is for and what declining costs. `skein-warden` is the optional other half of that: run
 it on the host and the cockpit asks it instead of asking you, still putting the command to a person
-before it runs. Without a warden nothing is blocked — you are simply the one who pastes the line.
-
-**Don't skip signing in.** It authenticates the agent runtime once inside the shared sandbox, and
-every box inherits that session. Without it each box comes up sitting at a login prompt, does
-nothing, and shows `sign in` on the board — the single most common way a first run goes quiet.
-Claude and Codex are separate sign-ins and both can be signed in.
+before it runs. Without a warden nothing is blocked — you are simply the one who pastes the line —
+so the checklist's warden step is information, not a gate
+([`docs/decisions/warden-or-prompt.md`](docs/decisions/warden-or-prompt.md)).
 
 ## Web cockpit (the primary surface)
 
@@ -169,16 +176,20 @@ route, against a checkout you have [built](#build) yourself.)*
 *(`SKEIN_REGISTRY=…` is the pre-`skein add` single-repo path; see [Registry
 resolution](docs/operating.md#registry-resolution-first-match-wins). Managed repos need none of it.)*
 
+*(`/v2` is the next board, served beside this one until it reaches parity: one queue of what needs
+you, a box's terminal, and adding a repo and a box. It has no fleet controls and no settings screen
+yet; `docs/parity.md` §7.1 is the walk that says what is left before it replaces `/`.)*
+
 A self-contained dark page (no build step) that live-updates over SSE. The fleet is an **attention
 inbox**: boxes sort "who needs you first" (a decision-blocked box, then a turn that ended on a
 question, then work in flight), and each row carries a one-line **headline** — the prompt it's
 blocked on, or the gist of its last message — with a chip from the **fork-detector**
 (`decision` / `asks` / `proceed?`) so a real fork stands out from a rote "shall I proceed?". Click any
-box to open its **embedded terminal** (xterm.js ↔ `sbx exec` ↔ a persistent per-runtime tmux session),
+box to open its **embedded terminal** (xterm.js ↔ a persistent per-runtime tmux session in the box),
 its **diff**, or a **Session** digest — "what happened here" assembled for free from the branch's
 commits, the agent's `.skein/journal.md`, and its last message, so you can catch up without reading the
 scrollback. No model tokens are spent building any of this. Each box also gets a second **Shell** tab
-(`sbx exec -it <box> /bin/bash`) for running commands yourself, and **attachments** — paste, drag-and-drop,
+(its own `skein-shell` tmux session) for running commands yourself, and **attachments** — paste, drag-and-drop,
 or the 📎 button — hand the agent any file or folder: a screenshot, a PDF, a spreadsheet, a video, a whole
 sample corpus. The agent can't see your clipboard or your disk (it runs in the sandbox), so skein streams
 each one into the box under `/tmp/skein-drop-<batch>/` (one directory per drop, so a dropped folder keeps
@@ -186,8 +197,8 @@ its structure) and pastes the in-box path — the folder's path for a folder —
 to open. Streamed, not buffered, so a large video costs the host no memory. Open sessions stay live as
 **tabs** in the dock: drag them into the order you want (it survives a reload), or move between them with
 `⌥1`–`⌥9` / `⌥[` `⌥]` — chords that work while you are typing in the agent, since the browser reserves
-`⌘1`–`⌘9` and the agents use `⌥←`/`⌥→` for word movement. Press `?` for the full key list (it lives in
-**Settings → Shortcuts**, rendered from the same table the app binds, so it can't drift).
+`⌘1`–`⌘9` and the agents use `⌥←`/`⌥→` for word movement. Press `?` for the full key list, under
+**Settings → Shortcuts**.
 
 Turn state has two halves. **Edges** are the runtime's lifecycle hooks — fast, but no runtime fires
 anything when you answer a permission prompt, dismiss a dialog, interrupt a turn, or when the agent
@@ -242,8 +253,8 @@ shown and labelled as such, so a stale diff never reads as the live tree.
 
 Each box also gets a **Files** tab — browse its workspace and read files without leaving skein:
 markdown renders (README auto-opens at the root, relative links navigate), images display inline,
-everything else shows as text. It reads **the box's own tree** (`sbx exec`, path-resolved and
-escape-guarded inside the box), because a clone-mode box works on its own copy: the host-side clone
+everything else shows as text. It reads **the box's own tree** (path-resolved and escape-guarded
+inside the box), because a clone-mode box works on its own copy: the host-side clone
 is a different checkout on a different branch, and for a repo whose host clone never got a working
 tree it is empty — which is how the tab could show nothing while the agent had a full tree. When the
 box is down it falls back to that host clone and labels the listing `host clone` rather than
@@ -261,11 +272,9 @@ that went with the box-level PR tools and the path picker, and nothing noticed.
 xterm.js and marked.js are vendored into the binary (served from `/vendor/`), so everything works
 with no CDN — important in the firewalled sbx network.
 
-> Loopback-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` (e.g. `0.0.0.0:7878`) to bind
-> off-loopback. The terminal WebSocket rejects unexpected `Origin`s (drive-by / DNS-rebinding
-> guard) — it allows loopback, `*.ts.net`, Tailscale IP ranges, and `$SKEIN_ALLOWED_ORIGINS`.
-> For remote/mobile you can either `tailscale serve` (below, keeps the loopback bind) or bind
-> off-loopback and hit the box's tailnet address directly.
+> Loopback-only by default (`127.0.0.1:7878`), and the terminal WebSocket rejects unexpected
+> `Origin`s (drive-by / DNS-rebinding guard). Reaching it from another device is [Remote
+> access](#remote-access-tailscale), below.
 
 ### Sandboxes skein did not create
 
@@ -299,15 +308,10 @@ a box that can read every other box's credentials should never be one you have t
 
 ### Opening the cockpit
 
-The API needs the fleet's token. On startup the server prints the URL that carries it:
-
-```
-skein-server → http://127.0.0.1:7878/?t=<token>
-```
-
-Open that once and the browser keeps a `HttpOnly` cookie; after that plain `http://127.0.0.1:7878`
-works. The token lives at `~/.skein/api-token` (0600, generated on first run), so a script can use
-`Authorization: Bearer $(cat ~/.skein/api-token)`.
+The API needs the fleet's token, which lives at `~/.skein/api-token` (0600). Open the cockpit once
+with the line from [Getting started](#getting-started) — the same one a page without the token
+shows — and the browser keeps a `HttpOnly` cookie; after that plain `http://127.0.0.1:7878` works. A
+script sends `Authorization: Bearer $(cat ~/.skein/api-token)`.
 
 **Why it exists.** Loopback is not the boundary it looks like. A box in the fleet reaches the host
 at `host.docker.internal:7878` — measured, not assumed — so before this, any agent could approve its
@@ -337,8 +341,8 @@ the keyboard, and **‹ boxes** returns to the fleet without ending the session.
 
 - **Shared/team tailnet:** restrict *which* users/devices can reach the port with a Tailscale
   **ACL** — that's the access control.
-- **`tailscale funnel` (public internet):** removes the tailnet boundary, so don't use it for
-  the terminal without adding an app-level auth token first (not currently implemented).
+- **`tailscale funnel` (public internet):** removes the tailnet boundary, leaving the fleet's token
+  as the only thing between the internet and every box's terminal. Don't.
 
 **Alternative — bind off-loopback directly.** If you'd rather skip `tailscale serve`, bind the
 server to a broader interface with `$SKEIN_ADDR` and reach it at the box's own tailnet address:
@@ -349,11 +353,10 @@ SKEIN_ADDR=0.0.0.0:7878 ./target/release/skein-server   # all interfaces
 ```
 
 Then open `http://<machine>.<tailnet>.ts.net:7878` or `http://<tailnet-ip>:7878`. The origin guard
-trusts `*.ts.net` **and** Tailscale IP ranges (CGNAT `100.64.0.0/10`, `fd7a:115c:a1e0::/48`), so the
-embedded terminals work over the raw tailnet address with no per-host config — the tailnet stays the
-auth boundary. (A non-tailnet LAN/public IP is still rejected; list it in `$SKEIN_ALLOWED_ORIGINS`
-if you really mean to expose it there.) `tailscale serve` is still preferred where you can use it —
-it keeps the bind on loopback and gives you real HTTPS.
+trusts the tailnet with no per-host config, so the embedded terminals work over the raw tailnet
+address and the tailnet stays the auth boundary; which origins it allows, and how to add one, is
+`SKEIN_ALLOWED_ORIGINS` in the [knob table](docs/operating.md#configuration). `tailscale serve` is
+still preferred where you can use it — it keeps the bind on loopback and gives you real HTTPS.
 
 ## CLI (terminal client, same core)
 
@@ -388,67 +391,21 @@ State prefers the explicit status a box's hooks report (`needs-input` / `waiting
 ## Build
 
 **You do not need this to run skein** — the [install above](#getting-started) builds it inside the
-sandbox. This is the developer route, for working on skein itself.
+sandbox. This is the developer route, for working on skein itself:
 
 ```sh
 cargo build --release --workspace   # → target/release/{skein, skein-server, skein-warden}
-                             # `--workspace`: a plain `cargo build` makes the first two only, and
-                             # the fleet cannot be created or resized without the third
-cargo test --workspace       # units, a black-box run of the real server (tests/server/), and the
-                             # box hook scripts driven as scripts (tests/turn_state_probe.rs)
-node tests/ui/voice.mjs      # what the mouth says + when it stays quiet (no browser needed)
-node tests/ui/tabs.mjs       # do your open tabs survive a reload (no browser needed)
-node tests/ui/smoke.mjs      # the cockpit in a browser — run it after touching src/web/index.html
-                             # (`cargo test` runs every suite in `BROWSER_SUITES` too, and says so
-                             #  when Playwright's chromium is not installed)
 ```
 
-**Some tests do not run on macOS**, and the suite says which. They drive shell scripts skein
-installs *into a box* — `sed -i` with no argument, `readlink -f`, `sort -z`,
-`tar --ignore-failed-read`, `/proc/<pid>/stat` — and every one of those spellings is the correct one
-where the script actually runs, which is a `bwrap` namespace inside a Linux sandbox.
-
-The list is `GATED` in `tests/platform_gates.rs`, each name with the reason it cannot run elsewhere.
-No count is written here on purpose: the last one said eight while `GATED` held eighteen, and a
-number in prose that the code can answer is a number that drifts. `cargo test` on a Mac prints the
-count and the names from `GATED` itself, and
-`every_platform_gated_test_is_declared_with_its_reason` fails the build if a test is gated without
-being written down — in both directions, so the list cannot silently outlive the tests either. For
-the whole suite, run `cargo test` inside a box.
-
-`cargo test` proves the API is right; the browser smoke test proves the *page* is right, which is
-not the same thing. It launches the real binary against a throwaway workspace and clicks through the
-tabs, asserting what is **visible** rather than what merely exists in the DOM — the Files tab once
-shipped with every folder rendered and then hidden by an unrelated CSS rule, invisible to every
-other check. One-time setup in `tests/ui/README.md`.
+To test it or contribute, [`CONTRIBUTING.md`](CONTRIBUTING.md) is the one place that says how: the
+command that runs the whole suite and why it is not a bare `cargo test`, the browser tier's one-time
+setup, and which tests do not run on a Mac.
 
 ## Where to go next
 
-Everything above is the front door — install skein, open the cockpit, drive a box from the browser
-or from the terminal. Everything else it does lives one document over, in
-[`docs/operating.md`](docs/operating.md), because *is this for me* and *how do I point this repo at
-a backlog* are questions asked months apart, and the first should not have to scroll past the
-second to reach its answer.
-
-Go there to:
-
-* **manage repos** — `skein add`, why a repo is a remote and a local path is refused, the per-repo
-  settings card, and the registry resolution order the pre-`skein add` single-repo path still uses;
-* **give the fleet a backlog it claims from** — a [`sync`](https://github.com/prateekreddy/sync)
-  gateway in front of Plane, why an atomic claim is the one thing Plane cannot do, and what a token
-  per box buys that assigning yourself does not;
-* **choose what credential a box holds** — the three GitHub paths, none of them a default, and the
-  measured retraction about what scoping a box does *not* narrow;
-* **decide what the fleet may install** — a box cannot `sudo`, so an `apt-get` inside one becomes a
-  request you approve once, for every box;
-* **read a conversation the terminal has lost**, hand a box from Claude to Codex, or carry durable
-  working files from one box to the next;
-* **look a knob up** — the `SKEIN_*` knob table, the `.env` that saves you retyping it, how skein
-  sizes a fleet, and how it reaches one at all.
-
-It closes with the two things worth reading before you change skein itself: what skein owns of the
-`sbx` setup and what it only reads, and why no request handler may run blocking work inline — the
-invariant the embedded terminal's responsiveness rests on.
+Everything above is the front door. Everything after it — managing repos, a backlog the fleet claims
+from, the credential each box holds, what the fleet may install, and every knob — is
+[`docs/operating.md`](docs/operating.md), whose own headings are its table of contents.
 
 ## Contributing, security, and the licence
 
@@ -460,7 +417,6 @@ invariant the embedded terminal's responsiveness rests on.
   vulnerability and the product working as designed is not in the usual place here.
 * [`docs/threat-model.md`](docs/threat-model.md) — what a box can and cannot reach, in one table,
   with the test behind each row.
-* [`CHANGELOG.md`](CHANGELOG.md) — what skein does today and how it got there, every entry traced
-  to a commit.
+* [`CHANGELOG.md`](CHANGELOG.md) — how skein got here, every entry traced to a commit.
 
 skein is dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE), at your option.

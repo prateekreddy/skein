@@ -6,8 +6,8 @@ Fixed, Removed and Security, newest first.
 **Nothing has been released yet.** `Cargo.toml:9` says `version = "0.1.0"`, and the repository
 carries no release tag — `git tag` lists `archive/in-fleet-final` and `archive/rescue-2026-08-29`,
 which mark archived branches, not versions. So there is no version history to write, and this file
-is instead: what skein does today, under **Unreleased**, and how it got there, under **Development
-history**.
+records how skein got here: what the tree held on `2026-09-07`, under **Unreleased**, frozen at that
+date, and the path to it, under **Development history**. What skein does today is the README's.
 
 Every entry below traces to at least one commit, though most were cited by hashes this history no
 longer has. Nothing here was written from memory.
@@ -20,12 +20,12 @@ every figure in it was wrong.
 git log --format='%s' a8cbac3 | wc -l                            # 858 commits
 git log --reverse --format='%ad' --date=short | head -1          # 2026-06-28
 git log -1 --format='%ad' --date=short a8cbac3                   # 2026-09-07
-git log --format='%s' a8cbac3 | grep -oE '^[a-z]+' | sort | uniq -c | sort -rn
 ```
 
-`fix` 366, `feat` 271, `docs` 114, `refactor` 45, `test` 35, `perf` 9, `chore` 7, `build` 3,
-`style` 2, `ci` 2, and one each of `wip` and `tools`, which are the two that are not conventional
-types at all. No commit in this history is marked `!` and no body carries a `BREAKING CHANGE`
+How many commits of each type the history holds is counted once, under "Commit messages" in
+[`CONTRIBUTING.md`](CONTRIBUTING.md), against a commit of its own, and is not repeated here.
+
+No commit in this history is marked `!` and no body carries a `BREAKING CHANGE`
 footer (`git log --format='%B' a8cbac3 | grep -c '^BREAKING CHANGE'` → 0), so nothing below is a
 declared break — the removals are recorded as removals because they removed a capability, not
 because a version boundary was crossed.
@@ -39,7 +39,7 @@ the start of a line, so anchoring it is both stricter and self-immune.
 
 ## [Unreleased]
 
-The state of the tree at `2026-09-07`.
+The state of the tree at `2026-09-07`, frozen there: a record, not a description of today.
 
 ### Added
 

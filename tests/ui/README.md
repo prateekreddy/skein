@@ -140,22 +140,76 @@ leave a process behind" contract `CONTRIBUTING.md` asks for after every browser 
 source-hygiene regression in a suite this run never touched should not be reported through the same
 number.
 
+## `harness/leaks.mjs` — did this run leave anything behind
+
+```sh
+node tests/ui/harness/leaks.mjs      # exit 0, and it prints the names it looked for
+```
+
+Run it after every browser run, not once at the end. `CONTRIBUTING.md` and `CLAUDE.md` both ask for
+it and both point here; this section is the one place its reasoning lives.
+
+**The line it replaced could not fail.** It read
+`ps -eo pid,args | grep -v grep | grep -cE 'ui-onboard-|skein-fleet-it-|skein-move-it-'`, every
+agent ran it, and it answered `0` on a box carrying 195 matching processes — 122 of them older than
+half an hour, the oldest over nine (SKEIN-647). Those three names were the fixtures of the day when
+it was written; there are forty now, and a stale alternation is indistinguishable from a correct one
+by its output alone. A check that cannot fail is worse than no check, because it is trusted.
+
+So it does not carry a list. It reads the names out of the call sites that create the fixtures —
+`Scratch::boxes` and `Scratch::temp` in `tests/*.rs`, `mkdtempSync` and `freshFixture` in
+`tests/ui/` — prints them, and **refuses to run at all when it derives none**, so a rename it stops
+recognising fails loudly instead of quietly printing zero.
+
+**Then it derived the right names and tried them in the wrong place.** The scan read
+`/proc/<pid>/cmdline` and nothing else, so it could only see a fixture named in a process's
+ARGUMENTS — while a `skein-server` is exec'd as a bare binary path and carries its fixture in
+`SKEIN_HOME` and `SKEIN_FLEET_ROOT`. It printed "nothing is running" beside a server that had been
+up for seven and a half hours (SKEIN-687). It reads the environment as well now, says how many
+processes would not let it, and `leakcheck.mjs` (below) keeps that true. Same lesson twice: a
+derived pattern is only as good as the surface it is tried against.
+
+**Then it went red about processes a reader could see were not theirs** (SKEIN-913) — the same
+failure from the other side, because a check that goes red for somebody else's reason teaches
+people to read past it, and the next red is read past too. It reports in two halves, and only one
+of them attributed what it found: the marker half said, in those words, that nothing there was this
+run's to be red about, while the fixture-name half exited 1 over five rows of another lane's
+`rustc`, every one nought seconds old with a live parent. **Both halves now answer one question the
+same way — a process is this run's leak only if it is attributable to THIS worktree and nothing is
+left of the run that made it.** Everything else is still reported, with its age and where it came
+from, under a headline that says whose it is; another lane's orphan is a real leak and is named as
+theirs, to be answered for where it belongs. So `exit 0` means *this* worktree is clean, and the
+rows printed beneath the counts are context rather than an accusation.
+
+**And both halves then went red over a process that was doing nothing wrong** — another worktree's
+`tmux … new-session -d -s skein-server`, one second old, twice, in a tree where no suite was running
+at all. Each half of the sentence above was wrong, and either alone produces that red. **`ppid == 1`
+is not "its run has gone" for something daemonised on purpose**: tmux forks a server and the
+launcher returns, so a healthy fixture's tmux is parentless from its first second, and an age
+threshold separates nothing, because a leak is one second old in its first second too. **And a path
+in an environment says where a process has BEEN as well as what it is using** — the only mention of
+this tree in that process was `OLDPWD`, the breadcrumb of the `cd` another lane's agent made on its
+way into its own worktree. So a parentless process is this run's leak only when nothing else of its
+own fixture is still running under a live parent, and its own children do not count (they are
+exactly what a stranded tmux keeps); and only when it does not also name another checkout of this
+repository, which the check asks `git worktree list` rather than keeping a list of lanes, breaking
+the tie on where the process is standing. One it can attribute to neither is printed under a
+headline saying so and reaches no exit code, because both available guesses are a failure this file
+already has a name for.
+
+The suites also stop what they started, on every way out including a throw and a Ctrl-C
+(`quiesceOnExit`, in the same file). A fixture *directory* is still kept when a suite fails, because
+it is the only evidence a failure leaves — but its tmux server and doorway loop go, since a kept
+fixture is exactly what let one restart a python every two seconds for nine hours.
+
 ## `leakcheck.mjs` — can the leak check see the server it is about
 
 ```sh
 node tests/ui/leakcheck.mjs       # no setup, no chromium, runs inside a box
 ```
 
-`node tests/ui/harness/leaks.mjs` is what answers "did that run leave anything behind", and it has
-been unable to fail twice now. The first time it restated three fixture names and went stale, which
-was fixed by deriving the names from the call sites that create them. The second time it tried
-those derived names against `/proc/<pid>/cmdline` alone — and the server a suite starts is exec'd
-as a bare binary path, told which fixture it belongs to in `SKEIN_HOME` and `SKEIN_FLEET_ROOT`. So
-the process left behind most often was the one shape the check could not see, and it printed
-"nothing is running from any of them" beside a `skein-server` that had been up for seven and a half
-hours (SKEIN-687).
-
-So this one starts a process carrying a derived prefix **only in its environment**, and checks that
+`harness/leaks.mjs` once could not see a server that named its fixture only in its environment
+(the section above). So this one starts a process carrying a derived prefix **only in its environment**, and checks that
 the report finds it, names the prefix it matched, and prints no part of the environment it matched
 in — that last because a real server's environment carries a credential. Written the other way
 round, with the prefix in the arguments, it would have passed before the fix and proved nothing.
@@ -173,10 +227,9 @@ launch dialog, launch. Three defects surfaced on the first run of it, all in the
 reachable from the CLI — Enter bypassing the no-repo gate, the repo control hidden whenever there
 was exactly one, and a footer promising `<repo>-<branch>` instead of the name about to be created.
 
-It also covers the fleet-sizing confirmation: the first launch must open the create dialog with the
-host's own numbers in it, `sbx create` must not have run before the confirm, and the sandbox that
-results must carry the sizes that were on screen — asserted against the recorded `sbx` argv, not
-against the config it was saved to.
+It also checks that launching a box creates no fleet, by any route: skein never runs `sbx create`
+itself, and asks the fixture's warden for nothing either. The create dialog this paragraph used to
+describe is deleted (SKEIN-627).
 
 Its fixture root follows the rule above — `$SKEIN_UI_FIXTURE_ROOT`, defaulting to
 `/var/tmp/skein-uifix` — and not `target/` since SKEIN-603: a worktree's own `$CARGO_TARGET_DIR` is
