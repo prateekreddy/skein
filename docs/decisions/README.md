@@ -21,8 +21,9 @@ Every record has the same fields, in this order:
 - **Enforced at** — the `file:line`, test or command where the code holds it. Where nothing
   enforces it yet, the record says so rather than leaving the field out.
 
-A record follows the project's first rule, *derive, do not assert*: a claim about the code cites the
-file and line or gives the command. The `path:line` citations here are held to what they named when
+A record follows the project's first rule, *derive, do not assert*, which
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) states: a claim about the code cites the file and line or
+gives the command. The `path:line` citations here are held to what they named when
 they were written by `tools/line-cite-check.py`, which reads every file under `docs/`.
 
 A record is changed when the decision changes, in the same commit as the code that changes it. It is

@@ -386,21 +386,28 @@ person's to make rather than the code's, and it is recorded rather than taken.
 
 ## 10. The flags
 
-**The flags are layers, and each answers a different question.** Four of the seven already exist,
-which is the reason to write them down together: a new switch that overlaps `read_prs` or
-`review_queue` would give two places to look for why nothing happened, and "why did it not review
-this" must have one answer.
+**The flags are layers, and each answers a different question.** Several already exist — the
+`state` column says which — and that is the reason to write them down together: a new switch that
+overlaps `read_prs` or `review_queue` would give two places to look for why nothing happened, and
+"why did it not review this" must have one answer.
 
 | # | the question it answers | switch | state |
 |---|---|---|---|
 | 0 | may **anything** act, anywhere in the fleet | `pr_workflows` / `SKEIN_PR_WORKFLOWS` | exists |
-| 1 | may skein **read** this repo's pull requests at all — the money door | `read_prs` | exists |
+| 0½ | may skein **read** pull requests at all, in any repo — the fleet-wide master switch over layer 1, and over a read you ask for as well | `review_summaries` / `SKEIN_REVIEW_AI` (Settings → Boxes, **Read pull requests**) | exists |
+| 1 | may skein **read** this repo's pull requests at all — the money door, per repo | `read_prs` | exists |
 | 2 | does this repo appear in **your queue** | `review_queue` | exists |
 | 3 | may the engine **act** on this repo | `auto_review` | **new** |
 | 4 | **which events** wake it | `auto_review_on` | **new** — built, `workflow::Wake` |
 | 5 | **how far** it may go unattended | `auto_review_ceiling` | **new** — the field exists; step 4 is what reads it |
 | 6 | **whose** pull requests | `auto_review_authors` | **new** — built |
 | 7 | **this one** pull request | the workflow assignment on the row | exists |
+
+Layers 0½ and 1 are the same question at two scopes, and both have to say yes: the reader that
+works unattended returns before anything else when `review_summaries` is off, and then skips every
+repo whose `read_prs` is off (`read_waiting`, `src/review/scope.rs`). The fleet switch is the only
+one of the two that also stops a read a person asked for (`summaries_enabled` in
+`src/review/visit.rs`).
 
 Layers 1 and 2 are deliberately not folded into 3. Reading costs money and is useful without any
 automation; the queue is a view. A repo can reasonably be *read* and *queued* with the engine off,

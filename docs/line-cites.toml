@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:495"]
+["CONTRIBUTING.md:497"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:509"]
+["CONTRIBUTING.md:511"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:540"]
+["CONTRIBUTING.md:542"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -37,7 +37,7 @@ line = "**Nothing is built or run on the host.** You download one file and hand 
 cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
 
 ["README.md:131"]
-line = "**If the sandbox dies**, re-run all three. `sbx create` on a name that exists is refused rather than"
+line = "**If the sandbox dies**, re-run the install lines. `sbx create` on a name that exists is refused"
 cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
 
 ["cockpit/src/saved.mjs:22"]

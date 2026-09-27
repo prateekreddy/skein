@@ -2348,7 +2348,7 @@ for exactly that reason.**
 |---|---|
 | the in-sandbox agent and its transport | it exists to survive a host-to-guest hop that no longer happens — **true as written, and it was not until the two jobs the same file had grown moved out**: the Docker watchdog and the machine-pressure counters are now `skein-server`'s, which is the long-lived in-sandbox process the agent used to be (SKEIN-573) |
 | its port publishing, healing loop and backoff | **done** (SKEIN-576). Same reason, and it was also the one thing built around a supposed no-unpublish trap that `sbx ports --unpublish` turns out not to be (§7.4). What replaced it is not a deletion: the cockpit's mapping is `fleet::publish_cockpit_port`, an Operation with a printable recipe and **no doer**, because `Act::Publish` has none by §9.4. §9.4's stamp guard moved to `cockpit_port_advice` — it now decides whether a *person* is told to publish, which is the same hazard with a different hand on it |
-| every `sbx exec` path **and its fallback twin** | with them, the transport-failure-versus-command-failure distinction that made the pairing necessary — but see below |
+| every `sbx exec` path **and its fallback twin** | **done** (SKEIN-576): a crossing's first hop, `Place::reach` in `src/place/argv.rs`, is empty, because skein is already in the sandbox and `sbx` is host-only. With them went the transport-failure-versus-command-failure distinction that made the pairing necessary — but see below |
 | two placement shapes | one remains |
 | sandbox listing as the truth about boxes | replaced by the box's own anchor (§6) |
 | the machine-global secret store | with it, two fleets on one host sharing one token |
@@ -2371,9 +2371,9 @@ container that kills it costs a rebuild of the whole fleet) and the cgroup/`vmst
 had taken them would have removed a safety mechanism and a first-class signal under cover of
 removing a transport, which is the same mistake one level up.
 
-**How they retire**: the transport and the `sbx exec` twin survive until delivery step 4, because
-until skein is in the fleet there is still a hop. They are removed *with* the move, not before it and
-not after — `docs/delivery.md` §3.
+**How they retired**: the `sbx exec` twin survived until delivery step 4, because until skein was in
+the fleet there was still a hop, and it went *with* the move rather than before or after it —
+`docs/delivery.md` §3, step 4c.
 
 ## 13b. Debugging skein itself
 

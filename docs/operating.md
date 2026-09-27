@@ -33,8 +33,8 @@ skein repos                                    # list managed repos
 ```
 
 …or in the cockpit: **⌘K → "Add a repo…"**. Adding a repo provisions a shared `.claude` store
-from scratch (mailbox + skein's turn-state probe), installs skein's own sbx kit, and seeds the
-host `gh` token into sbx so boxes can push/open PRs. Boxes are then named `<repo>-<branch>`; create
+from scratch (mailbox + skein's turn-state probe) and installs skein's own sbx kit; how its boxes
+push is the credential you pick under Settings → GitHub & keys (below). Boxes are then named `<repo>-<branch>`; create
 one from the **New box** dialog (which gains a repo selector once you manage more than one).
 
 The registry lives at `~/.skein/repos.json` (override the home with `$SKEIN_HOME`). The kit is
@@ -426,11 +426,13 @@ a receipt under `<repo-store>/skein/imports/`.
 
 ## Configuration
 
-`skein doctor` reports the resolved registry, bind address, and whether `sbx`/`git`/`gh`
-are present — run it first if something looks off. All knobs are environment variables — set
-them inline, or drop them in a **`.env`** (loaded automatically at startup from the cwd upward;
-real env vars still win). Copy [`.env.example`](../.env.example) to `.env` and you can just run
-`skein` / `skein-server` with no prefix:
+`skein doctor` reports the resolved registry, the bind address, the cockpit URL, whether `git` and
+`curl` are on `PATH`, and the warden (`cmd_doctor`, `src/bin/skein.rs`) — run it first if something
+looks off. Most settings live in the cockpit, under Settings, and are saved to
+`~/.skein/config.json`; the variables below are the rest, plus the few that override a setting for
+headless use. Set them inline, or drop them in a **`.env`** (loaded automatically at startup from
+the cwd upward; real env vars still win). Copy [`.env.example`](../.env.example) to `.env` and you
+can just run `skein` / `skein-server` with no prefix:
 
 | var | what | default |
 |-----|------|---------|
@@ -438,17 +440,17 @@ real env vars still win). Copy [`.env.example`](../.env.example) to `.env` and y
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
 | `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |
-| `SKEIN_ALLOWED_ORIGINS` | extra WS origins to allow (comma-sep hosts); loopback + `*.ts.net` always allowed | — |
+| `SKEIN_ALLOWED_ORIGINS` | extra WS origins to allow (comma-sep hosts). Always allowed: loopback, any `*.ts.net` host, and any Tailscale IP — CGNAT `100.64.0.0/10` and `fd7a:115c:a1e0::/48` (`origin_ok`, `src/bin/skein-server/door.rs`) | — |
 | `SKEIN_SELF` | this box's vmid (kept `live` when its `lastSeen` is quiet) | `$SANDBOX_VM_ID` |
-| `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
+| `SKEIN_REPO` | working directory for the tools skein runs (`git`, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}`/`{name}` substituted; relative to `$SKEIN_REPO`. **Optional**: unset, skein builds the launch itself (below), so the repo needs no launch script | _(native builder)_ |
 | `SKEIN_AGENT` | sbx runtime override; must match a registered Skein runtime adapter | repo/default runtime |
-| `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein` |
-| `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein-shell` |
-| `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | `sbx ls --json` |
-| `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; halts the sandbox to free compute (resume via attach). Non-destructive | `sbx stop {name}` |
-| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost) | `sbx rm -f {name}` |
-| `SKEIN_MERGE_METHOD` | merge strategy flag passed to `gh pr merge` | `--squash` |
+| `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | the box's `skein-agent` tmux session (`agent_session_name`, `src/runtime.rs`) |
+| `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | the box's `skein-shell` tmux session (`shell_argv`, `src/sandbox.rs`) |
+| `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | none: inside the fleet `sbx ls` cannot be asked, and boxes are read from their placement records (`src/sbx.rs`) |
+| `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; a test seam for a box skein has not placed. Non-destructive | none: skein stops a placed box itself (`stop_command`, `src/sandbox.rs`) |
+| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; a test seam, like `SKEIN_STOP_CMD` | none (`destroy_command`, `src/sandbox.rs`) |
+| `SKEIN_MERGE_METHOD` | merge strategy for a merge skein makes through GitHub's API: `squash`, `merge` or `rebase` | `squash` |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}`/`{runtime}` substituted | runtime adapter's native headless resume |
 | `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
 | `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
@@ -474,35 +476,29 @@ authenticates an installation, not a person, so it cannot say whose review a PR 
 queue reports that rather than listing nothing.
 
 **Sizing the fleet.** Every box runs inside one sbx sandbox, and its memory, CPUs and disk are
-fixed when that sandbox is created — sbx has no resize, so changing any of them means rebuilding it.
-So skein asks before it builds one: the first launch on a machine with no fleet opens a dialog with
-what the host has (RAM, cores, free disk) beside what skein proposes to take of it — 70% of memory,
-all cores but one, half the free disk capped at 60 GB. Nothing is created until you confirm, and the
-numbers you confirm are saved, so a later rebuild starts from them. Settings → fleet shows the same
-host figures beside the fields, and **Rebuild the fleet at these limits** is the same operation
-afterwards, carrying every box across.
+fixed when that sandbox is created — sbx has no resize, so changing any of them means making a new
+one. You choose them on the `sbx create` line in the README's [Getting
+started](../README.md#getting-started), and its table is where the sizes and their defaults are
+stated. Settings → Fleet shows what this machine has, and the lines to run on the host to make the
+sandbox again at other numbers; skein cannot do that from inside the sandbox it would be destroying.
 
-**How skein reaches the fleet.** By default it installs a small agent inside the fleet sandbox and
-talks to it over one held-open connection, falling back to `sbx exec` for anything the agent cannot
-carry. That is the faster path, and more importantly the one that survives a stalled sbx daemon: a
-stall hangs calls that need a *new* channel into the sandbox while established ones keep flowing, so
-without it the board goes blind while the boxes it watches are fine. The gauge strip says which of
-the two is actually carrying calls, always. To opt out, put `"fleet_agent": false` in
-`~/.skein/config.json` and restart — which removes the agent rather than routing around it.
+**How skein reaches a box.** skein runs inside the fleet sandbox, so it reaches a box by entering
+the box's namespace directly (`Place::exec`, `src/place/mod.rs`). There is no `sbx exec` hop to fall
+back from, and no transport to choose (`reach`, `src/place/argv.rs`).
 
 ## How it fits the sbx setup
 
 skein **reads** the shared store the sandboxes already maintain (`sandboxes.json`,
-`mailbox/`) and **drives** `sbx` / `git` / `gh`. It owns no state the bootstrap owns,
-and degrades gracefully when `sbx` isn't on PATH (e.g. read-only `ls` from anywhere
-with `$SKEIN_REGISTRY` set).
+`mailbox/`) and **drives** `git` and GitHub's API. It owns no state the bootstrap owns. `sbx` is
+host-only, so skein inside the fleet runs none of it; what needs `sbx` is a line it shows a person
+to run, and a read-only `ls` works from anywhere with `$SKEIN_REGISTRY` set.
 
 ## Terminal responsiveness (an invariant worth guarding)
 
 The embedded terminal shares skein-server's async runtime with everything else: the SSE
 fleet stream, every JSON handler, and the WS↔PTY bridge are all tasks on the same tokio
 workers. So **no request handler or stream may run blocking work inline** — anything that
-shells out (`sbx`, `git`, `gh`) or touches the filesystem must go through
+shells out (`git`, `curl`, a box's `tmux`) or touches the filesystem must go through
 `tokio::task::spawn_blocking`. A single inline blocking call freezes its worker for the
 whole duration and starves any terminal websocket scheduled on it: keystrokes stop echoing
 until it returns.

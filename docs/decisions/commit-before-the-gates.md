@@ -17,7 +17,7 @@ lost nothing, and one that stops before has lost everything but the diff on disk
 It also makes the gate receipt name a commit — `at <sha>` rather than `at <sha> + N uncommitted
 change(s)` — which is the form `tools/gates.sh --verify` can check against a tree that has not moved.
 
-The amend is only for a commit nothing sits on and nothing has cited (`CONTRIBUTING.md:540`); after
+The amend is only for a commit nothing sits on and nothing has cited (`CONTRIBUTING.md:542`); after
 that, fix with a new commit.
 
 **Rules out.**

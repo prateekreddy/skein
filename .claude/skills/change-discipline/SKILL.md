@@ -59,8 +59,8 @@ export CARGO_TARGET_DIR="$PWD/.target"
 export SKEIN_UI_FIXTURE_ROOT=/var/tmp/skein-uifix
 ```
 
-After every browser run, not once at the end — `CLAUDE.md` says why it reads the names it looks
-for rather than carrying a list:
+After every browser run, not once at the end — `tests/ui/README.md` says why it reads the names it
+looks for rather than carrying a list:
 
 ```sh
 node tests/ui/harness/leaks.mjs      # exit 0, and it prints the names it looked for

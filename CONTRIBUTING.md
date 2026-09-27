@@ -2,8 +2,9 @@
 
 Most of what is unusual about this repository is written down already, and this page is mostly a
 map to it rather than a second copy. The two things worth reading before anything else are
-[`CLAUDE.md`](CLAUDE.md), which is the working discipline, and
-[`ARCHITECTURE.md`](ARCHITECTURE.md), which is a signpost to the four design documents.
+["Before you change anything"](#before-you-change-anything) below, which is the working discipline,
+and [`ARCHITECTURE.md`](ARCHITECTURE.md), which is a signpost to the four design documents.
+[`CLAUDE.md`](CLAUDE.md) is the same guidance addressed to an agent, and it points back here.
 
 One rule governs everything below, and it is the one to internalise:
 
@@ -30,7 +31,7 @@ at all** — so the claim is not that the fleet paths are skipped politely, it i
 covered without one. What you *cannot* do without a fleet is watch a real box come up, and the
 suite is candid about which checks that costs you rather than pretending otherwise:
 
-* **On anything that is not Linux, eighteen tests do not run.** They drive the shell scripts skein
+* **On anything that is not Linux, the tests in `GATED` do not run.** They drive the shell scripts skein
   installs *into* a box — `readlink -f`, `sort -z`, `/proc/<pid>/stat` — and each of those
   spellings is the correct one where the script actually runs. The set is declared in
   `tests/platform_gates.rs` as `GATED`, with a reason per entry, and
@@ -125,9 +126,10 @@ cargo test --all --no-fail-fast
 ```
 
 `--no-fail-fast` is load-bearing, because **`cargo test` stops at the first test *binary* that
-fails** and there are 37 of them. `tests/browser_suites.rs` sorts fourth of the 29 in `tests/`
-(`ls tests/*.rs | sort`), so a single red browser suite means the report says nothing whatever
-about the twenty-five after it. That is not hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
+fails**, and every `tests/*.rs` is a binary of its own. `tests/browser_suites.rs` sorts near the
+front of them — fifth of 36 at `139bc75` (`ls tests/*.rs | sort | grep -n browser_suites`, and
+`ls tests/*.rs | wc -l`) — so a single red browser suite means the report says nothing whatever
+about the thirty-one after it. That is not hypothetical: master was pushed red at `d5d0e95` on a local run that stopped inside
 `browser_suites`, hiding a second broken gate that CI — fail-fast too, at the time — then found
 while still not reaching a third. One run that reports everything beats two that each report the
 first thing, which is the argument for the flag in both places: CI passes it now as well.
@@ -433,8 +435,8 @@ argue with — a prohibition on its own is just something to route around.
    already said so, and one of them said in as many words that the smaller question had been
    answered first once before and had to be corrected.
 
-   Read the design documents and search the tracker before you build, not after — and before you
-   file something, too. Two items in this tracker are duplicates of a decision that was already
+   Read the design documents and the settled records in `docs/decisions/`, and search the tracker,
+   before you build, not after — and before you file something, too. Two items in this tracker are duplicates of a decision that was already
    written down, filed by someone who searched afterwards.
 
 2. **Trace the whole path before you call anything dead.** Never conclude "nothing calls this" from
@@ -689,11 +691,20 @@ If you touched the page, run the browser suite for what you touched as well. The
 the cockpit bundle are embedded in the binary and `cargo build` does not run node, so a stale one is
 a cockpit quietly serving last week's code.
 
+After every browser run, check that it left nothing running:
+
+```sh
+node tests/ui/harness/leaks.mjs      # exit 0: nothing this worktree started is still running
+```
+
+What it looks for, and why it derives that rather than carrying a list, is in
+[`tests/ui/README.md`](tests/ui/README.md#harnessleaksmjs--did-this-run-leave-anything-behind).
+
 For anything larger than a bug fix, **open an issue first**. The design here is argued in four
-documents that are meant to be read together, and the second standing rule of the project is that
-a feature which cannot be written as a composition of the five primitives means the primitive set
-is wrong — and the fix is then the primitive set, not a mechanism beside it. That is a conversation
-worth having before the code, not after.
+documents that are meant to be read together, and the second standing rule of the project — a
+feature that is not a composition of the five primitives means the primitive set is wrong — is
+stated at the top of [`docs/architecture.md`](docs/architecture.md), above the primitives it is about.
+That is a conversation worth having before the code, not after.
 
 Found a security issue? Do not open a pull request for it. [`SECURITY.md`](SECURITY.md) says where
 to send it.
@@ -703,7 +714,8 @@ to send it.
 **Linux only, on purpose.** skein runs inside an sbx sandbox, and a sandbox is a Linux machine
 whatever the host is — so Linux is what executes it, and Linux is what CI builds and tests. There is
 no macOS job and no macOS binary, and nothing is published to crates.io. The suite does run on a Mac
-with the exceptions in `GATED` (see the README's Build section), but no CI run stands behind that.
+with the exceptions in `GATED` (see "Be honest with yourself about what you can run" above), but no
+CI run stands behind that.
 
 **What CI runs.** `.github/workflows/ci.yml`, on every branch push and pull request, on
 `ubuntu-latest`:

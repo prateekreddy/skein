@@ -5,7 +5,8 @@ documents under `docs/`, and this page's only job is to send you to the right on
 
 ## The four documents
 
-They are meant to be read together, and in this order if you are new:
+They are meant to be read together, and in this order if you are new. This table is the only list
+of them; every other document that mentions them points here:
 
 | document | what it is |
 |---|---|
@@ -18,8 +19,7 @@ They are meant to be read together, and in this order if you are new:
 What no test on a developer machine can answer, because it needs a real sandbox, is the last
 section of `docs/delivery.md`.
 
-If you are picking up the **in-fleet install**, the open items are in the work tracker, and
-[`CLAUDE.md`](CLAUDE.md) says which project and how to reach it. They used to be in a
+The open items are in the project's work tracker, not in this repository. They used to be in a
 `docs/TODO.md`, and before that in a `docs/in-fleet-handoff.md` that was folded into it; both are
 gone from this repository. The second of those was a dead link on this page for weeks, which is the
 failure the next paragraph is about.
@@ -38,11 +38,11 @@ command checks all of them.**
 
 ```sh
 ls docs/inventory.md docs/architecture.md docs/parity.md docs/delivery.md \
-   docs/modules.toml docs/sources.toml README.md CLAUDE.md \
+   docs/modules.toml docs/sources.toml README.md CLAUDE.md CONTRIBUTING.md \
    tools/module-check.py tools/source-check.py tests/parity_numbers.rs
 ```
 
-If that command prints eleven paths, this page is true. If it fails, this page is stale in the only
+If that command prints twelve paths, this page is true. If it fails, this page is stale in the only
 way a signpost *can* be stale — something moved and the sign was not repainted — and the failure
 names the file. There is no third state, because there is nothing else on this page to be wrong
 about.
@@ -53,9 +53,9 @@ carried a dead link, which is precisely the failure it exists to catch. A falsif
 of a page reports "true" about the part it does not cover. **If you add a path to this page, add it
 here in the same edit.** `tools/link-check.py` also fails the build on a link to a file git does not track.
 
-It missed one again, and the same way. `CLAUDE.md` is named in the last section — a live file, and
-a live claim, since a rename would leave that sentence pointing nowhere — and it was not on the
-line; it is now. **The one exception, and it has to be stated or the next edit will add the wrong
+It missed one again, and the same way. `CLAUDE.md` is named on this page — a live file, and a live
+claim, since a rename would leave that sentence pointing nowhere — and it was not on the line; it is
+now. **The one exception, and it has to be stated or the next edit will add the wrong
 thing**: a path named in the PAST TENSE, as gone, must stay off. `docs/in-fleet-handoff.md` and
 `docs/TODO.md` are the two, and putting either on the line would make the falsifier fail on a
 sentence whose whole content is that the file is not there. So: every path this page names as
@@ -90,10 +90,8 @@ A summary of code drifts because the code moves and the prose does not. This pag
 because it asserts nothing about the code: it asserts only where things are, and `ls` settles that.
 
 The rule the four documents were written to enforce, and the reason they are trustworthy where this
-page's predecessor was not:
-
-> **Derive, do not assert.** Where a claim is about the code, cite the file and line, or give the
-> command that produces the number. Never paraphrase from memory.
+page's predecessor was not, is **derive, do not assert** — stated once, at the top of
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 If you are about to add a paragraph here explaining how some part of skein works — that paragraph
 belongs in `docs/architecture.md` if it is about the destination, or `docs/inventory.md` if it is

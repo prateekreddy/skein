@@ -310,11 +310,12 @@ as "sbx has no unpublish verb and every mapping is permanent" — `sbx ports --h
 `--unpublish`, so the mapping is not permanent; the *reach* is still the privileged one, and it is
 what the Source law is about.) A law a reformat can repeal is not one.
 
-**The crossing is the first thing that leans on it** (SKEIN-103). A crossing has two hops and only
-the first depends on where skein runs: `sbx exec [flags] <sandbox>` from a host, nothing at all from
+**The crossing is the first thing that leans on it** (SKEIN-103). A crossing had two hops and only
+the first depended on where skein runs: `sbx exec [flags] <sandbox>` from a host, nothing at all from
 inside, since skein is already there and `sbx` is host-only. `Place::reach` is that hop and the only
-place it is decided; `enter()` — the `nsenter` into the box — is unchanged in both, which is why this
-is a hop removed rather than a transport rewritten.
+place it is decided, and since 4c it is empty (`src/place/argv.rs`); `enter()` — the `nsenter` into
+the box — was unchanged by the move, which is why this was a hop removed rather than a transport
+rewritten.
 
 Two things it found rather than planned. **A box whose sandbox is its own cannot be reached from
 inside the fleet's**: `SandboxItself` has no second hop, so dropping the first as well runs the command
@@ -430,8 +431,9 @@ not a lane's regression"](../CONTRIBUTING.md#line-cite-check-goes-red-at-a-merge
 in `CONTRIBUTING.md` is the whole of it, with what it cost; this is a pointer rather than a second
 copy, because two copies is how a retired premise ends up in ten places here.
 
-**The cost of incremental**: two placement shapes and the `sbx exec` fallback survive one more cycle
-— the very things the architecture wants deleted. That is real. It is smaller than a six-month branch
+**The cost of incremental**: two placement shapes and the `sbx exec` fallback survived one more cycle
+— the very things the architecture wants deleted. That was real, and the fallback has since gone with
+4c. It is smaller than a six-month branch
 against a codebase taking ~200 commits a month.
 
 ## 4. Migration
