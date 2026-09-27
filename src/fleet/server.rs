@@ -1718,4 +1718,120 @@ mod tests {
             senders.join("\n")
         );
     }
+
+    /// A stamp is believed only about the doorway it names: the pid must be alive, the port its
+    /// own, AND its command line the doorway's. Run against the real src/door.sh, with the
+    /// supervisor's sockets absent, so the stamp is the only way to a pid.
+    ///
+    /// A pid is a number the kernel hands out again. A doorway killed without clearing its stamp
+    /// leaves one naming whatever process is given that pid next, and SIGUSR1's default action ends
+    /// most processes — so a reload trusting the pid alone kills a stranger.
+    ///
+    /// **What would make this fail:** deleting the command-line check from `skein_stamped_door`
+    /// (in both copies, so the copy test above stays green) — the stranger gets the signal. Or
+    /// deleting the port check — the doorway stamped for another port gets it. The last case is
+    /// the control: the same process, stamped for its own port, IS signalled, so the two refusals
+    /// are not a script that signals nothing.
+    #[test]
+    fn a_stale_stamp_does_not_signal_whatever_now_has_its_pid() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let tmp = crate::testutil::tempdir();
+        let doorway = tmp.join("server-doorway.py");
+        let stamp = tmp.join("server.door");
+        let absent = tmp.join("no-supervisor.tmux");
+        let port = 47917;
+
+        // A process that records SIGUSR1 instead of dying of it. `$0` is `name`, so its command
+        // line holds `name` as one argument: the doorway's path for a doorway, anything else for a
+        // stranger.
+        let spawn = |name: &std::path::Path, marker: &std::path::Path| {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "trap 'touch {m}' USR1; while :; do sleep 0.05; done",
+                    m = crate::util::sh_quote(&marker.to_string_lossy())
+                ))
+                .arg(name)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a stand-in")
+        };
+        let reload = || {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "{DOOR_SH}\nskein_door_reload {} {port} {} {}",
+                    crate::util::sh_quote(&stamp.to_string_lossy()),
+                    crate::util::sh_quote(&doorway.to_string_lossy()),
+                    crate::util::sh_quote(&absent.to_string_lossy()),
+                ))
+                .output()
+                .expect("run src/door.sh")
+        };
+        let signalled = |marker: &std::path::Path| {
+            let until = Instant::now() + Duration::from_millis(600);
+            while Instant::now() < until {
+                if marker.exists() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+
+        let stranger_marker = tmp.join("stranger.usr1");
+        let mut stranger = spawn(&tmp.join("not-the-doorway"), &stranger_marker);
+        let door_marker = tmp.join("doorway.usr1");
+        let mut door = spawn(&doorway, &door_marker);
+        let cases = || -> Result<(), String> {
+            // The stranger: alive, right port, not the doorway.
+            std::fs::write(&stamp, format!("{} {port}\n", stranger.id())).unwrap();
+            let out = reload();
+            if signalled(&stranger_marker) {
+                return Err(
+                    "a stamp naming a live pid whose command line is not the doorway was \
+                            believed, and that process was sent SIGUSR1"
+                        .into(),
+                );
+            }
+            if out.status.success() {
+                return Err(format!(
+                    "skein_door_reload reported a reload with no doorway to reload: {}",
+                    String::from_utf8_lossy(&out.stdout)
+                ));
+            }
+            // The doorway, stamped for a port it does not hold.
+            std::fs::write(&stamp, format!("{} {}\n", door.id(), port + 1)).unwrap();
+            let out = reload();
+            if signalled(&door_marker) || out.status.success() {
+                return Err(
+                    "a stamp for another port was believed, and its doorway was sent \
+                            SIGUSR1"
+                        .into(),
+                );
+            }
+            // The control: the same doorway, stamped for this port.
+            std::fs::write(&stamp, format!("{} {port}\n", door.id())).unwrap();
+            let out = reload();
+            if !signalled(&door_marker) || !out.status.success() {
+                return Err(format!(
+                    "the doorway holding this port by its stamp was not signalled, so the refusals \
+                     above prove nothing: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            Ok(())
+        };
+        let verdict = cases();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        let _ = door.kill();
+        let _ = door.wait();
+        if let Err(why) = verdict {
+            panic!("{why}");
+        }
+    }
 }
