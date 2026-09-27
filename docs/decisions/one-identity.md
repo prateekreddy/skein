@@ -6,7 +6,7 @@ and appears under their name. skein does not act as a second actor "on behalf of
 separate identity is ever wanted, for a team install, it goes behind a setting that is off by
 default.
 
-That setting now exists, and it is narrow: `review_identity` (`src/config.rs:166-167`), `"me"` by
+That setting now exists, and it is narrow: `review_identity` (`src/config.rs:157-158`), `"me"` by
 default. `"app"` makes a review session's own comment review act as the skein GitHub App, for team
 installs (SKEIN-516). It changes nothing else. A workflow's verdict still posts as you under `"app"`
 (the owner, 2026-09-27), because it is the approval that counts on a protected branch.

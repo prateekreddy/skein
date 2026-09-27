@@ -13,7 +13,7 @@ Which route is taken is detected, never configured.
 **Why.** Some people will not install anything on their own machine. `sbx` is already required, so
 asking them to run the commands skein wants costs them nothing more, and people who do run a warden
 get those prompts done for them. The middle case is already real, not hypothetical: a warden can be
-built with some doers compiled out (`docs/architecture.md:665`, §8.3), and a create-only warden
+built with some doers compiled out (`docs/architecture.md:666`, §8.3), and a create-only warden
 means create is done and destroy is prompted. Two global modes cannot say that, and they would put
 the prompt behind an opt-in — which is how a fallback rots, because the people who need it on the
 day are the ones who never turned it on (`src/warden_client.rs:1060-1067`).
@@ -36,4 +36,4 @@ day are the ones who never turned it on (`src/warden_client.rs:1060-1067`).
 - `src/warden_client.rs:1014` — `Prompt`, whose three fields are the three parts.
 - `src/warden_client.rs:1648` — the test that every act's prompt carries all three, and renders the
   cost of declining where it can be seen.
-- `docs/architecture.md:614` — §8, the warden's design.
+- `docs/architecture.md:615` — §8, the warden's design.

@@ -431,7 +431,7 @@ describe a replacement — "a local filesystem path is a valid git remote, so a 
 still works: skein clones it into the mirror and fetches from your path" — and that replacement was
 never built. It is true of git and false of skein. `registrable_source` (`src/repos/source.rs:28`) requires
 a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
-everything else before it clones anything (`src/repos/add.rs:63`), in the words *"is a path, and skein
+everything else before it clones anything (`src/repos/add.rs:46`), in the words *"is a path, and skein
 registers repos by remote"*.
 
 So the cost is larger than the old entry admitted, and it is stated here rather than in the future

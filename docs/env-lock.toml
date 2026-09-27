@@ -140,7 +140,7 @@ reason = "not a field of a lock-carrying struct like the two rows above, but the
 #     TOUCH pattern, so every one of the 109 scopes that calls it is judged by rule one.
 [exempt."src/testutil::drop"]
 covers = 2
-reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:197) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
+reason = "two functions under one key: `EnvGuard::drop` (src/testutil.rs:101) holds the crate lock as a field of the struct it belongs to, so its restore runs before that guard is released; `EnvPins::drop` (src/testutil.rs:209) must not take the lock — `Mutex` is not re-entrant and a pinning fixture reaching another would deadlock — and its callers are held to rule one instead, because `env_pins(` is in this checker's TOUCH pattern"
 
 # `EnvPins::unset` used to need the same waiver as `set` did before SKEIN-723: no `#[test]` in this
 # file called it by name, only `.set(`, so `callers_of`'s same-module radius (SKEIN-904) found

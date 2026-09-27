@@ -36,7 +36,7 @@ malformed-settings outage.
    start. A box launched in tmux waiting on a keypress is a regression. Test this first: it alone
    decides whether the channel direction is viable.
 2. Codex gets nothing. Plugins are Claude-only, and the runtime adapter table exists to keep skein's
-   seam provider-neutral (`src/runtime.rs:57`). Moving shared hooks into a plugin un-shares them.
+   seam provider-neutral (`src/runtime.rs:71`). Moving shared hooks into a plugin un-shares them.
    The portable unit is the skill; hooks are not portable.
 
 **Rules out.** Starting a plugin port before both blockers are tested.
