@@ -348,6 +348,12 @@ mod tests {
     /// the cockpit prints for its token", fails `points at output nobody sees`. Both planted.
     #[test]
     fn the_way_in_is_one_line_everywhere_it_is_given() {
+        // `refusal` names the token's path, so it resolves `$SKEIN_HOME`: pinned, or run alone this
+        // reads whatever home the process was started with (SKEIN-626).
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &dir);
         let page = include_str!("web/index.html");
         assert!(
             page.contains(OPEN_FROM_THE_HOST),

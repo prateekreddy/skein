@@ -36,6 +36,7 @@ function world(flowsByRepo, opts = {}) {
     let revFlows = new Map(Object.entries(${JSON.stringify(flowsByRepo)}));
     let revQueue = ${JSON.stringify(opts.queue || null)};
     let revOpen = new Set();
+    let revFlowsHeld = null;
     const opened = [];
     const openReview = id => opened.push(id);
     const toggleRevRow = key => { revOpen = new Set([key]); };

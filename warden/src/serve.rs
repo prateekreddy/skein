@@ -1951,6 +1951,9 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
     #[test]
     #[cfg(feature = "destroy")]
     fn an_approval_at_the_terminal_is_what_lets_a_doer_reach_its_command() {
+        // The approved destroy runs `sbx`, so $PATH decides which one: a sibling holding this lock
+        // puts a stub there that answers like `sbx ports` (SKEIN-307).
+        let _env = crate::env_lock();
         use crate::approval::Console;
         let dir = scratch("terminal");
         let refuser = Warden {

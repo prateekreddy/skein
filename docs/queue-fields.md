@@ -97,7 +97,6 @@ no site.
 The test parses this section and nothing else, so a field is declared exactly when it has a line
 here. Format: a list item whose first backticked span is `Type.field`.
 
-- `Pr.labels` — server-consumed by the merge train (`src/prwork`, `src/workflow`)
 - `Pr.labels_total` — server-consumed by `Pr::labels_whole` in `src/prq/types.rs`, which is what stops a `no-label:` workflow condition holding on a truncated label list (SKEIN-373)
 - `Pr.standing_approvals` — server-consumed by `facts_of` in `src/prwork/facts.rs` (SKEIN-356)
 - `Pr.reviews_total` — server-consumed by `Pr::reviews_whole` in `src/prq/types.rs`, which is what makes the queue say that a pull request's reviews were cut off at `REVIEWS_FETCHED` instead of the row reading as one nobody has approved (SKEIN-386)
