@@ -143,6 +143,8 @@
              font-size:11px; color:var(--dim); border:1px solid var(--border-2); }
   .fr-step.done .fr-tick { color:var(--done); border-color:var(--done); }
   .fr-step.done .fr-txt b { color:var(--dim); font-weight:500; }
+  .fr-step.fr-info .fr-tick { border-style:dashed; }
+  .fr-step.fr-info .fr-txt b { color:var(--dim); font-weight:500; }
   .fr-txt { display:flex; flex-direction:column; gap:3px; font-size:13px; color:var(--text); }
   .fr-hint { font-size:12px; color:var(--faint); line-height:1.5; }
   .fr-foot { margin-top:18px; font-size:12px; color:var(--faint); }
@@ -1260,7 +1262,7 @@
     color:var(--accent); background:var(--accent-bg); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
     border-radius:9px; padding:8px 13px; cursor:pointer; transition:background var(--dur-fast), border-color var(--dur-fast); }
   .set-add:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 18%,transparent); }
-  /* shortcuts pane — rendered from KEYMAP, so it can't fall out of date */
+  /* shortcuts pane — rendered from keySheet() in cockpit/src/keys.mjs, the tables that bind the keys */
   .set-keys { display:flex; flex-direction:column; gap:16px; padding-top:6px; }
   .set-kgrp > b { display:block; font-size:10px; font-weight:600; letter-spacing:.12em;
                   text-transform:uppercase; color:var(--faint); margin-bottom:4px; }

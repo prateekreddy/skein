@@ -919,15 +919,15 @@ mod tests {
 
     /// The first-run checklist reads the warden by the name the server sends it under.
     ///
-    /// A wire assertion, and it is load-bearing rather than tidy: creating the fleet is what a first
-    /// Launch does and it goes only through the warden, so a checklist that cannot see that field
-    /// says "ready" and then hands somebody a 500. That happened. If the field is ever renamed, this
-    /// fails here rather than on somebody's first afternoon.
+    /// A wire assertion. The warden step is information rather than a gate since SKEIN-1184 — the
+    /// warden is optional, and without one skein shows the person the command — so what the step
+    /// needs is the check's own sentence, which says which of the two routes this fleet is on. If
+    /// the field is ever renamed, this fails here rather than as a blank step on a first run.
     #[test]
     fn the_first_run_checklist_reads_the_warden_the_server_reports() {
         assert!(
             INDEX.contains("h.warden"),
-            "the checklist does not read the warden, so a first run can reach Launch with none"
+            "the checklist does not read the warden, so a first run is never told what one adds"
         );
         // `warden_report` ASKS a warden, which a wire-shape assertion has no need to do — and
         // unpinned it asks whatever warden the machine running the suite can reach, which
@@ -938,8 +938,8 @@ mod tests {
         let _warden = crate::testutil::no_warden();
         let json = serde_json::to_string(&crate::health::warden_report()).unwrap();
         assert!(
-            json.contains("\"level\"") && json.contains("\"fix\""),
-            "the page reads `.level` and `.fix` off this check and the wire carries neither: {json}"
+            json.contains("\"level\"") && json.contains("\"detail\""),
+            "the page reads `.level` and `.detail` off this check and the wire carries neither: {json}"
         );
     }
 

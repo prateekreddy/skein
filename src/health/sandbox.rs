@@ -40,22 +40,28 @@ pub(super) fn sbx_health(fleet: &Option<Vec<crate::sbx::SbxBox>>, degraded: bool
     }
 }
 
-/// Whether the host warden is answering — because fleet create and destroy go only through it.
+/// Whether the host warden is answering, and what that changes — which is **information, not a
+/// verdict** (SKEIN-1184).
 ///
-/// **The whole point is that this is said BEFORE something needs it.** `create_through_warden`
-/// refuses rather than falling back, deliberately: a fallback that ran `sbx` here would be taken on
-/// exactly the day something was wrong. But until this line existed, that refusal was the first
-/// anybody heard of it, and the sequence was: build, start the server, watch every check go green,
-/// press Launch, get a 500. Worse on an *upgrade* than on a fresh install — an existing fleet keeps
-/// running, so the failure surfaces weeks later on the first resize, by which time nobody connects
-/// it to having upgraded skein.
+/// The warden is optional, and the owner's decision says so in as many words
+/// (`docs/decisions/warden-or-prompt.md`): a privileged host act is done by a warden that can, or
+/// the person is shown the command. So no warden is a supported state with an ordinary path through
+/// it, and this line says which of the two routes this fleet is on rather than grading it.
 ///
-/// **A fault, not a note.** Two of the fleet's five lifecycle operations are unavailable without it,
-/// there is one command that fixes it, and this is skein unable to do something it offers — which is
-/// what every other fault on this panel is. The argument against, and it is real: somebody who never
-/// resizes would carry a red mark for a capability they do not use, and a banner that is red for a
-/// state you have chosen is how the next real fault gets read as noise. It loses to the sentence
-/// above — the cost of finding out late is a fleet you cannot resize at the moment you need to.
+/// **It used to be a fault, counted on the banner, and the argument for that is overturned rather
+/// than forgotten.** It read: fleet create and destroy go only through the warden, so without one
+/// skein cannot do something it offers — and finding out late means a fleet you cannot resize at
+/// the moment you need to. Both premises went: a fleet is created by the person on the host before
+/// skein exists (`README.md`, "Getting started"), a resize from inside the fleet is always the line
+/// to run on the host (`fleet_lifecycle_refusal`), and every act that does go through
+/// `warden_client::perform` falls back to a prompt carrying the command, why, and what declining
+/// costs. What the fault's fix told a first run to do was compile Rust on a host the install
+/// deliberately keeps free of it.
+///
+/// **Something answering and refusing is still a fault**, because that is a warden somebody tried
+/// to run and got wrong — a port the two ends disagree about — and it has one fix. It no longer
+/// reaches the banner (`OnBanner::NotCounted` in `report.rs`); it stays on the diagnostics pane,
+/// where a person looking at their warden will see it.
 ///
 /// **What it does not do is trust the answer.** `capabilities` is what the far end SAYS it can do,
 /// and §8.3 is blunt that this is never evidence — a malicious endpoint advertises whatever makes
@@ -83,59 +89,31 @@ pub(super) fn warden_health(seen: Option<crate::warden_client::Sighting>) -> Hea
                 sighting.sandboxes.len()
             )))
         }
-        // **The advice depends on which failure it was**, and getting that wrong is worse than
-        // saying nothing. Every unsatisfied arm printed the build command, so this told somebody to
-        // build a warden they were plainly running. Something answering and refusing is not
-        // something missing, and the two send a reader to opposite places.
-        //
-        // The DETAIL stays the client's own words either way — not running, refusing the secret,
-        // unreadable — because "the warden is not available" sends nobody anywhere.
-        //
-        // **This was an `unknown` in-fleet and is a fault again**, because the reason for the
-        // exemption is gone. It read: the warden binds loopback, a loopback listener answers
-        // nothing inside the sandbox, so no warden a person starts would help — and a banner
-        // nobody can clear is how the next real fault gets read as noise. The premise was
-        // measured and is false on Docker Desktop, which proxies the gateway address from the
-        // host side; the bind has since widened for the hosts where it was true (SKEIN-475).
-        // In-fleet skein reaches the host warden, so an unreachable one is again what the
-        // unsatisfied arm has always been for: something a person can start.
-        None => HealthCheck::unsatisfied(
-            note(crate::warden_client::sighting_failure().unwrap_or_else(|| {
-                "the host warden did not answer, and no reason was recorded".into()
-            })),
-            match crate::warden_client::sighting_trouble() {
-                // It answered. Do not send anybody to a compiler.
-                Some(crate::warden_client::Unseen::Answered) => format!(
+        None => match crate::warden_client::sighting_trouble() {
+            // It answered, and it is not a warden this skein can use. Do not send anybody to a
+            // compiler: the detail stays the client's own words and the fix is about the port.
+            Some(crate::warden_client::Unseen::Answered) => HealthCheck::unsatisfied(
+                note(crate::warden_client::sighting_failure().unwrap_or_else(|| {
+                    "the host warden did not answer, and no reason was recorded".into()
+                })),
+                format!(
                     "something is answering on {} and it is not a warden this skein can use. Check \
                      what is on that port, and that both ends agree about which one it is: \
                      `$SKEIN_WARDEN` moves the client, `$SKEIN_WARDEN_PORT` moves the warden, and \
                      setting only one of them aims skein at whatever else happens to be listening.",
                     crate::warden_client::where_it_asks()
                 ),
-                // Nothing there — and in-fleet the crossing is part of the answer, so the advice
-                // names it. The address is now the host's rather than the sandbox's, which leaves
-                // two candidates rather than the old four, and they are checked in different
-                // places: a warden that is not running on the host, or a host whose warden cannot
-                // be reached at the address this asked.
-                // **One arm** (SKEIN-576): skein is in the fleet and the warden is on the host,
-                // always. The other arm was the host-driven one, and what it knew that this did
-                // not is folded in rather than deleted with it — "check a warden is running there"
-                // is unhelpful to somebody who never had the binary, and a plain `cargo build`
-                // does not make it.
-                _ => format!(
-                    "the warden runs on the host, and this asked it at {} \u{2014} the alias every \
-                     sandbox has for its host. Check a `skein-warden` is running there \u{2014} and \
-                     that there is one to run: `cargo build --release --workspace` makes it, while \
-                     a plain `cargo build` makes `skein` and `skein-server` only. Run it where you \
-                     will see it: it puts each create and destroy to a person, and nothing happens \
-                     until somebody answers. If that host is Linux, it also has to be a build that \
-                     binds the Docker bridge (architecture \u{a7}9.5): an older one binds loopback, \
-                     which answers host processes and nothing in here. `$SKEIN_WARDEN` moves this \
-                     end.",
-                    crate::warden_client::where_it_asks()
-                ),
-            },
-        ),
+            ),
+            // Nothing there: the ordinary state of an install that never ran one. Where it looked
+            // is still said, because somebody who IS running a warden and reads this needs the
+            // address to see why this one cannot reach it.
+            _ => HealthCheck::satisfied(note(format!(
+                "none answering at {} \u{2014} that is fine. When skein needs something done on \
+                 the host, it shows you the command to run. `skein-warden`, running on the host, \
+                 does those for you instead, after you approve each one in its terminal.",
+                crate::warden_client::where_it_asks()
+            ))),
+        },
     }
 }
 
@@ -229,7 +207,8 @@ pub(super) fn git_scope_health() -> HealthCheck {
     };
     match crate::gitgate::scope_status() {
         Off => HealthCheck::satisfied(format!(
-            "off — {unscoped_holds}. Settings → scope each box's access to its own repo"
+            "off — {unscoped_holds}. Settings → GitHub & keys → Scope each box's GitHub \
+             access to its own repo"
         )),
         NotConfigured => HealthCheck::satisfied(format!(
             "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
@@ -272,14 +251,19 @@ mod tests {
 
     /// The warden line, against a warden rather than by reading the code.
     ///
-    /// Both arms matter and they fail differently. A warden that is not there has to produce a
-    /// **fault with a fix** — that is the whole item: without this line the first anybody heard of a
-    /// missing warden was a 500 from pressing Launch, weeks after the upgrade that caused it. A
-    /// warden that IS there has to be believed about being reachable and quoted, never trusted,
-    /// about what it can do: §8.3 says the advertised capability set may decide what skein offers
-    /// and may never stand in for a check.
+    /// Both arms matter and they fail differently. A warden that is not there is **information,
+    /// not a fault** (SKEIN-1184, `docs/decisions/warden-or-prompt.md`): the person is shown the
+    /// command instead, so nothing is blocked, and the line says what a warden would add without
+    /// telling anybody to compile one. A warden that IS there has to be believed about being
+    /// reachable and quoted, never trusted, about what it can do: §8.3 says the advertised
+    /// capability set may decide what skein offers and may never stand in for a check.
+    ///
+    /// **The concrete change that makes it fail, named before it was written:** putting the old
+    /// `HealthCheck::unsatisfied` arm back for a warden that is not there fails `a missing warden
+    /// is not a fault`; restoring its `cargo build --release --workspace` advice fails `nobody is
+    /// sent to a compiler`.
     #[test]
-    fn a_warden_that_is_not_answering_is_a_fault_that_says_how_to_start_one() {
+    fn a_warden_that_is_not_answering_is_information_that_says_what_one_adds() {
         let _g = crate::testutil::env_lock();
 
         // A port nothing is listening on. Bound and dropped, so the number is real and free —
@@ -290,27 +274,36 @@ mod tests {
         std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{dead}"));
         let missing = warden_health(crate::warden_client::sighting());
         assert!(
-            missing.is_fault(),
-            "a warden that is not there read as fine"
+            !missing.is_fault(),
+            "a missing warden is not a fault — without one skein shows the person the command, \
+             which is a supported route and not a broken one: {missing:?}"
         );
-        // Both fields, because both are shown: `skein doctor` prints the detail and the fix on
-        // consecutive lines and the diagnostics pane puts one under the other. What has to be true
-        // is that between them a reader is told the name of the thing to start AND the command that
-        // produces it — the second is the half that was missing, since a plain `cargo build` never
-        // built it and "start the warden" is useless advice about a binary you do not have.
-        assert!(!missing.fix.is_empty(), "a fault with no way out");
-        let shown = format!("{} {}", missing.detail, missing.fix);
-        for needed in ["skein-warden", "--workspace"] {
+        // Not a fault, so no fix: `every_fault_says_what_would_fix_it` holds the other half.
+        assert!(
+            missing.fix.is_empty(),
+            "information with a fix attached: {missing:?}"
+        );
+        // What it adds, and what happens without it — the two halves of the sentence a first run
+        // reads on its checklist.
+        for needed in ["skein-warden", "shows you the command"] {
             assert!(
-                shown.contains(needed),
-                "nothing a reader sees mentions {needed}: {shown:?}"
+                missing.detail.contains(needed),
+                "the line does not say {needed:?}: {:?}",
+                missing.detail
             );
         }
-        // The reason has to be the client's own. "not available" sends nobody anywhere; the address
-        // it tried is the thing somebody acts on.
+        for absent in ["cargo build", "--workspace"] {
+            assert!(
+                !missing.detail.contains(absent),
+                "nobody is sent to a compiler over an optional piece: {:?}",
+                missing.detail
+            );
+        }
+        // Where it looked, because somebody who IS running a warden needs the address to see why
+        // this one cannot reach it.
         assert!(
             missing.detail.contains(&dead.to_string()),
-            "the fault does not say where it looked: {:?}",
+            "the line does not say where it looked: {:?}",
             missing.detail
         );
 

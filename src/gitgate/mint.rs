@@ -124,7 +124,7 @@ pub fn app_credentials() -> Result<(String, String), String> {
         p => crate::util::expand_tilde(p),
     };
     if id.is_empty() {
-        return Err("no GitHub App configured: Settings → GitHub App ID".into());
+        return Err("no GitHub App configured: Settings → GitHub & keys → GitHub App ID".into());
     }
     // An App id is a number, and [`jwt_claim`] interpolates it straight into a JSON claim. Checked
     // rather than trusted: `config.json` is an ordinary file that can be hand-edited, and an `id`
@@ -133,7 +133,7 @@ pub fn app_credentials() -> Result<(String, String), String> {
     // into a message that names the actual problem, and closes the injection on its own terms.
     if !id.chars().all(|c| c.is_ascii_digit()) {
         return Err(format!(
-            "the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub App ID"
+            "the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub & keys → GitHub App ID"
         ));
     }
     if !std::path::Path::new(&key).exists() {

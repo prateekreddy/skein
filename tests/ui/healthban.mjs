@@ -95,9 +95,19 @@ const bad = (what, fix) => ({ level: "unsatisfied", detail: `${what}. ${fix}`, f
 // keeps no list of its own, and `the_report_tells_the_page_which_checks_count` in
 // src/health/report.rs is what holds the real report to `OnBanner`. An unhealthy report without it
 // is not one the server can send, so `unhealthy` is how every `ok: false` fixture below is written.
+//
+// `labels`, as the report serves `CHECK_LABELS` (SKEIN-1186): every check in the report's order, with
+// the one name the banner, the diagnostics pane and `skein doctor` all print. A fixture here too —
+// `every_check_has_one_label_and_every_surface_reads_it` in src/health/report.rs holds the real
+// table — and it is what the page walks now instead of a list of its own.
 const COUNTED = ["registry", "sbx", "git", "gh", "probes", "mailbox", "memory", "disk", "gitgate",
-  "token_expiry", "proxy_injection", "warden", "cover"];
-const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
+  "token_expiry", "proxy_injection", "cover"];
+const LABELS = [["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "github reach"],
+  ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"], ["disk", "fleet disk"],
+  ["gitgate", "github scope"], ["token_expiry", "token life"], ["proxy_injection", "proxy credential"],
+  ["warden", "host warden"], ["cover", "box isolation"], ["ai", "ai enrichment"]]
+  .map(([key, label]) => ({ key, label }));
+const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...checks });
 
 // --- an unsatisfied counted check puts a row above the app, saying what is wrong ----------------
 //
@@ -169,7 +179,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
   const w = world();
   // The report a `NotCounted` fault actually produces: `first_counted_fault` skips it, so `ok`
   // stays true however loud the check itself is.
-  w.state.health = { ok: true, counted: COUNTED, ai: bad("enrichment is off", "turn it on in Settings") };
+  w.state.health = { ok: true, counted: COUNTED, labels: LABELS, ai: bad("enrichment is off", "turn it on in Settings") };
   w.loadHealth();
   await settle();
   t.check("a check the banner does not count cannot raise it on its own", w.ban(), null);
@@ -190,9 +200,9 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
   // The owner's rule, in his words "a check that raised it": the one sentence a reader can read
   // and copy is always the reason the banner is up.
   t.check("the headline is the counted fault, not the uncounted one ahead of it in the list",
-    w.ban()?.textContent, "disk: the disk is nearly full (+1 more)");
+    w.ban()?.textContent, "fleet disk: the disk is nearly full (+1 more)");
   t.check("and once the row is up for a counted reason, the uncounted check is named on it too",
-    (w.ban()?.title || "").includes("ai: enrichment is off"), true);
+    (w.ban()?.title || "").includes("ai enrichment: enrichment is off"), true);
 }
 
 // --- a banner up for no failing counted check still counts the uncounted one ----------------------
@@ -210,9 +220,9 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, ...checks });
   w.loadHealth();
   await settle();
   t.check("an uncounted fault does not take the headline from the reason the banner is up",
-    w.ban()?.textContent, "environment: probe updates · 1 stale (+1 more)");
+    w.ban()?.textContent, "environment: probe updates · 1 on old probes (+1 more)");
   t.check("and it is still in the tooltip",
-    (w.ban()?.title || "").includes("ai: enrichment is off"), true);
+    (w.ban()?.title || "").includes("ai enrichment: enrichment is off"), true);
 }
 
 // --- NOTHING DRAWN BEFORE THE BANNER CAN CANCEL IT -----------------------------------------------
@@ -273,7 +283,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("an unanswered check is reported in the tooltip, in those words",
-    (w.ban()?.title || "").includes("probes: could not be checked — the probe timed out"), true);
+    (w.ban()?.title || "").includes("box probes: could not be checked — the probe timed out"), true);
   t.check("and is not counted as a fault, so it does not inflate the headline",
     w.ban()?.textContent, "registry: the registry is unreachable");
 }
@@ -290,7 +300,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("a fault with no named check still leaves a readable row",
-    w.ban()?.textContent, "environment: probe updates · 1 dark · 1 stale");
+    w.ban()?.textContent, "environment: probe updates · 1 dark · 1 on old probes");
 }
 
 // --- the row is the way to the diagnostics pane ---------------------------------------------------
@@ -305,6 +315,43 @@ for (const name of STEPS) {
   await settle();
   w.ban()?.onclick();
   t.check("clicking the row opens the diagnostics pane and no other", w.state.opened, ["diag"]);
+}
+
+// --- ONE NAME PER CHECK: the banner and the pane it opens both say what the report calls it ------
+//
+// SKEIN-1186. The row headlined with the wire key (`cover: …`) and the diagnostics pane it opens
+// called the same check "box isolation" out of a table of its own, so one fault arrived under two
+// names one click apart — and `skein doctor` had a third. Both now render the report's `labels`.
+// The fixture's label is one no table anywhere has, so a page that still kept its own names could
+// not produce it.
+//
+// Fails on: headlining with `lead` rather than its label; putting a label table back into
+// `renderDiagnostics`.
+{
+  const labels = LABELS.map(l => l.key === "cover" ? { key: "cover", label: "example isolation" } : l);
+  const w = world();
+  w.state.health = { ok: false, counted: COUNTED, labels,
+                     cover: bad("started before the current isolation", "restart it") };
+  w.loadHealth();
+  await settle();
+  t.check("the banner names a check by the label the report serves",
+    w.ban()?.textContent, "example isolation: started before the current isolation");
+
+  const { reg, document } = stubDom(["set-diag", "set-diagn"]);
+  const pane = new Function("document", "health", `
+    ${grab("esc")}
+    let lastHealth = health;
+    ${grab("renderDiagnostics")}
+    renderDiagnostics();
+  `);
+  pane(document, w.state.health);
+  const drawn = reg.get("set-diag").innerHTML;
+  t.check("and the diagnostics pane it opens names it the same way",
+    [drawn.includes(`<span class="dg-name">example isolation</span>`), drawn.includes(">box isolation<")],
+    [true, false]);
+  // One row for the one check this report carries — not a second under another name.
+  t.check("and it is one row, not two under two names",
+    (drawn.match(/class="dg-name"/g) || []).length, 1);
 }
 
 t.done();

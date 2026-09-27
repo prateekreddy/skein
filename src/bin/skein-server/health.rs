@@ -31,6 +31,7 @@ pub(super) async fn api_health() -> Json<serde_json::Value> {
                     // The one field a crashed health task can still answer: it is about the binary,
                     // not about anything the task had to go and ask.
                     build: skein::health::BUILD_REVISION,
+                    labels: &skein::health::CHECK_LABELS,
                     registry: skein::health::HealthCheck::unknown(format!(
                         "the health check itself failed: {error}"
                     )),

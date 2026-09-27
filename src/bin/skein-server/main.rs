@@ -263,25 +263,11 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
             }
         }
     });
-    // **The warden, said at boot rather than at the first Launch.**
-    //
-    // Fleet create and destroy go only through it and there is deliberately no fallback, so a host
-    // without one has lost two lifecycle operations. Every other dependency this server needs is
-    // checked here — probes, kit, the launcher, the gh token, the ssh key — and this one was not, so
-    // the first anybody heard of it was a 500 from pressing a button. On an upgrade that lands weeks
-    // after the change that caused it, with nothing left pointing back.
-    //
-    // Not fatal. The server runs a fleet that already exists perfectly well without a warden; what
-    // it cannot do is make or resize one. Refusing to start over a capability somebody may not use
-    // today would be the wrong trade — but so is silence, which is what this had.
-    match skein::warden_client::sighting() {
-        Some(_) => {}
-        None => eprintln!(
-            "skein: {}\n       {}",
-            skein::warden_client::sighting_failure()
-                .unwrap_or_else(|| "the host warden did not answer".into()),
-            skein::health::warden_report().fix
-        ),
+    // **The warden, said at boot.** Optional (SKEIN-1184, `docs/decisions/warden-or-prompt.md`):
+    // without one skein shows the person the command instead, so this is one line saying which
+    // route this fleet is on — the health check's own sentence — and never a reason not to start.
+    if skein::warden_client::sighting().is_none() {
+        eprintln!("skein: {}", skein::health::warden_report().detail);
     }
     // Cross-project mailbox relay: a box only ever mounts its own project's store, so a message
     // addressed "all-projects" / "project:<id>" / to a vmid living in another project can only be

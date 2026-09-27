@@ -301,24 +301,107 @@ await check("a machine with nothing on it shows the first-run checklist", async 
   if (!body.includes("repositor")) throw new Error(`the checklist never mentions adding a repo: ${body.slice(0, 200)}`);
 });
 
-// **The warden is on the checklist, and it gates.**
+// **The warden is on the checklist, as information** (SKEIN-1184).
 //
-// Creating the fleet is what a first Launch does, and that goes only through the warden with no
-// fallback. Without this step the checklist read "ready", somebody pressed the button, and got a
-// 500 — a first run that says it is ready and then is not is the exact thing this page exists to
-// prevent. This fixture runs a warden, so the step must read as done and the list must offer the
-// launch; the assertion below it is the one that would have caught the gap.
-await check("the checklist counts the warden, and says so when it is up", async () => {
+// It used to gate "ready", on the reasoning that a first Launch created the fleet through it. A
+// Launch creates no fleet (SKEIN-627), and the owner's decision makes the warden optional
+// (docs/decisions/warden-or-prompt.md): without one skein shows the person the command. So the step
+// says which route this fleet is on — here, a warden answering — and is counted in nothing.
+await check("the checklist says the warden is answering, as information rather than a step", async () => {
   const h = await (await fetch(`http://127.0.0.1:${port}/api/health`, { headers: authHeader() })).json();
   if (h.warden?.level !== "satisfied")
     throw new Error(`this fixture runs a warden and health disagrees: ${JSON.stringify(h.warden)}`);
-  const body = (await (await mustSee("#fleet .empty", "the first-run checklist")).textContent()).toLowerCase();
-  if (!body.includes("warden"))
-    throw new Error(`the checklist never mentions the warden, so a first run can still reach a 500: ${body.slice(0, 300)}`);
-  // Done, not outstanding — a step that reads unfinished when it is finished sends somebody to start
-  // a second warden, and two on one port is a worse afternoon than none.
-  if (/start the warden/.test(body))
-    throw new Error(`the warden is answering and the checklist still asks for it: ${body.slice(0, 300)}`);
+  const row = await mustSee("#fleet .fr-step.fr-info", "the checklist's warden line");
+  const said = ((await row.textContent()) || "").toLowerCase();
+  if (!said.includes("warden") || !said.includes("answering"))
+    throw new Error(`the warden line does not say this fleet's warden is answering: ${said.slice(0, 300)}`);
+  if (/start the warden|cargo build/.test(said))
+    throw new Error(`the checklist still asks for a warden, or sends somebody to a compiler: ${said.slice(0, 300)}`);
+});
+
+// **And without one, a first run is still ready** — the checklist half of "a missing warden neither
+// blocks ready nor turns the banner red"; the banner half is `a_missing_warden_does_not_turn_the_banner_red`
+// in src/health/report.rs. The real `firstRunHtml`, handed the report this server gives for a warden
+// nobody started, with every other step done. `repos` and `lastHealth` are put back after, since the
+// rest of this suite reads them.
+//
+// Fails on: putting the warden back into `steps` with `done: h.warden?.level === "satisfied"` and a
+// report where it is unsatisfied — the head then reads "one thing and you are running".
+await check("a fleet with no warden reads ready on the checklist", async () => {
+  const head = await page.evaluate(() => {
+    const was = { lastHealth, repos };
+    try {
+      lastHealth = { ...lastHealth, sbx: { level: "satisfied", detail: "" }, logins: ["claude"],
+        git_credential: "a GitHub App",
+        // What `warden_health` says for a warden that is not there, and the one state that is still
+        // a fault — something else on its port — which must not gate either.
+        warden: { level: "unsatisfied", detail: "something is answering on that port", fix: "check it" } };
+      repos = [{ id: "example" }];
+      const div = document.createElement("div");
+      div.innerHTML = firstRunHtml();
+      return div.querySelector(".fr-head")?.textContent || "";
+    } finally { ({ lastHealth, repos } = was); }
+  });
+  if (!/^ready/.test(head)) throw new Error(`with every step done and no usable warden the checklist reads "${head}"`);
+});
+
+// **Signing in is one click in the cockpit, from the checklist and from the board** (SKEIN-1183).
+//
+// Both used to say "run `skein login claude`", the board's chip "on the host" — where there is no
+// skein. They open the same login terminal the expired-login banner opens now. The socket is
+// captured rather than opened: what is asserted is that the page opens the login terminal onto the
+// login route, and a real one would start an interactive agent login on the machine running this.
+//
+// Fails on: the checklist's `sign in to …` link or the chip's click going anywhere but
+// `openLoginTerminal` — the terminal stays shut and no socket is asked for.
+const captureLoginSocket = () => page.evaluate(() => {
+  window.__realWS = window.__realWS || window.WebSocket;
+  window.__asked = [];
+  window.WebSocket = class {
+    constructor(url) { window.__asked.push(url); this.readyState = 0; }
+    send() {} close() { this.readyState = 3; this.onclose?.(); }
+  };
+});
+const releaseLoginSocket = () => page.evaluate(() => {
+  closeLoginTerminal();
+  window.WebSocket = window.__realWS;
+});
+await check("the checklist's sign-in step opens the login terminal", async () => {
+  const link = await mustSee("#fleet .fr-login", "the checklist's sign-in link");
+  await captureLoginSocket();
+  try {
+    await link.click();
+    const got = await page.evaluate(() => ({
+      open: document.getElementById("loginterm").classList.contains("open"),
+      asked: window.__asked.slice(),
+    }));
+    if (!got.open) throw new Error("clicking the checklist's sign-in step opened no login terminal");
+    if (got.asked.length !== 1 || !/\/api\/login\/[a-z]+\/terminal$/.test(got.asked[0]))
+      throw new Error(`the login terminal asked for ${JSON.stringify(got.asked)}, not the login route`);
+  } finally { await releaseLoginSocket(); }
+  const said = (await (await mustSee("#fleet .empty", "the first-run checklist")).textContent()) || "";
+  if (/on the host|skein login/.test(said))
+    throw new Error(`the checklist still tells a first run to run a command: ${said.slice(0, 300)}`);
+});
+await check("the board's sign in chip opens the same login terminal", async () => {
+  await captureLoginSocket();
+  try {
+    const got = await page.evaluate(() => {
+      // A box the board sees signed out, drawn by the real `render` and clicked the way a person
+      // would. The next snapshot takes it away again.
+      render([{ name: "example-main", repo: "example", state: "needs-input", blocked_kind: "auth", agent: "claude" }]);
+      const chip = document.querySelector('#fleet [data-name="example-main"] .pchip');
+      const shown = chip ? { text: chip.textContent, tip: chip.title } : null;
+      chip?.click();
+      return { shown, open: document.getElementById("loginterm").classList.contains("open"),
+               asked: window.__asked.slice() };
+    });
+    if (!got.shown || got.shown.text !== "sign in") throw new Error(`no sign in chip was drawn: ${JSON.stringify(got.shown)}`);
+    if (/on the host|skein login/.test(got.shown.tip)) throw new Error(`the chip still says to run a command: ${got.shown.tip}`);
+    if (!got.open) throw new Error("clicking the sign in chip opened no login terminal");
+    if (got.asked.length !== 1 || !/\/api\/login\/claude\/terminal$/.test(got.asked[0]))
+      throw new Error(`the chip's terminal asked for ${JSON.stringify(got.asked)}, not claude's login route`);
+  } finally { await releaseLoginSocket(); }
 });
 
 // The checklist's own claim about the fleet. `sbx` here answers, so this step must read as done —

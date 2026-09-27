@@ -151,6 +151,8 @@
              font-size:11px; color:var(--dim); border:1px solid var(--border-2); }
   .fr-step.done .fr-tick { color:var(--done); border-color:var(--done); }
   .fr-step.done .fr-txt b { color:var(--dim); font-weight:500; }
+  .fr-step.fr-info .fr-tick { border-style:dashed; }
+  .fr-step.fr-info .fr-txt b { color:var(--dim); font-weight:500; }
   .fr-txt { display:flex; flex-direction:column; gap:3px; font-size:13px; color:var(--text); }
   .fr-hint { font-size:12px; color:var(--faint); line-height:1.5; }
   .fr-foot { margin-top:18px; font-size:12px; color:var(--faint); }
@@ -1268,7 +1270,7 @@
     color:var(--accent); background:var(--accent-bg); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
     border-radius:9px; padding:8px 13px; cursor:pointer; transition:background var(--dur-fast), border-color var(--dur-fast); }
   .set-add:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 18%,transparent); }
-  /* shortcuts pane — rendered from KEYMAP, so it can't fall out of date */
+  /* shortcuts pane — rendered from keySheet() in cockpit/src/keys.mjs, the tables that bind the keys */
   .set-keys { display:flex; flex-direction:column; gap:16px; padding-top:6px; }
   .set-kgrp > b { display:block; font-size:10px; font-weight:600; letter-spacing:.12em;
                   text-transform:uppercase; color:var(--faint); margin-bottom:4px; }
@@ -1571,7 +1573,7 @@
           </div>
           <div class="right">
             <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
-            <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
+            <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)" data-keys><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
             <span class="hdiv"></span>
             <button type="button" class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository" aria-label="Add a repository"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>repo</button>
             <button type="button" class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast" aria-label="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></button>
@@ -1582,13 +1584,13 @@
             <button type="button" class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you" aria-label="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
             <button type="button" class="kbtn ghost" id="voice" title="Say out loud when a box needs you" aria-label="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></button>
             <button type="button" class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos" aria-label="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-            <button type="button" class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)" aria-label="Command palette (⌘K)">⌘K</button>
+            <button type="button" class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)" aria-label="Command palette (⌘K)" data-keys>⌘K</button>
             <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
         <div class="gauges" id="gauges" onclick="showLoad()" style="cursor:pointer" title="the fleet sandbox's own VM — refreshed every 30s. Click for the same broken down by box (cpu, memory, disk)"></div>
         <div id="fleet"></div>
-        <footer class="keyhints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
+        <footer class="keyhints" data-keys><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="gutter" title="drag to resize"></div>
@@ -1640,7 +1642,7 @@
             <option value="review-request">review-request</option>
           </select>
         </div>
-        <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)"></textarea>
+        <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)" data-keys></textarea>
         <div class="row2"><span class="hint" id="mbx-hint"></span><button class="primary" id="mbx-send">Send</button></div>
       </div>
     </div>
@@ -1787,8 +1789,8 @@
   </div>
 
   <!-- Settings: a two-pane preferences surface. Sections are navigated, not scrolled past, so each
-       pane stays short enough to read; the Shortcuts pane is generated from one table (KEYMAP) so the
-       keys documented here cannot drift from the keys the app binds. -->
+       pane stays short enough to read; the Shortcuts pane is rendered from the tables that bind the
+       keys (`keySheet` in cockpit/src/keys.mjs), and cockpit/test/keys.test.mjs holds the two equal. -->
   <div id="settings" aria-hidden="true">
     <div class="set-shell" tabindex="-1" role="dialog" aria-modal="true" aria-label="Settings">
       <nav class="set-nav">
@@ -2085,10 +2087,8 @@ function sayUnauthorised() {
     + `<div class="noauth-t">This cockpit needs the fleet's token</div>`
     + `<div class="noauth-b">Not a login — one shared secret that keeps the fleet off the network`
     + ` it is reachable on. The page loads without it; nothing behind it does.</div>`
-    + `<div class="noauth-h">Open the URL <b>skein-server printed on startup</b> — it carries the`
-    + ` token, and your browser keeps it in a cookie afterwards, so this is a one-time step:</div>`
-    + `<pre class="noauth-c">skein-server → http://127.0.0.1:7878/?t=&lt;token&gt;</pre>`
-    + `<div class="noauth-h">Lost that line? On the host it is in the file itself:</div>`
+    + `<div class="noauth-h">Open it from the host with the token in the URL (<code>xdg-open</code>`
+    + ` on Linux). Your browser keeps it in a cookie afterwards, so this is a one-time step:</div>`
     + `<pre class="noauth-c">open "http://127.0.0.1:7878/?t=$(cat ~/.skein/api-token)"</pre>`
     + `<div class="noauth-b">Sharing a fleet with someone else means sharing that token — it is the`
     + ` whole of the access. <a href="?demo">Or look around in demo mode</a>, which needs none.</div>`
@@ -2219,6 +2219,9 @@ function makeRow(name) {
   el.addEventListener("click", e => {
     // the "proceed?" chip is the action itself — one click continues the box, no terminal trip
     if (e.target.classList.contains("pchip") && e.target.classList.contains("proceed")) { resumeBox(name); return; }
+    // the "sign in" chip opens the same login terminal the expired-login banner does — the one fix
+    // that works from the cockpit, and every box inherits what it signs in (SKEIN-1183)
+    if (e.target.classList.contains("pchip") && e.target.classList.contains("k-auth")) { openLoginTerminal(agentOf(name)); return; }
     if (e.target.classList.contains("hookwarn") && e.target.dataset.restart === "1") { restartAgent(name); return; }
     if (e.target.classList.contains("dchip")) { askDiskLimit(name); return; }
     // the check chip is a link to what the check actually said — a red tick you can't read is noise
@@ -2390,7 +2393,7 @@ const KTIP = {
   permission: "a tool is waiting for your approval",
   question:   "it asked you something and is waiting",
   trust:      "it can't start until you trust this folder",
-  auth:       "signed out or out of quota — run `skein login claude` on the host; every box inherits it",
+  auth:       "signed out or out of quota — click to sign in here; every box inherits the login",
 };
 // Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {
@@ -3885,7 +3888,7 @@ function revClearHtml() {
     ...unasked.map(u => `<div class="revclear-row off">
         <span class="revclear-n">—</span>
         <span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || "its review queue is switched off")}</span>
-        <button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repos</button></div>`),
+        <button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repositories</button></div>`),
   ];
   // The headline is a CLAIM, so it is only made when the scope was read. `revUnasked` decides that
   // in one place; everything below it — the other repos' counts, the failures, the unasked — is
@@ -3898,7 +3901,7 @@ function revClearHtml() {
         scope ? "" : " across the fleet"} — they are in the lanes below` : ""}.`}</div>
     ${why && (why.retry || why.fix) ? `<div class="revclear-acts">${
       why.retry ? `<button type="button" class="revchip go" onclick="loadReview(true)">try again</button>` : ""
-    }${why.fix ? `<button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repos</button>` : ""}</div>` : ""}
+    }${why.fix ? `<button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repositories</button>` : ""}</div>` : ""}
     ${rows.length ? `<div class="revclear-next">${rows.join("")}</div>` : ""}
   </div>`;
 }
@@ -6417,7 +6420,7 @@ function revComposeHtml(pr) {
         : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
            <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
-      <span class="dim revkeys">${asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept"}</span>
+      <span class="dim revkeys">${glyph(asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept")}</span>
     </div>
   </div>`;
 }
@@ -7759,7 +7762,7 @@ function renderTabs() {
       : `${what} — disconnected · click to reconnect`;
     const title = (s.dead ? deadTitle : what)
       + (half ? `\n\n${half[0]} — ${half[1]}` : "")
-      + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;
+      + glyph(`\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`);
     if (t.title !== title) t.title = title;
     const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
     const label = esc(s.box) + (s.kind === "shell"
@@ -9036,7 +9039,7 @@ const pal = document.getElementById("pal"), palInput = document.getElementById("
 let palItems = [], palSel = 0;
 function commands() {
   const acts = [
-    { sec:"Actions", label:"New box…", run:openNewBox, meta:"⌘N" },
+    { sec:"Actions", label:"New box…", run:openNewBox, meta:glyph("⌘N") },
     { sec:"Actions", label:"Add a repo…", run:addRepoPrompt },
     { sec:"Actions", label:"Settings…", run:() => openSettings("repos") },
     { sec:"Actions", label:"Keyboard shortcuts…", run:() => openSettings("keys"), meta:"?" },
@@ -9056,7 +9059,7 @@ function commands() {
     { sec:"Actions", label:"Load by box — who is using the CPU, memory and disk", run:showLoad },
     // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
     // recognition on a pause by itself, so this needs no second click to stop it.
-    { sec:"Actions", label:"Listen for a command", run:listen, meta:"hold ⌥ right" },
+    { sec:"Actions", label:"Listen for a command", run:listen, meta:glyph("hold ⌥ right") },
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
@@ -9747,21 +9750,11 @@ function renderDiagnostics() {
   if (!el) return;
   const h = lastHealth;
   if (!h) { el.innerHTML = `<div class="note">no report yet</div>`; return; }
-  const CHECKS = [
-    ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
-    ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
-    ["disk", "fleet disk"],
-    // "token life" directly under "github scope": the same credential asked two questions — what it
-    // can reach, and whether it will still reach it next month (SKEIN-928).
-    ["gitgate", "github scope"], ["token_expiry", "token life"],
-    // "proxy credential" third in the same group, because it is the same credential asked the
-    // question the other two cannot: not what skein's token may reach and not how long it lasts,
-    // but whether the token skein holds is the one GitHub is actually answering (SKEIN-548). It is
-    // the substrate's answer rather than skein's, which is why skein can only report it.
-    ["proxy_injection", "proxy credential"],
-    ["warden", "host warden"], ["cover", "box isolation"],
-    ["ai", "ai enrichment"],
-  ];
+  // Every check the report carries, under the one name the report gives it (SKEIN-1186) — the
+  // same `labels` the banner that sends you here headlines with, and the same names `skein doctor`
+  // prints. The pane used to keep a table of its own, so one check arrived under two names one
+  // click apart.
+  const CHECKS = (h.labels || []).map(l => [l.key, l.label]);
   // Three states, not two. `unknown` is "skein could not tell", which is neither a pass nor a
   // fault — reporting it as ✗ sent people to reinstall a working tool because `sbx ls` timed out
   // once. It gets the ! this panel already uses for "look at this, nothing is broken".
@@ -9799,7 +9792,7 @@ function renderDiagnostics() {
   el.innerHTML = rows
     + unowned
     + list(h.dark_boxes, "no signals")
-    + list(h.stale_boxes, "stale sessions")
+    + list(h.stale_boxes, "on old probes")
     + `<div class="dg-foot">the same report <code>skein doctor</code> prints, which also probes
        bwrap, tmux and the fleet's mounts from inside the sandbox.</div>`;
   const pill = document.getElementById("set-diagn");
@@ -9878,64 +9871,29 @@ function showUsage() {
 }
 
 const settingsModal = () => document.getElementById("settings");
-// The one place keys are documented. Rendered into Settings → Shortcuts (and reachable with `?`), so
-// what the UI claims and what the app binds are the same list.
-const KEYMAP = [
-  { sec:"Fleet", items:[
-    [["j","k"], "move the selection"],
-    [["↵"], "open the selected box's terminal"],
-    [["d"], "open its diff"],
-    [["]"], "jump to the next box that needs you"],
-    [["l"], "load by box — which one is using the CPU"],
-    [["/"], "filter the board by name, branch, repo or headline"],
-  ]},
-  // The review pane's map (SKEIN-151/159, docs/parity.md §3). The three deliberate absences
-  // are LISTED, not omitted: a key sheet that silently lacks `m` reads as a sheet that forgot it.
-  { sec:"Review — the queue", items:[
-    [["j","k"], "move the selection (inside an open stack, along its steps)"],
-    [["n","N"], "next / previous row you have not decided this session"],
-    [["→"], "enter the selected stack — ← or esc leaves it, back at its head"],
-    [["↵","o"], "open the selected row — o opens things here; GitHub is g h"],
-    [["e"], "set aside — the row greys in place, u takes it back within 8s"],
-    [["u"], "undo the held act"],
-    [["R"], "read this one again, against the commit that is there now"],
-    [["/"], "find a pull request"],
-    [["g","1"], "…g9 — the nth repo in the picker's order"],
-    [["g","r"], "the repo picker"],
-    [["g","g"], "first row · G last row"],
-    [["a"], "refused here, deliberately — you cannot approve from a surface that is not showing you the change; ↵ opens the row, and approve is a chip in it"],
-    [["m"], "unbound, deliberately — merging cannot be undone from this pane, so one letter must never land a commit on a base branch; the merge chip asks first"],
-  ]},
-  { sec:"Tabs", items:[
-    [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
-    [["⌥["],           "previous tab"],
-    [["⌥]"],           "next tab"],
-    [["⌥⇧[","⌥⇧]"],    "move the current tab left / right"],
-    [["drag"],         "reorder tabs by dragging one — esc cancels, and the order is remembered"],
-  ]},
-  { sec:"Anywhere", items:[
-    [["⌘K"], "command palette"],
-    [["⌘N"], "new box"],
-    [["?"],  "this list"],
-    [["esc"],"leave the terminal / close a dialog"],
-  ]},
-  { sec:"In a terminal", items:[
-    [["⌘C"], "copy the selection"],
-    [["⌘V"], "paste"],
-    [["⌃C"], "interrupt — goes through to the agent, never intercepted"],
-    [["⌘V","file"], "paste a file, or drag one in, to hand it to the agent"],
-  ]},
-];
-// ⌘/⌥/⇧/⌃ are Mac glyphs; away from a Mac the same bindings are Ctrl/Alt/Shift (the handlers already
-// accept either), so print what that keyboard actually has on it.
+// Settings → Shortcuts, and `?`. Rendered from `keySheet()` in cockpit/src/keys.mjs — the tables
+// that bind the keys — so what the sheet claims and what the app binds are one list (SKEIN-1187).
+// There used to be a second table here, and it had drifted from the first while saying it could not.
 const MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-const glyph = k => MAC ? k
-  : k.replace("⌘", "Ctrl+").replace("⌃", "Ctrl+").replace("⌥", "Alt+").replace("⇧", "Shift+");
+const glyph = k => platformKeys(k, MAC);
 function renderKeys() {
-  document.getElementById("set-keys").innerHTML = KEYMAP.map(g =>
+  document.getElementById("set-keys").innerHTML = keySheet().map(g =>
     `<div class="set-kgrp"><b>${esc(g.sec)}</b>` + g.items.map(([keys, what]) =>
       `<div class="set-krow"><span class="kk">${keys.map(k => k === "…" ? "…" : `<kbd>${esc(glyph(k))}</kbd>`).join("")}</span><span class="kd">${esc(glyph(what))}</span></div>`
     ).join("") + `</div>`).join("");
+}
+// Every other place the page names a modifier: the header buttons' hints, the board's footer and
+// the mailbox's placeholder are written with the Mac's ⌘ in `shell.html`, marked `data-keys`, and
+// put through the same `glyph` once at load — so a Linux keyboard is told Ctrl+K on the button as
+// well as in the sheet.
+function platformHints(root = document) {
+  for (const el of root.querySelectorAll("[data-keys]")) {
+    for (const attr of ["title", "aria-label", "placeholder"]) {
+      if (el.hasAttribute(attr)) el.setAttribute(attr, glyph(el.getAttribute(attr)));
+    }
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) n.nodeValue = glyph(n.nodeValue);
+  }
 }
 const SET_PANES = {
   repos:    "the repos skein can launch boxes into",
@@ -10654,25 +10612,19 @@ function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clear
 // page answers before you ask.
 function firstRunHtml(foreignN = 0) {
   const h = lastHealth || {};
+  // The runtime a sign-in is for: the one a new box would start with.
+  const runtime = settings.default_agent || runtimes[0]?.id || "claude";
   const steps = [
-    { done: h.sbx?.ok,
+    // `level`, not `ok`: a check carries no `ok` field, so this step could never tick and the list
+    // could never read "ready" (SKEIN-1184 found it on the way past).
+    { done: h.sbx?.level === "satisfied",
       label: "sbx is installed and answering",
       hint: `it runs the fleet — <a href="https://docs.docker.com/ai/sandboxes/" target="_blank" rel="noreferrer">install it</a>, and make sure Docker is running` },
-    // **The warden, and it gates.** Creating the fleet is what a first Launch does, and that goes
-    // only through the warden with no fallback — so without this step the checklist said "ready",
-    // somebody pressed the button, and got a 500. It is the step that was missing from the run this
-    // page exists to make smooth.
-    //
-    // The hint is the health check's own `fix` rather than a sentence written here, so a fleet whose
-    // warden has been moved to another port is told about ITS port instead of about the default.
-    { done: h.warden?.level === "satisfied",
-      label: h.warden?.level === "satisfied" ? "the warden is answering" : "start the warden",
-      hint: `<code>skein-warden</code> in its own terminal — creating or resizing the fleet asks a \
-             person there, deliberately, and there is no way round it. \
-             ${esc(h.warden?.fix || "")}` },
+    // Opens the same login terminal as the expired-login banner and the board's `sign in` chip
+    // (SKEIN-1183): one fix, from the cockpit, and nothing to run anywhere else.
     { done: (h.logins || []).length > 0,
       label: (h.logins || []).length ? `an agent is signed in (${h.logins.join(", ")})` : "sign an agent in",
-      hint: `run <code>skein login claude</code> once — every box inherits it, and without it each one comes up at a sign-in prompt and does nothing` },
+      hint: `<a href="#" class="fr-login" onclick="openLoginTerminal(${esc(JSON.stringify(runtime))});return false">sign in to ${esc(runtime)}</a> — once for the whole fleet: every box inherits it, and without it each one comes up at a sign-in prompt and does nothing` },
     { done: repos.length > 0,
       label: repos.length ? `${repos.length} ${repos.length === 1 ? "repository" : "repositories"} registered` : "add a repository",
       hint: `<a href="#" onclick="addRepoPrompt();return false">add one</a> — a box is a branch of a repo, so there is nothing to launch without it` },
@@ -10684,11 +10636,21 @@ function firstRunHtml(foreignN = 0) {
       label: h.git_credential ? `boxes can push (${h.git_credential})` : "choose how boxes push",
       hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a per-repo token, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
   ];
+  // **The warden is information, not a step** (SKEIN-1184, `docs/decisions/warden-or-prompt.md`).
+  // It used to gate "ready" on the reasoning that a first Launch created the fleet through it; a
+  // Launch creates no fleet (SKEIN-627), and without a warden skein shows the person the command
+  // instead. So it is said — the health check's own sentence, which names where it looked and what
+  // a warden adds — and counted in nothing.
+  const warden = h.warden ? `
+    <li class="fr-step fr-info">
+      <span class="fr-tick">·</span>
+      <span class="fr-txt"><b>host warden — optional</b><span class="fr-hint">${esc(h.warden.detail || "")}</span></span>
+    </li>` : "";
   const rows = steps.map(s => `
     <li class="fr-step ${s.done ? "done" : ""}">
       <span class="fr-tick">${s.done ? "✓" : "○"}</span>
       <span class="fr-txt"><b>${s.label}</b>${s.done ? "" : `<span class="fr-hint">${s.hint}</span>`}</span>
-    </li>`).join("");
+    </li>`).join("") + warden;
   const ready = steps.every(s => s.done);
   // Counted, not spelled out. It said "three things" while listing four the moment credentials became
   // a step — the kind of wrong that makes a first run feel unmaintained before it has done anything.
@@ -11407,23 +11369,21 @@ function selectTab(n) {
   showBox(s.box, "term", s.kind);
 }
 // Tab keys that must work *while you are typing in the agent*, so they can't live in the fleet's
-// keymap (which yields every key to a focused terminal). ⌥ chords only: the browser reserves ⌘1-9 and
-// ⌃Tab, and the agents' own composers use ⌥←/⌥→ for word movement — brackets are free in all of them.
-// Matched on e.code, since ⌥[ on macOS reports e.key as "“".
+// keymap (which yields every key to a focused terminal). Which key is which is `tabShortcutFor`, the
+// TABS table in cockpit/src/keys.mjs that the key sheet is rendered from (SKEIN-1187).
 document.addEventListener("keydown", e => {
-  if (!e.altKey || e.metaKey || e.ctrlKey) return;
-  const digit = /^Digit([1-9])$/.exec(e.code);
-  const step = e.code === "BracketRight" ? 1 : e.code === "BracketLeft" ? -1 : 0;
-  if (!digit && !step) return;
+  const action = tabShortcutFor(e);
+  if (!action) return;
   if (!sessions.size) return;
   e.preventDefault(); e.stopPropagation();
-  if (digit) { selectTab(+digit[1]); return; }
-  if (e.shiftKey) {                                  // ⌥⇧[ / ⌥⇧] — move the tab, don't switch to it
+  const nth = /^tab-([1-9])$/.exec(action);
+  if (nth) { selectTab(+nth[1]); return; }
+  if (action === "tab-move-left" || action === "tab-move-right") {   // move the tab, don't switch to it
     const id = activeSid(); const ids = orderedSids();
-    if (id && ids.includes(id)) moveTab(id, ids.indexOf(id) + step);
+    if (id && ids.includes(id)) moveTab(id, ids.indexOf(id) + (action === "tab-move-right" ? 1 : -1));
     return;
   }
-  cycleSession(step);
+  cycleSession(action === "tab-next" ? 1 : -1);
 }, true);
 
 // ---------- attachments: paste · drag-and-drop · attach button ----------
@@ -11768,8 +11728,8 @@ setInterval(() => {
     // that has gone quiet is a producer that wedged — nothing to wait for. A closed one is the
     // browser already retrying, and waiting is exactly right.
     ban.textContent = es && es.readyState === EventSource.OPEN
-      ? `board is ${age}s stale — the server stopped answering`
-      : `board is ${age}s stale — reconnecting…`;
+      ? `board not updated for ${age}s — the server stopped answering`
+      : `board not updated for ${age}s — reconnecting…`;
   } else ban?.remove();
 }, 2000);
 // Draw the board from the server, now, rather than waiting for the stream to notice.
@@ -11900,28 +11860,26 @@ function loadHealth() {
       banner = document.createElement("button"); banner.id = "healthban";
       banner.onclick = () => openSettings("diag"); document.body.prepend(banner);
     }
-    // **Every check the report carries, and the list is not a selection any more** (SKEIN-1003).
-    // It used to hold twelve of the fourteen, hand-written, and the two it was short of were the
-    // two nobody had decided about: "gh" — which is "curl is installed" and "GitHub can be reached
-    // at all" (SKEIN-548, SKEIN-926) — and "ai". Whether a check turns the banner red is decided
-    // in ONE place, `OnBanner` in `src/health/report.rs`, and the page is not that place: a key
-    // missing from here cannot suppress a banner, it can only produce `ok: false` with nothing in
-    // the row to read, which is the one failure this list has ever had. So it carries all of them,
-    // and `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's
-    // own fields — a new check is on this list or that test fails by name.
+    // **Every check the report carries, by the report's own list and names** (SKEIN-1003,
+    // SKEIN-1186). This used to be a hand-written array of wire keys, and the row headlined with the
+    // key itself — `cover: …` — while the diagnostics pane it opens called the same check
+    // "box isolation" and `skein doctor` called it "isolation". The report serves `labels` now:
+    // every check, in its order, with the one name `CHECK_LABELS` in `src/health/report.rs` gives it,
+    // and this row, the pane and the CLI all print that. A check added to the report is on this
+    // list without anybody touching the page, which is the failure a list here had once already —
+    // a counted fault it did not name put a red row above the app with nothing in it to read.
     //
     // Carrying a check the verdict does not count is deliberate and costs nothing: a check the
     // Rust side marks `NotCounted` gets named here when the banner is already up for some other
     // reason, and stays unable to raise one by itself.
     //
     // **And it cannot take the headline** (SKEIN-1013, the owner's call: "a check that raised
-    // it"). The row's one sentence — the only part a person can read on a phone and copy — used
-    // to be `failed[0]` in this list's order, and `ai` sits ahead of seven counted checks, so a
-    // fleet with a full disk and an uncounted `ai` fault would have headlined `ai` and put the
-    // disk in the tooltip. The headline is now the first failure the report says is `counted`;
-    // the page does not decide which those are, because `OnBanner` does and the report carries
-    // its answer. Uncounted failures are still in the row's count of the rest, and the tooltip.
-    const CHECKED = ["registry","sbx","git","gh","probes","mailbox","ai","memory","disk","gitgate","token_expiry","proxy_injection","warden","cover"];
+    // it"). The headline is the first failure the report says is `counted`; the page does not
+    // decide which those are, because `OnBanner` does and the report carries its answer. Uncounted
+    // failures are still in the row's count of the rest, and the tooltip.
+    const labels = health.labels || [];
+    const CHECKED = labels.map(l => l.key);
+    const nameOf = key => labels.find(l => l.key === key)?.label || key;
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");
@@ -11938,13 +11896,13 @@ function loadHealth() {
     const rest = failed.length - (lead ? 1 : 0);
     const extra = rest ? ` (+${rest} more)` : "";
     banner.textContent = lead
-      ? `${lead}: ${first}${extra}`
-      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}${extra}`;
+      ? `${nameOf(lead)}: ${first}${extra}`
+      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} on old probes` : ""}${extra}`;
     banner.title = [
-      ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
-      ...unsure.map(key => `${key}: could not be checked — ${health[key]?.detail || "no reason given"}`),
+      ...failed.map(key => `${nameOf(key)}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
+      ...unsure.map(key => `${nameOf(key)}: could not be checked — ${health[key]?.detail || "no reason given"}`),
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
-      ...(stale ? [`stale sessions: ${health.stale_boxes.join(", ")}`] : [])
+      ...(stale ? [`on old probes: ${health.stale_boxes.join(", ")}`] : [])
     ].join("\n");
     // Said rather than swallowed (SKEIN-1012): what reaches here now is the fetch, the parse, or
     // the banner block itself — and a server that is down already has the staleness banner saying
@@ -12700,6 +12658,7 @@ function createDemoSession(box, kind, runtime) {
 
 // ---------- boot ----------
 setFavicon(0);
+platformHints();
 if (DEMO) {
   loadRuntimes();
   repos = DEMO_REPOS;

@@ -496,9 +496,9 @@ fn read_or_default() -> Config {
             static TOLD: std::sync::Once = std::sync::Once::new();
             TOLD.call_once(|| {
                 eprintln!(
-                    "skein: cannot read your settings ({why}) — every setting is falling back to \
-                     its default until that file parses, including `fleet_agent`, which defaults \
-                     to on. The file is left alone; fix that one line and restart."
+                    "skein: cannot read your settings ({why}) — every setting is at its default \
+                     until that file parses. The file is left alone: fix it, and skein reads it \
+                     again the next time it looks — no restart."
                 );
             });
             Config::default()

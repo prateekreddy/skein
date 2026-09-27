@@ -521,10 +521,8 @@ fn cmd_doctor() -> Result<(), String> {
     // The warden, which is not a tool on PATH and is checked here beside the ones that are — because
     // to somebody reading this list the question is the same: is the thing skein needs present.
     //
-    // A line rather than a footnote, because fleet create and destroy go ONLY through it. There is
-    // deliberately no fallback (`fleet::create_through_warden`), so a host without one has lost two
-    // lifecycle operations — and until this line existed the first anybody heard of that was a 500
-    // from pressing Launch, which on an upgrade lands weeks after the change that caused it.
+    // Information rather than a verdict (SKEIN-1184): without a warden skein shows the person the
+    // command instead, so the line says which of the two routes this host is on.
     {
         let w = skein::health::warden_report();
         let mark = match w.level {
@@ -532,7 +530,11 @@ fn cmd_doctor() -> Result<(), String> {
             skein::health::Level::Unsatisfied => BAD,
             skein::health::Level::Unknown => WARN,
         };
-        println!("{mark} warden        {DIM}{}{RESET}", w.detail);
+        println!(
+            "{mark} {:<13} {DIM}{}{RESET}",
+            skein::health::label("warden"),
+            w.detail
+        );
         if !w.fix.is_empty() {
             println!("{DIM}              {}{RESET}", w.fix);
         }
@@ -693,7 +695,11 @@ fn cmd_doctor() -> Result<(), String> {
             skein::health::Level::Unsatisfied => BAD,
             skein::health::Level::Unknown => WARN,
         };
-        println!("{mark} git scope     {}", g.detail);
+        println!(
+            "{mark} {:<13} {}",
+            skein::health::label("gitgate"),
+            g.detail
+        );
         // The way out, on its own line and indented under the fault it clears. A diagnostic that
         // names a problem and not its remedy has handed over the half nobody can act on.
         if !g.fix.is_empty() {
@@ -716,7 +722,11 @@ fn cmd_doctor() -> Result<(), String> {
             skein::health::Level::Unsatisfied => BAD,
             skein::health::Level::Unknown => WARN,
         };
-        println!("{mark} token life    {}", t.detail);
+        println!(
+            "{mark} {:<13} {}",
+            skein::health::label("token_expiry"),
+            t.detail
+        );
         if !t.fix.is_empty() {
             println!("{DIM}              → {}{RESET}", t.fix);
         }
@@ -760,7 +770,7 @@ fn cmd_doctor() -> Result<(), String> {
             skein::health::Level::Unsatisfied => BAD,
             skein::health::Level::Unknown => WARN,
         };
-        println!("{mark} fleet disk    {}", d.detail);
+        println!("{mark} {:<13} {}", skein::health::label("disk"), d.detail);
         if !d.fix.is_empty() {
             println!("{DIM}              → {}{RESET}", d.fix);
         }
@@ -779,7 +789,7 @@ fn cmd_doctor() -> Result<(), String> {
             skein::health::Level::Unsatisfied => BAD,
             skein::health::Level::Unknown => WARN,
         };
-        println!("{mark} isolation     {}", c.detail);
+        println!("{mark} {:<13} {}", skein::health::label("cover"), c.detail);
         if !c.fix.is_empty() {
             println!("{DIM}              → {}{RESET}", c.fix);
         }

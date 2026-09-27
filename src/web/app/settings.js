@@ -65,64 +65,29 @@ function showUsage() {
 }
 
 const settingsModal = () => document.getElementById("settings");
-// The one place keys are documented. Rendered into Settings → Shortcuts (and reachable with `?`), so
-// what the UI claims and what the app binds are the same list.
-const KEYMAP = [
-  { sec:"Fleet", items:[
-    [["j","k"], "move the selection"],
-    [["↵"], "open the selected box's terminal"],
-    [["d"], "open its diff"],
-    [["]"], "jump to the next box that needs you"],
-    [["l"], "load by box — which one is using the CPU"],
-    [["/"], "filter the board by name, branch, repo or headline"],
-  ]},
-  // The review pane's map (SKEIN-151/159, docs/parity.md §3). The three deliberate absences
-  // are LISTED, not omitted: a key sheet that silently lacks `m` reads as a sheet that forgot it.
-  { sec:"Review — the queue", items:[
-    [["j","k"], "move the selection (inside an open stack, along its steps)"],
-    [["n","N"], "next / previous row you have not decided this session"],
-    [["→"], "enter the selected stack — ← or esc leaves it, back at its head"],
-    [["↵","o"], "open the selected row — o opens things here; GitHub is g h"],
-    [["e"], "set aside — the row greys in place, u takes it back within 8s"],
-    [["u"], "undo the held act"],
-    [["R"], "read this one again, against the commit that is there now"],
-    [["/"], "find a pull request"],
-    [["g","1"], "…g9 — the nth repo in the picker's order"],
-    [["g","r"], "the repo picker"],
-    [["g","g"], "first row · G last row"],
-    [["a"], "refused here, deliberately — you cannot approve from a surface that is not showing you the change; ↵ opens the row, and approve is a chip in it"],
-    [["m"], "unbound, deliberately — merging cannot be undone from this pane, so one letter must never land a commit on a base branch; the merge chip asks first"],
-  ]},
-  { sec:"Tabs", items:[
-    [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
-    [["⌥["],           "previous tab"],
-    [["⌥]"],           "next tab"],
-    [["⌥⇧[","⌥⇧]"],    "move the current tab left / right"],
-    [["drag"],         "reorder tabs by dragging one — esc cancels, and the order is remembered"],
-  ]},
-  { sec:"Anywhere", items:[
-    [["⌘K"], "command palette"],
-    [["⌘N"], "new box"],
-    [["?"],  "this list"],
-    [["esc"],"leave the terminal / close a dialog"],
-  ]},
-  { sec:"In a terminal", items:[
-    [["⌘C"], "copy the selection"],
-    [["⌘V"], "paste"],
-    [["⌃C"], "interrupt — goes through to the agent, never intercepted"],
-    [["⌘V","file"], "paste a file, or drag one in, to hand it to the agent"],
-  ]},
-];
-// ⌘/⌥/⇧/⌃ are Mac glyphs; away from a Mac the same bindings are Ctrl/Alt/Shift (the handlers already
-// accept either), so print what that keyboard actually has on it.
+// Settings → Shortcuts, and `?`. Rendered from `keySheet()` in cockpit/src/keys.mjs — the tables
+// that bind the keys — so what the sheet claims and what the app binds are one list (SKEIN-1187).
+// There used to be a second table here, and it had drifted from the first while saying it could not.
 const MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-const glyph = k => MAC ? k
-  : k.replace("⌘", "Ctrl+").replace("⌃", "Ctrl+").replace("⌥", "Alt+").replace("⇧", "Shift+");
+const glyph = k => platformKeys(k, MAC);
 function renderKeys() {
-  document.getElementById("set-keys").innerHTML = KEYMAP.map(g =>
+  document.getElementById("set-keys").innerHTML = keySheet().map(g =>
     `<div class="set-kgrp"><b>${esc(g.sec)}</b>` + g.items.map(([keys, what]) =>
       `<div class="set-krow"><span class="kk">${keys.map(k => k === "…" ? "…" : `<kbd>${esc(glyph(k))}</kbd>`).join("")}</span><span class="kd">${esc(glyph(what))}</span></div>`
     ).join("") + `</div>`).join("");
+}
+// Every other place the page names a modifier: the header buttons' hints, the board's footer and
+// the mailbox's placeholder are written with the Mac's ⌘ in `shell.html`, marked `data-keys`, and
+// put through the same `glyph` once at load — so a Linux keyboard is told Ctrl+K on the button as
+// well as in the sheet.
+function platformHints(root = document) {
+  for (const el of root.querySelectorAll("[data-keys]")) {
+    for (const attr of ["title", "aria-label", "placeholder"]) {
+      if (el.hasAttribute(attr)) el.setAttribute(attr, glyph(el.getAttribute(attr)));
+    }
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) n.nodeValue = glyph(n.nodeValue);
+  }
 }
 const SET_PANES = {
   repos:    "the repos skein can launch boxes into",
@@ -841,25 +806,19 @@ function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clear
 // page answers before you ask.
 function firstRunHtml(foreignN = 0) {
   const h = lastHealth || {};
+  // The runtime a sign-in is for: the one a new box would start with.
+  const runtime = settings.default_agent || runtimes[0]?.id || "claude";
   const steps = [
-    { done: h.sbx?.ok,
+    // `level`, not `ok`: a check carries no `ok` field, so this step could never tick and the list
+    // could never read "ready" (SKEIN-1184 found it on the way past).
+    { done: h.sbx?.level === "satisfied",
       label: "sbx is installed and answering",
       hint: `it runs the fleet — <a href="https://docs.docker.com/ai/sandboxes/" target="_blank" rel="noreferrer">install it</a>, and make sure Docker is running` },
-    // **The warden, and it gates.** Creating the fleet is what a first Launch does, and that goes
-    // only through the warden with no fallback — so without this step the checklist said "ready",
-    // somebody pressed the button, and got a 500. It is the step that was missing from the run this
-    // page exists to make smooth.
-    //
-    // The hint is the health check's own `fix` rather than a sentence written here, so a fleet whose
-    // warden has been moved to another port is told about ITS port instead of about the default.
-    { done: h.warden?.level === "satisfied",
-      label: h.warden?.level === "satisfied" ? "the warden is answering" : "start the warden",
-      hint: `<code>skein-warden</code> in its own terminal — creating or resizing the fleet asks a \
-             person there, deliberately, and there is no way round it. \
-             ${esc(h.warden?.fix || "")}` },
+    // Opens the same login terminal as the expired-login banner and the board's `sign in` chip
+    // (SKEIN-1183): one fix, from the cockpit, and nothing to run anywhere else.
     { done: (h.logins || []).length > 0,
       label: (h.logins || []).length ? `an agent is signed in (${h.logins.join(", ")})` : "sign an agent in",
-      hint: `run <code>skein login claude</code> once — every box inherits it, and without it each one comes up at a sign-in prompt and does nothing` },
+      hint: `<a href="#" class="fr-login" onclick="openLoginTerminal(${esc(JSON.stringify(runtime))});return false">sign in to ${esc(runtime)}</a> — once for the whole fleet: every box inherits it, and without it each one comes up at a sign-in prompt and does nothing` },
     { done: repos.length > 0,
       label: repos.length ? `${repos.length} ${repos.length === 1 ? "repository" : "repositories"} registered` : "add a repository",
       hint: `<a href="#" onclick="addRepoPrompt();return false">add one</a> — a box is a branch of a repo, so there is nothing to launch without it` },
@@ -871,11 +830,21 @@ function firstRunHtml(foreignN = 0) {
       label: h.git_credential ? `boxes can push (${h.git_credential})` : "choose how boxes push",
       hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a per-repo token, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
   ];
+  // **The warden is information, not a step** (SKEIN-1184, `docs/decisions/warden-or-prompt.md`).
+  // It used to gate "ready" on the reasoning that a first Launch created the fleet through it; a
+  // Launch creates no fleet (SKEIN-627), and without a warden skein shows the person the command
+  // instead. So it is said — the health check's own sentence, which names where it looked and what
+  // a warden adds — and counted in nothing.
+  const warden = h.warden ? `
+    <li class="fr-step fr-info">
+      <span class="fr-tick">·</span>
+      <span class="fr-txt"><b>host warden — optional</b><span class="fr-hint">${esc(h.warden.detail || "")}</span></span>
+    </li>` : "";
   const rows = steps.map(s => `
     <li class="fr-step ${s.done ? "done" : ""}">
       <span class="fr-tick">${s.done ? "✓" : "○"}</span>
       <span class="fr-txt"><b>${s.label}</b>${s.done ? "" : `<span class="fr-hint">${s.hint}</span>`}</span>
-    </li>`).join("");
+    </li>`).join("") + warden;
   const ready = steps.every(s => s.done);
   // Counted, not spelled out. It said "three things" while listing four the moment credentials became
   // a step — the kind of wrong that makes a first run feel unmaintained before it has done anything.

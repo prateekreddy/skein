@@ -169,8 +169,20 @@ pub fn off_switch_refusal() -> &'static str {
      other boundary to have: every box shares one network namespace with this port, so the fleet's \
      API token is the only thing standing between a box and /api/fleet/git-grants.\n\
      Nothing but this message is served, on any path. Unset $SKEIN_NO_API_AUTH wherever this server \
-     is started and restart it; the cockpit URL skein prints carries the token.\n"
+     is started and restart it, then open the cockpit from the host with:\n    \
+     open \"http://127.0.0.1:7878/?t=$(cat ~/.skein/api-token)\"\n"
 }
+
+/// **The one way to open the cockpit with its token**, from the host (SKEIN-1185).
+///
+/// Every place that tells a person how to get in used to say "open the URL skein printed", and on
+/// the documented install nothing prints one anywhere a person is looking: `skein-server` runs
+/// under the fleet's doorway inside the sandbox, and `bootstrap.sh` never printed it. The cockpit's
+/// own 401 page (`sayUnauthorised` in `src/web/app/board.js`) already had the line that works from
+/// the host, so that line is the one every other place gives — this refusal, the off-switch
+/// refusal above, and the end of `bootstrap.sh`.
+/// `the_way_in_is_one_line_everywhere_it_is_given` holds them to it.
+pub const OPEN_FROM_THE_HOST: &str = "open \"http://127.0.0.1:7878/?t=$(cat ~/.skein/api-token)\"";
 
 /// The token already on disk, or `None` — never minting one.
 ///
@@ -276,8 +288,8 @@ pub fn refusal() -> (StatusCode, String) {
     (
         StatusCode::UNAUTHORIZED,
         format!(
-            "this API needs the fleet's token. Open the cockpit at the URL skein printed \
-             (it carries ?t=…), or send `Authorization: Bearer $(cat {})`.\n",
+            "this API needs the fleet's token. From the host, open the cockpit with \
+             `{OPEN_FROM_THE_HOST}`, or send `Authorization: Bearer $(cat {})`.\n",
             token_path().display()
         ),
     )
@@ -330,6 +342,51 @@ mod tests {
 
     /// The failure that matters most: not "a wrong token is refused" but "an absent one is". A
     /// missing cookie and a missing header must never fall through to allowed.
+    /// **Every place that tells a person how to open the cockpit gives the same line, and it is
+    /// the one that works from the host** (SKEIN-1185).
+    ///
+    /// **The concrete change that makes it fail, named before it was written:** putting "the URL
+    /// skein printed" back into [`refusal`], or reverting the end of `bootstrap.sh` to "open what
+    /// the cockpit prints for its token", fails `points at output nobody sees`. Both planted.
+    #[test]
+    fn the_way_in_is_one_line_everywhere_it_is_given() {
+        let page = include_str!("web/index.html");
+        assert!(
+            page.contains(OPEN_FROM_THE_HOST),
+            "the cockpit's own 401 page no longer gives `{OPEN_FROM_THE_HOST}`, and it is the \
+             source every other place copies"
+        );
+        let (_, said) = refusal();
+        assert!(
+            said.contains(OPEN_FROM_THE_HOST),
+            "the API's 401 gives the line: {said}"
+        );
+        assert!(
+            off_switch_refusal().contains(OPEN_FROM_THE_HOST),
+            "the off-switch refusal gives the line: {}",
+            off_switch_refusal()
+        );
+        // The install's last words, where the port is the one it just started on. Asserted on the
+        // shape that survives the shell — `\$(cat …)` in the heredoc prints as `$(cat …)`.
+        let install = include_str!("../bootstrap.sh");
+        assert!(
+            install.contains("open \"http://127.0.0.1:$port/?t=\\$(cat ~/.skein/api-token)\""),
+            "the install ends with the line"
+        );
+        for said in [page, said.as_str(), off_switch_refusal(), install] {
+            for gone in [
+                "URL skein printed",
+                "URL skein prints",
+                "what the cockpit prints",
+            ] {
+                assert!(
+                    !said.contains(gone),
+                    "\"{gone}\" points at output nobody sees on the documented install"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nothing_at_all_is_refused() {
         // Point $SKEIN_HOME somewhere writable so `token()` mints rather than failing for its own
