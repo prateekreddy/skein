@@ -121,12 +121,12 @@ pub(super) async fn api_box_settings(Path(name): Path<String>) -> Response {
         // Asked of the box, because nothing host-side records it: the token lands in the box's own
         // `~/.config/sync/env`. One round trip, and only when someone opens this panel — the board
         // refreshes every 2s and could never pay for this per box.
-        "wired": skein::sandbox::sbx_guest_output(
-            &name,
-            "test -s \"$HOME/.config/sync/env\" && echo wired",
-            std::time::Duration::from_secs(15),
-        )
-        .unwrap_or_default()
+        "wired": skein::place::located(&name)
+            .and_then(|p| p.exec(
+                "test -s \"$HOME/.config/sync/env\" && echo wired",
+                std::time::Duration::from_secs(15),
+            ))
+            .unwrap_or_default()
         .contains("wired"),
         "agent": skein::repos::agent_for_box(&name),
         "repo_connection": repo

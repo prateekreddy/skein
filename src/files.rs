@@ -6,8 +6,7 @@
 //! for a clone-mode box the two are different checkouts on different branches.
 
 use crate::answer::Answer;
-use crate::place::place_of;
-use crate::sandbox::sbx_guest_output;
+use crate::place::located;
 use crate::sbx::lookup_dir;
 use crate::sbx::{box_liveness, Liveness};
 use crate::util::valid_name;
@@ -160,7 +159,7 @@ pub(crate) fn list_files_in_box(name: &str, rel: &str) -> Result<FileListing, St
          find \"$target\" -maxdepth 1 -mindepth 1 -printf '%y\\t%Y\\t%s\\t%f\\n' 2>/dev/null",
         guest_fs_preamble(rel)
     );
-    let raw = sbx_guest_output(name, &script, Duration::from_secs(20))?;
+    let raw = located(name)?.exec(&script, Duration::from_secs(20))?;
     let (_, body) = split_guest_fs(&raw)?;
     let mut entries = parse_guest_listing(&body);
     sort_entries(&mut entries);
@@ -168,18 +167,6 @@ pub(crate) fn list_files_in_box(name: &str, rel: &str) -> Result<FileListing, St
         path: rel.trim_matches('/').to_string(),
         entries,
     })
-}
-
-/// Like [`sbx_guest_output`] but keeps stdout as BYTES. Images and PDFs come through here; a lossy
-/// UTF-8 conversion would silently corrupt every one of them.
-pub(crate) fn sbx_guest_bytes(
-    name: &str,
-    shell: &str,
-    timeout: Duration,
-) -> Result<Vec<u8>, String> {
-    place_of(name)
-        .ok_or("invalid box name")?
-        .bytes(shell, timeout)
 }
 
 /// Read a file inside the box. The status line comes first as text, the file's raw bytes after it.
@@ -191,7 +178,9 @@ pub(crate) fn read_file_in_box(name: &str, rel: &str) -> Result<(Vec<u8>, bool),
         guest_fs_preamble(rel),
         FILE_READ_CAP
     );
-    let raw = sbx_guest_bytes(name, &script, Duration::from_secs(30))?;
+    // `bytes`, not `exec`: images and PDFs come through here, and a lossy UTF-8 conversion would
+    // silently corrupt every one of them.
+    let raw = located(name)?.bytes(&script, Duration::from_secs(30))?;
     let split = raw.iter().position(|b| *b == b'\n').unwrap_or(raw.len());
     let header = String::from_utf8_lossy(&raw[..split]).into_owned();
     let (size, _) = split_guest_fs(&header)?;

@@ -288,6 +288,32 @@ fn read_place_record(name: &str) -> Option<PlaceRecord> {
     serde_json::from_str(&fs::read_to_string(place_record_path(name)).ok()?).ok()
 }
 
+/// [`place_of`], for a caller that cannot go on without the place, refusing in words that say why.
+///
+/// Every way skein runs something inside a box (`located(name)?.exec(..)`, `.write(..)`) starts
+/// here, so a box with no place is refused one way. It used to be refused through two wrappers in
+/// `sandbox` (`sbx_guest_output` and `guest_write`) that did nothing else, beside callers that
+/// spelled the lookup out.
+pub fn located(name: &str) -> Result<Place, String> {
+    place_of(name).ok_or_else(|| unplaced(name))
+}
+
+/// Why `place_of` said no, phrased for whoever is reading the failure.
+///
+/// It answers two questions in one `Option`: the name is unusable, or the name is fine and skein has
+/// not placed a box by it. Both used to read "invalid box name", which was true of the first and
+/// misleading for the second — it sent people checking their typing when the answer was that the box
+/// does not exist or its start failed.
+pub fn unplaced(name: &str) -> String {
+    match valid_name(name) {
+        false => format!("unusable box name {name:?}"),
+        true => format!(
+            "skein has not placed a box called {name}, so it does not know where it runs \
+             (its start may have failed, or it may be a sandbox skein did not create)"
+        ),
+    }
+}
+
 /// Resolve a box to where it runs.
 ///
 /// `None` for a name that isn't one — every path into a box is gated here, so no caller has to
@@ -348,6 +374,28 @@ mod tests {
     // What `valid_name` guarantees is that a name is not a *path* — it may contain spaces and
     // shell metacharacters, which are inert here because the name is an argv element, never
     // interpolated into a shell string. The paths that DO build shell strings quote it.
+    /// `located` refuses the two ways `place_of` can say no in different words, because they send
+    /// a person to different places: their typing, or a box that does not exist or failed to start.
+    ///
+    /// **What would make this fail:** one message for both, which is what "invalid box name" was.
+    #[test]
+    fn a_box_with_no_place_is_refused_by_what_is_wrong() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", &dir);
+        let unrecorded = located("thing-none").expect_err("an unrecorded box has no place");
+        assert!(
+            unrecorded.contains("has not placed a box called thing-none"),
+            "an unrecorded box must be refused as unplaced, not as a bad name: {unrecorded}"
+        );
+        let bad = located("../etc").expect_err("a path is no box name");
+        assert!(
+            bad.contains("unusable box name"),
+            "a name that cannot be a box must be refused as a name: {bad}"
+        );
+    }
+
     #[test]
     fn a_name_that_could_be_a_path_has_no_place() {
         let _g = env_lock();

@@ -1,9 +1,8 @@
 //! The `sbx` seam: everything skein does *to* a sandbox.
 //!
-//! Every call into a box funnels through a handful of helpers here — [`sbx_guest_output`],
-//! `guest_write`, the launch/attach argv builders and the lifecycle commands. That is deliberate:
-//! it is the one place that knows a box is a sandbox, so changing what backs a box is a change to
-//! this module rather than to every feature that touches one.
+//! The launch/attach argv builders and the lifecycle commands live here. Running something inside
+//! a box does not: that is `crate::place::located(name)?.exec(..)` (or `.write`, `.bytes`), so what
+//! backs a box is a change to `place` rather than to every feature that touches one.
 
 use crate::ai::ai_says_hold;
 use crate::fleet::{box_root, box_state};
@@ -424,7 +423,7 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
             // inside a larger `sh -c`. Being text rather than an argv is why it cannot go through
             // `Place::command`, and was why it reached a real box in a test process with neither
             // half of the seam applied (SKEIN-764).
-            let place = place_of(name).ok_or_else(|| no_place(name))?;
+            let place = crate::place::located(name)?;
             place
                 .spawning(place.exec_argv(&guest))
                 .iter()
@@ -560,7 +559,7 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
     // `absent_box_reason` gives every other surface asked about a name skein has not placed: it
     // distinguishes a start that failed from a sandbox somebody else made, which "stop failed" did
     // not. `None` from it means "cannot tell", which here is still not a box this can stop.
-    Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)))
+    Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| crate::place::unplaced(name)))
 }
 
 /// The shell that destroys a shared box: the same ending, and then the box itself.
@@ -746,7 +745,7 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
     // refusal says which of the two reasons it is rather than reporting a teardown that failed.
     // `$SKEIN_DESTROY_CMD` used to be a second way through for such a name — `sbx rm -f <name>` by
     // default, until that default went, and then only a test seam (SKEIN-1200).
-    Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)))
+    Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| crate::place::unplaced(name)))
 }
 
 /// The other half of forgetting a box, and the half that is not about disk (SKEIN-736).
@@ -772,28 +771,6 @@ fn forget_what_skein_decided(name: &str) {
     }
 }
 
-/// Why `place_of` said no, phrased for whoever is reading the failure.
-///
-/// It answers two questions in one `Option`: the name is unusable, or the name is fine and skein has
-/// not placed a box by it. Both used to read "invalid box name", which was true of the first and
-/// misleading for the second — it sent people checking their typing when the answer was that the box
-/// does not exist or its start failed.
-fn no_place(name: &str) -> String {
-    match crate::util::valid_name(name) {
-        false => format!("unusable box name {name:?}"),
-        true => format!(
-            "skein has not placed a box called {name}, so it does not know where it runs \
-             (its start may have failed, or it may be a sandbox skein did not create)"
-        ),
-    }
-}
-
-pub fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String, String> {
-    place_of(name)
-        .ok_or_else(|| no_place(name))?
-        .exec(shell, timeout)
-}
-
 // ---------- work tracking: wiring a box to the sync gateway ----------
 // Boxes share a backlog through `sync` — Plane as the system of record, behind a gateway that adds
 // the one thing Plane cannot do: an atomic claim, so two boxes never work the same item. An agent
@@ -811,19 +788,6 @@ pub fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<St
 //
 // Nothing here runs on a tick. Provisioning is an explicit act (`sync_provision_box`), for the same
 // reason verification is: it spends a network round trip and mints a real credential.
-
-/// Run a command in a box with `stdin` fed from a string. The captured-output sibling of
-/// [`sbx_guest_output`], for the case where the payload must not be an argument.
-pub(crate) fn guest_write(
-    name: &str,
-    shell: &str,
-    stdin: &str,
-    timeout: Duration,
-) -> Result<(), String> {
-    place_of(name)
-        .ok_or_else(|| no_place(name))?
-        .write(shell, stdin.as_bytes(), timeout)
-}
 
 // ---------- transcript: the conversation as the RECORD has it, not as the screen had it ----------
 // A box's rendered terminal is the most fragile copy of its conversation: it dies with the browser
@@ -1013,7 +977,7 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
         return Err(format!("box {name:?} is not running"));
     }
     let session = agent_session_name(name, runtime);
-    let place = place_of(name).ok_or_else(|| no_place(name))?;
+    let place = crate::place::located(name)?;
     // `session` is built from a validated box name and a validated runtime, so it is safe to spell
     // into a shell string here — and going through the place is what aims kill-session at this
     // box's own server rather than whichever one answers on the sandbox's default socket.
@@ -1065,7 +1029,7 @@ pub fn reopen_agent_session(name: &str) -> Result<(), String> {
     restart_agent_session(name, None)?;
     let runtime = resolve_runtime(&agent_for_box(name));
     let session = agent_session_name(name, runtime.info.id);
-    let place = place_of(name).ok_or_else(|| no_place(name))?;
+    let place = crate::place::located(name)?;
     let shell = agent_session_shell(
         &place,
         name,

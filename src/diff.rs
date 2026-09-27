@@ -6,8 +6,8 @@
 
 use crate::answer::Answer;
 use crate::config::*;
+use crate::place::located;
 use crate::registry::{locate_registry, store_for_box};
-use crate::sandbox::sbx_guest_output;
 use crate::sbx::lookup_dir;
 use crate::sbx::{box_liveness, Liveness};
 use crate::util::valid_name;
@@ -109,7 +109,9 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
         return None;
     }
     if box_liveness(name) == Some(Liveness::Running) {
-        if let Ok(raw) = sbx_guest_output(name, &diff_script(&diff_base_refs()), DIFF_TIMEOUT) {
+        if let Ok(raw) =
+            located(name).and_then(|p| p.exec(&diff_script(&diff_base_refs()), DIFF_TIMEOUT))
+        {
             let (base, mut patch) = split_diff(&raw);
             if patch.len() > DIFF_CAP {
                 // Not `String::truncate`: it panics on a byte index inside a character, and a diff
@@ -117,7 +119,7 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
                 patch = clip_bytes(&patch, DIFF_CAP).to_string();
                 patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
             }
-            // `sbx_guest_output` goes through `Place::exec`, which for a placed box is an
+            // `Place::exec`, which for a placed box is an
             // `nsenter` into its namespace — §2.3's `enter`, and the reason this is on-demand only.
             return Some(Answer::from_box(
                 Diff { patch, base },

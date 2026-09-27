@@ -11,8 +11,8 @@
 //! filter ran.
 
 use crate::kit::ensure_store;
+use crate::place::located;
 use crate::repos::repo_for_box;
-use crate::sandbox::sbx_guest_output;
 use crate::util::sh_quote;
 use crate::util::valid_name;
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ pub fn shared_home_inventory(name: &str) -> Result<Vec<SharedHomeCandidate>, Str
     }
     let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
     ensure_store(Path::new(&repo.store))?;
-    let raw = sbx_guest_output(name, SHARED_HOME_INVENTORY, Duration::from_secs(120))?;
+    let raw = located(name)?.exec(SHARED_HOME_INVENTORY, Duration::from_secs(120))?;
     raw.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -157,7 +157,7 @@ pub fn import_shared_home(name: &str, selected: &[String]) -> Result<String, Str
             ));
         }
     }
-    sbx_guest_output(name, &import_script(selected), Duration::from_secs(600))
+    located(name)?.exec(&import_script(selected), Duration::from_secs(600))
 }
 
 /// The shell [`import_shared_home`] runs in the box to copy `selected` out of its `$HOME`: the
