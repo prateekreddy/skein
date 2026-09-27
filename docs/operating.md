@@ -466,10 +466,14 @@ fourth: it went through the `gh` CLI, which only knows its own login, so choosin
 running `gh auth login` as well — and on Linux `gh` keeps that token in the system keyring, so a
 queue polling every three minutes asked for a password every three minutes.
 
-The host now talks to the API itself, with a token you already gave it, resolved once per run in
-this order: an exported `GH_TOKEN`/`GITHUB_TOKEN`, the read token in Settings, any per-repo write
-token you stored. `skein doctor` says which one it used. There is no `gh` to install, nothing to
-authenticate, and no keyring in the picture at all.
+The host now talks to the API itself, and every call about a repository resolves its credential
+the same way (`credential_for_repo`, `src/gitgate/credentials.rs`): the token you stored for that
+repository — the one its boxes push with — then an exported `GH_TOKEN`/`GITHUB_TOKEN`, then the
+read token in Settings for reads only, and only then a `gh` login if the host has one. The queue,
+a verdict, a merge and the mirror of one repository therefore use the same token. Everything but
+`gh` is read again on each call, so a token replaced in Settings is used at once, without a
+restart; `gh` is asked once per run, because asking it can unlock a keyring. `skein doctor` says,
+per repository, which one reads and which one writes.
 
 A GitHub App is the one credential that cannot cover the host side: an installation token
 authenticates an installation, not a person, so it cannot say whose review a PR is waiting on. The
