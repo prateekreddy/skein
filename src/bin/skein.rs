@@ -377,7 +377,7 @@ fn cmd_ls() -> Result<(), String> {
         .fold("BOX".len(), usize::max);
     let w_st = views
         .iter()
-        .map(|v| v.state.len())
+        .map(|v| shown_state(&v.state).len())
         .fold("STATE".len(), usize::max);
     let w_br = views
         .iter()
@@ -406,7 +406,7 @@ fn cmd_ls() -> Result<(), String> {
             "{} {}  {}  {}  {}  {DIM}{}{RESET}",
             dot(v.tier),
             pad_colored(&name_cell, v.name.len(), w_name),
-            pad(&v.state, w_st),
+            pad(shown_state(&v.state), w_st),
             pad_colored(&format!("{CYAN}{}{RESET}", v.branch), v.branch.len(), w_br),
             pad(&v.age, w_age),
             v.dir,
@@ -415,6 +415,19 @@ fn cmd_ls() -> Result<(), String> {
 
     println!("\n{DIM}{} boxes{RESET}", views.len());
     Ok(())
+}
+
+/// A box's state in the word the cockpit uses for it (SKEIN-1189).
+///
+/// The registry's `live` (the sandbox is up and no agent has said otherwise) is drawn as `active` on
+/// the board (`cockpit/src/groups.mjs`), so `skein ls` printing `live` gave one box two names
+/// depending on where somebody looked. The wire keeps `live`; only what a person reads changes.
+fn shown_state(state: &str) -> &str {
+    if state == "live" {
+        "active"
+    } else {
+        state
+    }
 }
 
 fn dot(tier: u8) -> &'static str {
@@ -1768,6 +1781,18 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// **A running box is `active` in `skein ls`, as it is on the board** (SKEIN-1189).
+    ///
+    /// What would make it fail: `skein ls` printing the registry's own `live` again, or the mapping
+    /// reaching past it and renaming a state the board shows under its own word.
+    #[test]
+    fn skein_ls_calls_a_running_box_active_as_the_board_does() {
+        assert_eq!(super::shown_state("live"), "active");
+        for kept in ["working", "waiting", "idle", "stale", "needs-input"] {
+            assert_eq!(super::shown_state(kept), kept);
+        }
+    }
+
     /// **`skein add --agent` is refused, and says where the runtime is chosen now** (the owner,
     /// 2026-09-27: one fleet default plus a per-box pick). Refused before anything is cloned or
     /// written, so this touches no home.

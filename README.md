@@ -362,7 +362,7 @@ still preferred where you can use it — it keeps the bind on loopback and gives
 ## CLI (terminal client, same core)
 
 ```sh
-skein                 # = skein ls — the fleet, live boxes first
+skein                 # = skein ls — the fleet, the boxes that need you first
 skein attach <box>    # reattach to the live provider tmux session
 skein attach <box> --agent codex --handoff   # Codex takes over a Claude box
 skein attach <box> --agent claude --handoff  # Claude takes over a Codex box
