@@ -1309,19 +1309,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:137"]
+["src/fleet/server.rs:140"]
 line = "return Err(format!(\"invalid session name {session:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:222"]
+["src/fleet/server.rs:225"]
 line = "/// session; the same call with a short one created it. `MAX_IMSGSIZE` is 16384 and the header eats"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/server.rs:362"]
+["src/fleet/server.rs:365"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:560"]
+["src/fleet/server.rs:571"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
