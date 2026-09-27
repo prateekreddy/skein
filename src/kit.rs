@@ -989,7 +989,8 @@ mod tests {
                 "*.example",
                 "/.claude/skein",
                 "/.claude/settings.local.json",
-                "/.claude/settings.json.skein-old"
+                "/.claude/settings.json.skein-old",
+                "/.claude/skein.skein-old"
             ],
             "the clone's exclude is not what skein put in .claude"
         );

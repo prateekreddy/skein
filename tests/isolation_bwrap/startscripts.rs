@@ -541,12 +541,17 @@ echo "status [$(git status --porcelain | tr '\n' ' ')]"
 /// only the provision passes it (`fleet::provision_script`); and a checkout whose repo tracks
 /// `.claude/`, so `.claude` is a directory and not the store's old link.
 ///
+/// `born` is [`Born::WorkshopUnmatched`] for the restart that went dark: its launcher was handed no
+/// `SKEIN_BOX_STORE`, so it left no record of the store in the checkout (SKEIN-1174) and the kit
+/// has to find it by itself. [`Born::Workshop`] is the same restart from a launcher that knows it.
+///
 /// `workspace` makes `Fleet::repos`, which holds both repos' stores, a mount of its own, as the
 /// sandbox mounts `fleet::fleet_workspace`. `prepare` gets the checkout after it is committed and
 /// before the kit runs. Returns the checkout and what the start said: `kit <status>`, the kit's
 /// output, and `store is a mount` if the premise did not hold.
 fn restart_workshop(
     fleet: &Fleet,
+    born: Born,
     workspace: bool,
     prepare: impl FnOnce(&Path),
 ) -> Option<(PathBuf, String)> {
@@ -620,7 +625,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$own" >/dev/null || break; sleep 1; 
         vec![]
     };
     let said = fleet.in_box_mounting(
-        Born::Workshop,
+        born,
         &mounts,
         start,
         &[
@@ -677,7 +682,7 @@ fn the_workshop_box_finds_its_store_by_its_launch_spec_on_a_restart() {
     let fleet = Fleet::make("storefind-spec");
     launch_spec(&fleet, "web", "web-main");
     launch_spec(&fleet, "other", "other-main");
-    let Some((tree, said)) = restart_workshop(&fleet, true, |_| {}) else {
+    let Some((tree, said)) = restart_workshop(&fleet, Born::WorkshopUnmatched, true, |_| {}) else {
         return;
     };
     assert_eq!(
@@ -705,7 +710,7 @@ fn the_workshop_box_finds_its_store_through_the_link_an_earlier_start_made() {
     let fleet = Fleet::make("storefind-link");
     launch_spec(&fleet, "web", "web-main");
     let store = fleet.store();
-    let Some((tree, said)) = restart_workshop(&fleet, false, |tree| {
+    let Some((tree, said)) = restart_workshop(&fleet, Born::WorkshopUnmatched, false, |tree| {
         std::os::unix::fs::symlink(store.join("skein"), tree.join(".claude/skein")).unwrap();
     }) else {
         return;
@@ -738,7 +743,7 @@ fn a_box_never_adopts_another_repositorys_store() {
         }
         launch_spec(&fleet, "other", "web-main");
         let mirror = fleet.repos.join("web/mirror");
-        let Some((tree, said)) = restart_workshop(&fleet, true, |tree| {
+        let Some((tree, said)) = restart_workshop(&fleet, Born::WorkshopUnmatched, true, |tree| {
             let out = Command::new("git")
                 .arg("-C")
                 .arg(tree)
@@ -788,7 +793,7 @@ fn a_box_never_adopts_another_repositorys_store() {
 fn a_box_with_no_findable_store_says_no_store() {
     let fleet = Fleet::make("storefind-none");
     launch_spec(&fleet, "other", "other-main");
-    let Some((tree, said)) = restart_workshop(&fleet, true, |_| {}) else {
+    let Some((tree, said)) = restart_workshop(&fleet, Born::WorkshopUnmatched, true, |_| {}) else {
         return;
     };
     assert!(

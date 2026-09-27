@@ -690,7 +690,10 @@ depends_on = ["fleet", "place", "registry", "util"]
 depends_on = ["contracts", "moduledocs", "repos"]
 
 [current.sharedhome]
-depends_on = ["kit", "repos", "sandbox", "util"]
+# `probes` for box-self.sh (SKEIN-1174): the import runs in a box and asks it which store is the
+# box's, the same bytes every script `probes` installs there asks, pasted in front of the import
+# rather than a second copy of the rule.
+depends_on = ["kit", "probes", "repos", "sandbox", "util"]
 
 [current.signals]
 depends_on = ["digest", "registry", "util"]

@@ -22,6 +22,27 @@ pub(super) fn isolation_block() -> String {
     lines[from..=to].join("\n")
 }
 
+/// The launcher's record of which store is this box's (SKEIN-1174), lifted the same way: the `if`
+/// that writes `<tree>/.git/skein-store` from `$SKEIN_BOX_STORE`, which runs straight after the
+/// isolation block and before the variable is unset. [`Fleet::in_box_mounting`] runs it in that
+/// order, so a box whose checkout is a git repository starts with the record production gives it.
+pub(super) fn store_record_block() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let from = lines
+        .iter()
+        .position(|l| {
+            l.starts_with(r#"if [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ]"#)
+        })
+        .expect("the launcher's store record moved");
+    let to = lines[from..]
+        .iter()
+        .position(|l| *l == "fi")
+        .map(|i| from + i)
+        .expect("the store record has no end");
+    lines[from..=to].join("\n")
+}
+
 /// The launcher's start-up announcements, lifted the same way.
 ///
 /// One block holding both: the workshop box's banner and the uncovered box's, which is how they
@@ -367,6 +388,7 @@ impl Fleet {
         args: &[String],
     ) -> Vec<u8> {
         let block = isolation_block();
+        let store_record = store_record_block();
         let quoted: Vec<String> = args.iter().map(|a| skein::util::sh_quote(a)).collect();
         let record_bind = format!(
             "--bind {} {}",
@@ -396,6 +418,8 @@ impl Fleet {
              export SKEIN_FLEET_ROOT={fleet} SKEIN_BOX_PRIVILEGED={priv} \
              SKEIN_FLEET_MOUNTS={mounts} SKEIN_BOX_STORE={store}\n\
              {block}\n\
+             tree=\"$root/tree\"\n\
+             {store_record}\n\
              exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} -- /bin/sh -c {probe} skein-probe {args}\n",
             record = record_bind,
             root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),

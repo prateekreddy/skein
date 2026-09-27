@@ -93,6 +93,11 @@ const AGENT_GUIDE_SH: &str = include_str!("store/agent-guide.sh");
 const INSTALL_CODEX_HOOKS_SH: &str = include_str!("store/install-codex-hooks.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
+/// Which box this is and where its store is, the one answer to each (SKEIN-1174). Sourced by every
+/// script above from its own directory, so it is installed beside each copy of them: the store's
+/// `skein/bin/` and both plugin variants' `probe/`. `pub(crate)` for the one caller that is not a
+/// file in a box: the shared-home import pastes it in front of its own script.
+pub(crate) const BOX_SELF_SH: &str = include_str!("probe/box-self.sh");
 // Box-side path of the store's copies of the scripts (the store is linked at `<clone>/.claude`).
 // **No hook runs these any more** (SKEIN-1144): they are the commands a past skein wired, kept so
 // that [`store_settings`] can retire them from a store in exactly the spelling it wrote. The hooks
@@ -221,10 +226,11 @@ pub(crate) fn settings_defaults() -> serde_json::Value {
 /// hook runs, Claude's or Codex's, and every script one of those runs in turn. A script left out of
 /// this list and run by one that is in it is a script a sibling box can still rewrite, which is why
 /// the siblings are here: `sandbox-bootstrap.sh` runs `shared-home.sh`, `agent-guide.sh` and
-/// `mailbox.sh` from its own directory, and `box-codex-hook.sh` runs the probe it is named from its
-/// own directory. `plugin_probe_scripts_are_every_script_a_hook_runs` holds the list to that.
-fn plugin_probe_scripts() -> [(&'static str, &'static str); 14] {
+/// `mailbox.sh` from its own directory, `box-codex-hook.sh` runs the probe it is named from its
+/// own directory, and every one of them sources `box-self.sh` from its own directory (SKEIN-1174). `plugin_probe_scripts_are_every_script_a_hook_runs` holds the list to that.
+fn plugin_probe_scripts() -> [(&'static str, &'static str); 15] {
     [
+        ("box-self.sh", BOX_SELF_SH),
         ("box-status.sh", PROBE_STATUS_SH),
         ("box-task.sh", PROBE_TASK_SH),
         ("box-diff.sh", PROBE_DIFF_SH),
@@ -316,6 +322,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("statusline-command.sh", STATUSLINE_SH),
         ("sync-install.sh", SYNC_INSTALL_SH),
         ("sync-refresh.sh", SYNC_REFRESH_SH),
+        ("box-self.sh", BOX_SELF_SH),
     ] {
         let p = bin.join(file);
         // temp + rename, not a bare write: these scripts are EXECUTED by live boxes through the
@@ -1976,6 +1983,18 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// A checkout the way the kit leaves one whose repo tracks `.claude/`: a `.claude` directory of
+    /// its own, with only `skein/` linked to the store's (SKEIN-1053). Beside the store and never
+    /// containing it, so a probe finds the store through the link — and a probe that took the
+    /// checkout's own `.claude` for the store (SKEIN-1174) writes where no assertion on `store`
+    /// looks, and fails it.
+    fn checkout_linked_to(store: &Path) -> std::path::PathBuf {
+        let tree = store.parent().expect("a store has a parent").join("tree");
+        fs::create_dir_all(tree.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(store.join("skein"), tree.join(".claude/skein")).unwrap();
+        tree
+    }
+
     #[test]
     fn boxes_sharing_one_sandbox_each_report_under_their_own_name() {
         // The regression that made the fleet's first migrated box show `stale` on the board while
@@ -1993,7 +2012,7 @@ mod tests {
         let store = store_tmp.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-status.sh");
-        let project_dir = store.parent().unwrap().to_path_buf();
+        let project_dir = checkout_linked_to(&store);
 
         let report = |box_name: &str, mode: &str| {
             let out = Command::new("bash")
@@ -2089,10 +2108,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let _g = env_lock();
-        // **The default, said rather than inherited.** The assertion below is that the scripts'
-        // hard-coded `/boxes` is what `fleet::box_session_path` derives — which is only a claim
-        // about the default if nothing has moved it. The lock serialises the tests that set it and
-        // does not put it back, so this reads whatever the previous holder left unless it says.
+        // Nothing in this process reads the fleet root: each run below names its own, so which
+        // world the observer is in is this fixture's. Cleared so a previous holder of the lock
+        // does not hand its root on to anything that might.
         std::env::remove_var("SKEIN_FLEET_ROOT");
         let home = tempdir();
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
@@ -2101,7 +2119,7 @@ mod tests {
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-pane.sh");
-        let project_dir = store.parent().unwrap().to_path_buf();
+        let project_dir = checkout_linked_to(&store);
         let status = store.join("status");
 
         // A stub tmux that fails, which is what the script sees when the agent's window is gone.
@@ -2119,11 +2137,17 @@ mod tests {
             std::env::var("PATH").unwrap_or_default()
         );
 
-        // `sock` is the tell. `pane_observer_start` (src/runtime.rs) exports SKEIN_TMUX_SOCK for a
-        // box in a shared sandbox and exports nothing when the sandbox IS the box, so it is the one
-        // thing already in the environment that says whether SANDBOX_VM_ID names this box or the
-        // thing holding it.
-        let run = |skein_box: Option<&str>, sock: Option<&str>| {
+        // Which world the observer is in is the fleet launcher's presence, as it is for every
+        // script skein ships into a box (`skein_box_name` in box-self.sh): installed in the one
+        // sandbox that holds boxes, never in a per-VM one. A shared sandbox also has the attach's
+        // SKEIN_TMUX_SOCK; a per-VM one has neither. Both roots are this fixture's, so the answer
+        // does not depend on whether this suite happens to run inside a fleet.
+        let shared_root = home.join("shared-sandbox");
+        fs::create_dir_all(shared_root.join(".skein")).unwrap();
+        fs::write(shared_root.join(".skein/box-session.sh"), "#!/bin/sh\n").unwrap();
+        let legacy_root = home.join("per-vm-sandbox");
+        fs::create_dir_all(&legacy_root).unwrap();
+        let run = |skein_box: Option<&str>, shared: bool| {
             let mut c = Command::new("bash");
             c.arg(&script)
                 .arg("skein-agent")
@@ -2136,10 +2160,13 @@ mod tests {
                 Some(b) => c.env("SKEIN_BOX", b),
                 None => c.env_remove("SKEIN_BOX"),
             };
-            match sock {
-                Some(s) => c.env("SKEIN_TMUX_SOCK", s),
-                None => c.env_remove("SKEIN_TMUX_SOCK"),
-            };
+            if shared {
+                c.env("SKEIN_FLEET_ROOT", &shared_root)
+                    .env("SKEIN_TMUX_SOCK", "/no/such/session.sock");
+            } else {
+                c.env("SKEIN_FLEET_ROOT", &legacy_root)
+                    .env_remove("SKEIN_TMUX_SOCK");
+            }
             let out = c.output().expect("run box-pane.sh");
             assert!(out.status.success(), "box-pane.sh exited {:?}", out.status);
             out
@@ -2150,7 +2177,7 @@ mod tests {
         };
 
         // 1. The box says who it is. That name is the filename AND it is inside the file.
-        run(Some("alpha"), Some("/no/such/session.sock"));
+        run(Some("alpha"), true);
         let alpha = obs("alpha").expect("alpha wrote no observation");
         assert_eq!(
             alpha.box_name, "alpha",
@@ -2160,7 +2187,7 @@ mod tests {
 
         // 2. A shared sandbox with no SKEIN_BOX: the old chain would have written
         //    `skein-fleet.pane.json` here, over whatever was already there. Nothing is written.
-        run(None, Some("/no/such/session.sock"));
+        run(None, true);
         assert!(
             !status.join("skein-fleet.pane.json").exists(),
             "a box with no identity filed its screen under the sandbox's name — the 2026-08-04 \
@@ -2181,10 +2208,10 @@ mod tests {
             );
         }
 
-        // 3. A legacy box — no SKEIN_BOX and no socket, alone in its VM, where the VM name IS the
+        // 3. A legacy box — no SKEIN_BOX and no launcher, alone in its VM, where the VM name IS the
         //    box name. Unchanged: refusing here would take the screen away from every box that has
         //    not been migrated, to prevent a collision that cannot happen with one box per VM.
-        run(None, None);
+        run(None, false);
         let legacy = obs("skein-fleet").expect("a legacy box must still report under its VM name");
         assert_eq!(legacy.box_name, "skein-fleet");
 
@@ -2256,7 +2283,7 @@ mod tests {
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let bin = store.join("skein").join("bin");
-        let project_dir = store.parent().unwrap().to_path_buf();
+        let project_dir = checkout_linked_to(&store);
 
         // A sandbox that holds boxes is one skein installed its launcher into
         // (`fleet::box_session_path`), and that is the only thing a HOOK can read to tell the two
@@ -2270,7 +2297,7 @@ mod tests {
         )
         .unwrap();
         // **What the two sides have to agree on is the path, and both halves of it are read here
-        // rather than restated.** Eleven shipped scripts spell the launcher
+        // rather than restated.** box-self.sh, which every shipped script asks, spells the launcher
         // `"${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh"`, so the root's default is the
         // shell's own literal and the suffix is `box_session_path`'s.
         //
@@ -2281,7 +2308,7 @@ mod tests {
         // suffix, and that a probe's spelling still matches the host's.
         const ROOT_IN_THE_PROBES: &str = "/boxes";
         assert!(
-            PROBE_SESSION_SH.contains(&format!(
+            BOX_SELF_SH.contains(&format!(
                 "\"${{SKEIN_FLEET_ROOT:-{ROOT_IN_THE_PROBES}}}/.skein/box-session.sh\""
             )),
             "the probes no longer look for the launcher where this test says they do, so what it \
@@ -2355,7 +2382,24 @@ mod tests {
                 "",
             ),
             ("sandbox-bootstrap.sh", &[], "{}"),
+            // The screen observer, which used to decide the question by SKEIN_TMUX_SOCK instead of
+            // the launcher and so wrote under the sandbox's name in world 2 below whenever the
+            // socket was not exported. The stub tmux on PATH fails, so it writes one observation
+            // and exits.
+            ("box-pane.sh", &["skein-agent"], ""),
         ];
+        let stub_bin = home.join("stub-bin");
+        fs::create_dir_all(&stub_bin).unwrap();
+        fs::write(stub_bin.join("tmux"), "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(stub_bin.join("tmux"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            stub_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
 
         // Every file under the store, with its CONTENT. Compared before and after a run, because
         // "wrote nothing" is the assertion for the middle world and there is no other way to state
@@ -2393,6 +2437,7 @@ mod tests {
                 // What every box in one sandbox agrees on, and why it is not an identity.
                 .env("SANDBOX_VM_ID", vm)
                 .env("SKEIN_FLEET_ROOT", root)
+                .env("PATH", &path)
                 .env_remove("SKEIN_TMUX_SOCK")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -2642,10 +2687,9 @@ mod tests {
         )
         .unwrap();
 
-        // box-token-usage.sh resolves its store via `git -C $CLAUDE_PROJECT_DIR rev-parse
-        // --show-toplevel` (falling back to $CLAUDE_PROJECT_DIR itself when it's not a git repo,
-        // as here) + `.claude` — so this must point at the store's *parent*, not `home`.
-        let project_dir = store.parent().unwrap().to_path_buf();
+        // box-token-usage.sh finds its store from the checkout's `.claude/skein` link (box-self.sh),
+        // so this is a checkout linked the way the kit links one, not the store's own parent.
+        let project_dir = checkout_linked_to(&store);
         let run = || -> std::process::Output {
             use std::io::Write as _;
             let mut child = Command::new("bash")
@@ -2751,6 +2795,7 @@ mod tests {
         let root = tempdir();
         let store = root.join(".claude");
         ensure_probe_in(&store).expect("scaffold the store");
+        let tree = checkout_linked_to(&store);
         let installed = plugin_install_under(&fleet_root);
         for (path, body) in &installed {
             let path = Path::new(path);
@@ -2788,7 +2833,7 @@ mod tests {
                 let out = Command::new("bash")
                     .arg("-c")
                     .arg(&command)
-                    .env("CLAUDE_PROJECT_DIR", root.as_ref() as &Path)
+                    .env("CLAUDE_PROJECT_DIR", &tree)
                     .env("CLAUDE_PLUGIN_ROOT", &dir)
                     .env("SKEIN_BOX", "example")
                     .stdin(Stdio::null())
@@ -2820,7 +2865,7 @@ mod tests {
             let out = Command::new("bash")
                 .arg("-c")
                 .arg(&command)
-                .current_dir(root.as_ref() as &Path)
+                .current_dir(&tree)
                 .env_remove("CLAUDE_PROJECT_DIR")
                 .env("SKEIN_FLEET_ROOT", &fleet_root)
                 .env("SKEIN_BOX", "example")
@@ -3205,7 +3250,7 @@ mod tests {
         ]);
 
         let mut helpers: Vec<&str> = start_helpers().iter().map(|(n, _)| *n).collect();
-        helpers.extend(["shared-home.sh", "agent-guide.sh"]);
+        helpers.extend(["shared-home.sh", "agent-guide.sh", "box-self.sh"]);
         let mut called = std::collections::BTreeSet::new();
         for (caller, text) in &callers {
             assert!(

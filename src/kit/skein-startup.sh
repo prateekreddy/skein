@@ -65,13 +65,35 @@ if [ -f "$codex_cfg" ]; then
   fi
 fi
 
+# The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
+# store is writable by every box of the repo, so a helper run from there is one a sibling box can
+# rewrite and this box then runs as it starts. They are installed with this script, under the fleet
+# root's `.skein`, in the plugin variant every box loads whichever way the fleet's switch is set, and
+# the launcher binds that directory read-only into every box. Found from this script's own path,
+# which is where the fleet runs it from (`fleet::box_provision_path`). A per-VM sandbox runs its
+# copy from ~/.local/bin, has no `.skein`, and so goes without these.
+skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe"
+# Which box this is, and the first two ways of finding its store: box-self.sh, the one answer every
+# script skein ships into a box uses (SKEIN-1174). Without it (a per-VM sandbox, above) the store is
+# found by the scan below, and the name is the sandbox's, which there is the box's own.
+box_self="false"
+# shellcheck disable=SC1091
+. "$skein_probe/box-self.sh" 2>/dev/null && box_self="true"
+
 # The box identity, which is the sandbox's own only in the one-box-per-sandbox shape. In a shared
 # sandbox every box would otherwise report the same SANDBOX_VM_ID, so they would read each other's
-# launch spec and overwrite each other's boot report — one box's diagnosis for all of them. skein
-# names the box when it knows better.
-vmid="$(printenv SKEIN_BOX 2>/dev/null || true)"
-[ -n "$vmid" ] || vmid="$(printenv SANDBOX_VM_ID 2>/dev/null || hostname 2>/dev/null || echo unknown)"
-vmid="$(printf '%s' "$vmid" | tr / -)"
+# launch spec and overwrite each other's boot report — one box's diagnosis for all of them. So a box
+# in a shared sandbox that cannot say which box it is has no name here: it reads no launch spec and
+# writes no boot report, rather than the sandbox's.
+if [ "$box_self" = "true" ]; then
+  vmid="$(skein_box_name)" || vmid=""
+else
+  # No box-self.sh means no `.skein`, so no fleet launcher either: box-self.sh's own rule for that
+  # world, which is the only one this branch can be in.
+  vmid="$(printenv SKEIN_BOX 2>/dev/null || true)"
+  [ -n "$vmid" ] || vmid="$(printenv SANDBOX_VM_ID 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+  vmid="$(printf '%s' "$vmid" | tr / -)"
+fi
 
 # Find the skein store: skein writes a per-box launch spec at <store>/skein/launch/<vmid>.json,
 # so the store is the one mounted dir that contains that marker. Scanning mounts (rather than
@@ -83,9 +105,12 @@ vmid="$(printf '%s' "$vmid" | tr / -)"
 # Only the provision passes $SKEIN_STORE, and only a box whose store is bound back to it
 # (box-session.sh's `--bind "$SKEIN_BOX_STORE"`) has the store as a mount point. The workshop box
 # has neither on a restart: it is exempt from the cover, so its store is a directory inside the
-# workspace mount. So after those two, in this order:
-#   * the `.claude/skein` link an earlier start made — its target's parent is the store, which is
-#     how sandbox-bootstrap.sh and box-status.sh find it too;
+# workspace mount. So after $SKEIN_STORE, in this order:
+#   * `skein_box_store` (box-self.sh): what skein recorded in this checkout's git directory, then
+#     the `.claude/skein` link an earlier start made — its target's parent is the store — and never
+#     the checkout's own `.claude`. The answer every probe and the bootstrap get, so the kit cannot
+#     link one store while they report into another;
+#   * a mount holding this box's launch spec;
 #   * a store under any mount, at `<mount>/*/store/.claude` or `<mount>/repos/*/store/.claude`,
 #     holding this box's launch spec. This is what finds it on the first start after git replaced
 #     the old `.claude` link with the directory the repo tracks.
@@ -94,12 +119,16 @@ vmid="$(printf '%s' "$vmid" | tr / -)"
 # none, one store with this box's launch spec is taken and several are refused.
 store="$(printenv SKEIN_STORE 2>/dev/null || true)"
 [ -n "$store" ] && [ -d "$store" ] || store=""
+# The host named it, so it is recorded where box-self.sh looks first: the checkout's git directory,
+# beside this script's other markers there. The launcher writes the same record at every start.
+if [ -n "$store" ]; then
+  record_dir="$(git -C "$clone_root" rev-parse --git-common-dir 2>/dev/null || true)"
+  case "$record_dir" in "") ;; /*) ;; *) record_dir="$clone_root/$record_dir" ;; esac
+  [ -z "$record_dir" ] || printf '%s\n' "$store" > "$record_dir/skein-store" 2>/dev/null || true
+fi
 store_note=""
-if [ -z "$store" ] && [ -L "$clone_root/.claude/skein" ]; then
-  linked="$(readlink "$clone_root/.claude/skein")"
-  case "$linked" in /*) ;; *) linked="$clone_root/.claude/$linked" ;; esac
-  linked="$(dirname "$linked")"
-  [ -d "$linked" ] && store="$linked"
+if [ -z "$store" ] && [ "$box_self" = "true" ]; then
+  store="$(skein_box_store "$clone_root")" || store=""
 fi
 if [ -z "$store" ] && [ -r /proc/self/mountinfo ]; then
   while read -r mp; do
@@ -311,15 +340,6 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
   echo "[skein-kit] restored replacement snapshot from $handoff_dir"
 fi
 
-# The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
-# store is writable by every box of the repo, so a helper run from there is one a sibling box can
-# rewrite and this box then runs as it starts. They are installed with this script, under the fleet
-# root's `.skein`, in the plugin variant every box loads whichever way the fleet's switch is set, and
-# the launcher binds that directory read-only into every box. Found from this script's own path,
-# which is where the fleet runs it from (`fleet::box_provision_path`). A per-VM sandbox runs its
-# copy from ~/.local/bin, has no `.skein`, and so goes without these.
-skein_probe="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/plugin-turn-state/probe"
-
 # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
 # `.claude` is a directory of this box's own in both layouts (SKEIN-1053), and every run leaves a
 # boot report, because a silent miss here is the #1 way a box ends up with zero hooks while
@@ -384,6 +404,18 @@ else
         && ! git -C "$clone_root" ls-files --error-unmatch -- .claude/settings.json >/dev/null 2>&1; then
         if mv "$rc/settings.json" "$rc/settings.json.skein-old" 2>/dev/null; then
           moved="moved an untracked .claude/settings.json aside to .claude/settings.json.skein-old, which Claude does not load; nothing was deleted"
+          if [ -n "$claude_note" ]; then claude_note="$claude_note; $moved"; else claude_note="$moved"; fi
+        fi
+      fi
+      # A real `.claude/skein` directory holding nothing but boot reports is what the bootstrap left
+      # when it took the checkout's `.claude` for the store (SKEIN-1174), and it would block the
+      # link below on every start. Moved aside once, as the settings file above is; nothing is
+      # deleted, and a directory holding anything else, or one the repo tracks, is left alone.
+      if [ -d "$rc/skein" ] && [ ! -L "$rc/skein" ] && [ ! -e "$rc/skein.skein-old" ] \
+        && ! git -C "$clone_root" ls-files --error-unmatch -- .claude/skein >/dev/null 2>&1 \
+        && [ -z "$(find "$rc/skein" -mindepth 1 ! -path "$rc/skein/boot" ! -path "$rc/skein/boot/*" -print -quit 2>/dev/null)" ]; then
+        if mv "$rc/skein" "$rc/skein.skein-old" 2>/dev/null; then
+          moved="moved .claude/skein, a directory of boot reports an earlier start wrote into this checkout, aside to .claude/skein.skein-old so the store could be linked; nothing was deleted"
           if [ -n "$claude_note" ]; then claude_note="$claude_note; $moved"; else claude_note="$moved"; fi
         fi
       fi
@@ -469,7 +501,8 @@ if [ -n "$git_dir" ]; then
       { grep -vxF '/.claude' "$exclude" || true; } > "$exclude.skein" \
         && mv "$exclude.skein" "$exclude"
     fi
-    for own in /.claude/skein /.claude/settings.local.json /.claude/settings.json.skein-old; do
+    for own in /.claude/skein /.claude/settings.local.json /.claude/settings.json.skein-old \
+      /.claude/skein.skein-old; do
       grep -qxF "$own" "$exclude" 2>/dev/null || printf '%s\n' "$own" >> "$exclude"
     done
   else
@@ -537,8 +570,9 @@ if [ -d "$store/skills" ]; then
 fi
 
 # Boot report: one small JSON the cockpit (and `skein doctor`) can read instead of guessing
-# why a box is dark. Written into the store when reachable, best-effort.
-if [ -d "$store" ]; then
+# why a box is dark. Written into the store when reachable, best-effort, and under the box's own
+# name only: a box that cannot say which it is writes none rather than the sandbox's.
+if [ -d "$store" ] && [ -n "$vmid" ]; then
   mkdir -p "$store/skein/boot" 2>/dev/null || true
   jqp="false"; command -v jq >/dev/null 2>&1 && jqp="true"
   tmuxp="false"; command -v tmux >/dev/null 2>&1 && tmuxp="true"

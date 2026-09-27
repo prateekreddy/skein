@@ -1964,6 +1964,21 @@ SKEIN_MOUNTS
   fi
   unset fleet_root_dir state_parent fleet_mount owned skip
 fi
+# Which store is this box's, recorded where every script skein ships into the box looks first
+# (`skein_box_store` in box-self.sh, SKEIN-1174): the checkout's git directory, beside the kit's
+# own markers there. Every one of them used to work it out from `.claude/skein` instead, and a repo
+# that tracks `.claude/` has no such link until the kit makes one — so they took the checkout's own
+# `.claude` for the store and wrote into the clone. This is the one place that knows the answer.
+#
+# A file in the checkout rather than the variable left set, and not because the path is a secret:
+# the store is bound at this same path and `.claude/skein` names it. A variable follows every
+# process the box starts, and a test suite run in here would hand its fixtures' probes the box's
+# live store; a record in this checkout answers for this checkout only. Written at fleet scope,
+# before the namespace exists, for the workshop box as well as a covered one. An empty
+# SKEIN_BOX_STORE (a box skein cannot tie to a repo) leaves whatever the kit recorded.
+if [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] && [ -d "$tree/.git" ]; then
+  printf '%s\n' "$SKEIN_BOX_STORE" >"$tree/.git/skein-store" 2>/dev/null || true
+fi
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
 # fleet, and the box has no use for it after this point.
 unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE
