@@ -925,7 +925,7 @@ fn cmd_doctor() -> Result<(), String> {
         match skein::repos::gh_secret_seeded() {
             Some(when) => println!(
                 "{OK} gh secret     seeded {when} {DIM}— startup skips `gh auth token`, so no \
-                 keyring is unlocked. Settings → Overwrite token on startup re-seeds{RESET}"
+                 keyring is unlocked{RESET}"
             ),
             // What the *next start* will do. It refuses rather than reaching for `gh auth token`,
             // and predicting a keyring prompt that cannot happen sends somebody to look for a

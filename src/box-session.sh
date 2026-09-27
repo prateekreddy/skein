@@ -2161,7 +2161,7 @@ unset runtime_dir peer_socks peers
 # read as a line the launcher did not write.
 announce=""
 if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then
-  announce="$box is the WORKSHOP box. It sees every box's files, acts at fleet scope, and holds the fleet agent token; the mount cover is off for it. Settings → Boxes turns this off."
+  announce="$box is the WORKSHOP box. It sees every box's files, acts at fleet scope, and holds the fleet agent token; the mount cover is off for it. This box's own Box settings → workshop box turns this off."
 elif [ "${uncovered-}" = "1" ]; then
   announce="$box came up UNCOVERED, and nobody chose that. Nothing told it which mounts are its own, so every other repo's store and work tree are readable from here, and so is whatever the fleet's own state sits on. Its own checkout and the other boxes' are still separate. skein can only name a box's mounts when the box's name matches a repository it knows."
 fi
