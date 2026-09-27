@@ -2299,7 +2299,10 @@ Each is a specific way this codebase has previously accumulated debt.
 
 1. **Declared state has one writer. Recorded state has a documented protocol.** Not "one writer per
    fact", which is false for most of the volume.
-2. **No dual code paths to the same outcome.**
+2. **No dual code paths to the same outcome.** One deliberate exemption: `$SKEIN_LAUNCH_CMD`,
+   `$SKEIN_ATTACH_CMD`, `$SKEIN_SHELL_CMD` and `$SKEIN_RESUME_CMD` replace the command skein would
+   run, and so go around Place. They are documented operator settings (`docs/operating.md`), not
+   test hooks, and the owner kept them as such (SKEIN-1212, 2026-09-27).
 3. **Every Operation is idempotent, or marked `destructive` and never auto-driven.**
 4. **No displayed state from an edge alone *without saying so*** (§2.2 — the absolute form was wrong
    and the shipped code is right).
