@@ -1301,11 +1301,7 @@ line = "let body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resources.rs:221"]
-line = "let mut resources = RESOURCE_GATE.get(fresh, move || {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/resources.rs:279"]
+["src/fleet/resources.rs:318"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 
