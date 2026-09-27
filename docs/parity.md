@@ -31,8 +31,8 @@ its check in `tests/parity_numbers.rs`.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server/main.rs               # 103  (NOT '.route("' — that gives 90, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 171 unique, 174 occurrences
-grep -c 'function ' src/web/index.html                          # 460
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
+grep -c 'function ' src/web/index.html                          # 462
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -347,7 +347,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   than costed at nothing — the same rule, one level down.
 - `.env` loading, with a malformed file reported rather than silently truncated.
 - Sync connections and their tokens.
-- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `store` and a
+- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, `base_branch` (the
+  branch a new box starts from) and `read_prs` (Read ahead), plus `store` and a
   per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
   `connections.json`, not `Config`, and save on blur — a different persistence contract. A repo has
   no runtime of its own: a box runs the fleet's **Default agent** or the one picked for it in the
@@ -425,6 +426,14 @@ decision rather than an omission.
 ## 7. Deliberate removals and forced changes
 
 Each is a decision, with its cost stated in the user's terms.
+
+**A repository no longer picks a runtime, and the Add-repository overlay's agent picker is gone**
+(the owner, 2026-09-27, SKEIN-1207). A runtime is one fleet default (Settings → Boxes → Default
+agent) plus a pick per box in the New box dialog. The cost: a person who wanted every box of one repo
+on Codex and every other repo on Claude now picks Codex for each of that repo's boxes, or makes Codex
+the default and picks Claude for the rest. What it removes is a third place the same choice could be
+made. `skein add --agent` is refused with where the
+choice lives now, and an old `repos.json` naming a runtime still loads.
 
 **Adopt-in-place is removed, and nothing replaced it: a repo is a remote.** This entry used to
 describe a replacement — "a local filesystem path is a valid git remote, so a repo with no server
