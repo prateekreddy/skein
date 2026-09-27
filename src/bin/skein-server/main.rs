@@ -1589,17 +1589,6 @@ mod cockpit_routes {
                 "an EventSource, not a fetch — this scanner reads fetch calls",
             ),
             (
-                "/api/away",
-                "GET",
-                "the away digest is opened as a page, not fetched",
-            ),
-            (
-                "/api/away/seen",
-                "POST",
-                "posted by the away digest's own inline script, which is served from src/ and not \
-                 scanned here",
-            ),
-            (
                 "/api/boxes/:name/terminal",
                 "GET",
                 "a WebSocket upgrade — xterm opens it, no fetch is involved",

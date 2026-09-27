@@ -60,9 +60,10 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Signal provenance display**: the half-filled dot, and `hooks only` / `screen lost` /
   `screen unread`. This is the architecture's own level-versus-edge thesis, already shipped.
 - Per-box task line; search and filters; the needs strip.
-- **The away digest** — snapshot on `visibilitychange`, per-box deltas on return (needs a decision,
-  paused for you, finished with line count, back to work, +N lines, started, left the board),
-  priority-sorted, each row clicking through.
+- **The away digest** — the server's journal of state changes since the last time the board was
+  looked at (`/api/away`, marked by `/api/away/seen`), one line per box on where it ended up (needs
+  a decision, waiting for you, hit an error, finished, back to work, left the board),
+  priority-sorted, each row clicking through. It survives a reload and agrees across tabs.
 - Fleet gauges: load, resources, limits. **Per-box load view** (which box is eating CPU, memory,
   disk, ranked) and the per-box resource hover card and disk chip.
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever

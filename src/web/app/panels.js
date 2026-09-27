@@ -58,53 +58,58 @@ function renderLoad(ov, rows) {
   }
 }
 
-// ---------- away digest: "while you were gone" (free — client-side fleet delta) ----------
-let awaySnap = null;
-function snapFleet() {
-  const m = {};
-  for (const b of boxes) m[b.name] = { g: groupOf(b.state), pause: b.pause, headline: b.headline, d: (b.diff?.ins||0)+(b.diff?.del||0) };
-  return { t: Date.now(), m };
+// ---------- away digest: "while you were gone", from the server's journal ----------
+// The server keeps both halves: what changed state (`stream::since`) and when you last looked
+// (`seen.json`, one file for every tab and every reload). This page only says when it looked —
+// the moment it stops showing the board — and reads back what happened since.
+//
+// "Looked" is the tab going hidden or away, a dismissed digest, or a digest with nothing in it: the
+// person has seen the board as it stands. While the tab is visible the board itself is the digest.
+function markSeen() {
+  fetch("/api/away/seen", { method: "POST", keepalive: true }).catch(() => {});
 }
+async function showAwayDigest() {
+  let away;
+  try { away = await (await fetch("/api/away")).json(); } catch { return; }
+  const items = awayItems(away.moments || [], boxes, groupOf);
+  if (!items.length) { markSeen(); return; }
+  renderAwayOverlay(items, away.since);
+}
+let hiddenAt = 0, awayOnBoard = false;
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) awaySnap = snapFleet();
-  else if (awaySnap) { if ((Date.now()-awaySnap.t)/60000 >= 0.75) showAwayDigest(awaySnap); awaySnap = null; }
+  if (document.hidden) { hiddenAt = Date.now(); markSeen(); return; }
+  // A glance at another tab is not being away; the board you come back to already shows it.
+  if (hiddenAt && Date.now() - hiddenAt >= 45000) showAwayDigest();
+  hiddenAt = 0;
 });
-function showAwayDigest(snap) {
-  const items = [], now = {};
-  for (const b of boxes) now[b.name] = b;
-  for (const b of boxes) {
-    const before = snap.m[b.name], g = groupOf(b.state), dnow = (b.diff?.ins||0)+(b.diff?.del||0);
-    if (!before) { items.push({ pri:2, name:b.name, kind:"new", text:`started — ${b.headline||b.branch||""}` }); continue; }
-    if (g !== before.g) {
-      if (g === "attn")         items.push({ pri:0, name:b.name, kind:"attn",    text:`now needs a decision${b.headline?` — ${b.headline}`:""}` });
-      else if (g === "waiting") items.push({ pri:0, name:b.name, kind:"waiting", text:`paused for you${b.headline?` — ${b.headline}`:""}` });
-      else if (g === "done")    items.push({ pri:1, name:b.name, kind:"done",    text:`finished${dnow?` (${dnow} lines changed)`:""}` });
-      else if (g === "working") items.push({ pri:3, name:b.name, kind:"working", text:`back to work` });
-    } else if (dnow > before.d) {
-      items.push({ pri:3, name:b.name, kind:"prog", text:`+${dnow-before.d} more lines changed` });
-    }
-  }
-  for (const name in snap.m) if (!now[name]) items.push({ pri:2, name, kind:"gone", text:`left the board (destroyed / merged)` });
-  if (!items.length) return;
-  items.sort((a,b) => a.pri-b.pri || a.name.localeCompare(b.name));
-  renderAwayOverlay(items, snap.t);
+window.addEventListener("pagehide", markSeen);
+// The first board this page receives: a page opened after a night away is the case a digest in tab
+// memory could never answer, and the reason the journal is the server's.
+function awayOnFirstBoard() {
+  if (awayOnBoard) return;
+  awayOnBoard = true;
+  showAwayDigest();
 }
-function renderAwayOverlay(items, sinceT) {
+function renderAwayOverlay(items, since) {
   let ov = document.getElementById("away");
-  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov);
-    ov.addEventListener("click", e => { if (e.target === ov) ov.classList.remove("open"); }); }
-  const mins = Math.max(1, Math.round((Date.now()-sinceT)/60000));
+  const close = () => { ov.classList.remove("open"); markSeen(); };
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); }
+  ov.onclick = e => { if (e.target === ov) close(); };
+  // `since` is the server's mark; empty means nobody has looked since skein started keeping one.
+  const t = Date.parse(since);
+  const when = Number.isNaN(t) ? "since skein started" : `since ${new Date(t).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}`;
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>While you were away</b>`
-    + `<span class="sub">~${mins}m · ${items.length} update${items.length>1?"s":""}</span><span class="x">✕</span></div>`
+    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><span class="x">✕</span></div>`
     + `<div class="away-list"></div></div>`;
   const list = ov.querySelector(".away-list");
   for (const it of items) {
     const row = document.createElement("div"); row.className = `away-row k-${it.kind}`;
     row.innerHTML = `<span class="ad"></span><span class="nm">${esc(it.name)}</span><span class="tx">${esc(it.text)}</span>`;
-    row.addEventListener("click", () => { ov.classList.remove("open"); openSession(it.name); });
+    if (it.kind !== "gone") row.addEventListener("click", () => { close(); openSession(it.name); });
+    else row.style.cursor = "default";
     list.append(row);
   }
-  ov.querySelector(".x").addEventListener("click", () => ov.classList.remove("open"));
+  ov.querySelector(".x").addEventListener("click", close);
   ov.classList.add("open");
 }
 

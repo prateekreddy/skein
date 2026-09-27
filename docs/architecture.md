@@ -382,8 +382,9 @@ any of them on demand.
 **Transitions need durable state that neither noun covers**, and the first draft had nowhere to put
 it. A transition requires the retained previous value per `(subject, signal)`, plus a watermark for
 "what changed since I last looked". That is **recorded** state (§2.1) on the volume, written by
-skein. It must be server-side: today's away digest computes the delta client-side on tab re-focus,
-which is why a box that turned while you were looking elsewhere was never announced.
+skein. It must be server-side: the away digest once computed the delta client-side on tab re-focus,
+which is why a box that turned while you were looking elsewhere was never announced. It now reads
+the server's journal and mark (`/api/away`).
 
 ---
 
