@@ -122,11 +122,10 @@ reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/s
 # `sbx ports <sandbox>` to learn which host ports already forward to one, and answers `None` rather
 # than an empty list when it cannot run at all (§2.4's `unknown`).
 #
-# `sbx` — the module — is the fleet's own `sbx ls --json`, the same read-only listing
-# `warden/sightings` makes from the host side, behind a `util::Gate` so a struggling daemon is
-# asked less often rather than more. It was part of `fleet` until the listing was split out; the
-# row appearing here is a move, not a new reach, which is the sort of thing a count says and a
-# name cannot.
+# `sbx` — the module — came off this list with its `Command::new("sbx")` arm (SKEIN-1201). It was
+# unreachable: `fleet_boxes` returned before it whenever `$SKEIN_LS_CMD` was unset, because in the
+# fleet `sbx ls` asks about a host this process is not standing on. The listing it would have made
+# is `warden/sightings`', from the host side.
 #
 # `health`'s one is not a reach at all: it is the check's own name in `checks()` — a label. Its
 # second used to be `program_on_path("sbx")`, and SKEIN-576 deleted the question along with the
@@ -148,4 +147,4 @@ reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/s
 # from the placement's own argv, which is the `nsenter` alone. A spawner that names the program
 # cannot be told the crossing changed shape — which is how a terminal ends up attached to the wrong
 # machine.
-reaches = { fleet = 1, health = 1, sbx = 1, "warden/doer" = 1, "warden/sightings" = 1 }
+reaches = { fleet = 1, health = 1, "warden/doer" = 1, "warden/sightings" = 1 }
