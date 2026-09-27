@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:487"]
+["docs/modules.toml:491"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -725,59 +725,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// module note. `fleet` is never empty: `load_config` repairs a blank name, which is what makes"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:307"]
+["src/board.rs:303"]
 line = "pub state: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:334"]
+["src/board.rs:330"]
 line = "pub headline: Option<String>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:340"]
+["src/board.rs:336"]
 line = "pub pause: Pause,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:343"]
+["src/board.rs:339"]
 line = "/// each wants a different move from you, so the row names it instead of saying \"decision\"."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:345"]
+["src/board.rs:341"]
 line = "pub blocked_kind: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:350"]
+["src/board.rs:346"]
 line = "/// installed probe contract. See [`crate::signals::hook_health`] for what each one asks of a"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:357"]
+["src/board.rs:353"]
 line = "pub hook_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:362"]
+["src/board.rs:358"]
 line = "pub status_from: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:367"]
+["src/board.rs:363"]
 line = "pub screen_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:385"]
+["src/board.rs:381"]
 line = "pub foreign: bool,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:420"]
+["src/board.rs:416"]
 line = "pub cover: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:430"]
+["src/board.rs:426"]
 line = "/// Three ways to be uncapped and they are not one problem. *no-limit-computed* is skein's own"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:435"]
+["src/board.rs:431"]
 line = "pub ceiling: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:445"]
+["src/board.rs:441"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -910,60 +910,60 @@ cited_by = ["docs/architecture.md"]
 line = "pub fn descriptor(fds: Option<&str>, pid: Option<&str>, me: u32) -> Result<Option<RawFd>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:60"]
+["src/files.rs:59"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:67"]
+["src/files.rs:66"]
 line = "return Err(\"invalid path\".into());"
 window = "if path_leaves_the_workspace(rel) {\u000breturn Err(\"invalid path\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:74"]
+["src/files.rs:73"]
 line = "return Err(\"path escapes the workspace\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:119"]
+["src/files.rs:118"]
 line = "(\"ESCAPE\", _) => Err(\"path escapes the workspace\".into()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:120"]
+["src/files.rs:119"]
 line = "(\"NOTDIR\", _) => Err(\"not a directory\".into()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:121"]
+["src/files.rs:120"]
 line = "(\"NOTFILE\", _) => Err(\"not a file\".into()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:122"]
+["src/files.rs:121"]
 line = "(other, _) => Err(format!(\"the box could not read that ({other})\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:209"]
+["src/files.rs:198"]
 line = "return Err(\"not a directory\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:245"]
+["src/files.rs:234"]
 line = "return Err(\"not a file\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:263"]
+["src/files.rs:252"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:270"]
+["src/files.rs:259"]
 line = "return Err(\"invalid path\".into());"
 window = "if path_leaves_the_workspace(rel) {\u000breturn Err(\"invalid path\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:315"]
+["src/files.rs:304"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/files.rs:318"]
+["src/files.rs:307"]
 line = "return Err(\"invalid path\".into());"
 window = "if path_leaves_the_workspace(rel) {\u000breturn Err(\"invalid path\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
@@ -1410,7 +1410,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1774"]
+["src/fleet/start.rs:1804"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1584,7 +1584,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:524"]
+["src/kit/skein-startup.sh:527"]
 line = "merged=\"$(jq -s \"$retire\"'"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
@@ -1760,43 +1760,43 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &["
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
-["src/sandbox.rs:283"]
+["src/sandbox.rs:282"]
 line = "return Err(\"drop path too deep\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:298"]
+["src/sandbox.rs:297"]
 line = "return Err(\"drop path too long\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:316"]
+["src/sandbox.rs:315"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:387"]
+["src/sandbox.rs:386"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:395"]
+["src/sandbox.rs:394"]
 line = "return Err(format!("
 window = "Some(_) => {\u000breturn Err(format!(\u000b\"box {name:?} is not running; attach/start it before resuming\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:401"]
+["src/sandbox.rs:400"]
 line = "\"cannot tell whether box {name:?} is running; attach/start it before resuming\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:469"]
+["src/sandbox.rs:468"]
 line = "\"resume exited {}{}; see {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:542"]
+["src/sandbox.rs:541"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:559"]
+["src/sandbox.rs:558"]
 line = "// No placement record, and so no box of skein's to stop. The answer is the one"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1804,17 +1804,17 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_STOP_CMD`, the test seam that ran a shell for a box skein had not placed: Stop on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:606"]
+["src/sandbox.rs:605"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:719"]
+["src/sandbox.rs:718"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:745"]
+["src/sandbox.rs:744"]
 line = "// Same as `stop_box`: no placement record means there is no box here to tear down, and the"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1822,12 +1822,12 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_DESTROY_CMD`, the test seam that ran a shell for a box skein had not placed: Destroy on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1003"]
+["src/sandbox.rs:967"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1017"]
+["src/sandbox.rs:981"]
 line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1863,11 +1863,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"copying {guest}: {}\", stderr.trim()));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:321"]
+["src/takeover.rs:319"]
 line = "\"extracting shared context: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:401"]
+["src/takeover.rs:399"]
 line = "\"{source} already uses {target_runtime}; use the same-provider tmux restart path\""
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1918,17 +1918,17 @@ line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:844"]
+["src/tracking.rs:845"]
 line = "Err(format!("
 window = "let last = report.trim().lines().last().unwrap_or(\"\").trim();\u000bErr(format!(\u000b\"token written, but registration did not confirm{} — the box can still be registered by hand against {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:917"]
+["src/tracking.rs:918"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1002"]
+["src/tracking.rs:1003"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 
