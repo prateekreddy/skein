@@ -1642,6 +1642,14 @@ mod tests {
     /// plain `name=<n>` assignments are resolved first, and a bound this cannot read is an ERROR
     /// rather than a zero — a silently unread bound is a bound that is not checked, which is the
     /// whole failure this test exists to end.
+    ///
+    /// **The shared package install is read the way it runs** (src/package-install.sh, carried here
+    /// between marker lines). `_skein_bounded <n> …` is `timeout <n> …` where the image has it, so it
+    /// is counted as one. Its own body is `timeout "$@"`, whose bound is whatever each call passes,
+    /// so that body is not read again. And a function this script defines and never calls bounds
+    /// nothing it does: the kit carries `skein_npm_install` for the byte-for-byte copy and runs no
+    /// npm, and counting that would fail a budget on work that never happens. Any other body is
+    /// read line by line like the rest.
     fn bounds_in(script: &str) -> Result<u64, String> {
         let mut known: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
         for line in script.lines() {
@@ -1660,16 +1668,36 @@ mod tests {
             }
         }
         let mut allows = 0u64;
+        let mut skipping = false;
         for line in script.lines() {
             if line.trim().starts_with('#') {
                 continue;
+            }
+            if skipping {
+                skipping = line != "}";
+                continue;
+            }
+            if let Some(function) = line.strip_suffix("() {") {
+                let named = !function.is_empty()
+                    && function.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                let called = || {
+                    script.lines().any(|other| {
+                        !other.trim().starts_with('#')
+                            && other != line
+                            && other.split_whitespace().any(|word| word == function)
+                    })
+                };
+                if named && (function == "_skein_bounded" || !called()) {
+                    skipping = true;
+                    continue;
+                }
             }
             let mut words = line.split_whitespace().peekable();
             let mut before: Option<&str> = None;
             while let Some(word) = words.next() {
                 let previous = before;
                 before = Some(word);
-                if word != "timeout" {
+                if word != "timeout" && word != "_skein_bounded" {
                     continue;
                 }
                 // `command -v timeout` asks whether the tool exists and bounds nothing. That is the

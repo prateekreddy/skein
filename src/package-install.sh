@@ -38,30 +38,33 @@ skein_apt_install() {
       break
     fi
   done
-  _skein_apt_once "$@" >>"$_skein_log" 2>&1 && return 0
+  {
+    _skein_bounded 120 sudo -n apt-get update -qq
+    _skein_bounded 180 sudo -n apt-get install -y -qq "$@"
+  } >>"$_skein_log" 2>&1 && return 0
   _skein_rc=$?
   # A timeout is not retried: the same mirror gets the same time again and the caller's own
-  # deadline runs out first. Anything else, the lock race above most of all, gets one more go.
+  # deadline runs out first. Anything else, the lock race above most of all, gets one more install.
+  # The index is already fetched, so it is not fetched again.
   [ "$_skein_rc" -eq 124 ] && return 124
   sleep 5
-  _skein_apt_once "$@" >>"$_skein_log" 2>&1
+  _skein_bounded 180 sudo -n apt-get install -y -qq "$@" >>"$_skein_log" 2>&1
 }
 
-# One update and one install.
+# Why these bounds, which every caller shares. `update` FIRST, every time: a fresh image ships an
+# empty index, where install reports "Package 'tmux' has no installation candidate", which reads as
+# a missing package and is a missing index. `;` rather than `&&` after it: one unreachable source
+# fails `update` for the whole index, and the packages wanted may well be on the sources that
+# answered. Install's status is the verdict.
 #
-# `update` FIRST, every time: a fresh image ships an empty index, where install reports "Package
-# 'tmux' has no installation candidate", which reads as a missing package and is a missing index.
-# `;` rather than `&&` after it: one unreachable source fails `update` for the whole index, and
-# the packages wanted may well be on the sources that answered. Install's status is the verdict.
+# `sudo -n`: nothing here can answer a password prompt, and a prompt nobody answers waits out the
+# whole timeout before failing.
 #
-# `sudo -n`: nothing here can answer a password prompt, and a prompt nobody answers waits out
-# the whole timeout before failing. 600s for the install: killing dpkg mid-unpack leaves a
-# half-configured package that breaks every later install until `dpkg --configure -a`, so the
-# bound is set for a slow mirror, not for a quick failure.
-_skein_apt_once() {
-  _skein_bounded 180 sudo -n apt-get update -qq
-  _skein_bounded 600 sudo -n apt-get install -y -qq "$@"
-}
+# The numbers are set by the tightest deadline around them, not by the slowest mirror: at worst
+# 120 waiting + 120 + 180 + 5 + 180 = 605s of apt, and the fleet's launch runs npm after it inside
+# one 900s `sbx exec`, so npm has 240 of what is left. Longer bounds here are a deadline that fires
+# on the caller's side instead, where it says nothing about apt. `fleet::start`'s
+# `the_provisioning_budget_outlasts_the_script` reads them out of the startup kit's copy.
 
 # `timeout SECS COMMAND...` where the image has `timeout`, and the command unbounded where it does
 # not. coreutils is essential on Debian, so that is rare, but bootstrap.sh runs on whatever image
@@ -88,8 +91,8 @@ skein_npm_install() {
   _skein_prefix="$(npm config get prefix 2>/dev/null)"
   case "$_skein_prefix" in undefined | null) _skein_prefix="" ;; esac
   if [ -n "$_skein_prefix" ] && [ -w "$_skein_prefix" ]; then
-    _skein_bounded 600 npm install -g "$@" >>"$_skein_log" 2>&1
+    _skein_bounded 240 npm install -g "$@" >>"$_skein_log" 2>&1
   else
-    _skein_bounded 600 sudo -n npm install -g "$@" >>"$_skein_log" 2>&1
+    _skein_bounded 240 sudo -n npm install -g "$@" >>"$_skein_log" 2>&1
   fi
 }
