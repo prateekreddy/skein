@@ -167,19 +167,19 @@ fn the_parity_gate_still_reproduces_its_own_counts() {
     //
     // The page keeps no list of its own any more (SKEIN-1186): the banner and the diagnostics pane
     // walk the report's `labels`, which is `CHECK_LABELS` in `src/health/report.rs`, one
-    // `CheckLabel::new(` line per check.
+    // `CheckLabel::named(` line per check.
     // `health::tests::every_check_has_one_label_and_every_surface_reads_it` is what holds that
     // table level with the checks the report actually carries.
     let report = read("src/health/report.rs");
     let checked = report
         .lines()
-        .filter(|l| l.contains("CheckLabel::new("))
+        .filter(|l| l.contains("CheckLabel::named("))
         .count() as u64;
     check(
         "checks on the health banner",
-        stated(&parity, "grep -c 'CheckLabel::new('"),
+        stated(&parity, "grep -c 'CheckLabel::named('"),
         checked,
-        "grep -c 'CheckLabel::new(' src/health/report.rs",
+        "grep -c 'CheckLabel::named(' src/health/report.rs",
     );
 
     check(

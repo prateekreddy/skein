@@ -33,7 +33,7 @@ its check in `tests/parity_numbers.rs`.
 grep -c '\.route('  src/bin/skein-server/main.rs               # 103  (NOT '.route("' — that gives 90, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 170 unique, 173 occurrences
 grep -c 'function ' src/web/index.html                          # 459
-grep -c 'CheckLabel::new(' src/health/report.rs              # 14 checks on the health banner
+grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 

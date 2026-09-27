@@ -521,8 +521,7 @@ fn cmd_doctor() -> Result<(), String> {
     // The warden, which is not a tool on PATH and is checked here beside the ones that are — because
     // to somebody reading this list the question is the same: is the thing skein needs present.
     //
-    // Information rather than a verdict (SKEIN-1184): without a warden skein shows the person the
-    // command instead, so the line says which of the two routes this host is on.
+    // Information, not a verdict (SKEIN-1184): without a warden skein shows the command instead.
     {
         let w = skein::health::warden_report();
         let mark = match w.level {

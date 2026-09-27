@@ -404,10 +404,10 @@ pub(crate) fn config_json() -> PathBuf {
 /// from the first, because the error was thrown away and defaults returned in its place. One field
 /// serde could not deserialise discarded *every* setting in the file, and since most defaults match
 /// what a working install already had, the only visible symptom was whichever setting happened to
-/// differ. `fleet_agent` defaulted to `false` then, so the transport silently stopped being installed
-/// while the file said `true` and was right. That default is now `true`, which moves the symptom
-/// rather than removing it: a fleet that opted out would get an agent it declined. Same lesson either
-/// way — a default is indistinguishable from a choice, so the failure has to be *said*.
+/// differ. The case that found it was `fleet_agent`, a setting deleted with the in-sandbox agent
+/// (SKEIN-573): it defaulted to `false` then, so the transport silently stopped being installed while
+/// the file said `true` and was right. A default is indistinguishable from a choice, so the failure
+/// has to be *said*.
 fn read_config() -> Result<Option<Config>, String> {
     let path = config_json();
     let text = match fs::read_to_string(&path) {

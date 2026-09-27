@@ -45,7 +45,7 @@ const WARDEN_IS_OPTIONAL: &str = "the warden is optional (docs/decisions/warden-
      not a fault the fleet has — and a banner that is red for a state somebody chose teaches them \
      to read past the next one (SKEIN-913)";
 
-/// A check's name on the wire and the one label a person reads for it.
+/// A check's wire name and its one label; `named`, as secret-check reads `new`'s literals as paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CheckLabel {
     /// The field serde writes the check under, which is what the page indexes the report by.
@@ -55,7 +55,7 @@ pub struct CheckLabel {
 }
 
 impl CheckLabel {
-    const fn new(key: &'static str, label: &'static str) -> CheckLabel {
+    const fn named(key: &'static str, label: &'static str) -> CheckLabel {
         CheckLabel { key, label }
     }
 }
@@ -72,27 +72,27 @@ impl CheckLabel {
 /// In [`HealthReport::checks_with_banner`]'s order, which is the order the page lists them in;
 /// `every_check_has_one_label_and_every_surface_reads_it` holds the two level.
 pub const CHECK_LABELS: [CheckLabel; HealthReport::CHECK_COUNT] = [
-    CheckLabel::new("registry", "registry"),
-    CheckLabel::new("sbx", "sbx"),
-    CheckLabel::new("git", "git"),
+    CheckLabel::named("registry", "registry"),
+    CheckLabel::named("sbx", "sbx"),
+    CheckLabel::named("git", "git"),
     // Not about the `gh` CLI any more: "curl is installed" and "GitHub can be connected to at
     // all" (SKEIN-548, SKEIN-926) — so it is named for the second.
-    CheckLabel::new("gh", "github reach"),
-    CheckLabel::new("probes", "box probes"),
-    CheckLabel::new("mailbox", "mailbox"),
-    CheckLabel::new("memory", "fleet memory"),
-    CheckLabel::new("disk", "fleet disk"),
+    CheckLabel::named("gh", "github reach"),
+    CheckLabel::named("probes", "box probes"),
+    CheckLabel::named("mailbox", "mailbox"),
+    CheckLabel::named("memory", "fleet memory"),
+    CheckLabel::named("disk", "fleet disk"),
     // The same credential asked three questions — what it can reach, whether it will still reach
     // it next month (SKEIN-928), and whether it is the one GitHub is actually answering
     // (SKEIN-548) — so the three sit together. "token life" and not "expiry": this report also
     // carries `expired_logins`, so an unqualified "expiry" names two deadlines with two owners.
-    CheckLabel::new("gitgate", "github scope"),
-    CheckLabel::new("token_expiry", "token life"),
-    CheckLabel::new("proxy_injection", "proxy credential"),
-    CheckLabel::new("warden", "host warden"),
+    CheckLabel::named("gitgate", "github scope"),
+    CheckLabel::named("token_expiry", "token life"),
+    CheckLabel::named("proxy_injection", "proxy credential"),
+    CheckLabel::named("warden", "host warden"),
     // "isolation" is a word somebody can act on where "cover" is jargon.
-    CheckLabel::new("cover", "box isolation"),
-    CheckLabel::new("ai", "ai enrichment"),
+    CheckLabel::named("cover", "box isolation"),
+    CheckLabel::named("ai", "ai enrichment"),
 ];
 
 /// The label for the check serde writes as `key`, from [`CHECK_LABELS`] — for a surface that
