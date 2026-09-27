@@ -525,21 +525,14 @@ pub fn resume_batch(names: &[String]) -> BatchOutcome {
     out
 }
 
-/// The shell command that stops a box, when something has said what one is.
+/// Stop a box: end every process in it. The box stays listed (it goes stale until resumed) — this
+/// only frees the compute, it does not delist or destroy.
 ///
-/// `None` unless `$SKEIN_STOP_CMD` names a template (`{name}` is substituted and shell-quoted).
-/// **There is no default any more.** It used to be `sbx stop {name}` — the per-VM model, where a box
-/// WAS a sandbox named after it. Nothing resolves to that shape now ([`crate::place::place_of`]
-/// returns `None` for such a name), and in-fleet there is no `sbx` on `$PATH` to run it with, so the
-/// default could only ever miss — or, worse, halt an unrelated sandbox that happened to share the
-/// name. The variable survives as the seam this crate's own tests stop a box through.
-pub fn stop_command(name: &str) -> Option<String> {
-    let t = env::var("SKEIN_STOP_CMD").ok().filter(|t| !t.is_empty())?;
-    Some(t.replace("{name}", &sh_quote(name)))
-}
-
-/// Stop a box: run `stop_command` to halt the running sandbox. The box stays listed (it goes stale
-/// until resumed) — this only frees the compute, it does not delist or destroy.
+/// **Only a box skein placed.** There used to be a second way through, `$SKEIN_STOP_CMD`, for a
+/// name with no placement record: its default was `sbx stop <name>` from the per-VM model, and once
+/// that went it survived only as the seam this crate's tests stopped a box through. That made stop
+/// two mechanisms, the real one untested; the tests now place the box and stand in for the
+/// crossing with `place::seam`, so they run the path a person's Stop runs (SKEIN-1200).
 pub fn stop_box(name: &str) -> Result<(), String> {
     crate::fleet::disturbing_liveness(|| stop_box_inner(name))
 }
@@ -567,14 +560,7 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
     // `absent_box_reason` gives every other surface asked about a name skein has not placed: it
     // distinguishes a start that failed from a sandbox somebody else made, which "stop failed" did
     // not. `None` from it means "cannot tell", which here is still not a box this can stop.
-    let Some(cmd) = stop_command(name) else {
-        return Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)));
-    };
-    let (_out, err, code) = run_shell(&cmd)?;
-    if code != 0 {
-        return Err(format!("stop failed (exit {code}): {}", err.trim()));
-    }
-    Ok(())
+    Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)))
 }
 
 /// The shell that destroys a shared box: the same ending, and then the box itself.
@@ -699,21 +685,6 @@ fn delist_from_registry(store: &Path, name: &str) -> Result<(), String> {
     result
 }
 
-/// The shell command that tears a box down, when something has said what one is.
-///
-/// `None` unless `$SKEIN_DESTROY_CMD` names a template (`{name}` is substituted and shell-quoted).
-/// **There is no default any more**, and here the missing default is worth more than in
-/// [`stop_command`]: it was `sbx rm -f {name}`, DESTRUCTIVE, and aimed at a sandbox named after the
-/// box — so on a fleet install, where no such sandbox is skein's, the one thing it could hit is
-/// somebody else's sandbox that happens to share the name. Nothing resolves to the per-VM shape any
-/// more; the variable survives as the seam this crate's own tests tear a box down through.
-pub fn destroy_command(name: &str) -> Option<String> {
-    let t = env::var("SKEIN_DESTROY_CMD")
-        .ok()
-        .filter(|t| !t.is_empty())?;
-    Some(t.replace("{name}", &sh_quote(name)))
-}
-
 /// Destroy a box: end it, then delist it. The teardown must succeed before we delist, so a failed
 /// teardown leaves the box on the board to retry rather than orphaning a box you can no longer see.
 /// Destructive — the box's tree goes with it.
@@ -773,22 +744,9 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
     }
     // Same as `stop_box`: no placement record means there is no box here to tear down, and the
     // refusal says which of the two reasons it is rather than reporting a teardown that failed.
-    let Some(cmd) = destroy_command(name) else {
-        return Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)));
-    };
-    let (_out, err, code) = run_shell(&cmd)?;
-    if code != 0 {
-        return Err(format!("teardown failed (exit {code}): {}", err.trim()));
-    }
-    forget_what_skein_decided(name);
-    // The sandbox is gone (`sbx rm` succeeded). Delisting is just bookkeeping, and `sbx ls` is the
-    // fleet source of record — so a stale/unparseable registry must NOT fail the destroy, which would
-    // leave the box's tab open over a sandbox that no longer exists. Log and move on; the next
-    // successful delist (or a registry self-heal) cleans up the leftover entry.
-    if let Err(e) = delist_box(name) {
-        eprintln!("skein: destroyed {name}, but delisting it from the registry failed (harmless — sbx ls is the source of record): {e}");
-    }
-    Ok(())
+    // `$SKEIN_DESTROY_CMD` used to be a second way through for such a name — `sbx rm -f <name>` by
+    // default, until that default went, and then only a test seam (SKEIN-1200).
+    Err(crate::fleet::absent_box_reason(name).unwrap_or_else(|| no_place(name)))
 }
 
 /// The other half of forgetting a box, and the half that is not about disk (SKEIN-736).
@@ -1687,13 +1645,36 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// The crossing a placed box's stop or destroy runs through, stood in for: `answer` runs in its
+    /// place, and every argv that reached it is kept for the test to read. How these tests stop and
+    /// destroy a box since `$SKEIN_STOP_CMD` and `$SKEIN_DESTROY_CMD` went (SKEIN-1200): through the
+    /// path a person's button takes, with only the last hop replaced.
+    fn crossing_answering(
+        answer: &str,
+    ) -> (
+        crate::place::seam::Installed,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        let answer = answer.to_string();
+        let guard = crate::place::seam::install(Box::new(move |argv: &[String]| {
+            kept.lock().unwrap().push(argv.join(" "));
+            Some(vec!["sh".into(), "-c".into(), answer.clone()])
+        }));
+        (guard, seen)
+    }
+
     #[test]
     fn stop_box_runs_command_without_delisting() {
         let _g = env_lock();
         let dir = tempdir();
+        let fleet = tempdir();
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
-        env::set_var("SKEIN_HOME", &dir);
+        // And the fleet root, which the stop script names.
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir).set("SKEIN_FLEET_ROOT", &fleet);
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("stopped");
         fs::write(
@@ -1701,29 +1682,37 @@ mod tests {
             r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
         )
         .unwrap();
-        env::set_var("SKEIN_REGISTRY", &reg);
-        env::remove_var("SKEIN_SHARED");
+        env.set("SKEIN_REGISTRY", &reg).unset("SKEIN_SHARED");
+        placed("thing-x");
 
         // a failed stop surfaces an error and changes nothing.
-        env::set_var("SKEIN_STOP_CMD", "false");
-        assert!(stop_box("thing-x").is_err());
+        {
+            let (_crossing, _) = crossing_answering("false");
+            assert!(stop_box("thing-x").is_err());
+        }
 
-        // a successful stop runs the command but leaves the box listed (stop ≠ delist).
-        env::set_var(
-            "SKEIN_STOP_CMD",
-            format!("touch {}", sh_quote(marker.to_str().unwrap())),
-        );
+        // a successful stop runs the box's stop script but leaves the box listed (stop ≠ delist).
+        let (_crossing, seen) =
+            crossing_answering(&format!("touch {}", sh_quote(marker.to_str().unwrap())));
         stop_box("thing-x").unwrap();
         assert!(marker.exists());
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|argv| argv.contains("/boxes/thing-x/session.sock")),
+            "what crossed was not the box's stop script: {:?}",
+            seen.lock().unwrap()
+        );
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_some()); // still listed
+        assert!(
+            shared_record("thing-x").is_some(),
+            "a stop forgot the box's placement"
+        );
 
         assert!(stop_box("../escape").is_err()); // name guard
-
-        env::remove_var("SKEIN_STOP_CMD");
-        env::remove_var("SKEIN_REGISTRY");
-        env::remove_var("SKEIN_HOME");
     }
 
     /// With nothing placed and no override, stopping or destroying a box REFUSES — it does not
@@ -1744,16 +1733,9 @@ mod tests {
         let _warden = crate::testutil::no_warden();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
-        env::remove_var("SKEIN_STOP_CMD");
-        env::remove_var("SKEIN_DESTROY_CMD");
         // sbx answers, and lists nothing — so the refusal is the "no such box" one rather than
         // "cannot tell", and this test does not depend on whether the machine running it has sbx.
         env::set_var("SKEIN_LS_CMD", "printf '[]'");
-
-        assert!(
-            stop_command("web-main").is_none() && destroy_command("web-main").is_none(),
-            "there is no per-VM default left to run: a box is not a sandbox named after it"
-        );
 
         for why in [
             stop_box("web-main").unwrap_err(),
@@ -1784,14 +1766,13 @@ mod tests {
         let dir = tempdir();
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
-        env::set_var("SKEIN_HOME", &dir);
         // And the fleet root, since SKEIN-736: a destroy now asks `fleet::live_box_names` whether
         // the box is really gone before removing what skein decided about it, and `util::fleet_root`
         // refuses an unpinned test rather than answering with `/boxes` — the owner's live fleet.
         // Pinned through `env_pins` so it goes back on a failing assertion too (SKEIN-696).
         let fleet = tempdir();
         let mut env = env_pins();
-        env.set("SKEIN_FLEET_ROOT", &fleet);
+        env.set("SKEIN_HOME", &dir).set("SKEIN_FLEET_ROOT", &fleet);
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("torn-down");
         fs::write(
@@ -1800,23 +1781,35 @@ mod tests {
                "thing-y":{"branch":"y","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
         )
         .unwrap();
-        env::set_var("SKEIN_REGISTRY", &reg);
-        env::remove_var("SKEIN_SHARED");
+        env.set("SKEIN_REGISTRY", &reg).unset("SKEIN_SHARED");
+        placed("thing-x");
 
         // failed teardown must NOT delist — the box stays on the board to retry.
-        env::set_var("SKEIN_DESTROY_CMD", "false");
-        assert!(destroy_box("thing-x").is_err());
+        {
+            let (_crossing, _) = crossing_answering("false");
+            assert!(destroy_box("thing-x").is_err());
+        }
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_some()); // still listed
-
-        // successful teardown runs the command, then delists.
-        env::set_var(
-            "SKEIN_DESTROY_CMD",
-            format!("touch {}", sh_quote(marker.to_str().unwrap())),
+        assert!(
+            shared_record("thing-x").is_some(),
+            "a failed teardown forgot where the box is, so nothing can retry it"
         );
+
+        // successful teardown runs the box's destroy script, then delists.
+        let (_crossing, seen) =
+            crossing_answering(&format!("touch {}", sh_quote(marker.to_str().unwrap())));
         destroy_box("thing-x").unwrap();
         assert!(marker.exists()); // teardown ran
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|argv| argv.contains("/boxes/thing-x/session.sock")),
+            "what crossed was not the box's destroy script: {:?}",
+            seen.lock().unwrap()
+        );
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_none()); // delisted
@@ -1824,10 +1817,6 @@ mod tests {
 
         // name guard runs before any teardown command.
         assert!(destroy_box("../escape").is_err());
-
-        env::remove_var("SKEIN_DESTROY_CMD");
-        env::remove_var("SKEIN_REGISTRY");
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **A box created with a destroyed box's name inherits nothing skein decided about the box
@@ -1898,12 +1887,14 @@ mod tests {
             );
         }
 
-        // Destroyed through the seam this crate's own tests tear a box down with, doing what a real
-        // teardown does to the register above: `destroy_script`'s `rm -rf <fleet root>/<box>`.
-        env.set(
-            "SKEIN_DESTROY_CMD",
-            format!("rm -rf {}/{{name}}", sh_quote(&fleet.display().to_string())),
-        );
+        // Destroyed through the path a person's Destroy takes, with the crossing stood in for by
+        // what a real teardown does to the register above: `destroy_script`'s
+        // `rm -rf <fleet root>/<box>`.
+        placed("web-main");
+        let (_crossing, _) = crossing_answering(&format!(
+            "rm -rf {}",
+            sh_quote(&fleet.join("web-main").display().to_string())
+        ));
         destroy_box("web-main").unwrap();
         assert!(
             !fleet.join("web-main").exists(),
@@ -1949,22 +1940,18 @@ mod tests {
         let dir = tempdir();
         // Pinned, because `config::skein_home` refuses an unpinned test rather than answering
         // with the real `~/.skein` — where this fixture's state would otherwise land (SKEIN-626).
-        env::set_var("SKEIN_HOME", &dir);
         // The fleet root too, since SKEIN-736 — see `destroy_box_runs_teardown_then_delists`.
         let fleet = tempdir();
         let mut env = env_pins();
-        env.set("SKEIN_FLEET_ROOT", &fleet);
+        env.set("SKEIN_HOME", &dir).set("SKEIN_FLEET_ROOT", &fleet);
         let reg = dir.join("sandboxes.json");
         // a registry too broken to even self-heal: delist will fail, but the sandbox is already gone.
         fs::write(&reg, "{ not json at all").unwrap();
-        env::set_var("SKEIN_REGISTRY", &reg);
-        env::remove_var("SKEIN_SHARED");
-        env::set_var("SKEIN_DESTROY_CMD", "true"); // teardown "succeeds"
-                                                   // destroy must still report success so the cockpit closes the tab over the removed box.
+        env.set("SKEIN_REGISTRY", &reg).unset("SKEIN_SHARED");
+        placed("thing-x");
+        let (_crossing, _) = crossing_answering("true"); // teardown "succeeds"
+                                                         // destroy must still report success so the cockpit closes the tab over the removed box.
         assert!(destroy_box("thing-x").is_ok());
-        env::remove_var("SKEIN_DESTROY_CMD");
-        env::remove_var("SKEIN_REGISTRY");
-        env::remove_var("SKEIN_HOME");
     }
 
     // A box in a shared sandbox is attached to through its namespace, and every tmux call names its

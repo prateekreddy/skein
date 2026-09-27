@@ -2364,7 +2364,10 @@ mod tests {
             Some("skein-test-plane-secret"),
         )
         .unwrap();
-        env.set("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
+        // The box is placed and its teardown's crossing succeeds having done nothing, so what is
+        // under test is only what destroy asks the gateway.
+        crate::testutil::placed("gone");
+        let _crossing = crate::place::seam::doing_nothing();
         env.set("SKEIN_REGISTRY", dir.join("sandboxes.json"));
         fs::write(dir.join("sandboxes.json"), "{}").unwrap();
 

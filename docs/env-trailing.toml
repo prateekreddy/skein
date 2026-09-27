@@ -529,12 +529,6 @@ vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
 [leaks."src/sandbox::delisting_uses_the_boxs_own_store_and_cleans_up_even_when_the_registry_will_not"]
 vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
 
-[leaks."src/sandbox::destroy_box_runs_teardown_then_delists"]
-vars = ["SKEIN_DESTROY_CMD", "SKEIN_HOME", "SKEIN_REGISTRY"]
-
-[leaks."src/sandbox::destroy_succeeds_even_when_registry_is_unparseable"]
-vars = ["SKEIN_DESTROY_CMD", "SKEIN_HOME", "SKEIN_REGISTRY"]
-
 [leaks."src/sandbox::repo_launch_command_uses_skein_kit_and_persistent_session"]
 vars = ["SKEIN_HOME"]
 
@@ -543,9 +537,6 @@ vars = ["SKEIN_AI", "SKEIN_CLAUDE_BIN", "SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REG
 
 [leaks."src/sandbox::resume_box_guards_name_and_launches"]
 vars = ["SKEIN_HOME", "SKEIN_LS_CMD", "SKEIN_REGISTRY", "SKEIN_RESUME_CMD"]
-
-[leaks."src/sandbox::stop_box_runs_command_without_delisting"]
-vars = ["SKEIN_HOME", "SKEIN_REGISTRY", "SKEIN_STOP_CMD"]
 
 [leaks."src/sandbox::stopping_or_destroying_an_unplaced_box_refuses_instead_of_running_sbx"]
 vars = ["SKEIN_HOME", "SKEIN_LS_CMD"]

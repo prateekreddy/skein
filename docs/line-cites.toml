@@ -1791,43 +1791,43 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"resume exited {}{}; see {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:549"]
+["src/sandbox.rs:542"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:566"]
+["src/sandbox.rs:559"]
 line = "// No placement record, and so no box of skein's to stop. The answer is the one"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/sandbox.rs:575"]
-line = "return Err(format!(\"stop failed (exit {code}): {}\", err.trim()));"
+historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_STOP_CMD`, the test seam that ran a shell for a box skein had not placed: Stop on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:620"]
+["src/sandbox.rs:606"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:748"]
+["src/sandbox.rs:719"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:774"]
+["src/sandbox.rs:745"]
 line = "// Same as `stop_box`: no placement record means there is no box here to tear down, and the"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/sandbox.rs:781"]
-line = "return Err(format!(\"teardown failed (exit {code}): {}\", err.trim()));"
+historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_DESTROY_CMD`, the test seam that ran a shell for a box skein had not placed: Destroy on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1045"]
+["src/sandbox.rs:1003"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1059"]
+["src/sandbox.rs:1017"]
 line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1944,7 +1944,7 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "pub fn fleet_root() -> String {"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["src/util.rs:1183"]
+["src/util.rs:1179"]
 line = "pub(crate) fn invalidate(&self) {"
 cited_by = ["docs/recovery-survey.md"]
 
