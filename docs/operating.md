@@ -223,7 +223,7 @@ sandbox is created — sbx has no resize — so changing either destroys and rec
 
 Two ceilings means guessing the split in advance and rebuilding when the guess is wrong. **Docker
 shares the fleet disk** (Settings) removes the guess: dockerd's data root moves to `<fleet-root>/.docker`,
-on the boxes' own filesystem, and `Fleet disk` sizes the lot. One generous number instead of two exact
+on the boxes' own filesystem, and the next create's disk (Settings → Fleet) sizes the lot. One generous number instead of two exact
 ones.
 
 The trade is real and worth stating. Two disks are also two firewalls — a runaway `docker build`

@@ -1156,6 +1156,27 @@ console.log("\nfleet gauges");
     if (hot.figure !== "30.3/32.0G") throw new Error(`the hot gauge reads ${hot.figure}`);
   });
 
+  // R1 (the owner, 2026-09-27): the measured sandbox is the truth, and config.json's three fields
+  // are only what the next create asks for. So the Fleet pane states what the sandbox HAS, from the
+  // same reading as the strip, and the fields say they are the next create's. Fails if the line is
+  // drawn from anything but that reading (the host capacity it replaced reads as zeros in-fleet), or
+  // if a field is labelled as though it were the size of the sandbox running now.
+  await check("the Fleet pane says what this sandbox has, apart from what the next create asks for", async () => {
+    await page.evaluate(() => openSettings("fleet"));
+    await page.waitForFunction(
+      () => document.getElementById("set-sandboxsize")?.textContent === "8 CPUs · 32.0G memory · 20.0G disk",
+      null, { timeout: 5000 },
+    ).catch(async () => {
+      throw new Error(`the sandbox line reads ${JSON.stringify(await page.$eval("#set-sandboxsize", e => e.textContent))}`);
+    });
+    for (const id of ["set-fleetmem", "set-fleetcpus", "set-fleetdisk"]) {
+      const title = await page.$eval(`#${id}`, e => e.closest(".set-field").querySelector(".set-title").textContent);
+      if (!/at the next create/.test(title)) throw new Error(`#${id} is titled ${JSON.stringify(title)}`);
+    }
+    await page.keyboard.press("Escape");
+    await settle();
+  });
+
   // Left as this suite found it, so nothing after it inherits a strip full of invented figures.
   await page.unroute("**/api/fleet/resources");
   await page.evaluate(() => loadResources());

@@ -128,17 +128,14 @@ function setPane(pane) {
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
 function openSettings(pane = "repos") {
-  // The host's own numbers, beside the ones being typed. Fetched with the rest so the pane never
-  // renders a size against a blank.
-  loadFleetPlan().then(() => {
-    renderFleetPlanNotes();
-    const el = document.getElementById("set-hostcap");
-    if (!el) return;
-    const host = fleetPlan?.host;
-    el.textContent = host
-      ? `${host.cpus} CPUs · ${gbOf(host.memory_mb)} memory · ${gbOf(host.disk_free_mb)} free on ${host.disk_path}`
-      : "could not be measured";
-  });
+  loadFleetPlan().then(renderFleetPlanNotes);
+  // What this sandbox HAS, measured inside it, above the three fields that are only what the next
+  // create asks for (`sandboxSize`). The same reading the gauge strip draws from.
+  fetch("/api/fleet/resources").then(r => r.status === 200 ? r.json() : null).catch(() => null)
+    .then(r => {
+      const el = document.getElementById("set-sandboxsize");
+      if (el) el.textContent = sandboxSize(r, fmtGb) || "not measured yet — the sandbox has not answered";
+    });
   // Synchronously, from the report the board poll already has. The fetch below re-applies it, but
   // it lands after the dialog is open — and "after the dialog is open" is precisely the window in
   // which a rebuild button that had not yet been hidden would be clickable.
@@ -1353,13 +1350,13 @@ function addRepoPrompt() { openAddRepo(); }
 // so `fleet_exists` can only answer `Some(true)` about the fleet it is standing in — `exists ===
 // false` stopped being a state the wire could carry, and the dialog stopped being openable.
 //
-// What is left of the plan is prose and numbers the settings pane renders: the host's capacity
-// beside the fleet fields, why sbx could not be asked, and the `sbx` lines to run on the host in
-// place of the rebuild button (`renderFleetPlanNotes`).
+// What is left of the plan is prose the settings pane renders: why sbx could not be asked, and the
+// `sbx` lines to run on the host in place of the rebuild button (`renderFleetPlanNotes`). The
+// host's capacity it carries is not drawn: from inside the sandbox it reads as zeros
+// (`fleet::host_capacity`), and the size the pane shows is the sandbox's own, measured.
 let fleetPlan = null;
 async function loadFleetPlan() {
-  // In demo mode there is no host to measure, and a capacity line about a machine that does not
-  // exist is worse than a blank one.
+  // In demo mode there is no host to ask the lines for.
   if (DEMO) { fleetPlan = null; return null; }
   try {
     const r = await fetch("/api/fleet/plan");
@@ -1367,7 +1364,6 @@ async function loadFleetPlan() {
   } catch { fleetPlan = null; }
   return fleetPlan;
 }
-const gbOf = mb => mb ? `${Math.round(mb / 1024)} GB` : "unknown";
 
 function launchBox(branch) {
   branch = (branch||"").trim(); if (!branch) return;   // keep slashes — they belong to the branch
