@@ -9877,7 +9877,7 @@ const settingsModal = () => document.getElementById("settings");
 const MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
 const glyph = k => platformKeys(k, MAC);
 function renderKeys() {
-  document.getElementById("set-keys").innerHTML = keySheet().map(g =>
+  document.getElementById("set-keys").innerHTML = keySheet(MAC).map(g =>
     `<div class="set-kgrp"><b>${esc(g.sec)}</b>` + g.items.map(([keys, what]) =>
       `<div class="set-krow"><span class="kk">${keys.map(k => k === "…" ? "…" : `<kbd>${esc(glyph(k))}</kbd>`).join("")}</span><span class="kd">${esc(glyph(what))}</span></div>`
     ).join("") + `</div>`).join("");

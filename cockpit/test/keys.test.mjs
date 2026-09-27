@@ -259,3 +259,17 @@ test("a modifier prints as the keyboard in front of you has it", () => {
   assert.equal(platformKeys("⌘↵ posts · ⌘K palette", false), "Ctrl+↵ posts · Ctrl+K palette");
 });
 
+
+// Off a Mac, ⌘ becomes Ctrl — which would print the terminal's copy as Ctrl+C, the key that
+// interrupts the agent. The page copies on Ctrl+Shift there (`copy` in settings.js), so the sheet
+// has to say that. Fails on: writing the copy row back as a plain "⌘C" for every platform.
+test("off a Mac the terminal rows name the chords that terminal actually uses", () => {
+  const printed = mac => new Map(keySheet(mac).map(g => [g.sec, g.items])).get("In a terminal")
+    .map(([keys, what]) => [keys.map(k => platformKeys(k, mac)).join(" "), what]);
+  const linux = printed(false);
+  const chords = linux.map(([k]) => k);
+  assert.equal(new Set(chords).size, chords.length, `two rows print the same chord: ${chords.join(" · ")}`);
+  assert.equal(linux.find(([, w]) => w === "copy the selection")[0], "Ctrl+Shift+C");
+  assert.equal(linux.find(([, w]) => w === "paste")[0], "Ctrl+Shift+V");
+  assert.equal(printed(true).find(([, w]) => w === "copy the selection")[0], "⌘C");
+});

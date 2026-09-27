@@ -634,7 +634,9 @@ function rowsOf(table, prefix = []) {
 // keys and a drag — and a sheet that dropped them would leave people guessing at ⌘C.
 //
 // Written with the Mac's ⌘/⌥/⇧/⌃; `platformKeys` turns them into what another keyboard has on it.
-function keySheet() {
+// `mac` decides the one row family whose chord is not a modifier swap: off a Mac a terminal copies
+// and pastes on Ctrl+Shift, because a bare Ctrl+C is the interrupt (`copy`/`paste` in settings.js).
+function keySheet(mac = true) {
   return [
     { sec: "Anywhere", items: [
       [["⌘K"], SAYS.palette],
@@ -657,10 +659,10 @@ function keySheet() {
       [["drag"], "reorder tabs by dragging one — esc cancels, and the order is remembered"],
     ] },
     { sec: "In a terminal", items: [
-      [["⌘C"], "copy the selection"],
-      [["⌘V"], "paste"],
+      [[mac ? "⌘C" : "⌃⇧C"], "copy the selection"],
+      [[mac ? "⌘V" : "⌃⇧V"], "paste"],
       [["⌃C"], "interrupt — goes through to the agent, never intercepted"],
-      [["⌘V", "file"], "paste a file, or drag one in, to hand it to the agent"],
+      [[mac ? "⌘V" : "⌃⇧V", "file"], "paste a file, or drag one in, to hand it to the agent"],
     ] },
   ];
 }
