@@ -102,7 +102,7 @@ pub struct Config {
     #[serde(default)]
     pub seed_gh_secret: bool,
     /// The runtime a box runs unless one was picked for it in the New box dialog
-    /// ([`crate::runtime::fleet_agent`]). The only default: a repo has no runtime of its own.
+    /// ([`crate::runtime::fleet_default_runtime`]). The only default: a repo has no runtime of its own.
     #[serde(default = "default_agent")]
     pub default_agent: String,
     /// **Moved to each repo** ([`crate::repos::Repo::base_branch`], the owner, 2026-09-27): the
@@ -458,7 +458,6 @@ pub fn config_error() -> Option<String> {
     read_config().err()
 }
 
-/// Load skein's app settings (defaults if the file is absent or unreadable).
 /// Does `$name` hold a switch off?
 ///
 /// **An environment variable may only turn things off** (the owner, 2026-09-27). It exists so a
@@ -484,7 +483,7 @@ pub const ENV_SWITCHES: [(&str, &str); 4] = [
 
 /// Which settings the environment is holding right now: `Config` field → the variable holding it.
 ///
-/// Only what is **in force**, so Settings can say "held by `$SKEIN_X`" beside a control exactly
+/// Only what is **in force**, so Settings can name the variable holding a control beside it exactly
 /// when that control is not the one deciding, and say nothing otherwise. A note that is always
 /// there reads as boilerplate and is right only when the variable happens to be set (SKEIN-1141
 /// put one on each field; this makes it true).
@@ -505,6 +504,7 @@ pub fn held_by_env() -> std::collections::BTreeMap<&'static str, &'static str> {
     held
 }
 
+/// Load skein's app settings (defaults if the file is absent or unreadable).
 pub fn load_config() -> Config {
     let mut cfg = read_or_default();
     // **A fleet always has a name** (SKEIN-484). The field carries a serde default, so an ABSENT

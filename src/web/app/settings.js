@@ -195,7 +195,7 @@ function openSettings(pane = "repos") {
     settingsModal().querySelector(".set-shell")?.focus();
   });
 }
-// "held off by `$SKEIN_X`" beside a control, only while that variable is holding it — the server
+// "held off by" a SKEIN_* variable beside a control, only while that variable is holding it — the server
 // says which (`settings.held`). A control with nothing holding it carries no note at all.
 function renderHeld() {
   for (const el of settingsModal().querySelectorAll(".set-envnote[data-held]")) {

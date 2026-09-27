@@ -1781,6 +1781,13 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// One lock for every test in this binary that touches the environment: they are threads of
+    /// one process. Poisoning is recovered from, so one failed test does not fail the rest.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// **A running box is `active` in `skein ls`, as it is on the board** (SKEIN-1189).
     ///
     /// What would make it fail: `skein ls` printing the registry's own `live` again, or the mapping
@@ -1804,8 +1811,28 @@ mod tests {
         // Pinned, so a regression that lets the add go ahead writes into this directory and not
         // into whatever store the machine running the test has. Planting exactly that regression
         // once, unpinned, scaffolded a store in the owner's live `~/.skein`.
-        let home = std::env::temp_dir().join(format!("skein-add-agent-{}", std::process::id()));
+        let _env = env_lock();
+        let home = std::env::temp_dir().join(format!("skein-test-cli-{}-add", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
+        // Put back from `Drop`, so a failing assertion restores them as well as a passing one.
+        // `testutil::EnvPins` does this for the library; `testutil` is `#[cfg(test)]` inside the
+        // library and out of reach of this `[[bin]]`.
+        struct PutBack(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                for (name, was) in self.0.drain(..) {
+                    match was {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _put_back = PutBack(
+            ["SKEIN_HOME", "SKEIN_FLEET_ROOT"]
+                .map(|name| (name, std::env::var_os(name)))
+                .into(),
+        );
         std::env::set_var("SKEIN_HOME", &home);
         std::env::set_var("SKEIN_FLEET_ROOT", &home);
         let why = super::cmd_add(

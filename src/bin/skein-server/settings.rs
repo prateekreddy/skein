@@ -254,7 +254,7 @@ pub(super) async fn api_settings() -> Json<serde_json::Value> {
 
 /// The settings as the page reads them: the file, plus `held` — which of its fields an environment
 /// variable is holding right now, and which variable ([`skein::config::held_by_env`]). The page
-/// says "held by `$SKEIN_X`" beside exactly those, and nothing beside the rest.
+/// names the variable beside exactly those, and nothing beside the rest.
 ///
 /// `held` is not a setting and is never written: the save merges into a `Config`, which has no
 /// such field, so a page that posts it back loses nothing and keeps nothing.

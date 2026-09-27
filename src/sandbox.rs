@@ -112,7 +112,7 @@ pub(crate) fn repo_launch_command_as(
     let agent = agent_override
         .map(str::to_string)
         .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(crate::runtime::fleet_agent);
+        .unwrap_or_else(crate::runtime::fleet_default_runtime);
     if let Err(e) = write_launch_spec_for_agent(name, &branch, repo, &agent) {
         eprintln!("skein: write_launch_spec: {e}");
     }

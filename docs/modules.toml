@@ -348,7 +348,9 @@ depends_on = ["runtime", "util"]
 [current.diff]
 # `source` for one word: the diff is computed inside the box, and the answer says so by naming the
 # reach that produced it. §2.2 requires a signal to carry that; §2.3 is where the word is defined.
-depends_on = ["answer", "config", "registry", "sandbox", "sbx", "source", "util"]
+# `repos`, not `config`, for the branch a diff is measured against: it is set per repository now
+# (`Repo::base_branch`, SKEIN-1208), so the base is read off the box's repo record.
+depends_on = ["answer", "registry", "repos", "sandbox", "sbx", "source", "util"]
 
 [current.digest]
 depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]

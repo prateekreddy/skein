@@ -19,7 +19,7 @@ pub(crate) fn default_agent() -> String {
 /// runtime, copied from this setting when the repo was added and never editable afterwards, and it
 /// outranked the setting — so changing the default changed nothing for any repo already added. A
 /// value this build does not know falls back to [`default_agent`] rather than launching nothing.
-pub(crate) fn fleet_agent() -> String {
+pub(crate) fn fleet_default_runtime() -> String {
     let chosen = crate::config::load_config().default_agent;
     match valid_runtime(&chosen) {
         true => chosen,

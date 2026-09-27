@@ -125,7 +125,8 @@ pub fn repin_branch(name: &str, branch: &str) -> Result<(), String> {
         return Err("branch is empty".into());
     }
     let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
-    let agent = launch_spec_agent(&repo, name).unwrap_or_else(crate::runtime::fleet_agent);
+    let agent =
+        launch_spec_agent(&repo, name).unwrap_or_else(crate::runtime::fleet_default_runtime);
     write_launch_spec_for_agent(name, branch, &repo, &agent)
 }
 
@@ -152,7 +153,7 @@ pub fn branch_of(name: &str) -> Option<String> {
 }
 
 /// Runtime configured for a box. Prefer sbx's live record, then the per-box launch spec (which
-/// records the New-box pick), then the fleet's default ([`crate::runtime::fleet_agent`]).
+/// records the New-box pick), then the fleet's default ([`crate::runtime::fleet_default_runtime`]).
 pub fn agent_for_box(name: &str) -> String {
     // Not for a box in the fleet. Migration leaves the old sandbox stopped but still listed under
     // the box's name, so `sbx ls` answers with a record from before the move — which would outrank
@@ -168,7 +169,7 @@ pub fn agent_for_box(name: &str) -> String {
     }
     repo_for_box(name)
         .and_then(|repo| launch_spec_agent(&repo, name))
-        .unwrap_or_else(crate::runtime::fleet_agent)
+        .unwrap_or_else(crate::runtime::fleet_default_runtime)
 }
 
 #[cfg(test)]

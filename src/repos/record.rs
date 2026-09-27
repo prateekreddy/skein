@@ -39,7 +39,7 @@ pub struct Repo {
     pub base_branch: String,
     // No `agent` (the owner, 2026-09-27). A repo's own runtime was copied from the fleet default at
     // add time, could not be edited afterwards, and outranked the default for every box of the repo.
-    // The runtime is the fleet's default plus a pick per box (`runtime::fleet_agent`). An old
+    // The runtime is the fleet's default plus a pick per box (`runtime::fleet_default_runtime`). An old
     // `repos.json` that still carries the key reads fine: serde skips a field it does not know.
     /// The Plane project this repo's work is tracked in — a project URL or a bare uuid, kept
     /// verbatim so the cockpit can link to the board. Per-repo because a project is what an agent

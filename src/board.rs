@@ -90,7 +90,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 .as_ref()
                 .and_then(|rp| launch_spec_agent(rp, &name))
                 .filter(|a| valid_runtime(a))
-                .unwrap_or_else(crate::runtime::fleet_agent);
+                .unwrap_or_else(crate::runtime::fleet_default_runtime);
             // Branch resolution, most-authoritative first. Lifecycle probes refresh the per-store
             // registry after an in-box checkout. The launch spec is only the creation fallback; the
             // host clone is a different worktree (often on main) and must never override box state.

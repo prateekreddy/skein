@@ -303,7 +303,6 @@ mod tests {
             script.contains("show-toplevel"),
             "the diff runs at the box's repo root, not wherever the shell landed: {script}"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     // The box answers with the base on the first line and the patch after it. A patch can contain
