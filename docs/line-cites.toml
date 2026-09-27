@@ -1830,8 +1830,8 @@ line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:981"]
-line = "// `session` is built from a validated box name and a validated runtime, so it is safe to spell"
+["src/sandbox.rs:1060"]
+line = "fn refusal_argv(name: &str) -> Vec<String> {"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/server-doorway.py:218"]
