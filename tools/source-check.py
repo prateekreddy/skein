@@ -56,6 +56,12 @@ SPEC = os.path.join(ROOT, "docs", "sources.toml")
 # about the tree the gate makes claims over.
 CRATE_DIRS = [SRC, WARDEN]
 
+# curl as a command word followed by what a command takes next: an option, a quoted or `$`
+# argument, or a URL. Requiring the argument is what keeps `command -v curl >/dev/null`, which asks
+# whether curl exists and reaches nothing, and prose that names curl, off the count. Shared by the
+# Rust spelling below and the embedded-shell reader.
+CURL_COMMAND = r"""\bcurl\s+(?:-|["'$]|https?://)"""
+
 # How each Source is spelled in Rust. Deliberately the PRIMITIVE, not the wrapper: `place.exec()` is
 # skein's own front door and finding it proves nothing, while `nsenter` is the syscall dressed as a
 # command and cannot be spelled by accident.
@@ -66,6 +72,10 @@ SPELLINGS = {
                  # about `fs::read`. Left empty on purpose rather than made up.
     "http": [
         r'Command::new\("curl"\)',
+        # curl spelled as a COMMAND inside a string: a script run under `sh -c`, where the spawn
+        # the pattern above looks for is `Command::new("sh")` and the reach is in the argument.
+        # `tracking` minted and revoked sync tokens this way and was on no list.
+        CURL_COMMAND,
         r'Command::new\("gh"\)',
         r"\bTcpStream\b",
         r"\breqwest\b",
@@ -128,6 +138,52 @@ def shipped_in(paths):
     return rustcut.uncommented(rustcut.split_unit(paths, CRATE_DIRS)[0])
 
 
+# How a Source is spelled in the shell scripts a unit embeds with `include_str!`. A script that
+# ships inside a unit's binary and runs in a box or a sandbox reaches as surely as a spawn in the
+# unit's Rust does, and the Rust patterns never see it: `box-session.sh`'s git shim probes GitHub
+# with curl, `bootstrap.sh` fetches rustup with it, and neither was counted anywhere.
+#
+# `http` only, for now, and said so rather than implied: the scripts also spell `tmux` and `sbx`,
+# and reading those well needs patterns written for shell (a bare `tmux` there is a server on the
+# default socket, not `tmux -S`), which is its own change. Comment lines are dropped first, as
+# `uncommented` does for Rust.
+SHELL_SPELLINGS = {"http": [CURL_COMMAND]}
+INCLUDED = re.compile(r'include_str!\(\s*"([^"]+\.sh)"\s*\)')
+
+
+def embedded_shell(paths):
+    """The shell scripts one unit's shipped code embeds, as {path: text without comment lines}.
+
+    Resolved against each file of the unit in turn, the way `include_str!` resolves them against
+    the file that names them. A named script that is not on disk is an error rather than a zero,
+    for the same reason as everywhere else in this gate: an unread reach is an unchecked one.
+    """
+    found = {}
+    for path in paths:
+        for name in INCLUDED.findall(shipped_in([path])):
+            script = os.path.normpath(os.path.join(os.path.dirname(path), name))
+            if not os.path.isfile(script):
+                raise SystemExit(
+                    f"source-check: {os.path.relpath(path, ROOT)} embeds {name}, which is not at "
+                    f"{os.path.relpath(script, ROOT)}, so its reaches cannot be counted"
+                )
+            with open(script) as f:
+                found[script] = "\n".join(
+                    line for line in f.read().splitlines() if not line.lstrip().startswith("#")
+                )
+    return found
+
+
+def shell_reaches_in(text):
+    """{source: hits} for one embedded script's text, by `SHELL_SPELLINGS`."""
+    found = {}
+    for source, patterns in SHELL_SPELLINGS.items():
+        hits = sum(len(re.findall(pattern, text)) for pattern in patterns)
+        if hits:
+            found[source] = hits
+    return found
+
+
 def reaches_in(text):
     """{source: hits} for one unit's already-cut text. Split out so the self-check can count."""
     found = {}
@@ -150,6 +206,9 @@ def read_reaches():
         body = shipped_in(paths)
         for source, hits in reaches_in(body).items():
             found[source][unit] += hits
+        for script in embedded_shell(paths).values():
+            for source, hits in shell_reaches_in(script).items():
+                found[source][unit] += hits
     return found
 
 
@@ -420,9 +479,38 @@ def self_check():
             "source-check: its own cut is broken — the cut moved line numbers, so nothing this "
             "gate reports can be located."
         )
+    self_check_curl()
     self_check_whole_file_tests()
     self_check_counts()
     self_check_merge()
+
+
+def self_check_curl():
+    """curl reached through a shell is counted, and asking whether curl exists is not.
+
+    Each case names what makes it fail: drop `CURL_COMMAND` from `SPELLINGS["http"]` and the
+    `sh -c` string reads as nothing, which is how `tracking` reached the sync gateway unlisted;
+    loosen it to a bare `\\bcurl\\b` and `command -v curl` is counted as a reach; stop adding
+    `embedded_shell` in `read_reaches` and the last assertion goes red.
+    """
+    string = 'let script = format!("curl -sS -m 30 -X POST {}/v1/agent-tokens", base);'
+    if reaches_in(string) != {"http": 1}:
+        raise SystemExit(
+            "source-check: its own counting is broken — curl run from a `sh -c` string was "
+            "counted as %r, not one `http` reach" % (reaches_in(string),)
+        )
+    shell = "command -v curl >/dev/null 2>&1 || exit 0\nif curl -sS --noproxy '*' \"$u\"; then :; fi\n"
+    if shell_reaches_in(shell) != {"http": 1}:
+        raise SystemExit(
+            "source-check: its own counting is broken — a script that asks whether curl exists "
+            "and then runs it once was counted as %r, not one `http` reach" % (shell_reaches_in(shell),)
+        )
+    import inspect
+    if "embedded_shell(paths)" not in inspect.getsource(read_reaches):
+        raise SystemExit(
+            "source-check: its own reader is broken — `read_reaches` does not read the shell "
+            "scripts a unit embeds, so a curl in `box-session.sh` reaches nothing on this list"
+        )
 
 
 def self_check_whole_file_tests():

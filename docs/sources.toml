@@ -59,11 +59,17 @@ reaches = {}
 # is recoverable. Asking first is still worth a Source row: it is a TCP connect out of `fleet`, and
 # what it decides is whether to make a host mapping, which is the privileged half.
 #
-# `place` was here for the in-sandbox agent, and is not any more: the agent listens on a unix
-# socket under `.skein/private/` rather than on `0.0.0.0:8317` (ISO-4), so what `place` speaks to
-# it is a `socket` reach and no longer a network one. The row leaving this list is the boundary
-# getting smaller, which is the only direction a Source list should ever move without a reason
-# written beside it.
+# `place` was here for the in-sandbox agent, and left: the agent listens on a unix socket under
+# `.skein/private/` rather than on `0.0.0.0:8317` (ISO-4), so what `place` speaks to it is a
+# `socket` reach and no longer a network one. **It is back at 1 for a reach that was never
+# counted, not a new one**: `place/crossing.rs` embeds `box-session.sh`, whose git shim runs
+# `skein_reach_hint` when a git command that reaches GitHub fails — `curl --noproxy '*'` to
+# api.github.com, bounded (`-m 5 --connect-timeout 3`), no credential, status discarded, so a
+# blocked egress policy is named instead of read as a transient git error. `health` asks the same
+# question from the server (`probe_github_reach_at`); the shim asks it inside the box, at the
+# moment git failed, where no skein binary runs. The checker read Rust only until SKEIN-1201
+# taught it the shell a unit embeds.
+#
 # `gitgate` left the same way, and for the better reason: it had a curl client of its own to mint
 # App tokens, and it now asks `github` instead. Two units spelling the same reach were two sets of
 # answers about the same boundary — one of them could not read an HTTP status and put its request
@@ -98,7 +104,15 @@ reaches = {}
 # ran out on an installed curl, so it answers from PATH now and spawns nothing. That is a probe
 # leaving, not a reach being hidden: the one left is `call_reading_headers`, the client every
 # GitHub request goes through.
-reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/serve" = 2, warden_client = 3 }
+#
+# **`fleet` is 3 from 1, and `tracking` is 2 from nothing, with no new reach among them**
+# (SKEIN-1201). The checker matched `Command::new("curl")` in Rust and nothing else, so curl run
+# from a `sh -c` string or from a script a unit embeds was invisible. `fleet` embeds the same
+# `box-session.sh` shim as `place` (`fleet/kit.rs`), and `bootstrap.sh` (`fleet/install.rs`),
+# which fetches rustup's installer over https when the sandbox has no Rust toolchain. `tracking`
+# mints and revokes a box's sync-gateway token with `curl -X POST` and `curl -X DELETE` under
+# `sh -c`, the Plane token passed in the environment rather than on argv.
+reaches = { doorway = 1, fleet = 3, github = 1, health = 2, place = 1, repos = 1, tracking = 2, "warden/serve" = 2, warden_client = 3 }
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and
