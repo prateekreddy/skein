@@ -12,9 +12,37 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
     let requests = tokio::task::spawn_blocking(skein::gitgate::fleet_requests)
         .await
         .unwrap_or_default();
+    // **Your GitHub identity, per repository** (SKEIN-1179): which credential skein reads each
+    // managed repository with and which it posts, merges and labels with — the same answer
+    // `prq::token_for` gives the queue, the verdict and the tick, from the same resolver, so the
+    // page cannot describe a credential the calls do not use. Blocking because the last source is
+    // the host's `gh` login, which is a subprocess the first time it is asked.
+    let identity = tokio::task::spawn_blocking(|| {
+        let repos: Vec<serde_json::Value> = skein::repos::load_repos()
+            .iter()
+            .filter_map(|repo| {
+                let slug = skein::gitgate::repo_slug(repo)?;
+                Some(serde_json::json!({
+                    "repo": repo.id,
+                    "slug": slug,
+                    "reads": skein::prq::repo_token_source(&slug, skein::prq::Need::Read).key(),
+                    "writes": skein::prq::repo_token_source(&slug, skein::prq::Need::Write).key(),
+                }))
+            })
+            .collect();
+        serde_json::json!({
+            // "Who am I" — the one call that names no repository, and so the one that may be
+            // answered by a token stored for some other repository.
+            "viewer": skein::prq::host_token_source().key(),
+            "repos": repos,
+        })
+    })
+    .await
+    .unwrap_or_default();
     let grants = skein::gitgate::grants();
     let now = chrono::Utc::now();
     Json(serde_json::json!({
+        "identity": identity,
         "requests": requests,
         // `live` is computed here rather than in the page: an expiry is a comparison against the
         // host's clock, and a browser in another timezone with a skewed clock would draw a grant as

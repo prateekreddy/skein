@@ -6,153 +6,97 @@
 
 use super::*;
 
-/// Where the token the host talks to GitHub with came from, in the order it is looked for.
-///
-/// The order is the point: skein offers three ways to give it GitHub access, and the review queue
-/// used to require a fourth — `gh auth login` — because it was built out of the `gh` CLI and `gh`
-/// only knows its own store. One credential the user chose should do every job it is capable of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GhToken {
-    /// `$GH_TOKEN` / `$GITHUB_TOKEN`.
-    Environment,
-    /// The read token stored in Settings. A user's own PAT, which is what a review queue needs: it
-    /// answers "who are you" and can see the repositories its owner can.
-    ReadToken,
-    /// A per-repo write token, used because it is also a user's PAT and no read token was stored.
-    /// Narrower than a read token — what it cannot see is reported as a blind spot rather than
-    /// quietly missing from the queue.
-    WritePat,
-    /// The host's own `gh` login, asked for last.
-    ///
-    /// It was missing, and its absence contradicted this list's own reason for existing: skein used
-    /// to read this login itself, to put the account token in front of every box, so a fleet whose
-    /// boxes pushed as you necessarily had a credential here that could say who you are. Reported
-    /// from a live fleet: `skein doctor` showing `gh secret seeded` and `boxes push with this
-    /// account's gh token` three lines above `github token none`, with every pull request queue
-    /// answering 502.
-    ///
-    /// That seeding is gone with the machine-global store (architecture §13a), so this arm no longer
-    /// has a fleet-wide caller keeping it warm — which makes it more important rather than less, as
-    /// the queue's last resort on a machine where somebody has run `gh auth login`.
-    GhCli,
-    /// Nothing. The queue says so instead of reporting an empty queue, which is the one failure it
-    /// must never look like.
-    None,
-}
+pub use crate::gitgate::{credential_for_repo, GhToken, Need};
 
-impl GhToken {
-    pub fn label(self) -> &'static str {
-        match self {
-            GhToken::Environment => "$GH_TOKEN",
-            GhToken::ReadToken => "the read token in Settings",
-            GhToken::WritePat => "a repository write token you stored",
-            GhToken::GhCli => "the host's `gh` login",
-            GhToken::None => "no token at all",
-        }
-    }
-}
-
-/// The token and where it came from. **A credential that was found is resolved once per process;
-/// the absence of one is not remembered.**
+/// The credential for a call that is about **no** repository — [`viewer`]'s "who am I", and the
+/// reports that describe the host's own login.
 ///
-/// The asymmetry is the whole of it, and it was learned the way these things are. The memo used to
-/// hold `(GhToken::None, None)` too, and nothing in production ever cleared it — every call site of
-/// [`forget_host_token`] below is in a test, and there has never been one anywhere else. So a
-/// server started before its user had a
-/// token stayed that way: install, open the cockpit, read *"no GitHub token … add a read token in
-/// Settings → GitHub & keys"*, add one, and the queue goes on saying the same sentence until
-/// somebody thinks to restart the server. The first-run path, ending in a dead end that reads as
-/// the feature being broken.
+/// `$GH_TOKEN`, the read token, any stored repository token, then `gh`. Any token belonging to a
+/// user can answer `/user`, so here — and only here — a repository token filed for some other
+/// repository is a fair answer (SKEIN-953 is that same fallback reaching calls that DO name a
+/// repository, which now ask [`credential_for_repo`] instead).
 ///
-/// Re-looking costs two environment reads and two small file reads, which is nothing beside the
-/// network call every caller is about to make. The one source that is *not* free is the `gh` CLI,
-/// and [`look_for_a_credential`] says what happens to that one.
+/// **Nothing but the `gh` answer is remembered** (SKEIN-1177). This used to keep the first
+/// credential it found for the life of the process, and nothing in production ever cleared it, so a
+/// token replaced or forgotten in Settings went on being used until a restart — the same dead end
+/// SKEIN-1172's "replace it under Settings" sentence pointed people into.
 ///
 /// An App is deliberately absent from this list. An installation token authenticates an
 /// installation, not a person, so it cannot answer "whose review is this waiting on" — the queue's
 /// whole question. That limit is the App's, and saying so beats falling back to something that
 /// half-works.
 fn host_credential() -> (GhToken, Option<crate::secret::Secret>) {
-    let mut slot = match GH_TOKEN.lock() {
-        Ok(slot) => slot,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if slot.is_none() {
-        *slot = look_for_a_credential();
+    if let Some(token) = crate::gitgate::environment_token() {
+        return (GhToken::Environment, Some(token));
     }
-    // A fresh `Secret` per caller rather than the cached one, because [`crate::secret::Secret`] has
-    // no `Clone` on purpose: every copy is another buffer to scrub, so a copy is made where somebody
-    // can see it being made. The cached one stays here and is scrubbed when the process ends.
-    match slot.as_ref() {
-        Some((source, held)) => (*source, Some(crate::secret::Secret::new(held.expose()))),
+    if let Some(pat) = crate::gitgate::read_pat() {
+        return (GhToken::ReadToken, Some(pat));
+    }
+    if let Some(pat) = crate::gitgate::any_user_pat() {
+        return (GhToken::WritePat, Some(pat));
+    }
+    // Last, and last for a reason rather than by accident: asking `gh` can unlock a keyring, and
+    // every source above costs nothing.
+    match crate::gitgate::gh_login() {
+        Some(token) => (GhToken::GhCli, Some(token)),
         None => (GhToken::None, None),
     }
 }
 
-/// Every place a credential can come from, in the order they win, and `None` if there is none.
-///
-/// Separate from the memo above so that the memo can hold what this **found** and nothing else.
-fn look_for_a_credential() -> Option<(GhToken, crate::secret::Secret)> {
-    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(value) = std::env::var(key) {
-            if !value.trim().is_empty() {
-                return Some((
-                    GhToken::Environment,
-                    crate::secret::Secret::new(value.trim()),
-                ));
-            }
-        }
-    }
-    if let Some(pat) = crate::gitgate::read_pat() {
-        return Some((GhToken::ReadToken, pat));
-    }
-    // Any write PAT they stored. It belongs to a person, so it can say who that person is —
-    // which is the whole of what this needs.
-    if let Some(pat) = crate::gitgate::any_user_pat() {
-        return Some((GhToken::WritePat, pat));
-    }
-    // Last, and last for a reason rather than by accident: `gh` keeps its token in the system
-    // keyring on a modern Linux, so asking can unlock one — which is why skein's own startup
-    // stopped asking once the fleet secret was seeded. Every source above costs nothing, so
-    // this is reached only by a host that would otherwise have no credential at all.
-    //
-    // **The one source whose absence is written down**, because it is the one that costs
-    // something: a subprocess, a 15-second ceiling, and possibly a keyring prompt. Re-running it
-    // on every `host_token()` — seventeen call sites outside the tests, several of them per queue
-    // refresh, per repo, every three minutes from the badge poll — would turn a host with no
-    // credential from slow to unusable. So `gh` is asked once, and a host that is given a `gh`
-    // login after startup still needs a restart. The route the cockpit actually sends a person to
-    // — Settings → GitHub & keys, which writes a file this reads two lines up — does not, and that
-    // is the one the first-run dead end was on.
-    let mut asked = match GH_CLI_ASKED.lock() {
-        Ok(asked) => asked,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if !*asked {
-        *asked = true;
-        if let Some(token) = crate::repos::gh_cli_token() {
-            return Some((GhToken::GhCli, crate::secret::Secret::new(&token)));
-        }
-    }
-    None
+/// Which credential a call about `slug` would run on, for the places that report it.
+pub fn repo_token_source(slug: &str, need: Need) -> GhToken {
+    credential_for_repo(slug, need).0
 }
 
-/// Which credential the host's GitHub calls are running on, for the places that report it.
-pub fn host_token_source() -> GhToken {
-    host_credential().0
-}
-
-/// The token itself, or the sentence to show instead of an empty queue.
+/// The token for a call about `slug`, or the sentence to show instead.
 ///
 /// Public because the workflow tick acts as you — a label, a merge, a deleted branch are all things
 /// GitHub attributes to whoever's credential asked. There is deliberately no second, quieter
 /// credential for automation: everything skein does on its own is done as you, and shows up in the
 /// repository's history under your name where you can see it.
+pub fn token_for(slug: &str, need: Need) -> Result<crate::secret::Secret, String> {
+    if let (_, Some(token)) = credential_for_repo(slug, need) {
+        return Ok(token);
+    }
+    // A write that found nothing may still have passed the read token over, and that is the one
+    // refusal that must say so: "no token" beside a token the person can see stored in Settings
+    // reads as skein being broken.
+    if need == Need::Write && crate::gitgate::read_pat().is_some() {
+        return Err(format!(
+            "skein will not post, merge or label on {slug} with your read token — it is for \
+             reading only. To act here, store a token for {slug} on its card under Settings → \
+             Repositories, export GH_TOKEN, or run `gh auth login` on the host."
+        ));
+    }
+    Err(match need {
+        Need::Read => format!(
+            "No GitHub token reaches {slug}. Store a token for it on its card under Settings → \
+             Repositories, add a read token under Settings → GitHub & keys → Your GitHub \
+             identity, export GH_TOKEN, or run `gh auth login` on the host. A GitHub App cannot \
+             stand in: its token is not a person."
+        ),
+        Need::Write => format!(
+            "No GitHub token can act on {slug}. Store a token for it on its card under Settings → \
+             Repositories, export GH_TOKEN, or run `gh auth login` on the host. A GitHub App \
+             cannot stand in: its token is not a person."
+        ),
+    })
+}
+
+/// Which credential the host's repository-less calls run on — [`viewer`]'s — for the places that
+/// report it.
+pub fn host_token_source() -> GhToken {
+    host_credential().0
+}
+
+/// The token for a call that names no repository, or the sentence to show instead. [`viewer`] is
+/// the one such call; everything about a repository asks [`token_for`].
 pub fn host_token() -> Result<crate::secret::Secret, String> {
     host_credential().1.ok_or_else(|| {
         "no GitHub token: the review queue reads pull requests as you, and nothing here names a \
-         user. Any of these does it — `gh auth login` on the host, exporting GH_TOKEN, or a read \
-         token in Settings → GitHub & keys. A GitHub App cannot: an installation token is not a \
+         user. Any of these does it — `gh auth login` on the host, exporting GH_TOKEN, a token on \
+         a repository's card under Settings → Repositories, or a read token under Settings → \
+         GitHub & keys → Your GitHub identity. A GitHub App cannot: an installation token is not a \
          person."
             .to_string()
     })
@@ -183,9 +127,9 @@ pub fn host_token() -> Result<crate::secret::Secret, String> {
 /// is spent, in exactly the condition that produces it.
 ///
 /// Anything else remembered per process from a GitHub answer belongs here too. Reading a local
-/// credential does not ([`host_credential`]) — no rate limit can manufacture "no token at all" —
-/// but it keeps the same rule for the same reason: only a credential that was **found** is written
-/// down, because a miss there is a person who has not finished setting skein up yet.
+/// credential does not ([`host_credential`], [`credential_for_repo`]) — no rate limit can
+/// manufacture "no token at all" — and nothing read there is written down at all except `gh`'s
+/// answer, so a token stored, replaced or forgotten in Settings is what the next call uses.
 fn what_github_said<T: Clone>(
     memo: &std::sync::Mutex<std::collections::BTreeMap<String, T>>,
     slug: &str,
@@ -218,7 +162,7 @@ fn what_github_said<T: Clone>(
 /// what `crate::github::canonical_repo` exists to read.
 pub(super) fn renamed_to(slug: &str) -> Option<String> {
     what_github_said(&RENAMES, slug, || {
-        let token = host_token()?;
+        let token = token_for(slug, Need::Read)?;
         let now = crate::github::canonical_repo(slug, &token)?;
         // The name GitHub gave, and `None` when that is the name skein already holds. This `None`
         // is an ANSWER — it is inside the `Ok`, so it is remembered.
@@ -291,7 +235,7 @@ pub fn forget_renames() {
 /// place and cannot disagree about what the trunk is.
 pub fn trunk_of(slug: &str) -> String {
     what_github_said(&TRUNKS, slug, || {
-        let token = host_token()?;
+        let token = token_for(slug, Need::Read)?;
         let repo = crate::github::get_json(&crate::github::repo_path(slug), &token)?;
         repo.get("default_branch")
             .and_then(|b| b.as_str())
@@ -311,30 +255,14 @@ pub fn forget_trunks() {
     }
 }
 
-/// The one resolution, remembered. A `Mutex<Option<_>>` rather than a `OnceLock` so a test can
-/// forget it; the outer `Option` is "**have we found one**" — never "have we looked yet", which is
-/// the distinction [`host_credential`] exists to keep.
-static GH_TOKEN: std::sync::Mutex<Option<(GhToken, crate::secret::Secret)>> =
-    std::sync::Mutex::new(None);
-
-/// Whether the `gh` CLI has already been asked and had nothing — see [`look_for_a_credential`].
-static GH_CLI_ASKED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
-
-/// Forget it, so the next call resolves again.
+/// Forget what `gh` said, so the next call asks it again — see [`crate::gitgate::gh_login`], the
+/// one credential source that is remembered.
 ///
 /// Public because `tests/review_queue.rs` is a separate crate and points skein at a different stub
-/// per test: a token resolved once for the process would be the first test's, in every test.
-///
-/// Both memos, and the second one matters more than it looks: a test that leaves `GH_CLI_ASKED`
-/// set makes the next test's stub `gh` on `PATH` unreachable, and a test whose credential is never
-/// asked for passes for the wrong reason.
+/// per test: a `gh` answer kept for the process would be the first test's, in every test — and a
+/// test whose stub `gh` on `PATH` is never asked passes for the wrong reason.
 pub fn forget_host_token() {
-    if let Ok(mut slot) = GH_TOKEN.lock() {
-        *slot = None;
-    }
-    if let Ok(mut asked) = GH_CLI_ASKED.lock() {
-        *asked = false;
-    }
+    crate::gitgate::forget_gh_login();
 }
 
 /// The GitHub repository a managed repo maps to, as `owner/name`.
@@ -399,8 +327,9 @@ pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
         // `gh auth login`", as if that were the only one.
         format!(
             "GitHub could not identify you from {}: {e}. The review queue needs a token that names \
-             a user — export GH_TOKEN, or add a read token in Settings → GitHub & keys (a PAT of \
-             your own, which is what a fleet on the PAT path already has).",
+             a user — export GH_TOKEN, add a read token under Settings → GitHub & keys → Your \
+             GitHub identity, or store a token on a repository's card under Settings → \
+             Repositories.",
             host_token_source().label()
         )
     })?;
@@ -604,7 +533,7 @@ mod tests {
 
     /// **The GitHub credential is a `Secret` from the cache outwards, and prints as one.**
     ///
-    /// `host_credential` memoises the resolved token for the life of the process, and it used to
+    /// `host_credential` used to memoise the resolved token for the life of the process, and to
     /// memoise a `String` — so the credential sat in a static, in the clear, and any `{:?}` of what
     /// `host_token` returned put it on somebody's terminal or in a log. Under
     /// [`crate::secret::Secret`] that same `{:?}` is `<secret>`, and the bytes are scrubbed when the
@@ -1262,11 +1191,11 @@ mod tests {
     /// Driven with a `gh` on `PATH` that has no login, because that is the host state this is
     /// about and because a real `gh` on the machine running the tests would otherwise answer.
     ///
-    /// **What would make this fail:** putting the miss back in the memo — `slot.get_or_insert_with`
-    /// returning `(GhToken::None, None)`. The second `host_token_source` then still says `None`
-    /// with the token sitting in `$SKEIN_HOME/github-read-token`. And the second half fails the
-    /// other way: dropping `GH_CLI_ASKED` makes the log three lines instead of one, which is a
-    /// subprocess and a possible keyring prompt per GitHub call on a host with no credential.
+    /// **What would make this fail:** remembering the first answer, miss included, for the life of
+    /// the process. The second `host_token_source` then still says `None` with the token sitting in
+    /// `$SKEIN_HOME/github-read-token`. And the second half fails the other way: dropping the `gh`
+    /// memo (`gitgate::gh_login`) makes the log three lines instead of one, which is a subprocess
+    /// and a possible keyring prompt per GitHub call on a host with no credential.
     #[test]
     fn a_token_stored_after_the_first_look_is_found_without_a_restart() {
         let _g = crate::testutil::env_lock();
@@ -1460,5 +1389,459 @@ mod tests {
             "a review would have been posted to a name the repository no longer has"
         );
         forget_renames();
+    }
+
+    // ─────────────── one resolver per repository (SKEIN-953, 1176, 1177) ───────────────
+
+    /// One request as [`auth_github`] heard it: method, path, the `Authorization` value (lowercased,
+    /// empty when there was none), and the body.
+    #[derive(Debug, Clone)]
+    struct Heard {
+        method: String,
+        path: String,
+        auth: String,
+        body: String,
+    }
+
+    impl Heard {
+        /// Does this request change something on GitHub? A mutation over GraphQL counts.
+        fn writes(&self) -> bool {
+            self.method != "GET" && !(self.path == "/graphql" && !self.body.contains("mutation"))
+        }
+        /// Is this request about `slug` — in its path, or in a GraphQL body that names it?
+        fn about(&self, slug: &str) -> bool {
+            self.path.contains(&format!("/repos/{slug}/"))
+                || self.path == format!("/repos/{slug}")
+                || self.body.contains(&format!("repo:{slug}"))
+        }
+    }
+
+    /// A GitHub that records, per request, **which credential it was handed** — so every assertion
+    /// below is about the wire, not about what a function returned. It answers the handful of
+    /// shapes the queue, a verdict, a merge and a thread resolve need, and `{}` to anything else.
+    fn auth_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Heard>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let mut words = request.split_whitespace();
+                let method = words.next().unwrap_or("").to_string();
+                let path = words.next().unwrap_or("").to_string();
+                let (mut length, mut auth) = (0usize, String::new());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(n) = lower.strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    if let Some(a) = lower.strip_prefix("authorization:") {
+                        auth = a.trim().to_string();
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                let answer = match (method.as_str(), path.as_str()) {
+                    (_, "/user") => r#"{"login":"me"}"#.to_string(),
+                    (_, p) if p.starts_with("/user/teams") => "[]".to_string(),
+                    (_, "/graphql") if body.contains("resolveReviewThread") => {
+                        r#"{"data":{"resolveReviewThread":{"thread":{"id":"T","isResolved":true}}}}"#
+                            .to_string()
+                    }
+                    (_, "/graphql") => {
+                        r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                            .to_string()
+                    }
+                    ("PUT", p) if p.ends_with("/merge") => {
+                        r#"{"merged":true,"message":"merged"}"#.to_string()
+                    }
+                    ("POST", p) if p.ends_with("/reviews") => r#"{"id":1}"#.to_string(),
+                    ("GET", p) if p.contains("/pulls/") => {
+                        r#"{"state":"open","head":{"sha":"abc"},"base":{"ref":"main"}}"#.to_string()
+                    }
+                    ("GET", p) if p.starts_with("/repos/") => format!(
+                        r#"{{"full_name":"{}","default_branch":"main"}}"#,
+                        p.trim_start_matches("/repos/")
+                    ),
+                    _ => "{}".to_string(),
+                };
+                recorder.lock().unwrap().push(Heard {
+                    method,
+                    path,
+                    auth,
+                    body,
+                });
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), heard)
+    }
+
+    /// A home with no credential from the machine running the test: no `$GH_TOKEN`, no
+    /// `$GITHUB_TOKEN`, and a `gh` first on `$PATH` that has no login. Without this, a machine with
+    /// either would answer the "nothing else" half of every test below with its owner's real token.
+    fn with_no_host_credential(home: &std::path::Path, base: &str) -> crate::testutil::EnvPins {
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home)
+            .set("SKEIN_GITHUB_API", base)
+            .unset("GH_TOKEN")
+            .unset("GITHUB_TOKEN");
+        let bin = home.join("no-gh-login");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        env.set("PATH", format!("{}:{path}", bin.display()));
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+        env
+    }
+
+    /// Store a token for exactly one repository, the way a repo card does.
+    fn store_token_for(slug: &str, token: &str) {
+        let id = slug.replace('/', "-");
+        crate::gitgate::set_write_credential(&id, slug, &[slug.to_string()]).unwrap();
+        crate::gitgate::set_credential_token(&id, token).unwrap();
+    }
+
+    fn queued_repo(id: &str, slug: &str) -> crate::repos::Repo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "source": format!("https://github.com/{slug}.git"),
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap()
+    }
+
+    /// **Two repositories, two stored tokens: each repository's queue and merge carry its own**
+    /// (SKEIN-953, the owner's decision of 2026-09-27).
+    ///
+    /// `acme/one`'s token is FIRST in the file, which is the live shape of the bug: every host call
+    /// took the first stored token whatever repository it was about, so `acme/two`'s search, trunk
+    /// lookup and merge went out with a token scoped to `acme/one`, and GitHub answers a
+    /// fine-grained PAT outside its scope with a 401.
+    ///
+    /// **What would make it fail:** `credential_for_repo` taking "any stored token" for its first
+    /// step instead of the one filed under `slug` — every `acme/two` request then carries
+    /// `skein-test-one`, and `every request about acme/two carries acme/two's token` fails.
+    #[test]
+    fn each_repositorys_queue_and_merge_carry_that_repositorys_own_token() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let (base, heard) = auth_github();
+        let _env = with_no_host_credential(home.as_ref() as &std::path::Path, &base);
+        store_token_for("acme/one", "skein-test-one");
+        store_token_for("acme/two", "skein-test-two");
+        let (one, two) = (
+            queued_repo("one", "acme/one"),
+            queued_repo("two", "acme/two"),
+        );
+        crate::repos::save_repos(&[one.clone(), two.clone()]).unwrap();
+
+        queue(&one, true).expect("acme/one's queue answered");
+        queue(&two, true).expect("acme/two's queue answered");
+        merge("acme/one", 1, "abc").expect("acme/one merged");
+        merge("acme/two", 2, "abc").expect("acme/two merged");
+
+        let heard = heard.lock().unwrap().clone();
+        for (slug, token, merged) in [
+            (
+                "acme/one",
+                "bearer skein-test-one",
+                "/repos/acme/one/pulls/1/merge",
+            ),
+            (
+                "acme/two",
+                "bearer skein-test-two",
+                "/repos/acme/two/pulls/2/merge",
+            ),
+        ] {
+            let about: Vec<&Heard> = heard.iter().filter(|h| h.about(slug)).collect();
+            assert!(
+                about.iter().any(|h| h.path == "/graphql"),
+                "{slug}'s queue was never searched, so the assertion below is about nothing: \
+                 {heard:#?}"
+            );
+            assert!(
+                about.iter().any(|h| h.method == "PUT" && h.path == merged),
+                "{slug} was never merged: {heard:#?}"
+            );
+            for h in &about {
+                assert_eq!(
+                    h.auth, token,
+                    "every request about {slug} carries {slug}'s token — {} {} did not",
+                    h.method, h.path
+                );
+            }
+        }
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+    }
+
+    /// **The read token never reaches a write** (SKEIN-1176), and a write that has only it refuses
+    /// with a sentence naming what to add.
+    ///
+    /// The read side is asserted too, and that is what stops this passing for nothing: the read
+    /// token IS used — for a read — so the absence of it on every write is the resolver's choice,
+    /// not a token that was never there.
+    ///
+    /// **What would make it fail:** dropping `need == Need::Read` from the read-token step of
+    /// `credential_for_repo`. The verdict then goes out carrying the read token and succeeds, so
+    /// `an approval went out with the read token` fails — and were it not checked there, `no write
+    /// was sent at all` would.
+    #[test]
+    fn the_read_token_never_reaches_a_write_and_the_refusal_says_what_to_add() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let (base, heard) = auth_github();
+        let _env = with_no_host_credential(home.as_ref() as &std::path::Path, &base);
+        crate::gitgate::set_read_pat("skein-test-read-only").unwrap();
+
+        assert_eq!(
+            pr_is_open("acme/one", 1),
+            Some(true),
+            "a read with the read token stored did not answer"
+        );
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|h| !h.writes() && h.auth == "bearer skein-test-read-only"),
+            "the read token was not used for a read, so nothing below proves anything"
+        );
+
+        let refusals = [
+            submit_review("acme/one", 1, Verdict::Approve, "")
+                .expect_err("an approval went out with the read token"),
+            merge("acme/one", 1, "abc").expect_err("a merge went out with the read token"),
+            resolve_review_thread("acme/one", "T")
+                .expect_err("a thread was resolved with the read token"),
+            token_for("acme/one", Need::Write)
+                .map(|_| ())
+                .expect_err("a write was handed a token"),
+        ];
+        let heard = heard.lock().unwrap().clone();
+        assert!(
+            heard.iter().all(|h| !h.writes()),
+            "no write was sent at all: {heard:#?}"
+        );
+        for why in &refusals {
+            assert!(
+                why.contains("read token")
+                    && why.contains("acme/one")
+                    && why.contains("Settings → Repositories")
+                    && why.contains("GH_TOKEN")
+                    && why.contains("gh auth login"),
+                "the refusal must say the read token is why, and what to add: {why}"
+            );
+        }
+        crate::gitgate::set_read_pat("").unwrap();
+        forget_host_token();
+    }
+
+    /// **A token replaced on disk is the one the very next call sends** (SKEIN-1177) — no restart,
+    /// and nothing calls `forget_host_token` in between, because nothing in the server does.
+    ///
+    /// Both roads: a repository's own token (what the queue, verdicts and merges use), and the read
+    /// token behind "who am I".
+    ///
+    /// **What would make it fail:** remembering a found credential for the life of the process, as
+    /// `host_credential` used to — the second call then still sends the first token, and `the
+    /// replaced repository token` (or `the replaced read token`) fails.
+    #[test]
+    fn a_token_replaced_on_disk_is_used_by_the_next_call_without_a_restart() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let (base, heard) = auth_github();
+        let _env = with_no_host_credential(home.as_ref() as &std::path::Path, &base);
+        let last_auth = || heard.lock().unwrap().last().map(|h| h.auth.clone());
+
+        store_token_for("acme/one", "skein-test-before");
+        live_head_sha("acme/one", 1).expect("the first call answered");
+        assert_eq!(last_auth().as_deref(), Some("bearer skein-test-before"));
+        crate::gitgate::set_credential_token("acme-one", "skein-test-after").unwrap();
+        live_head_sha("acme/one", 1).expect("the second call answered");
+        assert_eq!(
+            last_auth().as_deref(),
+            Some("bearer skein-test-after"),
+            "the replaced repository token was not the one sent next"
+        );
+
+        crate::gitgate::remove_write_credential("acme-one").unwrap();
+        crate::gitgate::set_read_pat("skein-test-read-before").unwrap();
+        viewer().expect("who am I, first");
+        assert!(heard
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|h| h.path == "/user" && h.auth == "bearer skein-test-read-before"));
+        crate::gitgate::set_read_pat("skein-test-read-after").unwrap();
+        heard.lock().unwrap().clear();
+        viewer().expect("who am I, second");
+        assert!(
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|h| h.path == "/user" && h.auth == "bearer skein-test-read-after"),
+            "the replaced read token was not the one sent next: {:#?}",
+            heard.lock().unwrap()
+        );
+        crate::gitgate::set_read_pat("").unwrap();
+        forget_host_token();
+    }
+
+    /// **`$GH_TOKEN` ranks below a repository's own token, and above everything else** (the
+    /// owner's decision of 2026-09-27, survey Q2).
+    ///
+    /// A token stored for a repository is a deliberate "reach this repo this way"; the environment
+    /// variable is whatever the sandbox was started with. A repository with no token of its own
+    /// still gets the environment's.
+    ///
+    /// **What would make it fail:** the environment step moved above the stored one — `acme/one`
+    /// then goes out with `skein-test-env`, and `a repository's own token outranks $GH_TOKEN`
+    /// fails. Dropping the environment step instead fails `a repository with no token of its own`.
+    #[test]
+    fn gh_token_ranks_below_a_repositorys_own_token() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let (base, heard) = auth_github();
+        let mut env = with_no_host_credential(home.as_ref() as &std::path::Path, &base);
+        env.set("GH_TOKEN", "skein-test-env");
+        store_token_for("acme/one", "skein-test-one");
+        crate::gitgate::set_read_pat("skein-test-read-only").unwrap();
+
+        live_head_sha("acme/one", 1).expect("acme/one answered");
+        live_head_sha("acme/two", 1).expect("acme/two answered");
+        let heard = heard.lock().unwrap().clone();
+        let sent_for = |slug: &str| {
+            heard
+                .iter()
+                .find(|h| h.about(slug))
+                .map(|h| h.auth.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            sent_for("acme/one"),
+            "bearer skein-test-one",
+            "a repository's own token outranks $GH_TOKEN"
+        );
+        assert_eq!(
+            sent_for("acme/two"),
+            "bearer skein-test-env",
+            "a repository with no token of its own is read with $GH_TOKEN, ahead of the read token"
+        );
+        assert_eq!(
+            repo_token_source("acme/one", Need::Write),
+            GhToken::WritePat
+        );
+        assert_eq!(
+            repo_token_source("acme/two", Need::Write),
+            GhToken::Environment
+        );
+        crate::gitgate::set_read_pat("").unwrap();
+        forget_host_token();
+    }
+
+    /// **The last step of the order: with nothing else, the host's `gh` login reads AND writes**
+    /// (the owner's decision of 2026-09-27), and `gh` is asked once however many calls follow.
+    ///
+    /// No stored token, no `$GH_TOKEN`, no read token — only a `gh` on `$PATH` that prints a login
+    /// and writes a line to a log each time it is asked. A read, a merge and a second read then
+    /// have to carry that login, and the log has to hold exactly one line: the memo in
+    /// `gitgate::gh_login` is the one thing this resolver is allowed to remember.
+    ///
+    /// **What would make it fail:** `credential_for_repo` ending in `(GhToken::None, None)` instead
+    /// of asking `gh_login()` — the read then refuses, and `a read with only the gh login answered`
+    /// fails. Dropping the memo instead asks `gh` on every call (five times here), and `gh is
+    /// asked once across calls` fails.
+    #[test]
+    fn with_only_a_gh_login_a_repository_is_read_and_written_with_it_and_gh_is_asked_once() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let (base, heard) = auth_github();
+        let mut env = with_no_host_credential(home, &base);
+        let bin = home.join("gh-login");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("gh-asked.log");
+        std::fs::write(
+            bin.join("gh"),
+            format!(
+                "#!/bin/sh\n[ \"$1 $2\" = \"auth token\" ] || exit 1\necho asked >> '{}'\necho skein-test-gh-login\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        env.set("PATH", format!("{}:{path}", bin.display()));
+        forget_host_token();
+
+        live_head_sha("acme/one", 1).expect("a read with only the gh login answered");
+        merge("acme/one", 1, "abc").expect("a merge with only the gh login went out");
+        live_head_sha("acme/one", 1).expect("a second read with only the gh login answered");
+
+        let heard = heard.lock().unwrap().clone();
+        assert!(
+            heard.iter().any(|h| h.method == "PUT" && h.path == "/repos/acme/one/pulls/1/merge"),
+            "the merge never reached GitHub, so the assertion below is about reads only: {heard:#?}"
+        );
+        for h in heard.iter().filter(|h| h.about("acme/one")) {
+            assert_eq!(
+                h.auth, "bearer skein-test-gh-login",
+                "every request about acme/one carries the gh login — {} {} did not",
+                h.method, h.path
+            );
+        }
+        assert_eq!(repo_token_source("acme/one", Need::Read), GhToken::GhCli);
+        assert_eq!(repo_token_source("acme/one", Need::Write), GhToken::GhCli);
+        let asked = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(
+            asked.lines().count(),
+            1,
+            "gh is asked once across calls, and was asked {} times",
+            asked.lines().count()
+        );
+        forget_host_token();
     }
 }

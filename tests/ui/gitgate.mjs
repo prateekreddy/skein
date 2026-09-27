@@ -35,6 +35,8 @@ const source = [
   // last payload from `gitLast`. Without these two the suite died at its first `renderGitState`
   // with `ReferenceError: renderReviewIdentityNote is not defined`.
   "gitLast", "renderReviewIdentityNote",
+  // The per-repository "Your GitHub identity" rows (SKEIN-1179) and the words they are drawn in.
+  "IDENTITY_WORDS", "renderIdentity",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -52,6 +54,7 @@ const scope = new Function(`
   let scoped = { checked: true };
   let identity = { value: "me" };
   let identityNote = { hidden: true };
+  let identityRows = { innerHTML: "" };
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
   let failing = null;
   ${grab("esc")}
@@ -69,6 +72,7 @@ const scope = new Function(`
       if (id === "set-gitscope") return scoped;
       if (id === "set-review-identity") return identity;
       if (id === "set-review-identity-note") return identityNote;
+      if (id === "set-identity") return identityRows;
       if (id === "ar-plane") return form.plane;
       if (id === "ar-conn") return form.conn;
       if (id === "ar-review") return form.review;
@@ -102,7 +106,7 @@ const scope = new Function(`
   ${source}
   return {
     decideGitq, pollGitq, gitqCard, gitqGrantRow, revokeGitq, gitCredRow, editGitCred,
-    addGitCred, removeGitCred, renderGitState, repoSlug, nonGitHubHost, repoTokenRow, arApplySettings, credFor,
+    addGitCred, removeGitCred, renderGitState, renderIdentity, repoSlug, nonGitHubHost, repoTokenRow, arApplySettings, credFor,
     fields: () => fields,
     form: () => form,
     state: () => state,
@@ -111,6 +115,7 @@ const scope = new Function(`
     setIdentity: v => { identity.value = v; },
     setGitLast: d => { gitLast = d; },
     identityNote: () => identityNote,
+    identityRows: () => identityRows.innerHTML,
     failOn: u => { failing = u; },
     sent: () => sent,
     notes: () => notes,
@@ -426,6 +431,33 @@ T.setGitLast(noApp);
 T.renderGitState(noApp);
 check("with reviews acting as the App and no App set up, the status repaint shows the note", T.identityNote().hidden, false);
 
+
+// --- your GitHub identity, per repository (SKEIN-1179) ---------------------------------------------
+// The server says which source each repository reads and acts with (`gitgate::credential_for_repo`);
+// the page must name each one, and a repository nothing can act on must say so with the fix.
+// **What would make these fail**: drawing `reads` in both columns (the read-only row then claims it
+// posts with the read token), or dropping the warning on a row that cannot act.
+T.renderIdentity({ viewer: "repo", repos: [
+  { repo: "one", slug: "acme/one", reads: "repo", writes: "repo" },
+  { repo: "two", slug: "acme/two", reads: "read", writes: "none" },
+  { repo: "three", slug: "acme/three", reads: "env", writes: "env" },
+] });
+{
+  const rows = T.identityRows();
+  const rowOf = slug => (rows.split(`data-identity="${slug}"`)[1] || "").split("</div>")[0];
+  check("a repository with its own token reads and acts with it",
+    rowOf("acme/one").includes("reads with this repo&#39;s token · posts and merges with this repo&#39;s token"), true);
+  check("one with only the read token reads with it and acts with nothing",
+    /reads with your read token · posts and merges with nothing/.test(rowOf("acme/two")), true);
+  check("and says it cannot post, merge or label, and what to add",
+    /cannot post, merge or label here — store a token for it on its card/.test(rowOf("acme/two")), true);
+  check("one covered by the environment names $GH_TOKEN",
+    /reads with \$GH_TOKEN · posts and merges with \$GH_TOKEN/.test(rowOf("acme/three")), true);
+  check("a repository that can act carries no warning", /cannot post/.test(rowOf("acme/one")), false);
+}
+T.renderIdentity({ viewer: "none", repos: [] });
+check("no repositories says so rather than drawing nothing", /No GitHub repositories yet/.test(T.identityRows()), true);
+
 // --- which repository a source names --------------------------------------------------------------
 // Every row here is a case `gitgate::slug_from_url` handles; the two must not disagree.
 for (const [source, want] of [
@@ -454,6 +486,10 @@ T.setCreds([{ id: "acme-thing", repo: "acme/thing", has_token: true, problem: ""
 const owned = T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("a repo with a stored token says so on its own card", owned.includes("token stored"), true);
 check("and offers to forget it", owned.includes("Forget"), true);
+// The card says the token also runs this repository's queue, reviews and merges (SKEIN-1179) — it
+// used to say only that boxes push with it, while it was silently the host's identity too.
+check("and says the token also runs this repo's queue, reviews and merges",
+  owned.includes("your queue, reviews and merges here run on it"), true);
 
 const fromApp = T.repoTokenRow({ id: "other", source: "git@github.com:acme/other.git", slug: "acme/other" });
 check("one without falls back to the App rather than reading as broken", fromApp.includes("from the App"), true);

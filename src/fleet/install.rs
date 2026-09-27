@@ -758,10 +758,18 @@ mod tests {
             "the bootstrap failed with no ref asked for:\n{}\n{ran2}",
             String::from_utf8_lossy(&out2.stderr)
         );
+        // Found by its subcommand wherever it sits, then held to the exact form: the clone runs
+        // with git's credential helper emptied (SKEIN-1171), so a fetch of a public source sends
+        // no stored login — a clone that regained a helper fails here, not "nothing cloned".
         let cloned = ran2
             .lines()
-            .find(|l| l.starts_with("git clone"))
+            .find(|l| l.starts_with("git ") && l.split_whitespace().any(|w| w == "clone"))
             .unwrap_or_else(|| panic!("nothing cloned:\n{ran2}"));
+        assert!(
+            cloned.starts_with("git -c credential.helper= clone "),
+            "the clone no longer runs with git's credential helper emptied, so it can send a \
+             stored login to the source it fetches: {cloned}"
+        );
         assert!(
             !cloned.contains("--branch"),
             "with no SKEIN_SOURCE_REF the clone still names a branch, so it cannot take the \

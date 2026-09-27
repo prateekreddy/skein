@@ -146,7 +146,9 @@ pub fn credential_for(slug: &str) -> Option<(WriteCredential, Secret)> {
     })
 }
 
-/// Any user PAT this fleet already holds, for the host's own GitHub calls.
+/// Any user PAT this fleet already holds, for the host's one GitHub call that names **no**
+/// repository — "who am I" (`prq::viewer`). A call about a repository asks [`credential_for_repo`],
+/// which never answers with a token filed under some other repository (SKEIN-953).
 ///
 /// The principle: **one credential the user chose, doing every job it is capable of.** A per-repo
 /// write token is a PAT belonging to a person — it can say who that person is, and it can read the
@@ -382,6 +384,175 @@ pub fn set_read_pat(token: &str) -> Result<(), String> {
     }
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
     crate::secret::write(&path, &Secret::new(token))
+}
+
+// ───────────────────────────── which of your credentials reaches a repository ─────────────────────────────
+
+/// Where a GitHub token skein acts with came from.
+///
+/// The order is the point: skein offers several ways to give it GitHub access, and the review queue
+/// used to require a fourth — `gh auth login` — because it was built out of the `gh` CLI and `gh`
+/// only knows its own store. One credential the user chose should do every job it is capable of.
+///
+/// **Which order depends on the question** (the owner's decision of 2026-09-27, SKEIN-953). A call
+/// about one repository asks [`credential_for_repo`], which puts that repository's own stored token
+/// first; the one call that is about nobody's repository — "who am I", `prq::viewer` — asks
+/// `prq`'s host credential, which has no repository to prefer.
+///
+/// Here rather than in `prq` because both of skein's GitHub paths need it: `prq`'s API calls and
+/// `repos`' fleet-side git (`repos::fleet_git`), and `repos` may reach `gitgate` but not `prq`
+/// (`docs/modules.toml`). `prq` re-exports it, so its callers spell it as they always have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhToken {
+    /// `$GH_TOKEN` / `$GITHUB_TOKEN`.
+    Environment,
+    /// The read token stored in Settings. A user's own PAT, broad by design and **for reads only**:
+    /// [`credential_for_repo`] never hands it to a write (SKEIN-1176), because a contents:read token
+    /// fails every post, merge and label it is given.
+    ReadToken,
+    /// A per-repo token the owner stored. For a call about its own repository it is the first
+    /// choice; for "who am I", which names no repository, any one of them can say who its owner is.
+    WritePat,
+    /// The host's own `gh` login, asked for last.
+    ///
+    /// It was missing, and its absence contradicted this list's own reason for existing: skein used
+    /// to read this login itself, to put the account token in front of every box, so a fleet whose
+    /// boxes pushed as you necessarily had a credential here that could say who you are. Reported
+    /// from a live fleet: `skein doctor` showing `gh secret seeded` and `boxes push with this
+    /// account's gh token` three lines above `github token none`, with every pull request queue
+    /// answering 502.
+    ///
+    /// That seeding is gone with the machine-global store (architecture §13a), so this arm no longer
+    /// has a fleet-wide caller keeping it warm — which makes it more important rather than less, as
+    /// the queue's last resort on a machine where somebody has run `gh auth login`.
+    GhCli,
+    /// Nothing. The queue says so instead of reporting an empty queue, which is the one failure it
+    /// must never look like.
+    None,
+}
+
+impl GhToken {
+    pub fn label(self) -> &'static str {
+        match self {
+            GhToken::Environment => "$GH_TOKEN",
+            GhToken::ReadToken => "the read token in Settings",
+            GhToken::WritePat => "a repository write token you stored",
+            GhToken::GhCli => "the host's `gh` login",
+            GhToken::None => "no token at all",
+        }
+    }
+
+    /// A stable word for the source, for the cockpit to choose its own sentence by — the page names
+    /// where to renew a credential, and that differs by source (SKEIN-1179).
+    pub fn key(self) -> &'static str {
+        match self {
+            GhToken::Environment => "env",
+            GhToken::ReadToken => "read",
+            GhToken::WritePat => "repo",
+            GhToken::GhCli => "gh",
+            GhToken::None => "none",
+        }
+    }
+}
+
+/// What a repository-scoped call is going to do with the token it asks for.
+///
+/// Two values because there are two kinds of credential a person gives skein: tokens that may act,
+/// and the read token, which may only look (SKEIN-1176). A verdict, a merge, a label, a resolved
+/// thread, a deleted branch, and a review session that posts its own findings are all `Write`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    Read,
+    Write,
+}
+
+/// `$GH_TOKEN`, then `$GITHUB_TOKEN`, when either says anything. Read on every call.
+pub fn environment_token() -> Option<Secret> {
+    ["GH_TOKEN", "GITHUB_TOKEN"].iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| Secret::new(value.trim()))
+    })
+}
+
+/// The host's `gh` login, once asked: `None` until then, `Some(None)` when `gh` had nothing.
+static GH_CLI: std::sync::Mutex<Option<Option<Secret>>> = std::sync::Mutex::new(None);
+
+/// The host's `gh` login — **the one credential source that is remembered**, found or not.
+///
+/// Every other source is an environment read or a small file read, which is nothing beside the
+/// network call every caller is about to make, so they are read again on every call and a token
+/// replaced or forgotten in Settings is the one the next call uses (SKEIN-1177). This one is a
+/// subprocess with a 15-second ceiling that can unlock a system keyring on a modern Linux, and
+/// re-running it per GitHub request — several per queue refresh, per repo, every three minutes from
+/// the badge poll — would turn a host with no credential from slow to unusable. So `gh` is asked
+/// once per process, and a host given a `gh` login after startup needs a restart. The routes the
+/// cockpit sends a person to — Settings, which writes the files [`credential_for`] and [`read_pat`]
+/// read — do not.
+pub fn gh_login() -> Option<Secret> {
+    let mut asked = match GH_CLI.lock() {
+        Ok(asked) => asked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if asked.is_none() {
+        *asked = Some(crate::repos::gh_cli_token().map(|t| Secret::new(&t)));
+    }
+    // A fresh `Secret` per caller rather than the remembered one, because [`Secret`] has no `Clone`
+    // on purpose: every copy is another buffer to scrub, so a copy is made where somebody can see
+    // it being made.
+    asked
+        .as_ref()
+        .and_then(|found| found.as_ref())
+        .map(|held| Secret::new(held.expose()))
+}
+
+/// Forget what `gh` said, so the next [`gh_login`] asks it again. For tests, which put a different
+/// stub `gh` on `PATH` each.
+pub fn forget_gh_login() {
+    if let Ok(mut asked) = GH_CLI.lock() {
+        *asked = None;
+    }
+}
+
+/// **The one resolver for a GitHub credential about one repository** (SKEIN-953, the owner's
+/// decision of 2026-09-27): which of your credentials reaches `slug`, and where it came from.
+///
+/// 1. The token you stored for `slug` ([`credential_for`]) — the same one its boxes push with.
+///    Storing one is a deliberate act that says "reach this repo this way", which is why
+///    [`mint_token`] gives it the same precedence over the App.
+/// 2. `$GH_TOKEN` / `$GITHUB_TOKEN`.
+/// 3. The read token — **for [`Need::Read`] only** (SKEIN-1176).
+/// 4. The host's `gh` login.
+/// 5. Nothing.
+///
+/// Every GitHub API call skein makes about a repository asks this (`prq::token_for`), and so does
+/// the fleet-side git that clones and fetches mirrors (`repos::fleet_git`) — one resolver, so the
+/// queue, the verdict, the merge and the mirror of one repository cannot disagree about which
+/// token reaches it.
+///
+/// There is no "any stored token" step. That was the host token's, and it handed repository A's
+/// token to every call about repository B — a fine-grained PAT outside its scope answers 401, so
+/// the call failed while a token that covered B sat one line further down the file (SKEIN-953).
+///
+/// Read fresh on every call, stored files included (SKEIN-1177); only `gh` is asked once. Nothing
+/// is kept per repository in a process-wide slot, which was SKEIN-953's own constraint.
+pub fn credential_for_repo(slug: &str, need: Need) -> (GhToken, Option<Secret>) {
+    if let Some((_, token)) = credential_for(slug) {
+        return (GhToken::WritePat, Some(token));
+    }
+    if let Some(token) = environment_token() {
+        return (GhToken::Environment, Some(token));
+    }
+    if need == Need::Read {
+        if let Some(pat) = read_pat() {
+            return (GhToken::ReadToken, Some(pat));
+        }
+    }
+    match gh_login() {
+        Some(token) => (GhToken::GhCli, Some(token)),
+        None => (GhToken::None, None),
+    }
 }
 
 #[cfg(test)]

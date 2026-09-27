@@ -10,10 +10,10 @@
 //! — only for how deeply to explain a change once it's already in your queue. See
 //! [`crate::codeowners`] for why that split matters.
 //!
-//! **Identity lives on the host.** Every call here runs as *you*, on your own login — not on a
-//! box's scoped installation token. That is the deliberate opposite of [`crate::gitgate`], which
-//! exists to stop boxes from acting as you. An approval that isn't yours is worth nothing when the
-//! base branch is protected, so the review path stays on your side of that line.
+//! **Identity lives on the host.** Every call here runs as *you*, on your own credential for the
+//! repository it is about — never on a box's. [`crate::gitgate`] narrows each box to its own
+//! repository, so outside it a box cannot act as you. An approval that isn't yours is worth nothing
+//! when the base branch is protected, so the review path stays on your side of that line.
 //!
 //! Nothing in this module needs AI. A queue that lists and lanes PRs correctly is already the
 //! product; summaries in [`crate::review`] only decide how much reading each row saves you.
@@ -45,8 +45,9 @@ mod write;
 mod fixtures;
 
 pub use credentials::{
-    credential_lives, days_until, forget_host_token, forget_renames, forget_trunks, host_token,
-    host_token_source, repo_slug, slug_for_write, trunk_of, viewer, CredentialLife, GhToken, Life,
+    credential_for_repo, credential_lives, days_until, forget_host_token, forget_renames,
+    forget_trunks, host_token, host_token_source, repo_slug, repo_token_source, slug_for_write,
+    token_for, trunk_of, viewer, CredentialLife, GhToken, Life, Need,
 };
 pub use refresh::{
     counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue, StoppedPr,

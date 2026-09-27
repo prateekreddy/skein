@@ -30,19 +30,31 @@ pub(super) async fn api_update() -> Json<serde_json::Value> {
         // The token is looked up here rather than inside `update`, so that module needs no opinion
         // about credentials. Absent is fine and common: the repository is public, and an update
         // check that refused without a login would be a check nobody on a fresh fleet ever gets.
-        let token = skein::prq::host_token().ok();
+        //
+        // **The credential for skein's own repository**, by the one resolver every repository-scoped
+        // call uses (SKEIN-953). This check is where that bug was seen: the host token was the
+        // first repository token in the file, scoped to some other repository, so GitHub answered
+        // 401 while the token that covers skein's repository sat one line further down. A read, so
+        // the read token may answer it. Where the token came from travels with the answer, because
+        // the sentence for a refused one names where to replace it, and that differs by source.
+        let (source, token) = match skein::update::slug_of(&skein::fleet::skein_source_url()) {
+            Ok(slug) => skein::prq::credential_for_repo(&slug, skein::prq::Need::Read),
+            Err(_) => (skein::prq::GhToken::None, None),
+        };
         (
             skein::update::available(token),
             skein::fleet::runtime_updates(),
             skein::update::running(&skein::place::fleet_sandbox()),
+            source.key(),
         )
     })
     .await;
     Json(match found {
-        Ok((skein, runtimes, running)) => serde_json::json!({
+        Ok((skein, runtimes, running, token_source)) => serde_json::json!({
             "skein": skein,
             "runtimes": runtimes,
             "running": running,
+            "token_source": token_source,
         }),
         Err(e) => serde_json::json!({ "error": e.to_string() }),
     })

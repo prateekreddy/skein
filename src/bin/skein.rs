@@ -607,32 +607,55 @@ fn cmd_doctor() -> Result<(), String> {
     }
 
     {
-        // Which credential the host's own GitHub calls run on. It matters because only one of the
-        // three can reach the system keyring, and that is the one people were being pushed onto.
+        // Which credential answers "who are you" — the one GitHub call that names no repository.
+        // It matters because only one of the sources can reach the system keyring, and that is the
+        // one people were being pushed onto.
         use skein::prq::GhToken;
         match skein::prq::host_token_source() {
             GhToken::Environment => {
                 println!(
-                    "{OK} gh token      {DIM}$GH_TOKEN — nothing is read, nothing prompts{RESET}"
+                    "{OK} github token  {DIM}$GH_TOKEN — nothing is read, nothing prompts{RESET}"
                 )
             }
             GhToken::WritePat => println!(
-                "{OK} github token  {DIM}a repository write token you stored. A read token in \
-                 Settings would widen what the queue can see{RESET}"
+                "{OK} github token  {DIM}a repository token you stored says who you are; each \
+                 repository below uses its own token first{RESET}"
             ),
             GhToken::ReadToken => {
                 println!("{OK} github token  {DIM}the read token in Settings{RESET}")
             }
             GhToken::GhCli => println!(
-                "{OK} github token  {DIM}the host's `gh` login — the same credential that seeds \
-                 the fleet's secret{RESET}"
+                "{OK} github token  {DIM}the host's `gh` login — asked once when skein starts, so \
+                 a new login needs a restart{RESET}"
             ),
             GhToken::None => println!(
                 "{WARN} github token  none — the review queue reads PRs as you, and nothing here \
-                 names a user.\n              {DIM}`gh auth login` on this host, export \
-                 GH_TOKEN, or add a read token in Settings → GitHub & keys. A GitHub App cannot do \
-                 this one: an installation token is not a person{RESET}"
+                 names a user.\n              {DIM}Store a token on a repository's card under \
+                 Settings → Repositories, add a read token under Settings → GitHub & keys → Your \
+                 GitHub identity, export GH_TOKEN, or run `gh auth login` on this host. A GitHub \
+                 App cannot do this one: an installation token is not a person{RESET}"
             ),
+        }
+        // Per repository, which credential its queue reads with and its verdicts, merges and
+        // workflows act with (SKEIN-953) — the same answer Settings → GitHub & keys → Your GitHub
+        // identity shows, from the same resolver.
+        for repo in skein::repos::load_repos() {
+            let Some(slug) = skein::prq::repo_slug(&repo) else {
+                continue;
+            };
+            let reads = skein::prq::repo_token_source(&slug, skein::prq::Need::Read);
+            let writes = skein::prq::repo_token_source(&slug, skein::prq::Need::Write);
+            let named = |source: GhToken| match source {
+                GhToken::WritePat => "its own stored token",
+                GhToken::None => "nothing",
+                other => other.label(),
+            };
+            let mark = if writes == GhToken::None { WARN } else { OK };
+            println!(
+                "{mark}   {slug}  {DIM}reads with {}, posts and merges with {}{RESET}",
+                named(reads),
+                named(writes),
+            );
         }
     }
 

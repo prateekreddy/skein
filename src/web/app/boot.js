@@ -733,7 +733,7 @@ function renderUpdate() {
 
   box.innerHTML = `
     <div class="set-note ${esc(state)}">${esc(said)}</div>
-    ${u.token_refused ? `<div class="set-note warn" id="upd-token">${esc(UPDATE_WORDS.tokenRefused)}</div>` : ""}
+    ${u.token_refused ? `<div class="set-note warn" id="upd-token">${esc(UPDATE_WORDS.tokenRefused(updateState.token_source))}</div>` : ""}
     <table class="set-revs">
       <tr><th>running</th><td>${rev(u.running)}</td><td class="dim">the binary answering this page${u.dirty ? " — built from an edited tree" : ""}</td></tr>
       <tr><th>checkout</th><td>${rev(u.source)}</td><td class="dim">what a rebuild would compile</td></tr>
@@ -860,9 +860,17 @@ const UPDATE_WORDS = {
   cancelledToast: "update cancelled — the log shows where it stopped",
   cancelledNote: "You cancelled the update. The log below shows where it stopped; press Update skein to try again.",
   cancelFailed: why => `could not cancel the update: ${why}`,
-  // GitHub refused the stored token and the check asked again without it (SKEIN-1172) — shown
-  // whatever that second answer was, because the token needs replacing either way.
-  tokenRefused: "your stored GitHub token was refused — replace it under Settings → GitHub & keys",
+  // GitHub refused the token and the check asked again without it (SKEIN-1172) — shown whatever
+  // that second answer was, because the token needs replacing either way. **By where the token came
+  // from** (SKEIN-1179): `token_source` is `GhToken::key` for the credential the check runs on, and
+  // Settings can replace only two of the four — so "replace it under Settings" was wrong for an
+  // exported $GH_TOKEN and for the host's `gh` login, which are renewed where they were set.
+  tokenRefused: source => ({
+    env: "GitHub refused the token in $GH_TOKEN, so the check asked without it. Set a new one where skein-server gets its environment (for a fleet: sbx secret set github --sandbox <fleet> on your host), then restart skein.",
+    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories, or under Settings → GitHub & keys → Repository tokens.",
+    read: "GitHub refused your read token, so the check asked without it. Paste a new one under Settings → GitHub & keys → Your GitHub identity.",
+    gh: "GitHub refused the host's gh login, so the check asked without it. Run gh auth login again on the host, then restart skein.",
+  })[source] || "your stored GitHub token was refused — replace it under Settings → GitHub & keys",
 };
 
 // The "no progress" notice, drawn into its own element so a poll can update it without redrawing

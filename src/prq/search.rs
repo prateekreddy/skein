@@ -540,7 +540,7 @@ fn one_request(
     // the `Err` is not one [`crate::github::edge_refused`] recognises, so [`one_batch`] passes it
     // straight up rather than re-asking it in halves.
     let repo = repo_qualifier(slug)?;
-    let token = host_token()?;
+    let token = token_for(slug, Need::Read)?;
     let mut variables = serde_json::Map::new();
     variables.insert("n".into(), serde_json::json!(SEARCH_PAGE));
     for (i, search) in searches.iter().enumerate() {

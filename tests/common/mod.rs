@@ -322,7 +322,9 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // blocked-egress hint guard on it, and without it here a machine with no curl skips them while
     // this list still says the binary needs only jq and git (SKEIN-548).
     ("git_write_request", &[JQ, GIT, CURL]),
-    ("isolation_bwrap", &[BWRAP, JQ, PYTHON3, TMUX]),
+    // `git` because the workshop-restart tests commit the checkout they restart from
+    // (`startscripts.rs::restart_workshop`, SKEIN-1173) and skip without it (SKEIN-1192).
+    ("isolation_bwrap", &[BWRAP, GIT, JQ, PYTHON3, TMUX]),
     ("mail_provenance", &[JQ, FLOCK]),
     // The launcher's package-request leg shells out through `jq` to file the request; a machine
     // without it skips both tests that drive that leg.
