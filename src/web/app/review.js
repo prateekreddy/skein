@@ -666,7 +666,7 @@ function revClearHtml() {
     ...unasked.map(u => `<div class="revclear-row off">
         <span class="revclear-n">—</span>
         <span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || "its review queue is switched off")}</span>
-        <button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repos</button></div>`),
+        <button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repositories</button></div>`),
   ];
   // The headline is a CLAIM, so it is only made when the scope was read. `revUnasked` decides that
   // in one place; everything below it — the other repos' counts, the failures, the unasked — is
@@ -679,7 +679,7 @@ function revClearHtml() {
         scope ? "" : " across the fleet"} — they are in the lanes below` : ""}.`}</div>
     ${why && (why.retry || why.fix) ? `<div class="revclear-acts">${
       why.retry ? `<button type="button" class="revchip go" onclick="loadReview(true)">try again</button>` : ""
-    }${why.fix ? `<button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repos</button>` : ""}</div>` : ""}
+    }${why.fix ? `<button type="button" class="revchip" onclick="openSettings('repos')">Settings → Repositories</button>` : ""}</div>` : ""}
     ${rows.length ? `<div class="revclear-next">${rows.join("")}</div>` : ""}
   </div>`;
 }

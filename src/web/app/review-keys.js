@@ -73,7 +73,7 @@ function revComposeHtml(pr) {
         : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
            <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
-      <span class="dim revkeys">${asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept"}</span>
+      <span class="dim revkeys">${glyph(asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept")}</span>
     </div>
   </div>`;
 }

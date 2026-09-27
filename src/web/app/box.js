@@ -177,7 +177,7 @@ function renderTabs() {
       : `${what} — disconnected · click to reconnect`;
     const title = (s.dead ? deadTitle : what)
       + (half ? `\n\n${half[0]} — ${half[1]}` : "")
-      + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;
+      + glyph(`\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`);
     if (t.title !== title) t.title = title;
     const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
     const label = esc(s.box) + (s.kind === "shell"

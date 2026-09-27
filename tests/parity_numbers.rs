@@ -161,35 +161,25 @@ fn the_parity_gate_still_reproduces_its_own_counts() {
     );
 
     // The health banner's checks — the claim that had no command at all (SKEIN-1004). It read
-    // "seven checks" from the audit that wrote it while `CHECKED` grew to twelve and then to
+    // "seven checks" from the audit that wrote it while the page's list grew to twelve and then to
     // fourteen, and the gate cannot run what the line does not state, so it was the one number in
     // §5a that could only go stale quietly.
     //
-    // The count is the page's list and not the report's `CHECK_COUNT`, because the claim is about
-    // what the banner shows: `CHECKED` is what a raised banner filters to find something to name.
-    // `health::tests::every_check_the_report_carries_is_named_on_the_page` is what holds that list
-    // level with the checks the report actually sends.
-    let checked = {
-        let start = "const CHECKED = [";
-        let from = index
-            .find(start)
-            .expect("src/web/index.html has no `const CHECKED` — the banner's list was renamed")
-            + start.len();
-        let to = from + index[from..].find(']').expect("`CHECKED` is never closed");
-        // The same shape the stated command measures: a quoted lower-case key per entry.
-        index[from..to]
-            .split(',')
-            .map(|entry| entry.trim().trim_matches('"'))
-            .filter(|key| {
-                !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-            })
-            .count() as u64
-    };
+    // The page keeps no list of its own any more (SKEIN-1186): the banner and the diagnostics pane
+    // walk the report's `labels`, which is `CHECK_LABELS` in `src/health/report.rs`, one
+    // `CheckLabel::named(` line per check.
+    // `health::tests::every_check_has_one_label_and_every_surface_reads_it` is what holds that
+    // table level with the checks the report actually carries.
+    let report = read("src/health/report.rs");
+    let checked = report
+        .lines()
+        .filter(|l| l.contains("CheckLabel::named("))
+        .count() as u64;
     check(
         "checks on the health banner",
-        stated(&parity, "grep -o 'const CHECKED"),
+        stated(&parity, "grep -c 'CheckLabel::named('"),
         checked,
-        "grep -o 'const CHECKED = \\[[^]]*\\]' src/web/index.html | grep -o '\"[a-z_]*\"' | wc -l",
+        "grep -c 'CheckLabel::named(' src/health/report.rs",
     );
 
     check(

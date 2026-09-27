@@ -15,10 +15,10 @@ use super::*;
 /// array rather than at the check it was about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnBanner {
-    /// A fault here sets `ok = false`, so the banner appears and the page names it. Every check
-    /// counted here must also be in the page's `CHECKED`, or `ok: false` puts a red row above the
-    /// app with nothing in it to read — `every_check_the_report_carries_is_named_on_the_page`
-    /// keeps the two level.
+    /// A fault here sets `ok = false`, so the banner appears and the page names it — under its
+    /// label from [`CHECK_LABELS`], which the report serves as `labels` and the page walks, so a
+    /// counted check cannot be one the page has no name for
+    /// (`every_check_has_one_label_and_every_surface_reads_it`).
     Counted,
     /// A fault here is *reported* — the diagnostics pane, the work queue, and the banner's own
     /// list once it is up for some other reason — but never raises the banner on its own. The
@@ -36,15 +36,88 @@ const AI_IS_A_STATE_NOT_A_VERDICT: &str = "the enrichment toggle's own state, wh
      pane prints beside the checkbox: `HealthCheck::satisfied` on every branch, so there is no \
      fault here to count";
 
+/// Why `warden` is [`OnBanner::NotCounted`]: the warden is optional
+/// (`docs/decisions/warden-or-prompt.md`), and a fleet without one is a supported state rather
+/// than a broken one — every privileged host act it would perform is shown to the person as the
+/// line to run instead.
+const WARDEN_IS_OPTIONAL: &str = "the warden is optional (docs/decisions/warden-or-prompt.md): \
+     without one, skein shows the person the command a warden would have run, so its absence is \
+     not a fault the fleet has — and a banner that is red for a state somebody chose teaches them \
+     to read past the next one (SKEIN-913)";
+
+/// A check's wire name and its one label; `named`, as secret-check reads `new`'s literals as paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CheckLabel {
+    /// The field serde writes the check under, which is what the page indexes the report by.
+    pub key: &'static str,
+    /// What the banner, the diagnostics pane, `skein doctor`, the work queue and `/v2` call it.
+    pub label: &'static str,
+}
+
+impl CheckLabel {
+    const fn named(key: &'static str, label: &'static str) -> CheckLabel {
+        CheckLabel { key, label }
+    }
+}
+
+/// **The one name each check has, wherever it is shown** (SKEIN-1186).
+///
+/// There used to be three: the banner headlined with the wire key (`cover: …`), the diagnostics
+/// pane kept its own table in the page (`box isolation`), and `skein doctor` and the work queue
+/// used a third set written into [`HealthReport::checks_with_banner`] (`isolation`). The banner
+/// sends a reader to the diagnostics pane, so the same fault arrived under two names one click
+/// apart. The report now serves this table as `labels`, the page renders from it, and the CLI
+/// asks [`label`] — so a label is changed here or nowhere.
+///
+/// In [`HealthReport::checks_with_banner`]'s order, which is the order the page lists them in;
+/// `every_check_has_one_label_and_every_surface_reads_it` holds the two level.
+pub const CHECK_LABELS: [CheckLabel; HealthReport::CHECK_COUNT] = [
+    CheckLabel::named("registry", "registry"),
+    CheckLabel::named("sbx", "sbx"),
+    CheckLabel::named("git", "git"),
+    // Not about the `gh` CLI any more: "curl is installed" and "GitHub can be connected to at
+    // all" (SKEIN-548, SKEIN-926) — so it is named for the second.
+    CheckLabel::named("gh", "github reach"),
+    CheckLabel::named("probes", "box probes"),
+    CheckLabel::named("mailbox", "mailbox"),
+    CheckLabel::named("memory", "fleet memory"),
+    CheckLabel::named("disk", "fleet disk"),
+    // The same credential asked three questions — what it can reach, whether it will still reach
+    // it next month (SKEIN-928), and whether it is the one GitHub is actually answering
+    // (SKEIN-548) — so the three sit together. "token life" and not "expiry": this report also
+    // carries `expired_logins`, so an unqualified "expiry" names two deadlines with two owners.
+    CheckLabel::named("gitgate", "github scope"),
+    CheckLabel::named("token_expiry", "token life"),
+    CheckLabel::named("proxy_injection", "proxy credential"),
+    CheckLabel::named("warden", "host warden"),
+    // "isolation" is a word somebody can act on where "cover" is jargon.
+    CheckLabel::named("cover", "box isolation"),
+    CheckLabel::named("ai", "ai enrichment"),
+];
+
+/// The label for the check serde writes as `key`, from [`CHECK_LABELS`] — for a surface that
+/// prints one check at a time rather than the whole report, which is `skein doctor`.
+///
+/// Empty for a key that is not a check, and a test holds every caller in the CLI to real keys
+/// (`every_check_has_one_label_and_every_surface_reads_it`), because a label that printed nothing
+/// is the quiet version of the drift this exists to stop.
+pub fn label(key: &str) -> &'static str {
+    CHECK_LABELS
+        .iter()
+        .find(|c| c.key == key)
+        .map(|c| c.label)
+        .unwrap_or("")
+}
+
 impl HealthReport {
     /// How many checks [`HealthReport::checks`] returns — the length of its array, named rather
     /// than written into the signature so that a test can read it without building a report
     /// (`every_health_check_field_is_named_in_the_list`).
     pub const CHECK_COUNT: usize = 14;
 
-    /// Every check in the report, named, each with whether it turns the banner red
-    /// ([`OnBanner`]). One list, so a check added to the struct and forgotten here shows up as a
-    /// compile error rather than as a check nothing ever looks at.
+    /// Every check in the report, by its name on the wire, each with whether it turns the banner
+    /// red ([`OnBanner`]). One list, so a check added to the struct and forgotten here shows up as
+    /// a compile error rather than as a check nothing ever looks at.
     ///
     /// **That sentence was false for as long as this pattern ended in `..`** (SKEIN-1000). A `..`
     /// makes the destructuring accept whatever it has not been told about, so two checks were added
@@ -59,23 +132,21 @@ impl HealthReport {
     /// costs one line each and is what makes the next addition — of any type — stop the build until
     /// somebody decides which half it belongs in.
     ///
-    /// **And the third element is the same argument one step on** (SKEIN-1003). `ok` used to be a
+    /// **And the last element is the same argument one step on** (SKEIN-1003). `ok` used to be a
     /// separate array of eleven `&field` references, so a new check was silently *excluded* from
     /// the verdict exactly as `token_expiry` had been silently excluded from this list — same
     /// hole, one function down. `ok` is derived from this array now
     /// ([`HealthReport::first_counted_fault`]), so a check cannot reach the report without
     /// somebody having written down whether it belongs on the banner and, if not, why not.
     ///
-    /// **The second column is the check's name on the wire** (SKEIN-1013): the field serde writes
-    /// it under, which is what the page indexes the report by. It is not the first column, which
-    /// is a label a person reads — `token_expiry` goes out as "token life" to the work queue and
-    /// `doctor` — and the page cannot translate one into the other without a second list. So the
-    /// wire name rides here, beside the disposition it is paired with, and
-    /// [`HealthReport::counted_on_the_wire`] reads the two together.
+    /// **The first column is the check's name on the wire** (SKEIN-1013): the field serde writes
+    /// it under, which is what the page indexes the report by.
     /// `every_health_check_field_is_named_in_the_list` holds it equal to the binding beside it.
+    /// What a person reads is not here: it is [`CHECK_LABELS`], one table for every surface
+    /// (SKEIN-1186).
     pub fn checks_with_banner(
         &self,
-    ) -> [(&'static str, &'static str, &HealthCheck, OnBanner); Self::CHECK_COUNT] {
+    ) -> [(&'static str, &HealthCheck, OnBanner); Self::CHECK_COUNT] {
         use OnBanner::{Counted, NotCounted};
         let HealthReport {
             registry,
@@ -97,6 +168,7 @@ impl HealthReport {
             // which of these two halves it belongs in.
             ok: _,
             build: _,
+            labels: _,
             logins: _,
             expired_logins: _,
             runtime_updates: _,
@@ -111,9 +183,9 @@ impl HealthReport {
             counted: _,
         } = self;
         [
-            ("registry", "registry", registry, Counted),
-            ("sbx", "sbx", sbx, Counted),
-            ("git", "git", git, Counted),
+            ("registry", registry, Counted),
+            ("sbx", sbx, Counted),
+            ("git", git, Counted),
             // **Counted since SKEIN-1003, and it is the item's whole point.** This check is not
             // about the `gh` CLI any more: it is "curl is installed" and `github_reach_health` —
             // whether GitHub can be connected to AT ALL, which a deny-by-default egress policy
@@ -121,16 +193,9 @@ impl HealthReport {
             // with a fix, and while `ok` was a separate list that did not name this field, a fleet
             // with no route to GitHub had `ok == true`, no banner, and therefore nothing sending
             // anybody to the diagnostics pane that would have shown it.
-            ("gh", "gh", gh, Counted),
-            ("probes", "probes", probes, Counted),
-            ("mailbox", "mailbox", mailbox, Counted),
-            // The one check that is a *state readout* rather than a verdict: it is the enrichment
-            // toggle's own state, which the settings pane prints beside the checkbox, and it is
-            // built with `HealthCheck::satisfied` on every branch of `health_report` — "off" is a
-            // correct state, not a fault. Counting a value that cannot be a fault would be
-            // decoration; naming it here is what makes anyone who gives it a fault arm come back
-            // and decide, instead of inheriting a silence.
-            ("ai", "ai", ai, NotCounted(AI_IS_A_STATE_NOT_A_VERDICT)),
+            ("gh", gh, Counted),
+            ("probes", probes, Counted),
+            ("mailbox", mailbox, Counted),
             // **Counted since SKEIN-1003, and this one overturns a stated exclusion, so the
             // argument is here rather than in the commit.** The comment that excluded it read
             // "being at the ceiling is the fleet working as configured" — and that is true of the
@@ -140,52 +205,49 @@ impl HealthReport {
             // note: whatever it was did not finish", and no memory ceiling anywhere, where one
             // build can reach the VM's memory and the kernel picks a victim by badness rather than
             // by blame. Both are faults the check's own author named as faults.
-            ("memory", "memory", memory, Counted),
+            ("memory", memory, Counted),
             // A filesystem past its threshold is not a ceiling being used, it is a wall being
             // approached, and the only warning anyone gets before a build dies somewhere in the
             // middle — in whichever box happened to ask for the next block, usually not the one
             // that took the space. It can only be a fault past the threshold: an unknown disk (no
             // sandbox, no answer) is never one.
-            ("disk", "disk", disk, Counted),
-            ("gitgate", "gitgate", gitgate, Counted),
-            // Named for what it is about rather than for the field, like "isolation" below: `/v2`
-            // prints this key verbatim as the row's name (`src/web/v2.html:229`), beside box names
-            // and PR numbers. "expiry" on its own would be the one-word version and it is wrong
-            // here — this report also carries `expired_logins`, so an unqualified "expiry" names
-            // two different deadlines with different owners. "token life" is the label the
-            // cockpit's own `CHECKS` gives this check, so the diagnostics pane and the queue say
-            // one thing rather than two.
-            ("token life", "token_expiry", token_expiry, Counted),
-            // "proxy" alone would read as "is the proxy working", which is not the question: the
-            // check is about WHOSE credential the proxy answers with, and a proxy that is working
-            // perfectly is exactly the case it fires on. "proxy credential" is what the same
-            // `CHECKS` calls it, for the same reason.
-            (
-                "proxy credential",
-                "proxy_injection",
-                proxy_injection,
-                Counted,
-            ),
-            ("warden", "warden", warden, Counted),
-            // Named for what it is about rather than for the field: this key is what `/v2` puts
-            // on the row, and "isolation" is a word somebody can act on where "cover" is jargon.
-            ("isolation", "cover", cover, Counted),
+            ("disk", disk, Counted),
+            ("gitgate", gitgate, Counted),
+            ("token_expiry", token_expiry, Counted),
+            ("proxy_injection", proxy_injection, Counted),
+            // **Not counted since SKEIN-1184**, and this overturns a stated inclusion, so the
+            // argument is here. It was counted on the reasoning that fleet create and destroy go
+            // only through the warden, so a missing one was skein unable to do something it
+            // offers. The owner's decision says otherwise (warden-or-prompt): with no warden,
+            // skein shows the person the line, so nothing is unavailable — and a first run that
+            // followed the README met a red banner whose fix was compiling Rust on the host.
+            ("warden", warden, NotCounted(WARDEN_IS_OPTIONAL)),
+            ("cover", cover, Counted),
+            // The one check that is a *state readout* rather than a verdict: it is the enrichment
+            // toggle's own state, which the settings pane prints beside the checkbox, and it is
+            // built with `HealthCheck::satisfied` on every branch of `health_report` — "off" is a
+            // correct state, not a fault. Counting a value that cannot be a fault would be
+            // decoration; naming it here is what makes anyone who gives it a fault arm come back
+            // and decide, instead of inheriting a silence. Last, as the diagnostics pane has
+            // always listed it: it is about a switch, not about the fleet.
+            ("ai", ai, NotCounted(AI_IS_A_STATE_NOT_A_VERDICT)),
         ]
     }
 
-    /// Every check in the report, named — the list [`crate::queue::who_needs_you`] and `skein
-    /// doctor` iterate, which is every check whether or not it reaches the banner.
+    /// Every check in the report, by the label a person reads — the list
+    /// [`crate::queue::who_needs_you`] iterates, which is every check whether or not it reaches
+    /// the banner.
     ///
     /// Derived from [`HealthReport::checks_with_banner`] rather than written out again: two lists
     /// of the same fourteen checks is how this file came to have three of them and no two the
     /// same set (SKEIN-1003).
     pub fn checks(&self) -> [(&'static str, &HealthCheck); Self::CHECK_COUNT] {
         self.checks_with_banner()
-            .map(|(key, _, check, _)| (key, check))
+            .map(|(key, check, _)| (label(key), check))
     }
 
     /// **The first check that is both a fault and counted — the whole of what turns the banner
-    /// red**, and `None` when there is none.
+    /// red**, by its name on the wire, and `None` when there is none.
     ///
     /// Returns the key rather than a bool so that a caller, a test or a person reading a failure
     /// message learns *which* check decided it. `ok` is this plus "no stale sessions"; nothing
@@ -198,8 +260,8 @@ impl HealthReport {
     pub fn first_counted_fault(&self) -> Option<&'static str> {
         self.checks_with_banner()
             .into_iter()
-            .find(|(_, _, check, banner)| *banner == OnBanner::Counted && check.is_fault())
-            .map(|(key, _, _, _)| key)
+            .find(|(_, check, banner)| *banner == OnBanner::Counted && check.is_fault())
+            .map(|(key, _, _)| key)
     }
 
     /// **The checks whose fault raises the banner, by the names the page reads them under**
@@ -212,13 +274,14 @@ impl HealthReport {
     /// the report says. Every check is still in the report either way; this only says which of
     /// them may speak for the banner.
     ///
-    /// In [`HealthReport::checks_with_banner`]'s order, which is the page's `CHECKED` order, so the
-    /// first counted fault the page finds is the one [`HealthReport::first_counted_fault`] finds.
+    /// In [`HealthReport::checks_with_banner`]'s order, which is the order of the `labels` the page
+    /// walks, so the first counted fault the page finds is the one
+    /// [`HealthReport::first_counted_fault`] finds.
     pub fn counted_on_the_wire(&self) -> Vec<&'static str> {
         self.checks_with_banner()
             .into_iter()
-            .filter(|(_, _, _, banner)| *banner == OnBanner::Counted)
-            .map(|(_, wire, _, _)| wire)
+            .filter(|(_, _, banner)| *banner == OnBanner::Counted)
+            .map(|(key, _, _)| key)
             .collect()
     }
 }
@@ -238,6 +301,11 @@ pub struct HealthReport {
     /// the same verdict. `ok` says whether the banner is up; this says which checks can be the
     /// reason, so the page's headline is always one of them (SKEIN-1013).
     pub counted: Vec<&'static str>,
+    /// **Every check's key and the one label a person reads for it** — [`CHECK_LABELS`], served
+    /// so that the page renders the banner and the diagnostics pane from the same names `skein
+    /// doctor` and the work queue print, instead of keeping its own (SKEIN-1186). In the order the
+    /// page lists the checks.
+    pub labels: &'static [CheckLabel],
     /// Which build is answering: [`BUILD_REVISION`]. On the report because /api/health is the one
     /// surface every deployment serves — the cockpit, curl, and a box all reach it — so it is where
     /// "is the fix deployed" gets answered without grepping HTML for marker strings.
@@ -475,7 +543,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
             "no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \
              One build can reach the VM's memory, and with no swap the kernel picks a victim by \
              badness rather than by blame",
-            "skein resize 26g   (or Settings → Fleet → memory; it rebuilds the sandbox and carries \
+            "skein resize 26g   (or Settings → Fleet → Fleet memory; it rebuilds the sandbox and carries \
              every box's work across)",
         )
         .destroys(),
@@ -799,6 +867,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         // Overwritten beside `ok`, for the same reason: it is read off the report once it exists.
         counted: Vec::new(),
         build: BUILD_REVISION,
+        labels: &CHECK_LABELS,
         registry,
         sbx,
         git,
@@ -986,7 +1055,7 @@ mod tests {
         assert!(
             faults
                 .iter()
-                .all(|name| ["git", "gh", "warden"].contains(name)),
+                .all(|name| [label("git"), label("gh"), label("warden")].contains(name)),
             "something that is not a tool is reported broken, which on a machine with no fleet \
              means a check invented a fault out of a question it could not put: {faults:?}"
         );
@@ -1114,8 +1183,8 @@ mod tests {
     ///   field is a bare `HealthCheck` today; one that is not would be invisible here while still
     ///   failing to compile in the pattern, so the half that is missing is the cheaper half.
     /// * whether a key is a name anybody can act on, or whether the check reaches a surface.
-    ///   `the_proxy_check_is_on_the_banner_and_in_the_diagnostics_pane` below is that half, for the
-    ///   page; nothing checks the wording, and nothing can.
+    ///   `every_check_has_one_label_and_every_surface_reads_it` below is that half, for the page
+    ///   and the CLI; nothing checks the wording, and nothing can.
     ///
     /// **The concrete changes that make it fail, named before it was written:** putting `..` back
     /// in the pattern fails `the destructuring must not end in ..`; turning `token_expiry,` into
@@ -1194,55 +1263,53 @@ mod tests {
                 _ => {}
             }
         }
-        // `splitn(4, ", ")` and not `rsplit_once`, because the last column is the banner
+        // `splitn(3, ", ")` and not `rsplit_once`, because the last column is the banner
         // disposition and a `NotCounted` reason is prose that may hold a comma of its own. The
-        // field binding is the third column; the second is its name on the wire (SKEIN-1013).
-        let entries: Vec<[String; 4]> = groups
+        // field binding is the second column; the first is its name on the wire (SKEIN-1013).
+        let entries: Vec<[String; 3]> = groups
             .iter()
             .map(|group| {
                 let inner = group.trim_end_matches(',');
-                let mut columns = inner.splitn(4, ", ");
+                let mut columns = inner.splitn(3, ", ");
                 let mut next = || {
                     columns
                         .next()
                         .unwrap_or_else(|| {
                             panic!(
-                                "fewer than four columns in `({group})`, so it is not a \
-                                    `(key, wire, field, banner)` entry"
+                                "fewer than three columns in `({group})`, so it is not a \
+                                    `(wire, field, banner)` entry"
                             )
                         })
                         .trim()
                         .to_string()
                 };
-                [next(), next(), next(), next()]
+                [next(), next(), next()]
             })
             .collect();
         // The wire name is the binding beside it, spelled as a string. The binding is the field
         // (the destructuring above makes that a compile error otherwise) and serde writes a field
         // under its own name, so this equality is what makes `counted` a list of keys the page can
         // actually find in the report rather than labels it cannot (SKEIN-1013).
-        for [key, wire, field, _] in &entries {
+        for [wire, field, _] in &entries {
             assert_eq!(
                 wire.trim_matches('"'),
                 field,
-                "`{key}` says its name on the wire is {wire}, and serde writes it as `{field}` — \
+                "an entry says its name on the wire is {wire}, and serde writes it as `{field}` — \
                  the page would look for a key the report never sends, so a counted fault there \
                  could never be the banner's headline (SKEIN-1013)"
             );
         }
         // Every entry states its disposition, and it is one of the two the type has. A third
         // variant added without a reader here would otherwise be counted as neither.
-        for [key, _, _, banner] in &entries {
+        for [key, _, banner] in &entries {
             assert!(
                 banner == "Counted" || banner.starts_with("NotCounted("),
-                "`{key}` states its place on the banner as `{banner}`, which this test does not \
+                "{key} states its place on the banner as `{banner}`, which this test does not \
                  know how to read — every entry says `Counted` or `NotCounted(why)` (SKEIN-1003)"
             );
         }
-        let listed: std::collections::BTreeSet<&str> = entries
-            .iter()
-            .map(|[_, _, field, _]| field.as_str())
-            .collect();
+        let listed: std::collections::BTreeSet<&str> =
+            entries.iter().map(|[_, field, _]| field.as_str()).collect();
         // Proves the extraction read the WHOLE array before anything is concluded from it: a scan
         // that stopped early would otherwise report the fields it never reached as missing, which
         // is a red that sends the reader to the wrong file.
@@ -1265,65 +1332,145 @@ mod tests {
         );
     }
 
-    /// **Every check the report carries is a key the banner can name** (SKEIN-1003).
+    /// **Every check has one label, and the banner, the diagnostics pane and `skein doctor` all
+    /// read it from [`CHECK_LABELS`]** (SKEIN-1186).
     ///
-    /// The page's `CHECKED` is what a raised banner filters to find something to say. It was
-    /// hand-written and held twelve of the fourteen, which costs in one direction only, but that
-    /// direction is the bad one: a check that `ok` counts and `CHECKED` does not know about puts a
-    /// red row above the app with nothing in it to read.
-    /// `the_proxy_check_is_on_the_banner_and_in_the_diagnostics_pane` below asserts that for two
-    /// named keys; this is the general form, so the next check is covered before somebody
-    /// remembers to add a line here.
+    /// The same check used to have up to three names one click apart: the banner headlined with
+    /// the wire key, the diagnostics pane kept a table of its own in the page, and the CLI and the
+    /// work queue used a third. What holds them together now is that there is one table and each
+    /// surface reads it — the page from the report's `labels`, the CLI through [`label`] — so this
+    /// asserts the table is complete and in the report's order, that it goes out on the wire, that
+    /// the page keeps no table of its own, and that `doctor` asks for the label of a real check
+    /// every time it prints one. `tests/ui/healthban.mjs` drives the banner and the pane from the
+    /// served labels, which is the half a source-reading test cannot see.
     ///
-    /// **It compares field names, not `checks_with_banner`'s keys**, because the page switches on
-    /// what serde puts on the wire — `token_expiry`, not "token life". `check_fields` reads the
-    /// struct, which is the same thing serde serialises.
-    ///
-    /// **The concrete change that makes it fail, named before it was written:** deleting `"gh"`
-    /// from `CHECKED` in `src/web/index.html`, which is the state that page was in when the item
-    /// was filed. Planted, and it is the count guard that fires — "found 13 keys in the page's
-    /// `CHECKED` and the report has 14 checks", printing the thirteen with no `gh` among them.
-    /// Said here because the guard is deliberately in front of the set comparison, so a *missing*
-    /// key is reported by the first of the two and a renamed one by the second.
+    /// **The concrete changes that make it fail, named before they were written:** swapping two
+    /// rows of `CHECK_LABELS` fails `in the report's order`; writing `"{mark} git scope     "`
+    /// back into `skein doctor` fails `doctor prints every check it shows under the report's
+    /// label`; putting `const CHECKS = [` back into `panels.js` fails `the page keeps no label
+    /// table of its own`. The first two planted.
     #[test]
-    fn every_check_the_report_carries_is_named_on_the_page() {
-        let page = include_str!("../web/index.html");
-        let start = "const CHECKED = [";
-        let from = page
-            .find(start)
-            .unwrap_or_else(|| panic!("the page has no `{start}` — did it get renamed?"))
-            + start.len();
-        let to = from
-            + page[from..]
-                .find(']')
-                .expect("`const CHECKED` is never closed");
-        let checked: std::collections::BTreeSet<&str> = page[from..to]
-            .split(',')
-            .map(|entry| entry.trim().trim_matches('"'))
-            .filter(|key| !key.is_empty())
+    fn every_check_has_one_label_and_every_surface_reads_it() {
+        let report = every_check_satisfied();
+        let order: Vec<&str> = report
+            .checks_with_banner()
+            .iter()
+            .map(|(key, _, _)| *key)
             .collect();
-        // The extraction read the whole literal before anything is concluded from it, the way the
-        // test above proves its own: a split that matched nothing would otherwise report every
-        // field as missing from the page, which sends the reader to the wrong file.
+        let labelled: Vec<&str> = CHECK_LABELS.iter().map(|c| c.key).collect();
         assert_eq!(
-            checked.len(),
+            labelled, order,
+            "`CHECK_LABELS` must name every check exactly once, in the report's order — the \
+             order is the page's, so the first counted fault it finds is `first_counted_fault`'s"
+        );
+        let names: std::collections::BTreeSet<&str> =
+            CHECK_LABELS.iter().map(|c| c.label).collect();
+        assert_eq!(
+            names.len(),
             HealthReport::CHECK_COUNT,
-            "this test found {} keys in the page's `CHECKED` and the report has {} checks. If a \
-             check was added, add it to `CHECKED` too; if this found the wrong number of keys in \
-             a list that looks right, it is mis-parsing it: {checked:?}",
-            checked.len(),
-            HealthReport::CHECK_COUNT
+            "two checks share a label, so a reader cannot tell which one is failing: {:?}",
+            CHECK_LABELS
         );
+        assert!(
+            CHECK_LABELS.iter().all(|c| !c.label.trim().is_empty()),
+            "a check with an empty label prints nothing where its name should be"
+        );
+
+        // On the wire, where the page reads it.
+        let wire = serde_json::to_value(&report).expect("a health report serialises");
+        let served: Vec<(&str, &str)> = wire["labels"]
+            .as_array()
+            .expect("`labels` goes out as a list")
+            .iter()
+            .map(|l| {
+                (
+                    l["key"].as_str().expect("a label has a key"),
+                    l["label"].as_str().expect("a label has a label"),
+                )
+            })
+            .collect();
         assert_eq!(
-            check_fields(include_str!("report.rs")),
-            checked,
-            "the report's checks and the page's `CHECKED` are not the same set. A name on the \
-             left and not the right is the one that costs: if `OnBanner` counts it, `ok: false` \
-             puts a red row above the app and `CHECKED.filter` finds nothing to name in it — \
-             which is what a fleet that could not reach GitHub at all got, silently, for as long \
-             as `gh` was in neither list (SKEIN-1003). A name on the right and not the left is a \
-             key the report never sends, so the banner can never print it."
+            served,
+            CHECK_LABELS
+                .iter()
+                .map(|c| (c.key, c.label))
+                .collect::<Vec<_>>(),
+            "the report does not serve the labels the CLI prints"
         );
+
+        // The page renders from them, and keeps no table of its own to drift from them.
+        let page = include_str!("../web/index.html");
+        for own in ["const CHECKS = [", "const CHECKED = ["] {
+            assert!(
+                !page.contains(own),
+                "the page keeps no label table of its own, and `{own}` is one: the banner and the \
+                 diagnostics pane render from the report's `labels`"
+            );
+        }
+
+        // `skein doctor` prints five of the checks one at a time. Each asks for the label.
+        let cli = include_str!("../bin/skein.rs");
+        let asked: std::collections::BTreeSet<&str> = cli
+            .split("skein::health::label(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('"').map(|(key, _)| key))
+            .collect();
+        for key in &asked {
+            assert!(
+                !label(key).is_empty(),
+                "`skein doctor` asks for the label of `{key}`, which is not a check"
+            );
+        }
+        assert_eq!(
+            asked,
+            ["cover", "disk", "gitgate", "token_expiry", "warden"]
+                .into_iter()
+                .collect(),
+            "doctor prints every check it shows under the report's label — a check it prints with \
+             a name typed into the CLI is a second name for it"
+        );
+    }
+
+    /// **A fleet with no warden is not a fault and cannot turn the banner red** (SKEIN-1184).
+    ///
+    /// The owner's decision (`docs/decisions/warden-or-prompt.md`) makes the warden optional, and
+    /// the first screen used to disagree twice: the checklist waited on it and the banner went red
+    /// over it, with a fix that compiled Rust on the host. This is the banner half; the checklist
+    /// half is `tests/ui/onboarding.mjs`, against the real page.
+    ///
+    /// **The concrete change that makes it fail, named before it was written:** marking `warden`
+    /// `Counted` again fails `even a warden that answers wrongly does not raise the banner`.
+    /// Planted.
+    #[test]
+    fn a_missing_warden_does_not_turn_the_banner_red() {
+        let _g = crate::testutil::env_lock();
+        let _warden = crate::testutil::no_warden();
+        let mut report = every_check_satisfied();
+        // The real line for a warden nobody started, not a fixture of one.
+        report.warden = warden_health(crate::warden_client::sighting());
+        assert!(
+            !report.warden.is_fault(),
+            "no warden answering is reported as a fault: {:?}",
+            report.warden
+        );
+        assert_eq!(report.first_counted_fault(), None);
+        // And the stronger half, which is the disposition itself: even the one warden state that
+        // IS a fault — something answering on its port that is not a warden — is for the
+        // diagnostics pane, not for the banner.
+        report.warden = HealthCheck::unsatisfied("something else is on that port", "check it");
+        assert_eq!(
+            report.first_counted_fault(),
+            None,
+            "even a warden that answers wrongly does not raise the banner: the warden is optional, \
+             and a banner red over a part somebody chose not to run is read past next time"
+        );
+        assert!(
+            !report.counted_on_the_wire().contains(&"warden"),
+            "the page is told the warden may headline the banner"
+        );
+        // Non-vacuity: the same report does go red for a counted check.
+        report.disk = HealthCheck::unsatisfied("the disk is full", "clear it");
+        assert_eq!(report.first_counted_fault(), Some("disk"));
     }
 
     /// A report built here with every check satisfied, so that one check's level is the only
@@ -1341,6 +1488,7 @@ mod tests {
             ok: false,
             counted: Vec::new(),
             build: BUILD_REVISION,
+            labels: &CHECK_LABELS,
             registry: satisfied(),
             sbx: satisfied(),
             git: satisfied(),
@@ -1469,8 +1617,8 @@ mod tests {
         let not_counted: std::collections::BTreeSet<&str> = report
             .checks_with_banner()
             .into_iter()
-            .filter(|(_, _, _, banner)| matches!(banner, OnBanner::NotCounted(_)))
-            .map(|(_, wire, _, _)| wire)
+            .filter(|(_, _, banner)| matches!(banner, OnBanner::NotCounted(_)))
+            .map(|(wire, _, _)| wire)
             .collect();
         assert_eq!(
             checks
@@ -1487,59 +1635,5 @@ mod tests {
             "`ai` is `NotCounted` today, so this fixture has something to leave out — if that \
              changed, the assertion above compares two empty sets and says nothing"
         );
-    }
-
-    /// **The proxy check reaches the banner and the diagnostics pane, read out of the two arrays
-    /// the page actually filters on** (SKEIN-548).
-    ///
-    /// `health_report` counts `proxy_injection` towards `ok`, so a page that does not carry the key
-    /// produces the exact failure SKEIN-928's comment warns about: `ok: false` puts a red row above
-    /// the app and `CHECKED.filter` finds nothing to name in it. Nothing else in this tree ties a
-    /// report field to the page — `the_wire_names_are_the_names_the_page_switches_on` below covers
-    /// the three *level* strings and not the keys.
-    ///
-    /// **It reads the array literals, not the file.** A `page.contains("proxy_injection")` would
-    /// pass on the comment three lines above the array, which is SKEIN-987's lesson exactly: an
-    /// HTML comment that names a thing is not a use of it. `token_expiry` is asserted alongside so
-    /// that an extraction which silently matched nothing fails here rather than passing everything.
-    ///
-    /// **The concrete change that makes this fail, named before it was written:** deleting
-    /// `"proxy_injection"` from the page's `CHECKED`. Planted, and `the banner must count it`
-    /// failed; deleting the `CHECKS` row failed `the diagnostics pane must have a row for it`.
-    #[test]
-    fn the_proxy_check_is_on_the_banner_and_in_the_diagnostics_pane() {
-        let page = include_str!("../web/index.html");
-        let literal = |start: &str| -> String {
-            let from = page
-                .find(start)
-                .unwrap_or_else(|| panic!("the page has no `{start}` — did it get renamed?"))
-                + start.len();
-            let rest = &page[from..];
-            // `];` and not `]`: `CHECKS` is an array OF arrays, and its first element closes with
-            // `],` four characters in. The statement's own terminator is the only unambiguous end.
-            let to = rest
-                .find("];")
-                .unwrap_or_else(|| panic!("`{start}` is not closed anywhere after it"));
-            rest[..to].to_string()
-        };
-        // The banner's list, which is what decides whether a red banner has anything to say.
-        let checked = literal("const CHECKED = [");
-        for key in ["token_expiry", "proxy_injection"] {
-            assert!(
-                checked.contains(&format!("\"{key}\"")),
-                "the banner must count it, or `ok: false` shows a red row with nothing in it — \
-                 `{key}` is not in CHECKED: {checked}"
-            );
-        }
-        // The diagnostics pane's rows. `CHECKS` is a list of pairs, so the first entry of the pair
-        // is what has to be there — a label alone would render a row nothing fills.
-        let checks = literal("const CHECKS = [");
-        for key in ["token_expiry", "proxy_injection"] {
-            assert!(
-                checks.contains(&format!("[\"{key}\",")),
-                "the diagnostics pane must have a row for it, since the banner sends a reader \
-                 straight there — `{key}` is not in CHECKS: {checks}"
-            );
-        }
     }
 }

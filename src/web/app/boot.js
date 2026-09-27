@@ -62,23 +62,21 @@ function selectTab(n) {
   showBox(s.box, "term", s.kind);
 }
 // Tab keys that must work *while you are typing in the agent*, so they can't live in the fleet's
-// keymap (which yields every key to a focused terminal). ⌥ chords only: the browser reserves ⌘1-9 and
-// ⌃Tab, and the agents' own composers use ⌥←/⌥→ for word movement — brackets are free in all of them.
-// Matched on e.code, since ⌥[ on macOS reports e.key as "“".
+// keymap (which yields every key to a focused terminal). Which key is which is `tabShortcutFor`, the
+// TABS table in cockpit/src/keys.mjs that the key sheet is rendered from (SKEIN-1187).
 document.addEventListener("keydown", e => {
-  if (!e.altKey || e.metaKey || e.ctrlKey) return;
-  const digit = /^Digit([1-9])$/.exec(e.code);
-  const step = e.code === "BracketRight" ? 1 : e.code === "BracketLeft" ? -1 : 0;
-  if (!digit && !step) return;
+  const action = tabShortcutFor(e);
+  if (!action) return;
   if (!sessions.size) return;
   e.preventDefault(); e.stopPropagation();
-  if (digit) { selectTab(+digit[1]); return; }
-  if (e.shiftKey) {                                  // ⌥⇧[ / ⌥⇧] — move the tab, don't switch to it
+  const nth = /^tab-([1-9])$/.exec(action);
+  if (nth) { selectTab(+nth[1]); return; }
+  if (action === "tab-move-left" || action === "tab-move-right") {   // move the tab, don't switch to it
     const id = activeSid(); const ids = orderedSids();
-    if (id && ids.includes(id)) moveTab(id, ids.indexOf(id) + step);
+    if (id && ids.includes(id)) moveTab(id, ids.indexOf(id) + (action === "tab-move-right" ? 1 : -1));
     return;
   }
-  cycleSession(step);
+  cycleSession(action === "tab-next" ? 1 : -1);
 }, true);
 
 // ---------- attachments: paste · drag-and-drop · attach button ----------
@@ -423,8 +421,8 @@ setInterval(() => {
     // that has gone quiet is a producer that wedged — nothing to wait for. A closed one is the
     // browser already retrying, and waiting is exactly right.
     ban.textContent = es && es.readyState === EventSource.OPEN
-      ? `board is ${age}s stale — the server stopped answering`
-      : `board is ${age}s stale — reconnecting…`;
+      ? `board not updated for ${age}s — the server stopped answering`
+      : `board not updated for ${age}s — reconnecting…`;
   } else ban?.remove();
 }, 2000);
 // Draw the board from the server, now, rather than waiting for the stream to notice.
@@ -555,28 +553,26 @@ function loadHealth() {
       banner = document.createElement("button"); banner.id = "healthban";
       banner.onclick = () => openSettings("diag"); document.body.prepend(banner);
     }
-    // **Every check the report carries, and the list is not a selection any more** (SKEIN-1003).
-    // It used to hold twelve of the fourteen, hand-written, and the two it was short of were the
-    // two nobody had decided about: "gh" — which is "curl is installed" and "GitHub can be reached
-    // at all" (SKEIN-548, SKEIN-926) — and "ai". Whether a check turns the banner red is decided
-    // in ONE place, `OnBanner` in `src/health/report.rs`, and the page is not that place: a key
-    // missing from here cannot suppress a banner, it can only produce `ok: false` with nothing in
-    // the row to read, which is the one failure this list has ever had. So it carries all of them,
-    // and `every_check_the_report_carries_is_named_on_the_page` holds it level with the report's
-    // own fields — a new check is on this list or that test fails by name.
+    // **Every check the report carries, by the report's own list and names** (SKEIN-1003,
+    // SKEIN-1186). This used to be a hand-written array of wire keys, and the row headlined with the
+    // key itself — `cover: …` — while the diagnostics pane it opens called the same check
+    // "box isolation" and `skein doctor` called it "isolation". The report serves `labels` now:
+    // every check, in its order, with the one name `CHECK_LABELS` in `src/health/report.rs` gives it,
+    // and this row, the pane and the CLI all print that. A check added to the report is on this
+    // list without anybody touching the page, which is the failure a list here had once already —
+    // a counted fault it did not name put a red row above the app with nothing in it to read.
     //
     // Carrying a check the verdict does not count is deliberate and costs nothing: a check the
     // Rust side marks `NotCounted` gets named here when the banner is already up for some other
     // reason, and stays unable to raise one by itself.
     //
     // **And it cannot take the headline** (SKEIN-1013, the owner's call: "a check that raised
-    // it"). The row's one sentence — the only part a person can read on a phone and copy — used
-    // to be `failed[0]` in this list's order, and `ai` sits ahead of seven counted checks, so a
-    // fleet with a full disk and an uncounted `ai` fault would have headlined `ai` and put the
-    // disk in the tooltip. The headline is now the first failure the report says is `counted`;
-    // the page does not decide which those are, because `OnBanner` does and the report carries
-    // its answer. Uncounted failures are still in the row's count of the rest, and the tooltip.
-    const CHECKED = ["registry","sbx","git","gh","probes","mailbox","ai","memory","disk","gitgate","token_expiry","proxy_injection","warden","cover"];
+    // it"). The headline is the first failure the report says is `counted`; the page does not
+    // decide which those are, because `OnBanner` does and the report carries its answer. Uncounted
+    // failures are still in the row's count of the rest, and the tooltip.
+    const labels = health.labels || [];
+    const CHECKED = labels.map(l => l.key);
+    const nameOf = key => labels.find(l => l.key === key)?.label || key;
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");
@@ -593,13 +589,13 @@ function loadHealth() {
     const rest = failed.length - (lead ? 1 : 0);
     const extra = rest ? ` (+${rest} more)` : "";
     banner.textContent = lead
-      ? `${lead}: ${first}${extra}`
-      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}${extra}`;
+      ? `${nameOf(lead)}: ${first}${extra}`
+      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} on old probes` : ""}${extra}`;
     banner.title = [
-      ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
-      ...unsure.map(key => `${key}: could not be checked — ${health[key]?.detail || "no reason given"}`),
+      ...failed.map(key => `${nameOf(key)}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
+      ...unsure.map(key => `${nameOf(key)}: could not be checked — ${health[key]?.detail || "no reason given"}`),
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
-      ...(stale ? [`stale sessions: ${health.stale_boxes.join(", ")}`] : [])
+      ...(stale ? [`on old probes: ${health.stale_boxes.join(", ")}`] : [])
     ].join("\n");
     // Said rather than swallowed (SKEIN-1012): what reaches here now is the fetch, the parse, or
     // the banner block itself — and a server that is down already has the staleness banner saying
@@ -1363,6 +1359,7 @@ function createDemoSession(box, kind, runtime) {
 
 // ---------- boot ----------
 setFavicon(0);
+platformHints();
 if (DEMO) {
   loadRuntimes();
   repos = DEMO_REPOS;

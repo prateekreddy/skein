@@ -1130,7 +1130,11 @@ say "the cockpit is listening on :$port inside the sandbox, and answers as $answ
 [ "$from" = update ] && exit 0
 cat >&2 <<EOF
 
-skein: open what the cockpit prints for its token, and the install is done.
+skein: the install is done. Open the cockpit from the host with its token:
+
+    open "http://127.0.0.1:$port/?t=\$(cat ~/.skein/api-token)"
+
+(xdg-open on Linux.) Your browser keeps the token in a cookie, so this is a one-time step.
 
 If the browser cannot reach :$port, the create did not publish it. Publishing is the one thing a
 sandbox cannot do for itself, which is why it belongs on the create -- "sbx create ... -p

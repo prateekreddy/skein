@@ -128,8 +128,9 @@ reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/s
 # row appearing here is a move, not a new reach, which is the sort of thing a count says and a
 # name cannot.
 #
-# `health`'s one is not a reach at all: it is the check's own name in `checks()` — a label. Its
-# second used to be `program_on_path("sbx")`, and SKEIN-576 deleted the question along with the
+# `health`'s two are not reaches at all: they are the check's own name, once in `CHECK_LABELS`
+# (its wire key and its label) and once in `checks_with_banner` — the table was one line until
+# SKEIN-1186 gave the labels a table of their own. A third used to be `program_on_path("sbx")`, and SKEIN-576 deleted the question along with the
 # answer: whether `sbx` is on `$PATH` decides nothing from inside the fleet, since `sbx ls` asks
 # about the HOST's machine and this process is not standing on it.
 #
@@ -148,4 +149,4 @@ reaches = { doorway = 1, fleet = 1, github = 1, health = 2, repos = 1, "warden/s
 # from the placement's own argv, which is the `nsenter` alone. A spawner that names the program
 # cannot be told the crossing changed shape — which is how a terminal ends up attached to the wrong
 # machine.
-reaches = { fleet = 1, health = 1, sbx = 1, "warden/doer" = 1, "warden/sightings" = 1 }
+reaches = { fleet = 1, health = 2, sbx = 1, "warden/doer" = 1, "warden/sightings" = 1 }

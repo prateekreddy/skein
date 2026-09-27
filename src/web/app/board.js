@@ -103,10 +103,8 @@ function sayUnauthorised() {
     + `<div class="noauth-t">This cockpit needs the fleet's token</div>`
     + `<div class="noauth-b">Not a login — one shared secret that keeps the fleet off the network`
     + ` it is reachable on. The page loads without it; nothing behind it does.</div>`
-    + `<div class="noauth-h">Open the URL <b>skein-server printed on startup</b> — it carries the`
-    + ` token, and your browser keeps it in a cookie afterwards, so this is a one-time step:</div>`
-    + `<pre class="noauth-c">skein-server → http://127.0.0.1:7878/?t=&lt;token&gt;</pre>`
-    + `<div class="noauth-h">Lost that line? On the host it is in the file itself:</div>`
+    + `<div class="noauth-h">Open it from the host with the token in the URL (<code>xdg-open</code>`
+    + ` on Linux). Your browser keeps it in a cookie afterwards, so this is a one-time step:</div>`
     + `<pre class="noauth-c">open "http://127.0.0.1:7878/?t=$(cat ~/.skein/api-token)"</pre>`
     + `<div class="noauth-b">Sharing a fleet with someone else means sharing that token — it is the`
     + ` whole of the access. <a href="?demo">Or look around in demo mode</a>, which needs none.</div>`
@@ -237,6 +235,9 @@ function makeRow(name) {
   el.addEventListener("click", e => {
     // the "proceed?" chip is the action itself — one click continues the box, no terminal trip
     if (e.target.classList.contains("pchip") && e.target.classList.contains("proceed")) { resumeBox(name); return; }
+    // the "sign in" chip opens the same login terminal the expired-login banner does — the one fix
+    // that works from the cockpit, and every box inherits what it signs in (SKEIN-1183)
+    if (e.target.classList.contains("pchip") && e.target.classList.contains("k-auth")) { openLoginTerminal(agentOf(name)); return; }
     if (e.target.classList.contains("hookwarn") && e.target.dataset.restart === "1") { restartAgent(name); return; }
     if (e.target.classList.contains("dchip")) { askDiskLimit(name); return; }
     // the check chip is a link to what the check actually said — a red tick you can't read is noise
@@ -408,7 +409,7 @@ const KTIP = {
   permission: "a tool is waiting for your approval",
   question:   "it asked you something and is waiting",
   trust:      "it can't start until you trust this folder",
-  auth:       "signed out or out of quota — run `skein login claude` on the host; every box inherits it",
+  auth:       "signed out or out of quota — click to sign in here; every box inherits the login",
 };
 // Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {

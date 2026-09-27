@@ -22,7 +22,7 @@
           </div>
           <div class="right">
             <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
-            <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
+            <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)" data-keys><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
             <span class="hdiv"></span>
             <button type="button" class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository" aria-label="Add a repository"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>repo</button>
             <button type="button" class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast" aria-label="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></button>
@@ -33,13 +33,13 @@
             <button type="button" class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you" aria-label="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
             <button type="button" class="kbtn ghost" id="voice" title="Say out loud when a box needs you" aria-label="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></button>
             <button type="button" class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos" aria-label="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-            <button type="button" class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)" aria-label="Command palette (⌘K)">⌘K</button>
+            <button type="button" class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)" aria-label="Command palette (⌘K)" data-keys>⌘K</button>
             <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
         <div class="gauges" id="gauges" onclick="showLoad()" style="cursor:pointer" title="the fleet sandbox's own VM — refreshed every 30s. Click for the same broken down by box (cpu, memory, disk)"></div>
         <div id="fleet"></div>
-        <footer class="keyhints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
+        <footer class="keyhints" data-keys><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="gutter" title="drag to resize"></div>
@@ -91,7 +91,7 @@
             <option value="review-request">review-request</option>
           </select>
         </div>
-        <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)"></textarea>
+        <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)" data-keys></textarea>
         <div class="row2"><span class="hint" id="mbx-hint"></span><button class="primary" id="mbx-send">Send</button></div>
       </div>
     </div>
@@ -238,8 +238,8 @@
   </div>
 
   <!-- Settings: a two-pane preferences surface. Sections are navigated, not scrolled past, so each
-       pane stays short enough to read; the Shortcuts pane is generated from one table (KEYMAP) so the
-       keys documented here cannot drift from the keys the app binds. -->
+       pane stays short enough to read; the Shortcuts pane is rendered from the tables that bind the
+       keys (`keySheet` in cockpit/src/keys.mjs), and cockpit/test/keys.test.mjs holds the two equal. -->
   <div id="settings" aria-hidden="true">
     <div class="set-shell" tabindex="-1" role="dialog" aria-modal="true" aria-label="Settings">
       <nav class="set-nav">

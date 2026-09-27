@@ -113,7 +113,7 @@ const pal = document.getElementById("pal"), palInput = document.getElementById("
 let palItems = [], palSel = 0;
 function commands() {
   const acts = [
-    { sec:"Actions", label:"New box…", run:openNewBox, meta:"⌘N" },
+    { sec:"Actions", label:"New box…", run:openNewBox, meta:glyph("⌘N") },
     { sec:"Actions", label:"Add a repo…", run:addRepoPrompt },
     { sec:"Actions", label:"Settings…", run:() => openSettings("repos") },
     { sec:"Actions", label:"Keyboard shortcuts…", run:() => openSettings("keys"), meta:"?" },
@@ -133,7 +133,7 @@ function commands() {
     { sec:"Actions", label:"Load by box — who is using the CPU, memory and disk", run:showLoad },
     // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
     // recognition on a pause by itself, so this needs no second click to stop it.
-    { sec:"Actions", label:"Listen for a command", run:listen, meta:"hold ⌥ right" },
+    { sec:"Actions", label:"Listen for a command", run:listen, meta:glyph("hold ⌥ right") },
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
@@ -855,21 +855,11 @@ function renderDiagnostics() {
   if (!el) return;
   const h = lastHealth;
   if (!h) { el.innerHTML = `<div class="note">no report yet</div>`; return; }
-  const CHECKS = [
-    ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
-    ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
-    ["disk", "fleet disk"],
-    // "token life" directly under "github scope": the same credential asked two questions — what it
-    // can reach, and whether it will still reach it next month (SKEIN-928).
-    ["gitgate", "github scope"], ["token_expiry", "token life"],
-    // "proxy credential" third in the same group, because it is the same credential asked the
-    // question the other two cannot: not what skein's token may reach and not how long it lasts,
-    // but whether the token skein holds is the one GitHub is actually answering (SKEIN-548). It is
-    // the substrate's answer rather than skein's, which is why skein can only report it.
-    ["proxy_injection", "proxy credential"],
-    ["warden", "host warden"], ["cover", "box isolation"],
-    ["ai", "ai enrichment"],
-  ];
+  // Every check the report carries, under the one name the report gives it (SKEIN-1186) — the
+  // same `labels` the banner that sends you here headlines with, and the same names `skein doctor`
+  // prints. The pane used to keep a table of its own, so one check arrived under two names one
+  // click apart.
+  const CHECKS = (h.labels || []).map(l => [l.key, l.label]);
   // Three states, not two. `unknown` is "skein could not tell", which is neither a pass nor a
   // fault — reporting it as ✗ sent people to reinstall a working tool because `sbx ls` timed out
   // once. It gets the ! this panel already uses for "look at this, nothing is broken".
@@ -907,7 +897,7 @@ function renderDiagnostics() {
   el.innerHTML = rows
     + unowned
     + list(h.dark_boxes, "no signals")
-    + list(h.stale_boxes, "stale sessions")
+    + list(h.stale_boxes, "on old probes")
     + `<div class="dg-foot">the same report <code>skein doctor</code> prints, which also probes
        bwrap, tmux and the fleet's mounts from inside the sandbox.</div>`;
   const pill = document.getElementById("set-diagn");

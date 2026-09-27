@@ -95,6 +95,30 @@ const REVIEW_CHORD = {
   h: "rev-github",
 };
 
+// The tab keys, which must work *while you are typing in the agent*, so they are decided apart from
+// the tables above (which yield every key to a focused terminal). ⌥ chords only: the browser
+// reserves ⌘1-9 and ⌃Tab, and the agents' own composers use ⌥←/⌥→ for word movement — brackets are
+// free in all of them. Matched on `code`, since ⌥[ on macOS reports `key` as "“". Keyed by what the
+// key sheet prints, so the sheet and the binding are this one table (SKEIN-1187); `⌥1`…`⌥9` are
+// matched in code below for the reason `g 1`…`g 9` are.
+const TABS = {
+  "⌥[": "tab-previous",
+  "⌥]": "tab-next",
+  "⌥⇧[": "tab-move-left",
+  "⌥⇧]": "tab-move-right",
+};
+
+// Which tab key an event is, if any — `tab-1`…`tab-9` (the nth tab; past the end is the last), or
+// one of TABS.
+export function tabShortcutFor(event) {
+  if (!event || !event.altKey || event.metaKey || event.ctrlKey) return null;
+  const digit = /^Digit([1-9])$/.exec(event.code || "");
+  if (digit) return `tab-${digit[1]}`;
+  const bracket = { BracketLeft: "[", BracketRight: "]" }[event.code];
+  if (!bracket) return null;
+  return TABS[`⌥${event.shiftKey ? "⇧" : ""}${bracket}`] || null;
+}
+
 // `where` is what the caller knows about focus, which is the part that needs a DOM. Passing it in is
 // what makes this testable at all.
 export function shortcutFor(event, where) {
@@ -137,6 +161,133 @@ export const ACTIONS = [
     ...Object.values(FLEET),
     ...Object.values(REVIEW),
     ...Object.values(REVIEW_CHORD),
+    ...Object.values(TABS),
+    ...Array.from({ length: 9 }, (_, i) => `tab-${i + 1}`),
     ...Array.from({ length: 9 }, (_, i) => `rev-repo-${i + 1}`),
   ]),
 ];
+
+// ---- the key sheet: Settings → Shortcuts and `?` (SKEIN-1187) --------------------------------
+//
+// **Rendered from the tables above, not written beside them.** The page kept a second table for the
+// sheet, which nothing bound from, and it had drifted: the fleet's `o`, `[`, `}` and the arrow keys
+// were bound here and missing there, under a comment saying the two "can't drift". So the sheet is
+// built from FLEET, REVIEW, REVIEW_CHORD and TABS, and all a key needs to appear on it is the words
+// in SAYS; `keys.test.mjs` holds the sheet equal to what those tables bind.
+
+// What each action does, in the words the sheet prints. Actions that share words share a row, so
+// `j`/`↓` and `k`/`↑` are one line and not four.
+const SAYS = {
+  palette: "command palette",
+  "new-box": "new box",
+  "close-dialog": "close a dialog",
+  keys: "this list",
+  deselect: "leave the terminal, back to the board",
+  next: "move the selection",
+  previous: "move the selection",
+  open: "open the selected box's terminal",
+  diff: "open its diff",
+  filter: "filter the board by name, branch, repo or headline",
+  "next-needs-you": "jump to the next box that needs you",
+  load: "load by box — which one is using the CPU",
+  "previous-session": "previous open session",
+  "next-session": "next open session",
+  "rev-next": "move the selection (inside an open stack, along its steps)",
+  "rev-previous": "move the selection (inside an open stack, along its steps)",
+  "rev-next-undecided": "next / previous row you have not decided this session",
+  "rev-previous-undecided": "next / previous row you have not decided this session",
+  "rev-into": "enter the selected stack",
+  "rev-back": "fold the open row, or leave the stack, back at its head",
+  "rev-open": "open the selected row — o opens things here; GitHub is g h",
+  "rev-aside": "set aside — the row greys in place, u takes it back within 8s",
+  "rev-undo": "undo the held act",
+  "rev-reread": "read this one again, against the commit that is there now",
+  "rev-search": "find a pull request",
+  "rev-last": "last row",
+  "rev-first": "first row",
+  "rev-repo-menu": "the repo picker",
+  "rev-github": "open it on GitHub",
+  "rev-approve": "refused here, deliberately — you cannot approve from a surface that is not showing you the change; ↵ opens the row, and approve is a chip in it",
+  "rev-comment": "says where comment went — a chip on the row",
+  "rev-request": "says where request changes went — a chip on the row",
+  "rev-next-file": "say where the diff went — g h opens the change on GitHub",
+  "rev-previous-file": "say where the diff went — g h opens the change on GitHub",
+  "tab-previous": "previous tab",
+  "tab-next": "next tab",
+  "tab-move-left": "move the current tab left / right",
+  "tab-move-right": "move the current tab left / right",
+};
+
+// How a key's name prints. Anything not here prints as itself.
+const SHOWN = { Escape: "esc", Enter: "↵", ArrowDown: "↓", ArrowUp: "↑", ArrowLeft: "←", ArrowRight: "→" };
+
+// Rows for one table: its keys grouped by the words their actions share, in the table's order.
+function rowsOf(table, prefix = []) {
+  const rows = new Map();
+  for (const [key, action] of Object.entries(table)) {
+    const says = SAYS[action];
+    if (!says) continue;
+    if (!rows.has(says)) rows.set(says, []);
+    rows.get(says).push(...prefix, SHOWN[key] || key);
+  }
+  return [...rows].map(([says, keys]) => [keys, says]);
+}
+
+// **The key sheet**, as sections of `[keys, words]` rows. Four sections are the binding tables
+// themselves; the last two are said here because they are not skein's to bind — the terminal's own
+// keys and a drag — and a sheet that dropped them would leave people guessing at ⌘C.
+//
+// Written with the Mac's ⌘/⌥/⇧/⌃; `platformKeys` turns them into what another keyboard has on it.
+// `mac` decides the one row family whose chord is not a modifier swap: off a Mac a terminal copies
+// and pastes on Ctrl+Shift, because a bare Ctrl+C is the interrupt (`copy`/`paste` in settings.js).
+export function keySheet(mac = true) {
+  return [
+    { sec: "Anywhere", items: [
+      [["⌘K"], SAYS.palette],
+      [["⌘N"], SAYS["new-box"]],
+      [["?"], SAYS.keys],
+      [["esc"], SAYS["close-dialog"]],
+    ] },
+    { sec: "Fleet", items: rowsOf(FLEET).filter(([keys]) => keys[0] !== "?") },
+    { sec: "Review — the queue", items: [
+      ...rowsOf(REVIEW).filter(([keys]) => keys[0] !== "?"),
+      [["g", "1", "…", "g", "9"], "the nth repo in the picker's order"],
+      ...rowsOf(REVIEW_CHORD, ["g"]),
+      // The one deliberate absence, LISTED rather than omitted: a sheet that silently lacks `m`
+      // reads as a sheet that forgot it. `shortcutFor` returns nothing for it, and a test says so.
+      [["m"], "unbound, deliberately — merging cannot be undone from this pane, so one letter must never land a commit on a base branch; the merge chip asks first"],
+    ] },
+    { sec: "Tabs", items: [
+      [["⌥1", "…", "⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
+      ...rowsOf(TABS),
+      [["drag"], "reorder tabs by dragging one — esc cancels, and the order is remembered"],
+    ] },
+    { sec: "In a terminal", items: [
+      [[mac ? "⌘C" : "⌃⇧C"], "copy the selection"],
+      [[mac ? "⌘V" : "⌃⇧V"], "paste"],
+      [["⌃C"], "interrupt — goes through to the agent, never intercepted"],
+      [[mac ? "⌘V" : "⌃⇧V", "file"], "paste a file, or drag one in, to hand it to the agent"],
+    ] },
+  ];
+}
+
+// Every key the tables bind, by table — what `keys.test.mjs` holds the sheet to, so a key added to
+// a table and not to the sheet fails there rather than going undocumented.
+export function boundKeys() {
+  return {
+    fleet: Object.keys(FLEET),
+    review: Object.keys(REVIEW),
+    chord: Object.keys(REVIEW_CHORD),
+    tabs: Object.keys(TABS),
+  };
+}
+
+// ⌘/⌥/⇧/⌃ are Mac glyphs; away from a Mac the same bindings are Ctrl/Alt/Shift (the handlers
+// accept either), so print what that keyboard actually has on it. Every place the cockpit names a
+// modifier goes through this — the sheet, the footer, the buttons' hints — so a Linux user is not
+// told ⌘K on a button and Ctrl+K in the sheet.
+export function platformKeys(text, mac) {
+  return mac ? text
+    : String(text).replaceAll("⌘", "Ctrl+").replaceAll("⌃", "Ctrl+").replaceAll("⌥", "Alt+").replaceAll("⇧", "Shift+");
+}
+

@@ -398,11 +398,15 @@ console.log("\nacts");
 // open), the busy guard dropped (an Esc mid-answer closes it, or a second ask is sent), Esc
 // clearing what was typed, the chord posting past the undo window, or either hint reworded.
 const composerKey = () => page.evaluate(() => revComposing && revComposeStore(revComposing));
+// The hint names the key this platform has (SKEIN-1187): the chord the checks below press is
+// Control+Enter, and a hint saying ⌘ to somebody with no ⌘ key is the defect. Decided from the
+// browser's own platform, not from the page's `glyph`, so a glyph that stopped translating fails.
+const CHORD = await page.evaluate(() => /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "") ? "⌘↵" : "Ctrl+↵");
 await check("⌘↵ in an ask presses ask, and the composer says so", async () => {
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
   await until(() => !!document.getElementById("rev-compose"), null, "pressing ask drew no composer");
   const hint = await page.$eval("#revpane .revcompose .revacts .revkeys", e => e.textContent.trim());
-  if (hint !== "⌘↵ asks · Esc closes") throw new Error(`the ask composer's hint is not the approved one: ${JSON.stringify(hint)}`);
+  if (hint !== `${CHORD} asks · Esc closes`) throw new Error(`the ask composer's hint is not the approved one: ${JSON.stringify(hint)}`);
   await page.fill("#rev-compose", "why 5 seconds?");
   await page.focus("#rev-compose");
   await page.keyboard.press("Control+Enter");
@@ -444,7 +448,7 @@ await check("⌘↵ in a comment posts it through the undo window, not past it",
   await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
   await until(() => !!document.getElementById("rev-compose"), null, "pressing comment drew no composer");
   const hint = await page.$eval("#revpane .revcompose .revacts .revkeys", e => e.textContent.trim());
-  if (hint !== "⌘↵ posts · Esc closes — your words are kept")
+  if (hint !== `${CHORD} posts · Esc closes — your words are kept`)
     throw new Error(`the comment composer's hint is not the approved one: ${JSON.stringify(hint)}`);
   const key = await composerKey();
   const rowKey = await page.evaluate(() => revComposing.repo + "#" + revComposing.number);
