@@ -154,8 +154,6 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
         // handoff brief built from it — says what the board's row for this box says.
         status: turn_state(name, &agent_for_box(name))
             .status
-            .or_else(|| reg.as_ref().map(|r| r.status.clone()))
-            .filter(|s| !s.is_empty())
             .unwrap_or_default(),
     };
     let (state, tier) = sb.state_with(live);

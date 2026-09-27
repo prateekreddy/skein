@@ -121,11 +121,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch: branch.clone(),
                 dir: dir.clone(),
                 last_seen: r.map(|x| x.last_seen.clone()).unwrap_or_default(),
-                // the registry's own status remains the transitional fallback for unprobed boxes.
-                status: fused
-                    .or_else(|| r.map(|x| x.status.clone()))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_default(),
+                status: fused.unwrap_or_default(),
             };
             // Liveness through `box_liveness`, never straight off the `sbx ls` row — for a box in
             // the fleet the two disagree, and the row wins in the worst possible way.

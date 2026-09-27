@@ -839,7 +839,18 @@ mod tests {
         fs::write(
             home.join("sandboxes.json"),
             format!(
-                r#"{{"demo-task":{{"branch":"b","dir":"/boxes/demo-task/tree","lastSeen":"{}","status":"waiting"}}}}"#,
+                r#"{{"demo-task":{{"branch":"b","dir":"/boxes/demo-task/tree","lastSeen":"{}"}}}}"#,
+                secs_ago(20)
+            ),
+        )
+        .unwrap();
+        // The box's own turn state, as its hooks write it. It used to be a `status` in the
+        // registry row, which nothing writes and the board no longer reads.
+        fs::create_dir_all(home.join("status")).unwrap();
+        fs::write(
+            home.join("status/demo-task.json"),
+            format!(
+                r#"{{"status":"waiting","ts":"{}","box":"demo-task"}}"#,
                 secs_ago(20)
             ),
         )
