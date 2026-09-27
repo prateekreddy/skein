@@ -15,7 +15,7 @@ plugin claims below are as the documentation stood on the date, not re-verified 
 guidance — guidance as a skill, because a plugin's own `CLAUDE.md` is not loaded as context. Loaded
 with `--plugin-dir` from a path skein controls: no marketplace, no network, versioned with the
 binary. That would also retire the network-dependent plugin install the bootstrap runs in the
-background at every box start (`src/store/sandbox-bootstrap.sh:275-293`).
+background at every box start (`src/store/sandbox-bootstrap.sh:268-286`).
 
 **What provably cannot.** `statusLine` (a plugin's settings honour only `agent` and
 `subagentStatusLine`), `tui`, `permissions` and `env`; and the whole provisioning layer, because an
@@ -42,4 +42,4 @@ malformed-settings outage.
 **Rules out.** Starting a plugin port before both blockers are tested.
 
 **Enforced at.** Nothing; this is research. The kit is where skein's settings are merged into a
-box's own untracked `settings.local.json` today (`src/kit/skein-startup.sh:412`).
+box's own untracked `settings.local.json` today (`src/kit/skein-startup.sh:444`).

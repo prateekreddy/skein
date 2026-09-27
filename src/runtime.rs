@@ -185,11 +185,15 @@ pub(crate) fn guarded_agent_command(agent: &str, command: &str) -> String {
 
 /// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
 /// creating its agent process. Reattaching to a live tmux session skips this entire branch.
+///
+/// The store is `box-self.sh`'s answer, as it is for every script skein ships into a box
+/// (SKEIN-1174): a box whose store cannot be found says the guide could not be refreshed, rather
+/// than reading the checkout's own `.claude` as the store.
 pub(crate) fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
     let instruction = sh_quote(runtime.instruction_file);
     let override_ = sh_quote(runtime.instruction_override);
     format!(
-        r#"root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; helper="${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/plugin-turn-state/probe/agent-guide.sh"; if [ -r "$helper" ]; then bash "$helper" "$store" {instruction} {override_} || echo 'skein: durable agent guidance could not be refreshed' >&2; else echo 'skein: agent guide helper is unavailable; restart the host server to refresh this store' >&2; fi"#
+        r#"root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; helper="${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/plugin-turn-state/probe/agent-guide.sh"; if [ -r "$helper" ] && . "${{SKEIN_FLEET_ROOT:-/boxes}}/.skein/plugin-turn-state/probe/box-self.sh" 2>/dev/null; then store="$(skein_box_store "$root")" && bash "$helper" "$store" {instruction} {override_} || echo 'skein: durable agent guidance could not be refreshed' >&2; else echo 'skein: agent guide helper is unavailable; restart the host server to refresh this store' >&2; fi"#
     )
 }
 

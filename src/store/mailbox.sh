@@ -17,9 +17,9 @@
 # for the one *silent* failure mode skein cannot tolerate: a message that sits unread because nothing
 # ever re-checked after SessionStart.
 #
-# Installed twice: into <store>/skein/bin, where the store is two levels up from this script and an
-# agent runs it by hand, and into skein's read-only plugin (`probe/`), which is the copy the hooks
-# run (SKEIN-1144) and which finds the store from the project, as box-status.sh does.
+# Installed twice: into <store>/skein/bin, where an agent runs it by hand, and into skein's
+# read-only plugin (`probe/`), which is the copy the hooks run (SKEIN-1144). Both find the store,
+# and this box's name, through box-self.sh beside them (SKEIN-1174).
 #
 # Usage:
 #   mailbox.sh send --to <vmid|broadcast|all-projects|project:<id>> \
@@ -33,15 +33,14 @@
 set -uo pipefail
 
 self="$(cd "$(dirname "$0")" && pwd)"
-if [ "$(basename "$(dirname "$self")")" = skein ]; then
-  here="$(dirname "$(dirname "$self")")"   # the store's copy: .claude/skein/bin, two levels down
-else
-  # The plugin's copy. The project's .claude, with the merged layout's hop (box-status.sh says why).
-  cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
-  here="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")/.claude"
-  if [ -L "$here/skein" ]; then here="$(dirname "$(readlink "$here/skein")")"; fi
-  [ -d "$here" ] || exit 0
-fi
+. "$self/box-self.sh" 2>/dev/null || exit 0
+cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
+# Said rather than silent, for the reason the identity below is: `send` with nowhere to put the
+# message must not read as sent.
+here="$(skein_box_store "$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")")" || {
+  echo "[skein-mailbox] this box's store could not be found; mail is neither sent nor delivered" >&2
+  exit 0
+}
 command -v jq >/dev/null 2>&1 || {
   echo "[skein-mailbox] jq is unavailable; mailbox delivery is disabled (visible in /api/health)" >&2
   exit 0
@@ -62,27 +61,17 @@ own="${SKEIN_STATE:-}/inbox"
 # remembered in this box's own HOME instead. Private per box: another box cannot silence the owner
 # by marking its messages seen, and a box tampering with its own only repeats or misses its own mail.
 seen_file="${HOME:-/tmp}/.skein-mail-seen"
-# The BOX, not the VM. SKEIN_BOX names the box wherever it was set; with it unset, skein's fleet
-# launcher decides — installed at `fleet::box_session_path()` only in a sandbox that HOLDS boxes,
-# so its absence means a legacy box alone in its VM where the sandbox's name IS the box's, and its
-# presence means a shared sandbox, where SANDBOX_VM_ID is one string for every box in it and a
-# signal keyed on it lands on whichever box owns that name. The argument in full, and the measured
-# residue that settled it, is in box-status.sh — installed beside this one in <store>/skein/bin/.
+# The BOX, not the VM: decided in box-self.sh, which gives the argument in full.
 #
 # Loudly here, and not `exit 0` as the hooks do: this is a command the agent runs and reads the
 # answer of, so silence would look like an empty inbox — the one reading a lost identity must never
 # produce. What it would cost otherwise is worse than a misfiled file: mail addressed to this box
 # would go undelivered because the address no longer matches, every outgoing message would claim to
 # come from a box that does not exist, and `seenBy` would fill with the sandbox's name.
-if [ -n "${SKEIN_BOX:-}" ]; then
-  vmid="$SKEIN_BOX"
-elif [ ! -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
-  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
-else
+vmid="$(skein_box_name)" || {
   echo "[skein-mailbox] this box cannot establish which box it is (no SKEIN_BOX in a shared sandbox); mail is neither sent nor delivered" >&2
   exit 0
-fi
-vmid="${vmid//\//-}"   # slash-safe identity (matches the registry/journal shard keys)
+}
 
 # The one registry key that is NOT a box. In a shared sandbox `SANDBOX_VM_ID` names the SANDBOX,
 # and the identity chain above says why: before SKEIN-224 the hooks fell through to it, so a

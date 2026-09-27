@@ -61,28 +61,16 @@ tm() {
   fi
 }
 
-# Merged layout: the shared store is that link's target parent, not the repo dir (box-status.sh).
 cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
-store="$root/.claude"
-if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
-[ -d "$store" ] || exit 0
-
-# The BOX, not the VM — and here the question is settled by SKEIN_TMUX_SOCK rather than by the fleet
-# launcher the hooks read: `pane_observer_start` (src/runtime.rs) exports the box's own tmux socket
-# under the shared model and exports nothing at all when the sandbox IS the box. So SKEIN_BOX is the
-# box wherever it is set; no socket means a legacy box alone in its VM, where the sandbox's name IS
-# the box's; a socket with no SKEIN_BOX means a shared sandbox that cannot say which box this is,
-# and an observation written there would land on whichever box owns that name. The argument in full,
-# and the measured residue that settled it, is in box-status.sh — beside this one in skein/bin/.
-if [ -n "${SKEIN_BOX:-}" ]; then
-  vmid="$SKEIN_BOX"
-elif [ -z "${SKEIN_TMUX_SOCK:-}" ]; then
-  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
-else
-  exit 0
-fi
-vmid="${vmid//\//-}"
+# Which store this box reports into, and under which name: both decided in box-self.sh, installed
+# beside this script, which says why neither is guessed (SKEIN-1174). Either one unknown is a quiet
+# exit — a hook's stdout is read by the agent, and a signal nobody files is one the board already
+# calls missing, while one filed in the checkout or under the sandbox's name is one it believes.
+here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+. "$here/box-self.sh" 2>/dev/null || exit 0
+store="$(skein_box_store "$root")" || exit 0
+vmid="$(skein_box_name)" || exit 0
 dir="$store/status"
 mkdir -p "$dir" 2>/dev/null || exit 0
 out="$dir/$vmid.pane.json"

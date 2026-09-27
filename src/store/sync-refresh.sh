@@ -34,19 +34,16 @@ set -uo pipefail
 
 project="${WORKSPACE_DIR:-}"
 [ -n "$project" ] || project="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-# The store. Two copies of this script exist and they find it differently, as mailbox.sh's do: the
-# store's own, two levels below it (`.claude/skein/bin/`), and skein's read-only plugin's
-# (`probe/`), which is the one skein runs (SKEIN-1149) and which finds it from the project's
-# `.claude`, with the merged layout's hop (box-status.sh says why).
+# The store, found through box-self.sh beside this script (SKEIN-1174), as every script skein
+# ships into a box finds it. Two copies of this one exist — the store's own and skein's read-only
+# plugin's, which is the one skein runs (SKEIN-1149) — and both ask the same question. Empty when
+# there is none, and nothing below writes anywhere then: the checkout's own `.claude` is not a store.
 self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-if [ "$(basename "$(dirname "$self")")" = skein ]; then
-  store="$(dirname "$(dirname "$self")")"
-else
-  store="$project/.claude"
-  if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"
-  elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi
+store=""
+if . "$self/box-self.sh" 2>/dev/null; then
+  store="$(skein_box_store "$project")" || store=""
 fi
-src="$store/skein/sync"
+src="${store:+$store/skein/sync}"
 
 slug="$(printf '%s' "$project" | sed 's#/#-#g')"
 state_dir="$HOME/.local/state/skein"
@@ -62,6 +59,10 @@ for arg in "$@"; do
   esac
 done
 
+if [ -z "$store" ]; then
+  echo "[sync] this box's store could not be found, so nothing was refreshed" >&2
+  exit 0
+fi
 if [ ! -d "$src" ]; then
   echo "[sync] $src is missing — restart the host server to refresh this store" >&2
   exit 0

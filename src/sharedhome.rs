@@ -55,8 +55,10 @@ pub fn shared_home_inventory(name: &str) -> Result<Vec<SharedHomeCandidate>, Str
 const SHARED_HOME_IMPORT: &str = r####"
 set -euo pipefail
 root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"
-store="$root/.claude"
-if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
+# `skein_box_store` and `skein_box_name` are box-self.sh's, pasted in front of this script by
+# `import_shared_home`: the same answer every script skein ships into a box gets (SKEIN-1174).
+store="$(skein_box_store "$root")" || { echo "this box's store could not be found from $root" >&2; exit 1; }
+self="$(skein_box_name)" || self=""
 canonical="$store/shared-home"
 [ -d "$canonical" ] && [ -w "$canonical" ] \
   || { echo "shared-home unavailable or not writable: $canonical" >&2; exit 1; }
@@ -74,7 +76,7 @@ for name in "$@"; do
   [ -z "$unsafe" ] || { echo "unsafe nested entry blocks import: $unsafe" >&2; exit 1; }
 done
 
-stage="$store/.shared-home-import.$(printf '%s' "${SANDBOX_VM_ID:-box}" | tr / -).$$"
+stage="$store/.shared-home-import.${self:-box}.$$"
 mkdir -p "$stage"
 trap 'rm -rf "$stage"' EXIT
 warnings="$stage/.tar-warnings"
@@ -113,10 +115,10 @@ done
 mkdir -p "$store/skein/imports"
 items="$(jq -Rsc 'split("\n")[:-1]' <"$imported_list")"
 warning_text="$(cat "$warnings")"
-jq -cn --arg from "${SANDBOX_VM_ID:-unknown}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+jq -cn --arg from "${self:-unknown}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson items "$items" --arg warnings "$warning_text" \
   '{from:$from,ts:$ts,items:$items,warnings:$warnings}' \
-  > "$store/skein/imports/$(date -u +%Y%m%dT%H%M%SZ)-${SANDBOX_VM_ID:-box}.json"
+  > "$store/skein/imports/$(date -u +%Y%m%dT%H%M%SZ)-${self:-box}.json"
 printf 'imported %s item(s) into %s\n' "$imported" "$canonical"
 if [ -s "$warnings" ]; then
   echo 'Skipped source entries:'
@@ -155,13 +157,22 @@ pub fn import_shared_home(name: &str, selected: &[String]) -> Result<String, Str
             ));
         }
     }
+    sbx_guest_output(name, &import_script(selected), Duration::from_secs(600))
+}
+
+/// The shell [`import_shared_home`] runs in the box to copy `selected` out of its `$HOME`: the
+/// entries as `$@`, box-self.sh's two functions (SKEIN-1174), then the import itself. Public so
+/// the isolation suite runs these exact bytes inside a box rather than a copy of them.
+pub fn import_script(selected: &[String]) -> String {
     let selection = selected
         .iter()
         .map(|entry| sh_quote(entry))
         .collect::<Vec<_>>()
         .join(" ");
-    let command = format!("set -- {selection}; {SHARED_HOME_IMPORT}");
-    sbx_guest_output(name, &command, Duration::from_secs(600))
+    format!(
+        "set -- {selection}\n{}\n{SHARED_HOME_IMPORT}",
+        crate::probes::BOX_SELF_SH
+    )
 }
 
 #[cfg(test)]

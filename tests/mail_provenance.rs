@@ -32,9 +32,11 @@ fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(store.join("skein/bin")).unwrap();
 
-    // The script as it ships, in the layout it expects: `<store>/.claude/skein/bin/mailbox.sh`.
+    // The script as it ships, in the layout it expects: `<store>/.claude/skein/bin/mailbox.sh`,
+    // beside the box-self.sh it asks which box and which store this is.
     let script = store.join("skein/bin/mailbox.sh");
     std::fs::copy("src/store/mailbox.sh", &script).unwrap();
+    std::fs::copy("src/probe/box-self.sh", store.join("skein/bin/box-self.sh")).unwrap();
 
     // A box's message, in the shared mailbox — and it claims to be skein. **No trickery is needed
     // for this**: the directory is writable from inside every box, and this is a file.

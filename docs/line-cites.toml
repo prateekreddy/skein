@@ -850,35 +850,35 @@ cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2019"]
+["src/box-session.sh:2034"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2020"]
+["src/box-session.sh:2035"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2083"]
+["src/box-session.sh:2098"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2208"]
+["src/box-session.sh:2223"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2277"]
+["src/box-session.sh:2292"]
 line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2650"]
+["src/box-session.sh:2665"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2700"]
+["src/box-session.sh:2715"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2741"]
+["src/box-session.sh:2756"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1584,7 +1584,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:412"]
+["src/kit/skein-startup.sh:444"]
 line = "merged=\"$(jq -s \"$retire\"'"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
@@ -1835,7 +1835,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
 cited_by = ["docs/architecture.md"]
 
-["src/store/sandbox-bootstrap.sh:275"]
+["src/store/sandbox-bootstrap.sh:268"]
 line = "if [ -n \"$wanted\" ] && [ \"$wanted\" != \"$(cat \"$marker\" 2>/dev/null || true)\" ] \\"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 

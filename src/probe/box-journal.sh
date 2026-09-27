@@ -13,28 +13,14 @@ set -uo pipefail
 
 cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
-store="$root/.claude"
-# Merged layout: the shared store is that link's target parent, not the repo dir (box-status.sh).
-if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
-[ -d "$store" ] || exit 0
-
-# The BOX, not the VM. SKEIN_BOX names the box wherever it was set; with it unset, skein's fleet
-# launcher decides — installed at `fleet::box_session_path()` only in a sandbox that HOLDS boxes,
-# so its absence means a legacy box alone in its VM where the sandbox's name IS the box's, and its
-# presence means a shared sandbox, where SANDBOX_VM_ID is one string for every box in it and a
-# signal keyed on it lands on whichever box owns that name. The argument in full, and the measured
-# residue that settled it, is in box-status.sh — installed beside this one in <store>/skein/bin/.
-#
-# Refusing is the conservative half: a box with no signal reads as one that has not reported, which
-# is TRUE and which the board already says out loud.
-if [ -n "${SKEIN_BOX:-}" ]; then
-  vmid="$SKEIN_BOX"
-elif [ ! -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
-  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
-else
-  exit 0
-fi
-vmid="${vmid//\//-}"
+# Which store this box reports into, and under which name: both decided in box-self.sh, installed
+# beside this script, which says why neither is guessed (SKEIN-1174). Either one unknown is a quiet
+# exit — a hook's stdout is read by the agent, and a signal nobody files is one the board already
+# calls missing, while one filed in the checkout or under the sandbox's name is one it believes.
+here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+. "$here/box-self.sh" 2>/dev/null || exit 0
+store="$(skein_box_store "$root")" || exit 0
+vmid="$(skein_box_name)" || exit 0
 
 journal="$root/.skein/journal.md"
 [ -r "$journal" ] || exit 0

@@ -81,19 +81,16 @@ export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes"
 
 project="${WORKSPACE_DIR:-}"
 [ -n "$project" ] || project="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-# The store. Two copies of this script exist and they find it differently, as mailbox.sh's do: the
-# store's own, two levels below it (`.claude/skein/bin/`), and skein's read-only plugin's
-# (`probe/`), which is the one skein runs (SKEIN-1149) and which finds it from the project's
-# `.claude`, with the merged layout's hop (box-status.sh says why).
+# The store, found through box-self.sh beside this script (SKEIN-1174), as every script skein
+# ships into a box finds it. Two copies of this one exist — the store's own and skein's read-only
+# plugin's, which is the one skein runs (SKEIN-1149) — and both ask the same question. Empty when
+# there is none, and nothing below writes anywhere then: the checkout's own `.claude` is not a store.
 self="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-if [ "$(basename "$(dirname "$self")")" = skein ]; then
-  store="$(dirname "$(dirname "$self")")"
-else
-  store="$project/.claude"
-  if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"
-  elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi
+store=""
+if . "$self/box-self.sh" 2>/dev/null; then
+  store="$(skein_box_store "$project")" || store=""
 fi
-src="$store/skein/sync"
+src="${store:+$store/skein/sync}"
 
 # Credentials: the environment first, then the box-private file skein writes. Never the store — the
 # agent token is a bearer credential and the store is mounted live into every box for this repo.
@@ -117,9 +114,13 @@ token="${SYNC_AGENT_TOKEN:-}"
 # plugin's `.mcp.json`. Measured, not assumed — with the variable set only in project settings, the
 # plugin still resolved to the default gateway compiled into it. User scope does work.
 [ -n "$url" ] || url="${SYNC_MCP_URL:-}"
-[ -n "$url" ] || url="$(sed -n '1s/[[:space:]]*$//p' "$src/gateway" 2>/dev/null)"
+[ -n "$url" ] || [ -z "$src" ] || url="$(sed -n '1s/[[:space:]]*$//p' "$src/gateway" 2>/dev/null)"
 if [ -z "$url" ]; then
   # The common case at box startup. Quiet on purpose: a box with no tracker is not a broken box.
+  exit 0
+fi
+if [ -z "$store" ]; then
+  echo "[sync] this box's store could not be found, so the tracker was not installed" >&2
   exit 0
 fi
 if [ ! -d "$src" ]; then

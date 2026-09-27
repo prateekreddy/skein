@@ -20,10 +20,11 @@ use std::process::{Command, Stdio};
 
 const BOX: &str = "web-main";
 
-/// A throwaway store with the probe pointed at it.
+/// A throwaway store, and a checkout linked to it the way the kit links one (`tree/.claude/skein`
+/// is the store's `skein/`), with the probe pointed at the checkout.
 ///
 /// Deliberately **not** under `/tmp` or `$HOME` — a box binds its own directories over both — and
-/// not under a git checkout either, since the script resolves its store from `git rev-parse
+/// not under a git checkout either, since the script resolves the checkout from `git rev-parse
 /// --show-toplevel` and would otherwise climb out into the real one.
 struct Probe {
     root: Scratch,
@@ -32,7 +33,13 @@ struct Probe {
 impl Probe {
     fn new(what: &str) -> Probe {
         let root = Scratch::boxes(&format!("skein-turnstate-it-{what}"));
-        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::create_dir_all(root.join("store/.claude/skein")).unwrap();
+        fs::create_dir_all(root.join("tree/.claude")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("store/.claude/skein"),
+            root.join("tree/.claude/skein"),
+        )
+        .unwrap();
         Probe { root }
     }
 
@@ -49,7 +56,7 @@ impl Probe {
         let mut child = Command::new("bash")
             .arg(Self::script())
             .arg(mode)
-            .env("CLAUDE_PROJECT_DIR", self.root.path())
+            .env("CLAUDE_PROJECT_DIR", self.root.join("tree"))
             .env("SKEIN_BOX", BOX)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -77,7 +84,7 @@ impl Probe {
     fn state(&self) -> (String, String) {
         let p = self
             .root
-            .join(".claude")
+            .join("store/.claude")
             .join("status")
             .join(format!("{BOX}.json"));
         let text = fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));

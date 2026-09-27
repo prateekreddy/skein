@@ -18,14 +18,17 @@ input="$(cat 2>/dev/null || true)"
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -z "$cwd" ] && cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
-store="$root/.claude"
-# Merged layout: the shared store is that link's target parent, not the repo dir (box-status.sh).
-if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
-[ -d "$store" ] || { echo "[skein-bootstrap] no .claude store at $store — skipping" >&2; exit 0; }
 # The helpers this runs are the ones BESIDE it, not the store's (SKEIN-1144). The hook runs this
 # script from skein's read-only plugin; running a helper out of the store would hand whatever a
 # sibling box wrote there to this box's SessionStart, which is the hole moving this script closed.
 here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+# Which store, decided in box-self.sh beside this script. **Never the checkout's own `.claude`**:
+# in a repo that tracks one, taking it for the store pointed `$HOME/shared` and the memory bridge
+# into the clone and wrote a boot report there (SKEIN-1174). A box whose store cannot be found
+# shares nothing and writes nothing, and says so.
+. "$here/box-self.sh" 2>/dev/null || { echo "[skein-bootstrap] box-self.sh is missing beside $0 — skipping" >&2; exit 0; }
+store="$(skein_box_store "$root")" \
+  || { echo "[skein-bootstrap] this box's store could not be found from $root — skipping" >&2; exit 0; }
 
 # --- durable project workspace: private $HOME/shared -> mounted store/shared-home ----------------
 # The same provider-neutral helper runs during durable kit startup. Running it again here self-heals
@@ -49,26 +52,16 @@ if [ -r "$agent_guide" ] && [ -r "$runtime_manifest" ]; then
   done <"$runtime_manifest"
 fi
 
-# The BOX, not the VM. SKEIN_BOX names the box wherever it was set; with it unset, skein's fleet
-# launcher decides — installed at `fleet::box_session_path()` only in a sandbox that HOLDS boxes,
-# so its absence means a legacy box alone in its VM where the sandbox's name IS the box's, and its
-# presence means a shared sandbox, where SANDBOX_VM_ID is one string for every box in it and a
-# signal keyed on it lands on whichever box owns that name. The argument in full, and the measured
-# residue that settled it, is in box-status.sh — installed beside this one.
+# The BOX, not the VM: decided in box-self.sh, which gives the argument in full.
 #
 # Empty rather than `exit 0`, because most of what this hook does is not keyed on identity at all —
 # the shared-home contract, the memory bridge and the gitignored-path surfacing are what make the
 # box usable, and they are the same work whoever it turns out to be. Only the parts that write
 # under a name are skipped, each at its own use below.
-if [ -n "${SKEIN_BOX:-}" ]; then
-  vmid="$SKEIN_BOX"
-elif [ ! -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
-  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
-else
+vmid="$(skein_box_name)" || {
   echo "[skein-bootstrap] no SKEIN_BOX in a shared sandbox: this box cannot say which box it is, so it registers and reports under no name" >&2
   vmid=""
-fi
-vmid="${vmid//\//-}"
+}
 # Where this repo's SOURCE TREE is — the checkout the gitignored files below come from. Not a
 # mirror: a mirror is a remote and carries tracked files only, so the .env and the CLAUDE.md a
 # project keeps out of git exist in no clone of any shape, only in somebody's working tree.

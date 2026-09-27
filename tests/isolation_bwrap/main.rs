@@ -36,6 +36,7 @@ fn script(name: &str) -> PathBuf {
         .join(name)
 }
 
+mod boxself;
 mod cover;
 mod harness;
 mod homes;
