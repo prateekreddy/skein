@@ -1584,7 +1584,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:444"]
+["src/kit/skein-startup.sh:524"]
 line = "merged=\"$(jq -s \"$retire\"'"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
@@ -1863,11 +1863,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"copying {guest}: {}\", stderr.trim()));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:304"]
+["src/takeover.rs:321"]
 line = "\"extracting shared context: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:384"]
+["src/takeover.rs:401"]
 line = "\"{source} already uses {target_runtime}; use the same-provider tmux restart path\""
 cited_by = ["docs/recovery-survey.md"]
 

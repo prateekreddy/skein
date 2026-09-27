@@ -213,9 +213,26 @@ fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
     fs::rename(&tmp, host).map_err(|e| format!("install {}: {e}", host.display()))
 }
 
+/// The shared package install (`src/package-install.sh`), then what this path wants of it: jq
+/// and tmux, apt's own words on stderr if they still are not there, and the package indexes
+/// removed afterwards, because they dwarf both tools and are useless after this one pass.
+pub(crate) fn source_takeover_tools_script() -> String {
+    format!(
+        r#"{}
+need=""; command -v jq >/dev/null 2>&1 || need="$need jq"; command -v tmux >/dev/null 2>&1 || need="$need tmux"; if [ -n "$need" ]; then command -v apt-get >/dev/null 2>&1 || {{ echo "missing required tools:$need and no supported package manager" >&2; exit 1; }}; log=$(mktemp); skein_apt_install "$log" $need || tail -n 25 "$log" >&2; rm -f "$log"; sudo -n rm -rf /var/lib/apt/lists/* 2>/dev/null || true; fi; command -v jq >/dev/null && command -v tmux >/dev/null"#,
+        include_str!("package-install.sh")
+    )
+}
+
 fn ensure_source_takeover_tools(name: &str) -> Result<(), String> {
-    let script = r#"need=""; command -v jq >/dev/null 2>&1 || need="$need jq"; command -v tmux >/dev/null 2>&1 || need="$need tmux"; if [ -n "$need" ]; then command -v apt-get >/dev/null 2>&1 || { echo "missing required tools:$need and no supported package manager" >&2; exit 1; }; waited=0; while ps -eo comm= 2>/dev/null | grep -Eq '^[[:space:]]*(apt|apt-get|dpkg)[[:space:]]*$' && [ "$waited" -lt 240 ]; do sleep 2; waited=$((waited + 2)); done; timeout 120 sudo apt-get install -y -qq $need 2>/dev/null || { timeout 120 sudo apt-get update -qq && timeout 120 sudo apt-get install -y -qq $need; }; sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true; fi; command -v jq >/dev/null && command -v tmux >/dev/null"#;
-    sbx_guest_output(name, script, Duration::from_secs(520)).map(|_| ())
+    // 900s, the deadline every other caller of the shared install gives it, because its apt step
+    // alone is bounded at 180s + 600s; the 520s this had was sized for a 120s install.
+    sbx_guest_output(
+        name,
+        &source_takeover_tools_script(),
+        Duration::from_secs(900),
+    )
+    .map(|_| ())
 }
 
 fn write_replacement_launch_spec(
