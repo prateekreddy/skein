@@ -274,6 +274,46 @@ mod tests {
         );
     }
 
+    /// **A box runs its own pick, not the fleet's default** (the owner, 2026-09-27: one fleet
+    /// default plus a per-box pick). `agent_for_box` is what every reconnect, resume and transcript
+    /// read asks (`sandbox::attach_argv`, `reopen_agent_session`, `transcript`), so a box created
+    /// as Codex on a Claude fleet has to answer Codex here or it comes back as Claude.
+    ///
+    /// What would make it fail: `agent_for_box` answering the fleet default without reading the
+    /// box's launch spec (planted by the coordinator; every other lib test stayed green).
+    #[test]
+    fn a_box_with_its_own_pick_runs_it_over_the_fleets_default() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = tempdir();
+        let mut env = env_pins();
+        // Both pinned before anything resolves a path (SKEIN-1213), and no `sbx ls` override, so
+        // the live-record branch reads nothing and the launch spec is what answers.
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        env.unset("SKEIN_LS_CMD");
+        let store = home.join("st").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+        save_repos(&[Repo {
+            id: "thing".into(),
+            source: "https://example.com/thing.git".into(),
+            store: store.to_string_lossy().into_owned(),
+            ..Default::default()
+        }])
+        .unwrap();
+        crate::testutil::switch_on(|c| c.default_agent = "claude".into());
+        let repo = &load_repos()[0];
+
+        write_launch_spec_for_agent("thing-picked", "picked", repo, "codex").unwrap();
+        assert_eq!(
+            agent_for_box("thing-picked"),
+            "codex",
+            "a box picked as codex answered the fleet default instead of its own pick"
+        );
+        // The control: with no pick recorded, the fleet's default is what it runs.
+        assert_eq!(agent_for_box("thing-unpicked"), "claude");
+    }
+
     #[test]
     fn repin_branch_rewrites_launch_spec_without_relaunch() {
         let _g = env_lock();
