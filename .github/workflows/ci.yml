@@ -75,18 +75,23 @@ jobs:
       # is exactly what was checked. Not cached, deliberately: the build is seconds, and a cached
       # binary would be one this run never checked. Man pages, completions, SELinux and upstream's
       # own tests are switched off because nothing here uses them and each is a build dependency.
-      # `$GITHUB_PATH` puts it first on PATH for every later step, `cargo test` included.
+      #
+      # Installed into `/usr/local`, and nowhere of this job's own choosing, because of the
+      # launcher: `src/box-session.sh` pins its PATH to the system default
+      # (`export PATH=/usr/local/sbin:/usr/local/bin:...`) before it looks for bwrap, so a bwrap
+      # put first on the RUNNER's PATH from `$RUNNER_TEMP` passed every proof here and was then
+      # "not installed in this sandbox" to every box `fleet_launch` started. `/usr/local/bin` is on
+      # both PATHs, and first on the launcher's.
       - run: |
           curl -fsSL -o "$RUNNER_TEMP/bwrap.tar.xz" \
             "https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz"
           echo "$BWRAP_SHA256  $RUNNER_TEMP/bwrap.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/bwrap.tar.xz" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/bubblewrap-$BWRAP_VERSION"
-          meson setup _build --prefix="$RUNNER_TEMP/bwrap" -Dman=disabled -Dselinux=disabled \
+          meson setup _build --prefix=/usr/local -Dman=disabled -Dselinux=disabled \
             -Dtests=false -Dbash_completion=disabled -Dzsh_completion=disabled
           meson compile -C _build
-          meson install -C _build
-          echo "$RUNNER_TEMP/bwrap/bin" >> "$GITHUB_PATH"
+          sudo meson install -C _build
       # Installing bubblewrap is NOT enough, and believing it was cost 27 days of red master.
       # `ubuntu-24.04` ships `kernel.apparmor_restrict_unprivileged_userns=1`, which refuses the
       # unprivileged user namespace bwrap needs. So bwrap installs, runs, and dies — and a guard
@@ -107,13 +112,18 @@ jobs:
       # sentence into a stderr the tests capture and take the read-only fallback — and every test
       # has a branch for that, so the suites would go on passing on it. That is how CI ran 0.9.0
       # without anyone learning the overlay was untested. So the version and the path are
-      # asserted by name, and the overlay is made here, the same pair of options the launcher
+      # asserted by name — on this job's PATH and on the one the launcher pins, read out of
+      # `src/box-session.sh` rather than copied here, which are not the same PATH and once found
+      # different bwraps — and the overlay is made here, the same pair of options the launcher
       # uses, and a write inside it must land in the upper layer and leave the lower one alone.
       - run: |
           command -v bwrap
           bwrap --version
-          test "$(command -v bwrap)" = "$RUNNER_TEMP/bwrap/bin/bwrap" \
+          test "$(command -v bwrap)" = /usr/local/bin/bwrap \
             || { echo "the bwrap on PATH is not the pinned build" >&2; exit 1; }
+          launcher_path=$(sed -n 's/^export PATH=\(.*\)$/\1/p' src/box-session.sh)
+          test "$(PATH="$launcher_path" sh -c 'command -v bwrap')" = /usr/local/bin/bwrap \
+            || { echo "the launcher's PATH ($launcher_path) does not find the pinned build" >&2; exit 1; }
           test "$(bwrap --version)" = "bubblewrap $BWRAP_VERSION" \
             || { echo "the bwrap on PATH is not bubblewrap $BWRAP_VERSION" >&2; exit 1; }
           lower="$RUNNER_TEMP/overlay-proof"
@@ -466,18 +476,20 @@ jobs:
           echo "$BWRAP_SHA256  $RUNNER_TEMP/bwrap.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/bwrap.tar.xz" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/bubblewrap-$BWRAP_VERSION"
-          meson setup _build --prefix="$RUNNER_TEMP/bwrap" -Dman=disabled -Dselinux=disabled \
+          meson setup _build --prefix=/usr/local -Dman=disabled -Dselinux=disabled \
             -Dtests=false -Dbash_completion=disabled -Dzsh_completion=disabled
           meson compile -C _build
-          meson install -C _build
-          echo "$RUNNER_TEMP/bwrap/bin" >> "$GITHUB_PATH"
+          sudo meson install -C _build
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: bwrap --dev-bind / / -- /bin/true
       - run: |
           command -v bwrap
           bwrap --version
-          test "$(command -v bwrap)" = "$RUNNER_TEMP/bwrap/bin/bwrap" \
+          test "$(command -v bwrap)" = /usr/local/bin/bwrap \
             || { echo "the bwrap on PATH is not the pinned build" >&2; exit 1; }
+          launcher_path=$(sed -n 's/^export PATH=\(.*\)$/\1/p' src/box-session.sh)
+          test "$(PATH="$launcher_path" sh -c 'command -v bwrap')" = /usr/local/bin/bwrap \
+            || { echo "the launcher's PATH ($launcher_path) does not find the pinned build" >&2; exit 1; }
           test "$(bwrap --version)" = "bubblewrap $BWRAP_VERSION" \
             || { echo "the bwrap on PATH is not bubblewrap $BWRAP_VERSION" >&2; exit 1; }
           lower="$RUNNER_TEMP/overlay-proof"
