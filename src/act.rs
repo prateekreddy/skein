@@ -513,10 +513,17 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("line-"))
             .count();
-        assert_eq!(
-            got,
-            lines,
-            "it declared itself ended with {} of {lines} lines still to come",
+        // Whole, or short AND saying so. The pumps get `DRAIN` after the child exits, and on a
+        // loaded machine — a four-core CI runner with the whole lib suite beside it — twenty
+        // thousand lines can take longer than that; the act then ends with the note, by design.
+        // What must never happen is the case this test exists for: `Ended` while the pumps are
+        // still going, with nothing in the transcript to say so. Removing the drain wait gives
+        // exactly that, and still fails here.
+        let said_short = done.output.contains("what follows was not captured");
+        assert!(
+            got == lines || said_short,
+            "it declared itself ended with {} of {lines} lines still to come, and the transcript \
+             does not say it was cut short",
             lines - got
         );
     }
