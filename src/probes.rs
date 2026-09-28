@@ -779,8 +779,8 @@ fn store_settings(existing: &serde_json::Value) -> serde_json::Value {
     // Keep the prompt cache for everything outside the main conversation (subagents, workflows,
     // background and helper requests) for an hour rather than Claude Code's five minutes, so a
     // subagent that pauses longer than that does not pay for its whole prompt again. Additive, as
-    // `tui` is: a store that sets `"5m"` keeps it. Claude Code's own
-    // `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL` still wins over any setting.
+    // `tui` is: a store that sets `"5m"` keeps it. Claude Code's own environment variable for the
+    // same TTL still wins over any setting.
     root.entry("subagentPromptCacheTtl")
         .or_insert_with(|| json!("1h"));
     // NOT `crossSessionInbound` — deliberately, and this is where it was tried first.

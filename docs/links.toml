@@ -30,6 +30,9 @@
 ".claude/hooks/wf-journal.sh" = "somebody else's: the same sentence, the other of that repository's two hooks."
 "src/deployment.rs" = "past tense: the module that carried `SKEIN_IN_FLEET` and its enumerated list, deleted by SKEIN-521 and SKEIN-576. The paragraph is the record of how the migration arrived."
 
+["docs/operating.md"]
+".claude/settings.local.json" = "somebody else's: a box's own settings file, named as where the kit puts skein's subagent cache default; the kit writes it in each box's checkout at runtime and `.gitignore` keeps it out of this tree (SKEIN-1048, SKEIN-1218)."
+
 ["docs/parity.md"]
 "src/fleet-agent.py" = "past tense: the sentence says this file is deleted (SKEIN-573) and lists what went with it."
 
