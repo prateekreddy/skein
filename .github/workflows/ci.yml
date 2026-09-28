@@ -55,6 +55,24 @@ jobs:
       # would not work: `cargo test` captures a PASSING test's output, and a skipped test passes —
       # the reason the skips were invisible in the first place.
       - run: bwrap --dev-bind / / -- /bin/true
+      # TEMPORARY diagnostic (SKEIN-1216): why the launcher's ~/.local overlay probe says no here.
+      - run: |
+          set -x
+          bwrap --version; uname -a; head -3 /etc/os-release
+          dpkg -l bubblewrap | tail -1
+          ls -l "$(command -v bwrap)"
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces || true
+          sudo aa-status 2>&1 | grep -iE 'bwrap|userns|profiles are' || true
+          ls /etc/apparmor.d | grep -iE 'bwrap|userns' || true
+          findmnt -T /var/tmp; findmnt -T "$HOME"; findmnt -R "$HOME/.local" || true
+          d=$(mktemp -d /var/tmp/ovl.XXXX); mkdir -p "$d/.local/bin"
+          bwrap --dev-bind / / --overlay-src "$d/.local" --tmp-overlay "$d/.local" -- /bin/true; echo "var/tmp overlay exit=$?"
+          d2=$(mktemp -d "$HOME/ovl.XXXX"); mkdir -p "$d2/.local/bin"
+          bwrap --dev-bind / / --overlay-src "$d2/.local" --tmp-overlay "$d2/.local" -- /bin/true; echo "home overlay exit=$?"
+          bwrap --unshare-user --dev-bind / / --overlay-src "$d/.local" --tmp-overlay "$d/.local" -- /bin/true; echo "unshare-user overlay exit=$?"
+          unshare -Urm sh -c "mkdir -p /tmp/u /tmp/m && mount -t tmpfs t /tmp/u && mkdir /tmp/u/up /tmp/u/wk && mount -t overlay o -o lowerdir=$d/.local,upperdir=/tmp/u/up,workdir=/tmp/u/wk /tmp/m && echo raw-overlay-ok" || echo "raw overlay in userns failed"
+          sudo dmesg | tail -20 || true
+        continue-on-error: true
       # **Every gate below is `tools/gates.sh run <name>`, and that indirection is the point.**
       #
       # The list of gates, and the command each one runs, used to exist twice: here, and in a
