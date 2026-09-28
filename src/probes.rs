@@ -3344,6 +3344,51 @@ mod tests {
         );
     }
 
+    /// **A repo's store `settings.json` gets `subagentPromptCacheTtl: "1h"` when skein provisions
+    /// or refreshes it, and a store that set its own keeps it** (SKEIN-1218). On disk, through
+    /// [`ensure_probe_in`], which every `skein-server` start runs over every store
+    /// ([`ensure_probe_all`]) and every provisioning runs over the one it makes.
+    ///
+    /// What would make it fail: the default removed from [`store_settings`] (the fresh store has
+    /// no key: the first assertion); the default written with `insert` rather than
+    /// `or_insert_with`, or a refresh that writes skein's defaults in place of the file rather
+    /// than into it (either way the store's `"5m"` becomes `"1h"`: the second).
+    #[test]
+    fn a_provisioned_store_gets_an_hour_of_subagent_prompt_cache_and_keeps_its_own() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let read = |store: &Path| -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap()).unwrap()
+        };
+
+        let fresh = home.join("fresh/.claude");
+        fs::create_dir_all(&fresh).unwrap();
+        ensure_probe_in(&fresh).expect("a store with no settings.json could not be set up");
+        assert_eq!(
+            read(&fresh)["subagentPromptCacheTtl"],
+            "1h",
+            "a provisioned store was not given skein's subagent cache TTL: {}",
+            read(&fresh)
+        );
+
+        let theirs = home.join("theirs/.claude");
+        fs::create_dir_all(&theirs).unwrap();
+        fs::write(
+            theirs.join("settings.json"),
+            "{\"subagentPromptCacheTtl\":\"5m\"}\n",
+        )
+        .unwrap();
+        ensure_probe_in(&theirs).expect("refresh the store");
+        let refreshed = read(&theirs);
+        assert_eq!(
+            refreshed["subagentPromptCacheTtl"], "5m",
+            "a store's own subagent cache TTL was overwritten: {refreshed}"
+        );
+    }
+
     /// **skein's past default status line moves to the plugin's copy of the renderer, and a
     /// status line a person set is kept exactly** (SKEIN-1149).
     ///
