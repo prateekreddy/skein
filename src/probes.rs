@@ -208,7 +208,7 @@ const CODEX_HOOKS_JSON: &str = "codex-hooks.json";
 const SETTINGS_DEFAULTS_JSON: &str = "settings-defaults.json";
 
 /// What the kit's case 2 (`kit/skein-startup.sh`) reads to set skein's settings in a box: `settings`
-/// is skein's `tui` and `statusLine` defaults, exactly what [`store_settings`] gives a store that
+/// is skein's `tui`, `subagentPromptCacheTtl` and `statusLine` defaults, exactly what [`store_settings`] gives a store that
 /// sets neither, and `storeEraStatusLine` is the past default the kit copied into a repo's own
 /// `settings.json`, which the box's local file now overrides.
 ///
@@ -694,8 +694,8 @@ fn with_turn_state(own: &str, turn_state: &serde_json::Value) -> serde_json::Val
 }
 
 /// The store's `settings.json`, with **no skein hooks in it**: every hook command a past skein
-/// wired there is retired, the person's own hooks are kept exactly, and skein's `tui` and
-/// `statusLine` defaults are added where the store sets none. Idempotent. Pure — the testable core
+/// wired there is retired, the person's own hooks are kept exactly, and skein's `tui`,
+/// `subagentPromptCacheTtl` and `statusLine` defaults are added where the store sets none. Idempotent. Pure — the testable core
 /// of `ensure_probe_in`.
 ///
 /// The hooks it retires now load from skein's plugin ([`turn_state_hooks`]). Before SKEIN-1062
@@ -776,6 +776,13 @@ fn store_settings(existing: &serde_json::Value) -> serde_json::Value {
     // the browser PTY than the inline renderer, and equals `CLAUDE_CODE_NO_FLICKER=1` without needing
     // an env var (sbx has no --env). Additive: never clobber a `tui` already set in the store.
     root.entry("tui").or_insert_with(|| json!("fullscreen"));
+    // Keep the prompt cache for everything outside the main conversation (subagents, workflows,
+    // background and helper requests) for an hour rather than Claude Code's five minutes, so a
+    // subagent that pauses longer than that does not pay for its whole prompt again. Additive, as
+    // `tui` is: a store that sets `"5m"` keeps it. Claude Code's own environment variable for the
+    // same TTL still wins over any setting.
+    root.entry("subagentPromptCacheTtl")
+        .or_insert_with(|| json!("1h"));
     // NOT `crossSessionInbound` — deliberately, and this is where it was tried first.
     //
     // This file is the project store, which is REPO scope, and a repository's settings can only ever
@@ -3309,6 +3316,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A store that sets no `subagentPromptCacheTtl` gets skein's `"1h"`, and one that sets its
+    /// own keeps it** (SKEIN-1218). This value is also what the kit reads from
+    /// `settings-defaults.json` for every box ([`settings_defaults`]).
+    ///
+    /// What would make it fail: the default removed from [`store_settings`] (the fresh store and
+    /// the defaults file have no key: the first two assertions); the default written with `insert`
+    /// rather than `or_insert_with` (the store's `"5m"` becomes `"1h"`: the last).
+    #[test]
+    fn a_store_gets_an_hour_of_subagent_prompt_cache_unless_it_sets_its_own() {
+        let fresh = store_settings(&serde_json::json!({}));
+        assert_eq!(
+            fresh["subagentPromptCacheTtl"], "1h",
+            "a fresh store was not given skein's subagent cache TTL: {fresh}"
+        );
+        assert_eq!(
+            settings_defaults()["settings"]["subagentPromptCacheTtl"],
+            "1h",
+            "the defaults the kit reads carry no subagent cache TTL"
+        );
+        let theirs = store_settings(&serde_json::json!({ "subagentPromptCacheTtl": "5m" }));
+        assert_eq!(
+            theirs["subagentPromptCacheTtl"], "5m",
+            "a store's own subagent cache TTL was overwritten"
+        );
+    }
+
+    /// **A repo's store `settings.json` gets `subagentPromptCacheTtl: "1h"` when skein provisions
+    /// or refreshes it, and a store that set its own keeps it** (SKEIN-1218). On disk, through
+    /// [`ensure_probe_in`], which every `skein-server` start runs over every store
+    /// ([`ensure_probe_all`]) and every provisioning runs over the one it makes.
+    ///
+    /// What would make it fail: the default removed from [`store_settings`] (the fresh store has
+    /// no key: the first assertion); the default written with `insert` rather than
+    /// `or_insert_with`, or a refresh that writes skein's defaults in place of the file rather
+    /// than into it (either way the store's `"5m"` becomes `"1h"`: the second).
+    #[test]
+    fn a_provisioned_store_gets_an_hour_of_subagent_prompt_cache_and_keeps_its_own() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let read = |store: &Path| -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap()).unwrap()
+        };
+
+        let fresh = home.join("fresh/.claude");
+        fs::create_dir_all(&fresh).unwrap();
+        ensure_probe_in(&fresh).expect("a store with no settings.json could not be set up");
+        assert_eq!(
+            read(&fresh)["subagentPromptCacheTtl"],
+            "1h",
+            "a provisioned store was not given skein's subagent cache TTL: {}",
+            read(&fresh)
+        );
+
+        let theirs = home.join("theirs/.claude");
+        fs::create_dir_all(&theirs).unwrap();
+        fs::write(
+            theirs.join("settings.json"),
+            "{\"subagentPromptCacheTtl\":\"5m\"}\n",
+        )
+        .unwrap();
+        ensure_probe_in(&theirs).expect("refresh the store");
+        let refreshed = read(&theirs);
+        assert_eq!(
+            refreshed["subagentPromptCacheTtl"], "5m",
+            "a store's own subagent cache TTL was overwritten: {refreshed}"
+        );
     }
 
     /// **skein's past default status line moves to the plugin's copy of the renderer, and a

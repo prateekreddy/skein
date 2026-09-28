@@ -12,6 +12,11 @@ bootstrap that bridges memory and surfaces mailbox hand-offs, the mailbox, and a
 default status line, set in each box's own `.claude/settings.local.json`. An empty folder
 comes up fully working.
 
+The same file also gets `"subagentPromptCacheTtl": "1h"`, which keeps Claude Code's prompt cache
+for subagents and other background requests for an hour instead of five minutes. A repo that wants
+five minutes sets `"subagentPromptCacheTtl": "5m"` in its own `.claude/settings.json`, and skein
+then leaves the key out of every box's local file.
+
 Skein installs `jq` during box setup as the single JSON dependency. It does not install Python or a
 second agent CLI. A failed `jq` install is recorded in `skein/boot/<vmid>.json` and shown by the
 cockpit health banner instead of silently pretending signals work.

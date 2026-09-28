@@ -205,6 +205,11 @@ its native status-line JSON into Skein's renderer; Codex maps the live `token_co
 refreshing every 30 seconds and omitting unavailable segments. An explicit Codex `/statusline`
 choice disables Skein's adapted footer.
 
+Each Claude box also keeps the prompt cache for subagents, workflows and background requests for an
+hour instead of Claude Code's five minutes: the kit sets `"subagentPromptCacheTtl": "1h"` in the
+box's own `.claude/settings.local.json` at every start, unless the repo's `.claude/settings.json` or
+that local file already sets the key, so a repo that commits `"5m"` keeps it.
+
 Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
 the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also
 injects a durable brief containing the active task, last outcome, journal, diff, changed files, and a
