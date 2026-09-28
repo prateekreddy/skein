@@ -201,6 +201,28 @@ fn the_test_marker_arrives_in_a_binary_where_cfg_test_is_false() {
     );
 }
 
+/// **An ambient `$SKEIN_HOME` or `$SKEIN_FLEET_ROOT` never reaches a test.** The refusals below fire
+/// only on an unset variable, and inside a skein box `$SKEIN_HOME` is exported and names the
+/// owner's live store — so an unpinned test there was answered with it rather than refused, and
+/// wrote into it (SKEIN-1213). `.cargo/config.toml` forces both to empty, which both readers treat
+/// as unset.
+///
+/// **What makes it fail:** removing either line from `.cargo/config.toml` — on any machine, since
+/// the variable then arrives absent (or ambient), not empty.
+#[test]
+fn an_inherited_home_or_fleet_root_never_reaches_a_test() {
+    let _env = common::env_lock();
+    for var in ["SKEIN_HOME", "SKEIN_FLEET_ROOT"] {
+        assert_eq!(
+            std::env::var(var).ok().as_deref(),
+            Some(""),
+            "${var} did not arrive forced empty — `.cargo/config.toml`'s [env] table is what \
+             forces it, and without that a box's own ${var} answers an unpinned test with the \
+             live fleet instead of the refusal"
+        );
+    }
+}
+
 /// And what the marker buys: an unpinned `$SKEIN_HOME` is refused, not answered.
 ///
 /// On a developer box the fallback resolves through `/boxes/.skein/skein-home` to the fleet's real

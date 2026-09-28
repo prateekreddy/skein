@@ -12,3 +12,14 @@
 # `force` is left off, so a caller that sets `SKEIN_TEST` itself still wins.
 [env]
 SKEIN_TEST = "1"
+
+# And the two variables a test must pin, forced EMPTY — which `config::skein_home` and
+# `util::fleet_root` read exactly as unset — so an unpinned test meets their refusal instead of
+# inheriting a value. The refusal only fires on an unset variable, and inside a skein box
+# `$SKEIN_HOME` is exported and names the owner's LIVE store: a `cargo test` there was answered with
+# it, and one unpinned test wrote a repo scaffold and a kit spec into it (SKEIN-1213). `force`,
+# because the ambient value is exactly the one that must not win. A test pins them with
+# `set_var`, which this does not touch. `cargo run` gets this table too, so a `cargo run` of the
+# CLI refuses as a test would; run the built binary instead.
+SKEIN_HOME = { value = "", force = true }
+SKEIN_FLEET_ROOT = { value = "", force = true }
