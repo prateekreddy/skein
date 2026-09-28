@@ -354,6 +354,23 @@ fn launcher_path_statements() -> String {
         .join("\n")
 }
 
+/// The launcher's fixed PATH — the value of its one `export PATH=` at column 0, which
+/// [`launcher_path_statements`] has already proved is there exactly once.
+fn launcher_fixed_path() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let line = src
+        .lines()
+        .find(|l| l.starts_with("export PATH="))
+        .expect("box-session.sh no longer exports a fixed PATH");
+    let value = line["export PATH=".len()..].trim().trim_matches('"');
+    assert!(
+        value.starts_with('/') && !value.contains('$'),
+        "the launcher's `export PATH=` is no longer a literal list of directories ({value}), so it \
+         is not the fixed PATH this harness compares a session's tail against"
+    );
+    value.to_string()
+}
+
 /// The launcher's final `exec bwrap` — the whole of it, to end of file.
 ///
 /// This is the one block in `box-session.sh` that *starts a box*: the namespace, the login shell
@@ -693,8 +710,11 @@ impl Started {
 ///     resolves its own copy, which is exactly why the sibling test exists.
 ///   * **Dropping the `$PATH` tail**, so a box gets no userland — the sibling test fires, but run 3
 ///     dies earlier and elsewhere: with no fixed six on the session's PATH the pane cannot find
-///     `mv`, so no report is written at all. The `ends_with` assertion below therefore has NO
-///     sabotage that reaches it, and is documentation rather than a proved guard.
+///     `mv`, so no report is written at all.
+///   * **Appending a directory after `$box_path`** in the session block's export — the `ends_with`
+///     assertion, and only it (SKEIN-1216: `export PATH="$box_path:/skein-test-extra"`). It
+///     compares against the launcher's own `export PATH=`, not against run 1, because run 1 reads
+///     the host's `/etc/profile.d` and a host may append to PATH there.
 ///   * **Neutering the strip**, so run 1 is the fixed launcher — run 1's presence assertion, whose
 ///     message counts the lines it removed (`0`) and so says which of the two it is.
 ///   * **Taking the profile bind off run 2** — run 2's presence assertion.
@@ -778,13 +798,19 @@ fn the_agent_session_a_box_starts_runs_on_the_boxs_own_path() {
         now.path
     );
     // And the fixed six is still behind it, which is what makes a box able to run `sudo`, `git` and
-    // `python3` at all. `before.path` is that PATH, measured in run 1 rather than spelled here.
+    // `python3` at all. Read out of the launcher's own `export PATH=`, not from run 1: run 1 reads
+    // the HOST's `/etc/profile.d`, and a login shell there may append to PATH — Ubuntu's snapd
+    // appends `/snap/bin` — while run 3 reads the planted one, so `before.path` is the fixed six
+    // plus whatever this host's profile adds, and `ends_with` it was red on the ubuntu-24.04
+    // runner for a reason that has nothing to do with the box (SKEIN-1216). Fails if the session
+    // block puts anything after `$box_path` in its export.
+    let fixed = launcher_fixed_path();
     assert!(
-        now.path.ends_with(&before.path),
+        now.path.ends_with(&format!(":{fixed}")),
         "the box's session PATH no longer ends with the launcher's fixed PATH, so a box has the \
          agent and not the userland: {} does not end with {}",
         now.path,
-        before.path
+        fixed
     );
 }
 
