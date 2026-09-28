@@ -1399,8 +1399,10 @@ done
 # real `~/.local` and shows it at the box's own `~/.local`.
 #
 # **Asked by running it, because a box that cannot start is worse than a box that cannot write.**
-# `--tmp-overlay` arrived in bubblewrap 0.9; this substrate has 0.11.1. An unconditional overlay on
-# a sandbox whose image ships an older bwrap is `bwrap: Unknown option`, which is every box on that
+# `--overlay-src` and `--tmp-overlay` arrived in bubblewrap 0.10; this substrate has 0.11.1, and the
+# 0.9.0 that `ubuntu-24.04` ships answers `bwrap: Unknown option --overlay-src` (measured on the CI
+# runner, SKEIN-1216). An unconditional overlay on a sandbox whose image ships an older bwrap is
+# that error, which is every box on that
 # fleet refusing to start with no way in to fix it — the one failure this file must never have. So
 # the capability is probed rather than assumed, and a bwrap without it gets the SAFE half: a
 # read-only bind, which keeps the property that matters (no box decides what another box executes)
@@ -1418,15 +1420,17 @@ done
 #
 # One extra `bwrap` per overlay entry per box start, ~8ms, against a launch that already spends
 # seconds in provisioning.
+read_only_paths=()
 for rel in "${overlay_paths[@]}"; do
   [ -e "$HOME/$rel" ] || continue
   if bwrap --dev-bind / / --overlay-src "$HOME/$rel" --tmp-overlay "$HOME/$rel" -- /bin/true >/dev/null 2>&1; then
     binds+=(--overlay-src "$HOME/$rel" --tmp-overlay "$HOME/$rel")
   else
     binds+=(--ro-bind "$HOME/$rel" "$HOME/$rel")
+    read_only_paths+=("$rel")
     echo "skein: bwrap here cannot overlay ~/$rel, so it is READ-ONLY in $box rather than \
 copy-on-write — every tool is still there, but nothing inside the box can install into it. \
-bubblewrap 0.9 or newer, and a ~/$rel with no mount points under it, is what gets the writable \
+bubblewrap 0.10 or newer, and a ~/$rel with no mount points under it, is what gets the writable \
 upper layer back." >&2
   fi
 done
@@ -1438,6 +1442,22 @@ done
 # `sync-install.sh` has no `~/.local/state` at all, and `--bind` of a missing source is a hard
 # bwrap failure, which would mean no box on that fleet could start.
 mkdir -p "$home/.local/state" || exit 1
+# The DESTINATION has to exist as well as the source, and under the read-only fallback bwrap cannot
+# make it: it creates a missing mount point with mkdir, and inside a read-only bind that is
+# `Can't mkdir …/.local/state: Read-only file system` — every box failing to start right after the
+# sentence above promised it a read-only `~/.local`. That was every box on a stock `ubuntu-24.04`
+# host, whose sandbox `~/.local` need not have a `state` (SKEIN-1216). The overlay needs none of
+# this, because its upper layer is writable, so the mount point is made only when the fallback ran,
+# and in the SANDBOX's `~/.local`, where it is one empty directory the private bind then covers.
+case " ${read_only_paths[*]} " in
+  *" .local "*)
+    [ -d "$HOME/.local/state" ] || mkdir -p "$HOME/.local/state" || {
+      echo "skein: $box cannot start: ~/.local is read-only in it, and skein could not create \
+~/.local/state in the sandbox for the box's own state to be mounted on. Run mkdir -p ~/.local/state \
+in the sandbox, then start the box again." >&2
+      exit 1
+    } ;;
+esac
 binds+=(--bind "$home/.local/state" "$HOME/.local/state")
 
 # The npm prefix the agent CLIs actually live in — READ-ONLY, and this is the other half of

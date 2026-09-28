@@ -141,6 +141,13 @@ impl Homes {
     /// `rewrite` is applied to the lifted bind block before it runs — the seam the
     /// presence-before-absence halves use, and nothing else.
     fn inside(&self, box_name: &str, probe: &str, rewrite: &dyn Fn(String) -> String) -> String {
+        self.start(box_name, probe, rewrite).stdout
+    }
+
+    /// [`Homes::inside`], also returning what the launcher said — which is how a test learns which
+    /// of the launcher's two `~/.local` branches this host took, from the sentence a person
+    /// starting a box here would read.
+    fn start(&self, box_name: &str, probe: &str, rewrite: &dyn Fn(String) -> String) -> Launched {
         // `box=` because the launcher names the box in the sentence it prints when this bwrap
         // cannot make an overlay, and `set -u` is on in the lifted block exactly as it is in
         // production. A harness that left it undefined would fail every box start on that path and
@@ -165,12 +172,29 @@ impl Homes {
             .arg(&runner)
             .output()
             .expect("bash");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(
             out.status.success(),
-            "the box did not start: {}\n--- script ---\n{runner}",
-            String::from_utf8_lossy(&out.stderr)
+            "the box did not start: {stderr}\n--- script ---\n{runner}"
         );
-        String::from_utf8_lossy(&out.stdout).to_string()
+        Launched {
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr,
+        }
+    }
+}
+
+/// What one box start printed: the probe's answers, and the launcher's own sentences.
+struct Launched {
+    stdout: String,
+    stderr: String,
+}
+
+impl Launched {
+    /// Did the launcher take the read-only fallback for `~/.local`? Read from the sentence it
+    /// prints when it does, which is what a person starting a box on that host is told.
+    fn read_only_local(&self) -> bool {
+        self.stderr.contains("cannot overlay ~/.local")
     }
 }
 
@@ -259,19 +283,38 @@ fn a_binary_one_box_plants_is_not_what_another_box_runs() {
     fs::write(&good, "#!/bin/sh\nprintf %s shared\n").unwrap();
 
     // --- absence: the launcher as it is ---
-    let planted = f.inside("box-a", &plant, &|b| b);
-    assert_eq!(
-        answer(&planted, "wrote"),
-        "yes",
-        "a box can no longer write its OWN `~/.local/bin`, which is a different bug: the overlay \
-         is meant to redirect that write, not refuse it:\n{planted}"
-    );
-    assert_eq!(
-        answer(&planted, "ran"),
-        "planted",
-        "the box that planted does not see its own write, so its upper layer is not where its \
-         writes go:\n{planted}"
-    );
+    //
+    // **Which of the launcher's two branches ran decides what the planting box may do**, and the
+    // launcher says which: on a bwrap that can overlay, the box's own write must be redirected, not
+    // refused; on one that cannot (bubblewrap before 0.10, which is what `ubuntu-24.04` ships), the
+    // write must be REFUSED, because the fallback is a read-only bind and anything else would hand
+    // the hole back. Neither branch is skipped — the second box's assertion below holds on both —
+    // and `a_bwrap_with_no_overlay_falls_back_to_read_only_rather_than_to_empty_or_to_shared` forces the
+    // fallback on a host that would otherwise take the overlay, so both are run everywhere.
+    let started = f.start("box-a", &plant, &|b| b);
+    let planted = &started.stdout;
+    if started.read_only_local() {
+        assert_eq!(
+            answer(planted, "wrote"),
+            "no",
+            "the launcher said `~/.local` is READ-ONLY in this box, and the box wrote into \
+             `~/.local/bin` anyway — the fallback is not the read-only bind it says it is:\n{planted}"
+        );
+    } else {
+        assert_eq!(
+            answer(planted, "wrote"),
+            "yes",
+            "a box can no longer write its OWN `~/.local/bin`, which is a different bug: the \
+             overlay is meant to redirect that write, not refuse it:\n{planted}\n{}",
+            started.stderr
+        );
+        assert_eq!(
+            answer(planted, "ran"),
+            "planted",
+            "the box that planted does not see its own write, so its upper layer is not where its \
+             writes go:\n{planted}"
+        );
+    }
     // The property first, then the mechanism behind it. Both fire under the same sabotage — putting
     // `.local` back in `share_paths` — and this is the order that says which failure it is: "the
     // second box ran the first one's binary" is the defect, and "the sandbox's own copy changed" is
@@ -462,8 +505,10 @@ fn the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it() {
 /// **A bwrap too old for an overlay leaves a box with its tools and without the hole** — it does
 /// not leave the fleet unable to start (SKEIN-963).
 ///
-/// `--tmp-overlay` arrived in bubblewrap 0.9. An unconditional overlay on a sandbox image carrying
-/// an older one is `bwrap: Unknown option` at every box start, on a fleet whose only way in is a
+/// `--overlay-src` and `--tmp-overlay` arrived in bubblewrap 0.10: the 0.9.0 that `ubuntu-24.04`
+/// ships answers `bwrap: Unknown option --overlay-src`, measured on the CI runner (SKEIN-1216). An
+/// unconditional overlay on a sandbox image carrying an older one is that error at every box
+/// start, on a fleet whose only way in is a
 /// box — which is the one failure `box-session.sh` must never have, and the reason it probes the
 /// capability by running it instead of assuming it. This asserts what the fallback is worth: the
 /// shared toolchain is still all there, and it is still not something a box can change.
@@ -472,7 +517,13 @@ fn the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it() {
 ///
 /// Making the fallback a `--tmpfs` (an empty `~/.local`, so the box is stranded without its tools)
 /// or a plain `--bind` (the SKEIN-963 hole back, on exactly the substrates least able to notice).
-/// The two assertions below are one for each.
+/// The two assertions below are one for each. And taking out the launcher's `mkdir` of the
+/// `~/.local/state` mount point in the fallback branch: the box does not start at all, because the
+/// sandbox here has no `~/.local/state` — as a fresh fleet's need not — and bwrap cannot make the
+/// destination of the private state bind inside a read-only bind. That was SKEIN-1216, every box on
+/// a stock `ubuntu-24.04` host failing with `Can't mkdir …/.local/state: Read-only file system`
+/// right after the sentence promising a read-only `~/.local`; this test missed it for as long as
+/// its fixture made that directory for it.
 ///
 /// The forced-fallback rewrite is derived: it replaces the probe's own command with `false`. Delete
 /// the probe and the substitution finds nothing, the real overlay runs, and it is the READ-ONLY
@@ -484,6 +535,9 @@ fn a_bwrap_with_no_overlay_falls_back_to_read_only_rather_than_to_empty_or_to_sh
         return;
     }
     let f = Homes::make("skein-fallback963");
+    // The sandbox as a fresh fleet has it and `fleet_launch` builds it: a `~/.local` with no
+    // `state` in it, which is the case the fallback could not start (SKEIN-1216).
+    fs::remove_dir_all(f.shared.join(".local/state")).unwrap();
     let no_overlay = |b: String| {
         b.replace(
             r#"if bwrap --dev-bind / / --overlay-src "$HOME/$rel" --tmp-overlay "$HOME/$rel" -- /bin/true >/dev/null 2>&1; then"#,

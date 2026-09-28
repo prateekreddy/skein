@@ -189,8 +189,14 @@ fn the_installer_download_from_a_mirror_that_never_answers_ends_with_the_reason_
         !status.unwrap().success(),
         "an installer download that gave up did not end the install as a failure:\n{log}"
     );
+    // curl's reason by its EXIT CODE, not its words. 28 is the operation-timeout code in every curl
+    // there is, and `--show-error` prints it as `curl: (28) …`; the words after it are curl's own
+    // and depend on its version and on the phase the bound caught. The first spelling here matched
+    // "Connection timed out", which is what curl 8.18 says, and it was red on the ubuntu-24.04
+    // runner, whose curl says `curl: (28) SSL connection timeout` for the same stall (SKEIN-1216).
+    // A mirror that hung up instead, or refused, is `(35)`, `(56)` or `(7)`, and fails this.
     assert!(
-        log.contains("Connection timed out")
+        log.contains("curl: (28)")
             && log.contains("rustup could not download the Rust toolchain")
             && log.contains("run bootstrap.sh again"),
         "the log does not carry curl's reason, what it means in the owner's terms, and what to do \
