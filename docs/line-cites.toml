@@ -1337,80 +1337,80 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: {mount:?} has a newline in it, so boxes cannot be told about it — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:530"]
-line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/start.rs:547"]
-line = "return Err(format!(\"invalid box name {name:?}\"));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/start.rs:558"]
-line = "ensure_fleet(&sandbox)?;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/start.rs:600"]
-line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/start.rs:619"]
-line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/start.rs:648"]
-line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/start.rs:741"]
+["src/fleet/start.rs:419"]
 line = "\"{why}\\n {name} IS running — its session and namespace came up — but it has \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:748"]
+["src/fleet/start.rs:574"]
+line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:591"]
+line = "return Err(format!(\"invalid box name {name:?}\"));"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:602"]
+line = "ensure_fleet(&sandbox)?;"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:644"]
+line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:663"]
+line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:692"]
+line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/start.rs:774"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/start.rs:765"]
+["src/fleet/start.rs:791"]
 line = "eprintln!(\"skein: could not set {name}'s git identity ({e}); its first commit will ask who you are\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:773"]
+["src/fleet/start.rs:799"]
 line = "eprintln!(\"skein: {name} came up, but its conversation could not be located ({e})\")"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:781"]
+["src/fleet/start.rs:807"]
 line = "\"skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:791"]
+["src/fleet/start.rs:817"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:828"]
+["src/fleet/start.rs:854"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:887"]
+["src/fleet/start.rs:914"]
 line = "\"skein: {name} has a session nothing can enter — {why} — so it is being ended \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:905"]
+["src/fleet/start.rs:932"]
 line = "\"box {name} has no checkout in {} — `skein start {name}` to build one\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:923"]
+["src/fleet/start.rs:950"]
 line = "eprintln!(\"skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there\", record.sandbox);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:956"]
+["src/fleet/start.rs:983"]
 line = "eprintln!(\"skein: {name} had no live session, so it was restarted (its work is untouched)\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:976"]
+["src/fleet/start.rs:1014"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1802"]
+["src/fleet/start.rs:1840"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 

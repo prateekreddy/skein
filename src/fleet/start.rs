@@ -380,6 +380,50 @@ pub fn provision_script(name: &str, store: &str) -> String {
     )
 }
 
+/// Run [`provision_script`] inside a box for the start its launcher has just made.
+///
+/// **Every launch, whichever path made it** (SKEIN-1220). The launcher writes a fresh
+/// `skein-start-id` each time it runs, and the kit is what answers that id: its ready marker, and
+/// every setting and link it writes, belong to the start it ran for. There are two paths that run
+/// the launcher — [`start_box`] and [`ensure_box_session`] — and only the first used to provision,
+/// so a box brought back by an attach after its sandbox cycled came up on a new id with no kit run
+/// for it. Measured on a live fleet: not one box had a ready marker for the start it was on, and a
+/// box whose `.claude` is a directory had no status line, because only the kit writes
+/// `.claude/settings.local.json`. One function now, so the two paths cannot drift apart again.
+///
+/// Re-running it is safe by the kit's own construction, checked line by line rather than taken on
+/// trust: the branch checkout and a handoff restore are each guarded by a marker in the clone's git
+/// directory and happen once; the apt pass fires only for a missing `jq` or `tmux`; the store
+/// entries are linked only where nothing is there yet; the settings merge adds a default only where
+/// neither file sets one and rewrites the file only when the result differs; the exclude lines are
+/// added only when absent. What a re-run does do is convert a `.claude` that is still the store's
+/// own link — once, and exactly as SKEIN-1053 says a box is converted "at its next start".
+///
+/// Through the placement, so it lands in the box's private HOME rather than the sandbox's.
+fn provision_box(name: &str, store: &str) -> Result<(), String> {
+    let boxed = place_of(name).ok_or_else(|| format!("box {name} was not placed"))?;
+    // **Said before it starts, because this step can take minutes and says nothing while it does.**
+    // It installs the kit, the hooks and any approved packages, over a captured `exec` with a
+    // five-minute budget — so a start that is working normally prints two lines and then goes
+    // completely quiet, which reads as a hang. Reported as "somebody ran restart and it never
+    // completed"; it had completed, or was about to.
+    eprintln!(
+        "skein: provisioning {name} (kit, hooks, approved packages) — up to {} minutes",
+        PROVISION_BUDGET.as_secs() / 60
+    );
+    boxed
+        .exec(&provision_script(name, store), PROVISION_BUDGET)
+        .map(|_| ())
+        .map_err(|why| {
+            format!(
+                "{why}\n       {name} IS running — its session and namespace came up — but it has \
+                 no hooks or kit, so the board cannot see its turns. Run `skein restart {name}` \
+                 to try again{}",
+                what_to_look_at(&why)
+            )
+        })
+}
+
 /// Bring one box up inside the fleet sandbox, from nothing to a running, provisioned agent.
 ///
 /// The ordering is forced by what each step produces rather than chosen: the anchor pid does not
@@ -723,27 +767,9 @@ fn start_box_inner(
         write_launch_spec_for_agent(name, branch, repo, &agent_for_box(name))?;
     }
 
-    // Through the placement, so it lands in the box's private HOME rather than the sandbox's.
+    provision_box(name, &repo.store)?;
+    // The rest of this start still needs the placement, for the identity script below.
     let boxed = place_of(name).ok_or_else(|| format!("box {name} was not placed"))?;
-    // **Said before it starts, because this step can take minutes and says nothing while it does.**
-    // It installs the kit, the hooks and any approved packages, over a captured `exec` with a
-    // five-minute budget — so a start that is working normally prints two lines and then goes
-    // completely quiet, which reads as a hang. Reported as "somebody ran restart and it never
-    // completed"; it had completed, or was about to.
-    eprintln!(
-        "skein: provisioning {name} (kit, hooks, approved packages) — up to {} minutes",
-        PROVISION_BUDGET.as_secs() / 60
-    );
-    boxed
-        .exec(&provision_script(name, &repo.store), PROVISION_BUDGET)
-        .map_err(|why| {
-            format!(
-                "{why}\n       {name} IS running — its session and namespace came up — but it has \
-                 no hooks or kit, so the board cannot see its turns. Run `skein restart {name}` \
-                 again{}",
-                what_to_look_at(&why)
-            )
-        })?;
 
     // Every start, not just a migration's. `migrate_box` used to be the only caller, and its call
     // sits *after* `start_box` — so a migration that failed here left the conversation under the old
@@ -853,7 +879,8 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
 ///
 /// A no-op for a box with a live session, and for a box that isn't placed (its sandbox is its box,
 /// and sbx starts that itself). Never clones: a missing tree is a different problem and saying so is
-/// more useful than silently rebuilding one.
+/// more useful than silently rebuilding one. It does provision: the launch is a new start, and
+/// [`provision_box`] says why a start without its kit is a box without its settings.
 pub fn ensure_box_session(name: &str) -> Result<(), String> {
     let Some(record) = shared_record(name) else {
         return Ok(()); // not skein's to start — see `absent_box_reason`
@@ -954,6 +981,17 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     // box reach here identically — and asserting it sends anyone debugging to look for a restart
     // that never happened. The tree, the private HOME and the ceiling are all intact either way.
     eprintln!("skein: {name} had no live session, so it was restarted (its work is untouched)");
+    // The launcher above wrote a new start id, and nothing but the kit answers one (SKEIN-1220).
+    // A box with no registered repository has no store to provision from — it can only be here
+    // because someone allowed it uncovered — so it keeps what its last provisioning wrote, and says
+    // so rather than reading as provisioned.
+    match repo_for_box(name) {
+        Some(repo) => provision_box(name, &repo.store)?,
+        None => eprintln!(
+            "skein: {name} belongs to no registered repository, so its kit was not run for this \
+             start; it keeps the settings and hooks its last provisioning gave it"
+        ),
+    }
     Ok(())
 }
 

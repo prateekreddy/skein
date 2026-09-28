@@ -202,6 +202,20 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         claude.trim().starts_with(store.to_str().unwrap()),
         "the box's .claude/skein must resolve into the store, got {claude:?}"
     );
+    // The file only the kit writes, and the one a box with a `.claude` directory reads its status
+    // line from (SKEIN-1220). Present after the first start, or the relaunch half below asserts a
+    // file that was never there to come back.
+    let local_settings = PathBuf::from(format!("{tree}/.claude/settings.local.json"));
+    assert!(
+        local_settings.is_file(),
+        "the first start's kit wrote no {}, so the relaunch assertion below would be about nothing",
+        local_settings.display()
+    );
+    let first_start = start_id_of(name);
+    assert!(
+        !first_start.is_empty(),
+        "the launcher wrote no start id on the first start"
+    );
 
     // ---- the sandbox cycles: the tree survives, the session does not ----
     // Measured against a real sandbox, not imagined: after sbx restarted skein-fleet, the box's
@@ -314,11 +328,42 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         store.join(&snap).join("agent-state.tgz").exists(),
         "and its private agent state with them"
     );
+    // A setting that arrived after this box's last provisioning, as SKEIN-1218's default did for
+    // every box on the fleet: gone from the box's own file, so only a kit run can bring it back.
+    fs::remove_file(&local_settings).expect("remove the box's settings.local.json");
     ensure_box_session(name).expect("restart the session from the tree");
     assert_eq!(
         fleet_liveness().get(name).copied(),
         Some(true),
         "the box is reachable again without a re-clone"
+    );
+
+    // ---- the relaunch is a start, and the kit runs for it (SKEIN-1220) ----
+    // `ensure_box_session` is the path every attach and every cockpit terminal takes to bring back
+    // a box whose sandbox cycled, and it used to launch without provisioning: on the live fleet,
+    // not one box had a ready marker for the start it was on. What fails each assertion: dropping
+    // the provisioning from `ensure_box_session` fails the first; a kit that writes its ready
+    // marker under any name but the current start's fails the third.
+    assert!(
+        local_settings.is_file(),
+        "a box relaunched by ensure_box_session did not get its kit run, so its settings.local.json \
+         (skein's status line and defaults) was not written: {}",
+        local_settings.display()
+    );
+    let second_start = start_id_of(name);
+    assert_ne!(
+        first_start, second_start,
+        "the relaunch did not mint a new start id, so this proves nothing about a new start"
+    );
+    let ready = PathBuf::from(format!(
+        "{}/tmp/skein-startup.ready.{second_start}",
+        box_root(name)
+    ));
+    assert!(
+        ready.exists(),
+        "a box relaunched by ensure_box_session has no ready marker for the start it is on ({}), \
+         so its kit never ran for it",
+        ready.display()
     );
     let after = shared_record(name).unwrap().ns_pid;
     assert_ne!(
@@ -586,4 +631,13 @@ fn await_ls(want: Option<Liveness>) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The start a box is on, as its launcher wrote it: `<root>/tmp/skein-start-id`, the id the kit
+/// suffixes its markers with. Empty when there is none.
+fn start_id_of(name: &str) -> String {
+    fs::read_to_string(format!("{}/tmp/skein-start-id", box_root(name)))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
