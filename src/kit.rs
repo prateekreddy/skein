@@ -940,10 +940,83 @@ mod tests {
             fs::read_to_string(kit.claude("settings.json")).unwrap(),
             own
         );
+        // The repo set `tui` and a status line but no subagent cache TTL, so skein's is the one
+        // default that goes in.
         assert_eq!(
             kit.json("settings.local.json"),
-            serde_json::json!({}),
+            serde_json::json!({
+                "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"]
+            }),
             "the box's local settings override what the repo chose"
+        );
+    }
+
+    /// **Skein's `subagentPromptCacheTtl` of `"1h"` goes into a box's own `settings.local.json`
+    /// only where neither that file nor the repo's `settings.json` sets one** (SKEIN-1218), so a
+    /// repo or a box that wants Claude Code's `"5m"` keeps it.
+    ///
+    /// What would make it fail: the kit's jq losing its `subagentPromptCacheTtl` rule, or the key
+    /// leaving [`crate::probes::settings_defaults`] (no box gets `"1h"`: the first two
+    /// assertions); the rule ignoring the repo's file (the local file gets `"1h"`, which outranks
+    /// the repo's `"5m"`: the third); the rule ignoring the local file (the box's own `"5m"` is
+    /// overwritten: the last).
+    #[test]
+    fn a_box_gets_an_hour_of_subagent_prompt_cache_unless_its_repo_or_itself_sets_one() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+
+        // Neither file sets it: both layouts, a repo with no `.claude` and one that ships its own.
+        for ships in [None, Some("{}\n")] {
+            let kit = KitBox::new("claude", ships);
+            kit.start();
+            assert_eq!(
+                kit.json("settings.local.json")["subagentPromptCacheTtl"],
+                "1h",
+                "a box whose settings set no subagent cache TTL did not get skein's (ships {ships:?})"
+            );
+        }
+        let kit = KitBox::new("claude", Some("{}\n"));
+        kit.start();
+        let first = fs::read(kit.claude("settings.local.json")).unwrap();
+        kit.start();
+        assert_eq!(
+            fs::read(kit.claude("settings.local.json")).unwrap(),
+            first,
+            "a second start changed the local settings"
+        );
+
+        // The repo's own `"5m"`: the local file stays without the key, so the repo's wins.
+        let repo = "{\"subagentPromptCacheTtl\":\"5m\"}\n";
+        let kit = KitBox::new("claude", Some(repo));
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(kit.claude("settings.json")).unwrap(),
+            repo
+        );
+        let local = kit.json("settings.local.json");
+        assert!(
+            local.get("subagentPromptCacheTtl").is_none(),
+            "the box's local file overrides the repo's own subagent cache TTL: {local}"
+        );
+
+        // The box's own `"5m"` in its local file is not overwritten.
+        let kit = KitBox::new("claude", Some("{}\n"));
+        fs::write(
+            kit.claude("settings.local.json"),
+            "{\"subagentPromptCacheTtl\":\"5m\"}\n",
+        )
+        .unwrap();
+        kit.start();
+        assert_eq!(
+            kit.json("settings.local.json")["subagentPromptCacheTtl"],
+            "5m",
+            "the box's own subagent cache TTL was overwritten"
         );
     }
 

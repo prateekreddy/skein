@@ -437,9 +437,9 @@ fi
 #      earlier start made for layout 1 goes, the link and never what it points at.
 # In both, skein's settings go into `.claude/settings.local.json`: untracked, this box's own, and
 # never the repo's `settings.json`, which the repo may track and which is left exactly as it is
-# (SKEIN-1048). What goes in is skein's `tui` and `statusLine` defaults, read from the plugin's
-# read-only `settings-defaults.json` and never from the store. Each default goes in only where
-# neither file sets one, except the status line a past merge copied into `settings.json`, which ran
+# (SKEIN-1048). What goes in is skein's `tui`, `subagentPromptCacheTtl` and `statusLine` defaults,
+# read from the plugin's read-only `settings-defaults.json` and never from the store. Each default
+# goes in only where neither file sets one, except the status line a past merge copied into `settings.json`, which ran
 # the store's renderer and which the local file now overrides. The same pass RETIRES every skein
 # hook a past merge copied into either file: skein's turn-state hooks load from its read-only
 # plugin now (SKEIN-1062), and a copy left here would fire each of them twice. "skein's" is the
@@ -530,6 +530,8 @@ else
         | $d.settings.statusLine as $line
         | $l
         | (if .tui == null and $s.tui == null then .tui = $d.settings.tui else . end)
+        | (if .subagentPromptCacheTtl == null and $s.subagentPromptCacheTtl == null
+           then .subagentPromptCacheTtl = $d.settings.subagentPromptCacheTtl else . end)
         | (if .statusLine.command == $d.storeEraStatusLine then .statusLine.command = $line.command
            elif .statusLine == null and ($s.statusLine == null or $s.statusLine.command == $d.storeEraStatusLine)
            then .statusLine = (($s.statusLine // $line) + {command: $line.command})
