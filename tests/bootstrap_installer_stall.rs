@@ -189,7 +189,7 @@ fn the_installer_download_from_a_mirror_that_never_answers_ends_with_the_reason_
         !status.unwrap().success(),
         "an installer download that gave up did not end the install as a failure:\n{log}"
     );
-    // curl's reason by its EXIT CODE, not its words. 28 is `CURLE_OPERATION_TIMEDOUT` in every curl
+    // curl's reason by its EXIT CODE, not its words. 28 is the operation-timeout code in every curl
     // there is, and `--show-error` prints it as `curl: (28) …`; the words after it are curl's own
     // and depend on its version and on the phase the bound caught. The first spelling here matched
     // "Connection timed out", which is what curl 8.18 says, and it was red on the ubuntu-24.04
