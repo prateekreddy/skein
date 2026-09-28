@@ -9,6 +9,29 @@ on:
   pull_request:
   workflow_call:
 
+# **The bubblewrap the `check` and `coverage` jobs build, pinned once for both (SKEIN-1217).** An
+# exact upstream release, and the sha256 of its tarball, which each job checks before it builds.
+#
+# Why build one at all: `ubuntu-24.04` ships bubblewrap 0.9.0, which answers `bwrap: Unknown option
+# --overlay-src` — overlays arrived in 0.10. On that bwrap `src/box-session.sh` takes its read-only
+# `~/.local` fallback every time, so the path every real box takes (the copy-on-write overlay, the
+# write redirected to its upper layer, `fleet_launch` end to end) ran nowhere in CI (SKEIN-1216).
+#
+# Why 0.11.2: the fleet substrate runs 0.11.1, and 0.11.2 is that series' last release — its one
+# change is a fix for setuid mode (CVE-2026-41163), which neither a box nor this runner uses. 0.12
+# and 0.13 change how sandbox setup resolves symlinks and remounts, which would put CI on a bwrap
+# that behaves unlike the one the fleet runs; move this when the substrate moves.
+#
+# The checksum is the one upstream published beside the release, `bubblewrap-0.11.2.tar.xz.sha256sum`,
+# and it matched the tarball downloaded and hashed independently, and GitHub's own asset digest.
+#
+# The fallback is not lost by this. The test in `tests/isolation_bwrap/homes.rs` named
+# `a_bwrap_with_no_overlay_falls_back_to_read_only_rather_than_to_empty_or_to_shared`
+# forces it on any bwrap, this one included, so both of the launcher's branches run here.
+env:
+  BWRAP_VERSION: "0.11.2"
+  BWRAP_SHA256: "69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6"
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -40,7 +63,35 @@ jobs:
       # written down nowhere (SKEIN-1094). Installing it makes the question moot rather than
       # answered. `the_check_job_installs_every_package_the_coverage_job_does` in
       # `tests/platform_gates.rs` keeps this line from falling behind the coverage job's again.
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
+      #
+      # bubblewrap is no longer apt's (SKEIN-1217): the step after this builds the release pinned
+      # in `env:` at the top of this file, and the rest of this line is what that build needs —
+      # meson and ninja to drive it, libcap for bwrap's capability handling, pkg-config to find it.
+      # Apt's 0.9.0 is left off rather than shadowed, so there is no older bwrap on this machine
+      # for anything to fall back to without saying so.
+      - run: sudo apt-get update && sudo apt-get install -y tmux meson ninja-build libcap-dev pkg-config
+      # The pinned bubblewrap, from upstream's release tarball, checked against the sha256 in `env:`
+      # before a byte of it is unpacked. The same shape as the gitleaks step below: what runs here
+      # is exactly what was checked. Not cached, deliberately: the build is seconds, and a cached
+      # binary would be one this run never checked. Man pages, completions, SELinux and upstream's
+      # own tests are switched off because nothing here uses them and each is a build dependency.
+      #
+      # Installed into `/usr/local`, and nowhere of this job's own choosing, because of the
+      # launcher: `src/box-session.sh` pins its PATH to the system default
+      # (`export PATH=/usr/local/sbin:/usr/local/bin:...`) before it looks for bwrap, so a bwrap
+      # put first on the RUNNER's PATH from `$RUNNER_TEMP` passed every proof here and was then
+      # "not installed in this sandbox" to every box `fleet_launch` started. `/usr/local/bin` is on
+      # both PATHs, and first on the launcher's.
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/bwrap.tar.xz" \
+            "https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz"
+          echo "$BWRAP_SHA256  $RUNNER_TEMP/bwrap.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/bwrap.tar.xz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/bubblewrap-$BWRAP_VERSION"
+          meson setup _build --prefix=/usr/local -Dman=disabled -Dselinux=disabled \
+            -Dtests=false -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C _build
+          sudo meson install -C _build
       # Installing bubblewrap is NOT enough, and believing it was cost 27 days of red master.
       # `ubuntu-24.04` ships `kernel.apparmor_restrict_unprivileged_userns=1`, which refuses the
       # unprivileged user namespace bwrap needs. So bwrap installs, runs, and dies — and a guard
@@ -55,6 +106,34 @@ jobs:
       # would not work: `cargo test` captures a PASSING test's output, and a skipped test passes —
       # the reason the skips were invisible in the first place.
       - run: bwrap --dev-bind / / -- /bin/true
+      # **And that it is the pinned bwrap, and that it overlays** (SKEIN-1217). The launcher's own
+      # probe (`src/box-session.sh`, the `bwrap ... --overlay-src ... --tmp-overlay` it runs before
+      # choosing a branch) is quiet by design: a bwrap that cannot overlay makes it print one
+      # sentence into a stderr the tests capture and take the read-only fallback — and every test
+      # has a branch for that, so the suites would go on passing on it. That is how CI ran 0.9.0
+      # without anyone learning the overlay was untested. So the version and the path are
+      # asserted by name — on this job's PATH and on the one the launcher pins, read out of
+      # `src/box-session.sh` rather than copied here, which are not the same PATH and once found
+      # different bwraps — and the overlay is made here, the same pair of options the launcher
+      # uses, and a write inside it must land in the upper layer and leave the lower one alone.
+      - run: |
+          command -v bwrap
+          bwrap --version
+          test "$(command -v bwrap)" = /usr/local/bin/bwrap \
+            || { echo "the bwrap on PATH is not the pinned build" >&2; exit 1; }
+          launcher_path=$(sed -n 's/^export PATH=\(.*\)$/\1/p' src/box-session.sh)
+          test "$(PATH="$launcher_path" sh -c 'command -v bwrap')" = /usr/local/bin/bwrap \
+            || { echo "the launcher's PATH ($launcher_path) does not find the pinned build" >&2; exit 1; }
+          test "$(bwrap --version)" = "bubblewrap $BWRAP_VERSION" \
+            || { echo "the bwrap on PATH is not bubblewrap $BWRAP_VERSION" >&2; exit 1; }
+          lower="$RUNNER_TEMP/overlay-proof"
+          mkdir -p "$lower"
+          bwrap --dev-bind / / --overlay-src "$lower" --tmp-overlay "$lower" -- /bin/true
+          bwrap --dev-bind / / --overlay-src "$lower" --tmp-overlay "$lower" -- \
+            /bin/sh -c 'touch "$1/written" && test -e "$1/written"' sh "$lower"
+          test ! -e "$lower/written" \
+            || { echo "a write inside the overlay reached its lower layer" >&2; exit 1; }
+          echo "bubblewrap $BWRAP_VERSION overlays: the write inside landed in the upper layer only"
       # **Every gate below is `tools/gates.sh run <name>`, and that indirection is the point.**
       #
       # The list of gates, and the command each one runs, used to exist twice: here, and in a
@@ -360,7 +439,9 @@ jobs:
   # was a machine where every requirement in `tests/common/mod.rs` was present — bwrap able to make
   # a namespace, tmux, node, and Playwright's chromium. Leave one out here and its tests skip, the
   # number drops a point or two, and the job goes red about the runner rather than the change. The
-  # reasons for each step are on the `check` job's copy of it above.
+  # reasons for each step are on the `check` job's copy of it above. That includes the pinned
+  # bubblewrap (SKEIN-1217): the floor is measured where the launcher overlays `~/.local`, which is
+  # what a fleet does, so this job builds the same release, from the same `env:` pin, and proves it.
   coverage:
     runs-on: ubuntu-latest
     steps:
@@ -378,9 +459,37 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - run: sudo apt-get update && sudo apt-get install -y bubblewrap tmux
+      - run: sudo apt-get update && sudo apt-get install -y tmux meson ninja-build libcap-dev pkg-config
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/bwrap.tar.xz" \
+            "https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz"
+          echo "$BWRAP_SHA256  $RUNNER_TEMP/bwrap.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/bwrap.tar.xz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/bubblewrap-$BWRAP_VERSION"
+          meson setup _build --prefix=/usr/local -Dman=disabled -Dselinux=disabled \
+            -Dtests=false -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C _build
+          sudo meson install -C _build
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: bwrap --dev-bind / / -- /bin/true
+      - run: |
+          command -v bwrap
+          bwrap --version
+          test "$(command -v bwrap)" = /usr/local/bin/bwrap \
+            || { echo "the bwrap on PATH is not the pinned build" >&2; exit 1; }
+          launcher_path=$(sed -n 's/^export PATH=\(.*\)$/\1/p' src/box-session.sh)
+          test "$(PATH="$launcher_path" sh -c 'command -v bwrap')" = /usr/local/bin/bwrap \
+            || { echo "the launcher's PATH ($launcher_path) does not find the pinned build" >&2; exit 1; }
+          test "$(bwrap --version)" = "bubblewrap $BWRAP_VERSION" \
+            || { echo "the bwrap on PATH is not bubblewrap $BWRAP_VERSION" >&2; exit 1; }
+          lower="$RUNNER_TEMP/overlay-proof"
+          mkdir -p "$lower"
+          bwrap --dev-bind / / --overlay-src "$lower" --tmp-overlay "$lower" -- /bin/true
+          bwrap --dev-bind / / --overlay-src "$lower" --tmp-overlay "$lower" -- \
+            /bin/sh -c 'touch "$1/written" && test -e "$1/written"' sh "$lower"
+          test ! -e "$lower/written" \
+            || { echo "a write inside the overlay reached its lower layer" >&2; exit 1; }
+          echo "bubblewrap $BWRAP_VERSION overlays: the write inside landed in the upper layer only"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

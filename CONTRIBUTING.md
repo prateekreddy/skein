@@ -49,10 +49,11 @@ suite is candid about which checks that costs you rather than pretending otherwi
 
 * **Without `bwrap`, the isolation cover is proved by nothing.** `tests/isolation_bwrap/` runs a
   real namespace and reads the paths back; where it cannot make one it skips with a message. That
-  skip is right on a laptop and wrong in CI, which is why the workflow installs bubblewrap, turns
+  skip is right on a laptop and wrong in CI, which is why the workflow builds a pinned bubblewrap, turns
   `kernel.apparmor_restrict_unprivileged_userns` off, and then *proves* it with
   `bwrap --dev-bind / / -- /bin/true` as its own step. Installing it was not enough on its own and
-  believing it was cost 27 days of red master.
+  believing it was cost 27 days of red master. The pin is 0.10 or newer because the launcher's
+  `~/.local` overlay needs it, and a step proves that too (SKEIN-1217).
 
 * **Without Playwright's chromium, the browser tier does not open a page.** See below.
 
@@ -227,11 +228,13 @@ gets used for.
 
 `.github/workflows/ci.yml` invokes those same gates, one step per gate, as `tools/gates.sh run
 <name>` — so that a red X in the UI still names the gate that failed while the command it runs is
-written down only once. Sixteen of its `- run:` steps are not gates. Seven are in the `check` job:
-four prepare the machine, one proves bwrap actually works, one runs gitleaks — a release pinned by
+written down only once. Twenty of its `- run:` steps are not gates. Nine are in the `check` job:
+four prepare the machine, one builds the bubblewrap release pinned by its checksum in the workflow's
+`env:` (the runner's own is too old to overlay `~/.local`, SKEIN-1217), one proves bwrap actually
+works, one proves it is that release and that it overlays, one runs gitleaks — a release pinned by
 its checksum, with `.gitleaks.toml` as its allow-list, and not a gate only because a contributor's
 machine has no gitleaks — and one deepens the clone for the step after it. Two are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds every
-target at it, and seven are the `coverage` job, which holds line coverage at a floor — both under
+target at it, and nine are the `coverage` job, which holds line coverage at a floor — both under
 "Releases, and what CI covers" below. The step that reports
 what the run skipped used to be an eighth — advisory, and therefore never acted on, which is what
 made `noskip-check` a gate instead (SKEIN-558, SKEIN-881). **The rest are gates that can fail your
@@ -240,7 +243,7 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 37
+grep -c '^      - run:' .github/workflows/ci.yml     # → 41
 tools/gates.sh --list | wc -l                        # → 22
 ```
 

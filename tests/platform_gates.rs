@@ -1479,3 +1479,134 @@ fn the_check_job_installs_every_package_the_coverage_job_does() {
          them can skip where noskip-check runs: check has {check:?}, coverage has {coverage:?}"
     );
 }
+
+/// The `publish` job's shell block, out of `.github/workflows/release.yml`, with the step's own
+/// indentation removed — the script GitHub hands to `bash -e`.
+///
+/// Read as text for the reason `ci_apt_packages` gives: the block is the first `- run: |` after the
+/// job's `  publish:` line, and it ends at the first line indented less than its body.
+fn release_publish_script() -> String {
+    let release = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
+    )
+    .expect("the release workflow");
+    let mut lines = release
+        .lines()
+        .skip_while(|l| *l != "  publish:")
+        .skip_while(|l| l.trim() != "- run: |")
+        .skip(1);
+    let body = "          ";
+    let mut script = String::new();
+    for line in lines.by_ref() {
+        if line.is_empty() {
+            script.push('\n');
+        } else if let Some(rest) = line.strip_prefix(body) {
+            script.push_str(rest);
+            script.push('\n');
+        } else {
+            break;
+        }
+    }
+    assert!(
+        script.contains("gh release"),
+        "found no `gh release` in the publish job's run block, so this reads the wrong block:\n{script}"
+    );
+    script
+}
+
+/// Run the publish block against a `gh` that records its arguments, one call per line, and answers
+/// `release view` as told. Returns those calls.
+fn run_release_publish(dir: &Path, release_exists: bool) -> Vec<String> {
+    let stub = dir.join("bin");
+    let dist = dir.join("dist");
+    std::fs::create_dir_all(&stub).unwrap();
+    std::fs::create_dir_all(&dist).unwrap();
+    for f in [
+        "skein-v0.0.0-example.tar.gz",
+        "skein-v0.0.0-example.tar.gz.sha256",
+    ] {
+        std::fs::write(dist.join(f), "example").unwrap();
+    }
+    let gh = stub.join("gh");
+    std::fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n\
+         if [ \"$1 $2\" = 'release view' ] && [ -z \"$GH_RELEASE_EXISTS\" ]; then\n\
+           echo 'release not found' >&2; exit 1\n\
+         fi\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let log = dir.join("gh.log");
+    let path = format!(
+        "{}:{}",
+        stub.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("-e")
+        .arg("-c")
+        .arg(release_publish_script())
+        .current_dir(dir)
+        .env("PATH", path)
+        .env("GH_LOG", &log)
+        .env("GITHUB_REF_NAME", "v0.0.0")
+        .env("GITHUB_REPOSITORY", "example/thing")
+        .env_remove("GH_RELEASE_EXISTS");
+    if release_exists {
+        cmd.env("GH_RELEASE_EXISTS", "1");
+    }
+    let out = cmd.output().expect("bash");
+    assert!(
+        out.status.success(),
+        "the publish block failed with release_exists={release_exists}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// **The release's `publish` step uploads into a release that exists, and creates one that does
+/// not.** v0.1.0's run passed every gate and both builds and then failed in `publish` with `a
+/// release with the same tag name already exists: v0.1.0` (run 36413315833): the owner had written
+/// the release by hand first, and `gh release create` refuses an existing one. A tag cannot be
+/// pushed to test the workflow, so its block is run here against a stub `gh`, both ways.
+///
+/// **What makes it fail:** the block back to an unconditional `gh release create` (the "exists"
+/// half sees `create`, not `upload`); `--clobber` dropped from the upload, so a re-run cannot
+/// replace an archive it already attached; `--verify-tag` dropped from the create; or the upload
+/// given `--title`/`--notes`, which would overwrite what the owner wrote.
+#[test]
+fn the_release_publish_step_uploads_into_an_existing_release_and_creates_a_missing_one() {
+    let dir = common::Scratch::temp("skein-release-publish");
+    let files = "dist/skein-v0.0.0-example.tar.gz dist/skein-v0.0.0-example.tar.gz.sha256";
+
+    let exists = run_release_publish(&dir.join("exists"), true);
+    assert_eq!(
+        exists,
+        vec![
+            "release view v0.0.0 --repo example/thing".to_string(),
+            format!("release upload v0.0.0 {files} --repo example/thing --clobber"),
+        ],
+        "with the release already there, publish must upload into it with --clobber and nothing \
+         else — no create, which refuses, and no title or notes, which are the owner's"
+    );
+
+    let absent = run_release_publish(&dir.join("absent"), false);
+    assert_eq!(
+        absent,
+        vec![
+            "release view v0.0.0 --repo example/thing".to_string(),
+            format!(
+                "release create v0.0.0 {files} --repo example/thing --verify-tag \
+                 --title skein v0.0.0 --generate-notes"
+            ),
+        ],
+        "with no release yet, publish must create it as it always did, --verify-tag included"
+    );
+}

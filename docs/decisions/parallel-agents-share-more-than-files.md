@@ -14,11 +14,11 @@ worktrees and running processes — and writes the rules for them into every age
 - **The git index.** A path on the command line commits that path's working-tree state, whatever
   another agent has left in it, and going first does not avoid the sweep — it only decides whose
   name the other's work lands under. The fix is to remove the need for the shared file, not to take
-  turns. `CONTRIBUTING.md:511` (rule 5) is the rule in full.
+  turns. `CONTRIBUTING.md:514` (rule 5) is the rule in full.
 - **Commit shas.** A sha cited in a tracker completion is a promise not to rewrite it. Twelve commits
   were once rebased after agents had cited them. A commit that cannot be pushed from this
   environment — anything under `.github/workflows/` needs a token scope the fleet does not have —
-  goes at the tip from the start. `CONTRIBUTING.md:542`.
+  goes at the tip from the start. `CONTRIBUTING.md:545`.
 - **The tracker's lease holder.** Every agent in one box authenticates as one holder, so `held`,
   the call to make first after a restart, returns other agents' live leases as well as your own, and
   `capture` infers false relations from them. Name each agent's items in its brief, so it has
@@ -32,7 +32,7 @@ worktrees and running processes — and writes the rules for them into every age
   file changed, not that the named plant applied: a two-part plant whose first half silently
   matched nothing made a colleague's correct work look broken, and a test binary built from
   sabotaged source minutes earlier made broken work look correct. Assert on the artefact, once per
-  part (`CONTRIBUTING.md:497`, rule 3).
+  part (`CONTRIBUTING.md:500`, rule 3).
 - **Another agent's worktree.** Two agents sabotaging one file in one worktree overwrite each other's
   restores, and each one's md5 check looks correct against its own snapshot. Editing a worktree while
   its gate run is live moves the tree under the run and voids it by construction — that is what
@@ -74,5 +74,5 @@ and the guard then reads the wrong parent. Guards must fail closed.
 or killing inside another agent's worktree or processes; a brief that relies on the repository's
 guidance reaching the agent instead of stating the rule.
 
-**Enforced at.** `CONTRIBUTING.md:511` and `CONTRIBUTING.md:542` hold the index and sha rules. The
+**Enforced at.** `CONTRIBUTING.md:514` and `CONTRIBUTING.md:545` hold the index and sha rules. The
 rest is enforced by nothing but the brief, which is why the brief carries it.

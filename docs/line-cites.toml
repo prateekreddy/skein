@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:497"]
+["CONTRIBUTING.md:500"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:511"]
+["CONTRIBUTING.md:514"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:542"]
+["CONTRIBUTING.md:545"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 

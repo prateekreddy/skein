@@ -94,12 +94,29 @@ jobs:
           merge-multiple: true
       # `gh` is preinstalled on hosted runners and authenticates with this job's own token, so no
       # secret is added. `--verify-tag` refuses to create a tag if the pushed one is somehow absent.
+      #
+      # **A release that already exists gets the files, and keeps its words.** The owner may write a
+      # release by hand before the tag's run gets here — v0.1.0's was — and `gh release create`
+      # refuses an existing one: that run passed every gate and both builds and then failed here
+      # with `a release with the same tag name already exists: v0.1.0` (run 36413315833). So when
+      # `gh release view` finds it, the archives are uploaded into it, `--clobber` replacing any of
+      # the same name, and its title and notes are left as the owner wrote them. Otherwise it is
+      # created exactly as before. A `view` that fails for any other reason also lands on `create`,
+      # which then fails loudly rather than publishing into something it could not read.
+      # `tests/platform_gates.rs` runs this block against a stub `gh`, both ways.
       - run: |
           ls -l dist
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "skein $GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null; then
+            echo "release $GITHUB_REF_NAME already exists: uploading into it, title and notes untouched"
+            gh release upload "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "skein $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
