@@ -418,7 +418,7 @@ fn provision_box(name: &str, store: &str) -> Result<(), String> {
             format!(
                 "{why}\n       {name} IS running — its session and namespace came up — but it has \
                  no hooks or kit, so the board cannot see its turns. Run `skein restart {name}` \
-                 again{}",
+                 to try again{}",
                 what_to_look_at(&why)
             )
         })
