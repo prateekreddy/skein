@@ -1521,7 +1521,10 @@ fn run_release_publish(dir: &Path, release_exists: bool) -> Vec<String> {
     let dist = dir.join("dist");
     std::fs::create_dir_all(&stub).unwrap();
     std::fs::create_dir_all(&dist).unwrap();
-    for f in ["skein-v0.0.0-example.tar.gz", "skein-v0.0.0-example.tar.gz.sha256"] {
+    for f in [
+        "skein-v0.0.0-example.tar.gz",
+        "skein-v0.0.0-example.tar.gz.sha256",
+    ] {
         std::fs::write(dist.join(f), "example").unwrap();
     }
     let gh = stub.join("gh");
