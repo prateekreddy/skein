@@ -371,6 +371,16 @@ jobs:
             git fetch --unshallow --filter=tree:0 origin
           fi
       - run: tools/gates.sh run citation-check
+      # TEMPORARY diagnostic (SKEIN-1217): make the launcher's overlay branch fail loudly, so every
+      # test that takes it goes red naming it. On a bwrap that cannot overlay, nothing here fails.
+      - name: temporary overlay-branch diagnostic
+        continue-on-error: true
+        run: |
+          sed -i '/^    binds+=(--overlay-src "\$HOME\/\$rel" --tmp-overlay "\$HOME\/\$rel")$/i\    echo "skein-diag: overlay branch taken for ~/$rel in $box" >\&2; exit 97' src/box-session.sh
+          grep -n "skein-diag" src/box-session.sh
+          cargo test --test isolation_bwrap --test fleet_launch --no-fail-fast 2>&1 \
+            | grep -E "^test |test result|skein-diag|cannot overlay|panicked at" | head -300
+          git checkout -- src/box-session.sh
 
   # **The declared MSRV, built at.** `rust-version` in `Cargo.toml` is a claim to every reader, and a
   # claim nothing re-checks goes stale the first time somebody uses an API newer than it: the job
