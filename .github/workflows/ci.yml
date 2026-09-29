@@ -9,8 +9,9 @@ on:
   pull_request:
   workflow_call:
 
-# **The bubblewrap the `check` and `coverage` jobs build, pinned once for both (SKEIN-1217).** An
-# exact upstream release, and the sha256 of its tarball, which each job checks before it builds.
+# **The bubblewrap the `test`, `noskip` and `coverage` jobs build, pinned once for all three
+# (SKEIN-1217).** An exact upstream release, and the sha256 of its tarball, which each job checks
+# before it builds.
 #
 # Why build one at all: `ubuntu-24.04` ships bubblewrap 0.9.0, which answers `bwrap: Unknown option
 # --overlay-src` — overlays arrived in 0.10. On that bwrap `src/box-session.sh` takes its read-only
@@ -32,8 +33,190 @@ env:
   BWRAP_VERSION: "0.11.2"
   BWRAP_SHA256: "69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6"
 
+# **The shape: five jobs that run side by side, and nothing waits on anything (SKEIN-1228).**
+#
+# Every gate used to run in one `check` job, one after another, and a push took thirty minutes to
+# answer: the test suite (456 s), the same suite again under `$SKEIN_TESTS_NO_SKIP` (395 s), and a
+# history fetch for `citation-check` (773 s) were most of it, and none of them needs another's
+# output. So each is a job of its own now, and the wall clock is the slowest job rather than the sum:
+#
+#   check     every gate that reads the tree rather than running it — fmt, clippy, the doc gates,
+#             gitleaks, the cockpit's node gates. No bubblewrap, no browser: nothing here needs one.
+#   test      `submodule-check`, then the suite — on the pinned bubblewrap, with tmux and chromium.
+#   noskip    the suite again under `$SKEIN_TESTS_NO_SKIP`, on the same machine setup as `test`.
+#   citation  `citation-check`, the one gate that reads history, on a clone deepened to commits only.
+#   msrv, coverage   as before.
+#
+# **Every gate is still exactly one `- run: tools/gates.sh run <name>` step in exactly one job**,
+# and `gate-list-check` still fails when that stops being true in either direction, so splitting the
+# job did not make room for a gate to fall out of it. A red job still names the gate that failed,
+# because each gate is still its own step.
+#
+# `test` and `noskip` build the same thing, so they share one Rust cache (`shared-key` below): the
+# dependency build is paid once and restored by both. They run the suite twice, as they did before,
+# and that is deliberate rather than overlooked — `noskip-check` judges only the SKIPS in its run,
+# and a skip under `$SKEIN_TESTS_NO_SKIP` is a panic, so reading the `test` gate's verdict out of
+# that run too would mean telling a skip's panic from a real failure in the log, which is a second
+# definition of the `test` gate somewhere other than `tools/gates.sh`. Two runners at once cost
+# minutes, not wall clock.
+#
+# The two long scripts three jobs share — the pinned bubblewrap's build and its overlay proof — are
+# written once, as a YAML anchor (`run: &name`) in the `test` job and an alias (`run: *name`) in
+# `noskip` and `coverage`, so those jobs cannot drift apart on what building or proving bwrap is.
+# The one-line steps are written out in each job, the apt line deliberately:
+# `tests/platform_gates.rs` reads it per job to hold every job that runs the suite to at least what
+# the `coverage` job installs.
 jobs:
   check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `submodule-check` is in the `test` job, beside the tests it is the precondition of; this
+          # job's gates read the tree, and the submodule is still here so that a gate reading every
+          # tracked path sees the same checkout it sees locally.
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # **Every gate below is `tools/gates.sh run <name>`, and that indirection is the point.**
+      #
+      # The list of gates, and the command each one runs, used to exist twice: here, and in a
+      # runner that lived in a session scratchpad, that every agent on this box was told to run,
+      # and that was never checked in. They drifted in BOTH directions before anybody looked.
+      # `tools/alone-check.py` was in that runner and in `CONTRIBUTING.md` and in no step here;
+      # `tools/line-cite-check.py` was added here and to `CONTRIBUTING.md` and the local runner
+      # never learned about it; and the two copies of the cockpit `node --test` line had come to
+      # disagree about their own arguments. Running "the gates" locally and running "the gates"
+      # here therefore checked different things, and neither said so.
+      #
+      # So a gate's command now lives in `tools/gates.sh` and nowhere else. What this file still
+      # holds is which JOB each gate runs in and the membership, because those are what a per-step
+      # run needs in order to put a red X on the step that failed.
+      #
+      # **One step per gate rather than one step for the whole script, deliberately.** A single
+      # step would collapse every gate's outcome into one name in the UI, and it would have to
+      # reproduce the jobs' setup as well — installing bubblewrap, proving it actually runs,
+      # fetching a browser, deepening the clone. None of that is a gate. Setup belongs here; the
+      # list belongs there.
+      #
+      # And this first gate is what stops the membership drifting again: it fails when this file
+      # and `CONTRIBUTING.md` stop naming the set `tools/gates.sh` defines, in either direction,
+      # and it fails when a step here names a gate the list marks as deliberately not-for-CI.
+      - run: tools/gates.sh run gate-list-check
+      - run: tools/gates.sh run fmt
+      # `--all` as well as `--all-targets`: the workspace's other crate is `warden/`, and a gate
+      # that lints one of two crates says less than it appears to.
+      - run: tools/gates.sh run clippy
+      # The module graph. Rust cannot express "this module may not depend on that one", so the rule
+      # architecture.md §14 is built on has no compiler behind it — this is the compiler.
+      - run: tools/gates.sh run module-check
+      # The Source law (§2.3): nothing reaches anything except through a declared Source. Same
+      # reason and same shape — a law nothing checks is a paragraph.
+      - run: tools/gates.sh run source-check
+      # Process-wide env vars in tests. `cargo test` runs a file's tests on many threads, so two
+      # that set the same variable interleave and read each other's values — which fails as a
+      # random red somewhere else, and has cost real time on this project more than once. The gate
+      # finds a `set_var`/`remove_var` in a scope that does not hold `env_lock()`, resolving test
+      # helpers transitively, with the deliberate exceptions declared in `docs/env-lock.toml`.
+      - run: tools/gates.sh run env-lock-check
+      - run: tools/gates.sh run fleet-pin-check
+      # Symbols named in prose. CLAUDE.md rule 1 is "derive, do not assert", and nothing enforced
+      # the prose half: a cut removes a function and the sentence describing it stays, indefinitely
+      # and confidently. The review cut left nine such references, two of them in `docs/parity.md`
+      # — the acceptance gate — while that same file's own route and page-function COUNTS kept
+      # reproducing. Counting cannot see a sentence. Absences that are legitimate (somebody else's
+      # name, a design record's past tense, a proposal for something unbuilt) are declared with
+      # their reason in `docs/prose-symbols.toml`.
+      #
+      # The same gate checks the OTHER half of rule 1, the `file:line` citation. Sixty-three of
+      # them named a file that is not on disk or a line past the end of one — three sampled at
+      # random from one file were all wrong, one by about 530 lines, and nothing had ever looked.
+      # It cannot tell you a citation points at the wrong line, only that the line is not there
+      # to point at; the fix it recommends is a symbol name, which the check above already keeps
+      # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
+      - run: tools/gates.sh run prose-check
+      # Whether the file a markdown link or a backticked repo path names is tracked at all — the
+      # question the step above never asks. `[docs/live-check.md](docs/live-check.md)` on the root
+      # page passed every doc gate the day that file left the repository (SKEIN-1157).
+      - run: tools/gates.sh run link-check
+      # The other half of that citation, and the half that actually goes wrong. `prose-check.py`
+      # above asks only whether the line is INSIDE the file it names, and says so itself — "GREEN
+      # HERE MEANS FOLLOWABLE, NEVER RIGHT". `docs/prose-symbols.toml` cited
+      # `src/bin/skein-server.rs:5132` for `await_holding_lock`, which lives at 5296; that citation
+      # was read by the step above and passed, because 5132 is inside the file. A number that is
+      # looked at and cannot be judged is the shape SKEIN-647 warns about: a check that is trusted
+      # and cannot fail.
+      #
+      # `docs/line-cites.toml` records what each cited line SAID when it was cited — read out of the
+      # tree as it stood in the commit that wrote the citation, so seeding it could not bless a
+      # citation that had already drifted. This step fails when a line no longer says it. Seventy-
+      # five citations in `docs/` were wrong the day the ledger was written; one inserted line in
+      # `src/fleet.rs` turns seventy of them red, and `--relocate --write` puts them back.
+      #
+      # It reads the working tree and the ledger only, so unlike `citation-check.py` in the
+      # `citation` job it needs no history and is unaffected by the shallow clone.
+      - run: tools/gates.sh run line-cite-check
+      # Prose inside a string literal, where a `\` line continuation used to be. rustfmt cannot
+      # break a literal, so a long sentence is written across two lines with a trailing `\` — and a
+      # heredoc that patches Rust source eats that `\` as its OWN line continuation, leaving the
+      # continuation line's indentation inside the string. `skein doctor` then prints "branch and
+      # <18 spaces> conversation" to the fleet's owner. Fifteen were in the tree when the gate was
+      # written and two more were nearly added the same way (SKEIN-741, SKEIN-735). It is invisible
+      # in a diff, which is why review had not caught one of them.
+      - run: tools/gates.sh run continuation-check
+      # Identifiers from before this repository was this repository. `CONTRIBUTING.md` has told
+      # contributors to run this since it was written — twice, once in prose and once in the
+      # pre-push list — and nothing ever did: the gate existed, passed, and was invoked by no
+      # workflow, so the one check standing between a prior client's names and a public git
+      # history ran only when somebody remembered.
+      # It is also the gate whose failure is unfixable after the fact — a push cannot be unseen —
+      # which is precisely the kind that must not depend on memory (SKEIN-492).
+      - run: tools/gates.sh run residue-check
+      # The four secrets rules of SKEIN-516: one writer for a 0600 credential, nothing on argv,
+      # every header built from a `Secret`, a credential file under `private/`, and every test
+      # credential visibly not one. The allow-lists, with their reasons, are in the tool.
+      - run: tools/gates.sh run secret-check
+      # And the scanner a stranger would run on this repository before trusting it. Not a gate in
+      # `tools/gates.sh`, because a contributor's machine has no gitleaks, and a gate that cannot
+      # run everywhere fails for a reason that is not the change. The release is pinned by its
+      # sha256 rather than by a third-party action, so what runs here is exactly the binary that
+      # was checked. `.gitleaks.toml` is the allow-list, and it allows only the `skein-test-`
+      # prefix and code that is not this repository's.
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner
+      # The public CLAUDE.md, which every agent in a checkout reads first: no tracker id, no tracker
+      # project id, nothing on the residue register, AGENTS.md a symlink to it, and sync's installer
+      # leaving it byte-identical. That last rule runs the installer's own doc step, because a
+      # renamed `## Work tracking` heading would otherwise append the owner's tracker section to a
+      # tracked file on every box with sync, and nothing else would say so (SKEIN-1158).
+      - run: tools/gates.sh run claude-md-check
+      # The three node gates below import nothing but node's own modules, so this job needs node
+      # and not the browser tier's `npm install`. Pinned rather than whatever `ubuntu-latest`
+      # preinstalls, for the reason given on the same step in the `test` job.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
+      # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
+      # agrees with the code right up until one of them changes.
+      - run: tools/gates.sh run cockpit-tests
+      # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
+      # gone stale is a cockpit quietly running last week's code.
+      - run: tools/gates.sh run cockpit-bundle
+      # A browser fixture belongs under one root, swept by the pid rule. The suites that built
+      # theirs from `os.tmpdir()` instead were unreadable from inside the box they are for, and
+      # carried no pid, so nothing ever swept them. This derives the suites rather than listing
+      # them, and refuses when it derives none (SKEIN-653, SKEIN-700, SKEIN-717).
+      - run: tools/gates.sh run fixture-root-check
+
+  # **The suite, on a machine where none of its guards has a reason to skip.**
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,17 +235,20 @@ jobs:
           # working is a named red step rather than two tests going quiet (SKEIN-826).
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # One cache for this job and `noskip`, which compile exactly the same targets. Without the
+      # shared key each job gets a cache of its own, keyed by job, and pays for the same build.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: suite
       # bubblewrap, so the isolation cover is exercised against a real namespace rather than skipped.
       # The test skips with a message where bwrap cannot make one, which keeps a constrained runner
       # green — and that is exactly the outcome this line exists to stop being the normal one.
       # tmux for the same reason: `tests/common/mod.rs`'s REQUIREMENTS lists it for `lib`,
       # `fleet_launch`, `fleet_move` and `server`, and whether the runner image carries it was
       # written down nowhere (SKEIN-1094). Installing it makes the question moot rather than
-      # answered. `the_check_job_installs_every_package_the_coverage_job_does` in
-      # `tests/platform_gates.rs` keeps this line from falling behind the coverage job's again.
+      # answered. `every_job_that_runs_the_suite_installs_every_package_the_coverage_job_does` in
+      # `tests/platform_gates.rs` keeps this line, and the `noskip` job's, from falling behind the
+      # coverage job's again.
       #
       # bubblewrap is no longer apt's (SKEIN-1217): the step after this builds the release pinned
       # in `env:` at the top of this file, and the rest of this line is what that build needs —
@@ -71,10 +257,11 @@ jobs:
       # for anything to fall back to without saying so.
       - run: sudo apt-get update && sudo apt-get install -y tmux meson ninja-build libcap-dev pkg-config
       # The pinned bubblewrap, from upstream's release tarball, checked against the sha256 in `env:`
-      # before a byte of it is unpacked. The same shape as the gitleaks step below: what runs here
-      # is exactly what was checked. Not cached, deliberately: the build is seconds, and a cached
-      # binary would be one this run never checked. Man pages, completions, SELinux and upstream's
-      # own tests are switched off because nothing here uses them and each is a build dependency.
+      # before a byte of it is unpacked. The same shape as the gitleaks step in the `check` job: what
+      # runs here is exactly what was checked. Not cached, deliberately: the build is seconds, and a
+      # cached binary would be one this run never checked. Man pages, completions, SELinux and
+      # upstream's own tests are switched off because nothing here uses them and each is a build
+      # dependency.
       #
       # Installed into `/usr/local`, and nowhere of this job's own choosing, because of the
       # launcher: `src/box-session.sh` pins its PATH to the system default
@@ -82,7 +269,7 @@ jobs:
       # put first on the RUNNER's PATH from `$RUNNER_TEMP` passed every proof here and was then
       # "not installed in this sandbox" to every box `fleet_launch` started. `/usr/local/bin` is on
       # both PATHs, and first on the launcher's.
-      - run: |
+      - run: &bwrap-build |
           curl -fsSL -o "$RUNNER_TEMP/bwrap.tar.xz" \
             "https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz"
           echo "$BWRAP_SHA256  $RUNNER_TEMP/bwrap.tar.xz" | sha256sum -c -
@@ -116,7 +303,7 @@ jobs:
       # `src/box-session.sh` rather than copied here, which are not the same PATH and once found
       # different bwraps — and the overlay is made here, the same pair of options the launcher
       # uses, and a write inside it must land in the upper layer and leave the lower one alone.
-      - run: |
+      - run: &bwrap-overlays |
           command -v bwrap
           bwrap --version
           test "$(command -v bwrap)" = /usr/local/bin/bwrap \
@@ -134,35 +321,6 @@ jobs:
           test ! -e "$lower/written" \
             || { echo "a write inside the overlay reached its lower layer" >&2; exit 1; }
           echo "bubblewrap $BWRAP_VERSION overlays: the write inside landed in the upper layer only"
-      # **Every gate below is `tools/gates.sh run <name>`, and that indirection is the point.**
-      #
-      # The list of gates, and the command each one runs, used to exist twice: here, and in a
-      # runner that lived in a session scratchpad, that every agent on this box was told to run,
-      # and that was never checked in. They drifted in BOTH directions before anybody looked.
-      # `tools/alone-check.py` was in that runner and in `CONTRIBUTING.md` and in no step here;
-      # `tools/line-cite-check.py` was added here and to `CONTRIBUTING.md` and the local runner
-      # never learned about it; and the two copies of the cockpit `node --test` line had come to
-      # disagree about their own arguments. Running "the gates" locally and running "the gates"
-      # here therefore checked different things, and neither said so.
-      #
-      # So a gate's command now lives in `tools/gates.sh` and nowhere else. What this file still
-      # holds is the ORDER and the membership, because those are what a per-step run needs in order
-      # to put a red X on the step that failed.
-      #
-      # **One step per gate rather than one step for the whole script, deliberately.** A single
-      # step would collapse every gate's outcome into one name in the UI, and it would have to
-      # reproduce this job's setup as well — installing bubblewrap, proving it actually runs,
-      # fetching a browser, deepening the clone for the last step. None of that is a gate. Setup
-      # belongs here; the list belongs there.
-      #
-      # And this first gate is what stops the membership drifting again: it fails when this file
-      # and `CONTRIBUTING.md` stop naming the set `tools/gates.sh` defines, in either direction,
-      # and it fails when a step here names a gate the list marks as deliberately not-for-CI.
-      - run: tools/gates.sh run gate-list-check
-      - run: tools/gates.sh run fmt
-      # `--all` as well as `--all-targets`: the workspace's other crate is `warden/`, and a gate
-      # that lints one of two crates says less than it appears to.
-      - run: tools/gates.sh run clippy
       # Node BEFORE `cargo test`, because `cargo test` shells out to it: `cockpit::tests::
       # the_cockpit_bundle_is_not_stale` runs `node cockpit/build.mjs --check`, and the suites
       # listed in `tests/browser_suites.rs` run from there too. It passed only because `ubuntu-latest` preinstalls some
@@ -214,177 +372,124 @@ jobs:
       # that one and still did not reach `queue_field_readers`, which was also broken. One run that
       # reports everything beats two that each report the first thing.
       - run: tools/gates.sh run test
-      # The module graph. Rust cannot express "this module may not depend on that one", so the rule
-      # architecture.md §14 is built on has no compiler behind it — this is the compiler.
-      - run: tools/gates.sh run module-check
-      # The Source law (§2.3): nothing reaches anything except through a declared Source. Same
-      # reason and same shape — a law nothing checks is a paragraph.
-      - run: tools/gates.sh run source-check
-      # Process-wide env vars in tests. `cargo test` runs a file's tests on many threads, so two
-      # that set the same variable interleave and read each other's values — which fails as a
-      # random red somewhere else, and has cost real time on this project more than once. The gate
-      # finds a `set_var`/`remove_var` in a scope that does not hold `env_lock()`, resolving test
-      # helpers transitively, with the deliberate exceptions declared in `docs/env-lock.toml`.
-      - run: tools/gates.sh run env-lock-check
-      - run: tools/gates.sh run fleet-pin-check
-      # Symbols named in prose. CLAUDE.md rule 1 is "derive, do not assert", and nothing enforced
-      # the prose half: a cut removes a function and the sentence describing it stays, indefinitely
-      # and confidently. The review cut left nine such references, two of them in `docs/parity.md`
-      # — the acceptance gate — while that same file's own route and page-function COUNTS kept
-      # reproducing. Counting cannot see a sentence. Absences that are legitimate (somebody else's
-      # name, a design record's past tense, a proposal for something unbuilt) are declared with
-      # their reason in `docs/prose-symbols.toml`.
-      #
-      # The same gate checks the OTHER half of rule 1, the `file:line` citation. Sixty-three of
-      # them named a file that is not on disk or a line past the end of one — three sampled at
-      # random from one file were all wrong, one by about 530 lines, and nothing had ever looked.
-      # It cannot tell you a citation points at the wrong line, only that the line is not there
-      # to point at; the fix it recommends is a symbol name, which the check above already keeps
-      # honest. Today's are deferred in `docs/prose-debt.toml`, each naming the item that ends it.
-      - run: tools/gates.sh run prose-check
-      # Whether the file a markdown link or a backticked repo path names is tracked at all — the
-      # question the step above never asks. `[docs/live-check.md](docs/live-check.md)` on the root
-      # page passed every doc gate the day that file left the repository (SKEIN-1157).
-      - run: tools/gates.sh run link-check
-      # The other half of that citation, and the half that actually goes wrong. `prose-check.py`
-      # above asks only whether the line is INSIDE the file it names, and says so itself — "GREEN
-      # HERE MEANS FOLLOWABLE, NEVER RIGHT". `docs/prose-symbols.toml` cited
-      # `src/bin/skein-server.rs:5132` for `await_holding_lock`, which lives at 5296; that citation
-      # was read by the step above and passed, because 5132 is inside the file. A number that is
-      # looked at and cannot be judged is the shape SKEIN-647 warns about: a check that is trusted
-      # and cannot fail.
-      #
-      # `docs/line-cites.toml` records what each cited line SAID when it was cited — read out of the
-      # tree as it stood in the commit that wrote the citation, so seeding it could not bless a
-      # citation that had already drifted. This step fails when a line no longer says it. Seventy-
-      # five citations in `docs/` were wrong the day the ledger was written; one inserted line in
-      # `src/fleet.rs` turns seventy of them red, and `--relocate --write` puts them back.
-      #
-      # It reads the working tree and the ledger only, so unlike `citation-check.py` at the end of
-      # this file it needs no history and is unaffected by the shallow clone.
-      - run: tools/gates.sh run line-cite-check
-      # Prose inside a string literal, where a `\` line continuation used to be. rustfmt cannot
-      # break a literal, so a long sentence is written across two lines with a trailing `\` — and a
-      # heredoc that patches Rust source eats that `\` as its OWN line continuation, leaving the
-      # continuation line's indentation inside the string. `skein doctor` then prints "branch and
-      # <18 spaces> conversation" to the fleet's owner. Fifteen were in the tree when the gate was
-      # written and two more were nearly added the same way (SKEIN-741, SKEIN-735). It is invisible
-      # in a diff, which is why review had not caught one of them.
-      - run: tools/gates.sh run continuation-check
-      # Identifiers from before this repository was this repository. `CONTRIBUTING.md` has told
-      # contributors to run this since it was written — twice, once in prose and once in the
-      # pre-push list — and nothing ever did: the gate existed, passed, and was invoked by no
-      # workflow, so the one check standing between a prior client's names and a public git
-      # history ran only when somebody remembered.
-      # It is also the gate whose failure is unfixable after the fact — a push cannot be unseen —
-      # which is precisely the kind that must not depend on memory (SKEIN-492).
-      - run: tools/gates.sh run residue-check
-      # The four secrets rules of SKEIN-516: one writer for a 0600 credential, nothing on argv,
-      # every header built from a `Secret`, a credential file under `private/`, and every test
-      # credential visibly not one. The allow-lists, with their reasons, are in the tool.
-      - run: tools/gates.sh run secret-check
-      # And the scanner a stranger would run on this repository before trusting it. Not a gate in
-      # `tools/gates.sh`, because a contributor's machine has no gitleaks, and a gate that cannot
-      # run everywhere fails for a reason that is not the change. The release is pinned by its
-      # sha256 rather than by a third-party action, so what runs here is exactly the binary that
-      # was checked. `.gitleaks.toml` is the allow-list, and it allows only the `skein-test-`
-      # prefix and code that is not this repository's.
-      - run: |
-          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tgz" \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner
-      # The public CLAUDE.md, which every agent in a checkout reads first: no tracker id, no tracker
-      # project id, nothing on the residue register, AGENTS.md a symlink to it, and sync's installer
-      # leaving it byte-identical. That last rule runs the installer's own doc step, because a
-      # renamed `## Work tracking` heading would otherwise append the owner's tracker section to a
-      # tracked file on every box with sync, and nothing else would say so (SKEIN-1158).
-      - run: tools/gates.sh run claude-md-check
-      # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
-      # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
-      # agrees with the code right up until one of them changes.
-      - run: tools/gates.sh run cockpit-tests
-      # The binary embeds the built bundle and `cargo build` does not run node, so a bundle that has
-      # gone stale is a cockpit quietly running last week's code.
-      - run: tools/gates.sh run cockpit-bundle
-      # A browser fixture belongs under one root, swept by the pid rule. The suites that built
-      # theirs from `os.tmpdir()` instead were unreadable from inside the box they are for, and
-      # carried no pid, so nothing ever swept them. This derives the suites rather than listing
-      # them, and refuses when it derives none (SKEIN-653, SKEIN-700, SKEIN-717).
-      - run: tools/gates.sh run fixture-root-check
-      # **What that run skipped — reported, and now able to fail the build (SKEIN-558, SKEIN-881).**
-      #
-      # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
-      # output — a skipped test passes — so the notice is invisible in exactly the run where it
-      # matters. That is how eighteen silent skips survived here, and how SKEIN-549's two tests
-      # died on this runner for 27 days while reading as fine. `$SKEIN_TESTS_NO_SKIP` inverts it:
-      # every skip becomes a named panic (`tests/common/mod.rs`, `NO_SKIP`), and cargo cannot hide
-      # a failing test's output.
-      #
-      # The mechanism itself is no longer the unverified half. `tests/harness.rs`'s
-      # `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips` proves both arms —
-      # an ordinary early return without the variable, and with it a panic naming the guard and the
-      # reason — and the `test` gate above runs it.
-      #
-      # **This step used to be non-blocking, and the argument for that had a hole in it.** It read:
-      # a scoped no-skip run "needs a hand-kept list of what a runner image happens to provide,
-      # sitting beside `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody
-      # else's platform is exactly the thing that goes stale without saying so". True about a list,
-      # and a list was never the only option. Whether THIS runner has tmux is not a fact anybody
-      # writes down: it is a question you ask the machine you are standing on, at the moment you
-      # need the answer. `tools/noskip-check.py` reads the requirements out of
-      # `tests/common/mod.rs`, probes each one here, and fails the build for a skip inside a binary
-      # whose every declared requirement this machine answers for — reporting, and nothing more,
-      # about the rest. Both halves are derived and nothing about this image is written down.
-      #
-      # Why it had to stop being advisory: two `upstream/sync` drift guards skipped on every run
-      # for as long as anyone had been running them. This switch DID find them and this summary DID
-      # list them, and because the step could not fail they sat as expected failures until somebody
-      # was sent to look (SKEIN-826). Two failures everyone has learned to expect is how a switch
-      # stops being run at all.
-      #
-      # **AND IT MUST NOT REPORT AN ALL-CLEAR FROM A RUN THAT NEVER HAPPENED.** This step used to
-      # decide between "these skipped" and "nothing skipped" on one question — does the log hold a
-      # `SKIPPED at` line — which a log holds neither of when the build failed, when a gate refused,
-      # or when `tools/gates.sh` exited 3 because HEAD moved under it. All three produce zero
-      # matches, and the step was `set +e`, so the summary said "Nothing: every guard in the suite
-      # found what it needed" about a run that had asked nothing and been told nothing. That is the
-      # same defect one layer up from the one the switch exists for — a display reporting on
-      # something other than what it names — and the fix is the same shape: require POSITIVE
-      # evidence the run happened before reading anything into its silence. `^test result:` is that
-      # evidence, one line per test binary, and the count is printed so a run that reported on three
-      # binaries cannot be mistaken for one that reported on all of them (SKEIN-826). That rule now
-      # lives in the tool, which also FAILS on that silence rather than printing Unknown into a
-      # green step — except for the two `tools/gates.sh` exit codes documented as neither a pass nor
-      # a failure.
-      #
-      # It still goes through `tools/gates.sh run test`, so this report does not become a second
-      # place the test command is written down, and it still reuses the build the `test` gate made.
+
+  # **What the suite skipped — reported, and able to fail the build (SKEIN-558, SKEIN-881).**
+  #
+  # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
+  # output — a skipped test passes — so the notice is invisible in exactly the run where it
+  # matters. That is how eighteen silent skips survived here, and how SKEIN-549's two tests
+  # died on this runner for 27 days while reading as fine. `$SKEIN_TESTS_NO_SKIP` inverts it:
+  # every skip becomes a named panic (`tests/common/mod.rs`, `NO_SKIP`), and cargo cannot hide
+  # a failing test's output.
+  #
+  # The mechanism itself is no longer the unverified half. `tests/harness.rs`'s
+  # `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips` proves both arms —
+  # an ordinary early return without the variable, and with it a panic naming the guard and the
+  # reason — and the `test` job runs it.
+  #
+  # **This gate used to be non-blocking, and the argument for that had a hole in it.** It read:
+  # a scoped no-skip run "needs a hand-kept list of what a runner image happens to provide,
+  # sitting beside `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody
+  # else's platform is exactly the thing that goes stale without saying so". True about a list,
+  # and a list was never the only option. Whether THIS runner has tmux is not a fact anybody
+  # writes down: it is a question you ask the machine you are standing on, at the moment you
+  # need the answer. `tools/noskip-check.py` reads the requirements out of
+  # `tests/common/mod.rs`, probes each one here, and fails the build for a skip inside a binary
+  # whose every declared requirement this machine answers for — reporting, and nothing more,
+  # about the rest. Both halves are derived and nothing about this image is written down.
+  #
+  # Why it had to stop being advisory: two `upstream/sync` drift guards skipped on every run
+  # for as long as anyone had been running them. This switch DID find them and this summary DID
+  # list them, and because the step could not fail they sat as expected failures until somebody
+  # was sent to look (SKEIN-826). Two failures everyone has learned to expect is how a switch
+  # stops being run at all.
+  #
+  # **AND IT MUST NOT REPORT AN ALL-CLEAR FROM A RUN THAT NEVER HAPPENED.** This step used to
+  # decide between "these skipped" and "nothing skipped" on one question — does the log hold a
+  # `SKIPPED at` line — which a log holds neither of when the build failed, when a gate refused,
+  # or when `tools/gates.sh` exited 3 because HEAD moved under it. All three produce zero
+  # matches, and the step was `set +e`, so the summary said "Nothing: every guard in the suite
+  # found what it needed" about a run that had asked nothing and been told nothing. That is the
+  # same defect one layer up from the one the switch exists for — a display reporting on
+  # something other than what it names — and the fix is the same shape: require POSITIVE
+  # evidence the run happened before reading anything into its silence. `^test result:` is that
+  # evidence, one line per test binary, and the count is printed so a run that reported on three
+  # binaries cannot be mistaken for one that reported on all of them (SKEIN-826). That rule now
+  # lives in the tool, which also FAILS on that silence rather than printing Unknown into a
+  # green step — except for the two `tools/gates.sh` exit codes documented as neither a pass nor
+  # a failure.
+  #
+  # It still goes through `tools/gates.sh run test`, so this report does not become a second
+  # place the test command is written down. **It is a job of its own, beside `test` rather than
+  # after it** (SKEIN-1228): it used to follow `test` in one job to reuse that build, which saved a
+  # compile and cost the whole run of the suite in wall clock. The machine it runs on is set up
+  # exactly as the `test` job's is — the same steps, the two long ones by alias — because a
+  # requirement this job lacked would turn a hostable binary report-only here and quietly narrow
+  # what the gate can fail.
+  noskip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The two `upstream/sync` drift guards skip without it, and here a skip in the `lib`
+          # binary is a failure — which is how this gate found them the first time (SKEIN-826).
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: suite
+      - run: sudo apt-get update && sudo apt-get install -y tmux meson ninja-build libcap-dev pkg-config
+      - run: *bwrap-build
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: bwrap --dev-bind / / -- /bin/true
+      - run: *bwrap-overlays
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+        working-directory: tests/ui
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/ui/package.json') }}
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/ui
       - run: tools/gates.sh run noskip-check
-      # Commit-sha citations in `docs/`. A history rewrite invalidates every one of them at once,
-      # without touching a document — it has happened here already, and the rewrite over the
-      # archive branches (SKEIN-652, SKEIN-605) is scoped and not yet run.
-      #
-      # THIS STEP IS LAST, AND THE ONE BEFORE IT IS WHY. `actions/checkout` clones at depth 1, and
-      # on a depth-1 clone `git rev-list HEAD` names one commit — so every citation would be
-      # reported unresolvable, for a reason indistinguishable from the failure this gate exists to
-      # find. `tools/citation-check.py` refuses to run on a shallow clone rather than answer from
-      # one. The clone is therefore deepened here, with `--filter=tree:0` fetching the COMMITS
-      # only: 2.0 MiB of this repository's 1021 MiB, against 1018 MiB of blobs that nothing in
-      # this gate reads. That leaves a partial clone behind, which is why this pair sits after
-      # every other step rather than beside the checkout — nothing that follows can then be
-      # slowed by a lazy object fetch. Measured over `file://` on a developer box: 6.4 s for the
-      # fetch, 1.8 MiB added to `.git`, and 0.04 s for the gate itself.
+
+  # **Commit-sha citations in `docs/`, in a job of their own.** A history rewrite invalidates every
+  # one of them at once, without touching a document — it has happened here already, and the
+  # rewrite over the archive branches (SKEIN-652, SKEIN-605) is scoped and not yet run.
+  #
+  # `actions/checkout` clones at depth 1, and on a depth-1 clone `git rev-list HEAD` names one
+  # commit — so every citation would be reported unresolvable, for a reason indistinguishable from
+  # the failure this gate exists to find. `tools/citation-check.py` refuses to run on a shallow
+  # clone rather than answer from one. The clone is therefore deepened here, with `--filter=tree:0`
+  # fetching the COMMITS only: 2.0 MiB of this repository's 1021 MiB, against 1018 MiB of blobs that
+  # nothing in this gate reads.
+  #
+  # **`--no-recurse-submodules` is what makes that cheap, and its absence cost thirteen minutes a
+  # run.** The fetch itself took 3 s on GitHub (master run 36437455752); the 12 min 48 s after it
+  # were git deciding whether to fetch into `upstream/sync`, which by default it does "on demand" —
+  # by reading every newly fetched commit's tree for a changed gitlink. On a clone that fetched no
+  # trees, each of those reads is a lazy fetch of its own. This gate reads commits and never the
+  # submodule, so the checkout does not populate it and the fetch does not look for it.
+  #
+  # Its own job, rather than last in `check` as it was, because the partial clone this leaves behind
+  # would make any gate after it that touches history pay a lazy fetch per object: in `check`,
+  # `line-cite-check` reads `git blame` when history is there. Here nothing follows it.
+  citation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - run: |
           if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-            git fetch --unshallow --filter=tree:0 origin
+            git fetch --unshallow --filter=tree:0 --no-recurse-submodules origin
           fi
       - run: tools/gates.sh run citation-check
 
   # **The declared MSRV, built at.** `rust-version` in `Cargo.toml` is a claim to every reader, and a
-  # claim nothing re-checks goes stale the first time somebody uses an API newer than it: the job
-  # above builds on `stable` only, where that is invisible. The version is READ from `Cargo.toml`
+  # claim nothing re-checks goes stale the first time somebody uses an API newer than it: the other
+  # jobs build on `stable` only, where that is invisible. The version is READ from `Cargo.toml`
   # rather than written here too, so there is one copy of it and this job cannot test a different
   # number from the one the manifest declares.
   #
@@ -434,12 +539,12 @@ jobs:
   # `python3 tools/coverage-check.py rust` — `gate-list-check` counts a tool a workflow step runs as
   # run, which is what lets this one live outside the list.
   #
-  # **The setup repeats the `check` job's, deliberately, and adds `tmux`.** A number is only
-  # comparable with the floor if it comes from the same suite the floor was measured on, and that
-  # was a machine where every requirement in `tests/common/mod.rs` was present — bwrap able to make
-  # a namespace, tmux, node, and Playwright's chromium. Leave one out here and its tests skip, the
-  # number drops a point or two, and the job goes red about the runner rather than the change. The
-  # reasons for each step are on the `check` job's copy of it above. That includes the pinned
+  # **The setup is the `test` job's, step for step, the two long scripts by alias.** A number is
+  # only comparable with the floor if it comes from the same suite the floor was measured on, and
+  # that was a machine where every requirement in `tests/common/mod.rs` was present — bwrap able to
+  # make a namespace, tmux, node, and Playwright's chromium. Leave one out here and its tests skip,
+  # the number drops a point or two, and the job goes red about the runner rather than the change.
+  # The reasons for each step are on the `test` job's copy of it above. That includes the pinned
   # bubblewrap (SKEIN-1217): the floor is measured where the launcher overlays `~/.local`, which is
   # what a fleet does, so this job builds the same release, from the same `env:` pin, and proves it.
   coverage:
@@ -460,36 +565,10 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - run: sudo apt-get update && sudo apt-get install -y tmux meson ninja-build libcap-dev pkg-config
-      - run: |
-          curl -fsSL -o "$RUNNER_TEMP/bwrap.tar.xz" \
-            "https://github.com/containers/bubblewrap/releases/download/v$BWRAP_VERSION/bubblewrap-$BWRAP_VERSION.tar.xz"
-          echo "$BWRAP_SHA256  $RUNNER_TEMP/bwrap.tar.xz" | sha256sum -c -
-          tar -xJf "$RUNNER_TEMP/bwrap.tar.xz" -C "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP/bubblewrap-$BWRAP_VERSION"
-          meson setup _build --prefix=/usr/local -Dman=disabled -Dselinux=disabled \
-            -Dtests=false -Dbash_completion=disabled -Dzsh_completion=disabled
-          meson compile -C _build
-          sudo meson install -C _build
+      - run: *bwrap-build
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: bwrap --dev-bind / / -- /bin/true
-      - run: |
-          command -v bwrap
-          bwrap --version
-          test "$(command -v bwrap)" = /usr/local/bin/bwrap \
-            || { echo "the bwrap on PATH is not the pinned build" >&2; exit 1; }
-          launcher_path=$(sed -n 's/^export PATH=\(.*\)$/\1/p' src/box-session.sh)
-          test "$(PATH="$launcher_path" sh -c 'command -v bwrap')" = /usr/local/bin/bwrap \
-            || { echo "the launcher's PATH ($launcher_path) does not find the pinned build" >&2; exit 1; }
-          test "$(bwrap --version)" = "bubblewrap $BWRAP_VERSION" \
-            || { echo "the bwrap on PATH is not bubblewrap $BWRAP_VERSION" >&2; exit 1; }
-          lower="$RUNNER_TEMP/overlay-proof"
-          mkdir -p "$lower"
-          bwrap --dev-bind / / --overlay-src "$lower" --tmp-overlay "$lower" -- /bin/true
-          bwrap --dev-bind / / --overlay-src "$lower" --tmp-overlay "$lower" -- \
-            /bin/sh -c 'touch "$1/written" && test -e "$1/written"' sh "$lower"
-          test ! -e "$lower/written" \
-            || { echo "a write inside the overlay reached its lower layer" >&2; exit 1; }
-          echo "bubblewrap $BWRAP_VERSION overlays: the write inside landed in the upper layer only"
+      - run: *bwrap-overlays
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
