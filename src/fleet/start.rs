@@ -2220,8 +2220,9 @@ mod tests {
     fn a_box_start_carries_its_repos_telemetry_switch_and_it_is_off_unless_switched_on() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", home.join("fleet"));
         crate::repos::save_repos(&[crate::repos::Repo {
             id: "web".into(),
             ..Default::default()
@@ -2238,8 +2239,6 @@ mod tests {
             script.contains("SKEIN_BOX_TELEMETRY='1'"),
             "a repo that switched telemetry on does not tell its box's launcher so: {script}"
         );
-        std::env::remove_var("SKEIN_FLEET_ROOT");
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **The third surface of the same wall points at the same way through** (SKEIN-707).

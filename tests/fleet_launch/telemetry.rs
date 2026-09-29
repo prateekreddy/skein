@@ -38,6 +38,15 @@ fn run_telemetry_block(home: &Path, setting: Option<&str>) -> std::process::Outp
         .expect("bash runs the launcher's telemetry block")
 }
 
+/// One row of the table below: the case, `$SKEIN_BOX_TELEMETRY`, the box's `settings.json` before
+/// the block runs (`None` for no file), and the `DISABLE_TELEMETRY` expected after (`None` for none).
+type Case = (
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
 /// A box's user settings, parsed; `None` for a file that is not there.
 fn settings_of(home: &Path) -> Option<serde_json::Value> {
     let text = fs::read_to_string(home.join(".claude/settings.json")).ok()?;
@@ -63,8 +72,7 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
         return skip("the launcher writes this key with python3, and there is none here");
     }
     let dir = scratch_named("telemetry");
-    // (case, $SKEIN_BOX_TELEMETRY, settings.json before, DISABLE_TELEMETRY expected after)
-    let cases: [(&str, Option<&str>, Option<&str>, Option<&str>); 10] = [
+    let cases: [Case; 10] = [
         ("a new box, no settings file", Some("0"), None, Some("1")),
         (
             "an older host that never sets the variable",

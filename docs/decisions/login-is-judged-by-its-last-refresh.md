@@ -36,7 +36,7 @@ hash reads a healthy fleet as orphaned.
 **Enforced at.**
 
 - `src/fleet/login.rs:282` — the host's election, in the heal script, with the two fields' jobs.
-- `src/box-session.sh:998` — `login_life`, the box's election at session start.
+- `src/box-session.sh:999` — `login_life`, the box's election at session start.
 - `src/fleet/login.rs:1252` — `the_two_elections_agree_on_which_login_is_best`, which asserts that
   they agree rather than what they answer.
 
