@@ -1489,7 +1489,7 @@ fn ci_jobs() -> std::collections::BTreeMap<String, CiJob> {
 /// was; or a workflow in which no job runs one of those two gates.
 #[test]
 fn every_job_that_runs_the_suite_installs_every_package_the_coverage_job_does() {
-    let jobs = ci_jobs();
+    let jobs =ci_jobs();
     let coverage = jobs
         .get("coverage")
         .map(|j| &j.apt)
