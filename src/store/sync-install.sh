@@ -150,14 +150,14 @@ stamp="$state/sync-$slug.done"
 #
 # **And kept beside the plugin, in `~/.claude`, because a marker must live where the thing it
 # records lives** (SKEIN-1233). It used to be `~/.local/state/skein/sync-plugin.done`, and the
-# launcher seeds a new box's `~/.local/state` by copying the sandbox's (`seed_paths` in
-# `src/box-session.sh`), which is the privileged box's own home. So every box created after that
-# box once installed the plugin arrived believing it had done so too, while its own `~/.claude`,
-# where the plugin actually lives, had none: one box in eighteen had the plugin. That old marker is
-# no longer read, because nothing can tell a copy of another box's from this box's own — so a box
-# holding only the old one is asked afresh, and one that never had the plugin gets it. What this box
-# has is read from Claude Code's own record of it, `installed_plugins.json`, first: a file test, not
-# a subprocess, and not a claim anything else can make on the box's behalf.
+# launcher seeded a new box's `~/.local/state` by copying the sandbox's, which is the privileged
+# box's own home (`seed_paths` in `src/box-session.sh`, until SKEIN-1234 removed it). So every box
+# created after that box once installed the plugin arrived believing it had done so too, while its
+# own `~/.claude`, where the plugin actually lives, had none: one box in eighteen had the plugin.
+# That old marker is no longer read, because nothing can tell a copy of another box's from this
+# box's own — so a box holding only the old one is asked afresh, and one that never had the plugin
+# gets it. What this box has is read from Claude Code's own record of it, `installed_plugins.json`,
+# first: a file test, not a subprocess, and not a claim anything else can make on the box's behalf.
 
 # Which version this box is serving, read from the marketplace checkout the plugin loads from.
 plugin_version() {

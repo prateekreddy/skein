@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// What the fixture writes into the sandbox's own work-tracker stamps, so that a copy of one inside a
+/// box is told apart from a stamp the box wrote itself under the same name.
+const SEEDED_STAMP: &str = "skein-test: the sandbox's stamp, not this box's";
+
 /// The whole of `start_box`, rather than its pieces called in the right order by hand.
 ///
 /// The test above assembles the launch itself — install, clone, session — and that is precisely why
@@ -72,6 +76,20 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         br#"{"claudeAiOauth":{"accessToken":"SEEDED","refreshToken":"r"},"mcpOAuth":{"sync|sandbox":{"accessToken":"GRANT-SHARED"}}}"#,
     )
     .unwrap();
+    // The sandbox's own work-tracker stamps, as a real one has them: one for the very tree path this
+    // box is about to get, which is how a box reusing an old box's name was told "already set up"
+    // (SKEIN-1234), and one for a tree path nothing here uses. Carrying `SEEDED_STAMP` so that a copy
+    // can be told from a stamp the box's own `sync-install.sh` writes under the same name.
+    let sandbox_state = sandbox_home.join(".local/state/skein");
+    fs::create_dir_all(&sandbox_state).unwrap();
+    let own_slug = format!("{}/tree", box_root(name)).replace('/', "-");
+    let seeded_stamps = [
+        format!("sync-{own_slug}.done"),
+        "sync-skein-test-other-tree.done".to_string(),
+    ];
+    for stamp in &seeded_stamps {
+        fs::write(sandbox_state.join(stamp), SEEDED_STAMP).unwrap();
+    }
     pins.set("HOME", &sandbox_home)
         // The fleet sandbox already exists, so `ensure_fleet` goes straight to substrate +
         // launcher.
@@ -188,6 +206,43 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     assert!(
         link.trim().starts_with(store.to_str().unwrap()),
         "shared home must point into the mounted store, got {link:?}"
+    );
+
+    // ---- and it starts with an empty `~/.local/state` of its own, not the sandbox's (SKEIN-1234) --
+    // Asked from INSIDE the box, because that is what `sync-install.sh` reads: the sandbox's
+    // `~/.local` is the overlay's lower layer, so the stamps planted above would show through if
+    // the private bind were missing, as well as if the launcher copied them. What fails it: putting
+    // `.local/state` back in `seed_paths`, or dropping the bind of the box's own `~/.local/state`.
+    // The credential assertion further down is the presence half: the seed loop did run for this
+    // box, it just no longer carries the state.
+    for stamp in &seeded_stamps {
+        assert!(
+            sandbox_state.join(stamp).is_file(),
+            "the fixture's sandbox stamp {stamp} is gone, so its absence in the box proves nothing"
+        );
+        let inside = boxed
+            .exec(
+                &format!("cat \"$HOME/.local/state/skein/{stamp}\" 2>/dev/null || echo absent"),
+                Duration::from_secs(30),
+            )
+            .expect("read the box's own state");
+        assert!(
+            !inside.contains(SEEDED_STAMP),
+            "a new box started with the sandbox's work-tracker stamp {stamp}, so sync-install.sh \
+             treats it as already set up and never gives it its gateway URL: {inside:?}"
+        );
+    }
+    let state = boxed
+        .exec(
+            "d=\"$HOME/.local/state\"; [ -d \"$d\" ] && touch \"$d/.skein-test-probe\" \
+             && rm \"$d/.skein-test-probe\" && echo writable || echo unwritable",
+            Duration::from_secs(30),
+        )
+        .expect("probe the box's own state directory");
+    assert_eq!(
+        state.trim(),
+        "writable",
+        "a new box has no writable ~/.local/state, so sync-install.sh cannot record its own setup"
     );
 
     // And the store is reachable from the checkout, which is what makes hooks and the probe work:

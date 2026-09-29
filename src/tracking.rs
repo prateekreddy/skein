@@ -2259,10 +2259,11 @@ mod tests {
         );
     }
 
-    /// SKEIN-1233. A new box's `~/.local/state` is seeded by copying the sandbox's, which is the
-    /// privileged box's own home, so it arrives carrying that box's `sync-plugin.done`. The plugin
-    /// itself lives in the box's own `~/.claude`, which has none. Believing the copied marker left
-    /// seventeen boxes of eighteen without the plugin; the box must decide from its own `~/.claude`.
+    /// SKEIN-1233. A new box's `~/.local/state` was seeded by copying the sandbox's, which is the
+    /// privileged box's own home, so it arrived carrying that box's `sync-plugin.done`; SKEIN-1234
+    /// stopped the copy, and boxes seeded before then still hold one. The plugin itself lives in
+    /// the box's own `~/.claude`, which has none. Believing the copied marker left seventeen boxes
+    /// of eighteen without the plugin; the box must decide from its own `~/.claude`.
     #[test]
     fn a_box_seeded_with_another_boxs_plugin_marker_still_gets_the_plugin() {
         let _g = env_lock();

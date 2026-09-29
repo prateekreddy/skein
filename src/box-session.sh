@@ -870,10 +870,20 @@ printf '%s\n' "$start_id" >"$tmp/skein-start-id" || exit 1
 # box by construction and gives it exactly the box's lifetime.)
 #
 # Seeded into the box on first start and diverging from there: credentials, per-box conversation
-# history, the MCP registration that points each box at its own repo's work-tracking gateway, and
-# the work-tracker install stamps under `.local/state` — which are the one thing under `.local`
-# that must outlive a restart, and the reason is below `overlay_paths`.
-seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile" ".local/state")
+# history, and the MCP registration that points each box at its own repo's work-tracking gateway.
+#
+# **`.local/state` used to be seeded too, and it was removed on purpose** (SKEIN-1234; the owner
+# chose "stop copying it", 2026-09-29). It was added so that the boxes SKEIN-963 moved off a shared
+# `~/.local` kept the work-tracker stamps they already had. That was needed only once: every start
+# since makes the box's own `~/.local/state` (the `mkdir` before the private bind below), so a box
+# that has started once never takes the seed again. After that the copy reached only brand-new boxes,
+# and there it did harm. The sandbox's `~/.local/state` belongs to the privileged box, about 660
+# files, including a `sync-<slug>.done` for every tree path any box has used. A new box that reused
+# an old box's name, and therefore its tree path, arrived "already set up": `sync-install.sh` stopped
+# at that stamp before writing its gateway URL or its CLAUDE.md block. SKEIN-1233 was the same leak
+# through the plugin marker. So a new box's `~/.local/state` now starts empty and holds only what
+# that box writes. Existing boxes keep what they have.
+seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
 # Bound back through, genuinely shared. These are package caches no box needs its own copy of.
 #
 # **`.local` is no longer one of them, and that is SKEIN-963.** It carries the agent CLIs and about
@@ -910,14 +920,15 @@ share_paths=(".cargo" ".rustup" ".npm")
 # a box can push into its own upper layer. A box that installs torch inside itself spends 1 GB of
 # the sandbox's memory until it restarts.
 #
-# **`.local/state` is the exception, and it is in `seed_paths` for a reason worth writing down.**
+# **`.local/state` is the exception: it is bound back private from the box's own home, below.**
 # `sync-install.sh` gates itself on `$HOME/.local/state/skein/sync-<slug>.done`, and that stamp
 # means "this box owns its CLAUDE.md, its memory and its skill now" — the whole point of the gate
 # is that a later start must not re-assert over them. An ephemeral upper layer loses the stamp at
 # every restart, so the gate would open every time and rewrite a box's own memory on every start.
-# Seeded and then bound back private below: the stamps a box has today come with it, and the ones
-# it writes from now on are its own. That also closes a smaller defect nobody had filed — the
-# stamp directory was SHARED, so one box's stamp answered for a box that had never run the install.
+# Bound back private, the stamps a box writes are its own and survive its restarts. That also closes
+# a smaller defect nobody had filed — the stamp directory was SHARED, so one box's stamp answered for
+# a box that had never run the install. It is no longer SEEDED as well, because a copy of the
+# sandbox's stamps is that same defect again, one copy at a time (SKEIN-1234, beside `seed_paths`).
 overlay_paths=(".local")
 
 # `.claude/sessions` was a fifth entry here, and the reason it is not is the whole of SKEIN-572.
@@ -1518,10 +1529,10 @@ done
 # ...and the box's own state back through the overlay it just went under (see `overlay_paths`).
 #
 # AFTER the loop, because it has to win: the overlay covers all of `.local`, and this is the one
-# subtree under it that a restart must find again. Created here rather than assumed, because the
-# seed only copies when the sandbox has something to copy — a fleet whose sandbox has never run
-# `sync-install.sh` has no `~/.local/state` at all, and `--bind` of a missing source is a hard
-# bwrap failure, which would mean no box on that fleet could start.
+# subtree under it that a restart must find again. Created here, because nothing else makes it: it
+# is not seeded from the sandbox (SKEIN-1234, beside `seed_paths`), so a new box has none until this
+# line runs, and `--bind` of a missing source is a hard bwrap failure — no new box could start. On
+# a box's first start this is what gives it an empty `~/.local/state` of its own.
 mkdir -p "$home/.local/state" || exit 1
 # The DESTINATION has to exist as well as the source, and under the read-only fallback bwrap cannot
 # make it: it creates a missing mount point with mkdir, and inside a read-only bind that is
