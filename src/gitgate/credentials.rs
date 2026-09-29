@@ -78,10 +78,10 @@ impl WriteCredential {
                 ))
             }
         }
-        match self.repos.iter().find(|r| !slug_is_nameable(r)) {
-            Some(bad) => Some(format!("{bad:?} is not a repository")),
-            None => None,
-        }
+        self.repos
+            .iter()
+            .find(|r| !slug_is_nameable(r))
+            .map(|bad| format!("{bad:?} is not a repository"))
     }
 
     /// The first repository this token covers — the only one unless it is shared — or empty if it
@@ -1110,8 +1110,7 @@ mod tests {
             stub_github(200, r#"{"permissions":{"push":false}}"#),
         );
         let why = shareable_token(&id, "a/two")
-            .err()
-            .expect("a token that cannot push was offered for sharing");
+            .expect_err("a token that cannot push was offered for sharing");
         assert!(
             why.contains("the token a/one uses cannot push to a/two")
                 && why.contains("Nothing was saved"),
