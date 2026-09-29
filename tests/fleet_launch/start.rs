@@ -7,6 +7,14 @@ use super::*;
 /// box is told apart from a stamp the box wrote itself under the same name.
 const SEEDED_STAMP: &str = "skein-test: the sandbox's stamp, not this box's";
 
+/// What the fixture writes into every file of the sandbox's own Claude Code state, so that a copy of
+/// one inside a box is found by content wherever it landed (SKEIN-1235).
+const PRIVILEGED: &str = "skein-test: the privileged box's own, not skein's";
+
+/// The account the sandbox's login belongs to, in its `~/.claude.json`: the one key of that file a
+/// new box is meant to get.
+const ACCOUNT: &str = "skein-test-account@example.invalid";
+
 /// The whole of `start_box`, rather than its pieces called in the right order by hand.
 ///
 /// The test above assembles the launch itself — install, clone, session — and that is precisely why
@@ -90,6 +98,40 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     for stamp in &seeded_stamps {
         fs::write(sandbox_state.join(stamp), SEEDED_STAMP).unwrap();
     }
+    // The privileged box's own Claude Code state, as a real sandbox home has it (SKEIN-1235): its
+    // prompt history, its auto-memory and a conversation for the very tree path this box is about to
+    // get, skein's sync-plugin marker and Claude Code's record of the plugin, its own settings and
+    // personal instructions, and a `.claude.json` of its own. Every file carries `PRIVILEGED`, so a
+    // copy of any of them anywhere in the new box's Claude Code home is found by content, whatever
+    // it is called there. The one key a new box should get from them, the login's account, does not.
+    let privileged_claude = [
+        "history.jsonl".to_string(),
+        format!("projects/{own_slug}/memory/MEMORY.md"),
+        format!("projects/{own_slug}/a-conversation.jsonl"),
+        "skein-sync-plugin.done".to_string(),
+        "plugins/installed_plugins.json".to_string(),
+        "settings.json".to_string(),
+        "CLAUDE.md".to_string(),
+    ];
+    for rel in &privileged_claude {
+        let at = sandbox_home.join(".claude").join(rel);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        let body = match rel.as_str() {
+            "plugins/installed_plugins.json" => {
+                format!(r#"{{"plugins":{{"sync@sync":"{PRIVILEGED}"}}}}"#)
+            }
+            "settings.json" => format!(r#"{{"model":"{PRIVILEGED}"}}"#),
+            _ => PRIVILEGED.to_string(),
+        };
+        fs::write(&at, body).unwrap();
+    }
+    fs::write(
+        sandbox_home.join(".claude.json"),
+        format!(
+            r#"{{"oauthAccount":{{"emailAddress":"{ACCOUNT}"}},"userID":"{PRIVILEGED}","projects":{{"/elsewhere":{{"lastSessionId":"{PRIVILEGED}"}}}}}}"#
+        ),
+    )
+    .unwrap();
     pins.set("HOME", &sandbox_home)
         // The fleet sandbox already exists, so `ensure_fleet` goes straight to substrate +
         // launcher.
@@ -296,14 +338,75 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         seeded.contains("SEEDED"),
         "a new box inherits the sandbox's login rather than asking for its own: {seeded}"
     );
+    // ---- and the login is ALL it gets of the sandbox's Claude Code home (SKEIN-1235) ----
+    // The sandbox's home is the privileged box's, and a new box's `~/.claude` and `~/.claude.json`
+    // hold the login plus what skein writes for every box, and nothing of that box's own. What
+    // fails each assertion: `.claude` back in `seed_paths` fails the walk (history, memory, the
+    // plugin marker, settings, all of it), and so does any one file of it seeded alone;
+    // `.claude.json` back in it fails the walk on `userID` and the project entry; dropping the
+    // `oauthAccount` step fails the account check; seeding `.claude/.credentials.json` whole
+    // instead of merging its login fails the grant check; dropping the `mkdir` of the box's own
+    // `~/.claude` fails the mode check.
+    for rel in &privileged_claude {
+        let planted =
+            fs::read_to_string(sandbox_home.join(".claude").join(rel)).unwrap_or_default();
+        assert!(
+            planted.contains(PRIVILEGED),
+            "the fixture's sandbox file .claude/{rel} is gone, so its absence in the box proves \
+             nothing"
+        );
+    }
+    let box_home = PathBuf::from(format!("{}/home", box_root(name)));
+    let mut walked = files_under(&box_home.join(".claude"));
+    walked.push(box_home.join(".claude.json"));
+    let copied: Vec<String> = walked
+        .iter()
+        .filter(|f| {
+            fs::read_to_string(f)
+                .map(|t| t.contains(PRIVILEGED))
+                .unwrap_or(false)
+        })
+        .map(|f| f.display().to_string())
+        .collect();
+    assert!(
+        copied.is_empty(),
+        "a new box started with the privileged box's own Claude Code state — its history, memory, \
+         plugin marker, settings or project records — in {copied:?}"
+    );
+    assert!(
+        walked.len() > 2,
+        "the box's Claude Code home holds almost nothing, so the walk above is about nothing: \
+         {walked:?}"
+    );
+    let account = fs::read_to_string(box_home.join(".claude.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("oauthAccount").cloned());
+    assert_eq!(
+        account,
+        Some(serde_json::json!({ "emailAddress": ACCOUNT })),
+        "a new box got the login without the account it belongs to"
+    );
+    assert!(
+        !seeded.contains("GRANT-SHARED"),
+        "a new box was handed the sandbox's per-repo MCP grant along with the login: {seeded}"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(box_home.join(".claude"))
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0);
+    assert_eq!(
+        mode, 0o700,
+        "a new box's ~/.claude holds its login and is readable by others: {mode:o}"
+    );
     // ---- and it is not then asked to log in anyway (SKEIN-957) ----
     // The invariant, over a box that was really started rather than over a fixture: a box skein has
     // handed a credential to must not meet Claude Code's onboarding screen, which is gated on
     // `hasCompletedOnboarding` in `~/.claude.json` and not on the credential. Derived over every
     // home under the fleet root that the launcher's own `login_life` calls a login, so a seed path
     // that acquires a credential some other way and forgets the flag fails here too. The sandbox's
-    // copy in this fixture has no `.claude.json` at all, which is the state that produced the bug:
-    // the flag cannot have arrived by being copied down.
+    // `.claude.json` in this fixture carries no flag, which is the state that produced the bug: the
+    // flag cannot have arrived by being copied down.
     let carrying = homes_carrying_a_login(&root.join("boxes"));
     assert!(
         !carrying.is_empty(),
@@ -749,6 +852,25 @@ fn start_id_of(name: &str) -> String {
 /// in the box reads, and where the launcher writes the telemetry-plugin default (SKEIN-1225).
 fn box_user_settings(name: &str) -> PathBuf {
     PathBuf::from(format!("{}/home/.claude/settings.json", box_root(name)))
+}
+
+/// Every regular file under `dir`, found without following a symlink: a link out of a box's home
+/// (the memory link into the store, for one) leads to what the box shares on purpose, not to what
+/// was copied into it.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => found.extend(files_under(&path)),
+            Ok(m) if m.is_file() => found.push(path),
+            _ => {}
+        }
+    }
+    found
 }
 
 /// `enabledPlugins["telemetry@builtin"]` in the box's user settings, or `None` where it is not set.
