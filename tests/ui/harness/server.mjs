@@ -32,10 +32,15 @@ export const FIXTURE_GH_TOKEN = "gho_fixture_not_a_real_credential";
  * from a real one.
  *
  * Absence is not the same evidence. `src/box-session.sh` skips a seed path it cannot find
- * (`[ -e "$HOME/$rel" ] || continue`), so an empty home leaves the box with no `.claude` at all —
+ * (`[ -e "$HOME/$rel" ] || continue`), so an empty home leaves the box with nothing seeded at all —
  * which is indistinguishable from a launch that never reached the seed loop, and would let the
  * check in `onboarding.mjs` pass for a box that never started. A file that could only have come
  * from here makes the copy itself observable.
+ *
+ * Written twice, because the two copies now answer opposite questions (SKEIN-1235). The one in
+ * `.profile`, which the launcher still seeds whole, must arrive: it is the evidence that the box
+ * was seeded from this home. The one in `.claude` must NOT: a new box's `~/.claude` holds the login
+ * and skein's own defaults, and nothing else of the home it was started from.
  */
 export const FIXTURE_HOME_SENTINEL = "seeded-from-a-ui-fixture-home";
 
@@ -50,11 +55,11 @@ function commonAncestor(a, b) {
 
 /**
  * The `HOME` this suite's server runs on: a directory inside the suite's own fixture, holding a
- * `.claude` with [`FIXTURE_HOME_SENTINEL`] in it and nothing else.
+ * `.claude` with [`FIXTURE_HOME_SENTINEL`] in it, a `.profile` naming it, and nothing else.
  *
  * **Unpinned, `$HOME` is the home of whoever ran the suite, and a box start copies it whole**
- * (SKEIN-657). `src/box-session.sh` seeds each box from `$HOME` — `.claude`, `.claude.json`,
- * `.codex`, `.gitconfig`, `.bashrc`, `.profile` — with
+ * (SKEIN-657). `src/box-session.sh` seeded each box from `$HOME` — `.claude` and `.claude.json`
+ * until SKEIN-1235, and still `.codex`, `.gitconfig`, `.bashrc`, `.profile` — with
  * `cp -a "$HOME/$rel" "$mine" 2>/dev/null || { …; exit 1; }`, so the copy is not merely wasteful,
  * it is *fatal to the launch* when it returns non-zero. Measured while writing this: `du -sh
  * ~/.claude` on the box this was fixed on said 463 MB, and the copy of it that landed in one
@@ -123,6 +128,10 @@ function fixtureHome(base) {
     path.join(home, ".claude", FIXTURE_HOME_SENTINEL),
     "Written by tests/ui/harness/server.mjs. A box carrying this file was seeded from a UI\n" +
       "fixture's home rather than from the home of whoever ran the suite.\n",
+  );
+  fs.writeFileSync(
+    path.join(home, ".profile"),
+    `# ${FIXTURE_HOME_SENTINEL}: written by tests/ui/harness/server.mjs, and seeded into every box\n`,
   );
   return home;
 }
