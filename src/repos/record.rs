@@ -83,6 +83,22 @@ pub struct Repo {
     /// opposite mount.
     #[serde(default = "crate::config::default_true")]
     pub peer_messaging: bool,
+    /// **May Claude Code in this repo's boxes send Anthropic its usage telemetry?** (SKEIN-1225.)
+    ///
+    /// **Off unless it is switched on, per repo** (the owner, 2026-09-29). Off, every box of the
+    /// repo runs Claude Code with `DISABLE_TELEMETRY=1`, which stops its analytics events and the
+    /// built-in `telemetry` plugin that batches them to Anthropic. skein's own per-turn telemetry
+    /// is a different thing and stays: it is written into the repo's store and goes nowhere else.
+    /// Absent from the file is off, so a repo registered before the switch existed gets the new
+    /// default at its boxes' next start, which is what was asked for.
+    ///
+    /// **The enforcement point is the launcher**, the way [`Repo::peer_messaging`]'s is:
+    /// [`crate::fleet::session_script`] carries it as `SKEIN_BOX_TELEMETRY`, and `box-session.sh`
+    /// writes the variable into the box's own user settings, the one file every Claude session in
+    /// the box reads whatever directory it starts in. Like that switch, flipping it reaches a box
+    /// at its next start and not before.
+    #[serde(default)]
+    pub anthropic_telemetry: bool,
     /// Does this repo have a review queue, and may the badge poll it?
     ///
     /// **On by default**, and separate from whether summaries are allowed: this is about *this*

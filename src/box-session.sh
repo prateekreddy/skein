@@ -720,6 +720,7 @@ inherited_env=(
   # the ones a box has no use for as it reads them.
   SKEIN_FLEET_LIMITS SKEIN_FLEET_GUARANTEES SKEIN_GIT_SCOPE SKEIN_BOX_REPO SKEIN_BOX_PRIVILEGED
   SKEIN_MODEL_SCRATCH SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE SKEIN_BOX_PEERS SKEIN_FLEET_NAME
+  SKEIN_BOX_TELEMETRY
   # Where the fleet's own files are. Unset in production (it defaults to /boxes); a test fixture
   # sets it, and then the probes and the request helpers inside its boxes must resolve the
   # fixture's launcher and queues rather than the live fleet's.
@@ -1377,6 +1378,82 @@ except Exception:
         pass
 PY
 fi
+
+# Claude Code's usage telemetry to Anthropic, off unless this box's repo turned it on (SKEIN-1225).
+#
+# `DISABLE_TELEMETRY=1` stops Claude Code's analytics events and makes its built-in `telemetry`
+# plugin unavailable (its `isAvailable` gate is false while the variable is set, so it is not loaded
+# at all). skein's own per-turn telemetry is unaffected: it is written into the repo's store.
+#
+# In the box's own USER settings, as `env`, and not anywhere else, because this is the one place
+# every Claude session in the box reads. The kit's `.claude/settings.local.json` is read only by a
+# session whose project is the box's tree, so a `claude` started in a worktree elsewhere would miss
+# it; an export in the `bash -lc` at the end of this file reaches what the tmux server starts but
+# not what skein runs through a crossing (`Place::wrap`), such as a headless `claude --continue
+# --print`, and a crossing does carry `HOME`. A repo that sets the variable in its own project
+# settings still wins, as project settings do over user settings.
+#
+# `1` is skein's value. Off, it is added where the key is absent; on, it is removed where it is
+# exactly `1`. Any other value somebody wrote into this box's file stays either way, and so does an
+# unparseable file, which is said rather than rewritten.
+skein_telemetry="${SKEIN_BOX_TELEMETRY-0}"
+if command -v python3 >/dev/null 2>&1; then
+  telemetry_rc=0
+  python3 - "$home/.claude/settings.json" "$skein_telemetry" 2>/dev/null <<'PY' || telemetry_rc=$?
+import json, os, sys, tempfile
+p, sent = sys.argv[1], sys.argv[2] in ("1", "on", "yes", "true")
+try:
+    with open(p) as f:
+        data = json.load(f)
+except FileNotFoundError:
+    data = {}
+except Exception:
+    sys.exit(3)
+if not isinstance(data, dict):
+    sys.exit(3)
+env = data.get("env")
+if env is None:
+    env = {}
+elif not isinstance(env, dict):
+    sys.exit(3)
+if sent:
+    if env.get("DISABLE_TELEMETRY") != "1":
+        sys.exit(0)
+    del env["DISABLE_TELEMETRY"]
+    if env:
+        data["env"] = env
+    else:
+        data.pop("env", None)
+else:
+    if "DISABLE_TELEMETRY" in env:
+        sys.exit(0)
+    env["DISABLE_TELEMETRY"] = "1"
+    data["env"] = env
+d = os.path.dirname(p) or "."
+os.makedirs(d, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=d)
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, p)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.exit(3)
+PY
+  if [ "$telemetry_rc" -ne 0 ]; then
+    if [ "$skein_telemetry" = "1" ]; then
+      echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude/settings.json could not be read or is not JSON this can change — it is left exactly as it is, so a DISABLE_TELEMETRY in it still stops Claude Code sending Anthropic its usage telemetry, though this repo allows it" >&2
+    else
+      echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude/settings.json could not be read or is not JSON this can change — it is left exactly as it is, so Claude Code in this box may still send Anthropic its usage telemetry" >&2
+    fi
+  fi
+  unset telemetry_rc
+fi
+unset skein_telemetry SKEIN_BOX_TELEMETRY
 
 # $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
 # ORIGINAL filesystem, so these still name the sandbox's real directories even though each

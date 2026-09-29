@@ -495,6 +495,24 @@ pub fn set_peer_messaging(id: &str, on: bool) -> Result<(), String> {
     })
 }
 
+/// Let Claude Code in this repo's boxes send Anthropic its usage telemetry, or stop it.
+///
+/// Its own function for the reason [`set_peer_messaging`] is: it changes what a box does at launch,
+/// and a route that saved it as a side effect of an unrelated field would change that unasked.
+///
+/// **Nothing here reaches a running box.** The value is read when a box is launched
+/// ([`Repo::anthropic_telemetry`]), so a box started before this returns keeps what it started
+/// with until its next start.
+pub fn set_anthropic_telemetry(id: &str, on: bool) -> Result<(), String> {
+    update_repos(|repos| {
+        let Some(repo) = repos.iter_mut().find(|r| r.id == id) else {
+            return Err(format!("no repo called {id:?}"));
+        };
+        repo.anthropic_telemetry = on;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

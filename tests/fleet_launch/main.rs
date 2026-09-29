@@ -103,6 +103,7 @@ mod lifecycle;
 mod onboarding;
 mod start;
 mod sudo;
+mod telemetry;
 mod trust;
 
 use fixture::*;
