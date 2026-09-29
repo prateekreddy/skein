@@ -137,8 +137,13 @@ const NODE_SUITES: [&str; 30] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 13] = [
+const BROWSER_SUITES: [&str; 14] = [
     "actfail",
+    // Adding a private repository from the add dialog, with a pasted token and with the token
+    // another repo has: the clone uses the token chosen, a refused one is never saved, a share
+    // states its cost first and is checked for push access, and no response, page or log carries a
+    // token (SKEIN-1231).
+    "addtoken",
     // A box's question in the questions panel: its text and its offered answers shown as plain
     // text, and each answer, typed line and dismissal reaching the box's inbox (SKEIN-1061).
     "asks",

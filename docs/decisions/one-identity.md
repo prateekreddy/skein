@@ -48,7 +48,9 @@ repo this way", which is why it outranks `$GH_TOKEN`.
 This is about acts on pull requests, which run on the host. A box is narrowed differently: by
 repository, not by identity. On the App path a box's git access is an installation token scoped to
 its own repository; on the token path it is the one token you stored for that repository, which is
-yours. Either way a box cannot act outside its own repository (`src/gitgate/mod.rs`).
+yours. Either way a box cannot act outside its own repository (`src/gitgate/mod.rs`) — unless you
+shared that repository's token with others when adding them, which reaches those too and is said
+before it is saved (2026-09-29, SKEIN-1231).
 
 **Enforced at.**
 

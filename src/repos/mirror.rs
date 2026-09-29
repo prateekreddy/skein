@@ -44,6 +44,17 @@ pub(super) fn mirror_is_made(path: &Path) -> bool {
 /// registered before mirrors existed has none, and the alternative to making one on demand is a
 /// migration that has to run before anything else works.
 pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
+    ensure_mirror_at_add(repo, None, false)
+}
+
+/// [`ensure_mirror`], as the add of a repo runs it: `adding` words a refusal for the add dialog,
+/// and `given` is the token the person chose there, pasted or shared, which the clone uses in
+/// place of any stored one — see [`fleet_git_at_add`].
+pub(super) fn ensure_mirror_at_add(
+    repo: &Repo,
+    given: Option<(&crate::secret::Secret, &str)>,
+    adding: bool,
+) -> Result<PathBuf, String> {
     let mirror = mirror_path(&repo.id);
     if mirror_is_made(&mirror) {
         return Ok(mirror);
@@ -67,11 +78,41 @@ pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| format!("{} has no parent to lock", mirror.display()))?
         .join(".mirror.lock");
-    crate::util::with_lock(&guard, || clone_mirror(repo, &mirror))
+    crate::util::with_lock(&guard, || clone_mirror(repo, &mirror, given, adding))
+}
+
+/// Can the token chosen at add time reach this repo's remote? For the add of a repo whose mirror
+/// is already on disk — one removed and added again keeps its files — where no clone runs, and a
+/// token would otherwise be saved without ever having been shown to the remote.
+///
+/// `git ls-remote`, the cheapest thing that makes the remote ask for a credential and the same
+/// wiring the clone uses, so it is refused in the same words.
+pub(super) fn reach_at_add(
+    repo: &Repo,
+    given: (&crate::secret::Secret, &str),
+) -> Result<(), String> {
+    let from = repo.source.trim();
+    let mut command = Command::new("git");
+    let auth = fleet_git_at_add(&mut command, repo, Some(given));
+    command.args(["ls-remote", "--heads", "--", from]);
+    let out = bounded_output(&mut command, "git ls-remote", Duration::from_secs(60))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(git_refusal(
+            &format!("reaching {from}"),
+            &String::from_utf8_lossy(&out.stderr),
+            &auth,
+        )),
+    }
 }
 
 /// The clone itself, with the lock in [`ensure_mirror`] already held.
-fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
+fn clone_mirror(
+    repo: &Repo,
+    mirror: &Path,
+    given: Option<(&crate::secret::Secret, &str)>,
+    adding: bool,
+) -> Result<PathBuf, String> {
     // Asked again under the lock. The caller that held it may have been making exactly this mirror,
     // and cloning over a finished one is the collision this function exists to stop.
     if mirror_is_made(mirror) {
@@ -92,8 +133,12 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(mirror.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
     let mut command = Command::new("git");
-    // Never a terminal, and the fleet's own credential if it has one (SKEIN-951).
-    let auth = fleet_git(&mut command, repo);
+    // Never a terminal, and the fleet's own credential if it has one (SKEIN-951) — or, when a repo
+    // is being added, the token the person chose for it (SKEIN-1231).
+    let auth = match adding {
+        true => fleet_git_at_add(&mut command, repo, given),
+        false => fleet_git(&mut command, repo),
+    };
     // `--` before the two positionals, so a `source` beginning with `-` is a repository name git
     // cannot find rather than an option git obeys. Belt to `registrable_source`'s braces, and worth
     // saying what it is NOT: with the argv this builds, an injected option was *not* exploitable —

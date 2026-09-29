@@ -5,23 +5,41 @@ use super::*;
 
 // ───────────────────────────── stored fine-grained PATs ─────────────────────────────
 
-/// A fine-grained PAT its owner minted by hand, for **one** repository.
+/// A fine-grained PAT its owner minted by hand: for **one** repository, unless they chose to share it.
 ///
 /// The alternative to the App, for someone who would rather not install one across their account at
-/// all: a token they created themselves, scoped in GitHub's own UI to exactly the repository they
+/// all: a token they created themselves, scoped in GitHub's own UI to exactly the repositories they
 /// chose. skein never sees anything wider, and cannot — the token *is* the scope.
 ///
-/// **Exactly one repository, and that is the whole security argument.** A token covering three repos
-/// would hand all three to whichever box receives it: the credential helper offers it only when git
-/// asks about one of them, but the helper runs *inside* the box as the same uid as the agent, so
-/// anything it can read the agent can read. A helper routes; it cannot contain. The only way a
-/// broad token stays broad-but-safe is never entering the box at all, which is a host-side proxy and
-/// a different design. Until then, one repo per token means the credential a box holds is already
-/// exactly as narrow as its rights — nothing is trusted to stay in its lane.
+/// **One repository per token, unless the person shares it on purpose — and sharing has a cost that
+/// is stated before it is made.** A token that reaches several repositories hands every one of them
+/// to whichever box receives it: the credential helper offers it only when git asks about the box's
+/// own repo, but the helper runs *inside* the box as the same uid as the agent, so anything it can
+/// read the agent can read. A helper routes; it cannot contain. So a box of `owner/a` holding a
+/// token shared with `owner/b` can push to `owner/b`, and nothing skein does inside the box changes
+/// that.
 ///
-/// The repository name here is a **claim**, not the enforcement. GitHub enforces what the token can
-/// reach; this is how skein knows which repo to hand it to. Getting it wrong costs a token that does
-/// not work, never one that works too well.
+/// Until 2026-09-29 that was the whole rule: exactly one repository, refused otherwise. The owner
+/// decided then (SKEIN-1231: "Allow sharing, with a warning") that a person may reuse one token for
+/// several repositories, provided they do it deliberately and are told the cost first. What that
+/// means in the code:
+///
+/// * **Sharing is the only way to a multi-repo entry.** It happens when a repo is added and the
+///   person picks "use the token another repo has" — the add dialog says, before they confirm, that
+///   the boxes of every repo sharing it can push to all of them — and GitHub must say the token can
+///   push to the new repository before the share is saved ([`check_token`]). The entry is then
+///   marked [`WriteCredential::shared`].
+/// * **Anything else still covers exactly one.** [`set_write_credential`] refuses a list of several,
+///   and an entry naming several that is not marked shared — a hand edit, or a file from before
+///   sharing existed — is listed with its problem and never used.
+/// * **Leaving a share takes only that repository's coverage.** Removing a repo, or storing a token
+///   for one repo alone ([`store_repo_token`]), drops it from the shared entry; the token file stays
+///   for as long as any repository is left on it.
+///
+/// The repository names here are a **claim**, not the enforcement. GitHub enforces what the token
+/// can reach; this is how skein knows which repo to hand it to. Getting it wrong costs a token that
+/// does not work, never one that works too well — which is why the share is checked against GitHub
+/// rather than taken on trust.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WriteCredential {
     #[serde(default)]
@@ -29,11 +47,14 @@ pub struct WriteCredential {
     /// What its owner calls it, for the cockpit. Never used as a path.
     #[serde(default)]
     pub label: String,
-    /// `owner/name`. A list rather than a string because this once held several, and a stored file
-    /// written then must still parse — as something [`WriteCredential::problem`] refuses, not as
-    /// something that silently keeps working.
+    /// `owner/name`, each. One, unless [`WriteCredential::shared`] says the person chose more.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// The person shared this token with another repository on purpose, from the add dialog, having
+    /// been told what that lets each repo's boxes do. The only thing that lets `repos` hold more
+    /// than one. Absent in every file written before sharing existed, which reads as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 impl WriteCredential {
@@ -46,28 +67,35 @@ impl WriteCredential {
         if !valid_credential_id(&self.id) {
             return Some(format!("{:?} is not a credential id", self.id));
         }
-        match self.repos.len() {
-            1 => {}
-            0 => return Some("names no repository".into()),
-            n => {
+        match (self.repos.len(), self.shared) {
+            (0, _) => return Some("names no repository".into()),
+            (1, _) | (_, true) => {}
+            (n, false) => {
                 return Some(format!(
-                    "names {n} repositories; a stored token must cover exactly one, or every box \
-                     that gets it can write all {n}"
+                    "names {n} repositories without having been shared from the add dialog; a \
+                     stored token covers one repository unless its owner shares it, because every \
+                     box that gets it can write all {n}"
                 ))
             }
         }
-        match slug_is_nameable(&self.repos[0]) {
-            true => None,
-            false => Some(format!("{:?} is not a repository", self.repos[0])),
+        match self.repos.iter().find(|r| !slug_is_nameable(r)) {
+            Some(bad) => Some(format!("{bad:?} is not a repository")),
+            None => None,
         }
     }
 
-    /// The single repository this token covers, or empty if it is not usable.
+    /// The first repository this token covers — the only one unless it is shared — or empty if it
+    /// is not usable.
     pub fn repo(&self) -> &str {
         match self.problem() {
             None => &self.repos[0],
             Some(_) => "",
         }
+    }
+
+    /// May this credential be handed to a box of `slug`? Only when it is usable and names it.
+    pub fn covers(&self, slug: &str) -> bool {
+        self.problem().is_none() && self.repos.iter().any(|r| same_repo(r, slug))
     }
 }
 
@@ -134,9 +162,10 @@ pub fn credential_has_token(id: &str) -> bool {
 pub fn credential_for(slug: &str) -> Option<(WriteCredential, Secret)> {
     write_credentials().into_iter().find_map(|c| {
         // A credential with a problem is skipped rather than used. This is the check that actually
-        // holds: the form refuses a multi-repo entry, but the file behind it can be hand-edited,
-        // and this is the last point before a token is placed inside a box.
-        if c.problem().is_some() || !same_repo(c.repo(), slug) {
+        // holds: the form refuses a multi-repo entry and only a share from the add dialog makes
+        // one, but the file behind it can be hand-edited, and this is the last point before a token
+        // is placed inside a box.
+        if !c.covers(slug) {
             return None;
         }
         let token = crate::secret::read(&credential_token_path(&c.id))
@@ -195,15 +224,206 @@ pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(
         id: id.to_string(),
         label: label.trim().to_string(),
         repos: repos.to_vec(),
+        shared: false,
     };
+    if next.repos.len() > 1 {
+        return Err(format!(
+            "this token names {} repositories; a token stored here covers exactly one. To use one \
+             token for several, add each further repo with \"use the token another repo has\", \
+             which says what sharing lets their boxes do before it is saved",
+            next.repos.len()
+        ));
+    }
     if let Some(why) = next.problem() {
         return Err(format!("this token {why}"));
     }
     crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        // Writing over a shared entry would take the token away from every other repo on it, with
+        // nothing on their cards to say so (SKEIN-1231).
+        if let Some(sharing) = all.iter().find(|c| c.id == id && c.repos.len() > 1) {
+            return Err(format!(
+                "{id} is the token {} share, and replacing it here would take it from all but one \
+                 of them. Replace it for all of them from any of their cards, or use a token for \
+                 one repo alone from that repo's card",
+                sharing.repos.join(", ")
+            ));
+        }
         all.retain(|c| c.id != id);
         all.push(next);
         Ok(())
     })
+}
+
+/// Store `token` as `slug`'s own, covering `slug` alone — the add dialog's "paste a new token", and
+/// a repo card's "use a token for this repo alone" (SKEIN-1231). Returns the id it is filed under.
+///
+/// **If `slug` was sharing a token, it stops**: it is dropped from that entry, which keeps its token
+/// file for the repositories still on it. Left there, the shared entry — earlier in the file —
+/// would go on answering [`credential_for`] for `slug`, and the token just stored would never be
+/// used.
+///
+/// The id is `slug`'s own ([`repo_credential_id`]), unless a shared entry already has that id — the repo that first shared its token keeps nothing of the
+/// share when it leaves — in which case it gets the first free `<id>-<n>`.
+///
+/// The list is written before the token, the order [`remove_write_credential`] argues for: a
+/// failure between the two leaves an entry the cockpit shows as "no token stored", never a live
+/// token that no entry names.
+pub fn store_repo_token(slug: &str, token: &str) -> Result<String, String> {
+    if !slug_is_nameable(slug) {
+        return Err(format!("{slug:?} is not a repository"));
+    }
+    if token.trim().is_empty() {
+        return Err("no token was given".into());
+    }
+    let own = repo_credential_id(slug);
+    let mut emptied = Vec::new();
+    let id = crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        emptied = leave_shares(all, slug);
+        let taken = |id: &str| {
+            all.iter()
+                .any(|c| c.id == id && !(c.repos.len() == 1 && same_repo(&c.repos[0], slug)))
+        };
+        let id = match taken(&own) {
+            false => own.clone(),
+            true => (2..)
+                .map(|n| {
+                    let base: String = own.chars().take(60).collect();
+                    format!("{base}-{n}")
+                })
+                .find(|id| !taken(id))
+                .unwrap_or_default(),
+        };
+        all.retain(|c| c.id != id && !(c.repos.len() == 1 && same_repo(&c.repos[0], slug)));
+        all.push(WriteCredential {
+            id: id.clone(),
+            label: slug.to_string(),
+            repos: vec![slug.to_string()],
+            shared: false,
+        });
+        Ok(id)
+    })?;
+    forget_tokens(&emptied);
+    set_credential_token(&id, token)?;
+    Ok(id)
+}
+
+/// Take `slug` off every shared entry in `all`. An entry left with one repository is no longer
+/// shared; one left with none — only a hand-edited file can get there — is removed, and its id is
+/// returned so its token file can go too, after the list is written.
+fn leave_shares(all: &mut Vec<WriteCredential>, slug: &str) -> Vec<String> {
+    for c in all.iter_mut().filter(|c| c.repos.len() > 1) {
+        c.repos.retain(|r| !same_repo(r, slug));
+        c.shared = c.repos.len() > 1;
+    }
+    let emptied: Vec<String> = all
+        .iter()
+        .filter(|c| c.repos.is_empty())
+        .map(|c| c.id.clone())
+        .collect();
+    all.retain(|c| !c.repos.is_empty());
+    emptied
+}
+
+/// Forget the token files of entries [`leave_shares`] removed. Best effort, and after the list is
+/// written, for the reason [`remove_write_credential`] gives.
+fn forget_tokens(ids: &[String]) {
+    for id in ids {
+        let _ = set_credential_token(id, "");
+    }
+}
+
+/// The id a repository's own token is stored under. It is the rule the cockpit's `credId` applied
+/// before the host took over choosing ids (SKEIN-1231), so every id already on disk was made by it,
+/// and re-storing a repo's token finds and replaces the entry it wrote. Lowercased; each run of
+/// anything but `a-z`, `0-9` and `-` becomes one `-`; dashes trimmed from both ends; at most 64
+/// characters.
+pub fn repo_credential_id(slug: &str) -> String {
+    let mut id = String::new();
+    let mut run = false;
+    for c in slug.to_lowercase().chars() {
+        match c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
+            true => {
+                id.push(c);
+                run = false;
+            }
+            false if !run => {
+                id.push('-');
+                run = true;
+            }
+            false => {}
+        }
+    }
+    id.trim_matches('-').chars().take(64).collect()
+}
+
+/// The token of stored credential `id`, if GitHub says it can push to `slug` — the check a share
+/// must pass before it is saved (SKEIN-1231). The token comes back so the clone that adds the repo
+/// can use it, with the words that name it — "the token owner/a and owner/b use"; nothing is
+/// written here.
+///
+/// The credential is named by the repositories it covers, never by any part of its token, in the
+/// refusals as on the page.
+pub fn shareable_token(id: &str, slug: &str) -> Result<(Secret, String), String> {
+    let Some(c) = write_credentials().into_iter().find(|c| c.id == id) else {
+        return Err(format!(
+            "there is no stored token called {id:?} any more. Paste a token for {slug} instead"
+        ));
+    };
+    let whose = format!("the token {} uses", c.repos.join(" and "));
+    if let Some(why) = c.problem() {
+        return Err(format!("{whose} cannot be shared: it {why}"));
+    }
+    let Some(token) = crate::secret::read(&credential_token_path(&c.id))
+        .ok()
+        .flatten()
+    else {
+        return Err(format!(
+            "{whose} has no token stored any more, so there is nothing to share. Paste a token for \
+             {slug} instead"
+        ));
+    };
+    match check_token(&token, slug) {
+        Ok(true) => Ok((token, whose)),
+        Ok(false) => Err(format!(
+            "{whose} cannot push to {slug}: GitHub says it has expired, or it was not granted \
+             {slug}. Nothing was saved. Paste a new token for {slug} instead, or add {slug} to \
+             that token's repositories on GitHub and try again"
+        )),
+        Err(e) => Err(format!(
+            "could not ask GitHub whether {whose} can push to {slug}, so it was not shared: {e}"
+        )),
+    }
+}
+
+/// Add `slug` to the coverage of stored credential `id` and mark it shared — the save half of a
+/// share, run only after [`shareable_token`] has passed and the repo's clone has worked with it. One
+/// entry and one token file, not a copy, so replacing the token later reaches every repo on it.
+pub fn share_credential(id: &str, slug: &str) -> Result<(), String> {
+    if !slug_is_nameable(slug) {
+        return Err(format!("{slug:?} is not a repository"));
+    }
+    crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        let Some(c) = all.iter_mut().find(|c| c.id == id) else {
+            return Err(format!("there is no stored token called {id:?} any more"));
+        };
+        if !c.repos.iter().any(|r| same_repo(r, slug)) {
+            c.repos.push(slug.to_string());
+        }
+        c.shared = c.repos.len() > 1;
+        Ok(())
+    })
+}
+
+/// A repository skein no longer manages leaves every token it was sharing — only its own name is
+/// taken off; the token stays for the repositories still on it (SKEIN-1231). A token `slug` holds
+/// alone is left as it always was: removing a repo does not forget its token.
+pub fn release_shared_coverage(slug: &str) -> Result<(), String> {
+    let emptied =
+        crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+            Ok(leave_shares(all, slug))
+        })?;
+    forget_tokens(&emptied);
+    Ok(())
 }
 
 /// Store (or, with an empty value, forget) a credential's token.
@@ -709,14 +929,22 @@ mod tests {
     }
 
     #[test]
-    fn a_token_covering_more_than_one_repo_is_refused_outright() {
-        // The security argument for the whole feature. A token covering three repos hands all three
-        // to whichever box receives it — the helper offers it for one, but the helper runs inside
-        // the box as the agent's own uid, so anything it can read the agent can read. A helper
-        // routes; it cannot contain.
+    fn a_token_pasted_for_more_than_one_repo_is_refused_outright() {
+        // What stays forbidden after sharing was allowed (SKEIN-1231, 2026-09-29): a token STORED
+        // for several repositories at once. A token covering three repos hands all three to
+        // whichever box receives it — the helper offers it for one, but the helper runs inside the
+        // box as the agent's own uid, so anything it can read the agent can read. The one way to a
+        // multi-repo entry is a share from the add dialog, which states that cost first.
+        //
+        // What fails it: dropping the `repos.len() > 1` refusal in `set_write_credential`. The entry
+        // is then still refused, by `problem()`, but in words that never tell the person sharing
+        // exists — the first assertion, on the refusal's wording, is the one that fails.
         let (_lock, _home, _env) = fresh_home();
         let why = set_write_credential("three", "", &["a/one".into(), "a/two".into()]).unwrap_err();
-        assert!(why.contains("exactly one"), "{why}");
+        assert!(
+            why.contains("covers exactly one") && why.contains("use the token another repo has"),
+            "{why}"
+        );
         assert!(
             write_credentials().is_empty(),
             "it must not have been stored"
@@ -732,6 +960,10 @@ mod tests {
     fn a_multi_repo_credential_hand_edited_into_the_file_is_still_never_used() {
         // The check that actually holds. `github-pats.json` is an ordinary host file: refusing this
         // only at the form would leave the code that places tokens accepting what the form rejects.
+        // An entry naming several repositories is used only when it is marked `shared`, which only
+        // the add dialog's share writes (SKEIN-1231) — so an unmarked one, a hand edit or a file
+        // from before sharing existed, is still refused. What fails it: `problem()` accepting any
+        // length again, or ignoring the marker.
         let (_lock, home, _env) = fresh_home();
         std::fs::write(
             home.join("github-pats.json"),
@@ -746,6 +978,10 @@ mod tests {
         );
         assert!(credential_for("a/two").is_none());
         assert!(
+            any_user_pat().is_none(),
+            "nor lent out as the person's own PAT"
+        );
+        assert!(
             !can_issue_write_tokens(),
             "and it must not count as a way to issue tokens, or boxes scope with nothing to push with"
         );
@@ -753,6 +989,174 @@ mod tests {
         let listed = write_credentials();
         assert_eq!(listed.len(), 1);
         assert!(listed[0].problem().is_some());
+    }
+
+    /// **A token shared on purpose covers every repository on it** (SKEIN-1231), from the one file
+    /// — the owner's "Allow sharing, with a warning". The same entry as the test above, marked.
+    /// What fails it: `covers` still reading only the first repository, or `problem()` refusing a
+    /// marked entry — `credential_for("a/two")` then answers nothing.
+    #[test]
+    fn a_token_shared_on_purpose_is_used_for_every_repo_it_covers() {
+        let (_lock, home, _env) = fresh_home();
+        let id = store_repo_token("a/one", "skein-test-shared").unwrap();
+        share_credential(&id, "a/two").unwrap();
+
+        for slug in ["a/one", "A/Two"] {
+            let (c, token) = credential_for(slug)
+                .unwrap_or_else(|| panic!("the shared token does not reach {slug}"));
+            assert_eq!(
+                (c.id.as_str(), token.expose()),
+                ("a-one", "skein-test-shared"),
+                "{slug}"
+            );
+        }
+        assert!(can_issue_write_tokens() && any_user_pat().is_some());
+        let listed = write_credentials();
+        assert_eq!(
+            (
+                listed.len(),
+                listed[0].shared,
+                std::fs::read_dir(home.join("github-pats")).unwrap().count()
+            ),
+            (1, true, 1),
+            "a share must be one entry and one token file, marked as shared — not a copy"
+        );
+        assert!(set_write_credential("x", "", &["../a".into()]).is_err());
+    }
+
+    /// **A repo leaving a share takes its name off and nothing else** (SKEIN-1231): the other repos
+    /// keep the token, and the file is still there. What fails it: `leave_shares` dropping the whole
+    /// entry (or the removal forgetting its token) — `credential_for("a/one")` then answers nothing.
+    #[test]
+    fn a_repo_leaving_a_share_keeps_the_token_for_the_others() {
+        let (_lock, home, _env) = fresh_home();
+        let id = store_repo_token("a/one", "skein-test-shared").unwrap();
+        share_credential(&id, "a/two").unwrap();
+        share_credential(&id, "a/three").unwrap();
+
+        release_shared_coverage("a/two").unwrap();
+        assert!(
+            credential_for("a/two").is_none(),
+            "a/two left and still has the token"
+        );
+        for slug in ["a/one", "a/three"] {
+            let (_, token) = credential_for(slug)
+                .unwrap_or_else(|| panic!("{slug} lost the token when a/two left"));
+            assert_eq!(token.expose(), "skein-test-shared");
+        }
+        release_shared_coverage("a/three").unwrap();
+        let (c, _) = credential_for("a/one").expect("the last repo on it lost the token");
+        assert!(!c.shared, "one repository left is not a share any more");
+        assert!(home.join("github-pats").join(&id).exists());
+
+        // And a token a repo holds alone is left alone when it is removed, as it always was.
+        release_shared_coverage("a/one").unwrap();
+        assert!(
+            credential_for("a/one").is_some(),
+            "a token held alone was taken on removal"
+        );
+    }
+
+    /// **"Use a token for this repo alone" leaves the share, and the others keep theirs**
+    /// (SKEIN-1231), including when it is the repo the shared token was first stored for — whose own
+    /// id the shared entry still has. What fails it: `store_repo_token` writing its entry under the
+    /// shared entry's id (dropping the `taken` check) — the shared entry is then replaced, and
+    /// `a/two` loses its token.
+    #[test]
+    fn a_repo_that_stops_sharing_gets_its_own_token_and_the_others_keep_theirs() {
+        let (_lock, _home, _env) = fresh_home();
+        let shared = store_repo_token("a/one", "skein-test-shared").unwrap();
+        share_credential(&shared, "a/two").unwrap();
+
+        let own = store_repo_token("a/one", "skein-test-one-alone").unwrap();
+        assert_ne!(
+            own, shared,
+            "a/one's own token was filed under the shared entry's id"
+        );
+        let (c, token) = credential_for("a/one").unwrap();
+        assert_eq!(
+            (c.id.as_str(), token.expose()),
+            (own.as_str(), "skein-test-one-alone")
+        );
+        let (c, token) = credential_for("a/two").expect("a/two lost the shared token");
+        assert_eq!(
+            (c.id.as_str(), token.expose()),
+            (shared.as_str(), "skein-test-shared")
+        );
+        assert!(!c.shared);
+
+        // Writing over a shared entry through the card's ordinary route is refused, not obeyed.
+        share_credential(&shared, "a/three").unwrap();
+        let why = set_write_credential(&shared, "", &["a/two".into()]).unwrap_err();
+        assert!(why.contains("a/two, a/three"), "{why}");
+        assert!(
+            credential_for("a/three").is_some(),
+            "the refused write took a/three's token"
+        );
+    }
+
+    /// **A share is checked against GitHub first** (SKEIN-1231): only a token GitHub says can push
+    /// to the new repository comes back to be shared, and a refusal names the token by the repos
+    /// that use it, never by its bytes. The GitHub is a local stub. What fails it: `shareable_token`
+    /// returning the token without `check_token` — the push-false case then answers `Ok`.
+    #[test]
+    fn a_token_is_shared_only_when_github_says_it_can_push_to_the_new_repo() {
+        let (_lock, _home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let id = store_repo_token("a/one", "skein-test-shared").unwrap();
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(200, r#"{"permissions":{"push":false}}"#),
+        );
+        let why = shareable_token(&id, "a/two")
+            .err()
+            .expect("a token that cannot push was offered for sharing");
+        assert!(
+            why.contains("the token a/one uses cannot push to a/two")
+                && why.contains("Nothing was saved"),
+            "{why}"
+        );
+        assert!(
+            !why.contains("skein-test-shared"),
+            "the refusal carries the token: {why}"
+        );
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(200, r#"{"permissions":{"push":true}}"#),
+        );
+        let (token, whose) =
+            shareable_token(&id, "a/two").expect("a token that can push was refused");
+        assert_eq!(
+            (token.expose(), whose.as_str()),
+            ("skein-test-shared", "the token a/one uses")
+        );
+        assert!(
+            credential_for("a/two").is_none(),
+            "the check saved the share by itself"
+        );
+    }
+
+    /// **The id a repo's own token is stored under is the one the cockpit's `credId` gave it**, so
+    /// the entries already on disk are found and replaced rather than landed behind, where
+    /// `credential_for`'s first-match-wins would keep the old token in use. Each case is what that
+    /// function (`repo.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+    /// .slice(0, 64)`) returned for that input, run under node before it was deleted.
+    #[test]
+    fn a_repos_own_token_is_filed_under_the_id_the_card_uses() {
+        for (slug, want) in [
+            ("acme/thing", "acme-thing"),
+            ("Acme/Thing.JS", "acme-thing-js"),
+            ("a.-b/c_d", "a--b-c-d"),
+            ("-lead/x", "lead-x"),
+        ] {
+            assert_eq!(repo_credential_id(slug), want, "{slug}");
+        }
+        assert_eq!(
+            repo_credential_id(&format!("{}/x", "a".repeat(80))).len(),
+            64
+        );
     }
 
     #[test]

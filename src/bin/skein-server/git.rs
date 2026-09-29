@@ -78,6 +78,10 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
             "id": c.id,
             "label": c.label,
             "repo": c.repo(),
+            // Every repository it covers, and whether that is because its owner shared it — the
+            // repo cards name the others, never any part of the token (SKEIN-1231).
+            "repos": c.repos,
+            "shared": c.shared && c.problem().is_none() && c.repos.len() > 1,
             "has_token": skein::gitgate::credential_has_token(&c.id),
             // Carried so an unusable entry can explain itself. One hand-edited to cover three
             // repositories is listed and refused, and a list that silently omitted it would leave
@@ -100,9 +104,27 @@ pub(super) struct CredentialReq {
     token: Option<String>,
 }
 
-/// Store a fine-grained PAT and the repositories it covers.
+/// Store a fine-grained PAT and the repository it covers.
+///
+/// **With no `repos`, it replaces the token of a credential that already exists and nothing
+/// else** — how a shared token is rotated from any card that shares it, reaching every repo on it
+/// at once, since they share one file (SKEIN-1231). Its coverage is left exactly as it is: a share
+/// is made only by adding a repo, never by this route.
 pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response {
-    if let Err(e) = skein::gitgate::set_write_credential(&r.id, &r.label, &r.repos) {
+    if r.repos.is_empty() {
+        let known = skein::gitgate::write_credentials()
+            .iter()
+            .any(|c| c.id == r.id);
+        let token = r.token.as_deref().map(str::trim).unwrap_or_default();
+        if !known || token.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "name the repository this token is for, or replace the token of one that is \
+                 already stored",
+            )
+                .into_response();
+        }
+    } else if let Err(e) = skein::gitgate::set_write_credential(&r.id, &r.label, &r.repos) {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
     if let Some(token) = r.token {
@@ -111,6 +133,32 @@ pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response
         }
     }
     // Boxes whose repo this now covers can be given it without waiting for the next tick.
+    tokio::task::spawn_blocking(|| {
+        for view in load_views()
+            .unwrap_or_default()
+            .iter()
+            .filter(|v| !v.foreign)
+        {
+            let _ = skein::gitgate::refresh_tokens(&view.name);
+        }
+    });
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct AloneReq {
+    /// `owner/name`.
+    repo: String,
+    token: String,
+}
+
+/// Store a token for one repository alone, taking it out of any token it was sharing — the "use a
+/// token for this repo alone" of a repo card whose token is shared (SKEIN-1231). The other repos
+/// keep the shared token; see [`skein::gitgate::store_repo_token`].
+pub(super) async fn api_git_credential_alone(Json(r): Json<AloneReq>) -> Response {
+    if let Err(e) = skein::gitgate::store_repo_token(r.repo.trim(), &r.token) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
     tokio::task::spawn_blocking(|| {
         for view in load_views()
             .unwrap_or_default()

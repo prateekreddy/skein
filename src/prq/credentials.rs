@@ -472,7 +472,9 @@ pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLif
         if !seen.insert(found.id.clone()) {
             continue;
         }
-        let repo = found.repo().to_string();
+        // Every repository on it: a token shared from the add dialog is one row that names them all
+        // (SKEIN-1231).
+        let repo = found.repos.join(", ");
         let label = match found.label.trim().is_empty() {
             true => repo,
             false => format!("{} ({repo})", found.label.trim()),

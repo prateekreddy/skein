@@ -505,17 +505,23 @@ function gitqGrantRow(g) {
     </div>`;
 }
 
-// A stored token covers exactly one repository, and the row says so rather than leaving it to be
-// discovered: a token covering three would hand all three to any box that receives it, because the
-// helper that chooses runs inside the box as the agent's own uid.
+// A stored token covers one repository unless its owner shared it from the add dialog, and the row
+// says which rather than leaving it to be discovered: a token covering three hands all three to any
+// box that receives it, because the helper that chooses runs inside the box as the agent's own uid.
+// A shared row has no "Replace token" here — this pane stores a token for one repo, which would
+// take that repo out of the share — and says where it is replaced instead (SKEIN-1231).
 function gitCredRow(c) {
-  const state = c.problem ? "refused" : (c.has_token ? "ready" : "incomplete");
+  const state = c.problem ? "refused" : (c.has_token ? (c.shared ? "shared" : "ready") : "incomplete");
+  const why = c.problem ? `unusable — ${esc(c.problem)}`
+    : !c.has_token ? "no token stored"
+    : c.shared ? `shared on purpose — boxes of each of these repos can push to all of them. Replace it from any of their cards; forgetting it here takes it from all ${(c.repos || []).length}`
+    : "";
   return `
     <div class="set-cred" data-cred="${esc(c.id)}">
       <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
-      <span class="cslug">${esc(c.repo || (c.repos || []).join(", ") || "?")}</span>
-      <span class="cwhy">${c.problem ? `unusable — ${esc(c.problem)}` : (c.has_token ? "" : "no token stored")}</span>
-      <button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>
+      <span class="cslug">${esc((c.repos && c.repos.length ? c.repos.join(", ") : c.repo) || "?")}</span>
+      <span class="cwhy">${why}</span>
+      ${c.shared ? "" : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
       <button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>
     </div>`;
 }
@@ -566,7 +572,9 @@ function renderGitState(d) {
     return;
   }
   el.className = "set-state on";
-  el.innerHTML = `<b>Scoped.</b> A box writes only its own repo and asks for any other. ${esc(how)}. Takes effect at each box's next start.`;
+  // A shared token is the exception the sentence has to carry, or it is untrue (SKEIN-1231).
+  const shared = (d.credentials || []).some(c => c.shared && !c.problem && c.has_token);
+  el.innerHTML = `<b>Scoped.</b> A box writes only its own repo${shared ? " — or every repo its token is shared with —" : ""} and asks for any other. ${esc(how)}. Takes effect at each box's next start.`;
 }
 
 // One fetch answers both sections and the repo cards, so it is done once and shared rather than
@@ -715,19 +723,36 @@ function probeGit() {
     .finally(() => { btn.disabled = false; });
 }
 
-// The id is derived from the repo rather than asked for: it is only a filename, and one token per
-// repo means the repo already identifies it. Re-storing the same repo therefore *replaces* its
-// token, which is what rotating one should do — and is why nothing anywhere asks for an id.
-const credId = repo => repo.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
-// Which stored credential covers `owner/name`, if any. Case-insensitive, because GitHub is.
-const credFor = slug => (gitqCreds || []).find(c => (c.repo || "").toLowerCase() === (slug || "").toLowerCase());
+// Which stored credential covers `owner/name`, if any. Case-insensitive, because GitHub is. Every
+// repository on it counts, so a repo sharing another's token finds it (SKEIN-1231).
+const credFor = slug => (gitqCreds || []).find(c =>
+  ((c.repos && c.repos.length) ? c.repos : [c.repo]).some(r => (r || "").toLowerCase() === (slug || "").toLowerCase()));
+// "a", "a and b", "a, b and c" — how the page names a token: by the repositories that use it, never
+// by any part of it (SKEIN-1231).
+function reposPhrase(list) {
+  const r = (list || []).filter(Boolean);
+  return r.length < 2 ? (r[0] || "") : `${r.slice(0, -1).join(", ")} and ${r[r.length - 1]}`;
+}
 
-// The network call alone, with no form attached — three places store a token now (this pane, a
-// repo's own card, and the add-repo dialog) and only one of them has the inputs below.
+// The network call alone, with no form attached — two places store a token for a repo now (this
+// pane and a repo's own card; the add dialog sends its token with the clone). It is always that
+// repo's own token, covering it alone: a repo that was sharing a token leaves the share, and the
+// others keep theirs (`gitgate::store_repo_token`, SKEIN-1231). The host picks the id — the one this
+// page used to derive itself (`gitgate::repo_credential_id`), unless a shared token already has it —
+// so re-storing a repo still replaces its token, and nothing anywhere asks for an id.
 function storeGitCred(repo, token) {
+  return fetch("/api/fleet/repo-token", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repo, token }),
+  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+}
+
+// Replace a stored token and nothing else — how a shared token is rotated from any card that shares
+// it, reaching every repo on it at once because they share one file (SKEIN-1231).
+function rotateGitCred(id, token) {
   return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id: credId(repo), label: repo, repos: [repo], token }),
+    body: JSON.stringify({ id, token }),
   }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
 }
 

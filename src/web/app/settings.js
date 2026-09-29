@@ -476,6 +476,20 @@ function repoTokenRow(r) {
       + `<span class="desc" data-notoken>${why}</span></label>`;
   }
   const c = credFor(slug);
+  // **A shared token says who it is shared with, and how to leave** (SKEIN-1231). The others are
+  // named by repository, never by any part of the token. Replacing it here replaces it for every
+  // repo on it — one file — and "Use for this repo alone" stores a token for this one and takes it
+  // out of the share, leaving the others theirs. No "Forget" here: that would take it from all.
+  const others = c && c.shared && !c.problem ? (c.repos || []).filter(x => x.toLowerCase() !== slug.toLowerCase()) : [];
+  if (others.length) {
+    const all = others.length + 1;
+    return `<label class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
+      + `<span class="desc">the token <b>${esc(slug)}</b> shares with <b>${esc(reposPhrase(others))}</b>. Boxes of all ${all} repos can push to all of them with it, and skein reads your review queue, posts your reviews and merges here with it. Stored 0600 on the host and never served back</span>`
+      + `<div class="set-cred"><span class="sq-state approved">shared token</span><span class="cwhy">replacing it here replaces it for all ${all}; to stop sharing, paste a token for ${esc(slug)} alone</span></div>`
+      + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (paste a token)" autocomplete="off" />`
+      + `<button type="button" class="kbtn" data-rotatetoken="${esc(c.id)}" data-slug="${esc(slug)}" data-id="${esc(r.id)}">Replace for all ${all}</button>`
+      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div></label>`;
+  }
   const state = c && !c.problem && c.has_token
     ? `<span class="sq-state approved">token stored</span><span class="cwhy">boxes push with it, and your queue, reviews and merges here run on it; storing another replaces it</span>`
       + `<button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>`
@@ -553,19 +567,24 @@ function renderRepoList() {
   // route — a token in the wrong store, on blur, silently.
   el.querySelectorAll(".rbody input:not([data-repotoken]), .rbody select")
     .forEach(i => i.addEventListener("change", () => saveRepoField(i)));
-  el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () => {
-    const slug = b.dataset.storetoken;
+  // Two buttons can spend the card's one token field: "Store" / "Use for … alone" (this repo's own
+  // token) and, on a shared card, "Replace for all" (the shared file) — SKEIN-1231.
+  const spend = (b, slug, send) => {
     const input = el.querySelector(`[data-repotoken="${CSS.escape(slug)}"]`);
     const token = (input.value || "").trim();
     if (!token) { toast("paste a token first"); input.focus(); return; }
     // The card is re-rendered by loadGitCreds, so the field clears itself — but clear it here too,
     // because a failed store must not leave the token sitting in a visible input either.
     input.value = "";
-    storeGitCred(slug, token).then(() => {
+    send(token).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
     }).catch(e => toast(String(e.message || "could not store that token")));
-  }));
+  };
+  el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () =>
+    spend(b, b.dataset.storetoken, token => storeGitCred(b.dataset.storetoken, token))));
+  el.querySelectorAll("[data-rotatetoken]").forEach(b => b.addEventListener("click", () =>
+    spend(b, b.dataset.slug, token => rotateGitCred(b.dataset.rotatetoken, token))));
 }
 function saveRepoField(input) {
   const { id, key } = input.dataset;
@@ -1186,6 +1205,7 @@ function openAddRepo() {
   const src = document.getElementById("ar-src");
   src.value = ""; arSetMsg(""); arWarnedHost = "";
   document.getElementById("ar-token").value = "";
+  document.getElementById("ar-tokwhich").value = "";
   document.getElementById("ar-plane").value = "";
   // Off, matching `repos::add`. A new repo is a repo nobody has said they review yet, and the
   // queue is the one setting here that spends something on its own every three minutes.
@@ -1195,6 +1215,9 @@ function openAddRepo() {
   // header too, and offering "Not tracked" as the only choice would be a lie about the fleet.
   arRenderConns();
   loadSync().then(arRenderConns);
+  // The tokens another repo already has, fetched fresh for the same reason as the connections.
+  arRenderTokens();
+  loadGitCreds().then(arRenderTokens).catch(() => {});
   arUpdateDerived();
   document.getElementById("ar-go").textContent = "Add →";
   arModal().classList.add("open");
@@ -1211,6 +1234,20 @@ function arRenderConns() {
     `<option value="${esc(c.id)}">${esc(c.ready ? c.label : c.label + " (not usable yet)")}</option>`)).join("");
   if (was && [...el.options].some(o => o.value === was)) el.value = was;
 }
+// "Paste a new token", or one of the stored tokens another repo has, each named by the repos that
+// use it (SKEIN-1231). Only usable ones with a token behind them; hidden when there are none, which
+// is a first run. Re-drawn like the connections, keeping a choice already made.
+function arRenderTokens() {
+  const el = document.getElementById("ar-tokwhich");
+  if (!el) return;
+  const was = el.value;
+  const usable = (gitqCreds || []).filter(c => !c.problem && c.has_token && (c.repos || []).length);
+  el.innerHTML = [`<option value="">Paste a new token</option>`].concat(usable.map(c =>
+    `<option value="${esc(c.id)}">Use the token ${esc(reposPhrase(c.repos))} ${c.repos.length === 1 ? "uses" : "use"}</option>`)).join("");
+  el.style.display = usable.length ? "" : "none";
+  el.value = was && [...el.options].some(o => o.value === was) ? was : "";
+  arUpdateDerived();
+}
 function arUpdateDerived() {
   const source = document.getElementById("ar-src").value;
   const id = deriveRepoId(source);
@@ -1225,9 +1262,18 @@ function arUpdateDerived() {
   const noSlug = !!source.trim() && !slug;
   tok.disabled = false;
   tok.placeholder = "github_pat_… — leave blank if a GitHub App covers it";
+  // A shared token: no field to paste into, and the cost said before Add is pressed — the owner's
+  // condition for allowing sharing at all ("Allow sharing, with a warning", 2026-09-29).
+  const which = document.getElementById("ar-tokwhich");
+  const shared = which && which.value ? (gitqCreds || []).find(c => c.id === which.value) : null;
+  tok.style.display = shared ? "none" : "";
+  if (shared) {
+    hint.innerHTML = `Shared, not copied: boxes of <b>${slug ? esc(slug) : "this repo"}</b> and of <b>${esc(reposPhrase(shared.repos))}</b> will all be able to push to all of them with this token. skein first checks that GitHub lets it push to ${slug ? esc(slug) : "this repo"}, and a new token stored on any of their cards later replaces it for all of them.`;
+    return;
+  }
   hint.innerHTML = noSlug
     ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
-    : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with. On the App path you need none.`;
+    : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none.`;
 }
 // The source the non-GitHub warning was last shown for: pressing Add again on the same source is
 // the "anyway" (SKEIN-812). Cleared when the dialog opens, so a new visit asks again.
@@ -1261,7 +1307,17 @@ function submitAddRepo() {
   const settle = () => { clearInterval(tick); go.disabled = false; };
   // No `store`: the route refuses one outright (SKEIN-535), and adopting an existing store is a
   // CLI-only affordance now — `skein add <git-url> --store <path>`.
-  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src }) })
+  //
+  // **The token goes with the clone, not after it** (SKEIN-1231). It used to be stored by
+  // `arApplySettings` once the add had returned, so a private repo's clone ran with no credential,
+  // failed, and the token was discarded with it — no private repo could be added from here. The
+  // host clones with the token chosen and saves it only if that clone worked.
+  const share = document.getElementById("ar-tokwhich").value;
+  const token = share ? "" : (document.getElementById("ar-token").value || "").trim();
+  const body = { source: src };
+  if (share) body.share = share;
+  else if (token) body.token = token;
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       settle();
@@ -1273,9 +1329,12 @@ function submitAddRepo() {
       // the server picks that id — deriving it in the page would be a second implementation of a
       // rule that already exists, wrong exactly when they disagree.
       go.textContent = "Setting up…";
+      // Clear the field the moment the host has it: nothing on the page holds the token after this.
+      document.getElementById("ar-token").value = "";
       return arApplySettings(repo).then(problems => {
         loadRepos();
-        const notes = [res.warning, ...problems].filter(Boolean);
+        if (share || token) loadGitCreds().catch(() => {});
+        const notes = [res.warning, res.token_note, ...problems].filter(Boolean);
         if (notes.length) {         // e.g. SSH origin — keep the modal up so the note is readable
           arSetMsg(notes.join(" · "), "warn");
           go.textContent = "Done"; go.onclick = closeAddRepo;
@@ -1289,6 +1348,7 @@ function submitAddRepo() {
       // A timeout leaves a half-made repo directory behind, and "it failed" without that is how the
       // next attempt fails too, for a reason nobody can see.
       const timedOut = /timed out|deadline|timeout/i.test(e.message || "");
+      // The pasted token stays in its field, so "paste a token … and press Add again" is one step.
       arSetMsg(
         timedOut
           ? `${e.message} — the clone was still running when skein gave up. Check ~/.skein/repos for a partial copy before retrying.`
@@ -1307,7 +1367,6 @@ function arApplySettings(repo) {
   const plane = (document.getElementById("ar-plane").value || "").trim();
   const conn = document.getElementById("ar-conn").value;
   const review = document.getElementById("ar-review").value === "true";
-  const token = (document.getElementById("ar-token").value || "").trim();
   const body = {};
   if (plane) body.plane_project = plane;
   if (conn) body.sync_connection = conn;
@@ -1325,11 +1384,8 @@ function arApplySettings(repo) {
     }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await r.text()) || r.statusText}`); })
       .catch(e => problems.push(`settings not saved: ${e.message}`)));
   }
-  if (token) {
-    const slug = repo.slug || "";
-    if (!slug) problems.push("no write token stored — this repo has no GitHub remote to scope one to");
-    else jobs.push(storeGitCred(slug, token).catch(e => problems.push(`token not stored: ${e.message}`)));
-  }
+  // No token here any more: it went with the clone (SKEIN-1231), and the host said if it was not
+  // saved (`token_note`).
   return Promise.all(jobs).then(() => problems);
 }
 // kept name for existing callers (header ＋repo, per-section ＋, settings, palette) → opens the modal

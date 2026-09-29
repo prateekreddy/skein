@@ -465,14 +465,33 @@ pub fn adopt_fleet_base_branch() -> Result<usize, String> {
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
 /// clone or store on disk (they may hold unpushed work / a clone-mode box's only copy) — only skein's
 /// registration is removed; report the paths so the user can delete them deliberately.
+///
+/// **It also leaves any token it was sharing** (SKEIN-1231): its name comes off that credential and
+/// the token stays for the repositories still on it. Not when another registered repo is the same
+/// GitHub repository, which still needs the coverage. A token the repo held alone is left, as it
+/// always was. The repo is gone either way, so a failure to update the token list is said rather
+/// than returned — returning it would read as the removal having failed.
 pub fn remove_repo(id: &str) -> Result<Repo, String> {
-    update_repos(|repos| {
+    let (removed, still) = update_repos(|repos| {
         let pos = repos
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(|| format!("no repo with id {id:?}"))?;
-        Ok(repos.remove(pos))
-    })
+        let removed = repos.remove(pos);
+        let still: Vec<String> = repos.iter().filter_map(crate::gitgate::repo_slug).collect();
+        Ok((removed, still))
+    })?;
+    if let Some(slug) = crate::gitgate::repo_slug(&removed) {
+        if !still.iter().any(|s| crate::gitgate::same_repo(s, &slug)) {
+            if let Err(why) = crate::gitgate::release_shared_coverage(&slug) {
+                eprintln!(
+                    "skein: {id} is removed, but {slug} could not be taken off the token it was \
+                     sharing ({why}); that token still names it in github-pats.json"
+                );
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Turn this repo's boxes on or off the peer network.

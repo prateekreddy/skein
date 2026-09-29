@@ -215,12 +215,19 @@
       <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds one under <code>~/.skein/repos</code>. To adopt a store you already have, from the host:</div>
       <pre class="ar-cmd">skein add &lt;git-url&gt; --store &lt;path&gt;</pre>
 
-      <!-- Everything else a repo carries, set here rather than found later on its card. Each of
-           these is applied *after* the clone lands, because they all key on the repo's id and there
+      <!-- Everything else a repo carries, set here rather than found later on its card. All but the
+           token are applied *after* the clone lands, because they key on the repo's id and there
            is no id until the server has picked one. A failure to apply one is reported and never
-           unmakes the repo — the clone is the expensive part and it succeeded. -->
+           unmakes the repo — the clone is the expensive part and it succeeded.
+
+           **The token goes WITH the clone** (SKEIN-1231): it is what lets a private repository be
+           cloned at all, and it is saved only if the clone worked with it. It is pasted, or it is
+           the one another repo already has — offered by the repos that use it, never by any part
+           of it. The choice is drawn only when there is a stored token to share, so a first run's
+           dialog is no taller than it was (onboarding.mjs clicks the Add button below). -->
       <div class="ar-sec">this repository</div>
       <label class="nb-lbl">write token <span class="ar-opt">optional</span></label>
+      <select id="ar-tokwhich" style="display:none" onchange="arUpdateDerived()"></select>
       <input id="ar-token" type="password" placeholder="github_pat_… — leave blank if a GitHub App covers it" autocomplete="off" />
       <div class="ar-derived" id="ar-tokhint">a fine-grained PAT covering only this repo, which its boxes push with. On the App path you need none.</div>
       <label class="nb-lbl">work tracking</label>

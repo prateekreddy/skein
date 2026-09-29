@@ -75,6 +75,12 @@ pub(super) struct FleetGit {
     remote: String,
     /// The `GIT_SSH_COMMAND` git was given — see [`ssh_that_cannot_ask`].
     ssh: String,
+    /// This git is the clone that adds the repo, so there is no card yet to store a token on: a
+    /// refusal points at the add dialog's token field instead (SKEIN-1231).
+    adding: bool,
+    /// The token sent is the one the person chose in the add dialog — pasted, or shared from another
+    /// repo — rather than one skein resolved for itself.
+    given: bool,
 }
 
 /// Wire up a git command skein runs fleet-side: never a terminal, and the credential the fleet
@@ -105,6 +111,39 @@ pub(super) struct FleetGit {
 /// belonging to a person is not something to offer a host on the strength of a URL skein did not
 /// recognise.
 pub(super) fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
+    wire(command, repo, None)
+}
+
+/// [`fleet_git`] for the clone that adds a repo, which is the one fleet-side git that may be
+/// handed a token skein has not stored yet.
+///
+/// **The token chosen in the add dialog is the one the clone uses** (SKEIN-1231). A pasted one was
+/// stored only after the add succeeded, so the clone of a private repository went out with nothing
+/// — a new repository has no stored token to be resolved — was refused, and the token was thrown
+/// away with the failed add. No add of a private repository could ever succeed.
+///
+/// Given here rather than stored first so that a token which cannot reach the repository is never
+/// saved: [`add_repo_with_token`] stores it only once this clone has succeeded with it. The same
+/// holds for a token shared from another repo. `given` is that token and the words that name it to
+/// the person ("the token you pasted"); `None` resolves exactly as [`fleet_git`] does, and differs
+/// only in how a refusal is worded.
+pub(super) fn fleet_git_at_add(
+    command: &mut Command,
+    repo: &Repo,
+    given: Option<(&crate::secret::Secret, &str)>,
+) -> FleetGit {
+    wire(command, repo, Some(given))
+}
+
+/// The wiring both of the above share. `at_add` is `None` for every fleet-side git but the add's
+/// clone, and `Some(given)` for that one.
+fn wire(
+    command: &mut Command,
+    repo: &Repo,
+    at_add: Option<Option<(&crate::secret::Secret, &str)>>,
+) -> FleetGit {
+    let adding = at_add.is_some();
+    let given = at_add.flatten();
     // First, and unconditionally. Every path below can decide there is no credential to send; none
     // of them may decide that git is allowed to ask a terminal instead.
     command.env("GIT_TERMINAL_PROMPT", "0");
@@ -118,8 +157,22 @@ pub(super) fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
             sent: None,
             remote,
             ssh,
+            adding,
+            given: false,
         };
     };
+    if let Some((token, named)) = given {
+        command.env(FLEET_TOKEN_VAR, token.expose());
+        only_skeins_helper(command);
+        return FleetGit {
+            slug: Some(slug),
+            sent: Some(named.to_string()),
+            remote,
+            ssh,
+            adding,
+            given: true,
+        };
+    }
     let (source, token) = crate::gitgate::credential_for_repo(&slug, crate::gitgate::Need::Read);
     let found = token.map(|token| {
         let from = match source {
@@ -149,9 +202,24 @@ pub(super) fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
             sent: None,
             remote,
             ssh,
+            adding,
+            given: false,
         };
     };
     command.env(FLEET_TOKEN_VAR, token.expose());
+    only_skeins_helper(command);
+    FleetGit {
+        slug: Some(slug),
+        sent: Some(path),
+        remote,
+        ssh,
+        adding,
+        given: false,
+    }
+}
+
+/// Make [`FLEET_CREDENTIAL_HELPER`] the only helper git asks.
+fn only_skeins_helper(command: &mut Command) {
     // `credential.helper` is a LIST, and the empty value is how git is told to forget the entries it
     // has accumulated from the fleet's own config files. Without the reset a helper configured there
     // — `store` pointing at a file with a stale token, say — is asked first and answers first, and
@@ -161,12 +229,6 @@ pub(super) fn fleet_git(command: &mut Command, repo: &Repo) -> FleetGit {
     command.env("GIT_CONFIG_VALUE_0", "");
     command.env("GIT_CONFIG_KEY_1", "credential.helper");
     command.env("GIT_CONFIG_VALUE_1", FLEET_CREDENTIAL_HELPER);
-    FleetGit {
-        slug: Some(slug),
-        sent: Some(path),
-        remote,
-        ssh,
-    }
 }
 
 /// The ssh command a fleet-side git runs: whatever it would have run anyway, with
@@ -313,6 +375,28 @@ pub(super) fn git_refusal(doing: &str, stderr: &str, auth: &FleetGit) -> String 
     if !refused_for_want_of_a_credential(stderr) {
         return format!("{doing}: {stderr}");
     }
+    // The add's own clone. There is no card to send anybody to yet, and the token field is on the
+    // screen they are looking at, so that is the next step named (SKEIN-1231).
+    if let (true, Some(slug)) = (auth.adding, &auth.slug) {
+        let account = match (auth.given, &auth.sent) {
+            (true, Some(from)) => format!(
+                "GitHub turned down {from} for {slug} — it has expired, or it was not granted \
+                 this repository — so nothing was saved"
+            ),
+            (false, Some(from)) => format!(
+                "skein sent {from}, and GitHub turned it down — it has expired, or it does not \
+                 cover {slug}"
+            ),
+            (_, None) => format!(
+                "skein has no token that reaches {slug}, which is how GitHub answers for a private \
+                 repository"
+            ),
+        };
+        return format!(
+            "{doing}: {account}. Paste a fine-grained token that covers {slug}, with Contents \
+             read and write, into the token field and press Add again. git said: {stderr}"
+        );
+    }
     let account = match (&auth.slug, &auth.sent) {
         (_, Some(from)) => format!(
             "skein sent {from}, and it was refused — so it has expired, or it does not cover this \
@@ -340,6 +424,7 @@ pub(super) fn git_refusal(doing: &str, stderr: &str, auth: &FleetGit) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repos::testkit::no_host_credential;
     use crate::testutil::{env_lock, env_pins, tempdir};
 
     /// A repo record pointing at a GitHub URL, with no mirror and nothing on disk but its store.
@@ -356,31 +441,6 @@ mod tests {
             "agent": "claude",
         }))
         .unwrap()
-    }
-
-    /// **No credential reaches these tests from the machine running them.** Fleet-side git asks the
-    /// same resolver as every GitHub call (SKEIN-953), which reads `$GH_TOKEN`/`$GITHUB_TOKEN` and
-    /// the host's `gh` login — so on a machine that has either, a test about "no credential" would
-    /// hand git a real token, and a recorded environment would print it. Both are removed, and a
-    /// `gh` with no login goes first on `$PATH`.
-    fn no_host_credential(home: &Path, env: &mut crate::testutil::EnvPins) {
-        use std::os::unix::fs::PermissionsExt;
-        env.unset("GH_TOKEN").unset("GITHUB_TOKEN");
-        let bin = home.join("no-gh-login");
-        fs::create_dir_all(&bin).unwrap();
-        fs::write(
-            bin.join("gh"),
-            "#!/bin/sh
-exit 1
-",
-        )
-        .unwrap();
-        fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
-        env.set(
-            "PATH",
-            format!("{}:{}", bin.display(), env::var("PATH").unwrap_or_default()),
-        );
-        crate::gitgate::forget_gh_login();
     }
 
     /// A `git` on `$PATH` that records the environment it was spawned with and then answers exactly
@@ -491,6 +551,8 @@ exit 1
                 sent: None,
                 remote: "https://github.com/acme/thing.git".into(),
                 ssh: "ssh -oBatchMode=yes".into(),
+                adding: false,
+                given: false,
             },
         );
         assert!(
