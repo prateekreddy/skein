@@ -1,28 +1,33 @@
-//! Claude Code's usage telemetry to Anthropic is off in a box unless its repo turned it on.
+//! Claude Code's built-in `telemetry` plugin is off in a box unless its repo turned it on.
 
 use super::*;
 
 // -------------------------------------------------------------------------------------------------
-// The launcher's telemetry block, over every shape a box's user settings can be in (SKEIN-1225)
+// The launcher's telemetry-plugin block, over every shape a box's user settings can be in
+// (SKEIN-1225)
 // -------------------------------------------------------------------------------------------------
 //
-// The launcher writes `env.DISABLE_TELEMETRY = "1"` into the box's own `~/.claude/settings.json`
-// unless `$SKEIN_BOX_TELEMETRY` says the box's repo allows it, and takes that value out again when
-// it does. That the variable reaches the launcher from the repo's switch, and that a really started
-// and a really relaunched box carry the result, are asserted in `start.rs` and in
-// `fleet::start`'s own tests; this is the block's judgement over files a real start rarely meets.
+// The launcher writes `enabledPlugins["telemetry@builtin"] = false` into the box's own
+// `~/.claude/settings.json` unless `$SKEIN_BOX_TELEMETRY` says the box's repo allows the plugin,
+// and takes that value out again when it does. That the variable reaches the launcher from the
+// repo's switch, and that a really started and a really relaunched box carry the result, are
+// asserted in `start.rs` and in `fleet::start`'s own tests; this is the block's judgement over
+// files a real start rarely meets.
 
-/// Run the launcher's telemetry block against one fixture home, with `$SKEIN_BOX_TELEMETRY` set to
-/// `setting` or, for `None`, not set at all — which is what an older host passes.
+/// The settings key Claude Code reads to enable or disable its built-in `telemetry` plugin.
+const PLUGIN: &str = "telemetry@builtin";
+
+/// Run the launcher's telemetry-plugin block against one fixture home, with `$SKEIN_BOX_TELEMETRY`
+/// set to `setting` or, for `None`, not set at all — which is what an older host passes.
 fn run_telemetry_block(home: &Path, setting: Option<&str>) -> std::process::Output {
     let block = launcher_block(
         "skein_telemetry=",
         "unset skein_telemetry SKEIN_BOX_TELEMETRY",
     );
     assert!(
-        block.contains("DISABLE_TELEMETRY"),
-        "the lifted block no longer writes the variable Claude Code's telemetry is gated on, so \
-         this harness is running something that cannot answer the question it was written for"
+        block.contains(PLUGIN),
+        "the lifted block no longer names the plugin it is meant to turn off, so this harness is \
+         running something that cannot answer the question it was written for"
     );
     let set = match setting {
         Some(v) => format!("export SKEIN_BOX_TELEMETRY={}\n", skein::util::sh_quote(v)),
@@ -35,16 +40,17 @@ fn run_telemetry_block(home: &Path, setting: Option<&str>) -> std::process::Outp
             home.display()
         ))
         .output()
-        .expect("bash runs the launcher's telemetry block")
+        .expect("bash runs the launcher's telemetry-plugin block")
 }
 
 /// One row of the table below: the case, `$SKEIN_BOX_TELEMETRY`, the box's `settings.json` before
-/// the block runs (`None` for no file), and the `DISABLE_TELEMETRY` expected after (`None` for none).
+/// the block runs (`None` for no file), and the plugin's `enabledPlugins` value expected after
+/// (`None` for no entry).
 type Case = (
     &'static str,
     Option<&'static str>,
     Option<&'static str>,
-    Option<&'static str>,
+    Option<serde_json::Value>,
 );
 
 /// A box's user settings, parsed; `None` for a file that is not there.
@@ -57,62 +63,63 @@ fn settings_of(home: &Path) -> Option<serde_json::Value> {
 ///
 /// **What makes each assertion fail**, planted and watched before this was believed:
 ///
-///   * the block not writing the key (`env["DISABLE_TELEMETRY"] = "1"` deleted) — `sends Anthropic
-///     its usage telemetry although its repo never allowed it` fails, for the off cases;
-///   * the block ignoring `$SKEIN_BOX_TELEMETRY` (reading `sent` as always false) — `still has
-///     skein's DISABLE_TELEMETRY although its repo turned telemetry on` fails;
-///   * replacing `env` rather than adding to it (`env = {}` always) — `the env entry ... was there
-///     and is gone` fails, naming the entry;
-///   * taking out any value on, not only `1` (the `!= "1"` guard removed) — `somebody's own value
-///     ... was taken out` fails;
+///   * the block not writing the key (`plugins[key] = False` deleted) — `runs Claude Code's
+///     telemetry plugin although its repo never allowed it` fails, for the off cases;
+///   * the block ignoring `$SKEIN_BOX_TELEMETRY` (reading `allowed` as always false) — `still has
+///     skein's telemetry@builtin: false although its repo allowed the plugin` fails;
+///   * replacing `enabledPlugins` rather than adding to it (`plugins = {}` always) — `the
+///     enabledPlugins entry ... was there and is gone` fails, naming the entry;
+///   * taking out any value on, not only `false` (the `is not False` guard removed) — `somebody's
+///     own value ... was taken out` fails;
 ///   * writing over an unparseable file — `left exactly as it was` fails on the byte comparison.
 #[test]
-fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
+fn a_box_runs_without_the_telemetry_plugin_unless_its_repo_allows_it() {
     if !have("python3") {
         return skip("the launcher writes this key with python3, and there is none here");
     }
+    let off = || Some(serde_json::Value::Bool(false));
     let dir = scratch_named("telemetry");
     let cases: [Case; 10] = [
-        ("a new box, no settings file", Some("0"), None, Some("1")),
+        ("a new box, no settings file", Some("0"), None, off()),
         (
             "an older host that never sets the variable",
             None,
             None,
-            Some("1"),
+            off(),
         ),
         (
-            "a used file, with other settings and other env in it",
+            "a used file, with other settings and other plugins in it",
             Some("0"),
             Some(
-                r#"{"crossSessionInbound":"accept","env":{"SYNC_MCP_URL":"https://example.invalid"},"model":"x"}"#,
+                r#"{"crossSessionInbound":"accept","enabledPlugins":{"sync@sync":true},"env":{"SYNC_MCP_URL":"https://example.invalid"}}"#,
             ),
-            Some("1"),
+            off(),
         ),
         (
             "a file with somebody's own value, off",
             Some("0"),
-            Some(r#"{"env":{"DISABLE_TELEMETRY":"yes please"}}"#),
-            Some("yes please"),
+            Some(r#"{"enabledPlugins":{"telemetry@builtin":true}}"#),
+            Some(serde_json::Value::Bool(true)),
         ),
         (
-            "a repo switched on, over skein's value and other env",
+            "a repo switched on, over skein's value and other plugins",
             Some("1"),
             Some(
-                r#"{"crossSessionInbound":"accept","env":{"DISABLE_TELEMETRY":"1","SYNC_MCP_URL":"https://example.invalid"}}"#,
+                r#"{"crossSessionInbound":"accept","enabledPlugins":{"telemetry@builtin":false,"sync@sync":true}}"#,
             ),
             None,
         ),
         (
             "a repo switched on, over skein's value alone",
             Some("1"),
-            Some(r#"{"env":{"DISABLE_TELEMETRY":"1"}}"#),
+            Some(r#"{"enabledPlugins":{"telemetry@builtin":false}}"#),
             None,
         ),
         (
             "a repo switched on, over somebody's own value",
             Some("1"),
-            Some(r#"{"env":{"DISABLE_TELEMETRY":"true"}}"#),
-            Some("true"),
+            Some(r#"{"enabledPlugins":{"telemetry@builtin":"no"}}"#),
+            Some(serde_json::Value::String("no".into())),
         ),
         (
             "a repo switched on, no settings file",
@@ -127,15 +134,15 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
             None,
         ),
         (
-            "a file whose env is not an object",
+            "a file whose enabledPlugins is not an object",
             Some("0"),
-            Some(r#"{"env":["DISABLE_TELEMETRY"]}"#),
+            Some(r#"{"enabledPlugins":["telemetry@builtin"]}"#),
             None,
         ),
     ];
 
-    let mut off = 0;
-    let mut on = 0;
+    let mut switched_off = 0;
+    let mut switched_on = 0;
     let mut left_alone = 0;
     for (n, (case, setting, before, want)) in cases.iter().enumerate() {
         let home = dir.join(format!("box-{n}/home"));
@@ -146,7 +153,7 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
         let out = run_telemetry_block(&home, *setting);
         assert!(
             out.status.success(),
-            "the launcher's telemetry block failed for `{case}`: {}",
+            "the launcher's telemetry-plugin block failed for `{case}`: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         let said = String::from_utf8_lossy(&out.stderr).to_string();
@@ -154,7 +161,9 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
         let was: Option<serde_json::Value> = before.and_then(|b| serde_json::from_str(b).ok());
         let extendable = match &was {
             None => before.is_none(),
-            Some(serde_json::Value::Object(o)) => o.get("env").is_none_or(|e| e.is_object()),
+            Some(serde_json::Value::Object(o)) => {
+                o.get("enabledPlugins").is_none_or(|e| e.is_object())
+            }
             Some(_) => false,
         };
 
@@ -166,9 +175,9 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
                 "`{case}` was rewritten; a file skein cannot change must be left exactly as it was"
             );
             assert!(
-                said.contains("settings.json") && said.contains("telemetry"),
-                "`{case}` was left alone in silence, so nobody can tell why the box may still send \
-                 its telemetry: {said:?}"
+                said.contains("settings.json") && said.contains("telemetry plugin"),
+                "`{case}` was left alone in silence, so nobody can tell why the box may still run \
+                 the telemetry plugin: {said:?}"
             );
             continue;
         }
@@ -176,24 +185,25 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
         let after = settings_of(&home);
         let got = after
             .as_ref()
-            .and_then(|s| s.get("env"))
-            .and_then(|e| e.get("DISABLE_TELEMETRY"))
-            .and_then(|v| v.as_str());
-        match *want {
-            Some("1") if before.is_none_or(|b| !b.contains("DISABLE_TELEMETRY")) => {
+            .and_then(|s| s.get("enabledPlugins"))
+            .and_then(|e| e.get(PLUGIN))
+            .cloned();
+        let had_one = before.is_some_and(|b| b.contains(PLUGIN));
+        match want {
+            Some(serde_json::Value::Bool(false)) if !had_one => {
                 assert_eq!(
-                    got,
-                    Some("1"),
-                    "`{case}`: this box sends Anthropic its usage telemetry although its repo never \
+                    got.as_ref(),
+                    want.as_ref(),
+                    "`{case}`: this box runs Claude Code's telemetry plugin although its repo never \
                      allowed it: {after_text:?}"
                 );
-                off += 1;
+                switched_off += 1;
             }
             None => {
                 assert_eq!(
                     got, None,
-                    "`{case}`: this box still has skein's DISABLE_TELEMETRY although its repo turned \
-                     telemetry on: {after_text:?}"
+                    "`{case}`: this box still has skein's telemetry@builtin: false although its \
+                     repo allowed the plugin: {after_text:?}"
                 );
                 if before.is_none() {
                     assert!(
@@ -201,20 +211,20 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
                         "`{case}`: a settings file was created only to say nothing: {after_text:?}"
                     );
                 }
-                on += 1;
+                switched_on += 1;
             }
             Some(theirs) => assert_eq!(
-                got,
+                got.as_ref(),
                 Some(theirs),
-                "`{case}`: somebody's own value for DISABLE_TELEMETRY was taken out or replaced, \
-                 and only skein's `1` is skein's: {after_text:?}"
+                "`{case}`: somebody's own value for telemetry@builtin was taken out or replaced, \
+                 and only skein's `false` is skein's: {after_text:?}"
             ),
         }
 
-        // Nothing else in the file is lost, in `env` or beside it.
+        // Nothing else in the file is lost, in `enabledPlugins` or beside it.
         if let Some(serde_json::Value::Object(whole)) = &was {
             for (key, value) in whole {
-                if key == "env" {
+                if key == "enabledPlugins" {
                     continue;
                 }
                 assert_eq!(
@@ -224,26 +234,27 @@ fn a_box_sends_no_telemetry_unless_its_repo_allows_it() {
                      wrote back: {after_text:?}"
                 );
             }
-            if let Some(serde_json::Value::Object(env)) = whole.get("env") {
-                for (key, value) in env {
-                    if key == "DISABLE_TELEMETRY" {
+            if let Some(serde_json::Value::Object(plugins)) = whole.get("enabledPlugins") {
+                for (key, value) in plugins {
+                    if key == PLUGIN {
                         continue;
                     }
                     assert_eq!(
                         after
                             .as_ref()
-                            .and_then(|a| a.get("env"))
+                            .and_then(|a| a.get("enabledPlugins"))
                             .and_then(|e| e.get(key)),
                         Some(value),
-                        "`{case}`: the env entry `{key}` was there and is gone: {after_text:?}"
+                        "`{case}`: the enabledPlugins entry `{key}` was there and is gone: \
+                         {after_text:?}"
                     );
                 }
             }
         }
     }
     assert!(
-        off == 3 && on == 3 && left_alone == 2,
-        "this table was read as {off} switched off, {on} switched on and {left_alone} left alone, \
-         which is not the split its cases were written to have"
+        switched_off == 3 && switched_on == 3 && left_alone == 2,
+        "this table was read as {switched_off} switched off, {switched_on} switched on and \
+         {left_alone} left alone, which is not the split its cases were written to have"
     );
 }

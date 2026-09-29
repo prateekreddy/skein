@@ -74,11 +74,11 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         } else {
             "0"
         }),
-        // Whether Claude Code in this box may send Anthropic its usage telemetry, which the
-        // launcher turns into `DISABLE_TELEMETRY` in the box's own user settings (SKEIN-1225). In
-        // the environment for the same reason as everything above it. `0` unless the box's repo
-        // switched it on (`repos::box_sends_anthropic_telemetry`).
-        telemetry_q = sh_quote(if crate::repos::box_sends_anthropic_telemetry(name) {
+        // Whether Claude Code's built-in `telemetry` plugin may run in this box, which the launcher
+        // turns into `enabledPlugins["telemetry@builtin"]` in the box's own user settings
+        // (SKEIN-1225). In the environment for the same reason as everything above it. `0` unless
+        // the box's repo switched it on (`repos::box_allows_the_telemetry_plugin`).
+        telemetry_q = sh_quote(if crate::repos::box_allows_the_telemetry_plugin(name) {
             "1"
         } else {
             "0"
@@ -2207,8 +2207,8 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// **A box's launcher is told its repo's telemetry switch, and it is off unless the repo said
-    /// on** (SKEIN-1225).
+    /// **A box's launcher is told its repo's telemetry-plugin switch, and it is off unless the repo
+    /// said on** (SKEIN-1225).
     ///
     /// The launcher is where the switch takes effect, and this variable is the only way it hears
     /// of it. What would make this fail: `session_script` passing a constant, or reading the
@@ -2217,7 +2217,7 @@ mod tests {
     /// settings after a real start and relaunch, is
     /// `tests/fleet_launch/start.rs::start_box_leaves_a_box_that_is_actually_usable`.
     #[test]
-    fn a_box_start_carries_its_repos_telemetry_switch_and_it_is_off_unless_switched_on() {
+    fn a_box_start_carries_its_repos_telemetry_plugin_switch_and_it_is_off_unless_switched_on() {
         let _g = env_lock();
         let home = tempdir();
         let mut env = env_pins();
@@ -2231,13 +2231,14 @@ mod tests {
         let script = session_script("web-main", "skein-agent", "claude");
         assert!(
             script.contains("SKEIN_BOX_TELEMETRY='0'"),
-            "a box of a repo that never switched telemetry on is not told to keep it off: {script}"
+            "a box of a repo that never allowed the telemetry plugin is not told to keep it off: \
+             {script}"
         );
         crate::repos::set_anthropic_telemetry("web", true).unwrap();
         let script = session_script("web-main", "skein-agent", "claude");
         assert!(
             script.contains("SKEIN_BOX_TELEMETRY='1'"),
-            "a repo that switched telemetry on does not tell its box's launcher so: {script}"
+            "a repo that allowed the telemetry plugin does not tell its box's launcher so: {script}"
         );
     }
 

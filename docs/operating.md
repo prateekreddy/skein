@@ -210,17 +210,16 @@ hour instead of Claude Code's five minutes: the kit sets `"subagentPromptCacheTt
 box's own `.claude/settings.local.json` at every start, unless the repo's `.claude/settings.json` or
 that local file already sets the key, so a repo that commits `"5m"` keeps it.
 
-Claude Code in a box sends Anthropic no usage telemetry unless its repo allows it. At every box
-start the launcher writes `DISABLE_TELEMETRY=1` into the `env` of the box's own
+Claude Code's built-in `telemetry` plugin is off in a box unless its repo allows it. At every box
+start the launcher sets `"telemetry@builtin": false` under `enabledPlugins` in the box's own
 `~/.claude/settings.json`, the one settings file every Claude session in the box reads, so Claude
-Code's analytics events stop and its built-in `telemetry` plugin is not loaded. To allow it for a
-repo, set `"anthropic_telemetry": true` on that repo in `repos.json`; its boxes pick it up at their
-next start, when the launcher takes skein's `1` back out. Setting the variable to off has costs,
-because Claude Code also stops evaluating its feature flags: a session started remotely from a
-claude.ai project on a box is refused, and your plugins synced from claude.ai stop updating there.
-Remote Control stays available (`claude doctor` reports it so with the variable set), and
-`SendMessage`/`ListAgents` between boxes are not gated on it. skein's own per-turn
-telemetry is separate and stays in the repo's store.
+Code does not load that plugin and the analytics rows other built-in plugins log through it are
+neither queued nor sent. That is all it turns off. Claude Code's own usage statistics still go to
+Anthropic, and its feature flags still evaluate, so Remote Control, push notifications and your
+plugins synced from claude.ai behave as they would anyway. To allow the plugin for a repo, set
+`"anthropic_telemetry": true` on that repo in `repos.json`; its boxes pick it up at their next
+start, when the launcher takes skein's `false` back out. A value somebody else wrote for that key
+is left alone either way. skein's own per-turn telemetry is separate and stays in the repo's store.
 
 Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
 the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also

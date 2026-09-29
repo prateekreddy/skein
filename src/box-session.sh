@@ -1379,29 +1379,33 @@ except Exception:
 PY
 fi
 
-# Claude Code's usage telemetry to Anthropic, off unless this box's repo turned it on (SKEIN-1225).
+# Claude Code's built-in `telemetry` plugin, off unless this box's repo turned it on (SKEIN-1225).
 #
-# `DISABLE_TELEMETRY=1` stops Claude Code's analytics events and makes its built-in `telemetry`
-# plugin unavailable (its `isAvailable` gate is false while the variable is set, so it is not loaded
-# at all). skein's own per-turn telemetry is unaffected: it is written into the repo's store.
+# The plugin is how other built-in plugins log analytics rows (`$.telemetry.log`, `$.telemetry.mark`)
+# and how those rows are batched to Anthropic's event-logging endpoint. `enabledPlugins` set to false
+# for `telemetry@builtin` stops Claude Code loading its hooks module at all, so nothing is queued or
+# sent through it. It turns off THIS PLUGIN and nothing else: Claude Code's own usage statistics
+# still go to Anthropic, and its feature flags still evaluate. That is the reason for the setting
+# rather than `DISABLE_TELEMETRY`, which also turns feature-flag evaluation off and with it Remote
+# Control's transport flags, push notifications and claude.ai plugin sync (the owner, 2026-09-29).
 #
-# In the box's own USER settings, as `env`, and not anywhere else, because this is the one place
-# every Claude session in the box reads. The kit's `.claude/settings.local.json` is read only by a
-# session whose project is the box's tree, so a `claude` started in a worktree elsewhere would miss
-# it; an export in the `bash -lc` at the end of this file reaches what the tmux server starts but
-# not what skein runs through a crossing (`Place::wrap`), such as a headless `claude --continue
-# --print`, and a crossing does carry `HOME`. A repo that sets the variable in its own project
-# settings still wins, as project settings do over user settings.
+# In the box's own USER settings and not anywhere else, because this is the one settings file every
+# Claude session in the box reads. The kit's `.claude/settings.local.json` is read only by a session
+# whose project is the box's tree, so a `claude` started in a worktree elsewhere would miss it; and
+# what skein runs through a crossing (`Place::wrap`), such as a headless `claude --continue --print`,
+# carries `HOME` and so reads this file too. A repo that names the plugin in its own project settings
+# still wins, as project settings do over user settings.
 #
-# `1` is skein's value. Off, it is added where the key is absent; on, it is removed where it is
-# exactly `1`. Any other value somebody wrote into this box's file stays either way, and so does an
-# unparseable file, which is said rather than rewritten.
+# `false` is skein's value. Off, it is added where the key is absent; on, it is removed where it is
+# exactly `false`. Any other value somebody wrote into this box's file stays either way, and so does
+# an unparseable file, which is said rather than rewritten.
 skein_telemetry="${SKEIN_BOX_TELEMETRY-0}"
 if command -v python3 >/dev/null 2>&1; then
   telemetry_rc=0
   python3 - "$home/.claude/settings.json" "$skein_telemetry" 2>/dev/null <<'PY' || telemetry_rc=$?
 import json, os, sys, tempfile
-p, sent = sys.argv[1], sys.argv[2] in ("1", "on", "yes", "true")
+key = "telemetry@builtin"
+p, allowed = sys.argv[1], sys.argv[2] in ("1", "on", "yes", "true")
 try:
     with open(p) as f:
         data = json.load(f)
@@ -1411,24 +1415,24 @@ except Exception:
     sys.exit(3)
 if not isinstance(data, dict):
     sys.exit(3)
-env = data.get("env")
-if env is None:
-    env = {}
-elif not isinstance(env, dict):
+plugins = data.get("enabledPlugins")
+if plugins is None:
+    plugins = {}
+elif not isinstance(plugins, dict):
     sys.exit(3)
-if sent:
-    if env.get("DISABLE_TELEMETRY") != "1":
+if allowed:
+    if key not in plugins or plugins[key] is not False:
         sys.exit(0)
-    del env["DISABLE_TELEMETRY"]
-    if env:
-        data["env"] = env
+    del plugins[key]
+    if plugins:
+        data["enabledPlugins"] = plugins
     else:
-        data.pop("env", None)
+        data.pop("enabledPlugins", None)
 else:
-    if "DISABLE_TELEMETRY" in env:
+    if key in plugins:
         sys.exit(0)
-    env["DISABLE_TELEMETRY"] = "1"
-    data["env"] = env
+    plugins[key] = False
+    data["enabledPlugins"] = plugins
 d = os.path.dirname(p) or "."
 os.makedirs(d, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=d)
@@ -1446,9 +1450,9 @@ except Exception:
 PY
   if [ "$telemetry_rc" -ne 0 ]; then
     if [ "$skein_telemetry" = "1" ]; then
-      echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude/settings.json could not be read or is not JSON this can change — it is left exactly as it is, so a DISABLE_TELEMETRY in it still stops Claude Code sending Anthropic its usage telemetry, though this repo allows it" >&2
+      echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude/settings.json could not be read or is not JSON this can change — it is left exactly as it is, so if it turns Claude Code's built-in telemetry plugin off, the plugin stays off though this repo allows it" >&2
     else
-      echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude/settings.json could not be read or is not JSON this can change — it is left exactly as it is, so Claude Code in this box may still send Anthropic its usage telemetry" >&2
+      echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude/settings.json could not be read or is not JSON this can change — it is left exactly as it is, so Claude Code's built-in telemetry plugin may still run in this box" >&2
     fi
   fi
   unset telemetry_rc

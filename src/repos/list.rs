@@ -495,7 +495,7 @@ pub fn set_peer_messaging(id: &str, on: bool) -> Result<(), String> {
     })
 }
 
-/// Let Claude Code in this repo's boxes send Anthropic its usage telemetry, or stop it.
+/// Let Claude Code's built-in `telemetry` plugin run in this repo's boxes, or turn it off.
 ///
 /// Its own function for the reason [`set_peer_messaging`] is: it changes what a box does at launch,
 /// and a route that saved it as a side effect of an unrelated field would change that unasked.

@@ -26,13 +26,13 @@ pub fn box_is_on_the_peer_network(name: &str) -> bool {
     repo_for_box(name).map(|r| r.peer_messaging).unwrap_or(true)
 }
 
-/// May Claude Code in this box send Anthropic its usage telemetry — [`Repo::anthropic_telemetry`]
+/// May Claude Code's built-in `telemetry` plugin run in this box — [`Repo::anthropic_telemetry`]
 /// for the repo it belongs to?
 ///
 /// The question `fleet::session_script` asks to decide `SKEIN_BOX_TELEMETRY`, beside
-/// [`box_is_on_the_peer_network`] for the same reason. A box belonging to no registered repo does
-/// not send it, which is the ship default: there is no repo whose switch could have said yes.
-pub fn box_sends_anthropic_telemetry(name: &str) -> bool {
+/// [`box_is_on_the_peer_network`] for the same reason. A box belonging to no registered repo runs
+/// without it, which is the ship default: there is no repo whose switch could have said yes.
+pub fn box_allows_the_telemetry_plugin(name: &str) -> bool {
     repo_for_box(name)
         .map(|r| r.anthropic_telemetry)
         .unwrap_or(false)

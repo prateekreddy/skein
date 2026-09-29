@@ -83,18 +83,20 @@ pub struct Repo {
     /// opposite mount.
     #[serde(default = "crate::config::default_true")]
     pub peer_messaging: bool,
-    /// **May Claude Code in this repo's boxes send Anthropic its usage telemetry?** (SKEIN-1225.)
+    /// **May Claude Code's built-in `telemetry` plugin run in this repo's boxes?** (SKEIN-1225.)
     ///
-    /// **Off unless it is switched on, per repo** (the owner, 2026-09-29). Off, every box of the
-    /// repo runs Claude Code with `DISABLE_TELEMETRY=1`, which stops its analytics events and the
-    /// built-in `telemetry` plugin that batches them to Anthropic. skein's own per-turn telemetry
-    /// is a different thing and stays: it is written into the repo's store and goes nowhere else.
-    /// Absent from the file is off, so a repo registered before the switch existed gets the new
-    /// default at its boxes' next start, which is what was asked for.
+    /// **Off unless it is switched on, per repo** (the owner, 2026-09-29: "Plugin only"). Off,
+    /// every box of the repo has `enabledPlugins["telemetry@builtin"] = false` in its user
+    /// settings, so Claude Code does not load the plugin that batches other built-in plugins'
+    /// analytics rows to Anthropic. That is all it turns off: Claude Code's own usage statistics
+    /// still go to Anthropic and its feature flags still evaluate, which is why this is not
+    /// `DISABLE_TELEMETRY`. skein's own per-turn telemetry is a different thing again: it is
+    /// written into the repo's store and goes nowhere else. Absent from the file is off, so a repo
+    /// registered before the switch existed gets the new default at its boxes' next start.
     ///
     /// **The enforcement point is the launcher**, the way [`Repo::peer_messaging`]'s is:
     /// [`crate::fleet::session_script`] carries it as `SKEIN_BOX_TELEMETRY`, and `box-session.sh`
-    /// writes the variable into the box's own user settings, the one file every Claude session in
+    /// writes the setting into the box's own user settings, the one file every Claude session in
     /// the box reads whatever directory it starts in. Like that switch, flipping it reaches a box
     /// at its next start and not before.
     #[serde(default)]

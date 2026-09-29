@@ -115,8 +115,8 @@ pub fn add_repo(source: &str, id: Option<&str>, store: Option<&str>) -> Result<R
         // `SendMessage` would read as broken, and the fix — see the field — is a mount, so it
         // would also need a restart to take effect.
         peer_messaging: true,
-        // **Off**, as its serde default is: a new repo's boxes send Anthropic no usage telemetry
-        // until somebody turns it on for that repo (SKEIN-1225).
+        // **Off**, as its serde default is: a new repo's boxes run without Claude Code's built-in
+        // telemetry plugin until somebody turns it on for that repo (SKEIN-1225).
         anthropic_telemetry: false,
         sync_gateway_url: String::new(),
     };

@@ -216,15 +216,14 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         !first_start.is_empty(),
         "the launcher wrote no start id on the first start"
     );
-    // ---- and its Claude Code sends Anthropic no usage telemetry (SKEIN-1225) ----
-    // The repo registered above never switched it on, which is every repo's default, so the box's
-    // own user settings carry `DISABLE_TELEMETRY`. What fails it: `session_script` passing `1`
-    // for a repo that never said so, or the launcher's telemetry block not writing the key.
+    // ---- and its Claude Code runs without the built-in telemetry plugin (SKEIN-1225) ----
+    // The repo registered above never allowed it, which is every repo's default, so the box's own
+    // user settings turn `telemetry@builtin` off. What fails it: `session_script` passing `1` for
+    // a repo that never said so, or the launcher's telemetry-plugin block not writing the key.
     assert_eq!(
-        telemetry_off_in(name).as_deref(),
-        Some("1"),
-        "a new box's Claude Code would send Anthropic its usage telemetry although its repo never \
-         allowed it"
+        telemetry_plugin_in(name),
+        Some(serde_json::Value::Bool(false)),
+        "a new box's Claude Code would run its telemetry plugin although its repo never allowed it"
     );
 
     // ---- the sandbox cycles: the tree survives, the session does not ----
@@ -341,11 +340,11 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // A setting that arrived after this box's last provisioning, as SKEIN-1218's default did for
     // every box on the fleet: gone from the box's own file, so only a kit run can bring it back.
     fs::remove_file(&local_settings).expect("remove the box's settings.local.json");
-    // And the telemetry default taken out of the box's user settings, as it is absent from every
-    // box started before SKEIN-1225: only the relaunch's own launcher run can put it back.
-    set_telemetry_off_in(name, None);
+    // And the telemetry-plugin default taken out of the box's user settings, as it is absent from
+    // every box started before SKEIN-1225: only the relaunch's own launcher run can put it back.
+    forget_telemetry_plugin_in(name);
     assert_eq!(
-        telemetry_off_in(name),
+        telemetry_plugin_in(name),
         None,
         "the relaunch half below would be about nothing"
     );
@@ -388,21 +387,22 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         before, after,
         "the anchor is a new process, so the placement must name it — a stale pid addresses nothing"
     );
-    // A relaunched box is off again (SKEIN-1225). What fails it: the launcher's telemetry block
-    // running only for a first start, or `ensure_box_session` launching through anything but the
-    // launcher.
+    // A relaunched box has the plugin off again (SKEIN-1225). What fails it: the launcher's
+    // telemetry-plugin block running only for a first start, or `ensure_box_session` launching
+    // through anything but the launcher.
     assert_eq!(
-        telemetry_off_in(name).as_deref(),
-        Some("1"),
-        "a box relaunched by ensure_box_session would send Anthropic its usage telemetry although \
+        telemetry_plugin_in(name),
+        Some(serde_json::Value::Bool(false)),
+        "a box relaunched by ensure_box_session would run Claude Code's telemetry plugin although \
          its repo never allowed it"
     );
 
-    // ---- the repo's switch turns it back on, at the box's next start (SKEIN-1225) ----
+    // ---- the repo's switch allows the plugin again, at the box's next start (SKEIN-1225) ----
     // Through the setter a person's choice goes through, then a real relaunch. What fails it: the
     // setter not saving the field, `session_script` not reading it, or the launcher not taking
     // skein's value back out.
-    skein::repos::set_anthropic_telemetry("demo", true).expect("switch telemetry on for the repo");
+    skein::repos::set_anthropic_telemetry("demo", true)
+        .expect("allow the telemetry plugin for the repo");
     place
         .exec(
             &format!("tmux -S {} kill-server", box_sock(name)),
@@ -411,12 +411,12 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         .expect("the kill must reach the box's tmux server");
     anchor_gone(after);
     forget_fleet_liveness();
-    ensure_box_session(name).expect("restart the session with telemetry switched on");
+    ensure_box_session(name).expect("restart the session with the telemetry plugin allowed");
     assert_eq!(
-        telemetry_off_in(name),
+        telemetry_plugin_in(name),
         None,
-        "the repo switched telemetry on and the relaunched box still carries skein's \
-         DISABLE_TELEMETRY"
+        "the repo allowed the telemetry plugin and the relaunched box still carries skein's \
+         telemetry@builtin: false"
     );
 
     // ---- one login, seeded down, and never written back up ----
@@ -691,41 +691,33 @@ fn start_id_of(name: &str) -> String {
 }
 
 /// The box's own user settings, `<root>/home/.claude/settings.json`: the file every Claude session
-/// in the box reads, and where the launcher writes the telemetry default (SKEIN-1225).
+/// in the box reads, and where the launcher writes the telemetry-plugin default (SKEIN-1225).
 fn box_user_settings(name: &str) -> PathBuf {
     PathBuf::from(format!("{}/home/.claude/settings.json", box_root(name)))
 }
 
-/// `env.DISABLE_TELEMETRY` in the box's user settings, or `None` where it is not set.
-fn telemetry_off_in(name: &str) -> Option<String> {
+/// `enabledPlugins["telemetry@builtin"]` in the box's user settings, or `None` where it is not set.
+fn telemetry_plugin_in(name: &str) -> Option<serde_json::Value> {
     let text = fs::read_to_string(box_user_settings(name)).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
     parsed
-        .get("env")?
-        .get("DISABLE_TELEMETRY")?
-        .as_str()
-        .map(str::to_string)
+        .get("enabledPlugins")?
+        .get("telemetry@builtin")
+        .cloned()
 }
 
-/// Set or remove `env.DISABLE_TELEMETRY` in the box's user settings, keeping everything else.
-fn set_telemetry_off_in(name: &str, value: Option<&str>) {
+/// Remove `enabledPlugins["telemetry@builtin"]` from the box's user settings, keeping the rest.
+fn forget_telemetry_plugin_in(name: &str) {
     let path = box_user_settings(name);
     let mut parsed: serde_json::Value = fs::read_to_string(&path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let env = parsed
-        .as_object_mut()
-        .expect("the box's user settings are an object")
-        .entry("env")
-        .or_insert_with(|| serde_json::json!({}));
-    match value {
-        Some(v) => env["DISABLE_TELEMETRY"] = serde_json::json!(v),
-        None => {
-            env.as_object_mut()
-                .expect("env is an object")
-                .remove("DISABLE_TELEMETRY");
-        }
+    if let Some(plugins) = parsed
+        .get_mut("enabledPlugins")
+        .and_then(|p| p.as_object_mut())
+    {
+        plugins.remove("telemetry@builtin");
     }
     fs::write(&path, serde_json::to_string_pretty(&parsed).unwrap()).unwrap();
 }
