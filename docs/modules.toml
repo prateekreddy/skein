@@ -565,6 +565,12 @@ depends_on = ["mailbox", "repos", "sbx", "util"]
 # of registering a repo whose boxes silently come up with no store. A copy of the rule in `repos`
 # would have avoided the edge and reintroduced the defect, which was two rules drifting. `fleet` is
 # already in the eighteen-module component with `repos`, so the knot does not grow.
+#
+# `secret` for the type alone, SKEIN-1231. Adding a repo now carries the token the person chose for
+# it — pasted, or shared from another repo — into the clone that adds it, and that token has to be a
+# `Secret` from the moment it is one: it reaches git only through `Command::env`, the sanctioned
+# channel `tools/secret-check.py` reads for. Carried as a `&str` it would be a credential with a
+# `Debug`. `secret` is a leaf that reaches nothing, so no cycle forms.
 depends_on = [
   "config",
   "fleet",
@@ -574,6 +580,7 @@ depends_on = [
   "registry",
   "runtime",
   "sbx",
+  "secret",
   "tracking",
   "util",
 ]

@@ -54,7 +54,7 @@ before it is saved (2026-09-29, SKEIN-1231).
 
 **Enforced at.**
 
-- `src/gitgate/credentials.rs:540` — `credential_for_repo`, the one per-repository resolver. The
+- `src/gitgate/credentials.rs:760` — `credential_for_repo`, the one per-repository resolver. The
   read token is reached only for `Need::Read`.
 - `src/prq/credentials.rs:57` — `token_for`, which every repository-scoped call asks. Its refusal
   names the repository and what to add, and says when the read token was passed over.
