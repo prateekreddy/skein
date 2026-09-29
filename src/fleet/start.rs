@@ -40,7 +40,8 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
          SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
-         SKEIN_BOX_PEERS={peers_q} SKEIN_FLEET_NAME={fleetname_q} \
+         SKEIN_BOX_PEERS={peers_q} SKEIN_BOX_TELEMETRY={telemetry_q} \
+         SKEIN_FLEET_NAME={fleetname_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // Where the agent in this box keeps its model scratch, as a path relative to the box's own
@@ -69,6 +70,15 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // config says now. A box belonging to no registered repo is on, which is the ship default
         // (`repos::box_is_on_the_peer_network`).
         peers_q = sh_quote(if crate::repos::box_is_on_the_peer_network(name) {
+            "1"
+        } else {
+            "0"
+        }),
+        // Whether Claude Code's built-in `telemetry` plugin may run in this box, which the launcher
+        // turns into `enabledPlugins["telemetry@builtin"]` in the box's own user settings
+        // (SKEIN-1225). In the environment for the same reason as everything above it. `0` unless
+        // the box's repo switched it on (`repos::box_allows_the_telemetry_plugin`).
+        telemetry_q = sh_quote(if crate::repos::box_allows_the_telemetry_plugin(name) {
             "1"
         } else {
             "0"
@@ -2195,6 +2205,41 @@ mod tests {
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A box's launcher is told its repo's telemetry-plugin switch, and it is off unless the repo
+    /// said on** (SKEIN-1225).
+    ///
+    /// The launcher is where the switch takes effect, and this variable is the only way it hears
+    /// of it. What would make this fail: `session_script` passing a constant, or reading the
+    /// switch the wrong way round — the first assertion catches `1` for a repo that never said so,
+    /// the second a switch that never reaches the launcher. The end-to-end half, a real box's user
+    /// settings after a real start and relaunch, is
+    /// `tests/fleet_launch/start.rs::start_box_leaves_a_box_that_is_actually_usable`.
+    #[test]
+    fn a_box_start_carries_its_repos_telemetry_plugin_switch_and_it_is_off_unless_switched_on() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "web".into(),
+            ..Default::default()
+        }])
+        .unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains("SKEIN_BOX_TELEMETRY='0'"),
+            "a box of a repo that never allowed the telemetry plugin is not told to keep it off: \
+             {script}"
+        );
+        crate::repos::set_anthropic_telemetry("web", true).unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains("SKEIN_BOX_TELEMETRY='1'"),
+            "a repo that allowed the telemetry plugin does not tell its box's launcher so: {script}"
+        );
     }
 
     /// **The third surface of the same wall points at the same way through** (SKEIN-707).

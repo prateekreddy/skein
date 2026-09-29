@@ -344,6 +344,8 @@ mod tests {
                 "GH_TOKEN",
                 "OPENAI_API_KEY",
                 "SKEIN_BOX_STORE",
+                // SKEIN-1225: the telemetry switch, consumed by the launcher and held by no box.
+                "SKEIN_BOX_TELEMETRY",
                 "SKEIN_FLEET_LIMITS",
                 "SKEIN_FLEET_MOUNTS",
                 "SKEIN_MODEL_SCRATCH",

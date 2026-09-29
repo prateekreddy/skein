@@ -26,6 +26,18 @@ pub fn box_is_on_the_peer_network(name: &str) -> bool {
     repo_for_box(name).map(|r| r.peer_messaging).unwrap_or(true)
 }
 
+/// May Claude Code's built-in `telemetry` plugin run in this box — [`Repo::anthropic_telemetry`]
+/// for the repo it belongs to?
+///
+/// The question `fleet::session_script` asks to decide `SKEIN_BOX_TELEMETRY`, beside
+/// [`box_is_on_the_peer_network`] for the same reason. A box belonging to no registered repo runs
+/// without it, which is the ship default: there is no repo whose switch could have said yes.
+pub fn box_allows_the_telemetry_plugin(name: &str) -> bool {
+    repo_for_box(name)
+        .map(|r| r.anthropic_telemetry)
+        .unwrap_or(false)
+}
+
 /// The branch skein recorded for a box in its repo's launch spec (`<store>/skein/launch/<name>.json`).
 /// Host-readable and authoritative for a clone-mode box (whose private clone isn't on the host), so
 /// the board can show the box's real branch — including a slashed one the name slug would have flattened.
