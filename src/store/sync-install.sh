@@ -147,6 +147,17 @@ stamp="$state/sync-$slug.done"
 #
 # Per box rather than per project, because `plugin install` is user-scoped — one box, one answer,
 # whatever repo it is working in.
+#
+# **And kept beside the plugin, in `~/.claude`, because a marker must live where the thing it
+# records lives** (SKEIN-1233). It used to be `~/.local/state/skein/sync-plugin.done`, and the
+# launcher seeds a new box's `~/.local/state` by copying the sandbox's (`seed_paths` in
+# `src/box-session.sh`), which is the privileged box's own home. So every box created after that
+# box once installed the plugin arrived believing it had done so too, while its own `~/.claude`,
+# where the plugin actually lives, had none: one box in eighteen had the plugin. That old marker is
+# no longer read, because nothing can tell a copy of another box's from this box's own — so a box
+# holding only the old one is asked afresh, and one that never had the plugin gets it. What this box
+# has is read from Claude Code's own record of it, `installed_plugins.json`, first: a file test, not
+# a subprocess, and not a claim anything else can make on the box's behalf.
 
 # Which version this box is serving, read from the marketplace checkout the plugin loads from.
 plugin_version() {
@@ -181,12 +192,26 @@ refresh_plugin() {
 }
 
 plugin="no"
-plugin_marker="$state/sync-plugin.done"
-if [ -e "$plugin_marker" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
-  # Already handled once, so the presence question is a file test rather than a subprocess. The
-  # version question is not answerable from a file test, and is the one that went stale.
+plugin_marker="$HOME/.claude/skein-sync-plugin.done"
+plugin_installed() {
+  grep -q '"sync@sync"' "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null
+}
+mark_plugin() {
+  mkdir -p "$HOME/.claude" 2>/dev/null && : > "$plugin_marker" 2>/dev/null
+  return 0
+}
+if [ -z "${SKEIN_SYNC_FORCE:-}" ] && plugin_installed; then
+  # Here, so the presence question is a file test rather than a subprocess. The version question
+  # is not answerable from a file test, and is the one that went stale. Marked as well, because a
+  # box that had the plugin before the marker moved has no marker yet, and without one its own
+  # later removal would read as "never had it" and be undone at the next start.
   plugin="yes"
+  mark_plugin
   command -v claude >/dev/null 2>&1 && refresh_plugin
+elif [ -z "${SKEIN_SYNC_FORCE:-}" ] && [ -e "$plugin_marker" ]; then
+  # Installed here once, and gone now: this box removed it, and that decision is its own. Not
+  # "yes": the tools are not here, and what follows must not be told they are.
+  :
 elif command -v claude >/dev/null 2>&1; then
   # The plugin carries three things skein has no copy of and cannot write: the lease MONITOR, which
   # keeps a claim alive as a process rather than as an obligation the model must remember; the
@@ -218,7 +243,7 @@ elif command -v claude >/dev/null 2>&1; then
   fi
   # Only on success, so a box that failed on a network blip tries again next start rather than
   # recording a plugin it does not have.
-  [ "$plugin" = "yes" ] && mkdir -p "$state" 2>/dev/null && : > "$plugin_marker" 2>/dev/null
+  [ "$plugin" = "yes" ] && mark_plugin
 fi
 
 if [ -e "$stamp" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
