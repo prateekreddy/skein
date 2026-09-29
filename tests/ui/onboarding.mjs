@@ -778,8 +778,8 @@ await check("provisioning ran in the box's home, not in the home of whoever ran 
 //
 // The same subject as the check above, from the other end. That one asks whether provisioning wrote
 // into the box's home; this asks where that home was seeded FROM, which is a different question with
-// a different failure. `src/box-session.sh` copies `$HOME/.claude` and five siblings into every box
-// it starts, and `$HOME` in a suite's server is whatever the harness put there. Unpinned it was the
+// a different failure. `src/box-session.sh` copied `$HOME/.claude` and five siblings into every box
+// it started, and `$HOME` in a suite's server is whatever the harness put there. Unpinned it was the
 // home of whoever ran the suite: 477.9 MB carrying that person's conversations and
 // `.credentials.json`, measured by running this check against the unpinned harness — copied per
 // box, out of a directory Claude Code renames files inside, under a `cp -a … || exit 1` that kills
@@ -796,10 +796,15 @@ await check("provisioning ran in the box's home, not in the home of whoever ran 
 // six-lane run at 0.7 MB with a `.claude.json` the box had made itself, while the same check had
 // passed at 0.0 MB minutes earlier. What is asserted instead is what only a seed can put there:
 //
-//   * the sentinel, which exists in no home but the one `harness/server.mjs` builds. Positive
-//     evidence, and the only clause here that fails if the box never starts at all.
-//   * `.credentials.json`, which arrives only by being copied from a home that has one — a box
-//     does not log itself in.
+//   * the sentinel in the box's `.profile`, which exists in no home but the one
+//     `harness/server.mjs` builds. Positive evidence, and the only clause here that fails if the
+//     box never starts at all.
+//   * the same sentinel NOT in the box's `~/.claude` (SKEIN-1235). The launcher no longer copies
+//     that directory at all: a new box gets the login and skein's defaults, and nothing else of
+//     the home it was started from, so a copy of the fixture's `.claude` means the whole-directory
+//     seed is back — and with it, from a real home, a privileged box's history and memory.
+//   * `.credentials.json`, which arrives only from a home that has a login — a box does not log
+//     itself in, and the fixture's home has none.
 //   * an EMPTY `projects/`. It looks like the obvious tell and is subtler than it looks: the
 //     directory exists in both arms, because `box-session.sh` binds the box's own conversation
 //     record over `$HOME/.claude/projects` and bwrap makes the mountpoint. A bind changes what is
@@ -807,8 +812,10 @@ await check("provisioning ran in the box's home, not in the home of whoever ran 
 //     and this directory keeps whatever the seed put in it — nothing, or the runner's entire
 //     conversation history. It is the size assertion, expressed as the thing the size was standing
 //     in for.
-await check("the box was seeded from this suite's fixture home, not from the runner's", () => {
-  const seeded = path.join(fx.root, "fleet", "my-project-main", "home", ".claude");
+await check("the box was seeded from this suite's fixture home, not from the runner's, and got none of its ~/.claude", () => {
+  const boxHome = path.join(fx.root, "fleet", "my-project-main", "home");
+  const seeded = path.join(boxHome, ".claude");
+  const read = at => { try { return fs.readFileSync(at, "utf8"); } catch { return ""; } };
   const bytes = dir => fs.readdirSync(dir, { withFileTypes: true }).reduce((n, e) => {
     const at = path.join(dir, e.name);
     if (e.isDirectory()) return n + bytes(at);
@@ -818,15 +825,21 @@ await check("the box was seeded from this suite's fixture home, not from the run
   const entries = dir => { try { return fs.readdirSync(dir); } catch { return []; } };
   const there = fs.existsSync(seeded);
   const found = {
-    theFixturesSentinel: there && fs.existsSync(path.join(seeded, FIXTURE_HOME_SENTINEL)),
+    theFixturesProfile: read(path.join(boxHome, ".profile")).includes(FIXTURE_HOME_SENTINEL),
+    theFixturesClaudeHome: there && fs.existsSync(path.join(seeded, FIXTURE_HOME_SENTINEL)),
     theRunnersCredentials: there && fs.existsSync(path.join(seeded, ".credentials.json")),
     theRunnersConversations: entries(path.join(seeded, "projects")).length > 0,
   };
-  const want = { theFixturesSentinel: true, theRunnersCredentials: false, theRunnersConversations: false };
+  const want = {
+    theFixturesProfile: true,
+    theFixturesClaudeHome: false,
+    theRunnersCredentials: false,
+    theRunnersConversations: false,
+  };
   for (const key of Object.keys(want)) {
     if (found[key] !== want[key]) {
       const size = there ? `${(bytes(seeded) / 1e6).toFixed(1)} MB` : "(the box has no ~/.claude at all)";
-      throw new Error(`the box's seeded ~/.claude is ${size}: ${JSON.stringify(found)}`);
+      throw new Error(`the box's ~/.claude is ${size}: ${JSON.stringify(found)}`);
     }
   }
 });

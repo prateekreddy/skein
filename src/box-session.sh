@@ -869,8 +869,37 @@ printf '%s\n' "$start_id" >"$tmp/skein-start-id" || exit 1
 # left: bwrap makes the upper layer as a tmpfs INSIDE the namespace, which makes it private to the
 # box by construction and gives it exactly the box's lifetime.)
 #
-# Seeded into the box on first start and diverging from there: credentials, per-box conversation
-# history, and the MCP registration that points each box at its own repo's work-tracking gateway.
+# Seeded into the box on first start and diverging from there: the Codex home and the person's shell
+# and git setup. Claude Code's two are not on the list, and the next two paragraphs say what reaches
+# a new box from them instead.
+#
+# **`.claude` and `.claude.json` used to be copied whole, and they were removed on purpose**
+# (SKEIN-1235; the owner, 2026-09-29: "Not just login but whatever default stuff added to boxes").
+# The sandbox's home is the privileged box's own, so the copy gave every new box that box's state:
+# its conversation history and sessions, the auto-memory under `projects/<tree-slug>/` for every tree
+# path it had worked in, its plugin installs and skein's markers about them, its own settings and
+# personal instructions, and in `.claude.json` its per-project records, device ids and tips. A new
+# box that reused an old tree path started with that path's memory. It also started believing its
+# sync-plugin question was settled, because the marker `sync-install.sh` keeps beside the plugin
+# arrived by copy (SKEIN-1233, one level up). So a new box's Claude Code home now holds what skein
+# gives every box and nothing else:
+#
+#   * the login, `.claude/.credentials.json`: the login keys only, by `merge_login` in the credential
+#     loop below, which creates the file in a box that has none. The file's `mcpOAuth` grants are per
+#     repo and stay where they are, as that loop has always left them.
+#   * the account that login belongs to, `oauthAccount` in `.claude.json`, just after the seed loop.
+#     Claude Code writes it at the same `/login` that writes the credential, so it is part of the
+#     login rather than the privileged box's state. The only key copied from that file.
+#   * `hasCompletedOnboarding` and the tree's workspace trust in `.claude.json`, `crossSessionInbound`
+#     and the telemetry-plugin default in `.claude/settings.json` — all written below, every start.
+#   * the tracker's `SYNC_MCP_URL` in `.claude/settings.json` (`sync-install.sh`), skein's block in
+#     `.claude/CLAUDE.md` (the kit's `agent-guide.sh`), and the memory link under `projects/` into the
+#     repo's store (`sandbox-bootstrap.sh`) — each written inside the box, by the kit as it starts or
+#     by skein's SessionStart hook.
+#
+# The status line, the hooks and the repo's skills are not in the home at all: they are in the
+# tree's `.claude`, from the kit and the plugin. Nothing else under the sandbox's `~/.claude` is
+# skein's to hand out. Existing boxes keep everything they have.
 #
 # **`.local/state` used to be seeded too, and it was removed on purpose** (SKEIN-1234; the owner
 # chose "stop copying it", 2026-09-29). It was added so that the boxes SKEIN-963 moved off a shared
@@ -883,7 +912,7 @@ printf '%s\n' "$start_id" >"$tmp/skein-start-id" || exit 1
 # at that stamp before writing its gateway URL or its CLAUDE.md block. SKEIN-1233 was the same leak
 # through the plugin marker. So a new box's `~/.local/state` now starts empty and holds only what
 # that box writes. Existing boxes keep what they have.
-seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
+seed_paths=(".codex" ".gitconfig" ".bashrc" ".profile")
 # Bound back through, genuinely shared. These are package caches no box needs its own copy of.
 #
 # **`.local` is no longer one of them, and that is SKEIN-963.** It carries the agent CLIs and about
@@ -960,6 +989,41 @@ for rel in "${seed_paths[@]}"; do
   mkdir -p "$(dirname "$mine")" || exit 1
   cp -a "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
 done
+
+# A new box's Claude Code home starts empty and private, rather than as the sandbox's (SKEIN-1235,
+# beside `seed_paths`). The credential loop below fills in the login.
+[ -e "$home/.claude" ] || { mkdir -p "$home/.claude" && chmod 700 "$home/.claude"; } || exit 1
+
+# ...and a new box's `~/.claude.json` starts with the one key of the sandbox's that belongs to the
+# login: `oauthAccount`, the account the credential was issued to. First start only, like the seed
+# loop: a box that has the file owns it. Everything else in the sandbox's file is the privileged
+# box's: its projects, its device and user ids, its tips and caches. Nothing to copy, or no python3
+# to copy it with, and the box starts with no file, which Claude Code creates for itself.
+if [ ! -e "$home/.claude.json" ] && [ -s "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOME/.claude.json" "$home/.claude.json" 2>/dev/null <<'PY' || true
+import json, os, sys, tempfile
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    with open(src) as f:
+        account = json.load(f).get("oauthAccount")
+except Exception:
+    sys.exit(0)
+if not isinstance(account, dict) or not account:
+    sys.exit(0)
+# Through a temporary file and a rename, as the onboarding and trust blocks below write this same
+# file. `mkstemp` makes it readable by its owner only, which is how Claude Code keeps it too.
+handle, temp = tempfile.mkstemp(dir=os.path.dirname(dst) or ".")
+try:
+    with os.fdopen(handle, "w") as out:
+        json.dump({"oauthAccount": account}, out)
+    os.replace(temp, dst)
+except Exception:
+    try:
+        os.unlink(temp)
+    except OSError:
+        pass
+PY
+fi
 
 # Credentials seed downward like everything else, but they also flow BACK — the only state here that
 # does. Seeding alone is a one-way copy on first start, which answers "log in once" for a box that
