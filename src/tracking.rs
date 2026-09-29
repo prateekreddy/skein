@@ -2174,8 +2174,9 @@ mod tests {
             "a stamped box must still get the plugin: {calls}"
         );
         assert!(
-            state.join("sync-plugin.done").is_file(),
-            "and record it, so the next start is a file test rather than a subprocess"
+            boxhome.join(".claude/skein-sync-plugin.done").is_file(),
+            "and record it beside the plugin, so the next start is a file test rather than a \
+             subprocess"
         );
         // Everything the stamp protects is still untouched: the gate did its job for the things it
         // was guarding, and only the plugin came through ahead of it.
@@ -2201,6 +2202,127 @@ mod tests {
                 .unwrap_or_default()
                 .contains("plugin install"),
             "installed once, then the box owns it — removing it must stay removed"
+        );
+    }
+
+    /// A box laid out for the plugin tests: a store, a project, and a `claude` on PATH that keeps
+    /// Claude Code's own record of installed plugins the way the real one does, so the script's
+    /// file test and its `plugin list` both see what the fake installed. Returns the store, the
+    /// project, the fake's bin dir, the log of its calls, and the box's home.
+    fn plugin_box(home: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("CLAUDE.md"), "# proj\n").unwrap();
+        let bin = home.join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("claude.log");
+        fs::write(
+            bin.join("claude"),
+            format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$*\" >> {log}\n\
+                 rec=\"$HOME/.claude/plugins/installed_plugins.json\"\n\
+                 case \"$*\" in\n\
+                 \"plugin install sync@sync\")\n\
+                 mkdir -p \"$HOME/.claude/plugins\"\n\
+                 printf '{{\"version\":2,\"plugins\":{{\"sync@sync\":[]}}}}' > \"$rec\" ;;\n\
+                 \"plugin list\") grep -q '\"sync@sync\"' \"$rec\" 2>/dev/null && echo '  sync@sync' ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        let boxhome = home.join("boxhome");
+        fs::create_dir_all(&boxhome).unwrap();
+        (store, project, bin, log, boxhome)
+    }
+
+    fn plugin_box_start(store: &Path, project: &Path, bin: &Path, boxhome: &Path) {
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", boxhome)
+            .env("WORKSPACE_DIR", project)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("SYNC_GATEWAY_URL", "https://gw.test/")
+            .env_remove("SKEIN_SYNC_FORCE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// SKEIN-1233. A new box's `~/.local/state` is seeded by copying the sandbox's, which is the
+    /// privileged box's own home, so it arrives carrying that box's `sync-plugin.done`. The plugin
+    /// itself lives in the box's own `~/.claude`, which has none. Believing the copied marker left
+    /// seventeen boxes of eighteen without the plugin; the box must decide from its own `~/.claude`.
+    #[test]
+    fn a_box_seeded_with_another_boxs_plugin_marker_still_gets_the_plugin() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let (store, project, bin, log, boxhome) = plugin_box(&home);
+        // What the seed hands a new box: the privileged box's marker, and no plugin of its own.
+        let seeded = boxhome.join(".local/state/skein");
+        fs::create_dir_all(&seeded).unwrap();
+        fs::write(seeded.join("sync-plugin.done"), "").unwrap();
+        assert!(!boxhome
+            .join(".claude/plugins/installed_plugins.json")
+            .exists());
+
+        plugin_box_start(&store, &project, &bin, &boxhome);
+
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains("plugin install sync@sync"),
+            "a marker copied from another box's home decided this box's plugin: {calls}"
+        );
+        assert!(
+            fs::read_to_string(boxhome.join(".claude/plugins/installed_plugins.json"))
+                .unwrap()
+                .contains("\"sync@sync\""),
+            "the box ends up with the plugin in its own ~/.claude"
+        );
+    }
+
+    /// The owner's rule, kept across the marker's move: a box that removed the plugin itself is
+    /// not given it back. Started from a box that had the plugin BEFORE the marker moved — so it
+    /// has the plugin and no new marker — because that is the case the move could break: its first
+    /// start after the change must record the plugin, or its later removal reads as "never had it".
+    #[test]
+    fn a_box_that_removed_the_plugin_itself_does_not_get_it_back() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let (store, project, bin, log, boxhome) = plugin_box(&home);
+        let record = boxhome.join(".claude/plugins/installed_plugins.json");
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        fs::write(&record, r#"{"version":2,"plugins":{"sync@sync":[]}}"#).unwrap();
+
+        plugin_box_start(&store, &project, &bin, &boxhome);
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !calls.contains("plugin install"),
+            "a box that has the plugin is not installed over: {calls}"
+        );
+
+        // The box removes it, as `claude plugin uninstall` would.
+        fs::write(&record, r#"{"version":2,"plugins":{}}"#).unwrap();
+        fs::write(&log, "").unwrap();
+        plugin_box_start(&store, &project, &bin, &boxhome);
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !calls.contains("plugin install") && !calls.contains("marketplace add"),
+            "a box that removed the plugin itself got it back at its next start: {calls}"
         );
     }
 
