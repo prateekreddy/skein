@@ -153,6 +153,16 @@ pub(super) struct AddRepoReq {
     /// bug being fixed here.
     #[serde(default)]
     store: String,
+    /// A write token pasted into the add dialog, which the clone uses and which is stored only once
+    /// that clone has worked (SKEIN-1231). Never echoed: no response or log carries it.
+    #[serde(default)]
+    token: String,
+    /// Or: the id of a stored credential to share with this repo as well — "use the token another
+    /// repo has". Checked for push access to this repo before the clone uses it, and saved as
+    /// coverage only after the clone works (SKEIN-1231). Wins over `token` when both are sent: the
+    /// page sends one, and a share is the choice that states its cost before it is made.
+    #[serde(default)]
+    share: String,
 }
 
 /// Register a repo: clone its remote, provision its store + kit, record it. A path is a 400, from
@@ -187,10 +197,32 @@ pub(super) async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
         )
             .into_response();
     }
+    // A token for a remote that is not on GitHub has nothing to be filed under. The repo is added
+    // without it and the page is told, as the dialog's hint promises — the person has already been
+    // warned that such a repo cannot push, and pressed Add anyway.
+    let source = r.source.trim().to_string();
+    let token = r.token.trim().to_string();
+    let share = r.share.trim().to_string();
+    let chose = !token.is_empty() || !share.is_empty();
+    let token_note = match chose && skein::gitgate::slug_from_url(&source).is_none() {
+        true => "no token was saved for it: this is not a GitHub repository, and skein files a \
+                 write token under the GitHub repository it covers"
+            .to_string(),
+        false => String::new(),
+    };
+    let (token, share) = match token_note.is_empty() {
+        true => (token, share),
+        false => (String::new(), String::new()),
+    };
     let res = tokio::task::spawn_blocking(move || {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
         // `None`, always: the only way past the refusal above is not to have named a store.
-        skein::repos::add_repo(r.source.trim(), id.as_deref(), None)
+        let chosen = match (share.is_empty(), token.is_empty()) {
+            (false, _) => skein::repos::AddToken::Share(&share),
+            (true, false) => skein::repos::AddToken::Paste(&token),
+            (true, true) => skein::repos::AddToken::None,
+        };
+        skein::repos::add_repo_with_token(&source, id.as_deref(), None, chosen)
     })
     .await;
     match res {
@@ -201,8 +233,10 @@ pub(super) async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
             // the browser to parse out of what was typed — the host and the page agreeing on one
             // slug is what lets a write token offered in the dialog be stored against the right repo.
             let slug = skein::gitgate::repo_slug(&repo).unwrap_or_default();
-            Json(serde_json::json!({ "repo": repo, "warning": warning, "slug": slug }))
-                .into_response()
+            Json(serde_json::json!({
+                "repo": repo, "warning": warning, "slug": slug, "token_note": token_note,
+            }))
+            .into_response()
         }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),

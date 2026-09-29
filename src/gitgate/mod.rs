@@ -19,20 +19,24 @@
 //! * **write** — a GitHub App installation token scoped to **one repository**, valid an hour,
 //!   minted by the host and dropped into the box's own host-mounted state directory. Or, for
 //!   someone who would rather not install an App across their account, a fine-grained PAT they
-//!   minted themselves — stored per repository, and **only** per repository.
+//!   minted themselves — stored per repository, and shared between repositories only when the
+//!   person chooses to, having been told what that costs (SKEIN-1231).
 //!
 //! So no write-capable credential sits in a box's environment at all, and the App's private key
 //! never leaves the host.
 //!
-//! **Why a stored token may cover exactly one repo.** Because the credential helper cannot contain
-//! anything. It runs *inside* the box, as the same uid as the agent, so whatever it can read the
-//! agent can read — the token file, its environment, its argv. It picks which credential to hand
-//! over; it cannot stop anyone taking the other one. A token covering three repositories is
-//! therefore write access to three repositories for every box that receives it, however carefully
-//! the helper offers it for one. One repo per token means the credential a box holds is already
-//! exactly as narrow as its rights, so nothing has to be trusted to stay in its lane. (The other
-//! way to make a broad credential safe is for it never to enter the box — a host-side git proxy —
-//! which is a different design and not this one.)
+//! **Why a stored token covers one repo unless its owner shares it.** Because the credential helper
+//! cannot contain anything. It runs *inside* the box, as the same uid as the agent, so whatever it
+//! can read the agent can read — the token file, its environment, its argv. It picks which
+//! credential to hand over; it cannot stop anyone taking the other one. A token covering three
+//! repositories is therefore write access to three repositories for every box that receives it,
+//! however carefully the helper offers it for one. One repo per token means the credential a box
+//! holds is already exactly as narrow as its rights, so nothing has to be trusted to stay in its
+//! lane — and that is the default. Since 2026-09-29 the owner may share one token between repos
+//! (SKEIN-1231, "Allow sharing, with a warning"): the add dialog states that the boxes of every repo
+//! sharing it can then push to all of them, and only that share makes a multi-repo entry
+//! (`credentials::WriteCredential`). (The other way to make a broad credential safe is for it never
+//! to enter the box — a host-side git proxy — which is a different design and not this one.)
 //!
 //! **Why the host pushes tokens rather than the box asking for one.** A credential helper has to
 //! answer inside a single `git` invocation, which wants a synchronous channel — and there isn't a

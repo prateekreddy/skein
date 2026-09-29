@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:577"]
+["src/bin/skein-server/main.rs:578"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:587"]
+["src/bin/skein-server/main.rs:588"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:678"]
+["src/bin/skein-server/main.rs:679"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:684"]
+["src/bin/skein-server/main.rs:685"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1430,21 +1430,22 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"{name}'s anchor pid has been reused by a different process since skein recorded it; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:190"]
+["src/gitgate/credentials.rs:219"]
 line = "return Err(format!("
+window = "if !valid_credential_id(id) {\u000breturn Err(format!(\u000b\"{id:?} is not a credential id (lowercase letters, digits and dashes)\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:215"]
+["src/gitgate/credentials.rs:435"]
 line = "return Err(format!(\"not a credential id: {id:?}\"));"
 window = "if !valid_credential_id(id) {\u000breturn Err(format!(\"not a credential id: {id:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:239"]
+["src/gitgate/credentials.rs:459"]
 line = "return Err(format!(\"not a credential id: {id:?}\"));"
 window = "if !valid_credential_id(id) {\u000breturn Err(format!(\"not a credential id: {id:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:540"]
+["src/gitgate/credentials.rs:760"]
 line = "pub fn credential_for_repo(slug: &str, need: Need) -> (GhToken, Option<Secret>) {"
 cited_by = ["docs/decisions/one-identity.md"]
 
@@ -1671,19 +1672,19 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "Gone with `Repo::agent` (SKEIN-1207, the owner 2026-09-27: one fleet default plus a per-box pick). A repository has no runtime of its own any more, so `add_repo` takes none and this refusal of a bad one has nothing to refuse; `skein add --agent` is now refused outright by `src/bin/skein.rs`, naming where a runtime is chosen. Declared rather than re-pointed because the row is the record of the refusal as it was measured, and moving it onto a different message would make the survey claim it found words that were never in this file."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/add.rs:32"]
+["src/repos/add.rs:82"]
 line = "let store = match store.map(str::trim).filter(|s| !s.is_empty()) {"
 cited_by = ["docs/architecture.md"]
 
-["src/repos/add.rs:46"]
+["src/repos/add.rs:96"]
 line = "if !registrable_source(source) {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos/add.rs:47"]
-line = "return Err(format!("
+["src/repos/add.rs:98"]
+line = "\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/add.rs:162"]
+["src/repos/add.rs:253"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
@@ -1708,15 +1709,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(\"no directory for the trigger overrides\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/mirror.rs:85"]
+["src/repos/mirror.rs:126"]
 line = "return Err(format!(\"{} has nothing to mirror from\", repo.id));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/mirror.rs:271"]
+["src/repos/mirror.rs:316"]
 line = "/// A repo's files, read out of its **mirror** rather than off somebody's disk."
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos/mirror.rs:321"]
+["src/repos/mirror.rs:366"]
 line = "return Err(format!("
 window = "if tree.git(&[\"rev-parse\", \"--verify\", \"HEAD\"]).is_none() {\u000breturn Err(format!(\u000b\"the mirror at {} has no readable HEAD — an empty repository, or a mirror that \\"
 cited_by = ["docs/recovery-survey.md"]
@@ -2164,7 +2165,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:714"]
+["src/web/app/panels.js:722"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2267,23 +2268,23 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `${esc(host)} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein.`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:612"]
+["src/web/app/settings.js:631"]
 line = ".catch(e => toast(`pull failed: ${e.message}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:675"]
+["src/web/app/settings.js:694"]
 line = ".catch(e => toast(`couldn't save: ${e.message}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:720"]
+["src/web/app/settings.js:739"]
 line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:734"]
+["src/web/app/settings.js:753"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:1244"]
+["src/web/app/settings.js:1290"]
 line = "arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, \"warn\");"
 cited_by = ["docs/recovery-survey.md"]
 

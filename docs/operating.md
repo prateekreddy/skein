@@ -351,7 +351,7 @@ There are exactly three ways a box gets GitHub credentials, and **none of them i
 | Path | What a box holds | What it costs you |
 |---|---|---|
 | **GitHub App** | a write token for its own repo, an hour at a time, plus read over your installs | one App, installed where you want it readable |
-| **Per-repo PAT** | a write token for that one repo | one token per repo, rotated by hand |
+| **Per-repo PAT** | a write token for that one repo — or, if you shared it, for every repo sharing it | one token per repo, rotated by hand |
 | **This account's `gh` token** | your whole account, in every box | nothing to set up — and no narrowing either |
 
 The third used to be on by default, which made the broadest of the three the one nobody chose. It also
@@ -360,6 +360,18 @@ unlock your keyring — every launch — before you had said which path you want
 picked, seeded once and remembered, and the first-run checklist asks for a choice rather than making
 one. Turning it off changes nothing for a fleet already running on it: the secret lives in sbx's own
 store, so it stays seeded and boxes keep pushing.
+
+**A per-repo PAT can be shared, and sharing widens every box that holds it.** When you add a repo,
+the dialog offers "paste a new token" or "use the token another repo has". The second adds the new
+repo to that token's list in `github-pats.json` — one token, one file, so replacing it on any of
+their cards reaches them all — after GitHub has said the token can push to the new repo. The cost,
+which the dialog states before you confirm: a box is handed its repo's token, and a box can read
+anything it holds, so the boxes of every repo sharing a token can push to all of them. That is the
+owner's decision of 2026-09-29 (SKEIN-1231: "Allow sharing, with a warning"); before it a stored
+token covered exactly one repository and nothing else was accepted. A pasted token still covers
+one, a list naming several that was not written by a share is refused where tokens are handed out
+(`src/gitgate/credentials.rs`, `WriteCredential::problem`), and a repo removed from skein, or given
+a token of its own from its card, leaves the share without taking the token from the others.
 
 `skein doctor` names which path you are on, and says so plainly when you are on none — boxes then
 hold no GitHub credential of their own. For a scoped box that means what it says: with nothing placed

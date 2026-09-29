@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 103  (NOT '.route("' — that gives 90, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 169 unique, 172 occurrences
-grep -c 'function ' src/web/index.html                          # 462
+grep -c '\.route('  src/bin/skein-server/main.rs               # 104  (NOT '.route("' — that gives 91, missing every entry whose path is on the line below)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 170 unique, 173 occurrences
+grep -c 'function ' src/web/index.html                          # 465
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -440,7 +440,7 @@ describe a replacement — "a local filesystem path is a valid git remote, so a 
 still works: skein clones it into the mirror and fetches from your path" — and that replacement was
 never built. It is true of git and false of skein. `registrable_source` (`src/repos/source.rs:28`) requires
 a scheme, accepting only `https://`, `http://`, `ssh://` and `git@host:`, and `add_repo` refuses
-everything else before it clones anything (`src/repos/add.rs:46`), in the words *"is a path, and skein
+everything else before it clones anything (`src/repos/add.rs:96`), in the words *"is a path, and skein
 registers repos by remote"*.
 
 So the cost is larger than the old entry admitted, and it is stated here rather than in the future
@@ -451,7 +451,7 @@ nothing to fetch from, and would differ from a URL repo in nothing a box could o
 repo has no server needs a server — a bare repo reachable over `ssh://` is enough.
 
 One consequence the old entry listed as "must be built, not assumed" was in fact built: `diff`,
-`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:271`)
+`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:316`)
 rather than a working checkout.
 
 **The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein

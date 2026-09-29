@@ -53,3 +53,28 @@ pub(super) fn origin_repo(dir: &Path) {
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-m", "one"]);
 }
+
+/// **No credential reaches these tests from the machine running them.** Fleet-side git asks the
+/// same resolver as every GitHub call (SKEIN-953), which reads `$GH_TOKEN`/`$GITHUB_TOKEN` and
+/// the host's `gh` login — so on a machine that has either, a test about "no credential" would
+/// hand git a real token, and a recorded environment would print it. Both are removed, and a
+/// `gh` with no login goes first on `$PATH`.
+pub(super) fn no_host_credential(home: &Path, env: &mut crate::testutil::EnvPins) {
+    use std::os::unix::fs::PermissionsExt;
+    env.unset("GH_TOKEN").unset("GITHUB_TOKEN");
+    let bin = home.join("no-gh-login");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("gh"),
+        "#!/bin/sh
+exit 1
+",
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    env.set(
+        "PATH",
+        format!("{}:{}", bin.display(), env::var("PATH").unwrap_or_default()),
+    );
+    crate::gitgate::forget_gh_login();
+}

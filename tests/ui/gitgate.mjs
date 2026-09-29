@@ -15,9 +15,10 @@
 //      settings screen offers; `gitgate::slug_from_url` decides which token the host mints. Two
 //      implementations of one rule, so the divergence is the thing under test — a form that accepts
 //      a token for a repository the host will never issue one for is the failure.
-//   5. **That a repo survives its own setup.** The add dialog now applies tracker settings and a
-//      token after the clone. The clone is the expensive, irreversible part: a settings call that
-//      fails must be reported, never allowed to unmake the repository.
+//   5. **That a repo survives its own setup.** The add dialog applies tracker settings after the
+//      clone. The clone is the expensive, irreversible part: a settings call that fails must be
+//      reported, never allowed to unmake the repository. The token is no longer among them — it
+//      goes with the clone (SKEIN-1231), and `addtoken.mjs` drives that against a real server.
 //
 //   node tests/ui/gitgate.mjs
 import { grab, harness, page } from "./lift.mjs";
@@ -28,7 +29,7 @@ const source = [
   // function alone gave `ReferenceError: gitqShown is not defined` and this suite stopped running
   // entirely (SKEIN-113). Same reason `voice.mjs` lifts `awaySince`.
   "gitqShown", "gitqAnnounced", "gitqCreds", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
-  "gitqGrantRow", "revokeGitq", "gitCredRow", "editGitCred", "credId", "credFor", "storeGitCred",
+  "gitqGrantRow", "revokeGitq", "gitCredRow", "editGitCred", "credFor", "reposPhrase", "storeGitCred", "rotateGitCred",
   "addGitCred", "removeGitCred", "renderGitState", "nameable", "slugFromPath", "repoSlug",
   "nonGitHubHost", "repoTokenRow", "arApplySettings",
   // `renderGitState` repaints the "Reviews act as" note first (SKEIN-516), and that note reads the
@@ -107,6 +108,7 @@ const scope = new Function(`
   return {
     decideGitq, pollGitq, gitqCard, gitqGrantRow, revokeGitq, gitCredRow, editGitCred,
     addGitCred, removeGitCred, renderGitState, renderIdentity, repoSlug, nonGitHubHost, repoTokenRow, arApplySettings, credFor,
+    reposPhrase, storeGitCred, rotateGitCred,
     fields: () => fields,
     form: () => form,
     state: () => state,
@@ -319,17 +321,18 @@ const forever = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "", live
 check("a permanent grant says so rather than showing a blank date", forever.includes("no expiry"), true);
 
 // --- stored repository tokens -------------------------------------------------------------------
+// A repo's own token goes to the route that stores one for that repository alone, and the HOST picks
+// the id (`gitgate::store_repo_token`, SKEIN-1231): the id the page used to derive could be the one a
+// shared token already has, and writing over it would take that token from every repo on it.
 T.reset();
 T.fields().repo.value = "acme/thing";
-T.fields().token.value = "github_pat_11ABC";
+T.fields().token.value = "skein-test-11ABC";
 await T.addGitCred();
-check("storing a token names exactly one repository", T.sent()[0].body.repos, ["acme/thing"]);
-check("and carries the token", T.sent()[0].body.token, "github_pat_11ABC");
-check(
-  "the id is derived from the repo, so re-storing it replaces rather than duplicates",
-  T.sent()[0].body.id,
-  "acme-thing",
-);
+check("storing a token names exactly one repository", T.sent()[0].body.repo, "acme/thing");
+check("through the route that stores a repo's own token", T.sent()[0].url, "/api/fleet/repo-token");
+check("and carries the token", T.sent()[0].body.token, "skein-test-11ABC");
+check("and no id — the host picks it, so a shared token's cannot be written over",
+  Object.keys(T.sent()[0].body).sort(), ["repo", "token"]);
 check("the token field is cleared after storing", T.fields().token.value, "");
 
 // Half a form is not a credential — storing a repo with no token would report the fleet as ready
@@ -355,10 +358,42 @@ check("and never prefills the old token", T.fields().token.value, "");
 check("saying plainly that the old one goes",
   T.fields().token.placeholder.includes("replaced"), true);
 
-T.fields().token.value = "github_pat_NEW";
+T.fields().token.value = "skein-test-NEW";
 await T.addGitCred();
-check("the rotation reuses the same id", T.sent()[0].body.id, "acme-thing");
-check("with the new token", T.sent()[0].body.token, "github_pat_NEW");
+check("the rotation names the same repository, so the host replaces its entry", T.sent()[0].body.repo, "acme/thing");
+check("with the new token", T.sent()[0].body.token, "skein-test-NEW");
+
+// --- a shared token: named by its repos, rotated for all, left one repo at a time (SKEIN-1231) ------
+check("reposPhrase names one repo", T.reposPhrase(["a/one"]), "a/one");
+check("two with an and", T.reposPhrase(["a/one", "a/two"]), "a/one and a/two");
+check("three with commas and an and", T.reposPhrase(["a/one", "a/two", "a/three"]), "a/one, a/two and a/three");
+
+// Rotation is the token alone, against the entry's id — never a repo list, which the host would
+// read as "cover exactly these" and the share would be lost.
+T.reset();
+await T.rotateGitCred("a-one", "skein-test-ROTATED");
+check("replacing a shared token sends its id and the token, and nothing else",
+  [T.sent()[0].url, JSON.stringify(T.sent()[0].body)],
+  ["/api/fleet/git-credentials", JSON.stringify({ id: "a-one", token: "skein-test-ROTATED" })]);
+
+const sharedCred = { id: "a-one", repo: "a/one", repos: ["a/one", "a/two", "a/three"], shared: true, label: "", has_token: true, problem: "" };
+T.reset();
+T.setCreds([sharedCred]);
+check("a repo sharing a token finds it by any repo on it", (T.credFor("A/Two") || {}).id, "a-one");
+const sharing = T.repoTokenRow({ id: "two", source: "git@github.com:a/two.git", slug: "a/two" });
+check("its card names the repos it shares the token with, by name",
+  sharing.includes("the token <b>a/two</b> shares with <b>a/one and a/three</b>"), true);
+check("and says what that lets their boxes do",
+  sharing.includes("Boxes of all 3 repos can push to all of them with it"), true);
+check("replacing it there replaces it for all of them", sharing.includes(`data-rotatetoken="a-one"`) && sharing.includes("Replace for all 3"), true);
+check("and stopping sharing is one step: a token for this repo alone",
+  sharing.includes(`data-storetoken="a/two"`) && sharing.includes("Use for a/two alone"), true);
+check("with no Forget, which would take the token from all three", sharing.includes("Forget"), false);
+
+const sharedRow = T.gitCredRow(sharedCred);
+check("the settings pane lists every repo on a shared token", sharedRow.includes("a/one, a/two, a/three"), true);
+check("marks it shared", sharedRow.includes(">shared<"), true);
+check("and offers no per-repo replace, which would break the share", sharedRow.includes("Replace token"), false);
 
 // --- what a credential row shows ----------------------------------------------------------------
 const ready = T.gitCredRow({ id: "a-b", repo: "a/b", label: "", has_token: true, problem: "" });
@@ -405,6 +440,12 @@ T.renderGitState({ ready: true, app_ready: true, app_id: "12345", credentials: [
 check("with an issuer and the switch on, it reads as scoped", T.state().innerHTML.includes("Scoped"), true);
 check("naming what does the issuing", T.state().innerHTML.includes("12345"), true);
 check("and drawn as good", T.state().className.includes("on"), true);
+check("with no shared token, a box writes only its own repo", T.state().innerHTML.includes("shared"), false);
+T.renderGitState({ ready: true, app_ready: false, credentials: [
+  { id: "a-one", repo: "a/one", repos: ["a/one", "a/two"], shared: true, has_token: true, problem: "" },
+] });
+check("a shared token is the exception the scoped line has to say (SKEIN-1231)",
+  T.state().innerHTML.includes("A box writes only its own repo — or every repo its token is shared with — and asks for any other"), true);
 
 // Configured but switched off is its own state — "ready" would overclaim and "not scoped" would
 // hide that the hard part is already done.
@@ -532,20 +573,24 @@ for (const [source, want] of [
 ]) check(`nonGitHubHost(${JSON.stringify(source)})`, T.nonGitHubHost(source), want);
 
 // --- the add dialog's follow-up work ---------------------------------------------------------------
-// Everything here keys on the repo's id, which the *server* picks — so it runs after the clone.
+// Everything here keys on the repo's id, which the *server* picks — so it runs after the clone. The
+// token is NOT among it any more: it goes with the clone, which it is what lets a private repo be
+// cloned at all (SKEIN-1231). Storing it here, after an add that had already failed without it, is
+// the bug the owner hit, so a token in the field must never be sent from this function.
 T.reset();
 T.form().plane.value = "https://plane.example/projects/abc/issues";
 T.form().conn.value = "backlog-1";
 T.form().review.value = "false";
-T.form().token.value = "github_pat_11ABC";
+T.form().token.value = "skein-test-11ABC";
 let problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("the whole form applied cleanly", problems, []);
 const settings = T.sent().find(s => s.url.includes("/settings"));
 check("the tracker fields are sent together, in one call", settings.body.plane_project, "https://plane.example/projects/abc/issues");
 check("with the connection", settings.body.sync_connection, "backlog-1");
 check("and a deliberate off for the review queue", settings.body.review_queue, false);
-const cred = T.sent().find(s => s.url.includes("git-credentials"));
-check("the token is stored against the repo it names", cred.body.repos, ["acme/thing"]);
+check("and the token is not stored after the clone — it went with it",
+  T.sent().some(s => s.url.includes("git-credentials") || s.url.includes("repo-token")), false);
+check("nor anywhere in what was sent", JSON.stringify(T.sent()).includes("skein-test-11ABC"), false);
 
 // Turning it ON is sent too. It used to send only a deliberate off and ride on the server's
 // default — and that default has since MOVED (`repos::add` registers a new repo with the queue off,
@@ -578,32 +623,8 @@ check("and the ON choice says what it spends", /a GitHub request per refresh, pe
 T.reset();
 T.failOn("/settings");
 T.form().plane.value = "p";
-T.form().token.value = "github_pat_x";
 problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("a failed settings call is reported", problems.length, 1);
 check("naming what did not happen", problems[0].includes("settings not saved"), true);
-check("and never stops the token being stored", T.sent().some(s => s.url.includes("git-credentials")), true);
-
-// A token typed for a repo with no GitHub identity must be refused loudly, not dropped quietly.
-T.reset();
-T.form().token.value = "github_pat_x";
-problems = await T.arApplySettings({ id: "scratch", source: "/Users/me/code/scratch", slug: "" });
-check("a token for a repo with no remote is refused, not silently dropped", problems.length, 1);
-check("saying why", problems[0].includes("no GitHub remote"), true);
-// It used to be "nothing is sent at all". The settings call is unconditional now — the review
-// queue states its value either way (SKEIN-270) — so what this check is actually about, and always
-// was, is that the CREDENTIAL does not go out.
-check("and no credential is stored for a repo that cannot have one",
-  T.sent().some(x => x.url.includes("git-credentials")), false);
-check("nothing else goes out either", T.sent().map(x => x.url.includes("/settings")), [true]);
-
-// The same form against a repo adopted in place: the host answered with a slug, so the token belongs
-// to that repository. Refusing it here was the dialog's half of the same bug.
-T.reset();
-T.form().token.value = "github_pat_adopted";
-problems = await T.arApplySettings({ id: "skein", source: "/Users/me/code/skein", slug: "acme/skein" });
-check("a token typed for an adopted repo is stored, not refused", problems, []);
-check("against the repository its origin names",
-  T.sent().find(s => s.url.includes("git-credentials")).body.repos, ["acme/skein"]);
 
 done();

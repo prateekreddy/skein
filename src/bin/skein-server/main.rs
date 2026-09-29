@@ -455,6 +455,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/boxes/:name/privileged", post(api_set_box_privileged))
         .route("/api/fleet/git-probe", post(api_git_probe))
         .route("/api/fleet/git-credentials", post(api_git_credential))
+        .route("/api/fleet/repo-token", post(api_git_credential_alone))
         .route("/api/fleet/git-read-token", post(api_git_read_token))
         .route(
             "/api/fleet/git-credentials/:id",

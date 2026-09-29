@@ -225,7 +225,18 @@ pub(super) fn git_scope_health() -> HealthCheck {
             "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use",
         ),
         Active { app, tokens } => HealthCheck::satisfied(format!(
-            "on — a box's own token writes only its own repo.{}{}",
+            "on — a box's own token writes only its own repo{}.{}{}",
+            // A shared token is the exception, and the line is untrue without it (SKEIN-1231).
+            match crate::gitgate::write_credentials()
+                .iter()
+                .filter(|c| c.shared && c.repos.len() > 1 && c.problem().is_none())
+                .count()
+            {
+                0 => String::new(),
+                n => format!(
+                    ", or every repo its token is shared with ({n} token(s) shared on purpose)"
+                ),
+            },
             match app.is_empty() {
                 true => String::new(),
                 false => format!(" App {app}"),
