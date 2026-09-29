@@ -176,7 +176,10 @@ set -u
 # directions, so an exception has to be written here to be allowed and cannot be forgotten into
 # existence.
 #
-# The order is CI's order, and three positions in it are load-bearing:
+# The order is a local run's order, and three positions in it are load-bearing for that run. CI
+# does not run them in this order: `.github/workflows/ci.yml` spreads the gates over jobs that run
+# side by side (SKEIN-1228), and where one of these positions matters there, that file says how it
+# keeps it.
 #
 #   * `submodule-check` comes BEFORE `test`, because it is a precondition of two tests inside it —
 #     the `upstream/sync` drift guards, which take their guard and return when the submodule is not
@@ -185,10 +188,12 @@ set -u
 #   * `alone-check` needs the lib test binary, so it follows `test` and reuses that build.
 #   * `noskip-check` runs that same suite a second time with `$SKEIN_TESTS_NO_SKIP` set, through
 #     `tools/gates.sh run test` rather than a second copy of the command, so it follows `test` too
-#     and costs execution rather than a compile. It is the gate that can fail a change over a SKIP,
-#     scoped to the binaries whose declared requirements this machine answers for (SKEIN-881).
-#   * `citation-check` is last, because it is the only gate that reads git history and CI has to
-#     deepen its shallow clone before calling it (see the comment on that step in ci.yml).
+#     and, locally, costs execution rather than a compile. It is the gate that can fail a change
+#     over a SKIP, scoped to the binaries whose declared requirements this machine answers for
+#     (SKEIN-881). In CI it is a job of its own beside `test`, and pays for its own build there.
+#   * `citation-check` is last, because it is the only gate that reads git history. In CI it has a
+#     job of its own that deepens the shallow clone before calling it (see the `citation` job in
+#     ci.yml).
 gates() {
   printf '%s\n' \
     "fmt|yes|cargo fmt --all -- --check" \

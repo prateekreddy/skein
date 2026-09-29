@@ -1409,12 +1409,19 @@ fn the_library_and_the_suite_ask_for_no_skips_with_the_same_variable() {
     );
 }
 
-/// What each job in `.github/workflows/ci.yml` installs with `apt-get install`, by job name.
+/// What each job in `.github/workflows/ci.yml` installs with `apt-get install`, and which gates it
+/// runs as `tools/gates.sh run <gate>`, by job name.
 ///
 /// Read as text rather than parsed as YAML, which this crate has no parser for: a job is a
-/// two-space-indented `name:` under `jobs:`, and a package is a word after `apt-get install` up to
-/// the end of that command.
-fn ci_apt_packages() -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+/// two-space-indented `name:` under `jobs:`, a package is a word after `apt-get install` up to the
+/// end of that command, and a gate is the word after a `- run: tools/gates.sh run` — the same shape
+/// `tools/gates.sh --check` reads the workflow's gates in.
+struct CiJob {
+    apt: std::collections::BTreeSet<String>,
+    gates: std::collections::BTreeSet<String>,
+}
+
+fn ci_jobs() -> std::collections::BTreeMap<String, CiJob> {
     let ci = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
     )
@@ -1431,59 +1438,91 @@ fn ci_apt_packages() -> std::collections::BTreeMap<String, std::collections::BTr
             let name = line.trim().trim_end_matches(':');
             if line.trim().ends_with(':') && !name.contains(' ') {
                 job = Some(name.to_string());
+                out.insert(
+                    name.to_string(),
+                    CiJob {
+                        apt: Default::default(),
+                        gates: Default::default(),
+                    },
+                );
                 continue;
             }
         }
         if line.trim_start().starts_with('#') {
             continue;
         }
-        let (Some(job), Some(rest)) = (&job, line.split("apt-get install").nth(1)) else {
+        let Some(job) = out.get_mut(job.as_deref().unwrap_or_default()) else {
             continue;
         };
-        let packages: &mut std::collections::BTreeSet<String> = out.entry(job.clone()).or_default();
+        if let Some(gate) = line.trim().strip_prefix("- run: tools/gates.sh run ") {
+            job.gates.insert(gate.trim().to_string());
+        }
+        let Some(rest) = line.split("apt-get install").nth(1) else {
+            continue;
+        };
         for word in rest.split_whitespace() {
             if word == "&&" || word == "||" || word.starts_with(';') {
                 break;
             }
             if !word.starts_with('-') {
-                packages.insert(word.to_string());
+                job.apt.insert(word.to_string());
             }
         }
     }
     out
 }
 
-/// **The `check` job installs at least what the `coverage` job does** (SKEIN-1094).
+/// **Every job that runs the suite installs at least what the `coverage` job does** (SKEIN-1094).
 ///
-/// The coverage job installs `bubblewrap tmux` so its number is measured where nothing skipped;
-/// `check` is where `noskip-check` runs, and it installed `bubblewrap` alone — so the tmux-dependent
-/// binaries could skip there on a runner image without tmux, and nothing recorded whether the image
-/// had it. Stated as an inclusion rather than as "tmux is on the line", so the next package the
-/// coverage job needs cannot be added to one job and not the other.
+/// The coverage job installs `tmux` (and what the pinned bubblewrap's build needs) so its number is
+/// measured where nothing skipped. The job `noskip-check` ran in installed less — so the
+/// tmux-dependent binaries could skip there on a runner image without tmux, and nothing recorded
+/// whether the image had it. Stated as an inclusion rather than as "tmux is on the line", so the
+/// next package the coverage job needs cannot be added to one job and not the other.
 ///
-/// **What makes it fail:** the `check` job's apt line without `tmux`, which is how it was.
+/// It used to name one job, `check`, because the suite ran in one job. SKEIN-1228 split the `test`
+/// and `noskip-check` gates into jobs of their own, which is two apt lines where there was one — so
+/// the jobs are found by the gates they run rather than by name, and a job this finds none of is a
+/// failure rather than a comparison of nothing.
+///
+/// **What makes it fail:** either suite job's apt line without `tmux`, which is how the one job
+/// was; or a workflow in which no job runs one of those two gates.
 #[test]
-fn the_check_job_installs_every_package_the_coverage_job_does() {
-    let jobs = ci_apt_packages();
+fn every_job_that_runs_the_suite_installs_every_package_the_coverage_job_does() {
+    let jobs = ci_jobs();
     let coverage = jobs
         .get("coverage")
+        .map(|j| &j.apt)
         .filter(|p| !p.is_empty())
         .expect("the coverage job installs nothing with apt, so this compares nothing");
-    let check = jobs
-        .get("check")
-        .expect("no `check` job installs anything with apt");
-    let missing: Vec<&String> = coverage.difference(check).collect();
-    assert!(
-        missing.is_empty(),
-        "the coverage job installs {missing:?} and the check job does not, so the binaries that need \
-         them can skip where noskip-check runs: check has {check:?}, coverage has {coverage:?}"
-    );
+    for gate in ["test", "noskip-check"] {
+        let running: Vec<(&String, &CiJob)> = jobs
+            .iter()
+            .filter(|(_, j)| j.gates.contains(gate))
+            .collect();
+        assert!(
+            !running.is_empty(),
+            "no job in ci.yml runs `tools/gates.sh run {gate}`, so this compares nothing: jobs \
+             and their gates are {:?}",
+            jobs.iter().map(|(n, j)| (n, &j.gates)).collect::<Vec<_>>()
+        );
+        for (name, job) in running {
+            let missing: Vec<&String> = coverage.difference(&job.apt).collect();
+            assert!(
+                missing.is_empty(),
+                "the coverage job installs {missing:?} and the `{name}` job, which runs `{gate}`, \
+                 does not, so the binaries that need them can skip there: `{name}` has {:?}, \
+                 coverage has {coverage:?}",
+                job.apt
+            );
+        }
+    }
 }
 
 /// The `publish` job's shell block, out of `.github/workflows/release.yml`, with the step's own
 /// indentation removed — the script GitHub hands to `bash -e`.
 ///
-/// Read as text for the reason `ci_apt_packages` gives: the block is the first `- run: |` after the
+/// Read as text for the reason `ci_jobs` gives: the block is the first `- run: |` after the
 /// job's `  publish:` line, and it ends at the first line indented less than its body.
 fn release_publish_script() -> String {
     let release = std::fs::read_to_string(
