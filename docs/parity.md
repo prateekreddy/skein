@@ -338,8 +338,9 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   host-capacity measurement (of whichever machine skein stands on — see above), and refusal to
   save when config is unparseable.
 - **Settings → Usage** — what the fleet has cost, read from each box's own transcripts where they
-  already live on the host. Fleet and per-box totals, per-month and per-model breakdowns, the
-  heaviest day and the box that drove it, and how old the reading is. Nothing is read on page load:
+  already live on the host. Fleet and per-box totals, per-model, per-month and per-week (ISO,
+  Monday to Sunday, UTC) breakdowns with the period the reading was taken in marked "so far", the
+  latest days as rows, the heaviest day and the box that drove it, and how old the reading is. Nothing is read on page load:
   a reading walks every box's transcripts, so the pane asks once when it is first opened, re-reads
   only when a person presses Refresh, and re-reads on its own at most hourly. It shows **no figure
   at all** rather than a zero before it has read, because a zero is the one wrong answer a person
