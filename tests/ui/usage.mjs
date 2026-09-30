@@ -252,6 +252,21 @@ try {
     const fresh = await seen("#set-usage .ug-when");
     value("a reading just taken is described as just taken", fresh.text, "read just now");
     value("and it is not marked stale", /\bstale\b/.test(fresh.cls), false);
+
+    // By week and the By day table (SKEIN-1237), ON SCREEN — node proves the markup and that no
+    // figure hides in a `title`; only a bounding box proves a CSS rule is not hiding the rows. The
+    // fixture's one turn is on Tuesday 1 Sep 2026, in the ISO week of Monday 31 Aug, and weeks
+    // before any reading this suite takes, so that week is whole and is not marked running.
+    // **What would make this fail:** the week section or the day rows not drawn, drawn at zero
+    // height, or the week keyed to anything but Monday.
+    const week = await seen("#set-usage .ug-week");
+    value("By week has a row on screen, labelled by its Monday-to-Sunday range",
+      !!week && week.height > 0 && /^31 Aug–6 Sep\b/.test(week.text.trim()) && /\$/.test(week.text), true);
+    value("and a week the reading has seen the end of is not marked as running",
+      /so far/.test(week ? week.text : "so far"), false);
+    const dayRow = await seen("#set-usage .ug-dayrow");
+    value("By day lists its days as rows a person can read without hovering",
+      !!dayRow && dayRow.height > 0 && /Tue 2026-09-01/.test(dayRow.text) && new RegExp(FIXTURE_BOX).test(dayRow.text), true);
   }
 
   // ── a second opening does not ask again ──────────────────────────────────────────────────────────

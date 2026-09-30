@@ -165,6 +165,78 @@ export function ownHtml(own, esc) {
   return row + breakdown + figures;
 }
 
+// ── weeks, and which period is still running (SKEIN-1237) ────────────────────────────────────────
+//
+// **Weeks are derived here, from `daily`, and not served.** Each day in the payload already carries
+// its cost and its boxes, so a week is a sum of seven of them and the payload needs no new field.
+// The days are UTC dates (`utc_day` in src/usage.rs), so every week here is a UTC week too — Monday
+// 00:00 UTC to Sunday 24:00 UTC — and the pane says so, because a person west of Greenwich sees
+// their Sunday evening counted into Monday.
+
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAY_MS = 86400000;
+const dayMs = day => Date.parse(`${String(day).slice(0, 10)}T00:00:00Z`);
+const dayOf = ms => new Date(ms).toISOString().slice(0, 10);
+
+// The Monday that starts `day`'s ISO week, as `YYYY-MM-DD`. `null` for a day that does not parse,
+// rather than a guess — a row filed under the wrong week is a wrong figure that looks right.
+export function isoWeekStart(day) {
+  const ms = dayMs(day);
+  if (Number.isNaN(ms)) return null;
+  const sinceMonday = (new Date(ms).getUTCDay() + 6) % 7;
+  return dayOf(ms - sinceMonday * DAY_MS);
+}
+
+// "22–28 Sep", "29 Sep–5 Oct", and the year only where it is needed to tell two weeks apart: on a
+// week that straddles New Year, or one in a year other than `year` (the reading's own).
+export function weekLabel(start, year) {
+  const a = new Date(dayMs(start));
+  const b = new Date(dayMs(start) + 6 * DAY_MS);
+  const [ay, by] = [a.getUTCFullYear(), b.getUTCFullYear()];
+  const d = x => `${x.getUTCDate()} ${MON[x.getUTCMonth()]}`;
+  if (ay !== by) return `${d(a)} ${ay}–${d(b)} ${by}`;
+  const tail = year !== undefined && year !== null && Number(year) !== ay ? ` ${ay}` : "";
+  if (a.getUTCMonth() === b.getUTCMonth()) return `${a.getUTCDate()}–${d(b)}${tail}`;
+  return `${d(a)}–${d(b)}${tail}`;
+}
+
+// The daily series folded into ISO weeks, oldest first: each week's Monday, its cost, and its
+// spend per box summed across the days it has. A day that does not parse is left out of every week
+// rather than filed under one.
+export function usageWeeks(daily) {
+  const weeks = new Map();
+  for (const d of Array.isArray(daily) ? daily : []) {
+    const start = isoWeekStart(d && d.day);
+    if (!start) continue;
+    const w = weeks.get(start) || { start, cost: 0, days: 0, by_box: {} };
+    w.cost += Number(d.cost) || 0;
+    w.days += 1;
+    for (const [box, c] of Object.entries(d.by_box || {})) w.by_box[box] = (w.by_box[box] || 0) + (Number(c) || 0);
+    weeks.set(start, w);
+  }
+  return [...weeks.values()].sort((a, b) => a.start.localeCompare(b.start));
+}
+
+// The day the reading was taken, which is what decides that a week or a month is still running:
+// the reading can hold nothing after it, so the period it was taken in is only "so far". The
+// reading's own `read_at` rather than the clock, because a reading taken last Sunday is a whole
+// week however late it is looked at; the clock stands in only when `read_at` does not parse.
+export function readingDay(readAt, nowMs) {
+  const t = Date.parse(readAt || "");
+  const ms = Number.isNaN(t) ? Number(nowMs) : t;
+  return Number.isFinite(ms) ? dayOf(ms) : null;
+}
+
+// How many days the By day table lists, newest last, under the strip that shows all of them.
+export const UG_DAY_ROWS = 14;
+
+// The top three boxes of a `by_box` map, in words: `deep-box $871.25 · other-box $12.00`.
+const topBoxes = (byBox, e) => Object.entries(byBox || {}).sort((x, y) => y[1] - x[1]).slice(0, 3)
+  .map(([b, c]) => `${e(b)} ${usd(c)}`).join(" · ");
+
+const SO_FAR = ` <span class="ug-part">· so far</span>`;
+
 // ── the panel ─────────────────────────────────────────────────────────────────────────────────────
 
 const bar = (v, max) =>
@@ -253,8 +325,9 @@ export function usageHtml(u, nowMs, esc, note) {
 
   const months = (Array.isArray(u.months) ? u.months : []).slice().sort((a, b) => String(a.month).localeCompare(String(b.month)));
   const topMonth = Math.max(...months.map(m => m.cost), 0);
+  const today = readingDay(u.read_at, nowMs);
   const monthRows = months.map(m => `<div class="ug-row">
-      <span class="ug-nm">${e(m.month)}</span>${bar(m.cost, topMonth)}
+      <span class="ug-nm">${e(m.month)}${today && String(m.month) === today.slice(0, 7) ? SO_FAR : ""}</span>${bar(m.cost, topMonth)}
       <span class="ug-fig"><b>${usd(m.cost)}</b> · ${fmtTok(m.tokens)}${
         m.cache_read !== undefined && m.tokens ? ` · ${usagePct(m.cache_read, m.tokens)} cache` : ""}</span>
     </div>`).join("");
@@ -266,10 +339,28 @@ export function usageHtml(u, nowMs, esc, note) {
       <span class="ug-fig"><b>${usd(m.cost)}</b> · ${fmtTok(m.tokens)}</span>
     </div>`).join("");
 
+  // Weeks, from the days (see `usageWeeks`). Each shows its cost, its share of the fleet total and
+  // the boxes that drove it; the week the reading was taken in is marked as running.
+  const weeks = usageWeeks(u.daily);
+  const topWeek = Math.max(...weeks.map(w => w.cost), 0);
+  const thisWeek = today ? isoWeekStart(today) : null;
+  const year = today ? Number(today.slice(0, 4)) : undefined;
+  const weekRows = weeks.map(w => {
+    const mix = topBoxes(w.by_box, e);
+    return `<div class="ug-row ug-week">
+      <span class="ug-nm">${e(weekLabel(w.start, year))}${w.start === thisWeek ? SO_FAR : ""}</span>${bar(w.cost, topWeek)}
+      <span class="ug-fig"><b>${usd(w.cost)}</b> · ${usagePct(w.cost, t.cost)} of the total</span>
+      ${mix ? `<span class="ug-mix">${mix}</span>` : ""}
+    </div>`;
+  }).join("");
+  const zone = weekRows
+    ? `<div class="note ug-zone">Weeks run Monday to Sunday. Every day on this pane is a UTC date, so an evening turn west of Greenwich counts toward the next day.</div>`
+    : "";
+
   // The daily series is the only thing here that shows a direction rather than a position, which is
-  // why it gets a shape instead of a table. The hover carries the exact day; the busiest one is
-  // named in words underneath, because a fact that exists only in a `title` is a fact on a phone
-  // nobody has.
+  // why it gets a shape as well as a table. The hover carries the exact day; the busiest one is
+  // named in words underneath, and the latest days are rows below that (SKEIN-1237), because a fact
+  // that exists only in a `title` is a fact on a phone nobody has.
   const daily = (Array.isArray(u.daily) ? u.daily : []).slice().sort((a, b) => String(a.day).localeCompare(String(b.day)));
   const topDay = Math.max(...daily.map(d => d.cost), 0);
   const busiest = daily.slice().sort((a, b) => b.cost - a.cost)[0];
@@ -281,13 +372,23 @@ export function usageHtml(u, nowMs, esc, note) {
       + `<div class="ug-dfoot">${fmtExact(daily.length)} day${daily.length === 1 ? "" : "s"} of spend`
       + (busiest ? `, the heaviest ${e(busiest.day)} at ${usd(busiest.cost)}` : "")
       + (busiestBox ? ` — most of it ${e(busiestBox[0])}, ${usd(busiestBox[1])}` : "")
-      + `.</div>`
+      + `.${daily.length > UG_DAY_ROWS ? ` The latest ${fmtExact(UG_DAY_ROWS)} are listed below.` : ""}</div>`
+      + daily.slice(-UG_DAY_ROWS).map(d => {
+        const mix = topBoxes(d.by_box, e);
+        const dow = DOW[new Date(dayMs(d.day)).getUTCDay()];
+        return `<div class="ug-row ug-dayrow">
+      <span class="ug-nm">${dow ? `${dow} ` : ""}${e(d.day)}</span>${bar(d.cost, topDay)}
+      <span class="ug-fig"><b>${usd(d.cost)}</b></span>
+      ${mix ? `<span class="ug-mix">${mix}</span>` : ""}
+    </div>`;
+      }).join("")
     : "";
 
   return head + hint + unpriced + insight
     + `<div class="ug-h">skein's own reading</div>` + ownHtml(u.own, e)
     + section("By box", boxRows, "no box reported a reading")
-    + section("By month", monthRows, "no month in this reading")
     + section("By model", modelRows, "no model in this reading")
+    + section("By month", monthRows, "no month in this reading")
+    + section("By week", weekRows + zone, "no week in this reading")
     + section("By day", dayStrip, "no daily series in this reading");
 }

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   usd, fmtExact, fmtTok, usagePct, usageAge, usageRead, usageHtml, USAGE_STALE_SECS,
+  isoWeekStart, weekLabel, usageWeeks, readingDay, UG_DAY_ROWS,
 } from "../src/usage.mjs";
 
 // The agreed payload shape, copied field for field rather than invented — the reader lane owns it
@@ -201,6 +202,7 @@ test("every section says so when it is empty rather than vanishing", () => {
     ["By box", "no box reported a reading"],
     ["By month", "no month in this reading"],
     ["By model", "no model in this reading"],
+    ["By week", "no week in this reading"],
     ["By day", "no daily series in this reading"],
   ]) {
     assert.match(visible(html), new RegExp(heading));
@@ -297,4 +299,131 @@ test("with no call of its own the section says so rather than vanishing", () => 
   assert.match(html, /skein made no model calls of its own in this reading/);
   const old = visible(usageHtml(READING, NOW, esc));
   assert.match(old, /skein made no model calls of its own in this reading/);
+});
+
+// ── weeks, the day table, and the running period (SKEIN-1237) ───────────────────────────────────
+// Four days across three ISO weeks, chosen so each boundary is exercised: 30 Aug is a Sunday and
+// must close the week of 24 Aug, 31 Aug is the Monday that opens the next, and 6 Sep (Sunday) and
+// 7 Sep (Monday) straddle the following boundary. The reading is taken Saturday 12 Sep, inside the
+// week of 7 Sep and inside September.
+const WEEKS = {
+  ...READING,
+  totals: { ...READING.totals, cost: 100 },
+  months: [
+    { month: "2026-09", cost: 70, tokens: 1000 },
+    { month: "2026-08", cost: 30, tokens: 1000 },
+  ],
+  daily: [
+    { day: "2026-09-07", cost: 40, by_box: { "c-box": 40 } },
+    { day: "2026-08-30", cost: 10, by_box: { "a-box": 10 } },
+    { day: "2026-08-31", cost: 20, by_box: { "a-box": 5, "b-box": 15 } },
+    { day: "2026-09-06", cost: 30, by_box: { "b-box": 30 } },
+  ],
+};
+// One section's markup, from its heading to the next heading. Raw, so a test can count rows by
+// class; wrap it in `visible` to ask what is on screen.
+const sectionText = (html, heading) => {
+  const at = html.indexOf(`<div class="ug-h">${heading}</div>`);
+  assert.ok(at >= 0, `no ${heading} section`);
+  const next = html.indexOf(`<div class="ug-h">`, at + 1);
+  return html.slice(at, next < 0 ? undefined : next);
+};
+
+test("an ISO week starts on Monday, so a Sunday closes the week before it", () => {
+  // Fails if the week is keyed on getUTCDay() without the Monday shift — a Sunday-start week files
+  // 30 Aug with 31 Aug and 6 Sep with 7 Sep, which moves money across every boundary.
+  assert.equal(isoWeekStart("2026-08-30"), "2026-08-24");
+  assert.equal(isoWeekStart("2026-08-31"), "2026-08-31");
+  assert.equal(isoWeekStart("2026-09-06"), "2026-08-31");
+  // Across New Year: Thursday 1 Jan 2026 is in the week that began on Monday 29 Dec 2025.
+  assert.equal(isoWeekStart("2026-01-01"), "2025-12-29");
+  // Fails if an unparseable day is filed somewhere rather than nowhere.
+  assert.equal(isoWeekStart("not a day"), null);
+});
+
+test("a week is labelled by its date range, with a year only where one is needed", () => {
+  // Fails if the end is computed as start + 7 (an eight-day week) or the month is dropped.
+  assert.equal(weekLabel("2026-09-21", 2026), "21–27 Sep");
+  assert.equal(weekLabel("2026-08-31", 2026), "31 Aug–6 Sep");
+  // Fails if the year is never printed: two Septembers a year apart would read the same.
+  assert.equal(weekLabel("2025-09-22", 2026), "22–28 Sep 2025");
+  assert.equal(weekLabel("2025-12-29", 2026), "29 Dec 2025–4 Jan 2026");
+});
+
+test("weeks are summed from the days, boxes and all, oldest first", () => {
+  // Fails if a day's cost or its boxes are not added into its week, or the order follows the payload.
+  const weeks = usageWeeks(WEEKS.daily);
+  assert.deepEqual(weeks.map(w => [w.start, w.cost, w.days]),
+    [["2026-08-24", 10, 1], ["2026-08-31", 50, 2], ["2026-09-07", 40, 1]]);
+  assert.deepEqual(weeks[1].by_box, { "a-box": 5, "b-box": 45 });
+  // A day that does not parse is in no week rather than in a wrong one.
+  assert.deepEqual(usageWeeks([{ day: "garbage", cost: 5 }]), []);
+});
+
+test("By week is on screen: range, cost, share of the total and the boxes behind it", () => {
+  // Fails if the section is dropped, if its figures live only in an attribute, or if the share is
+  // taken of anything but the fleet total the head shows.
+  const html = usageHtml(WEEKS, NOW, esc);
+  const week = visible(sectionText(html, "By week"));
+  assert.match(week, /24–30 Aug[\s\S]*?\$10\.00<\/b> · 10\.00% of the total/);
+  assert.match(week, /31 Aug–6 Sep[\s\S]*?\$50\.00<\/b> · 50\.00% of the total[\s\S]*?b-box \$45\.00 · a-box \$5\.00/);
+  assert.match(week, /7–13 Sep/);
+  assert.ok(week.indexOf("24–30 Aug") < week.indexOf("31 Aug–6 Sep") && week.indexOf("31 Aug–6 Sep") < week.indexOf("7–13 Sep"),
+    "weeks are not oldest first");
+  // The zone is said, because it moves a person's Sunday evening into Monday.
+  assert.match(week, /Weeks run Monday to Sunday\. Every day on this pane is a UTC date/);
+  // The time sections sit together, month then week then day.
+  const seen = visible(html);
+  assert.ok(seen.indexOf(">By month<") < seen.indexOf(">By week<") && seen.indexOf(">By week<") < seen.indexOf(">By day<"),
+    "By month, By week and By day are not in that order");
+});
+
+test("the week and the month the reading was taken in are marked as running, and no others", () => {
+  // Fails if "so far" is dropped, or is put on every row, or on the latest row whatever its date.
+  const html = usageHtml(WEEKS, NOW, esc);
+  const week = sectionText(html, "By week");
+  assert.equal((week.match(/so far/g) || []).length, 1, week);
+  assert.match(week, /7–13 Sep <span class="ug-part">· so far<\/span>/);
+  const month = sectionText(html, "By month");
+  assert.equal((month.match(/so far/g) || []).length, 1, month);
+  assert.match(month, /2026-09 <span class="ug-part">· so far<\/span>/);
+  assert.doesNotMatch(month, /2026-08 <span/);
+});
+
+test("which period is running is decided by the reading, not by the clock", () => {
+  // A reading taken on Saturday 12 Sep and looked at a month later: 7–13 Sep is still the week it
+  // could not see the end of. Fails if `readingDay` consults the clock first.
+  const later = Date.parse("2026-10-14T09:00:00Z");
+  assert.equal(readingDay(WEEKS.read_at, later), "2026-09-12");
+  assert.match(sectionText(usageHtml(WEEKS, later, esc), "By week"), /7–13 Sep <span class="ug-part">· so far/);
+  // A week the reading has seen the end of is whole. Fails if a reading taken the Monday after is
+  // still marking the week before as running.
+  const monday = { ...WEEKS, read_at: "2026-09-14T08:00:00Z" };
+  assert.doesNotMatch(sectionText(usageHtml(monday, later, esc), "By week"), /so far/);
+  // No `read_at` to go on, and the clock stands in rather than nothing being marked.
+  assert.equal(readingDay(undefined, NOW), "2026-09-12");
+  assert.match(sectionText(usageHtml({ ...WEEKS, read_at: undefined }, NOW, esc), "By week"), /7–13 Sep <span class="ug-part">· so far/);
+});
+
+test("By day is readable without hovering: the latest days as rows with their cost and boxes", () => {
+  // Fails if the days live only in the strip's `title` attributes — which `visible` strips, the
+  // same phone-invisible failure the footer exists to prevent.
+  const raw = sectionText(usageHtml(WEEKS, NOW, esc), "By day");
+  const day = visible(raw);
+  assert.match(day, /Mon 2026-09-07[\s\S]*?\$40\.00<\/b>[\s\S]*?c-box \$40\.00/);
+  assert.match(day, /Sun 2026-08-30[\s\S]*?\$10\.00<\/b>/);
+  assert.equal((raw.match(/class="ug-row ug-dayrow"/g) || []).length, 4);
+
+  // A long series lists only the latest UG_DAY_ROWS, oldest of them first, and says so. Fails if the
+  // table takes the first days instead of the last, or lists the whole series.
+  const long = Array.from({ length: 20 }, (_, i) => ({
+    day: `2026-08-${String(i + 1).padStart(2, "0")}`, cost: i + 1, by_box: { "x-box": i + 1 },
+  }));
+  const tail = sectionText(usageHtml({ ...WEEKS, daily: long }, NOW, esc), "By day");
+  assert.equal((tail.match(/class="ug-row ug-dayrow"/g) || []).length, UG_DAY_ROWS);
+  // Visible text only: the strip still carries every day in its hover, and that is not the table.
+  assert.doesNotMatch(visible(tail), /2026-08-06/);
+  assert.match(visible(tail), /Fri 2026-08-07[\s\S]*Thu 2026-08-20/);
+  assert.match(tail, /The latest 14 are listed below\./);
+  assert.equal(UG_DAY_ROWS, 14);
 });
