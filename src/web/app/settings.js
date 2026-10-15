@@ -476,6 +476,24 @@ function repoTokenRow(r) {
       + `<span class="desc" data-notoken>${why}</span></label>`;
   }
   const c = credFor(slug);
+  // **What GitHub said, when it was not "yes" at the moment of saving** (SKEIN-1239). A token
+  // GitHub turns down is never saved; one saved while GitHub could not be asked says so until the
+  // server's twenty-minute tick asks, and then either clears or says what GitHub answered.
+  const checked = !c || c.problem ? ""
+    : c.turned_down ? `<div class="set-cred"><span class="sq-state">turned down</span><span class="cwhy">GitHub turned this token down when skein asked after saving it: ${esc(c.turned_down)}. Paste a token with Contents read and write to replace it</span></div>`
+    : c.unchecked ? `<div class="set-cred"><span class="sq-state">not checked yet</span><span class="cwhy">GitHub could not be reached when it was saved (${esc(c.unchecked)}). Boxes push with it meanwhile, and skein asks GitHub again within 20 minutes</span></div>`
+    : "";
+  // **Use the token another repo has, from an existing card** (SKEIN-1241, amending SKEIN-1231's
+  // "only when adding"). Every repository that gains access is named before the button is pressed,
+  // and the host asks GitHub whether the token can push here before anything is saved.
+  const joinable = (gitqCreds || []).filter(x => !x.problem && x.has_token && (x.repos || []).length
+    && !x.repos.some(y => y.toLowerCase() === slug.toLowerCase()));
+  const share = joinable.length
+    ? `<div class="path-row"><select data-sharepick="${esc(slug)}" data-id="${esc(r.id)}"><option value="">Or use the token another repo has…</option>`
+      + joinable.map(x => `<option value="${esc(x.id)}">Use the token ${esc(reposPhrase(x.repos))} ${x.repos.length === 1 ? "uses" : "use"}</option>`).join("")
+      + `</select><button type="button" class="kbtn" data-sharetoken="${esc(slug)}" data-id="${esc(r.id)}" disabled>Use it</button></div>`
+      + `<span class="desc" data-sharehint="${esc(slug)}" hidden></span>`
+    : "";
   // **A shared token says who it is shared with, and how to leave** (SKEIN-1231). The others are
   // named by repository, never by any part of the token. Replacing it here replaces it for every
   // repo on it — one file — and "Use for this repo alone" stores a token for this one and takes it
@@ -488,7 +506,7 @@ function repoTokenRow(r) {
       + `<div class="set-cred"><span class="sq-state approved">shared token</span><span class="cwhy">replacing it here replaces it for all ${all}; to stop sharing, paste a token for ${esc(slug)} alone</span></div>`
       + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (paste a token)" autocomplete="off" />`
       + `<button type="button" class="kbtn" data-rotatetoken="${esc(c.id)}" data-slug="${esc(slug)}" data-id="${esc(r.id)}">Replace for all ${all}</button>`
-      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div></label>`;
+      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div>${checked}${share}</label>`;
   }
   const state = c && !c.problem && c.has_token
     ? `<span class="sq-state approved">token stored</span><span class="cwhy">boxes push with it, and your queue, reviews and merges here run on it; storing another replaces it</span>`
@@ -498,9 +516,9 @@ function repoTokenRow(r) {
         : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
   return `<label class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
     + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
-    + `<div class="set-cred">${state}</div>`
+    + `<div class="set-cred">${state}</div>${checked}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
-    + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div></label>`;
+    + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</label>`;
 }
 function renderRepoList() {
   const el = document.getElementById("set-repos");
@@ -565,8 +583,30 @@ function renderRepoList() {
   // The token input is excluded by name, not by luck: it carries a `data-id` like its neighbours but
   // no `data-key`, so leaving it in would POST `{undefined: "<the token>"}` to the repo settings
   // route — a token in the wrong store, on blur, silently.
-  el.querySelectorAll(".rbody input:not([data-repotoken]), .rbody select")
+  // The share picker likewise: it has a `data-id` and no `data-key`, and it saves only on its
+  // button, after its warning has been read.
+  el.querySelectorAll(".rbody input:not([data-repotoken]), .rbody select:not([data-sharepick])")
     .forEach(i => i.addEventListener("change", () => saveRepoField(i)));
+  el.querySelectorAll("[data-sharepick]").forEach(pick => pick.addEventListener("change", () => {
+    const slug = pick.dataset.sharepick;
+    const hint = el.querySelector(`[data-sharehint="${CSS.escape(slug)}"]`);
+    const go = el.querySelector(`[data-sharetoken="${CSS.escape(slug)}"]`);
+    const chosen = (gitqCreds || []).find(x => x.id === pick.value);
+    go.disabled = !chosen;
+    hint.hidden = !chosen;
+    if (!chosen) { hint.innerHTML = ""; return; }
+    hint.innerHTML = joinShareWarning(slug, chosen);
+  }));
+  el.querySelectorAll("[data-sharetoken]").forEach(b => b.addEventListener("click", () => {
+    const slug = b.dataset.sharetoken;
+    const pick = el.querySelector(`[data-sharepick="${CSS.escape(slug)}"]`);
+    if (!pick || !pick.value) return;
+    b.disabled = true;
+    joinGitShare(slug, pick.value).then(() => {
+      const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
+      if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+    }).catch(e => { b.disabled = false; toast(String(e.message || "could not use that token")); });
+  }));
   // Two buttons can spend the card's one token field: "Store" / "Use for … alone" (this repo's own
   // token) and, on a shared card, "Replace for all" (the shared file) — SKEIN-1231.
   const spend = (b, slug, send) => {
@@ -585,6 +625,18 @@ function renderRepoList() {
     spend(b, b.dataset.storetoken, token => storeGitCred(b.dataset.storetoken, token))));
   el.querySelectorAll("[data-rotatetoken]").forEach(b => b.addEventListener("click", () =>
     spend(b, b.dataset.slug, token => rotateGitCred(b.dataset.rotatetoken, token))));
+}
+// What a repo card says before it joins another repo's token (SKEIN-1241): every repository that
+// gains access, what this repo gives up, and that GitHub is asked first. The add dialog's words,
+// with the one thing an existing repo adds — it already pushes with something.
+function joinShareWarning(slug, chosen) {
+  const mine = credFor(slug);
+  const others = mine && mine.has_token && !mine.problem
+    ? (mine.repos || []).filter(x => x.toLowerCase() !== slug.toLowerCase()) : null;
+  const gives = !others ? ""
+    : others.length ? ` ${esc(slug)} stops sharing the token it has with ${esc(reposPhrase(others))}, which keep it.`
+    : ` The token ${esc(slug)} has now is forgotten.`;
+  return `Shared, not copied: boxes of <b>${esc(slug)}</b> and of <b>${esc(reposPhrase(chosen.repos))}</b> will all be able to push to all of them with this token.${gives} skein first checks that GitHub lets it push to ${esc(slug)}, and a new token stored on any of their cards later replaces it for all of them.`;
 }
 function saveRepoField(input) {
   const { id, key } = input.dataset;

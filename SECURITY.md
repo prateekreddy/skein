@@ -94,8 +94,8 @@ Anything that lets a box, a page, or a repository skein reads cross a line skein
   file is in scope; so is anything that lets the file out. The reasoning is in `src/apiauth.rs`,
   including the measurement that made it necessary.
 * **A box widening its own git scope.** A stored token is meant to cover exactly one repository —
-  or the repositories its owner deliberately shared it with from the add dialog, which says that
-  their boxes can then push to all of them — and a write to any other is meant to become a request
+  or the repositories its owner deliberately shared it with, from the add dialog or a repo's card,
+  which say that their boxes can then push to all of them — and a write to any other is meant to become a request
   a person approves. A box that grants itself
   that approval, or that reaches a repository without one, is a vulnerability.
 * **Getting the warden to perform a privileged operation nobody approved.** The warden runs on the

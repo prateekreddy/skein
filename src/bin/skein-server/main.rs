@@ -338,6 +338,11 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
                         eprintln!("skein: git token for {}: {problem}", view.name);
                     }
                 }
+                // A token saved while GitHub could not be asked is asked about here, and its card
+                // cleared or told what GitHub said (SKEIN-1239). Nothing is asked when none is.
+                for said in skein::gitgate::recheck_unchecked() {
+                    eprintln!("skein: {said}");
+                }
             })
             .await;
         }
@@ -456,6 +461,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/fleet/git-probe", post(api_git_probe))
         .route("/api/fleet/git-credentials", post(api_git_credential))
         .route("/api/fleet/repo-token", post(api_git_credential_alone))
+        .route("/api/fleet/repo-share", post(api_git_join_share))
         .route("/api/fleet/git-read-token", post(api_git_read_token))
         .route(
             "/api/fleet/git-credentials/:id",
