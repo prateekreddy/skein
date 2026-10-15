@@ -497,7 +497,7 @@ pub fn join_share(id: &str, slug: &str) -> Result<(), String> {
 
 /// What GitHub said about a token for one repository, asked before the token is saved.
 #[derive(Debug, Clone, PartialEq)]
-enum Asked {
+enum Answer {
     Pushes,
     /// GitHub answered, and the answer is no — in words that say which no.
     TurnedDown(String),
@@ -513,16 +513,16 @@ enum Asked {
 /// 403 or 404 — or saying it cannot push refuses the save, while a GitHub out of reach saves it
 /// marked unchecked. A rate limit is GitHub declining to answer rather than an answer, and
 /// [`crate::github`] says it in its own sentence, so it lands with the network.
-fn ask_before_saving(token: &Secret, slug: &str) -> Asked {
+fn ask_before_saving(token: &Secret, slug: &str) -> Answer {
     let path = crate::github::repo_path(slug);
     match crate::github::get_json_within(&path, token, std::time::Duration::from_secs(15)) {
         Ok(v) => match v.pointer("/permissions/push").and_then(|p| p.as_bool()) {
-            Some(true) => Asked::Pushes,
-            _ => Asked::TurnedDown(format!("it can read {slug} but not push to it")),
+            Some(true) => Answer::Pushes,
+            _ => Answer::TurnedDown(format!("it can read {slug} but not push to it")),
         },
         Err(e) => match rejected(&e) {
-            Some(said) => Asked::TurnedDown(format!("GitHub rejected it for {slug} ({said})")),
-            None => Asked::NotAsked(e),
+            Some(said) => Answer::TurnedDown(format!("GitHub rejected it for {slug} ({said})")),
+            None => Answer::NotAsked(e),
         },
     }
 }
@@ -552,9 +552,9 @@ fn ask_all(token: &Secret, slugs: &[String]) -> Answers {
     let mut out = Answers::default();
     for slug in slugs {
         match ask_before_saving(token, slug) {
-            Asked::Pushes => {}
-            Asked::TurnedDown(why) => out.turned_down.push((slug.clone(), why)),
-            Asked::NotAsked(why) => out.not_asked.push(format!("{slug}: {why}")),
+            Answer::Pushes => {}
+            Answer::TurnedDown(why) => out.turned_down.push((slug.clone(), why)),
+            Answer::NotAsked(why) => out.not_asked.push(format!("{slug}: {why}")),
         }
     }
     out
