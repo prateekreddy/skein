@@ -276,6 +276,10 @@ pub const GIT: Tool = Tool {
     name: "git",
     probe: None,
 };
+pub const GH: Tool = Tool {
+    name: "gh",
+    probe: None,
+};
 pub const JQ: Tool = Tool {
     name: "jq",
     probe: None,
@@ -316,7 +320,9 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // `python3` because the launcher's credential leg IS python — `login_life`, `merge_login`, and
     // the onboarding flag that goes with a seeded login (SKEIN-957). It was always needed and was
     // written down nowhere, which is the same gap SKEIN-765 closed for `tmux` in `server`.
-    ("fleet_launch", &[BWRAP, TMUX, GIT, PYTHON3]),
+    // `gh` because the launcher binds a shim over it, and the test that proves a running box's `gh`
+    // reads its replaced token runs the real one behind that shim (SKEIN-1240).
+    ("fleet_launch", &[BWRAP, TMUX, GIT, GH, PYTHON3]),
     ("fleet_move", &[TMUX, PYTHON3, RUSTUP]),
     // `curl` because the git shim's reachability probe IS a curl call: the two tests that drive the
     // blocked-egress hint guard on it, and without it here a machine with no curl skips them while

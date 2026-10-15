@@ -2456,7 +2456,75 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
       GH_TOKEN="$(cat "$own_token" 2>/dev/null)"
       export GH_TOKEN
     fi
-    unset own_token
+
+    # **`gh` reads the placed token on every call, not the value exported above** (SKEIN-1240).
+    #
+    # The host rewrites `$own_token` the moment a key is replaced in Settings
+    # (`gitgate::refresh_tokens`), and git sees the new one on its next call because the helper
+    # reads the file each time. The export above is a snapshot: every shell, terminal, Codex or
+    # Claude session in this box descends from the tmux server started at the bottom of this file,
+    # and a crossing copies `GH_TOKEN` out of that server's environment
+    # (`place::as_the_session_holds`), so all of them hold the token as it was when the box started,
+    # for as long as the box runs. The owner's decision on SKEIN-1240: `gh` uses a replaced key
+    # straight away, without reopening anything. So this shim, bound over the real `gh` exactly as
+    # the git shim below is bound over git, sets `GH_TOKEN` from the placed file for each invocation
+    # and execs the real one. With no file placed it unsets `GH_TOKEN`, so `gh` has no credential:
+    # the sandbox-wide token dropped above is gone from this namespace and nothing here brings it
+    # back.
+    #
+    # **A `GH_TOKEN` somebody set on purpose still wins.** A review crossing exports the owner's own
+    # token for one call (`fleet::credentials`) so that `gh` acts as the reviewer, and a person may
+    # export one by hand; overriding either would be skein quietly replacing a credential somebody
+    # chose. The stale value is told apart from those by what it is: the shim carries the sha256 of
+    # the value exported above (empty when none was), and only a `GH_TOKEN` matching it, or none at
+    # all, is replaced. That fingerprint is of a token this box can already read in full, so it
+    # tells the box nothing new. A box with no `sha256sum` cannot compare, and keeps the exported
+    # value as before rather than guessing.
+    #
+    # The export above stays, because other things in a box read `$GH_TOKEN` directly (a `curl`
+    # with it, an MCP server), and for them the value from the box's start is still better than
+    # none. They keep the old key until the session is reopened; only `gh` is fixed here.
+    gh_real=$(command -v gh 2>/dev/null || true)
+    [ -n "$gh_real" ] && gh_real=$(readlink -e "$gh_real" 2>/dev/null || true)
+    if [ -n "$gh_real" ] && [ -f "$gh_real" ]; then
+      mkdir -p "$root/bin" || exit 1
+      gh_mark=''
+      if [ -n "${GH_TOKEN-}" ] && command -v sha256sum >/dev/null 2>&1; then
+        gh_mark=$(printf '%s' "$GH_TOKEN" | sha256sum)
+        gh_mark="${gh_mark%% *}"
+      fi
+      # Same overlap trick as git's: the real binary is bound to a second path FIRST, because
+      # binding the shim over it shadows the very thing the shim has to exec.
+      : >"$root/bin/gh.real" 2>/dev/null || true
+      {
+        printf '#!/bin/sh\n'
+        printf 'skein_gh=%q\n' "$root/bin/gh.real"
+        printf 'skein_gh_token=%q\n' "$own_token"
+        printf 'skein_gh_mark=%q\n' "$gh_mark"
+        cat <<'GHSHIM'
+# A GH_TOKEN other than the one this box started with was set on purpose: use it unchanged.
+if [ -n "${GH_TOKEN-}" ]; then
+  [ -n "$skein_gh_mark" ] || exec "$skein_gh" "$@"
+  skein_gh_seen=$(printf '%s' "$GH_TOKEN" | sha256sum 2>/dev/null)
+  [ "${skein_gh_seen%% *}" = "$skein_gh_mark" ] || exec "$skein_gh" "$@"
+fi
+# Otherwise the token the host has placed for this box's repository now, or none at all.
+GH_TOKEN=''
+[ -r "$skein_gh_token" ] && GH_TOKEN=$(cat "$skein_gh_token" 2>/dev/null)
+if [ -n "$GH_TOKEN" ]; then
+  export GH_TOKEN
+else
+  unset GH_TOKEN
+fi
+exec "$skein_gh" "$@"
+GHSHIM
+      } > "$root/bin/gh" || exit 1
+      chmod 755 "$root/bin/gh" || exit 1
+      binds+=(--ro-bind "$gh_real" "$root/bin/gh.real")
+      binds+=(--ro-bind "$root/bin/gh" "$gh_real")
+      unset gh_mark
+    fi
+    unset own_token gh_real
   fi
 
   # The forwarded agent is account-wide, so leaving it reachable would undo all of the above: any

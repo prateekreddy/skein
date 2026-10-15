@@ -596,3 +596,184 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
         );
     }
 }
+
+/// **`gh` in a running scoped box uses the token placed for it now, not the one the box started
+/// with** (SKEIN-1240).
+///
+/// Replacing a key in Settings rewrites the box's placed token file at once, but `GH_TOKEN` is a
+/// snapshot taken when the launcher ran, and every process in the box (and every crossing, which
+/// copies it from the box's tmux server) holds that snapshot until the box is restarted. The `gh`
+/// shim the launcher binds over the real `gh` reads the file on every call instead. Driven for
+/// real: a real box, the real `gh` behind the shim, and `gh auth token`, which prints the
+/// credential `gh` resolved without reaching GitHub. Only `skein-test-` values exist here.
+///
+/// The box's own session shell is the long-lived process the owner reported: it asks once, waits
+/// while the test replaces the file, then asks again, all with one environment.
+///
+/// What would make each assertion fail:
+///   * `before`: the launcher no longer placing the own-repo token at all. It is the baseline.
+///   * `after` in the session, and the crossing's `gh`: the shim gone, so `gh` reads the exported
+///     snapshot again — the SKEIN-1240 bug. The session's own `$GH_TOKEN` is asserted to still be
+///     the old key, so the new one can only have come from the shim.
+///   * the chosen token: a shim that replaces every `GH_TOKEN` unconditionally, which would take
+///     the owner's own token away from a review crossing.
+///   * `removed`: a shim that leaves the old exported value in place when no file is placed, so a
+///     revoked key would go on being presented.
+#[test]
+fn gh_in_a_running_box_uses_the_token_placed_now() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") || !have("gh") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux or gh, so it cannot host a \
+             box with gh in it",
+        );
+    }
+    let name = "ghlive-main";
+    let root = scratch_named("ghlive");
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        .set("GH_TOKEN", "skein-test-fleet-token");
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    // `gh auth token` exits non-zero with nothing on stdout when it has no credential.
+    let report = "t=$(gh auth token 2>/dev/null); printf 'gh %s\\nenv %s\\n' \"${t:-none}\" \
+                  \"${GH_TOKEN-none}\"";
+    let mut script = session_script(
+        name,
+        "skein-agent",
+        &format!(
+            "{{ {report}; }} > /tmp/b.tmp && mv /tmp/b.tmp /tmp/before; \
+             while [ ! -e /tmp/go ]; do sleep 0.1; done; \
+             {{ {report}; }} > /tmp/a.tmp && mv /tmp/a.tmp /tmp/after; exec sleep 300"
+        ),
+    );
+    script = with_launch_env(&script, "SKEIN_GIT_SCOPE", "repo");
+    script = with_launch_env(&script, "SKEIN_BOX_REPO", "example/thing");
+    let tokens = PathBuf::from(box_state(name)).join("git-tokens");
+    fs::create_dir_all(&tokens).unwrap();
+    let placed = tokens.join("example%2Fthing");
+    fs::write(&placed, "skein-test-box-token-old").unwrap();
+
+    let launched = own_sandbox(FLEET)
+        .exec(&script, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("start the box: {e}"));
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+    let ns_start = sh(&format!(
+        "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
+    ))
+    .parse::<u64>()
+    .expect("the anchor's start time");
+    record_place(
+        name,
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            ns_pid: anchor,
+            home: sandbox_home.display().to_string(),
+            tree: "/".into(),
+            sock: box_sock(name),
+            generation: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .expect("a boot id")
+                .trim()
+                .to_string(),
+            ns_start,
+            ..Default::default()
+        },
+    )
+    .expect("place the box");
+
+    let box_tmp = PathBuf::from(format!("{}/tmp", box_root(name)));
+    let wait_for = |file: &str| {
+        let path = box_tmp.join(file);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        fs::read_to_string(&path).unwrap_or_default()
+    };
+    let before = wait_for("before");
+    // The key is replaced the way `gitgate::refresh_tokens` replaces it: the file is rewritten
+    // under a running box. Then the session's shell, still running with its first environment,
+    // is let go to ask again.
+    fs::write(&placed, "skein-test-box-token-new").unwrap();
+    fs::write(box_tmp.join("go"), "").unwrap();
+    let after = wait_for("after");
+    let place = place_of(name).expect("placed");
+    let crossed = place.exec(report, Duration::from_secs(30));
+    let chosen = place.exec(
+        "t=$(GH_TOKEN=skein-test-chosen gh auth token 2>/dev/null); printf 'gh %s\\n' \"${t:-none}\"",
+        Duration::from_secs(30),
+    );
+    fs::remove_file(&placed).unwrap();
+    let removed = place.exec(report, Duration::from_secs(30));
+
+    let limits = fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+    forget_place(name);
+    let _ = Command::new("tmux")
+        .args(["-S", &box_sock(name), "kill-server"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    anchor_gone(anchor);
+    if limits.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .status();
+    }
+
+    let field = |text: &str, key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key} ")))
+            .unwrap_or("")
+            .to_string()
+    };
+    let crossed = crossed.unwrap_or_else(|e| panic!("the crossing did not run: {e}"));
+    let chosen = chosen.unwrap_or_else(|e| panic!("the crossing did not run: {e}"));
+    let removed = removed.unwrap_or_else(|e| panic!("the crossing did not run: {e}"));
+
+    assert_eq!(
+        (
+            field(&before, "gh").as_str(),
+            field(&before, "env").as_str()
+        ),
+        ("skein-test-box-token-old", "skein-test-box-token-old"),
+        "the box did not start with its own placed token, so nothing below has a baseline: \
+         {before:?}"
+    );
+    assert_eq!(
+        field(&after, "env"),
+        "skein-test-box-token-old",
+        "the session's own GH_TOKEN changed under it, so the assertion below could pass without the \
+         shim: {after:?}"
+    );
+    assert_eq!(
+        field(&after, "gh"),
+        "skein-test-box-token-new",
+        "gh in a session started before the key was replaced still uses the old one (SKEIN-1240): \
+         {after:?}"
+    );
+    assert_eq!(
+        field(&crossed, "gh"),
+        "skein-test-box-token-new",
+        "gh in a crossing, which copies the session's GH_TOKEN, still uses the old key: {crossed:?}"
+    );
+    assert_eq!(
+        field(&chosen, "gh"),
+        "skein-test-chosen",
+        "a GH_TOKEN set on purpose for one call was replaced by the placed token, which would take \
+         a review crossing's own credential away: {chosen:?}"
+    );
+    assert_eq!(
+        field(&removed, "gh"),
+        "none",
+        "with no token placed for this box any more, gh still presented one: {removed:?}"
+    );
+}
