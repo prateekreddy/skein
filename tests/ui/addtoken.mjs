@@ -33,6 +33,8 @@ const API_TOKEN = "t".repeat(64);
 const LET_IN = "skein-test-private-token";
 // A token for some other repository: GitHub turns it down here.
 const WRONG = "skein-test-token-for-another-repo";
+// A token saved while the stub GitHub answers nothing but 503.
+const UNASKED = "skein-test-saved-while-github-was-down";
 
 function git(cwd, ...args) {
   return execFileSync("git", args, {
@@ -98,13 +100,18 @@ function startPrivateHost(fx) {
   return new Promise(ok => server.listen(0, "127.0.0.1", () => ok({ server, port: server.address().port, served })));
 }
 
-// GitHub's `GET /repos/{slug}`, for the share's push check. `push` is what the test says it is.
+// GitHub's `GET /repos/{slug}`, for the push check a share and a card's save make. `push` is what
+// the test says it is; a token in `refuse` gets GitHub's 401, and `down` answers every request 503.
 function startGitHubApi() {
-  const state = { push: false, asked: [] };
+  const state = { push: false, asked: [], refuse: new Set(), down: false };
   const server = http.createServer((req, res) => {
     state.asked.push(req.url);
-    const body = JSON.stringify({ permissions: { push: state.push } });
-    res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    const auth = req.headers.authorization || "";
+    const [code, answer] = state.down ? [503, { message: "Service Unavailable" }]
+      : [...state.refuse].some(t => auth.includes(t)) ? [401, { message: "Bad credentials" }]
+      : [200, { permissions: { push: state.push } }];
+    const body = JSON.stringify(answer);
+    res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
     res.end(body);
   });
   return new Promise(ok => server.listen(0, "127.0.0.1", () => ok({ server, url: `http://127.0.0.1:${server.address().port}`, state })));
@@ -261,10 +268,68 @@ try {
   check("and the card says it has a token of its own now",
     ((await cardBody().locator(".rbody").textContent()) || "").includes("token stored"), true);
 
+  // --- a card asks GitHub about a token before saving it (SKEIN-1239) ---------------------------
+  const tokenFile = id => fs.readFileSync(path.join(fx.home, "github-pats", id), "utf8").trim();
+  const toastText = async () => ((await page.textContent("#toast").catch(() => "")) || "").trim();
+  api.state.refuse.add(WRONG);
+  await cardBody().locator(`[data-repotoken="acme/second"]`).fill(WRONG);
+  await cardBody().locator("button", { hasText: "Store" }).click();
+  await until(async () => (await toastText()).includes("This token was not saved"));
+  // **What would make this fail:** the card's route storing without asking GitHub —
+  // `api_git_credential_alone` back on `store_repo_token`.
+  check("a token GitHub turns down is refused on the card, naming the repo and what GitHub said",
+    await toastText(),
+    "This token was not saved: GitHub rejected it for acme/second (401: Bad credentials). acme/second keeps the token it had. Paste a fine-grained token with Contents read and write on acme/second.");
+  check("and the token before it is still the one stored", tokenFile("acme-second"), LET_IN);
+
+  api.state.refuse.clear();
+  api.state.down = true;
+  await cardBody().locator(`[data-repotoken="acme/second"]`).fill(UNASKED);
+  await cardBody().locator("button", { hasText: "Store" }).click();
+  await until(async () => ((await cardBody().locator(".rbody").textContent()) || "").includes("not checked yet"));
+  // **What would make this fail:** a 503 read as GitHub turning the token down (nothing saved, no
+  // mark), or `unchecked` not served by `/api/fleet/git-grants` or not drawn by `repoTokenRow`.
+  check("a token saved while GitHub is out of reach says on its card that it has not been checked",
+    ((await cardBody().locator(".rbody").textContent()) || "").replace(/\s+/g, " ")
+      .split("not checked yet")[1]?.includes("GitHub could not be reached when it was saved (acme/second: GitHub said 503: Service Unavailable). Boxes push with it meanwhile, and skein asks GitHub again within 20 minutes"),
+    true);
+  check("and it was saved", tokenFile("acme-second"), UNASKED);
+  api.state.down = false;
+
+  // --- an existing repo uses the token another repo has, from its card (SKEIN-1241) -------------
+  const priv = () => page.locator(`[data-card="private"]`);
+  await priv().locator(".rhead").click();
+  await priv().locator(`[data-sharepick="acme/private"]`).selectOption("acme-first");
+  // **What would make this fail:** the picker saving on change rather than on its button, or a
+  // warning that leaves out a repo that gains access or the token this repo gives up.
+  check("an existing card names every repo that gains access, and what it gives up, before saving",
+    ((await priv().locator(`[data-sharehint="acme/private"]`).textContent()) || "").trim(),
+    "Shared, not copied: boxes of acme/private and of acme/first will all be able to push to all of them with this token. The token acme/private has now is forgotten. skein first checks that GitHub lets it push to acme/private, and a new token stored on any of their cards later replaces it for all of them.");
+  check("and choosing it saved nothing yet", (await creds()).find(c => c.id === "acme-first").repos, ["acme/first"]);
+
+  api.state.push = false;
+  await priv().locator("button", { hasText: "Use it" }).click();
+  await until(async () => (await toastText()).includes("cannot push to acme/private"));
+  // **What would make this fail:** `join_share` without `shareable_token`'s push check.
+  check("a token GitHub says cannot push there is not shared from the card",
+    { said: (await toastText()).startsWith("the token acme/first uses cannot push to acme/private"),
+      first: (await creds()).find(c => c.id === "acme-first").repos,
+      own: (await creds()).some(c => c.id === "acme-private") },
+    { said: true, first: ["acme/first"], own: true });
+
+  api.state.push = true;
+  await priv().locator("button", { hasText: "Use it" }).click();
+  await until(async () => (await creds()).find(c => c.id === "acme-first").repos.includes("acme/private"));
+  check("with push access, the card joins the share, and its own token goes",
+    (await creds()).filter(c => c.id === "acme-first" || c.id === "acme-private"),
+    [{ id: "acme-first", repos: ["acme/first", "acme/private"], shared: true, has_token: true }]);
+  check("still one file for the share, and none for the token it gave up",
+    fs.readdirSync(path.join(fx.home, "github-pats")).sort(), ["acme-first", "acme-second"]);
+
   // --- no token bytes anywhere a person or a log can read them -------------------------------------
   // **What would make this fail:** a route echoing its request, an error carrying git's command line
   // with a token in a URL, or a page drawing a stored token back.
-  const leaks = where => [LET_IN, WRONG].filter(t => where.includes(t));
+  const leaks = where => [LET_IN, WRONG, UNASKED].filter(t => where.includes(t));
   check("no /api/ response carried a token", { answers: answers.length > 10, leaked: leaks(answers.join("\n")) },
     { answers: true, leaked: [] });
   check("nor does the page", leaks(await page.content()), []);

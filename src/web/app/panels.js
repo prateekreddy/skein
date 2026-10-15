@@ -505,17 +505,23 @@ function gitqGrantRow(g) {
     </div>`;
 }
 
-// A stored token covers one repository unless its owner shared it from the add dialog, and the row
+// A stored token covers one repository unless its owner shared it, and the row
 // says which rather than leaving it to be discovered: a token covering three hands all three to any
 // box that receives it, because the helper that chooses runs inside the box as the agent's own uid.
 // A shared row has no "Replace token" here — this pane stores a token for one repo, which would
 // take that repo out of the share — and says where it is replaced instead (SKEIN-1231).
 function gitCredRow(c) {
   const state = c.problem ? "refused" : (c.has_token ? (c.shared ? "shared" : "ready") : "incomplete");
-  const why = c.problem ? `unusable — ${esc(c.problem)}`
+  // What GitHub said when it was not "yes" while saving (SKEIN-1239), ahead of whatever else the
+  // row has to say, because it is the part that needs doing something about.
+  const check = c.problem || !c.has_token ? ""
+    : c.turned_down ? `GitHub turned this token down when skein asked after saving it: ${esc(c.turned_down)}. `
+    : c.unchecked ? `not checked yet — GitHub could not be reached when it was saved (${esc(c.unchecked)}); skein asks again within 20 minutes. `
+    : "";
+  const why = check + (c.problem ? `unusable — ${esc(c.problem)}`
     : !c.has_token ? "no token stored"
     : c.shared ? `shared on purpose — boxes of each of these repos can push to all of them. Replace it from any of their cards; forgetting it here takes it from all ${(c.repos || []).length}`
-    : "";
+    : "");
   return `
     <div class="set-cred" data-cred="${esc(c.id)}">
       <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
@@ -753,6 +759,16 @@ function rotateGitCred(id, token) {
   return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, token }),
+  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+}
+
+// Point an existing repo at the token another repo has (SKEIN-1241). The host asks GitHub whether
+// that token can push here first, and refuses in words that name both, so the refusal is shown as
+// it comes.
+function joinGitShare(repo, share) {
+  return fetch("/api/fleet/repo-share", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repo, share }),
   }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
 }
 

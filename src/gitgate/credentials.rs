@@ -25,10 +25,11 @@ use super::*;
 /// means in the code:
 ///
 /// * **Sharing is the only way to a multi-repo entry.** It happens when a repo is added and the
-///   person picks "use the token another repo has" — the add dialog says, before they confirm, that
-///   the boxes of every repo sharing it can push to all of them — and GitHub must say the token can
-///   push to the new repository before the share is saved ([`check_token`]). The entry is then
-///   marked [`WriteCredential::shared`].
+///   person picks "use the token another repo has", or when an existing repo's card is pointed at
+///   another repo's token ([`join_share`], SKEIN-1241, which amended "only when adding"). Either
+///   way the page says, before they confirm, that the boxes of every repo sharing it can push to
+///   all of them, and GitHub must say the token can push to the repository joining before the
+///   share is saved ([`check_token`]). The entry is then marked [`WriteCredential::shared`].
 /// * **Anything else still covers exactly one.** [`set_write_credential`] refuses a list of several,
 ///   and an entry naming several that is not marked shared — a hand edit, or a file from before
 ///   sharing existed — is listed with its problem and never used.
@@ -50,11 +51,24 @@ pub struct WriteCredential {
     /// `owner/name`, each. One, unless [`WriteCredential::shared`] says the person chose more.
     #[serde(default)]
     pub repos: Vec<String>,
-    /// The person shared this token with another repository on purpose, from the add dialog, having
-    /// been told what that lets each repo's boxes do. The only thing that lets `repos` hold more
-    /// than one. Absent in every file written before sharing existed, which reads as `false`.
+    /// The person shared this token with another repository on purpose, from the add dialog or a
+    /// repo card, having been told what that lets each repo's boxes do. The only thing that lets
+    /// `repos` hold more than one. Absent in every file written before sharing existed, which reads
+    /// as `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
+    /// Saved while GitHub could not be asked whether this token can push (SKEIN-1239), and why not
+    /// — the network's words or GitHub's, never the token. Empty once a check has answered: the
+    /// next [`recheck_unchecked`] clears it, or moves what GitHub said to `turned_down`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unchecked: String,
+    /// What GitHub said when it was asked later, about a token saved [`unchecked`], and turned it
+    /// down. A token GitHub turns down while it is being saved is never saved, so only the later
+    /// check can set this; storing a new token clears it.
+    ///
+    /// [`unchecked`]: WriteCredential::unchecked
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub turned_down: String,
 }
 
 impl WriteCredential {
@@ -72,9 +86,9 @@ impl WriteCredential {
             (1, _) | (_, true) => {}
             (n, false) => {
                 return Some(format!(
-                    "names {n} repositories without having been shared from the add dialog; a \
-                     stored token covers one repository unless its owner shares it, because every \
-                     box that gets it can write all {n}"
+                    "names {n} repositories without having been shared; a stored token covers \
+                     one repository unless its owner shares it, because every box that gets it can \
+                     write all {n}"
                 ))
             }
         }
@@ -224,7 +238,7 @@ pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(
         id: id.to_string(),
         label: label.trim().to_string(),
         repos: repos.to_vec(),
-        shared: false,
+        ..Default::default()
     };
     if next.repos.len() > 1 {
         return Err(format!(
@@ -269,6 +283,13 @@ pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(
 /// failure between the two leaves an entry the cockpit shows as "no token stored", never a live
 /// token that no entry names.
 pub fn store_repo_token(slug: &str, token: &str) -> Result<String, String> {
+    store_repo_token_marked(slug, token, "")
+}
+
+/// [`store_repo_token`], with the entry written already marked [`WriteCredential::unchecked`] when
+/// `unchecked` says why GitHub could not be asked — in the same write, so there is no moment in
+/// which a token nobody checked reads as checked.
+fn store_repo_token_marked(slug: &str, token: &str, unchecked: &str) -> Result<String, String> {
     if !slug_is_nameable(slug) {
         return Err(format!("{slug:?} is not a repository"));
     }
@@ -298,7 +319,8 @@ pub fn store_repo_token(slug: &str, token: &str) -> Result<String, String> {
             id: id.clone(),
             label: slug.to_string(),
             repos: vec![slug.to_string()],
-            shared: false,
+            unchecked: unchecked.to_string(),
+            ..Default::default()
         });
         Ok(id)
     })?;
@@ -424,6 +446,273 @@ pub fn release_shared_coverage(slug: &str) -> Result<(), String> {
         })?;
     forget_tokens(&emptied);
     Ok(())
+}
+
+/// Point existing repository `slug` at stored credential `id`'s token — a repo card's "use the
+/// token another repo has" (SKEIN-1241, the owner's amendment of 2026-10-15 to "only when adding").
+/// The card says before it is pressed which repositories gain access. Checked first, by
+/// [`shareable_token`]: GitHub must say the token can push to `slug`, or nothing changes. Then, in
+/// one write, `slug` comes off whatever it pushed with before and joins `id`'s entry, marked shared:
+/// a token of its own is forgotten, and a share it was in keeps its token for the repos still on it.
+///
+/// Forgetting its own token is the point rather than a side effect: [`credential_for`] answers with
+/// the first entry that covers a repo, so a token of its own left in place could go on answering
+/// for `slug`, and the share would never be used.
+pub fn join_share(id: &str, slug: &str) -> Result<(), String> {
+    if !slug_is_nameable(slug) {
+        return Err(format!("{slug:?} is not a repository"));
+    }
+    let on_it = |c: &WriteCredential| c.id == id && c.repos.iter().any(|r| same_repo(r, slug));
+    if write_credentials().iter().any(on_it) {
+        return Err(format!("{slug} already uses that token"));
+    }
+    drop(shareable_token(id, slug)?);
+    let mut emptied = Vec::new();
+    crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        if !all.iter().any(|c| c.id == id) {
+            return Err(format!("there is no stored token called {id:?} any more"));
+        }
+        if all.iter().any(on_it) {
+            return Err(format!("{slug} already uses that token"));
+        }
+        let own: Vec<String> = all
+            .iter()
+            .filter(|c| c.id != id && c.repos.len() == 1 && same_repo(&c.repos[0], slug))
+            .map(|c| c.id.clone())
+            .collect();
+        all.retain(|c| !own.contains(&c.id));
+        emptied = leave_shares(all, slug);
+        emptied.extend(own);
+        if let Some(c) = all.iter_mut().find(|c| c.id == id) {
+            c.repos.push(slug.to_string());
+            c.shared = c.repos.len() > 1;
+        }
+        Ok(())
+    })?;
+    forget_tokens(&emptied);
+    Ok(())
+}
+
+// ───────────────────────────── a token is asked about before it is saved ─────────────────────────────
+
+/// What GitHub said about a token for one repository, asked before the token is saved.
+#[derive(Debug, Clone, PartialEq)]
+enum Asked {
+    Pushes,
+    /// GitHub answered, and the answer is no — in words that say which no.
+    TurnedDown(String),
+    /// GitHub could not be asked: the network, a timeout, a 5xx, a rate limit. Why.
+    NotAsked(String),
+}
+
+/// Ask GitHub whether `token` can push to `slug`, telling "no" apart from "could not ask".
+///
+/// Not [`check_token`], whose caller is the refresh: there a 403 must never read as a dead token,
+/// because what follows is a credential taken out of a box. Here what follows is only a refusal to
+/// save, and the owner's rule (2026-10-15, SKEIN-1239) is that GitHub rejecting the token — 401,
+/// 403 or 404 — or saying it cannot push refuses the save, while a GitHub out of reach saves it
+/// marked unchecked. A rate limit is GitHub declining to answer rather than an answer, and
+/// [`crate::github`] says it in its own sentence, so it lands with the network.
+fn ask_before_saving(token: &Secret, slug: &str) -> Asked {
+    let path = crate::github::repo_path(slug);
+    match crate::github::get_json_within(&path, token, std::time::Duration::from_secs(15)) {
+        Ok(v) => match v.pointer("/permissions/push").and_then(|p| p.as_bool()) {
+            Some(true) => Asked::Pushes,
+            _ => Asked::TurnedDown(format!("it can read {slug} but not push to it")),
+        },
+        Err(e) => match rejected(&e) {
+            Some(said) => Asked::TurnedDown(format!("GitHub rejected it for {slug} ({said})")),
+            None => Asked::NotAsked(e),
+        },
+    }
+}
+
+/// GitHub's own words, when `why` is [`crate::github`]'s sentence for a 401, 403 or 404 — the
+/// statuses that mean this token was turned down — and `None` for anything else.
+fn rejected(why: &str) -> Option<&str> {
+    let said = why
+        .strip_prefix("GitHub said ")
+        .or_else(|| why.strip_prefix("GitHub answered "))?;
+    ["401", "403", "404"]
+        .iter()
+        .any(|s| said.starts_with(s))
+        .then_some(said)
+}
+
+/// What GitHub said about one token for every repository it is to cover.
+#[derive(Debug, Default)]
+struct Answers {
+    /// `(repository, what GitHub said)` for each it turned the token down for.
+    turned_down: Vec<(String, String)>,
+    /// Why GitHub could not be asked, for each it could not.
+    not_asked: Vec<String>,
+}
+
+fn ask_all(token: &Secret, slugs: &[String]) -> Answers {
+    let mut out = Answers::default();
+    for slug in slugs {
+        match ask_before_saving(token, slug) {
+            Asked::Pushes => {}
+            Asked::TurnedDown(why) => out.turned_down.push((slug.clone(), why)),
+            Asked::NotAsked(why) => out.not_asked.push(format!("{slug}: {why}")),
+        }
+    }
+    out
+}
+
+/// "a", "a and b", "a, b and c" — the page's `reposPhrase`, for the sentences said from here.
+fn repos_phrase<S: AsRef<str>>(list: &[S]) -> String {
+    match list {
+        [] => String::new(),
+        [one] => one.as_ref().to_string(),
+        [rest @ .., last] => format!(
+            "{} and {}",
+            rest.iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<_>>()
+                .join(", "),
+            last.as_ref()
+        ),
+    }
+}
+
+/// Ask GitHub about `token` for every repository in `slugs`, before it is saved (SKEIN-1239).
+///
+/// `Err` is the refusal, whole: each repository GitHub turned it down for and what it said, then
+/// `kept` — what goes on working, which only the caller knows — then what to paste instead. `Ok`
+/// carries why it could not be asked about some repository, for [`WriteCredential::unchecked`], or
+/// is empty when GitHub says it can push to all of them.
+pub fn check_new_token(token: &str, slugs: &[String], kept: &str) -> Result<String, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("no token was given".into());
+    }
+    let answers = ask_all(&Secret::new(token), slugs);
+    if answers.turned_down.is_empty() {
+        return Ok(answers.not_asked.join("; "));
+    }
+    let whys: Vec<&str> = answers
+        .turned_down
+        .iter()
+        .map(|(_, w)| w.as_str())
+        .collect();
+    let failing: Vec<&str> = answers
+        .turned_down
+        .iter()
+        .map(|(s, _)| s.as_str())
+        .collect();
+    Err(format!(
+        "This token was not saved: {}. {kept}Paste a fine-grained token with Contents read and \
+         write on {}.",
+        whys.join("; "),
+        repos_phrase(&failing)
+    ))
+}
+
+/// Store `token` as `slug`'s own, as [`store_repo_token`] does, once GitHub has said it can push
+/// there — a repo card's "Store" and "Use for … alone", and the GitHub & keys pane (SKEIN-1239).
+/// Answers as [`check_new_token`] does: the refusal, or why it was saved unchecked ("" when it was
+/// checked). Turned down, nothing is written, and whatever `slug` pushed with before still works.
+pub fn store_repo_token_checked(slug: &str, token: &str) -> Result<String, String> {
+    if !slug_is_nameable(slug) {
+        return Err(format!("{slug:?} is not a repository"));
+    }
+    let kept = match credential_for(slug) {
+        Some(_) => format!("{slug} keeps the token it had. "),
+        None => String::new(),
+    };
+    let unchecked = check_new_token(token, &[slug.to_string()], &kept)?;
+    store_repo_token_marked(slug, token, &unchecked)?;
+    Ok(unchecked)
+}
+
+/// Replace the token of stored credential `id` and nothing else — a shared token rotated from any
+/// card that shares it — once GitHub has said the new one can push to **every** repository on it
+/// (SKEIN-1239). One it cannot push to would leave that repo's boxes with nothing to push with and
+/// the token that could gone, so the refusal names each that fails and the old token stays.
+pub fn replace_token_checked(id: &str, token: &str) -> Result<String, String> {
+    let Some(c) = write_credentials().into_iter().find(|c| c.id == id) else {
+        return Err(format!("there is no stored token called {id:?} any more"));
+    };
+    let kept = match (credential_has_token(id), c.repos.as_slice()) {
+        (false, _) | (_, []) => String::new(),
+        (true, [one]) => format!("{one} keeps the token it had. "),
+        (true, all) => format!(
+            "{} keep the token they share now, and a token that replaces it has to push to every \
+             one of them. ",
+            repos_phrase(all)
+        ),
+    };
+    let unchecked = check_new_token(token, &c.repos, &kept)?;
+    mark_checked(id, &unchecked)?;
+    set_credential_token(id, token).map(|()| unchecked)
+}
+
+/// Record what the check of a token about to be stored under `id` said: why it could not be asked,
+/// or "" — and forget any earlier `turned_down`, which was about the token being replaced. Written
+/// before the token, so a new token never sits behind an older "checked".
+pub fn mark_checked(id: &str, unchecked: &str) -> Result<(), String> {
+    crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+        if let Some(c) = all.iter_mut().find(|c| c.id == id) {
+            c.unchecked = unchecked.to_string();
+            c.turned_down.clear();
+        }
+        Ok(())
+    })
+}
+
+/// Ask GitHub about every token saved [`WriteCredential::unchecked`], and record the answer — the
+/// server's twenty-minute tick (SKEIN-1239). Pushes to all its repositories: the mark is cleared.
+/// Turned down for any: what GitHub said moves to `turned_down`, for the card to show, and the
+/// token stays where it is — it replaced the one before it, and taking it would leave nothing to
+/// push with. Still out of reach: left marked for the next tick. Returns a sentence for each token
+/// GitHub turned down.
+///
+/// The answer is written only if the token on disk is still the one asked about: a token saved
+/// while GitHub was being asked has its own check, and this one's answer is not about it.
+pub fn recheck_unchecked() -> Vec<String> {
+    let mut said = Vec::new();
+    for c in write_credentials()
+        .into_iter()
+        .filter(|c| !c.unchecked.is_empty())
+    {
+        let path = credential_token_path(&c.id);
+        let Some(token) = crate::secret::read(&path).ok().flatten() else {
+            continue;
+        };
+        let answers = ask_all(&token, &c.repos);
+        let turned_down: Vec<&str> = answers
+            .turned_down
+            .iter()
+            .map(|(_, w)| w.as_str())
+            .collect();
+        let turned_down = turned_down.join("; ");
+        let unchecked = match turned_down.is_empty() {
+            true => answers.not_asked.join("; "),
+            false => String::new(),
+        };
+        let wrote =
+            crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+                let same = crate::secret::read(&path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|now| now.expose() == token.expose());
+                if let Some(entry) = all.iter_mut().find(|e| e.id == c.id).filter(|_| same) {
+                    entry.unchecked = unchecked.clone();
+                    entry.turned_down = turned_down.clone();
+                }
+                Ok(())
+            });
+        if let Err(why) = wrote {
+            said.push(format!("the token {} uses: {why}", repos_phrase(&c.repos)));
+        } else if !turned_down.is_empty() {
+            said.push(format!(
+                "the token {} uses: {turned_down}",
+                repos_phrase(&c.repos)
+            ));
+        }
+    }
+    said
 }
 
 /// Store (or, with an empty value, forget) a credential's token.
@@ -1344,5 +1633,258 @@ mod tests {
         let answered = check_token(&Secret::new("skein-test-write-token"), "acme/thing");
         std::env::remove_var("SKEIN_GITHUB_API");
         assert_eq!(answered, Ok(true), "a token that can push must read as one");
+    }
+
+    /// A GitHub that answers `GET /repos/{slug}` per repository, from `answers`, and 404 for any
+    /// other path — so a check that asks about one repo when it should ask about three is seen.
+    fn stub_github_per_repo(answers: &'static [(&'static str, u16, &'static str)]) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (status, body) = answers
+                    .iter()
+                    .find(|(slug, _, _)| path == format!("/repos/{slug}"))
+                    .map(|(_, s, b)| (*s, *b))
+                    .unwrap_or((404, r#"{"message":"Not Found"}"#));
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// **A token GitHub turns down is never saved, and the one before it keeps working**
+    /// (SKEIN-1239, the owner's "refuse to save"). Each way GitHub says no — rejected outright, or
+    /// readable but not pushable — is refused in words naming the repository and what GitHub said.
+    /// What fails it: `store_repo_token_checked` storing without `check_new_token` — the first
+    /// refusal then comes back `Ok` and the old token is gone.
+    #[test]
+    fn a_token_github_turns_down_is_never_saved_and_the_one_before_keeps_working() {
+        let (_lock, _home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        store_repo_token("a/one", "skein-test-before").unwrap();
+
+        for (status, body, says) in [
+            (
+                401,
+                r#"{"message":"Bad credentials"}"#,
+                "GitHub rejected it for a/one (401: Bad credentials)",
+            ),
+            (
+                403,
+                r#"{"message":"Resource not accessible by personal access token"}"#,
+                "GitHub rejected it for a/one (403: Resource not accessible",
+            ),
+            (
+                200,
+                r#"{"permissions":{"push":false}}"#,
+                "it can read a/one but not push to it",
+            ),
+        ] {
+            env.set("SKEIN_GITHUB_API", stub_github(status, body));
+            let why = store_repo_token_checked("a/one", "skein-test-after")
+                .expect_err("a token GitHub turned down was saved");
+            assert!(
+                why.starts_with("This token was not saved: ")
+                    && why.contains(says)
+                    && why.contains("a/one keeps the token it had")
+                    && !why.contains("skein-test-after"),
+                "{status}: {why}"
+            );
+            let (_, token) = credential_for("a/one").expect("the token before was taken");
+            assert_eq!(token.expose(), "skein-test-before", "{status}");
+        }
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(200, r#"{"permissions":{"push":true}}"#),
+        );
+        assert_eq!(
+            store_repo_token_checked("a/one", "skein-test-after"),
+            Ok(String::new())
+        );
+        let (c, token) = credential_for("a/one").unwrap();
+        assert_eq!(
+            (token.expose(), c.unchecked.as_str()),
+            ("skein-test-after", "")
+        );
+    }
+
+    /// **A shared token is replaced only by one that can push to every repository on it**, and the
+    /// refusal names each one that fails (SKEIN-1239). What fails it: `replace_token_checked`
+    /// asking about the first repository alone — a/one can push, so the new token is saved and
+    /// a/two's and a/three's boxes are left with one that cannot.
+    #[test]
+    fn a_shared_token_is_replaced_only_by_one_that_pushes_to_every_repo_on_it() {
+        let (_lock, _home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let id = store_repo_token("a/one", "skein-test-shared").unwrap();
+        share_credential(&id, "a/two").unwrap();
+        share_credential(&id, "a/three").unwrap();
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github_per_repo(&[
+                ("a/one", 200, r#"{"permissions":{"push":true}}"#),
+                ("a/two", 200, r#"{"permissions":{"push":false}}"#),
+            ]),
+        );
+        let why = replace_token_checked(&id, "skein-test-new")
+            .expect_err("a token two of the three cannot push with replaced theirs");
+        assert!(
+            why.contains("it can read a/two but not push to it")
+                && why.contains("GitHub rejected it for a/three (404: Not Found)")
+                && why.contains("a/one, a/two and a/three keep the token they share now")
+                && why.contains("Contents read and write on a/two and a/three."),
+            "{why}"
+        );
+        for slug in ["a/one", "a/two", "a/three"] {
+            assert_eq!(
+                credential_for(slug).unwrap().1.expose(),
+                "skein-test-shared",
+                "{slug}"
+            );
+        }
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github_per_repo(&[
+                ("a/one", 200, r#"{"permissions":{"push":true}}"#),
+                ("a/two", 200, r#"{"permissions":{"push":true}}"#),
+                ("a/three", 200, r#"{"permissions":{"push":true}}"#),
+            ]),
+        );
+        replace_token_checked(&id, "skein-test-new").unwrap();
+        for slug in ["a/one", "a/two", "a/three"] {
+            assert_eq!(
+                credential_for(slug).unwrap().1.expose(),
+                "skein-test-new",
+                "{slug}"
+            );
+        }
+    }
+
+    /// **A token saved while GitHub is out of reach is saved, marked, and settled by the tick**
+    /// (SKEIN-1239, the owner's "save it and mark it unchecked"). What fails it: a 5xx read as
+    /// GitHub turning the token down (`rejected` accepting any status) — the save is then refused;
+    /// or `recheck_unchecked` not writing its answer — the mark never clears and a later refusal
+    /// never reaches the card.
+    #[test]
+    fn a_token_saved_while_github_is_out_of_reach_is_marked_and_the_tick_settles_it() {
+        let (_lock, _home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let down = stub_github(503, r#"{"message":"Service Unavailable"}"#);
+
+        env.set("SKEIN_GITHUB_API", &down);
+        let why = store_repo_token_checked("a/one", "skein-test-unasked")
+            .expect("a token GitHub could not be asked about was refused");
+        assert!(why.starts_with("a/one: GitHub said 503"), "{why}");
+        let (c, token) = credential_for("a/one").expect("it was not saved");
+        assert_eq!(
+            (token.expose(), c.unchecked.as_str()),
+            ("skein-test-unasked", why.as_str())
+        );
+
+        assert!(recheck_unchecked().is_empty());
+        assert!(
+            !credential_for("a/one").unwrap().0.unchecked.is_empty(),
+            "still out of reach, and the mark went"
+        );
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(401, r#"{"message":"Bad credentials"}"#),
+        );
+        let said = recheck_unchecked();
+        let (c, token) = credential_for("a/one").unwrap();
+        assert_eq!(
+            (c.unchecked.as_str(), c.turned_down.as_str(), token.expose()),
+            (
+                "",
+                "GitHub rejected it for a/one (401: Bad credentials)",
+                "skein-test-unasked"
+            ),
+            "the tick's answer was not recorded"
+        );
+        assert_eq!(said.len(), 1, "{said:?}");
+
+        env.set("SKEIN_GITHUB_API", &down);
+        store_repo_token_checked("a/one", "skein-test-second").unwrap();
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(200, r#"{"permissions":{"push":true}}"#),
+        );
+        assert!(recheck_unchecked().is_empty());
+        let (c, _) = credential_for("a/one").unwrap();
+        assert_eq!(
+            (c.unchecked.as_str(), c.turned_down.as_str()),
+            ("", ""),
+            "a token that checks out keeps a mark"
+        );
+    }
+
+    /// **An existing repo joins another repo's token from its card only when GitHub says it can
+    /// push there, and then pushes with nothing else** (SKEIN-1241). What fails it: `join_share`
+    /// without `shareable_token` — the push-false join then succeeds; or leaving the repo's own
+    /// entry in place — two entries then cover a/two and its own token file stays.
+    #[test]
+    fn an_existing_repo_joins_another_repos_token_only_when_github_says_it_can_push_there() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let shared = store_repo_token("a/one", "skein-test-shared").unwrap();
+        let own = store_repo_token("a/two", "skein-test-two-alone").unwrap();
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(200, r#"{"permissions":{"push":false}}"#),
+        );
+        let why = join_share(&shared, "a/two").expect_err("joined a token that cannot push");
+        assert!(
+            why.contains("the token a/one uses cannot push to a/two")
+                && why.contains("Nothing was saved"),
+            "{why}"
+        );
+        assert_eq!(
+            credential_for("a/two").unwrap().1.expose(),
+            "skein-test-two-alone"
+        );
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(200, r#"{"permissions":{"push":true}}"#),
+        );
+        join_share(&shared, "a/two").unwrap();
+        let listed = write_credentials();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|c| (c.id.as_str(), c.repos.join(","), c.shared))
+                .collect::<Vec<_>>(),
+            vec![(shared.as_str(), "a/one,a/two".to_string(), true)],
+            "a/two must push with the shared token and nothing else"
+        );
+        assert!(
+            !home.join("github-pats").join(&own).exists(),
+            "a/two's own token outlived the entry that named it"
+        );
+        assert_eq!(
+            credential_for("a/two").unwrap().1.expose(),
+            "skein-test-shared"
+        );
+        assert!(join_share(&shared, "a/two")
+            .unwrap_err()
+            .contains("already uses that token"));
     }
 }

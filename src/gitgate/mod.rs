@@ -33,8 +33,9 @@
 //! however carefully the helper offers it for one. One repo per token means the credential a box
 //! holds is already exactly as narrow as its rights, so nothing has to be trusted to stay in its
 //! lane — and that is the default. Since 2026-09-29 the owner may share one token between repos
-//! (SKEIN-1231, "Allow sharing, with a warning"): the add dialog states that the boxes of every repo
-//! sharing it can then push to all of them, and only that share makes a multi-repo entry
+//! (SKEIN-1231, "Allow sharing, with a warning"): the add dialog, or since SKEIN-1241 a repo's
+//! card, states that the boxes of every repo sharing it can then push to all of them, and only
+//! that share makes a multi-repo entry
 //! (`credentials::WriteCredential`). (The other way to make a broad credential safe is for it never
 //! to enter the box — a host-side git proxy — which is a different design and not this one.)
 //!

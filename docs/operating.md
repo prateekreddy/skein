@@ -361,12 +361,21 @@ picked, seeded once and remembered, and the first-run checklist asks for a choic
 one. Turning it off changes nothing for a fleet already running on it: the secret lives in sbx's own
 store, so it stays seeded and boxes keep pushing.
 
+**A per-repo PAT is asked about before it is saved.** Storing one on a repo's card or under GitHub &
+keys first asks GitHub whether it can push to every repository it is to cover (SKEIN-1239). If
+GitHub rejects it or says it cannot push, nothing is saved, the token stored before keeps working,
+and the refusal names each repository and what GitHub said. If GitHub cannot be reached it is saved
+and its card says it has not been checked yet; the server's twenty-minute tick asks again and
+either clears that or shows what GitHub answered.
+
 **A per-repo PAT can be shared, and sharing widens every box that holds it.** When you add a repo,
-the dialog offers "paste a new token" or "use the token another repo has". The second adds the new
-repo to that token's list in `github-pats.json` — one token, one file, so replacing it on any of
-their cards reaches them all — after GitHub has said the token can push to the new repo. The cost,
-which the dialog states before you confirm: a box is handed its repo's token, and a box can read
-anything it holds, so the boxes of every repo sharing a token can push to all of them. That is the
+the dialog offers "paste a new token" or "use the token another repo has", and an existing repo's
+card offers the second too (SKEIN-1241). It adds the repo to that token's list in
+`github-pats.json` — one token, one file, so replacing it on any of their cards reaches them all —
+after GitHub has said the token can push to that repo; from a card, the token the repo had of its
+own is forgotten. The cost, which the dialog and the card state before you confirm: a box is
+handed its repo's token, and a box can read anything it holds, so the boxes of every repo sharing a
+token can push to all of them. That is the
 owner's decision of 2026-09-29 (SKEIN-1231: "Allow sharing, with a warning"); before it a stored
 token covered exactly one repository and nothing else was accepted. A pasted token still covers
 one, a list naming several that was not written by a share is refused where tokens are handed out

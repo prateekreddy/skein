@@ -83,6 +83,11 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
             "repos": c.repos,
             "shared": c.shared && c.problem().is_none() && c.repos.len() > 1,
             "has_token": skein::gitgate::credential_has_token(&c.id),
+            // Not a credential: why GitHub could not be asked about it when it was saved, or what
+            // GitHub said when it was asked later. Both empty for a token that checked out
+            // (SKEIN-1239).
+            "unchecked": c.unchecked,
+            "turned_down": c.turned_down,
             // Carried so an unusable entry can explain itself. One hand-edited to cover three
             // repositories is listed and refused, and a list that silently omitted it would leave
             // someone staring at a repo whose token "is configured" and does not work.
@@ -109,30 +114,58 @@ pub(super) struct CredentialReq {
 /// **With no `repos`, it replaces the token of a credential that already exists and nothing
 /// else** — how a shared token is rotated from any card that shares it, reaching every repo on it
 /// at once, since they share one file (SKEIN-1231). Its coverage is left exactly as it is: a share
-/// is made only by adding a repo, never by this route.
+/// is made by adding a repo or by [`api_git_join_share`], never by this route.
+///
+/// **A token is asked about before it is saved** (SKEIN-1239): GitHub must say it can push to every
+/// repository it is to cover, or nothing is written and the token before it goes on working. A
+/// GitHub out of reach saves it marked unchecked, for the next tick to ask
+/// ([`skein::gitgate::recheck_unchecked`]).
 pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response {
-    if r.repos.is_empty() {
-        let known = skein::gitgate::write_credentials()
-            .iter()
-            .any(|c| c.id == r.id);
-        let token = r.token.as_deref().map(str::trim).unwrap_or_default();
-        if !known || token.is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                "name the repository this token is for, or replace the token of one that is \
-                 already stored",
-            )
-                .into_response();
+    let token = r
+        .token
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let saved = tokio::task::spawn_blocking(move || {
+        if r.repos.is_empty() {
+            let known = skein::gitgate::write_credentials()
+                .iter()
+                .any(|c| c.id == r.id);
+            if !known || token.is_empty() {
+                return Err(
+                    "name the repository this token is for, or replace the token of one \
+                            that is already stored"
+                        .to_string(),
+                );
+            }
+            return skein::gitgate::replace_token_checked(&r.id, &token).map(|_| ());
         }
-    } else if let Err(e) = skein::gitgate::set_write_credential(&r.id, &r.label, &r.repos) {
+        let unchecked = match token.is_empty() {
+            true => String::new(),
+            false => skein::gitgate::check_new_token(&token, &r.repos, "")?,
+        };
+        skein::gitgate::set_write_credential(&r.id, &r.label, &r.repos)?;
+        if let Some(token) = r.token {
+            if !token.trim().is_empty() {
+                skein::gitgate::mark_checked(&r.id, &unchecked)?;
+            }
+            skein::gitgate::set_credential_token(&r.id, &token)?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    if let Err(e) = saved {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
-    if let Some(token) = r.token {
-        if let Err(e) = skein::gitgate::set_credential_token(&r.id, &token) {
-            return (StatusCode::BAD_REQUEST, e).into_response();
-        }
-    }
-    // Boxes whose repo this now covers can be given it without waiting for the next tick.
+    refresh_every_box();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Boxes whose repo a stored token now covers, or no longer covers, are given it or have it taken
+/// without waiting for the next tick.
+fn refresh_every_box() {
     tokio::task::spawn_blocking(|| {
         for view in load_views()
             .unwrap_or_default()
@@ -142,7 +175,6 @@ pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response
             let _ = skein::gitgate::refresh_tokens(&view.name);
         }
     });
-    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -154,20 +186,42 @@ pub(super) struct AloneReq {
 
 /// Store a token for one repository alone, taking it out of any token it was sharing — the "use a
 /// token for this repo alone" of a repo card whose token is shared (SKEIN-1231). The other repos
-/// keep the shared token; see [`skein::gitgate::store_repo_token`].
+/// keep the shared token; see [`skein::gitgate::store_repo_token`]. Asked about first, as
+/// [`api_git_credential`] says (SKEIN-1239).
 pub(super) async fn api_git_credential_alone(Json(r): Json<AloneReq>) -> Response {
-    if let Err(e) = skein::gitgate::store_repo_token(r.repo.trim(), &r.token) {
+    let saved = tokio::task::spawn_blocking(move || {
+        skein::gitgate::store_repo_token_checked(r.repo.trim(), &r.token)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    if let Err(e) = saved {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
-    tokio::task::spawn_blocking(|| {
-        for view in load_views()
-            .unwrap_or_default()
-            .iter()
-            .filter(|v| !v.foreign)
-        {
-            let _ = skein::gitgate::refresh_tokens(&view.name);
-        }
-    });
+    refresh_every_box();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct JoinShareReq {
+    /// `owner/name` — the existing repository whose card asked.
+    repo: String,
+    /// The stored credential whose token it is to use.
+    share: String,
+}
+
+/// Point an existing repository at the token another repo already has — a repo card's "use the
+/// token … uses" (SKEIN-1241). The card names every repository that gains access before this is
+/// sent; GitHub must say the token can push here first ([`skein::gitgate::join_share`]).
+pub(super) async fn api_git_join_share(Json(r): Json<JoinShareReq>) -> Response {
+    let joined = tokio::task::spawn_blocking(move || {
+        skein::gitgate::join_share(r.share.trim(), r.repo.trim())
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    if let Err(e) = joined {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    refresh_every_box();
     StatusCode::NO_CONTENT.into_response()
 }
 
