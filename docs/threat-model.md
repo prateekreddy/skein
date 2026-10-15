@@ -135,6 +135,14 @@ the rule is not written twice. A `fleet`-scoped box still gets the fleet's token
 `a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch/environment.rs`)
 and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place/crossing.rs`).
 
+**What a box holds is its token as of its start, and `gh` reads past that** (SKEIN-1240). The
+session and every crossing carry the own-repo token the box started with, while the host rewrites
+the placed file the moment a key is replaced. A scoped box's `gh` is a shim, bound over the real
+binary, that reads the placed file on every call and has no credential when there is none. A
+`GH_TOKEN` that differs from the one the box started with was set on purpose, a review crossing's
+for one, and is used unchanged. Anything else that reads `$GH_TOKEN` keeps the old key until the
+box restarts. Test `gh_in_a_running_box_uses_the_token_placed_now` (`tests/fleet_launch/environment.rs`).
+
 ## Open
 
 Each of these either has no evidence strong enough for a row, or is a known gap in a row above. The
