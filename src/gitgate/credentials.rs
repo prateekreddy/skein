@@ -668,8 +668,9 @@ pub fn mark_checked(id: &str, unchecked: &str) -> Result<(), String> {
 /// push with. Still out of reach: left marked for the next tick. Returns a sentence for each token
 /// GitHub turned down.
 ///
-/// The answer is written only if the token on disk is still the one asked about: a token saved
-/// while GitHub was being asked has its own check, and this one's answer is not about it.
+/// The answer is written only if the token on disk is still the one asked about — its file not
+/// written since, and its entry still marked as it was: a token saved while GitHub was being asked
+/// has its own check, and this one's answer is not about it.
 pub fn recheck_unchecked() -> Vec<String> {
     let mut said = Vec::new();
     for c in write_credentials()
@@ -677,6 +678,8 @@ pub fn recheck_unchecked() -> Vec<String> {
         .filter(|c| !c.unchecked.is_empty())
     {
         let path = credential_token_path(&c.id);
+        let written = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let asked_about = written(&path);
         let Some(token) = crate::secret::read(&path).ok().flatten() else {
             continue;
         };
@@ -693,11 +696,14 @@ pub fn recheck_unchecked() -> Vec<String> {
         };
         let wrote =
             crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
-                let same = crate::secret::read(&path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|now| now.expose() == token.expose());
-                if let Some(entry) = all.iter_mut().find(|e| e.id == c.id).filter(|_| same) {
+                // Told by when the file was written and what the entry still says, rather than by
+                // comparing tokens, so the bytes never leave their type here.
+                let same = asked_about.is_some() && written(&path) == asked_about;
+                if let Some(entry) = all
+                    .iter_mut()
+                    .find(|e| e.id == c.id && e.unchecked == c.unchecked)
+                    .filter(|_| same)
+                {
                     entry.unchecked = unchecked.clone();
                     entry.turned_down = turned_down.clone();
                 }
