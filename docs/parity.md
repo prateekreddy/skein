@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 104  (NOT '.route("' — that gives 91, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 105  (NOT '.route("' — that gives 92, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 170 unique, 173 occurrences
-grep -c 'function ' src/web/index.html                          # 465
+grep -c 'function ' src/web/index.html                          # 467
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -350,7 +350,8 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - Sync connections and their tokens.
 - **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, `base_branch` (the
   branch a new box starts from) and `read_prs` (Read ahead), plus `store` and a
-  per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
+  per-repo write PAT from the Add-repository overlay, which GitHub is asked about before it is
+  saved and which an existing repo's card can share from another repo. These live in `repos.json` /
   `connections.json`, not `Config`, and save on blur — a different persistence contract. A repo has
   no runtime of its own: a box runs the fleet's **Default agent** or the one picked for it in the
   New box dialog (the owner, 2026-09-27); an old `repos.json` that still names one reads fine.
