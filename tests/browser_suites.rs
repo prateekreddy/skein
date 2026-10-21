@@ -137,7 +137,7 @@ const NODE_SUITES: [&str; 30] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 16] = [
+const BROWSER_SUITES: [&str; 17] = [
     "actfail",
     // Adding a private repository from the add dialog, with a pasted token and with the token
     // another repo has: the clone uses the token chosen, a refused one is never saved, a share
@@ -159,6 +159,12 @@ const BROWSER_SUITES: [&str; 16] = [
     "gitqrefused",
     "onboarding",
     "panecover",
+    // Popups over a box terminal: a paste or copy in a popup's field stays in the field and puts
+    // nothing on the terminal's socket, the terminal's own clipboard keys are unchanged, and a click
+    // outside closes every popup but the login terminal — not a drag out of a field (SKEIN-1246).
+    // Here because the claims are a browser's: native paste from the real clipboard, focus, and
+    // which element a press and a release land on.
+    "popups",
     // What a pane does after skein REFUSES it a terminal: whether the refusal is uncovered, whether
     // the pane says what it is waiting for, and whether it comes back with nobody clicking anything
     // (SKEIN-702). Here rather than in the node tier because the whole claim is about pixels — it
