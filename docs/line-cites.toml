@@ -2079,13 +2079,13 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if (s && (s.dead || s.ws.readyState > 1)) reconnectSession(boxOf(sid), kindOf(sid));"
 cited_by = ["docs/recovery-survey.md"]
 
+["src/web/app/boot.js:549"]
+line = "? `board not updated for ${age}s — the server stopped answering`"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/web/app/boot.js:588"]
 line = "for (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);"
 window = "render(tick.boxes || []);\u000bfor (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);\u000breturn;"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/app/boot.js:549"]
-line = "? `board not updated for ${age}s — the server stopped answering`"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/boot.js:613"]
@@ -2165,11 +2165,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load diff</div></div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:295"]
+["src/web/app/panels.js:323"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:728"]
+["src/web/app/panels.js:756"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
