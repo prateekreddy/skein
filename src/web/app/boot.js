@@ -389,6 +389,126 @@ function pickAttachment(folder) {
   });
 })();
 
+// ---------- a warning at the top, hidden for a while (SKEIN-1244) ----------
+// The owner's ask: "the warning that come at the top should be dismissable, they can come back after
+// some time but there should be a way to dismiss them temporarily". All four rows take part —
+// #healthban, #loginban, #trainban and #staleban — and each one, once drawn, hands its row and the
+// problems it is showing to `banDismissable`, which gives it a ✕ and decides whether it is hidden.
+// What counts as the same problem, and for how long, is `cockpit/src/dismiss.mjs`; this is only the
+// storing and the drawing.
+//
+// **Remembered in this browser only**, under `skein.dismiss.<row id>`, so a reload keeps it and
+// another device still shows the warning. Every read and write is guarded, and `BAN_HIDDEN` holds
+// this tab's own copy, so a browser that will not store anything can still hide a row until reload.
+//
+// **A dismissal ends with its problem.** When a row is taken down because nothing is wrong any more,
+// its dismissal is forgotten, so the same problem coming back later is shown — it is a new
+// occurrence, and the person never chose to hide that one.
+//
+// **And it can only ever HIDE what it was asked to** (SKEIN-1012's rule, kept): deciding is the last
+// thing a row does, after it has been drawn, and anything in the deciding that throws leaves the row
+// shown and says so on the console.
+const BAN_SHOWN = new Map();      // row id → the problems it is showing now
+const BAN_HIDDEN = new Map();     // row id → this tab's copy of its dismissal
+function banDismissal(which) {
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem(`skein.dismiss.${which}`) || "null"); } catch {}
+  return stored || BAN_HIDDEN.get(which) || null;
+}
+function banDismissable(ban, which, problems) {
+  try {
+    // A row up for something nothing names still gets one id, so it can be hidden at all.
+    const ids = problems.length ? problems : ["unnamed"];
+    BAN_SHOWN.set(which, ids);
+    // Made once, never rewritten by a poll: replacing a button under somebody's pointer between
+    // press and release loses the click.
+    if (!ban.querySelector(".bandis")) {
+      const arg = esc(JSON.stringify(which));
+      const ctl = document.createElement("span");
+      ctl.className = "bandis";
+      ctl.innerHTML = `<button type="button" class="banx" title="hide this warning for an hour" aria-label="hide this warning for an hour" onclick="banDismiss(event, ${arg})">✕</button>`
+        + `<button type="button" class="banmore" title="hide it for longer" aria-label="hide this warning for…" aria-haspopup="menu" aria-expanded="false" onclick="banMenu(event, ${arg})">▾</button>`;
+      // Its keys are its own: the page's keymap reads Enter as "open the selected box" and Escape
+      // as "drop focus", and a key pressed on a ✕ means neither.
+      ctl.onkeydown = e => e.stopPropagation();
+      ban.append(ctl);
+    }
+    ban.classList.toggle("bandismissed", stillDismissed(banDismissal(which), ids, Date.now()));
+  } catch (e) {
+    try { ban.classList.remove("bandismissed"); } catch {}
+    console.error(`skein: deciding whether ${which} was dismissed threw; it is shown`, e);
+  }
+}
+function banForget(which) {
+  BAN_SHOWN.delete(which);
+  BAN_HIDDEN.delete(which);
+  try { localStorage.removeItem(`skein.dismiss.${which}`); } catch {}
+}
+// The ✕ (an hour), or a choice from the menu. Never the row's own action: the press stops here.
+function banDismiss(ev, which, choice = "hour") {
+  ev?.stopPropagation();
+  const record = { ids: BAN_SHOWN.get(which) || ["unnamed"], until: dismissUntil(choice, Date.now()) };
+  BAN_HIDDEN.set(which, record);
+  try { localStorage.setItem(`skein.dismiss.${which}`, JSON.stringify(record)); } catch {}
+  banMenuClose(false);
+  document.getElementById(which)?.classList.add("bandismissed");
+}
+// The ▾: the three lengths as a small menu under it. A pointer, a finger and a keyboard all reach
+// it — it opens on a press, its first choice takes focus, the arrows move, Escape puts focus back on
+// the ▾, and a press anywhere else closes it.
+function banMenu(ev, which) {
+  ev.stopPropagation();
+  const opener = ev.currentTarget;
+  const open = document.getElementById("banmenu");
+  banMenuClose(false);
+  if (open && open.dataset.for === which) return;
+  const menu = document.createElement("div");
+  menu.id = "banmenu";
+  menu.dataset.for = which;
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "hide this warning");
+  for (const [choice, label] of DISMISS_CHOICES) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.setAttribute("role", "menuitem");
+    item.dataset.choice = choice;
+    item.textContent = label;
+    item.onclick = e => banDismiss(e, which, choice);
+    menu.append(item);
+  }
+  const items = [...menu.children];
+  menu.onkeydown = e => {
+    e.stopPropagation();   // the page's keymap has its own Escape and Enter; these are the menu's
+    const at = items.indexOf(document.activeElement);
+    if (e.key === "Escape") { e.preventDefault(); banMenuClose(true); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); items[(at + 1) % items.length].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
+    else if (e.key === "Tab") banMenuClose(false);
+  };
+  banMenuOpener = opener;
+  opener.setAttribute("aria-expanded", "true");
+  document.body.append(menu);
+  const r = opener.getBoundingClientRect();
+  menu.style.top = `${Math.round(r.bottom + 4)}px`;
+  menu.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+  items[0].focus();
+  document.addEventListener("pointerdown", banMenuOutside, true);
+}
+let banMenuOpener = null;
+function banMenuOutside(e) {
+  const menu = document.getElementById("banmenu");
+  if (menu && !menu.contains(e.target) && e.target !== banMenuOpener) banMenuClose(false);
+}
+function banMenuClose(refocus) {
+  document.removeEventListener("pointerdown", banMenuOutside, true);
+  document.getElementById("banmenu")?.remove();
+  const opener = banMenuOpener;
+  banMenuOpener = null;
+  if (!opener) return;
+  opener.setAttribute("aria-expanded", "false");
+  if (refocus) opener.focus();
+}
+
 // ---------- live stream ----------
 // Staleness banner: without it, a dead server left the board showing confident, fresh-looking data
 // (ages keep ticking client-side) with only the tiny live pip as a tell. Age the last snapshot
@@ -412,18 +532,26 @@ setInterval(() => {
   if (age >= STALE_AFTER_S) {
     if (!ban) {
       ban = document.createElement("div"); ban.id = "staleban";
+      // Still a pill nothing can be clicked through to — except its ✕, which `.bandis` makes
+      // pressable again (SKEIN-1244).
       ban.style.cssText = "position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:60;"
         + "background:var(--attn);color:#08090b;font:600 12px/1 var(--sans,sans-serif);"
-        + "padding:6px 14px;border-radius:0 0 8px 8px;pointer-events:none";
+        + "padding:6px 14px;border-radius:0 0 8px 8px;pointer-events:none;"
+        + "display:flex;align-items:center;column-gap:10px";
+      const said = document.createElement("span"); said.className = "banbody";
+      ban.append(said);
       document.body.append(ban);
     }
     // Which of the two it is, because they want different things from the reader. An open stream
     // that has gone quiet is a producer that wedged — nothing to wait for. A closed one is the
     // browser already retrying, and waiting is exactly right.
-    ban.textContent = es && es.readyState === EventSource.OPEN
+    ban.querySelector(".banbody").textContent = es && es.readyState === EventSource.OPEN
       ? `board not updated for ${age}s — the server stopped answering`
       : `board not updated for ${age}s — reconnecting…`;
-  } else ban?.remove();
+    // One outage is one problem, named by the moment the server last spoke: the seconds count and
+    // which of the two sentences it is change during an outage, and that moment does not.
+    banDismissable(ban, "staleban", staleProblems(lastTickAt));
+  } else if (ban) { ban.remove(); banForget("staleban"); }
 }, 2000);
 // Draw the board from the server, now, rather than waiting for the stream to notice.
 //
@@ -546,13 +674,19 @@ function loadHealth() {
     // owner already had is not taken away to give him the picker he asked for.
     step("renderModelChoices", renderModelChoices, health.models || []);
     let banner = document.getElementById("healthban");
-    if (health.ok) { banner?.remove(); return; }
+    if (health.ok) { banner?.remove(); banForget("healthban"); return; }
     if (!banner) {
       // A row above the app, never a pill over it: floating at the top covered the dock's tab bar,
       // which blocked exactly the work the warning was interrupting. As body's first flex child it
       // pushes the app down instead of painting over it, and disappears without leaving a hole.
-      banner = document.createElement("button"); banner.id = "healthban";
-      banner.onclick = () => openSettings("diag"); document.body.prepend(banner);
+      //
+      // The row is a div holding a button since SKEIN-1244, not a button: its ✕ is a button too,
+      // and one cannot hold the other. The sentence is the button that opens the diagnostics pane.
+      banner = document.createElement("div"); banner.id = "healthban";
+      const go = document.createElement("button"); go.type = "button"; go.className = "healthgo";
+      go.onclick = () => openSettings("diag");
+      banner.append(go);
+      document.body.prepend(banner);
     }
     // **Every check the report carries, by the report's own list and names** (SKEIN-1003,
     // SKEIN-1186). This used to be a hand-written array of wire keys, and the row headlined with the
@@ -589,7 +723,7 @@ function loadHealth() {
     // banner is up for stale sessions, an uncounted failure is still counted here, not dropped.
     const rest = failed.length - (lead ? 1 : 0);
     const extra = rest ? ` (+${rest} more)` : "";
-    banner.textContent = lead
+    banner.querySelector(".healthgo").textContent = lead
       ? `${nameOf(lead)}: ${first}${extra}`
       : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} on old probes` : ""}${extra}`;
     banner.title = [
@@ -598,6 +732,8 @@ function loadHealth() {
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
       ...(stale ? [`on old probes: ${health.stale_boxes.join(", ")}`] : [])
     ].join("\n");
+    // Last, after everything above has drawn: whether this person hid these problems.
+    banDismissable(banner, "healthban", healthProblems(health));
     // Said rather than swallowed (SKEIN-1012): what reaches here now is the fetch, the parse, or
     // the banner block itself — and a server that is down already has the staleness banner saying
     // so, so a warning per poll is the cost of never again losing a throw without a trace.
@@ -619,17 +755,23 @@ function loadHealth() {
 // A row per expired runtime, because each needs its own login and each button names its own flow.
 function renderLoginBanner(expired) {
   let ban = document.getElementById("loginban");
-  if (!expired.length) { ban?.remove(); return; }
-  if (!ban) { ban = document.createElement("div"); ban.id = "loginban"; document.body.prepend(ban); }
+  if (!expired.length) { ban?.remove(); banForget("loginban"); return; }
+  if (!ban) {
+    ban = document.createElement("div"); ban.id = "loginban";
+    const said = document.createElement("span"); said.className = "banbody";
+    ban.append(said);
+    document.body.prepend(ban);
+  }
   // Two witnesses, two sentences. The credential file states a date, knowable with nothing running.
   // A refusal is something that HAPPENED, at a moment, and it is the only one of the two that can
   // be wrong about the present — so it says when it was found out and what was said, rather than
   // claiming a death date nothing here can know. Rendered identically, a person cannot tell a
   // credential that is dead from one that was dead a moment ago.
-  ban.innerHTML = expired.map(l => `<span>${l.witness === "refusal"
+  ban.querySelector(".banbody").innerHTML = expired.map(l => `<span>${l.witness === "refusal"
       ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
       : `the fleet's ${esc(l.runtime)} login expired ${esc(l.expired_at)} — summaries, critiques and workflows are declining model calls`}</span>`
     + `<button type="button" class="loginfix" onclick="openLoginTerminal(${esc(JSON.stringify(l.runtime))})">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
+  banDismissable(ban, "loginban", loginProblems(expired));
 }
 
 // The options behind the review-model box. Rewritten only when the list actually changes: this
