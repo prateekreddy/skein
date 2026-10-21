@@ -12,7 +12,7 @@
 //     the banner repaints from that answer, and the server's last sentence becomes the toast.
 //
 //   node tests/ui/loginban.mjs
-import { grab, harness, stubDom } from "./lift.mjs";
+import { dismissing, grab, harness, stubDom } from "./lift.mjs";
 
 const t = harness();
 
@@ -64,6 +64,7 @@ function world() {
     ${grab("lastHealth")}
     ${grab("loadHealth")}
     ${grab("renderLoginBanner")}
+    ${dismissing()}
     // The bar no longer carries agent-CLI updates - they moved to Settings -> Update (SKEIN-486).
     // These two are the pure halves of that pane: one decides the verdict, one draws the CLI row.
     ${grab("updateVerdict")}
@@ -90,6 +91,9 @@ function world() {
   return { ...made, reg, sockets, state };
 }
 
+// What a row says, which since SKEIN-1244 is its body and not the whole row: the row holds its ✕ too.
+const said = ban => ban?.querySelector(".banbody")?.innerHTML ?? "";
+
 // Two promise hops sit between fetch and the paint (r.json(), then the handler); a couple of
 // macrotask turns flushes both.
 const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => setTimeout(r, 0)); };
@@ -110,9 +114,9 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   const ban = w.reg.get("loginban");
   t.check("an expired login raises the banner row", !!ban, true);
   t.check("the credential's own expiry names the runtime, the date and the consequence",
-    !!ban && ban.innerHTML.includes("the fleet's claude login expired 2026-08-22T10:00:00Z — summaries, critiques and workflows are declining model calls"),
+    !!ban && said(ban).includes("the fleet's claude login expired 2026-08-22T10:00:00Z — summaries, critiques and workflows are declining model calls"),
     true);
-  t.check("the banner offers the one click", !!ban && ban.innerHTML.includes(">log in<"), true);
+  t.check("the banner offers the one click", !!ban && said(ban).includes(">log in<"), true);
 }
 {
   const w = world();
@@ -123,11 +127,11 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   await settle();
   const ban = w.reg.get("loginban");
   t.check("a refusal says it was refused, and when",
-    !!ban && ban.innerHTML.includes("was refused at 2026-08-22T10:00:00Z"), true);
+    !!ban && said(ban).includes("was refused at 2026-08-22T10:00:00Z"), true);
   t.check("and carries the words the runtime used, escaped",
-    !!ban && ban.innerHTML.includes("invalid API key · run `claude login`"), true);
+    !!ban && said(ban).includes("invalid API key · run `claude login`"), true);
   t.check("the two witnesses do not read the same",
-    !!ban && ban.innerHTML.includes("login expired 2026-08-22"), false);
+    !!ban && said(ban).includes("login expired 2026-08-22"), false);
 }
 
 // --- no expired logins, no banner — including after there was one -------------------------------

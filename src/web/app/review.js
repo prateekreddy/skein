@@ -212,9 +212,14 @@ function renderRevBadge() {
 function renderTrainBanner() {
   const stops = revCounts.filter(c => (c.stopped || []).length);
   let ban = document.getElementById("trainban");
-  if (!stops.length) { ban?.remove(); return; }
-  if (!ban) { ban = document.createElement("div"); ban.id = "trainban"; document.body.prepend(ban); }
-  ban.innerHTML = [
+  if (!stops.length) { ban?.remove(); banForget("trainban"); return; }
+  if (!ban) {
+    ban = document.createElement("div"); ban.id = "trainban";
+    const said = document.createElement("span"); said.className = "banbody";
+    ban.append(said);
+    document.body.prepend(ban);
+  }
+  ban.querySelector(".banbody").innerHTML = [
     `<span class="trainlead">merge train stopped —</span>`,
     // Reasons kept to their first sentence: the row must say enough to decide whether to look now,
     // and no more — the full story is one click away in the review pane.
@@ -228,6 +233,8 @@ function renderTrainBanner() {
       ? [`<span class="trainlead">· and workflows are paused — nothing will act until resumed</span>`]
       : []),
   ].join("");
+  // Hidden only if every stopped pull request on it was hidden: another one stopping shows it.
+  banDismissable(ban, "trainban", trainProblems(stops));
 }
 
 function openReview(repoId) {

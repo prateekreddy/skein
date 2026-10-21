@@ -33,9 +33,32 @@
      the tab bar — a warning that covers the tabs blocks exactly the work it interrupts. */
   body { display:flex; flex-direction:column; }
   #app { display:flex; flex:1 1 auto; min-height:0; overflow:hidden; }
-  #healthban { display:block; width:100%; border:0; cursor:pointer; text-align:left;
-               background:#f0b429; color:#08090b; font:600 12px/1.35 sans-serif; padding:6px 14px;
-               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:none; }
+  /* A row, not a button, since SKEIN-1244 put a ✕ in it and a button cannot hold a button: the
+     sentence is the button now, and it takes all the room the ✕ does not, so nearly the whole row
+     is still the one click to the diagnostics pane. */
+  #healthban { display:flex; align-items:center; column-gap:10px; width:100%; flex:none;
+               background:#f0b429; color:#08090b; font:600 12px/1.35 sans-serif; padding:6px 14px; }
+  #healthban .healthgo { flex:1 1 auto; min-width:0; border:0; background:none; color:inherit;
+                         font:inherit; cursor:pointer; text-align:left; padding:0;
+                         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* What a row says, kept apart from its ✕ so a poll can rewrite one without the other. Laid out
+     as if it were not there, so a row's own spans and buttons stay that row's flex items. */
+  .banbody { display:contents; }
+  /* Hide a warning for a while (SKEIN-1244): ✕ is an hour, ▾ offers the other lengths. Pushed to
+     the row's end, never wrapped away from it, and big enough to hit with a thumb. */
+  .bandis { display:inline-flex; flex:none; margin-left:auto; gap:2px; pointer-events:auto; }
+  .bandis button { border:0; background:none; color:inherit; font:inherit; cursor:pointer;
+                   min-width:22px; min-height:20px; padding:0 5px; border-radius:4px; line-height:1; }
+  .bandis button:hover, .bandis button[aria-expanded="true"] { background:rgba(0,0,0,.14); }
+  .bandis button:focus-visible { outline:2px solid #08090b; outline-offset:-1px; }
+  @media (pointer:coarse) { .bandis button { min-width:34px; min-height:30px; } }
+  .bandismissed { display:none !important; }
+  #banmenu { position:fixed; z-index:80; display:flex; flex-direction:column; min-width:150px;
+             background:var(--overlay); border:1px solid var(--border-3); border-radius:var(--radius-sm);
+             padding:4px; box-shadow:0 14px 40px rgba(0,0,0,.5); }
+  #banmenu button { border:0; background:none; color:var(--text); font:13px/1.3 var(--ui);
+                    text-align:left; padding:7px 10px; border-radius:5px; cursor:pointer; }
+  #banmenu button:hover, #banmenu button:focus-visible { background:var(--accent-bg); outline:none; }
   /* The merge train's stops: the same kind of ROW as #healthban, but a different message — not
      "a box is stale" (amber, environment) but "a machine needs your decision" (attn-red, work).
      Each repo is its own click target, straight into that repo's review queue. */

@@ -15,7 +15,7 @@
 // stub deep enough to hold the button and its badge.
 //
 //   node tests/ui/revbadge.mjs
-import { grab, harness, pure } from "./lift.mjs";
+import { dismissing, grab, harness, pure } from "./lift.mjs";
 
 const t = harness();
 
@@ -70,6 +70,7 @@ function board() {
     ${grab("renderTrainBanner")}
     ${grab("renderRevBadge")}
     ${grab("pollReviewCounts")}
+    ${dismissing()}
     return { pollReviewCounts, counts: () => revCounts };
   `;
   const made = new Function("document", "fetch", src)(document, fetch);

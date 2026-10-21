@@ -11,22 +11,16 @@
 // document stub just deep enough to hold a prepended row.
 //
 //   node tests/ui/train.mjs
-import { grab, harness } from "./lift.mjs";
+import { dismissing, grab, harness, stubDom } from "./lift.mjs";
 
 const t = harness();
 
 // The page's world, stubbed down to what these two touch. `revbtn` is absent on purpose:
-// the badge's early return is exactly the path that must still draw the banner first.
+// the badge's early return is exactly the path that must still draw the banner first. The DOM is
+// `stubDom`, shared with the other rows' suites, since SKEIN-1244 gave each row a ✕ as a second
+// part beside what it says.
 function board(counts) {
-  const kids = [];
-  const document = {
-    body: { prepend: e => kids.unshift(e) },
-    getElementById: id => kids.find(e => e.id === id) || null,
-    createElement: tag => ({
-      tag, id: "", innerHTML: "",
-      remove() { const at = kids.indexOf(this); if (at >= 0) kids.splice(at, 1); },
-    }),
-  };
+  const { document } = stubDom();
   const src = `
     let revCounts = ${JSON.stringify(counts)};
     let revFlows = new Map();
@@ -35,6 +29,7 @@ function board(counts) {
     ${grab("revTrainPaused")}
     ${grab("renderTrainBanner")}
     ${grab("renderRevBadge")}
+    ${dismissing()}
     return {
       poll: cs => { if (cs !== undefined) revCounts = cs; renderRevBadge(); },
       // What the workflows payload last said the fleet switch was — the banner's only source.
@@ -45,7 +40,7 @@ function board(counts) {
   return {
     ...made,
     banner: () => document.getElementById("trainban"),
-    text: () => document.getElementById("trainban")?.innerHTML ?? null,
+    text: () => document.getElementById("trainban")?.querySelector(".banbody")?.innerHTML ?? null,
   };
 }
 

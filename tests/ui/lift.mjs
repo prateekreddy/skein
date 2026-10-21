@@ -478,16 +478,36 @@ export function openDoor() {
 // above the app, never a pill over it", because floating it covered the dock's tab bar and blocked
 // exactly the work the warning was interrupting. Neither claim is checkable from the registry
 // alone.
+//
+// And since SKEIN-1244 a row has PARTS — what it says, and the ✕ that hides it — so an element keeps
+// the children it is given and finds one by class (`.name` and nothing richer, which is all the
+// page asks of it). `className` and `classList` are one set of classes, as they are in a browser,
+// because the page writes the first and reads the second.
 export function stubDom(ids = []) {
   const reg = new Map();
   const where = [];
   const make = (id, tag = "") => {
     const classes = new Set();
+    const children = [];
     const e = {
-      id, tag, innerHTML: "", textContent: "", title: "", onclick: null,
+      id, tag, innerHTML: "", textContent: "", title: "", onclick: null, type: "", children,
+      dataset: {}, attrs: {},
+      get className() { return [...classes].join(" "); },
+      set className(v) { classes.clear(); for (const c of String(v).split(/\s+/).filter(Boolean)) classes.add(c); },
       classList: {
         add: c => classes.add(c), remove: c => classes.delete(c),
         contains: c => classes.has(c), toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)),
+      },
+      setAttribute: (k, v) => { e.attrs[k] = String(v); },
+      append: (...kids) => { children.push(...kids); },
+      querySelector: sel => {
+        const want = sel.replace(/^\./, "");
+        for (const k of children) {
+          if (k.classList?.contains(want)) return k;
+          const deeper = k.querySelector?.(sel);
+          if (deeper) return deeper;
+        }
+        return null;
       },
     };
     // `e.id` is read when remove() is CALLED, not now: the page makes an element with no id and
@@ -504,6 +524,22 @@ export function stubDom(ids = []) {
     body: { prepend: e => file("prepend", e), append: e => file("append", e) },
   };
   return { reg, document, where };
+}
+
+// The page's half of hiding a row (SKEIN-1244), for a world that draws one: the rule itself, from
+// the module the bundle is built from (`pure`, below), and the page functions that store and apply
+// it, lifted.
+//
+// `storage` is what the world's `localStorage` is: a working one by default, a `"throws"` one whose
+// every call throws — a browser that refuses storage — or `false` to leave the name to the world.
+export function dismissing({ storage = "memory" } = {}) {
+  const store = storage === "throws"
+    ? `const localStorage = { getItem() { throw new Error("storage refused"); }, setItem() { throw new Error("storage refused"); }, removeItem() { throw new Error("storage refused"); } };`
+    : storage
+      ? `const localStorage = (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })();`
+      : "";
+  return [pure("dismiss"), store, grab("BAN_SHOWN"), grab("BAN_HIDDEN"), grab("banDismissal"), grab("banDismissable"),
+    grab("banForget"), grab("banDismiss"), "function banMenuClose() {}"].join("\n");
 }
 
 // The tiny assert harness both suites share.
