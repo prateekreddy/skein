@@ -105,6 +105,19 @@ const stored = (page, id) => page.evaluate(id => {
   const v = localStorage.getItem(`skein.dismiss.${id}`);
   return v && { ...JSON.parse(v), now: Date.now() };
 }, id);
+// A dismissal ends with its problem: the row is hidden, the problem clears and the row comes down,
+// then the SAME problem returns well inside the hour — and that is a new occurrence, which shows.
+// `clear` and `restore` set what the routed answer says; the row's ids are the same before and after.
+const comesBack = async (page, id, clear, restore) => {
+  await page.click(`#${id} .banx`);
+  const hid = await shown(page, id);
+  clear();
+  await repoll(page);
+  const gone = await shown(page, id);
+  restore();
+  await repoll(page);
+  return [hid, gone, await shown(page, id)];
+};
 // The next poll, now, rather than in fifteen seconds or three minutes.
 const repoll = async page => {
   await page.evaluate(() => { loadHealth(); pollReviewCounts(); });
@@ -199,6 +212,13 @@ try {
     await until(page, async () => (await shown(page, "healthban")) === "shown");
     check("a dismissal that ran out while the page was closed shows the row on load",
       await shown(page, "healthban"), "shown");
+    // Fails if the `health.ok` branch of `loadHealth` stops forgetting the dismissal.
+    const sick = health;
+    check("a fleet that recovers and then fails the same check inside the hour shows the row",
+      await comesBack(page, "healthban",
+        () => { health = { ...sick, ok: true }; },
+        () => { health = sick; }),
+      ["hidden", "absent", "shown"]);
 
   });
   await part("the login row", async () => {
@@ -229,6 +249,13 @@ try {
     await page.click("#loginban .loginfix >> nth=0");
     check("and its own 'log in' still opens the login", (await acts(page)).map(a => a[0]), ["openLoginTerminal"]);
     await page.evaluate(() => closeLoginTerminal());
+    // Fails if `renderLoginBanner` stops forgetting the dismissal when no login is dead.
+    const dead = health.expired_logins;
+    check("a login that is fixed and then dies again inside the hour shows the row",
+      await comesBack(page, "loginban",
+        () => { health = { ...health, expired_logins: [] }; },
+        () => { health = { ...health, expired_logins: dead }; }),
+      ["hidden", "absent", "shown"]);
 
   });
   await part("the train row", async () => {
@@ -256,6 +283,13 @@ try {
     check("another pull request stopping shows the train row at once", await shown(page, "trainban"), "shown");
     await page.click("#trainban .trainrepo");
     check("and its repo still opens the review queue", (await acts(page)).map(a => a[0]), ["openReview"]);
+    // Fails if `renderTrainBanner` stops forgetting the dismissal when nothing is stopped.
+    const stuck = counts;
+    check("a train that moves and then stops on the same pull requests inside the hour shows the row",
+      await comesBack(page, "trainban",
+        () => { counts = stuck.map(c => ({ ...c, stopped: [] })); },
+        () => { counts = stuck; }),
+      ["hidden", "absent", "shown"]);
 
   });
   await part("the staleness row", async () => {
