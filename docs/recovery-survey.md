@@ -128,7 +128,7 @@ acting — a restart, a tab click, the overlay itself, a file drop. **That is no
 (re-read 2026-09-23, `grep -n 'reconnectSession(' src/web/app/*.js` prints its definition and
 six calls):
 `src/web/app/board.js:270`, `src/web/app/board.js:665`, `src/web/app/board.js:768`,
-`src/web/app/board.js:1066` (the recovery card's *Try again*), `src/web/app/board.js:1098` and
+`src/web/app/board.js:1083` (the recovery card's *Try again*), `src/web/app/board.js:1115` and
 `src/web/app/boot.js:175` — and the fifth is not a person: `retryWaiting` reconnects every pane
 waiting on a condition the moment the board tick or a `pty-freed` event says it cleared. Worse,
 the six failure sentences in `terminal_session`, `login_session` and `pump_pty`

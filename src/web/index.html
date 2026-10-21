@@ -2896,6 +2896,23 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
     showRecovery(s);
     renderTabs(); refreshRow(box);
   };
+  // Shift+Enter starts a new line in an agent's prompt instead of submitting it (SKEIN-1243). xterm
+  // encodes Shift+Enter as "\r", the same byte as Enter, so without this the agent submits. What is
+  // sent instead is Ctrl+J, "\n": tried through tmux against Claude Code and Codex, it inserted a
+  // newline in both and submitted nothing. "\x1b\r" did the same, but it is two bytes that a reader
+  // splitting on the escape can take as Escape and then Enter. Shell tabs keep "\r", which a shell
+  // needs.
+  //
+  // `false` for every event type, not only keydown: xterm asks this handler again on keypress, and
+  // a `true` there sends the "\r" after all. A key still composing in an IME is left to xterm.
+  if (kind === "agent") term.attachCustomKeyEventHandler(e => {
+    if (e.key !== "Enter" || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return true;
+    if (e.type === "keydown") {
+      e.preventDefault();
+      if (ws.readyState === 1) ws.send(new TextEncoder().encode("\n"));
+    }
+    return false;
+  });
   term.onData(d => {
     // sticky Ctrl (armed from the mobile key bar): fold the next char to its control code
     if (ctrlArmed && d.length === 1) { d = String.fromCharCode(d.charCodeAt(0) & 0x1f); ctrlArmed = false; updateCtrlBtn(); }
