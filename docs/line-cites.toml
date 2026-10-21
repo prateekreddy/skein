@@ -2079,53 +2079,53 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if (s && (s.dead || s.ws.readyState > 1)) reconnectSession(boxOf(sid), kindOf(sid));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:424"]
-line = "? `board not updated for ${age}s — the server stopped answering`"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/app/boot.js:460"]
+["src/web/app/boot.js:588"]
 line = "for (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);"
 window = "render(tick.boxes || []);\u000bfor (const b of (tick.boxes || [])) retryWaiting(\"wait-box\", b.name);\u000breturn;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:485"]
+["src/web/app/boot.js:549"]
+line = "? `board not updated for ${age}s — the server stopped answering`"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/boot.js:613"]
 line = "es.addEventListener(\"pty-freed\", () => retryWaiting(\"wait-pty\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:506"]
+["src/web/app/boot.js:634"]
 line = "es.onerror = () => { document.getElementById(\"live\").classList.remove(\"on\"); document.getElementById(\"livetext\").textContent = \"reconnecting…\"; };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:591"]
+["src/web/app/boot.js:725"]
 line = "const extra = rest ? ` (+${rest} more)` : \"\";"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:630"]
+["src/web/app/boot.js:771"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1109"]
+["src/web/app/boot.js:1251"]
 line = "if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1135"]
+["src/web/app/boot.js:1277"]
 line = "updateTail = setTimeout(step, 1500);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1152"]
+["src/web/app/boot.js:1294"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1226"]
+["src/web/app/boot.js:1368"]
 line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1381"]
+["src/web/app/boot.js:1523"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1389"]
+["src/web/app/boot.js:1531"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2189,63 +2189,63 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return `<div class=\"revflow\"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:336"]
+["src/web/app/review.js:343"]
 line = "let landed = false;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:464"]
+["src/web/app/review.js:471"]
 line = "if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:553"]
+["src/web/app/review.js:560"]
 line = "const n = { draft: 0, conflicted: 0 };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:661"]
+["src/web/app/review.js:668"]
 line = "<span>${esc(f.repo_id)} — skein could not read this queue: ${esc(f.error)}</span>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:662"]
+["src/web/app/review.js:669"]
 line = "<button type=\"button\" class=\"revchip\" onclick=\"loadReview(true)\">try again</button></div>`),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:668"]
+["src/web/app/review.js:675"]
 line = "<span>${esc(u.repo_id)} — skein did not ask: ${esc(u.skipped || \"its review queue is switched off\")}</span>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:669"]
+["src/web/app/review.js:676"]
 line = "<button type=\"button\" class=\"revchip\" onclick=\"openSettings('repos')\">Settings → Repositories</button></div>`),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:919"]
+["src/web/app/review.js:926"]
 line = "body = `<div class=\"revempty\">asking GitHub…</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:926"]
+["src/web/app/review.js:933"]
 line = "body += `<div class=\"revfail\"><b>the queue could not be built</b>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:927"]
+["src/web/app/review.js:934"]
 line = "<div>GitHub said: ${esc(revQueue.error)}</div>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:928"]
+["src/web/app/review.js:935"]
 line = "${revQueue.remembered"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:934"]
+["src/web/app/review.js:941"]
 line = "<button type=\"button\" class=\"revchip go\" onclick=\"loadReview(true)\">${revLoading ? \"trying…\" : \"try again\"}</button>"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:951"]
+["src/web/app/review.js:958"]
 line = "}</b>${failed.map(f => `<div>${esc(f.repo_id)} — ${esc(f.error)}</div>`).join(\"\")}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:1414"]
+["src/web/app/review.js:1421"]
 line = "// than left set, or the row would sit on \"…\" for ever with nothing to retry it: opening the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/review.js:1581"]
+["src/web/app/review.js:1588"]
 line = "if (d.error) toast(\"the workflow file has a problem — fix it before editing here\");"
 cited_by = ["docs/recovery-survey.md"]
 
