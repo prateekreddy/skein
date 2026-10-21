@@ -1554,12 +1554,9 @@ settingsModal().addEventListener("change", e => {
   // repaints as the switch moves, rather than only after a save and reopen.
   if (e.target.id === "set-gitscope") renderGitState(gitLast);
 });
-// Click the backdrop (not the dialog) to dismiss — expected of a modal, and it was missing.
-settingsModal().addEventListener("mousedown", e => { if (e.target === settingsModal()) closeSettings(); });
 document.getElementById("nb-repo").addEventListener("change", () => { fillSyncSelect(); gateLaunch(); });
 nbBranch.addEventListener("input", gateLaunch);
 document.getElementById("bs-go").addEventListener("click", saveBoxSettings);
-document.getElementById("boxset").addEventListener("mousedown", e => { if (e.target.id === "boxset") closeBoxSettings(); });
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
@@ -1608,6 +1605,14 @@ function copyText(text) {
 document.addEventListener("keydown", e => {
   const s = (view.mode === "term") ? activeSession() : null;
   if (!s) return;
+  // **A chord meant for something else is not the terminal's** (SKEIN-1246). This listener sees
+  // every key on the page before anything focused does, and it used to answer a paste in a Settings
+  // field by focusing the terminal behind the dialog, so the paste went to the box. A text field
+  // that is not a terminal's own (xterm's input is a TEXTAREA inside `.xterm`), or any open popup,
+  // keeps the browser's own copy and paste.
+  const t = e.target;
+  const inField = (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable) && !t.closest(".xterm");
+  if (inField || popupOpen()) return;
   const c = e.key === "c" || e.key === "C", v = e.key === "v" || e.key === "V";
   const copy  = (e.metaKey && !e.ctrlKey && c) || (e.ctrlKey && e.shiftKey && c);
   const paste = (e.metaKey && !e.ctrlKey && v) || (e.ctrlKey && e.shiftKey && v);

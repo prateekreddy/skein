@@ -20,9 +20,8 @@ function loadOverlay() {
   let ov = document.getElementById("load");
   if (!ov) {
     ov = document.createElement("div"); ov.id = "load"; document.body.append(ov);
-    ov.addEventListener("click", e => {
-      if (e.target === ov || e.target.classList.contains("x")) ov.classList.remove("open");
-    });
+    ov.addEventListener("click", e => { if (e.target.classList.contains("x")) ov.classList.remove("open"); });
+    closeOnBackdrop(ov, () => ov.classList.remove("open"));
   }
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Load by box</b>`
     + `<span class="sub">right now</span><span class="x">✕</span></div><div class="away-list"></div></div>`;
@@ -93,8 +92,7 @@ function awayOnFirstBoard() {
 function renderAwayOverlay(items, since) {
   let ov = document.getElementById("away");
   const close = () => { ov.classList.remove("open"); markSeen(); };
-  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); }
-  ov.onclick = e => { if (e.target === ov) close(); };
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); closeOnBackdrop(ov, close); }
   // `since` is the server's mark; empty means nobody has looked since skein started keeping one.
   const t = Date.parse(since);
   const when = Number.isNaN(t) ? "since skein started" : `since ${new Date(t).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}`;
@@ -112,6 +110,36 @@ function renderAwayOverlay(items, since) {
   ov.querySelector(".x").addEventListener("click", close);
   ov.classList.add("open");
 }
+
+// ---------- popups: what counts as one, and a click outside closing it ----------
+// Every overlay that sits over the page as a dialog. Two things read this list: the terminal's
+// clipboard keys, which leave every chord to the browser while one is open (SKEIN-1246 — a paste
+// into a Settings field landed in the box terminal behind it), and the wiring below.
+const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load"];
+function popupOpen() { return POPUP_IDS.some(id => document.getElementById(id)?.classList.contains("open")); }
+// A click on the backdrop closes the popup through the close function its ✕ and Escape use, so a
+// click outside loses exactly what those lose and nothing more. **Both the press and the release
+// must be on the backdrop itself**: selecting text in a field and letting go outside the dialog is
+// a press inside, and a `click` alone cannot tell — its target is the nearest element containing
+// both ends, which for that drag is the backdrop. A press on the backdrop released inside the
+// dialog does not close it either.
+function closeOnBackdrop(ov, close) {
+  let pressed = false;
+  ov.addEventListener("mousedown", e => { pressed = e.button === 0 && e.target === ov; });
+  ov.addEventListener("mouseup", e => {
+    const outside = pressed && e.target === ov;
+    pressed = false;
+    if (outside) close();
+  });
+}
+// `#away` and `#load` are made when first shown, and are wired where they are made. **The login
+// terminal (`#loginterm`) is left out on purpose**: that popup is a login in progress, closing it
+// ends the login, and a stray click beside it is no reason to — it closes by its ✕ only.
+for (const [id, close] of [
+  ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", closeSettings],
+  ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
+  ["askq", closeAskq],
+]) closeOnBackdrop(document.getElementById(id), close);
 
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
