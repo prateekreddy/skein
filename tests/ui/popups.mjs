@@ -327,6 +327,17 @@ await check("Settings stays open when a press on the backdrop is released inside
   if (!(await isOpen("settings"))) throw new Error("closed on a press that ended inside");
 });
 
+// Only the primary button closes: a right-click on the backdrop opens a context menu, and a middle
+// click is a paste on Linux — neither is "dismiss this". Fails if the helper's press test drops
+// `e.button === 0` (`pressed = e.target === ov`).
+for (const button of ["right", "middle"]) {
+  await check(`Settings stays open on a ${button}-button click on the backdrop`, async () => {
+    await openPopup("settings", () => openSettings("github"));
+    await page.mouse.click(BACKDROP.x, BACKDROP.y, { button });
+    if (!(await isOpen("settings"))) throw new Error(`closed on a ${button}-button click`);
+  });
+}
+
 // Closing goes through the popup's own close function, not a bare class removal: the mailbox's
 // close is the one with a visible side, the poller it stops. Fails if the helper is handed
 // `() => mbx.classList.remove("open")` instead of `closeMailbox`.
