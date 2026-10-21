@@ -277,17 +277,63 @@ fn look_for_newer_runtimes() -> Vec<RuntimeUpdate> {
 fn check_runtimes(sandbox: &str) -> Vec<RuntimeUpdate> {
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
         .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
-    let script = format!(
-        "SKEIN_RUNTIME_PACKAGES={}; {RUNTIME_VERSIONS_SCRIPT}",
-        sh_quote(packages.trim())
-    );
-    let Ok(out) = own_sandbox(sandbox).exec(&script, Duration::from_secs(120)) else {
+    let Ok(out) = own_sandbox(sandbox).exec(&versions_script(&packages), Duration::from_secs(120))
+    else {
         return Vec::new();
     };
     parse_runtime_versions(&out)
 }
 
-/// `<runtime> <have> <latest>` a line, and nothing else on stdout.
+/// **Where a box would find `claude` or `codex`, as shell** — the one definition both
+/// [`RUNTIME_VERSIONS_SCRIPT`] and [`RUNTIME_UPDATE_SCRIPT`] read versions through (SKEIN-1224).
+///
+/// Both scripts run as a crossing into the sandbox itself, on the fixed `FLEET_PATH`, and both used
+/// to ask a bare `claude --version` — which on that PATH is the root-owned `/usr/local/bin/claude`.
+/// No box runs that copy: a box's PATH leads with `$HOME/.local/bin` and the npm-global prefix
+/// ([`crate::place::box_path`]), and since SKEIN-968 the update installs into that prefix. Measured
+/// on the live fleet, 2026-10-21: the npm-global copies were 2.1.306 and 0.163.0, npm's newest, and
+/// the `/usr/local/bin` ones 2.1.272 and 0.154.0. So Settings offered an update every box already
+/// had, the update read 2.1.272 before and after and said "already current", and the offer never
+/// cleared.
+///
+/// So the lookup runs on the PATH a box gets, built by the same function `Place::wrap` exports to
+/// a box, with `$HOME` left for the sandbox's shell to fill in — a box's home is the sandbox's own
+/// path (the box-agent check in `src/bin/skein.rs` says why). That PATH ends in `FLEET_PATH`, so a plain
+/// image with nothing but a root `/usr/local` prefix still finds its one copy.
+///
+/// `skein_runtime_at R` prints the path of the `R` a box runs, or nothing. `skein_runtime_version R`
+/// prints that copy's first `--version` line, or nothing. In a subshell, so the caller's PATH stays
+/// `FLEET_PATH` for everything else the script runs.
+fn runtime_lookup() -> String {
+    format!(
+        r#"skein_box_path="{}";
+skein_runtime_at() {{ ( PATH="$skein_box_path"; command -v "$1" 2>/dev/null ); }};
+skein_runtime_version() {{ _skein_at="$(skein_runtime_at "$1")"; [ -n "$_skein_at" ] && "$_skein_at" --version 2>/dev/null | head -n 1; }};
+"#,
+        crate::place::box_path("$HOME")
+    )
+}
+
+/// The whole of what [`check_runtimes`] sends: the packages, [`runtime_lookup`], the check.
+fn versions_script(packages: &str) -> String {
+    format!(
+        "SKEIN_RUNTIME_PACKAGES={}; {}{RUNTIME_VERSIONS_SCRIPT}",
+        sh_quote(packages.trim()),
+        runtime_lookup()
+    )
+}
+
+/// The whole of what [`update_runtimes`] sends: the packages, [`runtime_lookup`], the update.
+fn update_script(packages: &str) -> String {
+    format!(
+        "SKEIN_RUNTIME_PACKAGES={}; {}{RUNTIME_UPDATE_SCRIPT}",
+        sh_quote(packages.trim()),
+        runtime_lookup()
+    )
+}
+
+/// `<runtime> <have> <latest>` a line, and nothing else on stdout. `have` is the copy a box runs —
+/// see [`runtime_lookup`].
 const RUNTIME_VERSIONS_SCRIPT: &str = r#"
          command -v npm >/dev/null 2>&1 || exit 0;
          for p in $SKEIN_RUNTIME_PACKAGES; do
@@ -296,8 +342,8 @@ const RUNTIME_VERSIONS_SCRIPT: &str = r#"
              *codex)       r=codex  ;;
              *)            continue ;;
            esac;
-           command -v "$r" >/dev/null 2>&1 || continue;
-           have="$($r --version 2>/dev/null | head -n 1 | tr -d '
+           [ -n "$(skein_runtime_at "$r")" ] || continue;
+           have="$(skein_runtime_version "$r" | tr -d '
 ')";
            latest="$(timeout 60 npm view "$p" version 2>/dev/null | tr -d '
 ')";
@@ -394,12 +440,8 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
     // no runtimes rather than npm-install an agent onto whoever is running the tests.
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
         .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
-    let script = format!(
-        "SKEIN_RUNTIME_PACKAGES={}; {RUNTIME_UPDATE_SCRIPT}",
-        sh_quote(packages.trim())
-    );
     let said = own_sandbox(sandbox)
-        .exec(&script, Duration::from_secs(900))
+        .exec(&update_script(&packages), Duration::from_secs(900))
         .map(|out| out.trim().to_string())?;
     // **Re-read before returning, because the bar answers from a remembered reading** (SKEIN-441).
     // Without this the install is invisible to the thing that offered it: `runtime_updates` keeps
@@ -712,9 +754,16 @@ fn parse_agent_start(out: Option<&str>) -> AgentStart {
 /// Unprivileged when the configured prefix is ours, `sudo` when it is not, because both substrates
 /// are real: a per-user npm prefix (this fleet) and a root-owned `/usr/local` (a plain image).
 ///
-/// And it SAYS when the copy it installed is not the copy on the PATH, rather than leaving that to
-/// be inferred from a version that did not move. A shadowed install is the one failure here that
-/// looks exactly like success.
+/// **Before and after are read from the copy a box runs** ([`runtime_lookup`], SKEIN-1224), not
+/// from whatever `FLEET_PATH` finds. Read there, they were a root-owned `/usr/local/bin` copy no box
+/// ran, so an install that moved every box's CLI reported "already current" — and on a sandbox with
+/// no root copy at all, said nothing about either runtime.
+///
+/// And it SAYS when the copy it installed is not the copy a box runs, rather than leaving that to be
+/// inferred from a version that did not move. A shadowed install is the one failure here that looks
+/// exactly like success. **On stdout**, as is the note about an older copy no box runs: on success
+/// `Place::exec` hands back stdout alone and drops stderr, so a warning written there — as this one
+/// was until SKEIN-1224 — reached neither the cockpit's toast nor the terminal.
 ///
 /// The install itself is `skein_npm_install`, from `src/package-install.sh`: the prefix rule above
 /// is that function's now, so a launch and an approved request install where this does.
@@ -724,11 +773,11 @@ const RUNTIME_UPDATE_SCRIPT: &str = concat!(
          set -- $SKEIN_RUNTIME_PACKAGES;
          [ "$#" -gt 0 ] || { echo 'no agent runtimes are configured here, so there is nothing to update'; exit 0; };
          command -v npm >/dev/null 2>&1 || { echo 'this sandbox has no npm, so the agent CLIs cannot be updated in it' >&2; exit 1; };
-         was_claude="$(claude --version 2>/dev/null | head -n 1)";
-         was_codex="$(codex --version 2>/dev/null | head -n 1)";
+         was_claude="$(skein_runtime_version claude)";
+         was_codex="$(skein_runtime_version codex)";
          prefix="$(npm config get prefix 2>/dev/null)";
          case "$prefix" in undefined|null) prefix="";; esac;
-         log=/tmp/skein-runtime-update.log;
+         log="${TMPDIR:-/tmp}/skein-runtime-update.log";
          : >"$log";
          skein_npm_install "$log" "$@" || {
              echo 'npm could not install the agent runtimes. It said:' >&2;
@@ -738,14 +787,19 @@ const RUNTIME_UPDATE_SCRIPT: &str = concat!(
          moved=0;
          for r in claude codex; do
            case "$r" in claude) was="$was_claude";; codex) was="$was_codex";; esac;
-           now="$($r --version 2>/dev/null | head -n 1)";
+           now="$(skein_runtime_version "$r")";
            if [ -z "$now" ]; then continue; fi;
            if [ -z "$was" ]; then echo "$r: installed, now $now"; moved=1;
            elif [ "$was" = "$now" ]; then echo "$r: $now (already current)";
            else echo "$r: $was -> $now"; moved=1; fi;
-           at="$(command -v "$r" 2>/dev/null)";
-           if [ -n "$prefix" ] && [ -n "$at" ] && [ "$at" != "$prefix/bin/$r" ] && [ -x "$prefix/bin/$r" ]; then
-             echo "$r: installed into $prefix but this sandbox runs $at, which every box runs too — the install is shadowed" >&2;
+           at="$(skein_runtime_at "$r")";
+           if [ -n "$prefix" ] && [ "$at" != "$prefix/bin/$r" ] && [ -x "$prefix/bin/$r" ]; then
+             echo "$r: npm installed it into $prefix/bin, but boxes run $at, which this update did not change";
+           fi;
+           other="$(command -v "$r" 2>/dev/null)";
+           if [ -n "$other" ] && [ "$other" != "$at" ]; then
+             old="$("$other" --version 2>/dev/null | head -n 1)";
+             if [ -n "$old" ] && [ "$old" != "$now" ]; then echo "$r: $other is still $old, but no box runs it"; fi;
            fi;
          done;
          [ "$moved" = 1 ] || echo 'nothing moved — every runtime here was already the newest npm has.'"#
@@ -1153,15 +1207,225 @@ mod tests {
         );
     }
 
+    /// A sandbox in a directory, for the real check and update scripts to run in (SKEIN-1224).
+    ///
+    /// Three places a runtime can be, standing in for the fleet's: `$HOME/.local/bin`, the first
+    /// entry of the PATH a box gets, holds the copy a box runs; `fleet-bin`, the script's own PATH,
+    /// holds the root-owned copy no box runs (or nothing, as on the fleet once those were removed);
+    /// and `npm` is a stub there that answers `config get prefix`, `view` and `install -g`, writing
+    /// the version it was told is newest into `<prefix>/bin`.
+    ///
+    /// The scripts are the ones production sends — [`versions_script`], [`update_script`], with
+    /// `$HOME` filled in by bash at run time — so the copy a box runs is found through
+    /// [`crate::place::box_path`] and nothing the test hands in. Only `$HOME/.local/bin` can be
+    /// planted: the box PATH's other entries are absolute, root-owned directories. Both runtimes are
+    /// always planted there, so a lookup never falls through to whatever this machine has
+    /// installed. Nothing is installed anywhere but under the test's own directory.
+    struct CliFixture {
+        dir: crate::testutil::TempDir,
+    }
+
+    impl CliFixture {
+        fn new() -> Self {
+            let dir = crate::testutil::tempdir();
+            for d in ["home/.local/bin", "fleet-bin"] {
+                std::fs::create_dir_all(dir.join(d)).unwrap();
+            }
+            CliFixture { dir }
+        }
+        fn path(&self, rel: &str) -> String {
+            self.dir.join(rel).to_str().unwrap().to_string()
+        }
+        /// An executable at `rel` that answers `--version` with `says`.
+        fn cli(&self, rel: &str, says: &str) {
+            self.script(rel, &format!("#!/bin/sh\necho '{says}'\n"));
+        }
+        fn script(&self, rel: &str, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let p = self.dir.join(rel);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        /// npm, whose global prefix is `prefix` and whose newest versions are these two.
+        fn npm(&self, prefix: &str, claude: &str, codex: &str) {
+            std::fs::create_dir_all(format!("{prefix}/bin")).unwrap();
+            self.script(
+                "fleet-bin/npm",
+                &format!(
+                    r#"#!/bin/sh
+case "$1" in
+  config) echo '{prefix}' ;;
+  view) case "$2" in *claude-code) echo '{claude}' ;; *codex) echo '{codex}' ;; esac ;;
+  install)
+    for p in "$@"; do
+      case "$p" in
+        *claude-code) printf '#!/bin/sh\necho "{claude} (Claude Code)"\n' >'{prefix}/bin/claude'; chmod 755 '{prefix}/bin/claude' ;;
+        *codex) printf '#!/bin/sh\necho "codex-cli {codex}"\n' >'{prefix}/bin/codex'; chmod 755 '{prefix}/bin/codex' ;;
+      esac
+    done ;;
+esac
+"#
+                ),
+            );
+        }
+        /// Run `script` the way a crossing does — `bash -c` — on the fixture's PATH and HOME, and
+        /// return its stdout, which is all `Place::exec` hands back from a run that succeeded.
+        fn run(&self, script: &str) -> String {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", self.path("fleet-bin")))
+                .env("HOME", self.path("home"))
+                .env("TMPDIR", self.path(""))
+                .output()
+                .expect("bash runs");
+            assert!(
+                out.status.success(),
+                "the script failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    }
+
+    const PACKAGES: &str = "@anthropic-ai/claude-code @openai/codex";
+
+    /// **A fleet whose boxes already run npm's newest is reported as current** (SKEIN-1224) — with
+    /// an older root-owned copy beside it that no box runs, and with that copy removed, which is
+    /// the fleet as the owner left it on 2026-10-21.
+    ///
+    /// What makes it fail: reading the version off the script's own PATH rather than the box's
+    /// (`$r --version`, or `skein_runtime_at` without its `PATH=`). With the stale copy that reads
+    /// 2.1.272 and 0.154.0 and reports both behind, which is the bug as seen; without it, the
+    /// runtime is not found at all and the check prints nothing, which the presence assertion
+    /// catches — an empty "nothing behind" proves nothing on its own.
+    #[test]
+    fn a_fleet_whose_boxes_run_the_newest_cli_is_not_offered_an_update() {
+        for stale in [true, false] {
+            let f = CliFixture::new();
+            f.cli("home/.local/bin/claude", "2.1.306 (Claude Code)");
+            f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
+            if stale {
+                f.cli("fleet-bin/claude", "2.1.272 (Claude Code)");
+                f.cli("fleet-bin/codex", "codex-cli 0.154.0");
+            }
+            f.npm(&f.path("home/.local"), "2.1.306", "0.163.0");
+            let out = f.run(&super::versions_script(PACKAGES));
+            assert!(
+                out.contains("claude 2.1.306 (Claude Code) 2.1.306")
+                    && out.contains("codex codex-cli 0.163.0 0.163.0"),
+                "the check did not read the copy a box runs (root copy present: {stale}); it \
+                 said:\n{out}"
+            );
+            assert_eq!(
+                super::parse_runtime_versions(&out),
+                Vec::new(),
+                "every box runs npm's newest, and the check still offers an update"
+            );
+        }
+    }
+
+    /// **The update's report is about the copy a box runs, before and after** (SKEIN-1224).
+    ///
+    /// What makes each assertion fail:
+    /// - the move line: reading `was` or `now` off the script's own PATH. With the stale root copy
+    ///   both read 2.1.272 and the line is "already current", which is what the owner was shown;
+    ///   with none, the runtime is skipped and there is no line.
+    /// - the note about the root copy: dropping it, or printing it on stderr, which `Place::exec`
+    ///   discards on success; and, the other way, printing it when there is no other copy.
+    /// - no "npm installed it into" line: the shadow check comparing against the script's own
+    ///   PATH, where `/usr/local/bin` is never the npm-global prefix and every update would say
+    ///   it was shadowed.
+    #[test]
+    fn the_update_reports_what_moved_in_the_copy_a_box_runs() {
+        // A box on an older claude, a root copy older still.
+        let f = CliFixture::new();
+        f.cli("home/.local/bin/claude", "2.1.300 (Claude Code)");
+        f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
+        f.cli("fleet-bin/claude", "2.1.272 (Claude Code)");
+        f.npm(&f.path("home/.local"), "2.1.306", "0.163.0");
+        let said = f.run(&super::update_script(PACKAGES));
+        assert!(
+            said.contains("claude: 2.1.300 (Claude Code) -> 2.1.306 (Claude Code)\n"),
+            "the update did not report the move in the copy a box runs:\n{said}"
+        );
+        assert!(
+            said.contains("codex: codex-cli 0.163.0 (already current)\n"),
+            "a runtime the install did not move is not reported as already current:\n{said}"
+        );
+        assert_eq!(
+            super::moved_runtimes(&said),
+            vec![("claude".into(), "2.1.300".into(), "2.1.306".into())],
+            "what is recorded as installed is not what moved"
+        );
+        let stale = format!(
+            "claude: {} is still 2.1.272 (Claude Code), but no box runs it\n",
+            f.path("fleet-bin/claude")
+        );
+        assert!(
+            said.contains(&stale),
+            "the older root copy beside the box's is not mentioned on stdout:\n{said}"
+        );
+        assert!(
+            !said.contains("npm installed it into"),
+            "an install into the prefix boxes run from is called shadowed:\n{said}"
+        );
+
+        // The fleet as the owner left it: no root copy, everything current.
+        let f = CliFixture::new();
+        f.cli("home/.local/bin/claude", "2.1.306 (Claude Code)");
+        f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
+        f.npm(&f.path("home/.local"), "2.1.306", "0.163.0");
+        let said = f.run(&super::update_script(PACKAGES));
+        assert_eq!(
+            said,
+            "claude: 2.1.306 (Claude Code) (already current)\n\
+             codex: codex-cli 0.163.0 (already current)\n\
+             nothing moved — every runtime here was already the newest npm has.\n",
+            "with no root copy, the update did not report the copies a box runs"
+        );
+    }
+
+    /// **An install that lands where no box looks says so, where the person will read it**
+    /// (SKEIN-1224). npm's prefix is somewhere off the box PATH, so the box's claude does not move.
+    ///
+    /// What makes it fail: the warning written to stderr, as it was — `Place::exec` hands back
+    /// stdout alone from a run that succeeded, so neither the toast nor the terminal ever showed
+    /// it — or the warning naming a copy other than the one a box runs.
+    #[test]
+    fn an_install_no_box_runs_is_reported_as_shadowed_on_stdout() {
+        let f = CliFixture::new();
+        f.cli("home/.local/bin/claude", "2.1.300 (Claude Code)");
+        f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
+        let elsewhere = f.path("elsewhere");
+        f.npm(&elsewhere, "2.1.306", "0.163.0");
+        let said = f.run(&super::update_script(PACKAGES));
+        assert!(
+            said.contains("claude: 2.1.300 (Claude Code) (already current)\n"),
+            "the box's copy did not move, and the report says otherwise:\n{said}"
+        );
+        let shadowed = format!(
+            "claude: npm installed it into {elsewhere}/bin, but boxes run {}, which this update \
+             did not change\n",
+            f.path("home/.local/bin/claude")
+        );
+        assert!(
+            said.contains(&shadowed),
+            "a shadowed install is not reported on stdout:\n{said}"
+        );
+    }
+
     /// The check runs where the CLIs are, asks npm what it would install, and asks each runtime
     /// what it is running — and it never reports a runtime the sandbox does not have.
     ///
-    /// Asserted on the script's text rather than by running it: `sbx` does not exist inside a box,
-    /// so nothing here can reach a sandbox. What this holds is the shape that would silently stop
-    /// the bar working.
+    /// Asserted on the text of the script as sent, [`super::runtime_lookup`] included — which copy
+    /// it reads is held by running it, in
+    /// `a_fleet_whose_boxes_run_the_newest_cli_is_not_offered_an_update`. What this holds is the
+    /// shape that would silently stop the bar working.
     #[test]
     fn the_version_check_asks_npm_and_the_sandbox_and_skips_what_is_not_installed() {
-        let script = super::RUNTIME_VERSIONS_SCRIPT;
+        let script = &super::versions_script(PACKAGES);
         assert!(
             script.contains("npm view"),
             "nothing asks npm what it would install, so the bar can never know there IS a newer \
@@ -1172,7 +1436,7 @@ mod tests {
             "nothing asks the sandbox what it is running, so skein cannot tell behind from current"
         );
         assert!(
-            script.contains("command -v \"$r\" >/dev/null 2>&1 || continue"),
+            script.contains("[ -n \"$(skein_runtime_at \"$r\")\" ] || continue"),
             "a runtime the sandbox does not have would be reported anyway — offering to update \
              something that is not installed"
         );
