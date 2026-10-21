@@ -29,7 +29,7 @@
 // `.catch`. Both are fixed in that file; this suite is what reads the result.
 //
 //   node tests/ui/healthban.mjs
-import { grab, harness, stubDom } from "./lift.mjs";
+import { dismissing, grab, harness, stubDom } from "./lift.mjs";
 
 const t = harness();
 
@@ -48,7 +48,10 @@ const t = harness();
 // surfaces" is a thing this suite can read rather than a thing it hopes; nothing else in the lifted
 // code writes to it. `fetchFails` makes the poll's own fetch reject.
 const STEPS = ["render", "renderDiagnostics", "renderLoginBanner", "renderModelChoices"];
-function world({ throws = null, fetchFails = false } = {}) {
+//
+// `decideThrows` replaces the dismissal rule with one that throws, for SKEIN-1244's half of
+// SKEIN-1012: deciding whether a row was hidden must never be what hides it.
+function world({ throws = null, fetchFails = false, decideThrows = false } = {}) {
   const { reg, document, where } = stubDom();
   const state = { health: { ok: true }, opened: [], logged: [] };
   const fetch = url => {
@@ -73,11 +76,16 @@ function world({ throws = null, fetchFails = false } = {}) {
     ${grab("esc")}
     ${grab("lastHealth")}
     ${grab("loadHealth")}
+    ${dismissing()}
+    ${decideThrows ? `function stillDismissed() { throw new Error("stillDismissed fell over"); }` : ""}
     ${throws === "renderLoginBanner" ? stub("renderLoginBanner") : grab("renderLoginBanner")}
-    return { loadHealth: () => loadHealth() };
+    return { loadHealth: () => loadHealth(), dismiss: () => banDismiss(null, "healthban") };
   `;
   const made = new Function("fetch", "document", "state", "console", src)(fetch, document, state, console);
-  return { ...made, reg, where, state, ban: () => reg.get("healthban") || null };
+  // `said` is the row's sentence, which is its button since SKEIN-1244 put a ✕ beside it.
+  const ban = () => reg.get("healthban") || null;
+  return { ...made, reg, where, state, ban, said: () => ban()?.querySelector(".healthgo")?.textContent,
+           hidden: () => !!ban()?.classList.contains("bandismissed") };
 }
 
 // Two promise hops sit between the fetch and the paint (r.json(), then the handler); a couple of
@@ -123,12 +131,14 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   const ban = w.ban();
   t.check("an unsatisfied counted check raises the row", !!ban, true);
   t.check("the row names the check and says its first sentence, and stops there",
-    ban?.textContent, "registry: the registry is unreachable");
-  // The row is a BUTTON prepended to the body, not a pill laid over it: floating at the top covered
-  // the dock's tab bar, which blocked exactly the work the warning was interrupting. Body's first
-  // child pushes the app down and leaves no hole when it goes.
-  t.check("and it is a button placed above the app rather than over it",
-    [ban?.tag, w.where], ["button", [["prepend", "healthban"]]]);
+    w.said(), "registry: the registry is unreachable");
+  // The row is prepended to the body, not a pill laid over it: floating at the top covered the
+  // dock's tab bar, which blocked exactly the work the warning was interrupting. Body's first
+  // child pushes the app down and leaves no hole when it goes. Its sentence is a BUTTON, the one
+  // click to the diagnostics pane, and the row is not one since SKEIN-1244 — the ✕ beside the
+  // sentence is a button too, and a button cannot hold a button.
+  t.check("and its sentence is a button, in a row placed above the app rather than over it",
+    [ban?.tag, ban?.querySelector(".healthgo")?.tag, w.where], ["div", "button", [["prepend", "healthban"]]]);
 }
 
 // --- several failures are COUNTED, not listed, so the row stays one readable sentence ------------
@@ -142,7 +152,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   w.loadHealth();
   await settle();
   t.check("three failures give one sentence and a count of the rest",
-    w.ban()?.textContent, "registry: the registry is unreachable (+2 more)");
+    w.said(), "registry: the registry is unreachable (+2 more)");
   // All three are still reachable — the row is the headline, the tooltip is the list.
   t.check("while every one of them is in the tooltip",
     ["registry", "sbx", "disk"].map(k => (w.ban()?.title || "").includes(`${k}: `)),
@@ -200,7 +210,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   // The owner's rule, in his words "a check that raised it": the one sentence a reader can read
   // and copy is always the reason the banner is up.
   t.check("the headline is the counted fault, not the uncounted one ahead of it in the list",
-    w.ban()?.textContent, "fleet disk: the disk is nearly full (+1 more)");
+    w.said(), "fleet disk: the disk is nearly full (+1 more)");
   t.check("and once the row is up for a counted reason, the uncounted check is named on it too",
     (w.ban()?.title || "").includes("ai enrichment: enrichment is off"), true);
 }
@@ -220,7 +230,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   w.loadHealth();
   await settle();
   t.check("an uncounted fault does not take the headline from the reason the banner is up",
-    w.ban()?.textContent, "environment: probe updates · 1 on old probes (+1 more)");
+    w.said(), "environment: probe updates · 1 on old probes (+1 more)");
   t.check("and it is still in the tooltip",
     (w.ban()?.title || "").includes("ai enrichment: enrichment is off"), true);
 }
@@ -240,7 +250,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check(`a throw in ${name} does not cost the banner`,
-    w.ban()?.textContent, "registry: the registry is unreachable");
+    w.said(), "registry: the registry is unreachable");
   t.check(`and the throw from ${name} reaches the console, not a swallow`,
     w.state.logged.some(([how, said, e]) =>
       how === "error" && String(said).includes(name) && e?.message === `${name} fell over`),
@@ -285,7 +295,7 @@ for (const name of STEPS) {
   t.check("an unanswered check is reported in the tooltip, in those words",
     (w.ban()?.title || "").includes("box probes: could not be checked — the probe timed out"), true);
   t.check("and is not counted as a fault, so it does not inflate the headline",
-    w.ban()?.textContent, "registry: the registry is unreachable");
+    w.said(), "registry: the registry is unreachable");
 }
 
 // --- `ok: false` that the page cannot NAME still says something a reader can act on --------------
@@ -300,7 +310,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("a fault with no named check still leaves a readable row",
-    w.ban()?.textContent, "environment: probe updates · 1 dark · 1 on old probes");
+    w.said(), "environment: probe updates · 1 dark · 1 on old probes");
 }
 
 // --- the row is the way to the diagnostics pane ---------------------------------------------------
@@ -313,7 +323,7 @@ for (const name of STEPS) {
   w.state.health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
   w.loadHealth();
   await settle();
-  w.ban()?.onclick();
+  w.ban()?.querySelector(".healthgo")?.onclick();
   t.check("clicking the row opens the diagnostics pane and no other", w.state.opened, ["diag"]);
 }
 
@@ -335,7 +345,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("the banner names a check by the label the report serves",
-    w.ban()?.textContent, "example isolation: started before the current isolation");
+    w.said(), "example isolation: started before the current isolation");
 
   const { reg, document } = stubDom(["set-diag", "set-diagn"]);
   const pane = new Function("document", "health", `
@@ -352,6 +362,41 @@ for (const name of STEPS) {
   // One row for the one check this report carries — not a second under another name.
   t.check("and it is one row, not two under two names",
     (drawn.match(/class="dg-name"/g) || []).length, 1);
+}
+
+// --- HIDING THE ROW NEVER COSTS THE ROW: a throw while deciding shows it ------------------------
+//
+// SKEIN-1244 gave the row a ✕, and with it a decision the row did not have before: was this
+// problem hidden? That decision is the one new way for a row nobody hid to go missing, so it is the
+// last thing the poll does and it is guarded — a throw in it leaves the row shown and says so.
+//
+// Fails on: the guard in `banDismissable` removed, or the catch hiding instead of showing; and the
+// non-vacuity half fails if `banDismiss` stops recording or the poll stops asking.
+{
+  const health = unhealthy({ registry: bad("the registry is unreachable", "check the network") });
+  const fine = world();
+  fine.state.health = health;
+  fine.loadHealth();
+  await settle();
+  fine.dismiss();
+  fine.loadHealth();
+  await settle();
+  t.check("a dismissed row stays hidden across the next poll — the rule below is live",
+    [fine.said(), fine.hidden()], ["registry: the registry is unreachable", true]);
+
+  const w = world({ decideThrows: true });
+  w.state.health = health;
+  w.loadHealth();
+  await settle();
+  w.dismiss();
+  w.loadHealth();
+  await settle();
+  t.check("and when deciding throws, the row is shown, saying what is wrong",
+    [w.said(), w.hidden()], ["registry: the registry is unreachable", false]);
+  t.check("and the throw reaches the console under the row's name",
+    w.state.logged.some(([how, said, e]) =>
+      how === "error" && String(said).includes("healthban") && e?.message === "stillDismissed fell over"),
+    true);
 }
 
 t.done();
