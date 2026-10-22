@@ -164,6 +164,21 @@ const workflowsWhen = async (holds, why) => {
   }
 };
 
+/** Press the editor's save, and return once the page has HANDLED the server's answer.
+ *
+ *  Not once the file changes (SKEIN-1271). The server writes the file before it answers, so a wait
+ *  on the file returns while the page's `.then` is still to run — and a check that closed the editor
+ *  in that gap had it reopened by the late answer, after which "workflows" closed instead of opening
+ *  (the coverage job of run 39570090380). "workflows saved" is set in the same task that settles the
+ *  editor's state and redraws, so once it reads that, nothing about this save is still to come. It
+ *  is cleared first so an earlier save's toast cannot answer for this one. A save the server refuses
+ *  never says it, and fails here with `why`; what reached the file is still `workflowsWhen`'s. */
+const pressSave = async why => {
+  await page.evaluate(() => { const t = document.getElementById("toast"); if (t) t.textContent = ""; });
+  await page.click("#revpane .revchip:has-text('save')");
+  await until(() => document.getElementById("toast")?.textContent === "workflows saved", null, why);
+};
+
 console.log("\nworkflows");
 // Assign, see what it would do, and leave one out. The chain the owner has to be able to walk
 // before trusting something that merges on its own — driven through the real page and the real
@@ -290,7 +305,7 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
   await steps().last().selectOption("flag");
   await settle();
   await page.fill("#revpane .revstep .revstep-line input", "CI is red");
-  await page.click("#revpane .revchip:has-text('save')");
+  await pressSave("the save was never answered with \"workflows saved\"");
 
   // It is on disk, in the shape skein reads back — not the shape the page sent.
   const written = await workflowsWhen(w => ((w.workflow || [])[0] || {}).name === "watch-ci",
@@ -331,7 +346,7 @@ await check("a merge train can be built here: one at a time is a control, not ju
   const chip = "#revpane .revflow-edit-head .revchip:has-text('one at a time')";
   await mustSee(chip, "the one-at-a-time control");
   await page.click(chip);
-  await page.click("#revpane .revchip:has-text('save')");
+  await pressSave("saving the switch was never answered with \"workflows saved\"");
   await workflowsWhen(w => !!(w.workflow || [])[0]?.serial, "the switch did not reach the file");
 
   // The round trip, which is the half that would go wrong silently: the editor reads the file back
@@ -348,9 +363,49 @@ await check("a merge train can be built here: one at a time is a control, not ju
 
   // And it can be un-set, which the file being the only interface made impossible without an editor.
   await page.click(chip);
-  await page.click("#revpane .revchip:has-text('save')");
+  await pressSave("saving the switch back was never answered with \"workflows saved\"");
   await workflowsWhen(w => !(w.workflow || [])[0]?.serial,
     "a train cannot be switched back to running in parallel");
+});
+
+// **A save's answer does not reopen an editor that was closed while it was on its way** (SKEIN-1271).
+// The answer used to set the editor's state whether or not it was still open, so closing the
+// editor while a save was in flight brought it back, and the next press of "workflows" — meant to
+// open it — closed it. The PUT is held at the network until the editor is shut, which makes the
+// order certain rather than a race this suite only sometimes loses.
+//
+// What makes it fail: `revEditSave` setting `revEdit` without asking whether the editor is open —
+// the old code — which redraws the editor the moment the held answer is let through.
+await check("a save answered after the editor was closed leaves it closed", async () => {
+  if (!(await page.locator("#revpane .revflow-edit-head").count()))
+    throw new Error("the editor is not open, so closing it proves nothing");
+  let release = () => {};
+  const held = new Promise(r => { release = r; });
+  const hold = async route => {
+    if (route.request().method() !== "PUT") return route.continue();
+    await held;
+    return route.continue();
+  };
+  await page.route("**/api/workflows", hold);
+  try {
+    await page.evaluate(() => { const t = document.getElementById("toast"); if (t) t.textContent = ""; });
+    await page.click("#revpane .revchip:has-text('save')");
+    await page.click("#revpane .revchip:has-text('workflows')");   // close, with the save held
+    await until(() => !document.querySelector("#revpane .revflow-edit-head"), null,
+      "the workflows editor would not close while a save was in flight");
+    release();
+    await until(() => document.getElementById("toast")?.textContent === "workflows saved", null,
+      "the held save was never answered with \"workflows saved\"");
+    if (await page.locator("#revpane .revflow-edit-head").count())
+      throw new Error("the save's answer reopened the editor after it had been closed");
+  } finally {
+    release();
+    await page.unroute("**/api/workflows", hold);
+  }
+  // Open again, for the checks below — which is also the press the old code turned into a close.
+  await page.click("#revpane .revchip:has-text('workflows')");
+  await until(() => !!document.querySelector("#revpane .revflow-edit-head .revchip"), null,
+    "the workflows editor would not open again after a save answered while it was closed");
 });
 // The control says what it DOES, because "serial" is the file's word and the person pressing it is
 // deciding whether every sibling re-runs CI on every merge.
@@ -393,7 +448,7 @@ await check("a workflow created in the cockpit can be made a train, without touc
   await chips.last().click();
   // A step, because a workflow with none is not one a save can be judged on.
   await page.locator("#revpane .revflow-edit .revchip:has-text('+ step')").last().click();
-  await page.click("#revpane .revchip:has-text('save')");
+  await pressSave("the new workflow's save was never answered with \"workflows saved\"");
   const written = (await workflowsWhen(w => (w.workflow || []).length > 1,
     "a workflow built from scratch here never reached the file")).workflow;
   const made = written[written.length - 1];
@@ -402,7 +457,7 @@ await check("a workflow created in the cockpit can be made a train, without touc
 
   // Put the fixture back for the checks below, which read the file this section wrote.
   await page.locator("#revpane .revflow-edit .revchip:has-text('delete workflow')").last().click();
-  await page.click("#revpane .revchip:has-text('save')");
+  await pressSave("deleting the new workflow was never answered with \"workflows saved\"");
   await workflowsWhen(w => (w.workflow || []).length === 1,
     "the workflow this check added would not go away again, and the checks below read this file");
 });
