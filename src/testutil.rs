@@ -5,6 +5,9 @@
 //! env lock especially — are process-global and must be *the same* value for every test in the
 //! crate, not a per-module copy.
 
+mod box_script;
+pub(crate) use box_script::{box_shell, moved, PointedWorktree};
+
 use crate::place::{record_place, PlaceRecord};
 use crate::registry::Sandbox;
 use chrono::Utc;

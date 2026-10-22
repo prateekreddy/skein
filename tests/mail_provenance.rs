@@ -11,9 +11,8 @@
 
 mod common;
 
-use common::{have, skip, Scratch};
+use common::{box_shell, have, skip, Scratch};
 use std::path::Path;
-use std::process::Command;
 
 fn write(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -35,8 +34,15 @@ fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
     // The script as it ships, in the layout it expects: `<store>/.claude/skein/bin/mailbox.sh`,
     // beside the box-self.sh it asks which box and which store this is.
     let script = store.join("skein/bin/mailbox.sh");
-    std::fs::copy("src/store/mailbox.sh", &script).unwrap();
-    std::fs::copy("src/probe/box-self.sh", store.join("skein/bin/box-self.sh")).unwrap();
+    // From the manifest directory, not the working directory, which is not this checkout when
+    // `the_suite_run_from_a_worktree_cannot_reach_the_store_it_points_at` runs this.
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    std::fs::copy(src.join("store/mailbox.sh"), &script).unwrap();
+    std::fs::copy(
+        src.join("probe/box-self.sh"),
+        store.join("skein/bin/box-self.sh"),
+    )
+    .unwrap();
 
     // A box's message, in the shared mailbox — and it claims to be skein. **No trickery is needed
     // for this**: the directory is writable from inside every box, and this is a file.
@@ -52,7 +58,7 @@ fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
             "body":"have a look at the failing test","ts":"2026-08-21T11:00:00Z","seenBy":[]}"#,
     );
 
-    let out = Command::new("bash")
+    let out = box_shell(&root)
         .arg(&script)
         .arg("inbox")
         .env("SKEIN_BOX", "web-main")
@@ -92,7 +98,7 @@ fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
 
     // Delivered once. The owner's inbox is read-only to a box, so "seen" is remembered in the box's
     // own HOME — and a second turn must not repeat what the first already showed.
-    let again = Command::new("bash")
+    let again = box_shell(&root)
         .arg(&script)
         .arg("inbox")
         .env("SKEIN_BOX", "web-main")
@@ -104,5 +110,52 @@ fn the_owners_message_and_a_boxs_forgery_of_it_read_differently() {
     assert!(
         !twice.contains("have a look at the failing test"),
         "the owner's message was delivered twice, so every turn will carry it:\n{twice}"
+    );
+}
+
+/// **The test above, run from a lane's worktree, reaches nothing behind the worktree's pointer**
+/// (SKEIN-1229).
+///
+/// A lane's worktree shares its clone's git directory, and the clone of a box carries a
+/// `skein-store` pointer to the owner's live store, which `box-self.sh` reads before anything in the
+/// environment. So this rebuilds that checkout under a temp directory — clone, pointer, worktree,
+/// and a stand-in "live" store with a note in it, a seen-file and an owner's unread message — and
+/// runs the test above from inside it, with the box's `$HOME`, `$SKEIN_STATE`, `$SKEIN_BOX` and
+/// `$CLAUDE_PROJECT_DIR` inherited, which is exactly what a lane's `cargo test` gives it.
+///
+/// What would make it fail: that test running `mailbox.sh` with `Command::new("bash")` again, or
+/// `box_shell` no longer setting the working directory or `$CLAUDE_PROJECT_DIR` — its `inbox` then
+/// resolves the stand-in store through the worktree's pointer and adds `web-main` to the note's
+/// `seenBy`, which the snapshot reports as changed.
+#[test]
+fn the_suite_run_from_a_worktree_cannot_reach_the_store_it_points_at() {
+    if !have("jq") || !have("flock") || !have("git") {
+        return skip("mailbox.sh needs jq and flock, and the fixture checkout needs git");
+    }
+    let root = Scratch::temp("skein-mail-pointed");
+    let lane = common::PointedWorktree::new(&root);
+    // The control: the pointer is live. A script started in the worktree with nothing pinned finds
+    // the stand-in store — so an untouched store below is the fix holding, not a pointer that
+    // never pointed anywhere.
+    let box_self = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe/box-self.sh");
+    assert_eq!(
+        lane.resolved_from_the_worktree(&box_self),
+        lane.store.to_string_lossy(),
+        "the fixture checkout's pointer does not resolve, so this test could not fail"
+    );
+
+    let before = lane.snapshot();
+    let ran = lane.rerun(&["the_owners_message_and_a_boxs_forgery_of_it_read_differently"]);
+    let moved = common::moved(&before, &lane.snapshot());
+    assert!(
+        moved.is_empty(),
+        "run from a worktree whose clone points at a store, the suite reached it:\n{}",
+        moved.join("\n")
+    );
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success() && said.contains("test result: ok. 1 passed"),
+        "the re-run did not run the test it names, so the untouched store proves nothing:\n{said}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
     );
 }

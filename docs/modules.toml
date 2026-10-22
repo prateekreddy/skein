@@ -751,8 +751,8 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # a test's reach says nothing about the design.
 #
 # It reached `place` and `registry` here until SKEIN-905, and that was the gate misreading, not the
-# code changing: `src/testutil.rs:8` is `use crate::place::{record_place, PlaceRecord};` and
-# `src/testutil.rs:9` is `use crate::registry::Sandbox;`, and both were counted as architecture
+# code changing: `src/testutil.rs:11` is `use crate::place::{record_place, PlaceRecord};` and
+# `src/testutil.rs:12` is `use crate::registry::Sandbox;`, and both were counted as architecture
 # because the cutter looked
 # for `#[cfg(test)]` INSIDE the file and this file's attribute is in its parent. The two edges are
 # still made, and `python3 tools/module-check.py --tests` still prints them, beside `util` — which

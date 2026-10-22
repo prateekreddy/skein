@@ -440,7 +440,7 @@ mod tests {
         fs::create_dir_all(&home_b).unwrap();
 
         let run = |home: &Path| {
-            Command::new("bash")
+            box_shell(&store_tmp)
                 .arg(&helper)
                 .arg(&store)
                 .env("HOME", home)
@@ -501,7 +501,7 @@ mod tests {
         fs::write(home.join(".codex/AGENTS.md"), "# My existing guidance\n").unwrap();
         let helper = store.join("skein/bin/agent-guide.sh");
         let run = |normal: &str, override_: &str| {
-            Command::new("bash")
+            box_shell(&work_tmp)
                 .arg(&helper)
                 .arg(&store)
                 .arg(normal)
@@ -539,7 +539,7 @@ mod tests {
             .contains("$HOME/shared"));
 
         // Without a real takeover, the turn-scoped handoff hook must emit no context at all.
-        let handoff = Command::new("bash")
+        let handoff = box_shell(&work_tmp)
             .arg(store.join("skein/bin/box-handoff.sh"))
             .arg("codex")
             .env("CLAUDE_PROJECT_DIR", &work)
@@ -586,7 +586,7 @@ mod tests {
 
         let home = dir.join("home");
         fs::create_dir_all(&home).unwrap();
-        let out = Command::new("bash")
+        let out = box_shell(&dir)
             .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
             .env("CLAUDE_PROJECT_DIR", &tree)
             .env("HOME", &home)
@@ -670,7 +670,7 @@ mod tests {
         std::os::unix::fs::symlink(&store, tree.join(".claude")).unwrap();
         let home = dir.join("home");
         fs::create_dir_all(&home).unwrap();
-        let out = Command::new("bash")
+        let out = box_shell(&dir)
             .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
             .env("CLAUDE_PROJECT_DIR", &tree)
             .env("HOME", &home)
@@ -1115,7 +1115,7 @@ mod tests {
     }
 
     fn bootstrap(kit: &KitBox) {
-        let out = Command::new("bash")
+        let out = box_shell(&kit.dir)
             .arg(kit.store.join("skein/bin/sandbox-bootstrap.sh"))
             .env("CLAUDE_PROJECT_DIR", &kit.tree)
             .env("HOME", &kit.home)
