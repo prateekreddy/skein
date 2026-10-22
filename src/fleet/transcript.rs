@@ -33,7 +33,7 @@ pub fn transcript_slug(dir: &str) -> String {
 pub fn realign_transcript(name: &str) -> Result<usize, String> {
     use crate::boxfile::{self, Dir};
     use std::ffi::OsString;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let root_path = std::path::PathBuf::from(box_state(name)).join("claude-projects");
     let target_name = OsString::from(transcript_slug(&format!("{}/tree", box_root(name))));
@@ -152,7 +152,7 @@ pub fn realign_transcript(name: &str) -> Result<usize, String> {
             let mut to = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(0o600)
+                .mode(meta.permissions().mode() & 0o777)
                 .open(&tmp)?;
             std::io::copy(&mut from, &mut to)?;
             to.set_permissions(meta.permissions())?;
