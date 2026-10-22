@@ -205,6 +205,7 @@ gates() {
     "source-check|yes|python3 tools/source-check.py" \
     "env-lock-check|yes|python3 tools/env-lock-check.py" \
     "fleet-pin-check|yes|python3 tools/fleet-pin-check.py" \
+    "box-script-check|yes|python3 tools/box-script-check.py" \
     "prose-check|yes|python3 tools/prose-check.py" \
     "link-check|yes|python3 tools/link-check.py" \
     "line-cite-check|yes|python3 tools/line-cite-check.py" \

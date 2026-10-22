@@ -249,8 +249,8 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 48
-tools/gates.sh --list | wc -l                        # → 22
+grep -c '^      - run:' .github/workflows/ci.yml     # → 49
+tools/gates.sh --list | wc -l                        # → 23
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -264,6 +264,7 @@ tools/gates.sh --list | wc -l                        # → 22
 | `source-check` | the Source law of §2.3 | `docs/sources.toml` |
 | `env-lock-check` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `fleet-pin-check` | a test that pins `$SKEIN_HOME` or `$SKEIN_FLEET_ROOT` says something about the other | `docs/fleet-pins.toml` |
+| `box-script-check` | a test runs a script from `src/store/` or `src/probe/` only through `box_shell`, which keeps it off the live store, the owner's inbox and their seen-file | a `box-script-check: not a box script` comment, with its reason |
 | `prose-check` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
 | `link-check` | every markdown link, and every backticked repo path, names a file git tracks; every record in `docs/decisions/` is in its README's index | `docs/links.toml` |
 | `line-cite-check` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
