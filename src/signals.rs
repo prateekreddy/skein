@@ -14,15 +14,21 @@ use crate::util::valid_name;
 use crate::util::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::Path;
 
+/// A signal file out of the shared store, which every box of the repo can write. Read through
+/// [`crate::boxfile`], because these are read on every board poll and a FIFO or a link to a device
+/// at one of these paths parked or exhausted the reader (SKEIN-1257).
+fn read_signal(path: &Path) -> std::io::Result<String> {
+    crate::boxfile::read_text(path, crate::boxfile::SIGNAL_CAP)
+}
+
 pub(crate) fn probe_is_stale(store: &Path, name: &str) -> bool {
-    let current = fs::read_to_string(store.join("skein/probe-revision"))
+    let current = read_signal(&store.join("skein/probe-revision"))
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let booted = fs::read_to_string(store.join("skein/boot").join(format!("{name}.json")))
+    let booted = read_signal(&store.join("skein/boot").join(format!("{name}.json")))
         .ok()
         .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
         .and_then(|value| value.get("probe_revision")?.as_str().map(str::to_string))
@@ -84,7 +90,7 @@ pub fn session_signal(name: &str) -> Option<SessionSignal> {
     let path = store_for_box(name)?
         .join("sessions")
         .join(format!("{name}.json"));
-    let txt = fs::read_to_string(path).ok()?;
+    let txt = read_signal(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     if !signal_is_ours(&v, name) {
         return None;
@@ -100,7 +106,7 @@ pub fn current_task(name: &str) -> Option<String> {
         return None;
     }
     if let Some(p) = store_for_box(name).map(|d| d.join("tasks").join(format!("{name}.json"))) {
-        if let Ok(txt) = fs::read_to_string(p) {
+        if let Ok(txt) = read_signal(&p) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
                 // Another box's task is not this box's live signal, so fall through to the journal
                 // rather than show it. The row would otherwise carry a plausible sentence about
@@ -181,7 +187,7 @@ pub(crate) fn status_edge(name: &str) -> Option<(String, i64)> {
     let p = store_for_box(name)?
         .join("status")
         .join(format!("{name}.json"));
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&read_signal(&p).ok()?).ok()?;
     // Before the status is read at all, because attribution is prior to every other question about
     // it: another box's "working" is not a stale claim about this box, it is not a claim about this
     // box, and fusing it with this box's screen would produce a turn state neither of them is in.
@@ -232,7 +238,7 @@ pub(crate) fn status_edge(name: &str) -> Option<(String, i64)> {
 /// checked, and the reason is in [`signal_is_ours`].
 fn hook_signal_misfiled(store: &Path, name: &str) -> bool {
     ["status", "sessions", "tasks"].iter().any(|kind| {
-        fs::read_to_string(store.join(kind).join(format!("{name}.json")))
+        read_signal(&store.join(kind).join(format!("{name}.json")))
             .ok()
             .and_then(|txt| serde_json::from_str::<serde_json::Value>(&txt).ok())
             .is_some_and(|v| !signal_is_ours(&v, name))
@@ -383,7 +389,7 @@ pub fn read_pane_raw(name: &str) -> Option<PaneObs> {
     let p = store_for_box(name)?
         .join("status")
         .join(format!("{name}.pane.json"));
-    serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
+    serde_json::from_str(&read_signal(&p).ok()?).ok()
 }
 
 /// True when the sample is recent enough to act on. Clock skew between host and guest would otherwise
@@ -990,7 +996,7 @@ pub fn current_status_detail(name: &str) -> Option<String> {
     let p = store_for_box(name)?
         .join("status")
         .join(format!("{name}.json"));
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&read_signal(&p).ok()?).ok()?;
     // The same file `status_edge` reads, so it must refuse it for the same reason and at the same
     // moment. A detail that survives a status that was rejected is how a row comes to say "API
     // error: rate limit" about a box that never hit one.
@@ -2506,4 +2512,30 @@ mod tests {
         "────────────────────────────────────────────────────────────",
         "  ⏸ manual mode on · ? for shortcuts · ← for agents",
     ];
+
+    // Every board poll reads a box's hook signals out of the store, which the boxes write. Fails
+    // if `read_signal` opens the path plainly again: the FIFO open waits for a writer, and
+    // `within` fails after five seconds.
+    #[test]
+    fn a_fifo_where_a_hook_signal_is_read_is_no_signal_rather_than_a_hang() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &dir)
+            .set("SKEIN_FLEET_ROOT", dir.join("fleet"))
+            .set("SKEIN_REGISTRY", dir.join("sandboxes.json"))
+            .unset("SKEIN_SHARED");
+        fs::write(
+            dir.join("sandboxes.json"),
+            r#"{"fifo-box":{"branch":"b","dir":"/nope","lastSeen":"","status":""}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        let fifo = dir.join("sessions").join("fifo-box.json");
+        crate::boxfile::plant_fifo(&fifo);
+        let signal = crate::boxfile::within(&fifo, "the session signal", || {
+            session_signal("fifo-box").is_some()
+        });
+        assert!(!signal);
+    }
 }

@@ -46,9 +46,6 @@ vars = ["SKEIN_HOME"]
 [leaks."src/diff::a_boxs_changed_files_are_read_from_the_patch_it_reported"]
 vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
 
-[leaks."src/diff::git_range_handles_repo_and_nonrepo"]
-vars = ["SKEIN_HOME"]
-
 [leaks."src/digest::read_journal_prefers_store_over_host_dir"]
 vars = ["SKEIN_HOME", "SKEIN_REGISTRY"]
 
