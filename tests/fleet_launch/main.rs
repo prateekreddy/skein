@@ -103,6 +103,7 @@ mod lifecycle;
 mod onboarding;
 mod start;
 mod sudo;
+mod swapped;
 mod telemetry;
 mod trust;
 
