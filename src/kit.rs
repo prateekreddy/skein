@@ -726,15 +726,12 @@ mod tests {
             fs::write(p, body).unwrap();
         };
         let run = || {
-            Command::new("bash")
+            box_shell(&dir)
                 .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
                 .env("CLAUDE_PROJECT_DIR", &tree)
                 .env("HOME", &home)
                 .env("SKEIN_BOX", "demo-main")
                 .env("SKEIN_SOURCE", &empty_source)
-                // The bootstrap ends by reading the owner's inbox under `$SKEIN_STATE`; a test
-                // run inside a box inherits that box's real one.
-                .env_remove("SKEIN_STATE")
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap()
@@ -1014,7 +1011,9 @@ mod tests {
                 .to_string(),
             )
             .unwrap();
-            let mut kit = Command::new("bash");
+            // Through `box_shell`, because the kit runs the store's scripts in turn and must not
+            // find anything of the machine running the suite (SKEIN-1229).
+            let mut kit = box_shell(&self.dir);
             kit.arg(self.root.join(".skein/skein-startup.sh"))
                 .env("HOME", &self.home)
                 .env("XDG_CONFIG_HOME", self.home.join(".config"))
