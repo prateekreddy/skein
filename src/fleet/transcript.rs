@@ -348,4 +348,44 @@ mod tests {
         let refused = answer.expect_err("a linked destination is refused, and says so");
         assert!(refused.contains("symbolic link"), "{refused}");
     }
+
+    // A real destination slug with a link planted at a FILE name the copy will write: the link
+    // counts as no conversation, so the copy goes ahead. Fails if the copy opens the destination
+    // name and writes through it (create + truncate in place of the O_EXCL temp and the rename):
+    // the decoy outside is overwritten and the destination stays a link.
+    #[test]
+    fn a_link_at_a_destination_file_is_replaced_not_written_through() {
+        use std::{fs, os::unix::fs::symlink};
+        let _g = env_lock();
+        let home = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let decoy = home.join("decoy");
+        fs::write(&decoy, "skein-test-decoy").unwrap();
+
+        let projects = std::path::PathBuf::from(box_state("file-box")).join("claude-projects");
+        let old = projects.join("-Users-you-work-file");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("real.jsonl"), "{\"the\":\"conversation\"}").unwrap();
+        let dest = projects.join(transcript_slug(&format!("{}/tree", box_root("file-box"))));
+        fs::create_dir_all(&dest).unwrap();
+        symlink(&decoy, dest.join("real.jsonl")).unwrap();
+
+        assert_eq!(realign_transcript("file-box").unwrap(), 1);
+        assert_eq!(
+            fs::read_to_string(&decoy).unwrap(),
+            "skein-test-decoy",
+            "the copy was written through a link at the destination file"
+        );
+        let landed = fs::symlink_metadata(dest.join("real.jsonl")).unwrap();
+        assert!(
+            landed.file_type().is_file(),
+            "the destination is still a link"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("real.jsonl")).unwrap(),
+            "{\"the\":\"conversation\"}"
+        );
+    }
 }
