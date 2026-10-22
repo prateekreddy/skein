@@ -980,12 +980,13 @@ mod tests {
     #[test]
     fn statusline_renderer_matches_bars_projection_colours_and_optional_segments() {
         use std::io::Write as _;
+        let dir = tempdir();
 
         let render = |input: &str| {
             // Exercise the same shell-quoted embedded form used by the Codex browser adapter.
             // Direct-workspace boxes do not necessarily mount the shared store, so a file-backed
             // test would miss the failure this path is designed to prevent.
-            let mut child = Command::new("sh")
+            let mut child = box_shell(&dir)
                 .arg("-c")
                 .arg(format!("bash -c {}", sh_quote(STATUSLINE_SH)))
                 .env("SKEIN_STATUSLINE_NOW", "1000000")
@@ -1423,7 +1424,7 @@ mod tests {
         .unwrap();
         fs::write(dir.join("silent.sh"), "#!/bin/sh\nexit 0\n").unwrap();
 
-        let contextual = Command::new("bash")
+        let contextual = box_shell(&dir)
             .args([wrapper.to_str().unwrap(), "SessionStart", "emit.sh"])
             .stdin(Stdio::null())
             .output()
@@ -1436,7 +1437,7 @@ mod tests {
             "handoff context"
         );
 
-        let silent = Command::new("bash")
+        let silent = box_shell(&dir)
             .args([wrapper.to_str().unwrap(), "UserPromptSubmit", "silent.sh"])
             .stdin(Stdio::null())
             .output()
@@ -1598,7 +1599,7 @@ mod tests {
         // before it.
         let run = || {
             let _ = std::fs::remove_file(&trace);
-            let out = std::process::Command::new("bash")
+            let out = box_shell(root)
                 .arg("-c")
                 .arg(format!(
                     "set -uo pipefail\nexport HOME={home}\nexport PATH={bin}:$PATH\nstore={store}\n\
@@ -1965,7 +1966,7 @@ mod tests {
             crate::runtime::turn_state_plugin_dir_under(&fleet_root)
         );
         let run = || {
-            Command::new("bash")
+            box_shell(&home_tmp)
                 .arg(&installer)
                 .env("HOME", &home)
                 .status()
@@ -2022,7 +2023,7 @@ mod tests {
         let project_dir = checkout_linked_to(&store);
 
         let report = |box_name: &str, mode: &str| {
-            let out = Command::new("bash")
+            let out = box_shell(&store_tmp)
                 .arg(&script)
                 .arg(mode)
                 .env("CLAUDE_PROJECT_DIR", &project_dir)
@@ -2074,7 +2075,7 @@ mod tests {
         // is right to write nothing. The variable is the host's own
         // (`fleet::fleet_root`), read the same way and meaning the same thing on both sides.
         let elsewhere = tempdir();
-        let out = Command::new("bash")
+        let out = box_shell(&store_tmp)
             .arg(&script)
             .arg("waiting")
             .env("CLAUDE_PROJECT_DIR", &project_dir)
@@ -2155,7 +2156,7 @@ mod tests {
         let legacy_root = home.join("per-vm-sandbox");
         fs::create_dir_all(&legacy_root).unwrap();
         let run = |skein_box: Option<&str>, shared: bool| {
-            let mut c = Command::new("bash");
+            let mut c = box_shell(&home);
             c.arg(&script)
                 .arg("skein-agent")
                 .env("PATH", &path)
@@ -2436,7 +2437,7 @@ mod tests {
                    skein_box: Option<&str>,
                    vm: &str,
                    root: &Path| {
-            let mut c = Command::new("bash");
+            let mut c = box_shell(&home);
             c.arg(bin.join(script))
                 .args(args)
                 .env("CLAUDE_PROJECT_DIR", &project_dir)
@@ -2699,7 +2700,7 @@ mod tests {
         let project_dir = checkout_linked_to(&store);
         let run = || -> std::process::Output {
             use std::io::Write as _;
-            let mut child = Command::new("bash")
+            let mut child = box_shell(&home)
                 .arg(&script)
                 // See the mailbox round-trip test: the box wins over the VM, and leaving SKEIN_BOX
                 // to be inherited files this turn's tokens under whichever box ran the test.
@@ -2837,11 +2838,13 @@ mod tests {
                     .into_iter()
                     .find(|(e, c)| e == event && c.contains(fragment))
                     .unwrap_or_else(|| panic!("{path} has no {event} hook running {fragment}"));
-                let out = Command::new("bash")
+                let out = box_shell(&root)
                     .arg("-c")
                     .arg(&command)
                     .env("CLAUDE_PROJECT_DIR", &tree)
                     .env("CLAUDE_PLUGIN_ROOT", &dir)
+                    // The process pins it (`env.set` above); `box_shell` does not inherit it.
+                    .env("SKEIN_FLEET_ROOT", &fleet_root)
                     .env("SKEIN_BOX", "example")
                     .stdin(Stdio::null())
                     .output()
@@ -2869,7 +2872,7 @@ mod tests {
                 .into_iter()
                 .find(|(e, c)| e == event && c.contains(&format!("box-status.sh {mode}")))
                 .unwrap_or_else(|| panic!("Codex has no {event} hook for box-status.sh"));
-            let out = Command::new("bash")
+            let out = box_shell(&root)
                 .arg("-c")
                 .arg(&command)
                 .current_dir(&tree)

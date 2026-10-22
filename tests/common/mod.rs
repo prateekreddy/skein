@@ -20,6 +20,14 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+
+// The one way a test runs a script skein ships into a box — a file of its own under
+// `src/testutil/`, so this binary and the library's tests share one definition rather than two
+// copies (`tools/box-script-check.py`, SKEIN-1229).
+#[path = "../../src/testutil/box_script.rs"]
+mod box_script;
+#[allow(unused_imports)] // each binary uses its own part of it, like the rest of this file
+pub use box_script::{box_shell, moved, PointedWorktree};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
