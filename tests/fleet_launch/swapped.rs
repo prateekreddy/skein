@@ -102,6 +102,9 @@ impl Swap {
             .env("HOME", self.sandbox_home())
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("SKEIN_FLEET_ROOT", self.fleet())
+            // Its companion, pinned too, though nothing here reads it: an unpinned one is the
+            // real `~/.skein` for anything that ever does.
+            .env("SKEIN_HOME", self.dir.join("skein"))
             .env("SKEIN_RUNTIME_DIR", self.dir.join("run/user"))
             .env("SKEIN_GIT_SCOPE", "repo")
             .env("SKEIN_BOX_REPO", "skein-test/repo")
