@@ -690,6 +690,122 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// The store is writable by every box of the repo, so `shared-paths.txt` is one box's say over
+    /// where a file lands in another box's checkout (SKEIN-1256). Only an entry of an ordinary shape
+    /// is surfaced — relative, no `..`, no hidden or `.git` directory on the way — and only as a
+    /// regular file that really sits in `shared-rw/`. A link an earlier start made for an entry that
+    /// no longer passes is taken away again.
+    ///
+    /// Fails if `shared_path_shape_ok` accepts every entry (the hook and the dot-directory config
+    /// are linked), or if `file_is_inside` accepts every file (the directory and the link are).
+    #[test]
+    fn a_shared_path_is_surfaced_only_in_an_ordinary_shape_and_only_as_a_regular_file() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        let store = dir.join("store").join(".claude");
+        let tree = dir.join("tree");
+        let empty_source = dir.join("no-source"); // there is no checkout to seed from, as in-fleet
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(&empty_source).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let rw = store.join("shared-rw");
+        let put = |rel: &str, body: &str| {
+            let p = rw.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        let run = || {
+            Command::new("bash")
+                .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+                .env("CLAUDE_PROJECT_DIR", &tree)
+                .env("HOME", &home)
+                .env("SKEIN_BOX", "demo-main")
+                .env("SKEIN_SOURCE", &empty_source)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+
+        // First, an ordinary start, to learn the exact spelling this script links through.
+        put("CLAUDE.md", "# direction\n");
+        fs::write(store.join("shared-paths.txt"), "CLAUDE.md\n").unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let linked = fs::read_link(tree.join("CLAUDE.md")).expect("an ordinary file is surfaced");
+        let rw_spelled = linked.parent().unwrap().to_path_buf();
+
+        // What an older start would have left behind: a hook linked out of shared-rw/.
+        put(".git/hooks/pre-commit", "#!/bin/sh\n");
+        let hook = tree.join(".git/hooks/pre-commit");
+        symlink(rw_spelled.join(".git/hooks/pre-commit"), &hook).unwrap();
+        assert!(
+            fs::symlink_metadata(&hook).is_ok(),
+            "the planted link must exist before the run"
+        );
+
+        put(".cargo/config.toml", "[build]\n");
+        put("backend/.env", "SECRET=skein-test-shared\n");
+        fs::create_dir_all(rw.join("confdir")).unwrap();
+        fs::write(rw.join("confdir/inner"), "x").unwrap();
+        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
+        symlink(dir.join("outside.txt"), rw.join("linked.txt")).unwrap();
+        fs::write(store.join("escape"), "escape\n").unwrap();
+        fs::write(
+            store.join("shared-paths.txt"),
+            "CLAUDE.md\n.git/hooks/pre-commit\n.cargo/config.toml\n../escape\n/etc/hostname\n\
+             confdir\nlinked.txt\nbackend/.env\n",
+        )
+        .unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        for refused in [
+            ".git/hooks/pre-commit",
+            ".cargo/config.toml",
+            "confdir",
+            "linked.txt",
+        ] {
+            assert!(
+                fs::symlink_metadata(tree.join(refused)).is_err(),
+                "{refused} must not be surfaced into the checkout; stderr: {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!("not surfacing '{refused}'")),
+                "{refused} must be refused out loud: {stderr}"
+            );
+        }
+        assert!(
+            fs::symlink_metadata(dir.join("escape")).is_err(),
+            "an entry with '..' must not land outside the checkout"
+        );
+        assert!(
+            stderr.contains("not surfacing '../escape'")
+                && stderr.contains("not surfacing '/etc/hostname'"),
+            "{stderr}"
+        );
+        let exclude = fs::read_to_string(tree.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!exclude.contains("/.git/hooks"), "{exclude}");
+
+        // And the ordinary entries still arrive, through the store.
+        assert_eq!(
+            fs::read_to_string(tree.join("backend/.env")).unwrap(),
+            "SECRET=skein-test-shared\n"
+        );
+        assert_eq!(fs::read_link(tree.join("CLAUDE.md")).unwrap(), linked);
+        env::remove_var("SKEIN_HOME");
+    }
+
     /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather
     /// than a piece of it: skein's plugin and the kit installed under the fleet root's `.skein`
     /// (`probes::plugin_install_under`'s bytes, the way `fleet::install_launcher` writes them), a
@@ -828,6 +944,7 @@ mod tests {
     fn have_jq() -> bool {
         Command::new("jq").arg("--version").output().is_ok()
     }
+
 
     /// **A repo that tracks `.claude/settings.json` stays clean when a box starts in it, and skein's
     /// settings go into the box's own `settings.local.json`** (SKEIN-1048).
