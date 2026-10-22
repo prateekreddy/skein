@@ -358,7 +358,7 @@ mod tests {
         // nothing. The block still needs the handful of tools it runs, so they are linked in.
         let tools = root.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
-        for tool in ["readlink", "mkdir", "chmod", "cat"] {
+        for tool in ["readlink", "mkdir", "chmod", "cat", "mktemp", "mv", "rm"] {
             let from = ["/usr/bin", "/bin"]
                 .iter()
                 .map(|d| std::path::Path::new(d).join(tool))
