@@ -72,7 +72,7 @@ use common::{chromium_missing, chromium_why_not, skip};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, OnceLock};
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
@@ -220,7 +220,7 @@ fn run(suite: &str) -> Option<(bool, String)> {
     Some((out.status.success(), said))
 }
 
-/// How many suites are in flight at once.
+/// How many suites may be in flight at once — across BOTH tiers, not in each.
 ///
 /// Bounded, not "start all of them". A node suite is a node process; a browser suite is a chromium
 /// and a `skein-server` besides. SKEIN-119 is the reason for the bound — what made `review.mjs`
@@ -232,15 +232,83 @@ fn run(suite: &str) -> Option<(bool, String)> {
 /// `SKEIN_UI_LANES=1` puts it back to one at a time. That is how the "before" half of the
 /// measurement on [`run_all`] was taken, and it is the first thing to try when a suite fails only
 /// ever in a full run and never on its own.
-fn lanes(total: usize) -> usize {
-    let asked = std::env::var("SKEIN_UI_LANES")
+fn lanes() -> usize {
+    std::env::var("SKEIN_UI_LANES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
-    asked.min(total).max(1)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+        .max(1)
 }
 
-/// Every suite, run [`lanes`] at a time, with the ones that failed reported in list order.
+/// **One budget for the two tiers, because they run at the same time** (SKEIN-1270).
+///
+/// The node tier and the browser tier are separate `#[test]`s in one binary, and `cargo test` runs
+/// a binary's tests on as many threads as there are cores. So each tier used to size its own pool
+/// at [`lanes`], and the two pools ran side by side: on a four-core runner, a lane per core of node
+/// processes PLUS a lane per core of chromium-and-server, twice the bound SKEIN-119 set — and the
+/// coverage job ran the same thing instrumented. That is the shape of every load flake this suite
+/// has had (SKEIN-657, SKEIN-716, SKEIN-751, SKEIN-1028, SKEIN-1219, SKEIN-1223, SKEIN-1230): a
+/// timeout that is generous on its own and is not under double load.
+///
+/// So a lane is a permit taken from this one pool, and a tier's workers wait for one. Each tier
+/// still starts as many workers as [`lanes`] allows, so either can use every lane while the other
+/// is idle or finished; together they never hold more than the budget.
+///
+/// **What it costs, measured** on 2026-10-22 against `f54f252`, on an 11-core box with nothing
+/// else of this repository's running (each run under the lanes' shared lock), whole binary:
+///
+/// ```text
+///                     each tier its own pool    one pool for both
+/// default lanes             84.3s                    84.8s
+/// SKEIN_UI_LANES=4          91.9s                   116.7s
+/// ```
+///
+/// The four-lane row is the four-core runner's shape, and on this box it is a cost: a lane per core
+/// per tier was eight processes on eleven idle cores. On four cores the same eight were twice the
+/// machine, which is the load the bound exists to take away, so there the trade is time for the
+/// flakes. Starting `review.mjs` first was tried, and bought nothing (123.3s).
+struct Lanes {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// A lane held for one suite, given back when it is dropped — so a suite that panics returns its
+/// lane too, and the other tier does not wait for ever on a permit nobody holds.
+struct Lane<'a>(&'a Lanes);
+
+impl Lanes {
+    fn new(size: usize) -> Self {
+        Lanes {
+            free: Mutex::new(size.max(1)),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn take(&self) -> Lane<'_> {
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        Lane(self)
+    }
+}
+
+impl Drop for Lane<'_> {
+    fn drop(&mut self) {
+        *self.0.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// The pool both tiers draw from.
+fn shared_lanes() -> &'static Lanes {
+    static LANES: OnceLock<Lanes> = OnceLock::new();
+    LANES.get_or_init(|| Lanes::new(lanes()))
+}
+
+/// Every suite, run in lanes from [`shared_lanes`], with the ones that failed reported in list
+/// order.
 ///
 /// `None` when node itself could not be started.
 ///
@@ -289,13 +357,26 @@ fn lanes(total: usize) -> usize {
 /// here is a fact stated twice and the second copy is the one that rots
 /// ([`no_prose_in_this_file_counts_what_the_lists_already_carry`]).
 fn run_all(suites: &[&str]) -> Option<Vec<String>> {
+    run_all_in(shared_lanes(), lanes(), suites, &run)
+}
+
+/// [`run_all`] with the pool, its size and the runner handed in, so the lane budget can be tested
+/// with a runner that only counts — see
+/// [`two_tiers_at_once_never_hold_more_lanes_than_one_budget`].
+fn run_all_in<F>(lanes: &Lanes, size: usize, suites: &[&str], run: &F) -> Option<Vec<String>>
+where
+    F: Fn(&str) -> Option<(bool, String)> + Sync,
+{
     let next = AtomicUsize::new(0);
     let done: Mutex<Vec<Option<(bool, String)>>> = Mutex::new(vec![None; suites.len()]);
     std::thread::scope(|scope| {
-        for _ in 0..lanes(suites.len()) {
+        for _ in 0..size.min(suites.len()).max(1) {
             scope.spawn(|| loop {
                 let at = next.fetch_add(1, Ordering::Relaxed);
                 let Some(suite) = suites.get(at) else { return };
+                // Named, not `_`: a `let _ =` drops the lane on the spot and the suite would run
+                // holding nothing.
+                let _lane = lanes.take();
                 let got = run(suite);
                 // Poisoning is uninteresting: the vector is slots with one writer each, and a
                 // panicking lane has left no half-written invariant behind it.
@@ -314,6 +395,53 @@ fn run_all(suites: &[&str]) -> Option<Vec<String>> {
         }
     }
     Some(broken)
+}
+
+/// **Both tiers at once hold no more lanes than one budget** (SKEIN-1270).
+///
+/// Two lists run through [`run_all_in`] side by side, on one pool, the way the two tier tests run
+/// side by side on [`shared_lanes`], with a runner that only counts how many are in flight. Each
+/// list is longer than the pool and each starts a worker per lane, so every worker contends.
+///
+/// # What makes it fail
+///
+/// - the `_lane` binding in [`run_all_in`] removed, or written `let _ =`: each tier is bounded only
+///   by its own workers again, the old shape, and the peak is twice the pool.
+/// - a pool that never gives a lane back (no `Drop` for [`Lane`]): the run never finishes, which
+///   `cargo test` reports as a hang rather than a red, and the bound is checked by the first.
+/// - and the second assertion: a pool that lets only one through at a time would pass the first
+///   assertion by doing nothing in parallel, so the peak must REACH the pool.
+#[test]
+fn two_tiers_at_once_never_hold_more_lanes_than_one_budget() {
+    const POOL: usize = 3;
+    let lanes = Lanes::new(POOL);
+    let now = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let counting = |_: &str| {
+        let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(n, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        now.fetch_sub(1, Ordering::SeqCst);
+        Some((true, String::new()))
+    };
+    let node: Vec<String> = (0..POOL * 3).map(|i| format!("node-{i}")).collect();
+    let browser: Vec<String> = (0..POOL * 3).map(|i| format!("browser-{i}")).collect();
+    let node: Vec<&str> = node.iter().map(String::as_str).collect();
+    let browser: Vec<&str> = browser.iter().map(String::as_str).collect();
+    std::thread::scope(|scope| {
+        scope.spawn(|| run_all_in(&lanes, POOL, &node, &counting));
+        scope.spawn(|| run_all_in(&lanes, POOL, &browser, &counting));
+    });
+    let peak = peak.into_inner();
+    assert!(
+        peak <= POOL,
+        "two tiers at once had {peak} suites in flight on a pool of {POOL}: each is bounded on its \
+         own and not together, which is the double load SKEIN-1270 is about"
+    );
+    assert_eq!(
+        peak, POOL,
+        "the pool never filled, so the bound above held by running less in parallel than allowed"
+    );
 }
 
 /// The tail of a suite's output — the part that says what failed.
