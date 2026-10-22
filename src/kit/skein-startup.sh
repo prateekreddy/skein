@@ -347,20 +347,57 @@ done
 [ "$tools_ok" = "true" ] \
   || echo "[skein-kit] required box tools unavailable:$missing" >&2
 
-# A cross-runtime replacement carries an immutable snapshot in the mounted store. Restore it
-# before either provider starts: the bundle preserves unpushed commits, separate patches
-# preserve index vs worktree state, and the archive preserves untracked files. This runs once
-# in the NEW target clone only; the source box is never reset, stopped, or destroyed.
+# A cross-runtime replacement carries an immutable snapshot. Restore it before either provider
+# starts: the bundle preserves unpushed commits, separate patches preserve index vs worktree
+# state, and the archive preserves untracked files. This runs once in the NEW target clone only;
+# the source box is never reset, stopped, or destroyed.
+#
+# **Only from this box's own host-only state directory (SKEIN-1258).** The snapshot used to sit
+# in the repo's store, which every box of the repo can write — including the source box, which
+# keeps running through a takeover — so what got unpacked here was whatever was there by the
+# time this ran, not what skein had written. The host now writes it under `$SKEIN_STATE`, which is
+# bound read-only into this box and into no other, and the launch spec (in the store, so
+# writable too) can only name a run inside it. Each archive is listed before it is opened, and one
+# holding a member outside what it should carry is refused whole.
 handoff_dir=""
 if [ -r "$spec" ] && command -v jq >/dev/null 2>&1; then
   handoff_dir="$(jq -r '.handoff.dir // ""' "$spec" 2>/dev/null)"
 fi
 handoff_marker="$clone_root/.git/skein-handoff-restored"
-if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
-  case "$handoff_dir" in
-    skein/handoff-snapshots/*) snapshot="$store/$handoff_dir" ;;
-    *) echo "[skein-kit] refusing unsafe handoff path: $handoff_dir" >&2; exit 1 ;;
+# Every member of archive $1 is one this restore may write. `tree`: a relative path with no `..`
+# and nothing under a `.git` directory. `home`: only the agent-state paths `fleet::agent_state_tar`
+# names, as regular files or directories.
+archive_members_ok() {
+  tar -tzf "$1" >/dev/null 2>&1 || return 1
+  case "$2" in
+    tree)
+      tar -tzf "$1" 2>/dev/null | awk '
+        /^\// { bad = 1 }
+        { n = split($0, part, "/"); for (i = 1; i <= n; i++) if (part[i] == ".." || part[i] == ".git") bad = 1 }
+        END { exit bad }' ;;
+    home)
+      tar -tzf "$1" 2>/dev/null | awk '
+        { sub(/^\.\//, "") }
+        $0 == ".claude.json" || $0 == ".claude/history.jsonl" || $0 == ".codex/history.jsonl" { next }
+        $0 == ".claude/todos" || $0 == ".claude/todos/" { next }
+        /^\.claude\/todos\/[^\/]+$/ { next }
+        $0 == ".claude/" || $0 == ".codex/" || $0 == "" { next }
+        { bad = 1 }
+        END { exit bad }' || return 1
+      tar -tvzf "$1" 2>/dev/null | awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { bad = 1 } END { exit bad }' ;;
+    *) return 1 ;;
   esac
+}
+if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
+  handoff_run="$(printf '%s' "$handoff_dir" | sed -n 's#^handoff/\([A-Za-z0-9][A-Za-z0-9._-]*\)$#\1#p')"
+  [ "handoff/$handoff_run" = "$handoff_dir" ] || handoff_run=""
+  case "$handoff_run" in
+    "" | *..*) echo "[skein-kit] refusing a handoff path outside this box's own state: $handoff_dir" >&2; exit 1 ;;
+  esac
+  box_state="$(printenv SKEIN_STATE 2>/dev/null || true)"
+  [ -n "$box_state" ] && [ -d "$box_state" ] \
+    || { echo "[skein-kit] this box has a handoff to restore but no host-only state directory to restore it from (SKEIN_STATE)" >&2; exit 1; }
+  snapshot="$box_state/$handoff_dir"
   [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] handoff bundle missing" >&2; exit 1; }
   # Two bundle shapes reach here. A cross-runtime takeover bundles HEAD alone, because it is moving
   # one branch to a new box. A fleet resize bundles --all, because it is reconstructing a box that
@@ -406,6 +443,8 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
       || { echo "[skein-kit] could not restore unstaged changes" >&2; exit 1; }
   fi
   if [ -s "$snapshot/untracked.tgz" ]; then
+    archive_members_ok "$snapshot/untracked.tgz" tree \
+      || { echo "[skein-kit] refusing the untracked-files archive: it holds a path outside the checkout or under .git" >&2; exit 1; }
     tar -C "$clone_root" -xzf "$snapshot/untracked.tgz" \
       || { echo "[skein-kit] could not restore untracked files" >&2; exit 1; }
   fi
@@ -415,8 +454,12 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
   # the seeded HOME, so the credentials seeded from the sandbox stay as they are — the snapshot
   # deliberately carries no auth of its own (see fleet::agent_state_tar).
   if [ -s "$snapshot/agent-state.tgz" ]; then
-    tar -C "$HOME" -xzf "$snapshot/agent-state.tgz" \
-      || echo "[skein-kit] could not restore the previous conversation; the tree is intact" >&2
+    if archive_members_ok "$snapshot/agent-state.tgz" home; then
+      tar -C "$HOME" -xzf "$snapshot/agent-state.tgz" \
+        || echo "[skein-kit] could not restore the previous conversation; the tree is intact" >&2
+    else
+      echo "[skein-kit] not restoring the previous agent state: its archive holds more than the paths it may carry; the tree is intact" >&2
+    fi
   fi
   cp "$snapshot/manifest.json" "$handoff_marker" 2>/dev/null \
     || printf '%s\n' "$handoff_dir" > "$handoff_marker"

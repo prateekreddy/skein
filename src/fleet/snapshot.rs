@@ -11,8 +11,14 @@ use super::*;
 /// files each need their own artifact: a bundle preserves history a patch cannot, and `git diff`
 /// covers neither untracked files nor the index/worktree distinction.
 ///
-/// Returns the path *relative to the store*, which is the form the launch spec carries and the
-/// provisioning script validates — it refuses anything not under `skein/handoff-snapshots/`.
+/// Returns the path *relative to the store*.
+///
+/// **No production caller, and the kit no longer restores what this writes** (SKEIN-1258). A
+/// snapshot in the store is one every box of the repo can rewrite before it is unpacked, so the kit
+/// restores only from the box's own host-only state directory, where a takeover now writes its
+/// snapshot (`takeover::prepare_replacement`). Resize stopped calling this when it became a byte
+/// copy (`fleet::resize`); what is left is two test call sites, so it is to be deleted rather
+/// than moved (SKEIN-1289).
 pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String> {
     let relative = format!("skein/handoff-snapshots/{name}/{run}");
     let snapshot = format!("{store}/{relative}");

@@ -945,6 +945,235 @@ mod tests {
         Command::new("jq").arg("--version").output().is_ok()
     }
 
+    /// A takeover's snapshot, written the way `takeover::prepare_replacement` writes one: a bundle
+    /// of the clone's HEAD, its manifest, and the two archives built from `untracked` and
+    /// `agent_state` (relative path, contents). Built in `stage`, a directory of the test's own.
+    fn handoff_snapshot(
+        kit: &KitBox,
+        at: &Path,
+        untracked: &[(&str, &str)],
+        agent_state: &[(&str, &str)],
+    ) {
+        fs::create_dir_all(at).unwrap();
+        kit.git(&[
+            "bundle",
+            "create",
+            &at.join("repo.bundle").to_string_lossy(),
+            "HEAD",
+        ]);
+        let head = kit.git(&["rev-parse", "HEAD"]);
+        fs::write(
+            at.join("manifest.json"),
+            format!("{{\"head\":\"{}\"}}\n", head.trim()),
+        )
+        .unwrap();
+        for (archive, members) in [
+            ("untracked.tgz", untracked),
+            ("agent-state.tgz", agent_state),
+        ] {
+            if members.is_empty() {
+                continue;
+            }
+            let stage = at.join(format!("{archive}.stage"));
+            for (rel, body) in members {
+                let p = stage.join(rel);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, body).unwrap();
+            }
+            let names: Vec<&str> = members.iter().map(|(rel, _)| *rel).collect();
+            let ok = Command::new("tar")
+                .arg("-C")
+                .arg(&stage)
+                .arg("-czf")
+                .arg(at.join(archive))
+                .args(&names)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "could not build {archive}");
+            fs::remove_dir_all(&stage).unwrap();
+        }
+    }
+
+    impl KitBox {
+        /// The kit, as [`KitBox::start`] runs it, with the box's host-only state directory named
+        /// (or not) and the launch spec asking for a handoff from `dir`; the outcome is returned
+        /// rather than asserted, because refusing is what some of these runs are for.
+        fn start_handoff(&self, dir: &str, state: Option<&Path>) -> std::process::Output {
+            let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+            fs::write(
+                self.store.join("skein/launch/web-main.json"),
+                serde_json::json!({
+                    "agent": "claude",
+                    "branch": branch.trim(),
+                    "handoff": {"source": "web-old", "dir": dir},
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut kit = Command::new("bash");
+            kit.arg(self.root.join(".skein/skein-startup.sh"))
+                .env("HOME", &self.home)
+                .env("XDG_CONFIG_HOME", self.home.join(".config"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("SKEIN_HOME", self.dir.join("skein-home"))
+                .env("SKEIN_FLEET_ROOT", &self.root)
+                .env("SKEIN_PROVISION", "1")
+                .env("SKEIN_BOX", "web-main")
+                .env("SKEIN_STORE", &self.store)
+                .env("WORKSPACE_DIR", &self.tree)
+                .env("SKEIN_STARTUP_MARKERS", self.dir.join("markers"))
+                .env_remove("SKEIN_STATE")
+                .stdin(std::process::Stdio::null());
+            if let Some(state) = state {
+                kit.env("SKEIN_STATE", state);
+            }
+            kit.output().unwrap()
+        }
+    }
+
+    /// **A takeover's snapshot is restored only from the box's own host-only state directory**
+    /// (SKEIN-1258). The repo's store is writable by every box of the repo, so a snapshot there is
+    /// whatever a box made of it before the kit ran; `$SKEIN_STATE` is bound read-only into this box
+    /// and no other.
+    ///
+    /// What would make it fail: the kit accepting `skein/handoff-snapshots/…` in the store again
+    /// (the first run succeeds and restores the store's file); the kit restoring without
+    /// `$SKEIN_STATE` (the second run succeeds); the kit no longer restoring from the state
+    /// directory at all (the last run leaves `notes.txt` absent).
+    #[test]
+    fn a_handoff_is_restored_only_from_the_boxs_own_host_only_state_directory() {
+        if !have_jq() {
+            return skip(
+                "no jq here, and the kit reads the handoff out of the launch spec with jq",
+            );
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        env::set_var("SKEIN_HOME", &skein_home);
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+
+        // The old place: the repo's store. Complete and well-formed, and still refused.
+        handoff_snapshot(
+            &kit,
+            &kit.store.join("skein/handoff-snapshots/web-main/r1"),
+            &[("notes.txt", "from the store\n")],
+            &[],
+        );
+        let out = kit.start_handoff("skein/handoff-snapshots/web-main/r1", Some(&state));
+        assert!(
+            !out.status.success(),
+            "a snapshot in the store must be refused: {out:?}"
+        );
+        assert!(!kit.tree.join("notes.txt").exists());
+
+        // The right place, but the kit was not told where this box's state is.
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[("notes.txt", "from the host\n")],
+            &[],
+        );
+        let out = kit.start_handoff("handoff/r1", None);
+        assert!(!out.status.success(), "no SKEIN_STATE, no restore: {out:?}");
+        assert!(!kit.tree.join("notes.txt").exists());
+
+        // A spec that tries to climb out of the state directory.
+        let out = kit.start_handoff("handoff/../../web-main/handoff/r1", Some(&state));
+        assert!(!out.status.success(), "{out:?}");
+
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
+            "from the host\n"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// **An archive in a snapshot is listed before it is opened, and one carrying more than it may
+    /// is refused whole** (SKEIN-1258). The untracked-files archive may not reach under `.git`;
+    /// the agent-state archive may hold only the paths `fleet::agent_state_tar` names.
+    ///
+    /// What would make it fail: `archive_members_ok` returning success for everything (the hook
+    /// lands under `.git/hooks`, or `.bashrc` lands in `$HOME`).
+    #[test]
+    fn a_handoff_archive_carrying_more_than_it_may_is_refused_whole() {
+        if !have_jq() {
+            return skip(
+                "no jq here, and the kit reads the handoff out of the launch spec with jq",
+            );
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        env::set_var("SKEIN_HOME", &skein_home);
+
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[
+                ("notes.txt", "work\n"),
+                (".git/hooks/post-checkout", "#!/bin/sh\n"),
+            ],
+            &[],
+        );
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(
+            !out.status.success(),
+            "an archive reaching under .git must be refused: {out:?}"
+        );
+        assert!(!kit.tree.join(".git/hooks/post-checkout").exists());
+        assert!(
+            !kit.tree.join("notes.txt").exists(),
+            "refused whole, not member by member"
+        );
+
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[("notes.txt", "work\n")],
+            &[(".claude/todos/t.json", "[]\n"), (".bashrc", "echo hi\n")],
+        );
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(
+            out.status.success(),
+            "the tree is intact, so the start goes on: {out:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
+            "work\n"
+        );
+        assert!(
+            !kit.home.join(".bashrc").exists(),
+            "only the named agent state may be restored"
+        );
+        assert!(
+            !kit.home.join(".claude/todos/t.json").exists(),
+            "refused whole"
+        );
+
+        // And the archive it should be, restored.
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[("notes.txt", "work\n")],
+            &[(".claude/todos/t.json", "[]\n"), (".claude.json", "{}\n")],
+        );
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_to_string(kit.home.join(".claude/todos/t.json")).unwrap(),
+            "[]\n"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
 
     /// **A repo that tracks `.claude/settings.json` stays clean when a box starts in it, and skein's
     /// settings go into the box's own `settings.local.json`** (SKEIN-1048).

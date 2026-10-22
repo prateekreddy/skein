@@ -118,8 +118,9 @@ Managed by skein (don't edit):
     handoffs/      durable provider-neutral takeover briefs plus one-shot pending copies per target
                    runtime. Native provider transcripts remain separate; replacement boxes receive
                    a bounded context export while the original remains natively resumable.
-    skein/handoff-snapshots/ immutable replacement snapshots: Git bundle, staged/unstaged patches,
-                   untracked archive, shared memory/skills/hooks backup, transcript export, manifest.
+    skein/handoff-snapshots/ written only by `fleet::snapshot_box`, which nothing in production
+                   calls (SKEIN-1289), and never restored from: a takeover's snapshot goes into
+                   the replacement box's host-only state directory instead (SKEIN-1258).
     skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found,
                    how .claude was linked (linked | merged | no-store | failed), what that start
                    changed in .claude if anything (claude_note), whether shared-home
