@@ -693,13 +693,22 @@ await check("launching a box creates no fleet — not by skein, not through the 
     throw new Error(`starting a box asked the warden to create a fleet: ${JSON.stringify(asked)}`);
 });
 
+// **It waits on the start's own answer, not on twenty seconds** (SKEIN-1272). The start ends one of
+// two ways, and each says so: the box is listed, or `skein start` records why it failed in
+// `starts/<box>.err` (`fleet::start::remember_start_failure`), which is the only other way out. So
+// this polls for either and stops at the first — a failure is reported the moment it is recorded,
+// rather than waited out. The bound is SKEIN-657's 60 seconds, the one the provisioning check below
+// already uses, and it is there only so a start that answers neither way fails with this sentence
+// instead of hanging. The flat twenty it replaces failed three CI runs on a box that had started:
+// in run 39863157406 this check said "the first box never appeared" and the check after it, which
+// waits, found that same box provisioned.
 await check("and the box ends up on the board", async () => {
-  for (let i = 0; i < 20; i++) {
+  const starts = path.join(fx.root, "home", "starts", "my-project-main.err");
+  for (const deadline = Date.now() + 60_000; Date.now() < deadline && !fs.existsSync(starts); ) {
     const boxes = await (await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).json();
     if (boxes.some(b => b.name === "my-project-main")) return;
-    await settle(1000);
+    await settle(250);
   }
-  const starts = path.join(fx.root, "home", "starts", "my-project-main.err");
   const why = fs.existsSync(starts) ? fs.readFileSync(starts, "utf8") : "(nothing recorded)";
   // What the create terminal itself said. The whole reason this suite exists is that the CLI is not
   // where onboarding happens, so the terminal's own text is the evidence, not a re-run by hand.
