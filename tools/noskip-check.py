@@ -70,7 +70,28 @@ REFUSES TO RUN RATHER THAN PASS QUIETLY, in every derivation it makes:
     Deriving nothing, or a set with no refusals in it, would make every refusal a red again — so
     that refuses too, like every other derivation above.
 
-  python3 tools/noskip-check.py            derive, run, judge — what CI calls
+A RUN THAT JUDGED ITS SKIPS MUST NOT READ GREEN OVER ITS FAILURES (SKEIN-1273). Under the switch a
+skip is a panic, so the run's exit status cannot tell a skip from a broken test, and this gate used
+to look only at the skips. That was fine while the run it judged was its own and the `test` job ran
+the suite beside it. It is not fine now that CI judges the coverage job's run instead of paying for
+a third: a run whose failing tests nobody looked at is the coverage job's old `--ignore-run-fail`
+green over again. So every test that failed is read out of the log and sorted — a skip's panic
+says `SKIPPED at` on the line after `panicked at`, and anything else is a failure this gate
+reports and fails on. So does a failed count with no failure block to match it, and a test binary
+that died without reporting a result: neither can be shown to be a skip.
+
+WHERE THE RUN COMES FROM. With `$SKEIN_NOSKIP_FROM` unset, this runs the suite itself, as it always
+has — what a local `tools/gates.sh` does. With it set to a log, it judges that log instead, and runs
+nothing: that is how CI's `coverage` job hands over the run `tools/coverage-check.py rust
+--no-skip-log` made, so the suite runs once for both numbers. An environment variable rather than a
+flag because CI calls this as `tools/gates.sh run noskip-check`, which takes no arguments. The log
+must begin with the line that tool writes naming `SKEIN_TESTS_NO_SKIP=1`, or this refuses: a run
+made without the switch has no skip panics in it, and judged here it would read as a run in which
+nothing skipped.
+
+  python3 tools/noskip-check.py            derive, run, judge — what a local run calls
+  SKEIN_NOSKIP_FROM=<log> python3 tools/noskip-check.py
+                                           derive, judge that log — what CI calls
   python3 tools/noskip-check.py --scope    print the derivation and stop, running nothing
 """
 
@@ -568,6 +589,72 @@ def environmental_spans(root):
 REFUSED = re.compile(r"(?m)^SKIPPED at ([^\s:]+):(\d+): (.*)$")
 RESULT = re.compile(r"(?m)^test result:")
 
+# The variable that hands this gate a run instead of having it make one, and the text the first line
+# of such a log must carry. `tools/coverage-check.py` writes that line; this is the other half of
+# the same contract, and a log without it is refused rather than judged.
+FROM_ENV = "SKEIN_NOSKIP_FROM"
+NO_SKIP_MARK = "SKEIN_TESTS_NO_SKIP=1"
+
+# How libtest reports a failure: a `---- <name> stdout ----` block holding what the test printed
+# and its panic, then per binary `test result: FAILED. P passed; F failed; …`, and cargo's own
+# `error: test failed, to rerun pass …` for each binary that failed.
+FAILURE_BLOCK = re.compile(r"(?m)^---- (.+) stdout ----$")
+FAILED_RESULT = re.compile(r"(?m)^test result: FAILED\. \d+ passed; (\d+) failed;")
+FAILED_BINARY = re.compile(r"(?m)^error: test failed, to rerun pass")
+# The thread id in brackets is newer libtest's (`thread 'name' (2415581) panicked at …`), and older
+# releases print none, so it is optional rather than assumed either way.
+PANIC_LINE = re.compile(r"^thread '.*'(?: \(\d+\))? panicked at .*:$")
+# Cargo colours its own lines when it thinks a person is reading — on a GitHub runner its
+# `error: test failed` arrives as `\x1b[1m\x1b[91merror\x1b[0m: test failed` (run 39863157406) —
+# so the log is read with the colour taken out, or a line-anchored pattern misses it.
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def read_given_log(path):
+    """The log `$SKEIN_NOSKIP_FROM` names, refused unless it says it was made under the switch."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise Refusal(f"${FROM_ENV} names {path}, which cannot be read: {exc}") from exc
+    first = text.split("\n", 1)[0]
+    if NO_SKIP_MARK not in first:
+        raise Refusal(
+            f"${FROM_ENV} names {path}, whose first line does not say the run was made under "
+            f"`{NO_SKIP_MARK}` (it says {first[:200]!r}). Without the switch a skip returns quietly "
+            f"instead of panicking, so judging this log would report nothing skipped whatever did."
+        )
+    return text
+
+
+def failed_tests(log):
+    """`(not_skips, unmatched, died)` — what in the run failed for a reason that is not a skip.
+
+    `not_skips` names each test whose failure block holds no skip panic; `unmatched` is how many
+    failures the `test result:` lines count beyond the blocks there are to read; `died` is how many
+    binaries cargo says failed beyond those that reported a result at all.
+    """
+    heads = list(FAILURE_BLOCK.finditer(log))
+    not_skips = []
+    for i, head in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(log)
+        body = log[head.end():end]
+        # A binary's last block runs on into its summary, which is not the test's output.
+        summary = re.search(r"(?m)^(failures:|test result:)", body)
+        if summary:
+            body = body[: summary.start()]
+        lines = body.splitlines()
+        skipped = any(
+            PANIC_LINE.match(line) and n + 1 < len(lines) and lines[n + 1].startswith("SKIPPED at ")
+            for n, line in enumerate(lines)
+        )
+        if not skipped:
+            not_skips.append(head.group(1))
+    results = FAILED_RESULT.findall(log)
+    unmatched = max(0, sum(int(n) for n in results) - len(heads))
+    died = max(0, len(FAILED_BINARY.findall(log)) - len(results))
+    return not_skips, unmatched, died
+
 
 def attribute(root, path, lib):
     """Which test binary does a guard at `path` belong to? `None` when that cannot be answered.
@@ -739,13 +826,19 @@ def main(argv):
             print(f"  {path}:{first}-{last}  {why}")
         return 0
 
-    status, log = run_suite(root)
-    logpath = os.path.join(os.environ.get("RUNNER_TEMP", "/var/tmp"), "noskip.log")
-    try:
-        with open(logpath, "w", encoding="utf-8") as fh:
-            fh.write(log)
-    except OSError:
-        logpath = "(not written)"
+    given = os.environ.get(FROM_ENV)
+    if given:
+        # Judged, not run: `status` is no exit code of `tools/gates.sh`, so no refusal can match it.
+        status, log, logpath = None, read_given_log(given), given
+    else:
+        status, log = run_suite(root)
+        logpath = os.path.join(os.environ.get("RUNNER_TEMP", "/var/tmp"), "noskip.log")
+        try:
+            with open(logpath, "w", encoding="utf-8") as fh:
+                fh.write(log)
+        except OSError:
+            logpath = "(not written)"
+    log = ANSI.sub("", log)
 
     binaries = len(RESULT.findall(log))
     out = ["### What this run skipped, and what that costs"]
@@ -777,7 +870,8 @@ def main(argv):
                 "and that is what to act on."
             )
         else:
-            out.append(f"**Unknown — the run reported on no test binary at all** (exit {status}).")
+            said = f"exit {status}" if status is not None else f"read from {logpath}"
+            out.append(f"**Unknown — the run reported on no test binary at all** ({said}).")
             out.append(
                 "This is NOT an all-clear. The switch asked for a run with no skips and got no run."
             )
@@ -838,6 +932,16 @@ def main(argv):
     if not refusals:
         out.append("")
         out.append(f"Nothing: every guard found what it needed, across {binaries} test {plural}.")
+    not_skips, unmatched, died = failed_tests(log)
+    if not_skips or unmatched or died:
+        out.append("")
+        out.append("**The run also FAILED, and not by skipping** — this gate fails on it (SKEIN-1273):")
+        for name in not_skips:
+            out.append(f"- `{name}`")
+        if unmatched:
+            out.append(f"- {unmatched} more failure(s) counted by `test result:` with no output to read")
+        if died:
+            out.append(f"- {died} test binar{'y' if died == 1 else 'ies'} that failed without reporting a result")
     out.append("")
     out.append(f"Full log: `{logpath}`")
     emit(out)
@@ -847,7 +951,11 @@ def main(argv):
     for path, line, why, binary in findings:
         print(f"error: {path}:{line} skipped in `{binary}`, which this machine can fully host: {why}",
               file=sys.stderr)
-    return 1 if findings else 0
+    for name in not_skips:
+        print(f"error: {name} failed, and not by skipping", file=sys.stderr)
+    if unmatched or died:
+        print(f"error: {unmatched + died} failure(s) in the run that no output names", file=sys.stderr)
+    return 1 if findings or not_skips or unmatched or died else 0
 
 
 if __name__ == "__main__":
