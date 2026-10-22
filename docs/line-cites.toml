@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:506"]
+["CONTRIBUTING.md:507"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:520"]
+["CONTRIBUTING.md:521"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:551"]
+["CONTRIBUTING.md:552"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -1877,20 +1877,20 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"{source} already uses {target_runtime}; use the same-provider tmux restart path\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/testutil.rs:8"]
+["src/testutil.rs:11"]
 line = "use crate::place::{record_place, PlaceRecord};"
 cited_by = ["docs/modules.toml"]
 
-["src/testutil.rs:9"]
+["src/testutil.rs:12"]
 line = "use crate::registry::Sandbox;"
 cited_by = ["docs/modules.toml"]
 
-["src/testutil.rs:101"]
+["src/testutil.rs:104"]
 line = "fn drop(&mut self) {"
 window = "impl Drop for EnvGuard {\u000bfn drop(&mut self) {\u000blet now: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> ="
 cited_by = ["docs/env-lock.toml"]
 
-["src/testutil.rs:209"]
+["src/testutil.rs:212"]
 line = "fn drop(&mut self) {"
 window = "impl Drop for EnvPins {\u000bfn drop(&mut self) {\u000b// Reverse, so the FIRST pin of a name is the last one undone and therefore the one that"
 cited_by = ["docs/env-lock.toml"]
@@ -2324,15 +2324,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:962"]
+["tests/common/mod.rs:970"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1000"]
+["tests/common/mod.rs:1008"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1014"]
+["tests/common/mod.rs:1022"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 
@@ -2344,11 +2344,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// `89cf36b`, so the bug fails this on a clean checkout and a dirty one alike."
 cited_by = ["docs/citations.toml"]
 
-["tools/gates.sh:715"]
+["tools/gates.sh:716"]
 line = "--verify)"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
 
-["tools/gates.sh:1229"]
+["tools/gates.sh:1230"]
 line = "exit 3"
 window = "echo \" Run it again on a tree nobody else is writing to.\"\u000bexit 3\u000bfi"
 cited_by = ["docs/decisions/commit-before-the-gates.md"]
