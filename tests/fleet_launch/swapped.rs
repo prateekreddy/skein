@@ -180,9 +180,16 @@ fn a_box_whose_own_directory_was_swapped_for_a_link_is_refused() {
             "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
         );
     }
-    for (i, rel) in ["home", "tmp", "home/.local", "home/.local/state", "bin", "home/.claude"]
-        .into_iter()
-        .enumerate()
+    for (i, rel) in [
+        "home",
+        "tmp",
+        "home/.local",
+        "home/.local/state",
+        "bin",
+        "home/.claude",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let name = format!("swapdir-{i}");
         let sub = Swap::new(scratch_named(&name), &name);
@@ -259,14 +266,20 @@ fn a_link_where_the_launcher_writes_is_replaced_and_what_it_led_to_is_untouched(
         ("home/.gitconfig", None),
         ("tree/.git/skein-store", None),
     ];
-    for (tool, shim) in [("sudo", "bin/sudo"), ("git", "bin/git"), ("gh", "bin/gh"), ("docker", "bin/docker")] {
+    for (tool, shim) in [
+        ("sudo", "bin/sudo"),
+        ("git", "bin/git"),
+        ("gh", "bin/gh"),
+        ("docker", "bin/docker"),
+    ] {
         if have(tool) {
             files.push((shim, Some(0o755)));
         }
     }
+    // `sudo` has no `.real`: its shim is bound over the real one and never execs it.
     let reals: Vec<String> = files
         .iter()
-        .filter(|(_, m)| m.is_some())
+        .filter(|(p, m)| m.is_some() && *p != "bin/sudo")
         .map(|(p, _)| format!("{p}.real"))
         .collect();
     for real in &reals {
@@ -312,8 +325,15 @@ fn a_link_where_the_launcher_writes_is_replaced_and_what_it_led_to_is_untouched(
     }
     for (rel, mode) in &files {
         if let Some(want) = mode {
-            let got = fs::metadata(swap.root().join(rel)).unwrap().permissions().mode() & 0o777;
-            assert_eq!(got, *want, "the shim at {rel} is mode {got:o}, not {want:o}");
+            let got = fs::metadata(swap.root().join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                got, *want,
+                "the shim at {rel} is mode {got:o}, not {want:o}"
+            );
         }
     }
     assert_eq!(
@@ -323,7 +343,10 @@ fn a_link_where_the_launcher_writes_is_replaced_and_what_it_led_to_is_untouched(
     );
     let start_id = swap.root().join("tmp/skein-start-id");
     assert!(
-        fs::symlink_metadata(&start_id).unwrap().file_type().is_file()
+        fs::symlink_metadata(&start_id)
+            .unwrap()
+            .file_type()
+            .is_file()
             && !fs::read_to_string(&start_id).unwrap().trim().is_empty(),
         "the start id is not a file of the box's own after the start"
     );
@@ -374,7 +397,10 @@ fn a_dotfile_link_inside_the_home_is_followed_and_a_foreign_git_directory_is_not
 
     let link = swap.root().join("home/.gitconfig");
     assert!(
-        fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "a gitconfig linked to a file inside the box's own home was replaced rather than followed"
     );
     let edited = fs::read_to_string(dotfiles.join("gitconfig")).unwrap();
