@@ -1,14 +1,14 @@
 //! What a box has been doing, assembled from sources that cost nothing.
 //!
 //! The inbox detail view answers "what happened here" without a model call: the registry state, the
-//! host-side diff and commits, the agent's own journal, its last reported message, and why the turn
-//! ended. Every one of those is a file somebody already wrote, so the answer is free and stays
+//! diff and commits the box reported, the agent's own journal, its last reported message, and why
+//! the turn ended. Every one of those is a file somebody already wrote, so the answer is free and stays
 //! accurate — a summary a model produced would be neither.
 //!
 //! Each ingredient is also readable on its own, because they have separate callers: `read_journal`
 //! feeds turn state, `recent_commits` feeds the board, and `session_digest` is the assembly.
 
-use crate::diff::{git_range, read_diffstat_file, DiffStat};
+use crate::diff::{in_box_commits, read_diffstat_file, DiffStat};
 use crate::registry::Sandbox;
 use crate::registry::{registry_entry_for_box, store_for_box};
 use crate::repos::agent_for_box;
@@ -16,17 +16,15 @@ use crate::repos::branch_of;
 use crate::sbx::box_liveness;
 use crate::sbx::lookup_dir;
 use crate::signals::{classify_message, session_signal, turn_state, Pause};
+use crate::util::keep_tail;
 use crate::util::valid_name;
-use crate::util::{bounded_output, keep_tail};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
 
 /// Recent commit subjects on the box's branch (newest first) — the agent's own changelog,
-/// a free, accurate "what was done" with no model call. For direct-mode boxes, computed host-side.
-/// For clone-mode boxes, reads the file box-diff.sh wrote. Empty when neither is available.
+/// a free, accurate "what was done" with no model call. Reads the file box-diff.sh wrote, else asks
+/// the box while it runs. Empty when neither is available.
 pub fn recent_commits(name: &str) -> Vec<String> {
     // Prefer box-diff.sh's commit file: the box is on the feature branch and knows its own
     // commits. Host-side git would run against whatever `dir` resolves to on the host — for
@@ -46,26 +44,11 @@ pub fn recent_commits(name: &str) -> Vec<String> {
             }
         }
     }
-    // Fall back to host-side git — useful for direct-mode boxes where the host dir IS the
-    // box's working tree (box-diff.sh may not have run yet on a fresh box).
-    if let Some(dir) = lookup_dir(name) {
-        if let Some(range) = git_range(name, &dir) {
-            let r = format!("{range}..HEAD");
-            let mut command = Command::new("git");
-            command.args(["-C", &dir, "log", "--format=%s", "-n", "20", &r]);
-            if let Ok(out) = bounded_output(&mut command, "git log", Duration::from_secs(15)) {
-                if out.status.success() {
-                    let v: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                        .lines()
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !v.is_empty() {
-                        return v;
-                    }
-                }
-            }
-        }
+    // Else ask the box itself, which is on the branch (box-diff.sh may not have run yet on a fresh
+    // box). Never `git` against its tree from here: that runs the box's own git config with the
+    // server's reach — `diff::in_box_lines` says how.
+    if let Some(commits) = in_box_commits(name) {
+        return commits;
     }
     vec![]
 }
@@ -99,7 +82,7 @@ pub fn read_journal(name: &str) -> Option<String> {
 }
 
 /// A glanceable "what happened here" for one box — the inbox detail view (steps 1–5), assembled
-/// entirely from free sources: the registry state, the host-side diff/commits, the agent's own
+/// entirely from free sources: the registry state, the box's reported diff/commits, the agent's own
 /// journal, and its last reported message. No model tokens spent.
 #[derive(Debug, Default, Serialize)]
 pub struct SessionDigest {
@@ -128,8 +111,8 @@ pub struct SessionDigest {
     pub pause: Pause,
 }
 
-/// Assemble the free session digest for a box. Pure reads + a couple of cached `git` calls;
-/// never a model call. Returns None for an unknown box name.
+/// Assemble the free session digest for a box. Pure reads, plus one question to the box itself when
+/// it has not reported its commits; never a model call. Returns None for an unknown box name.
 pub fn session_digest(name: &str) -> Option<SessionDigest> {
     if !valid_name(name) {
         return None;

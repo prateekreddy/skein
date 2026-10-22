@@ -123,3 +123,111 @@ pub(crate) fn prepare_handoff_for(
     write_atomic(&pending, &dir, brief.as_bytes())?;
     Ok(pending)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::*;
+    use std::process::Command;
+
+    // A box's tree and its `.git` are the box's to write, and skein-server runs as the same user as
+    // every box, so any git run against that tree outside the box runs the box's own config:
+    // `core.fsmonitor` on `git diff`, a `filter.<x>.clean` named from `.gitattributes` on anything
+    // that refreshes the index. The takeover brief used to run both (`git diff --name-only` for its
+    // file list, `git log` for its commits). Fails if either is run against the tree from here again:
+    // the planted command writes its marker and the `!exists()` assertions below name which one ran.
+    #[test]
+    fn a_takeover_brief_runs_nothing_the_box_planted_in_its_own_git_config() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", home.join("fleet"))
+            .set("SKEIN_LS_CMD", "false")
+            .set("SKEIN_REGISTRY", home.join("sandboxes.json"))
+            .unset("SKEIN_SHARED");
+        *crate::repos::REPOS_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+
+        let tree = home.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&tree)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        fs::write(tree.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        git(&["checkout", "-q", "-b", "feat"]);
+        fs::write(tree.join("b.txt"), "two\n").unwrap();
+        git(&["add", "b.txt"]);
+        git(&["commit", "-q", "-m", "on the branch"]);
+
+        // The plants, written after the commits so setting them up runs neither.
+        let fsmonitor_ran = home.join("fsmonitor-ran");
+        let filter_ran = home.join("filter-ran");
+        let plant = |marker: &Path, script: &str| {
+            let path = home.join(script);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let fsmonitor = plant(&fsmonitor_ran, "fsmonitor.sh");
+        let filter = plant(&filter_ran, "filter.sh");
+        git(&["config", "core.fsmonitor", fsmonitor.to_str().unwrap()]);
+        git(&["config", "filter.plant.clean", filter.to_str().unwrap()]);
+        fs::write(tree.join(".gitattributes"), "* filter=plant\n").unwrap();
+        // Uncommitted work, so a diff against the tree has a stat-dirty file to refresh.
+        fs::write(tree.join("a.txt"), "one, edited\n").unwrap();
+
+        fs::write(
+            home.join("sandboxes.json"),
+            format!(
+                r#"{{"web-box":{{"branch":"feat","dir":"{}","lastSeen":"","status":""}}}}"#,
+                tree.display()
+            ),
+        )
+        .unwrap();
+        // What the box reported at its last turn end: the brief's file list comes from here.
+        fs::create_dir_all(home.join("diffs")).unwrap();
+        fs::write(
+            home.join("diffs").join("web-box.patch"),
+            "diff --git a/src/reported.rs b/src/reported.rs\n+++ b/src/reported.rs\n+x\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join("diffs").join("web-box.commits"),
+            "the commit the box reported\n",
+        )
+        .unwrap();
+
+        let pending = prepare_handoff("web-box", Some("claude"), "codex").expect("a brief");
+        let brief = fs::read_to_string(&pending).unwrap();
+
+        assert!(
+            !fsmonitor_ran.exists(),
+            "the brief ran the box's core.fsmonitor outside the box"
+        );
+        assert!(
+            !filter_ran.exists(),
+            "the brief ran the box's clean filter outside the box"
+        );
+        // The visible result is kept: the file list and commits are the ones the box reported.
+        assert!(brief.contains("- `src/reported.rs`"), "{brief}");
+        assert!(brief.contains("the commit the box reported"), "{brief}");
+    }
+}
