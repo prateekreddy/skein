@@ -19,7 +19,6 @@ use crate::signals::{classify_message, session_signal, turn_state, Pause};
 use crate::util::keep_tail;
 use crate::util::valid_name;
 use serde::Serialize;
-use std::fs;
 use std::path::Path;
 
 /// Recent commit subjects on the box's branch (newest first) — the agent's own changelog,
@@ -186,7 +185,7 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
 mod tests {
     use super::*;
     use crate::testutil::*;
-    use std::env;
+    use std::{env, fs};
 
     #[test]
     fn read_journal_prefers_store_over_host_dir() {
