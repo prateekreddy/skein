@@ -562,7 +562,7 @@ mod tests {
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
 
         let run = |vmid: &str, args: &[&str]| -> std::process::Output {
-            Command::new("bash")
+            box_shell(&home)
                 .arg(&mailbox_sh)
                 .args(args)
                 // The box, and a *different* sandbox — which is the precedence the script now has
@@ -817,7 +817,7 @@ mod tests {
         .unwrap();
 
         let run = |vmid: &str, args: &[&str]| -> std::process::Output {
-            Command::new("bash")
+            box_shell(&home)
                 .arg(&mailbox_sh)
                 .args(args)
                 .env("SKEIN_BOX", vmid)
@@ -903,7 +903,7 @@ mod tests {
 
         // SKEIN_BOX unset: the legacy chain falls to SANDBOX_VM_ID, which is this box's own name.
         let run = |vmid: &str, args: &[&str]| -> std::process::Output {
-            Command::new("bash")
+            box_shell(&home)
                 .arg(&mailbox_sh)
                 .args(args)
                 .env_remove("SKEIN_BOX")
@@ -952,6 +952,58 @@ mod tests {
             String::from_utf8_lossy(&run("vmB", &["list"]).stdout)
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **The three tests above that run `mailbox.sh`, run from a lane's worktree, reach nothing
+    /// behind the worktree's pointer** (SKEIN-1229).
+    ///
+    /// They are the tests that delivered "hello" and "hello from A" from `boxA` and `vmA` to the
+    /// owner's box, twice: a lane's worktree shares its clone's git directory, that directory
+    /// carries a `skein-store` pointer to the live store, and `box-self.sh` reads it before anything
+    /// in the environment, so pinning `$SKEIN_HOME` did nothing. This rebuilds that checkout under a
+    /// temp directory, with a stand-in "live" store holding a note, a seen-file and an owner's
+    /// unread message, and re-runs the three from inside it with the box's `$HOME`,
+    /// `$SKEIN_STATE`, `$SKEIN_BOX` and `$CLAUDE_PROJECT_DIR` inherited.
+    ///
+    /// What would make it fail: any of the three starting `mailbox.sh` with `Command::new("bash")`
+    /// again, or `box_shell` no longer setting the working directory and `$CLAUDE_PROJECT_DIR` —
+    /// the fixture notes are then written into the stand-in's `mailbox/` — or no longer setting
+    /// `$HOME` and `$SKEIN_STATE`, when their `inbox` runs append the owner's message id to the
+    /// stand-in seen-file. The snapshot reports either.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_mailbox_tests_run_from_a_worktree_cannot_reach_the_store_it_points_at() {
+        let dir = tempdir();
+        let lane = PointedWorktree::new(&dir);
+        // The control: the pointer is live, so an untouched store below is the fix holding and not
+        // a pointer that never pointed anywhere.
+        let box_self =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/probe/box-self.sh");
+        assert_eq!(
+            lane.resolved_from_the_worktree(&box_self),
+            lane.store.to_string_lossy(),
+            "the fixture checkout's pointer does not resolve, so this test could not fail"
+        );
+
+        let before = lane.snapshot();
+        let ran = lane.rerun(&[
+            "mailbox::tests::mailbox_turn_boundary_delivery_round_trip",
+            "mailbox::tests::a_registry_key_named_after_the_sandbox_is_not_a_recipient",
+            "mailbox::tests::a_legacy_box_named_by_its_vm_is_still_a_recipient",
+        ]);
+        let moved = moved(&before, &lane.snapshot());
+        assert!(
+            moved.is_empty(),
+            "run from a worktree whose clone points at a store, the mailbox tests reached it:\n{}",
+            moved.join("\n")
+        );
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(
+            ran.status.success() && said.contains("test result: ok. 3 passed"),
+            "the re-run did not run the three tests it names, so the untouched store proves \
+             nothing:\n{said}\n{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
     }
 
     /// **The box registry is only ever read, so reading an unreadable one as empty loses nothing.**

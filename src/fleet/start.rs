@@ -2110,7 +2110,7 @@ mod tests {
         );
 
         let began = std::time::Instant::now();
-        let out = std::process::Command::new("bash")
+        let out = crate::testutil::box_shell(dir)
             .arg("-c")
             .arg(&script)
             .output()

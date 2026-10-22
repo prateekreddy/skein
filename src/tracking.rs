@@ -1527,13 +1527,17 @@ mod tests {
         boxhome: &Path,
         args: &[&str],
     ) -> (String, String) {
-        let out = Command::new("bash")
-            .arg(store.join("skein").join("bin").join("sync-refresh.sh"))
-            .args(args)
-            .env("HOME", boxhome)
-            .env("WORKSPACE_DIR", project)
-            .output()
-            .unwrap();
+        let out = box_shell(
+            boxhome
+                .parent()
+                .expect("a box home is under its test's directory"),
+        )
+        .arg(store.join("skein").join("bin").join("sync-refresh.sh"))
+        .args(args)
+        .env("HOME", boxhome)
+        .env("WORKSPACE_DIR", project)
+        .output()
+        .unwrap();
         assert!(out.status.success(), "refresh must never fail a box");
         (
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -1829,7 +1833,7 @@ mod tests {
         )
         .unwrap();
         let run = || {
-            Command::new("bash")
+            box_shell(&home)
                 .arg(store.join("skein").join("bin").join("sync-install.sh"))
                 .env("HOME", &boxhome)
                 .env("WORKSPACE_DIR", &project)
@@ -1965,7 +1969,7 @@ mod tests {
         let boxhome = home.join("boxhome");
         fs::create_dir_all(&boxhome).unwrap();
 
-        let out = Command::new("bash")
+        let out = box_shell(&home)
             .arg(store.join("skein").join("bin").join("sync-install.sh"))
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)
@@ -2088,7 +2092,7 @@ mod tests {
         fs::write(store.join("skein/sync/gateway"), "https://gw.test/mcp\n").unwrap();
         let boxhome = home.join("boxhome");
         fs::create_dir_all(&boxhome).unwrap();
-        let out = Command::new("bash")
+        let out = box_shell(&home)
             .arg(store.join("skein").join("bin").join("sync-install.sh"))
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)
@@ -2157,7 +2161,7 @@ mod tests {
         let slug = project.display().to_string().replace('/', "-");
         fs::write(state.join(format!("sync-{slug}.done")), "").unwrap();
 
-        let out = Command::new("bash")
+        let out = box_shell(&home)
             .arg(store.join("skein").join("bin").join("sync-install.sh"))
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)
@@ -2187,7 +2191,7 @@ mod tests {
 
         // Second start: the marker is believed, and `claude` is not asked again.
         fs::write(&log, "").unwrap();
-        let out = Command::new("bash")
+        let out = box_shell(&home)
             .arg(store.join("skein").join("bin").join("sync-install.sh"))
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)
@@ -2243,15 +2247,19 @@ mod tests {
     }
 
     fn plugin_box_start(store: &Path, project: &Path, bin: &Path, boxhome: &Path) {
-        let out = Command::new("bash")
-            .arg(store.join("skein").join("bin").join("sync-install.sh"))
-            .env("HOME", boxhome)
-            .env("WORKSPACE_DIR", project)
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("SYNC_GATEWAY_URL", "https://gw.test/")
-            .env_remove("SKEIN_SYNC_FORCE")
-            .output()
-            .unwrap();
+        let out = box_shell(
+            boxhome
+                .parent()
+                .expect("a box home is under its test's directory"),
+        )
+        .arg(store.join("skein").join("bin").join("sync-install.sh"))
+        .env("HOME", boxhome)
+        .env("WORKSPACE_DIR", project)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SYNC_GATEWAY_URL", "https://gw.test/")
+        .env_remove("SKEIN_SYNC_FORCE")
+        .output()
+        .unwrap();
         assert!(
             out.status.success(),
             "{}",
@@ -2357,7 +2365,7 @@ mod tests {
         // the whole story.
         let boxhome = home.join("boxhome");
         fs::create_dir_all(&boxhome).unwrap();
-        let out = Command::new("bash")
+        let out = box_shell(&home)
             .arg(store.join("skein").join("bin").join("sync-install.sh"))
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)
@@ -2397,7 +2405,7 @@ mod tests {
         let boxhome = home.join("boxhome");
         fs::create_dir_all(&boxhome).unwrap();
 
-        let out = Command::new("bash")
+        let out = box_shell(&home)
             .arg(store.join("skein").join("bin").join("sync-install.sh"))
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)

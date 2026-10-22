@@ -70,6 +70,10 @@ const GATED: &[(&str, &str)] = &[
         "the same, in the legacy world the script's identity chain branches on",
     ),
     (
+        "the_mailbox_tests_run_from_a_worktree_cannot_reach_the_store_it_points_at",
+        "re-runs the three above, from a worktree whose clone points at a stand-in store",
+    ),
+    (
         "box_token_usage_sums_new_assistant_entries_and_is_idempotent",
         "drives box-token-usage.sh in the userland it is installed into",
     ),
