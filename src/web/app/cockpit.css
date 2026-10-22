@@ -1299,6 +1299,12 @@
   .set-foot .hint { flex:1; color:var(--faint); font-size:11px; }
   .set-foot .kbtn { font-family:var(--ui); font-size:13px; height:auto; padding:8px 15px; }
   .set-foot.readonly .kbtn, .set-foot.readonly .primary { display:none; }   /* nothing to save here */
+  .set-leave { display:flex; align-items:center; gap:10px; padding:10px 22px; font-size:12.5px;
+               background:var(--inset); border-bottom:1px solid var(--line); color:var(--text); }
+  .set-leave[hidden] { display:none; }
+  .set-leave span { flex:1; }
+  .set-leave span::before { content:""; display:inline-block; width:6px; height:6px; margin-right:8px;
+                            border-radius:50%; background:var(--waiting); vertical-align:middle; }
   .set-dirty { display:none; align-items:center; gap:6px; font-size:11px; color:var(--waiting); }
   .set-dirty.on { display:inline-flex; }
   .set-dirty::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--waiting); }
