@@ -346,6 +346,12 @@ depends_on = []
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
 
+[current.boxfile]
+# Nothing: it opens a file a box wrote and reads it, and knowing whose file it is belongs to the
+# caller. Every module that reads the store or a box's `claude-projects/` depends on it instead of
+# calling `fs::read_to_string` there (SKEIN-1257).
+depends_on = []
+
 [current.config]
 depends_on = ["runtime", "util"]
 
@@ -390,6 +396,9 @@ depends_on = [
   # (`disk::box_side_state`, SKEIN-1061).
   "asks",
   "attempt",
+  # `boxfile` for `realign_transcript`, which copies out of a box's `claude-projects/` and must not
+  # follow a link the box put there (SKEIN-1253).
+  "boxfile",
   "config",
   "dockerd",
   "gitgate",
