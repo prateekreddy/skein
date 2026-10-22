@@ -1307,6 +1307,12 @@
   .set-foot .hint { flex:1; color:var(--faint); font-size:11px; }
   .set-foot .kbtn { font-family:var(--ui); font-size:13px; height:auto; padding:8px 15px; }
   .set-foot.readonly .kbtn, .set-foot.readonly .primary { display:none; }   /* nothing to save here */
+  .set-leave { display:flex; align-items:center; gap:10px; padding:10px 22px; font-size:12.5px;
+               background:var(--inset); border-bottom:1px solid var(--line); color:var(--text); }
+  .set-leave[hidden] { display:none; }
+  .set-leave span { flex:1; }
+  .set-leave span::before { content:""; display:inline-block; width:6px; height:6px; margin-right:8px;
+                            border-radius:50%; background:var(--waiting); vertical-align:middle; }
   .set-dirty { display:none; align-items:center; gap:6px; font-size:11px; color:var(--waiting); }
   .set-dirty.on { display:inline-flex; }
   .set-dirty::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--waiting); }
@@ -1850,8 +1856,15 @@
       <div class="set-main">
         <header class="set-top">
           <span class="set-h"><b id="set-htitle">Repositories</b><span id="set-hsub"></span></span>
-          <button type="button" class="set-x" onclick="closeSettings()" title="Close (esc)">✕</button>
+          <button type="button" class="set-x" onclick="leaveSettings()" title="Close (esc)">✕</button>
         </header>
+        <!-- Shown in place of closing while the form has unsaved changes (SKEIN-1260). Above the
+             panes rather than in the footer, which the self-saving panes hide. -->
+        <div class="set-leave" id="set-leave" role="alert" hidden>
+          <span>You have unsaved changes</span>
+          <button type="button" class="primary" id="set-leave-save">Save</button>
+          <button type="button" class="kbtn" id="set-leave-discard">Discard</button>
+        </div>
         <div class="set-scroll">
           <section class="set-pane on" data-pane="repos">
             <div id="set-repos" class="set-repos"></div>
@@ -9143,7 +9156,7 @@ function closeOnBackdrop(ov, close) {
 // terminal (`#loginterm`) is left out on purpose**: that popup is a login in progress, closing it
 // ends the login, and a stray click beside it is no reason to — it closes by its ✕ only.
 for (const [id, close] of [
-  ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", closeSettings],
+  ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
   ["askq", closeAskq],
 ]) closeOnBackdrop(document.getElementById(id), close);
@@ -9260,6 +9273,33 @@ document.getElementById("mbx-body").addEventListener("keydown", e => {
   e.stopPropagation();
 });
 
+// **A redraw keeps what you were in the middle of** (SKEIN-1261). The three request popups below
+// reload their whole list on a timer while open — that is how a new request appears — and a list
+// rebuilt from markup used to come back with every field as the markup wrote it: a typed answer
+// gone, a changed number of hours back at 24, a ticked box unticked, and the focus dropped. Each
+// field the person can change has an id built from its request, so after the rebuild every field
+// whose request is still on screen gets back its value, its tick and, if it had it, the focus and
+// the caret. A request that is new arrives as rendered; one that is gone takes its fields with it.
+function redrawKeeping(list, html) {
+  const kept = [...list.querySelectorAll("input[id], select[id], textarea[id]")]
+    .map(el => ({ id: el.id, value: el.value, checked: el.checked }));
+  const had = list.contains(document.activeElement) ? document.activeElement : null;
+  let caret = null;
+  try { caret = had && had.selectionStart != null ? [had.selectionStart, had.selectionEnd] : null; } catch { caret = null; }
+  list.innerHTML = html;
+  for (const k of kept) {
+    const el = document.getElementById(k.id);
+    if (!el || !list.contains(el)) continue;
+    el.value = k.value;
+    el.checked = k.checked;
+  }
+  const back = had && had.id ? document.getElementById(had.id) : null;
+  if (back && list.contains(back)) {
+    back.focus();
+    if (caret) try { back.setSelectionRange(caret[0], caret[1]); } catch { /* not a text field */ }
+  }
+}
+
 // ---------- package requests (a box asks, the fleet's owner decides) ----------
 //
 // A box cannot install a system package and never will be able to; the sandbox around it can, once,
@@ -9326,7 +9366,7 @@ function loadSubq() {
     }
     // Newest first here, though the API returns oldest-first: the thing needing a decision is
     // usually the thing that just happened.
-    list.innerHTML = reqs.slice().reverse().map(subqCard).join("");
+    redrawKeeping(list, reqs.slice().reverse().map(subqCard).join(""));
   }).catch(() => { list.innerHTML = `<div class="note">could not load package requests</div>`; });
 }
 
@@ -9408,7 +9448,7 @@ function askqCard(a) {
     // only place they go is inside the escaped button face.
     row = (options.length
       ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})">${esc(o)}</button>`).join("")
-      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
+      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
       + `<button class="kbtn ghost" onclick="dismissAskq(${k})">Dismiss</button>`;
   } else if (a.state === "answered") {
     row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc((a.decided || "").slice(11, 16))}</span>`;
@@ -9430,7 +9470,7 @@ function loadAskq() {
       list.innerHTML = `<div class="note">no questions — a box asks with the <code>skein_ask_person</code> tool</div>`;
       return;
     }
-    list.innerHTML = asks.slice().reverse().map(askqCard).join("");
+    redrawKeeping(list, asks.slice().reverse().map(askqCard).join(""));
   }).catch(() => { list.innerHTML = `<div class="note">could not load questions</div>`; });
 }
 
@@ -9458,6 +9498,13 @@ function answerAskq(key, i) {
   }
   return sendAskq(key, { answer });
 }
+
+// Enter in a typed answer sends it, as the button beside it does (SKEIN-1261).
+document.getElementById("askq-list").addEventListener("keydown", e => {
+  if (e.key !== "Enter" || e.isComposing || !e.target.matches?.(".aq-reply")) return;
+  e.preventDefault();
+  answerAskq(e.target.dataset.key, -1);
+});
 
 // Always offered: it frees the box's slot without answering, and the box is told so.
 function dismissAskq(key) { return sendAskq(key, { dismiss: true }); }
@@ -9739,7 +9786,7 @@ function loadGitq() {
         <a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a>${
           creds.length ? ` — ${creds.length} repository token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
     }
-    list.innerHTML = html;
+    redrawKeeping(list, html);
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
 }
 
@@ -9819,7 +9866,12 @@ function addGitCred() {
   }).catch(e => toast(String(e.message || "could not store that token")));
 }
 
+// Asks first, as `clearReadPat` does: Forget sits beside Store and Replace, and one stray press
+// took a token nobody can read back to paste again (SKEIN-1259).
 function removeGitCred(id) {
+  const c = (gitqCreds || []).find(x => x.id === id);
+  const which = reposPhrase(c && (c.repos && c.repos.length ? c.repos : [c.repo])) || "this repository";
+  if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
     .then(r => { if (!r.ok) throw 0; return loadGitCreds(); })
     .catch(() => toast("could not forget that token"));
@@ -10115,10 +10167,17 @@ function setPane(pane) {
   settingsModal().querySelector(".set-scroll").scrollTop = 0;
   // Shortcuts is a reference, not a form; repos and connections save themselves. A Save button that
   // covers none of what's on screen is worse than no Save button.
-  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking", "diag", "update", "usage"].includes(pane));
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", SET_SELF_SAVING.includes(pane));
 }
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
-function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
+function markDirty(on) {
+  document.getElementById("set-dirty").classList.toggle("on", on);
+  if (!on) document.getElementById("set-leave").hidden = true;
+}
+// The panes that are not part of the form: a reference, a report, or cards that save themselves as
+// you leave a field. Nothing in them is something Save would send, so the footer drops its buttons
+// there and an edit in one raises no unsaved-changes flag.
+const SET_SELF_SAVING = ["keys", "repos", "tracking", "diag", "update", "usage"];
 function openSettings(pane = "repos") {
   loadFleetPlan().then(renderFleetPlanNotes);
   // What this sandbox HAS, measured inside it, above the three fields that are only what the next
@@ -10295,6 +10354,8 @@ function saveConnection(card) {
     .catch(e => toast(e.message));
 }
 function forgetConnectionToken(id) {
+  const c = (syncStatus.connections || []).find(c => c.id === id);
+  if (!confirm(`Forget the Plane token for ${(c && c.label) || id}? Boxes already running keep theirs; a new box on this connection gets none until you paste another.`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
@@ -10493,12 +10554,12 @@ function repoTokenRow(r) {
   const others = c && c.shared && !c.problem ? (c.repos || []).filter(x => x.toLowerCase() !== slug.toLowerCase()) : [];
   if (others.length) {
     const all = others.length + 1;
-    return `<label class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
+    return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
       + `<span class="desc">the token <b>${esc(slug)}</b> shares with <b>${esc(reposPhrase(others))}</b>. Boxes of all ${all} repos can push to all of them with it, and skein reads your review queue, posts your reviews and merges here with it. Stored 0600 on the host and never served back</span>`
       + `<div class="set-cred"><span class="sq-state approved">shared token</span><span class="cwhy">replacing it here replaces it for all ${all}; to stop sharing, paste a token for ${esc(slug)} alone</span></div>`
       + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (paste a token)" autocomplete="off" />`
       + `<button type="button" class="kbtn" data-rotatetoken="${esc(c.id)}" data-slug="${esc(slug)}" data-id="${esc(r.id)}">Replace for all ${all}</button>`
-      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div>${checked}${share}</label>`;
+      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div>${checked}${share}</div>`;
   }
   const state = c && !c.problem && c.has_token
     ? `<span class="sq-state approved">token stored</span><span class="cwhy">boxes push with it, and your queue, reviews and merges here run on it; storing another replaces it</span>`
@@ -10506,11 +10567,13 @@ function repoTokenRow(r) {
     : `<span class="sq-state">${c && c.problem ? "refused" : "from the App"}</span><span class="cwhy">${
         c && c.problem ? esc(c.problem)
         : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
-  return `<label class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
+  // A <div>, not a <label>: a label hands a click on its text to its first control, and here that
+  // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
+  return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
     + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
     + `<div class="set-cred">${state}</div>${checked}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
-    + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</label>`;
+    + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
 }
 function renderRepoList() {
   const el = document.getElementById("set-repos");
@@ -10682,7 +10745,19 @@ function removeRepo(id) {
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
     .catch(e => toast(`remove failed: ${e.message}`));
 }
-function closeSettings() { settingsModal().classList.remove("open"); }
+// Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
+function closeSettings() { settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
+// **Escape, ✕ and a click outside ask first when there is something to lose** (SKEIN-1260, the
+// owner's decision of 2026-10-22). They used to close straight away, and reopening reset the form
+// from what was stored — so since SKEIN-1246 made a click outside close it, one stray click threw
+// away every unsaved edit. With nothing unsaved they close as before; with something, Settings
+// stays open and says so, with Save and Discard beside it. In the page, never `confirm()`.
+function leaveSettings() {
+  if (!document.getElementById("set-dirty").classList.contains("on")) { closeSettings(); return; }
+  document.getElementById("set-leave").hidden = false;
+  document.getElementById("set-leave-save").focus();
+}
+function discardSettings() { markDirty(false); closeSettings(); }
 // The settings payload, built in one place so an action that must save first (applyBoxLimits) can
 // never drift from what Save itself sends — a half-saved settings object is the kind of bug that
 // only shows up as a setting that mysteriously does not stick.
@@ -11512,6 +11587,8 @@ function launchBox(branch) {
   applyView();
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
+document.getElementById("set-leave-save").addEventListener("click", saveSettings);
+document.getElementById("set-leave-discard").addEventListener("click", discardSettings);
 document.getElementById("set-applylimits").addEventListener("click", applyBoxLimits);
 document.getElementById("set-save-go").addEventListener("click", saveBoxes);
 // Fields that are not part of the settings form even though they sit in it: a credential is stored
@@ -11529,16 +11606,20 @@ function ownSaveAction(el) {
   return null;
 }
 settingsModal().addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.target.closest(".set-navi")) {
+  // Not on the unsaved-changes notice: Enter on its Discard must discard, not save.
+  if (e.key === "Enter" && !e.target.closest(".set-navi, .set-leave")) {
     e.preventDefault();
     const own = e.target.matches?.(OWN_SAVE) ? ownSaveAction(e.target) : null;
     (own || saveSettings)();
-  } else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }
+  } else if (e.key === "Escape") { e.preventDefault(); leaveSettings(); }
   e.stopPropagation();
 });
 // Section nav, and any edit flips the footer's unsaved-changes flag.
 for (const b of settingsModal().querySelectorAll(".set-navi")) b.addEventListener("click", () => setPane(b.dataset.pane));
-const formEdit = e => e.target.closest(".set-pane") && !e.target.matches?.(OWN_SAVE);
+const formEdit = e => {
+  const pane = e.target.closest(".set-pane");
+  return !!pane && !SET_SELF_SAVING.includes(pane.dataset.pane) && !e.target.matches?.(OWN_SAVE);
+};
 settingsModal().addEventListener("input", e => { if (formEdit(e)) markDirty(true); });
 settingsModal().addEventListener("change", e => {
   if (formEdit(e)) markDirty(true);
@@ -11637,7 +11718,7 @@ document.addEventListener("keydown", e => {
   if (pal.classList.contains("open")) return;
   // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks
   // to the fleet keymap from an open dialog moves the selection behind it.
-  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") closeSettings(); return; }
+  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") leaveSettings(); return; }
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. **The decision is `shortcutFor`, tested in node**: what
   // is DOM-shaped is knowing where the focus is, and that is what is passed in.
