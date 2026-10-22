@@ -9,7 +9,7 @@ document.addEventListener("keydown", e => {
   if (pal.classList.contains("open")) return;
   // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks
   // to the fleet keymap from an open dialog moves the selection behind it.
-  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") closeSettings(); return; }
+  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") leaveSettings(); return; }
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. **The decision is `shortcutFor`, tested in node**: what
   // is DOM-shaped is knowing where the focus is, and that is what is passed in.

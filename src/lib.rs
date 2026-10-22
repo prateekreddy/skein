@@ -29,6 +29,7 @@ pub mod asks;
 pub mod assets;
 pub mod attempt;
 pub mod board;
+pub mod boxfile;
 pub mod cockpit;
 pub mod codeowners;
 pub mod config;

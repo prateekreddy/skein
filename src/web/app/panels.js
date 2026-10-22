@@ -136,7 +136,7 @@ function closeOnBackdrop(ov, close) {
 // terminal (`#loginterm`) is left out on purpose**: that popup is a login in progress, closing it
 // ends the login, and a stray click beside it is no reason to — it closes by its ✕ only.
 for (const [id, close] of [
-  ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", closeSettings],
+  ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
   ["askq", closeAskq],
 ]) closeOnBackdrop(document.getElementById(id), close);
@@ -253,6 +253,33 @@ document.getElementById("mbx-body").addEventListener("keydown", e => {
   e.stopPropagation();
 });
 
+// **A redraw keeps what you were in the middle of** (SKEIN-1261). The three request popups below
+// reload their whole list on a timer while open — that is how a new request appears — and a list
+// rebuilt from markup used to come back with every field as the markup wrote it: a typed answer
+// gone, a changed number of hours back at 24, a ticked box unticked, and the focus dropped. Each
+// field the person can change has an id built from its request, so after the rebuild every field
+// whose request is still on screen gets back its value, its tick and, if it had it, the focus and
+// the caret. A request that is new arrives as rendered; one that is gone takes its fields with it.
+function redrawKeeping(list, html) {
+  const kept = [...list.querySelectorAll("input[id], select[id], textarea[id]")]
+    .map(el => ({ id: el.id, value: el.value, checked: el.checked }));
+  const had = list.contains(document.activeElement) ? document.activeElement : null;
+  let caret = null;
+  try { caret = had && had.selectionStart != null ? [had.selectionStart, had.selectionEnd] : null; } catch { caret = null; }
+  list.innerHTML = html;
+  for (const k of kept) {
+    const el = document.getElementById(k.id);
+    if (!el || !list.contains(el)) continue;
+    el.value = k.value;
+    el.checked = k.checked;
+  }
+  const back = had && had.id ? document.getElementById(had.id) : null;
+  if (back && list.contains(back)) {
+    back.focus();
+    if (caret) try { back.setSelectionRange(caret[0], caret[1]); } catch { /* not a text field */ }
+  }
+}
+
 // ---------- package requests (a box asks, the fleet's owner decides) ----------
 //
 // A box cannot install a system package and never will be able to; the sandbox around it can, once,
@@ -319,7 +346,7 @@ function loadSubq() {
     }
     // Newest first here, though the API returns oldest-first: the thing needing a decision is
     // usually the thing that just happened.
-    list.innerHTML = reqs.slice().reverse().map(subqCard).join("");
+    redrawKeeping(list, reqs.slice().reverse().map(subqCard).join(""));
   }).catch(() => { list.innerHTML = `<div class="note">could not load package requests</div>`; });
 }
 
@@ -401,7 +428,7 @@ function askqCard(a) {
     // only place they go is inside the escaped button face.
     row = (options.length
       ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})">${esc(o)}</button>`).join("")
-      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
+      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
       + `<button class="kbtn ghost" onclick="dismissAskq(${k})">Dismiss</button>`;
   } else if (a.state === "answered") {
     row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc((a.decided || "").slice(11, 16))}</span>`;
@@ -423,7 +450,7 @@ function loadAskq() {
       list.innerHTML = `<div class="note">no questions — a box asks with the <code>skein_ask_person</code> tool</div>`;
       return;
     }
-    list.innerHTML = asks.slice().reverse().map(askqCard).join("");
+    redrawKeeping(list, asks.slice().reverse().map(askqCard).join(""));
   }).catch(() => { list.innerHTML = `<div class="note">could not load questions</div>`; });
 }
 
@@ -451,6 +478,13 @@ function answerAskq(key, i) {
   }
   return sendAskq(key, { answer });
 }
+
+// Enter in a typed answer sends it, as the button beside it does (SKEIN-1261).
+document.getElementById("askq-list").addEventListener("keydown", e => {
+  if (e.key !== "Enter" || e.isComposing || !e.target.matches?.(".aq-reply")) return;
+  e.preventDefault();
+  answerAskq(e.target.dataset.key, -1);
+});
 
 // Always offered: it frees the box's slot without answering, and the box is told so.
 function dismissAskq(key) { return sendAskq(key, { dismiss: true }); }
@@ -732,7 +766,7 @@ function loadGitq() {
         <a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a>${
           creds.length ? ` — ${creds.length} repository token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
     }
-    list.innerHTML = html;
+    redrawKeeping(list, html);
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
 }
 
@@ -812,7 +846,12 @@ function addGitCred() {
   }).catch(e => toast(String(e.message || "could not store that token")));
 }
 
+// Asks first, as `clearReadPat` does: Forget sits beside Store and Replace, and one stray press
+// took a token nobody can read back to paste again (SKEIN-1259).
 function removeGitCred(id) {
+  const c = (gitqCreds || []).find(x => x.id === id);
+  const which = reposPhrase(c && (c.repos && c.repos.length ? c.repos : [c.repo])) || "this repository";
+  if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
     .then(r => { if (!r.ok) throw 0; return loadGitCreds(); })
     .catch(() => toast("could not forget that token"));

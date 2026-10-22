@@ -25,6 +25,18 @@
 // letting go outside the dialog does not throw the dialog away. The login terminal is the one popup
 // left out: a stray click would end a login in progress.
 //
+// # What a popup must not throw away
+//
+// Three ways a popup lost something a person had done (SKEIN-1259, 1260, 1261), checked at the end
+// of this file because each is about a popup. A click on the "Write token" title of a repo card
+// pressed Forget — the card was a <label>, and a label hands a click to its first control — and
+// every Forget deleted at once. Settings closed on Escape, ✕ or a click outside with its edits
+// unsaved, and reopening reset them. And the three request popups rebuilt their list on a timer,
+// wiping a typed answer, a changed duration, a ticked box. The repo card and its token here are
+// real files the real server reads; the requests and the work-tracking connection are stubbed
+// routes, so the test decides when a refresh brings something new, and every write under
+// `/api/fleet/` is answered by a stand-in rather than the server (SKEIN-1290).
+//
 // # How each check is made to fail
 //
 // Each was planted, run and restored; the commit that adds this file names what went red.
@@ -50,12 +62,25 @@ function makeFixture() {
   fs.writeFileSync(path.join(home, "config.json"), "{}");
   fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
   fs.writeFileSync(path.join(root, "sandboxes.json"), "{}");
+  // One repo with a write token of its own, for the Forget checks. `read_prs: false`, so nothing
+  // here goes looking for its pull requests.
+  fs.mkdirSync(path.join(root, "work"));
+  fs.writeFileSync(path.join(home, "repos.json"), JSON.stringify([
+    { id: "acme", source: "https://github.com/acme/thing.git", source_tree: path.join(root, "work"), read_prs: false,
+      store: path.join(root, "store"), agent: "claude", plane_project: "", sync_connection: "" },
+  ]));
+  fs.writeFileSync(path.join(home, "github-pats.json"),
+    JSON.stringify([{ id: "acme-thing", label: "acme/thing", repos: ["acme/thing"] }]));
+  fs.mkdirSync(path.join(home, "github-pats"), { mode: 0o700 });
+  fs.writeFileSync(path.join(home, "github-pats", "acme-thing"), "skein-test-write-token", { mode: 0o600 });
   // The stand-in for sbx, so nothing the page asks reaches whatever `sbx` this machine has.
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
   fs.writeFileSync(sbx, "#!/usr/bin/env bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
   fs.chmodSync(sbx, 0o755);
+  // A `gh` with no login, so this machine's own cannot answer for a token.
+  fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   return { root, home, bin, sbx };
 }
 
@@ -73,6 +98,9 @@ const { log } = await startServer({
     SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
     SKEIN_LS_CMD: `${fx.sbx} ls --json`,
     PATH: `${fx.bin}:${process.env.PATH}`,
+    GH_TOKEN: "",
+    // Nowhere: nothing in this suite may ask GitHub anything.
+    SKEIN_GITHUB_API: "http://127.0.0.1:9",
   },
 });
 
@@ -370,6 +398,299 @@ await check("the login terminal does not close on a click outside, and does on i
   await page.locator("#loginterm .x").click();
   await page.waitForFunction(() => !document.getElementById("loginterm").classList.contains("open"));
 });
+
+// ---------- Forget asks first, and a title is not a button (SKEIN-1259) ----------
+console.log("\nForget, on a repo's write token and a connection's Plane token");
+
+// **No write to `/api/fleet/` reaches the server from here on** (SKEIN-1290): a fixture server's
+// fleet routes can reach a real fleet's queues, so every non-GET under it is answered by this
+// stand-in, and what the page sent is read from its request rather than from the server.
+await page.route(/\/api\/fleet\//, r => r.request().method() === "GET" ? r.fallback() : r.fulfill({ json: {} }));
+// Every DELETE the page sends, and every dialog it raises, with what the dialog said. Each check
+// says how the dialog is answered; none is answered by default.
+const deletes = [];
+page.on("request", r => { if (r.method() === "DELETE") deletes.push(new URL(r.url()).pathname); });
+let answerDialog = null;
+const dialogs = [];
+page.on("dialog", d => { dialogs.push(d.message()); (answerDialog ? d.accept() : d.dismiss()).catch(() => {}); });
+const tokenFile = path.join(fx.home, "github-pats", "acme-thing");
+const card = '#set-repos [data-repotoken="acme/thing"]';
+/** Settings on Repositories, with the repo's card unfolded — it opens folded. */
+const unfoldRepoCard = async () => {
+  await page.waitForSelector('#settings.open .rcard[data-card="acme"] .rhead');
+  if (!(await page.locator('.rcard[data-card="acme"]').evaluate(c => c.classList.contains("open")))) {
+    await page.locator('.rcard[data-card="acme"] .rhead').click();
+  }
+};
+const openRepoCard = async () => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("repos"));
+  await unfoldRepoCard();
+  await page.waitForFunction(sel => {
+    const f = document.querySelector(sel)?.closest(".set-field");
+    return f && f.textContent.includes("token stored");
+  }, card);
+  deletes.length = 0; dialogs.length = 0; answerDialog = null;
+};
+const tokenField = () => page.locator(card).locator("xpath=ancestor::*[contains(@class,'set-field')][1]");
+
+// Fails if the card's token block is a <label> again: the click on its title goes to Forget, which
+// raises the question (or, without it, sends the DELETE).
+await check("a click on a repo's \"Write token\" title neither asks to forget nor forgets", async () => {
+  await openRepoCard();
+  await tokenField().locator(".set-title").click({ position: { x: 10, y: 5 } });
+  await tokenField().locator(".desc").first().click();
+  await page.waitForTimeout(300);
+  if (deletes.length || dialogs.length || !fs.existsSync(tokenFile)) {
+    throw new Error(`DELETEs ${JSON.stringify(deletes)}, asked ${JSON.stringify(dialogs)}, token on disk: ${fs.existsSync(tokenFile)}`);
+  }
+});
+
+// Fails if `removeGitCred` stops asking: the DELETE goes out and the file is gone.
+await check("Forget on a repo's write token asks first, and Cancel keeps the token", async () => {
+  await openRepoCard();
+  await tokenField().locator("button", { hasText: "Forget" }).click();
+  await page.waitForTimeout(300);
+  const said = dialogs.join(" | ");
+  if (!said.startsWith("Forget the write token for acme/thing?") || deletes.length || !fs.existsSync(tokenFile)) {
+    throw new Error(`asked ${JSON.stringify(said)}, DELETEs ${JSON.stringify(deletes)}, token on disk: ${fs.existsSync(tokenFile)}`);
+  }
+});
+
+// The other answer, so the question is not a wall. The DELETE is answered by the stand-in above,
+// so what is checked is that the page sent it. Fails if the confirm's result is ignored either
+// way, or Forget stops sending the DELETE.
+await check("Forget, answered OK, sends the DELETE for that token", async () => {
+  await openRepoCard();
+  answerDialog = "accept";
+  await tokenField().locator("button", { hasText: "Forget" }).click();
+  await page.waitForTimeout(300);
+  answerDialog = null;
+  if (deletes.join() !== "/api/fleet/git-credentials/acme-thing" || dialogs.length !== 1) {
+    throw new Error(`DELETEs ${JSON.stringify(deletes)}, asked ${JSON.stringify(dialogs)}`);
+  }
+});
+
+// A work-tracking connection with a stored Plane token, stubbed: storing a real one is a POST this
+// suite has no other use for. The DELETE is stubbed too, so a failing check deletes nothing real.
+const conn = { id: "skein-test-conn", label: "test backlog", gateway_url: "https://gateway.invalid/", token_set: true, ready: true, repos: [] };
+await page.route("**/api/sync", r => r.request().method() === "GET"
+  ? r.fulfill({ json: { ready: true, connections: [conn] } }) : r.fallback());
+await page.route("**/api/sync/connections/*/token", r => r.fulfill({ json: { ready: false, connections: [{ ...conn, token_set: false, ready: false }] } }));
+
+// Fails if `forgetConnectionToken` stops asking: the DELETE goes out on the first press.
+await check("Forget on a connection's Plane token asks first, and Cancel sends nothing", async () => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("tracking"));
+  await page.waitForSelector('#settings.open .ccard[data-conn="skein-test-conn"] [data-forget]');
+  deletes.length = 0; dialogs.length = 0; answerDialog = null;
+  await page.locator('.ccard[data-conn="skein-test-conn"] [data-forget]').click();
+  await page.waitForTimeout(300);
+  const said = dialogs.join(" | ");
+  if (!said.startsWith("Forget the Plane token for test backlog?") || deletes.length) {
+    throw new Error(`asked ${JSON.stringify(said)}, DELETEs ${JSON.stringify(deletes)}`);
+  }
+});
+await page.unroute("**/api/sync");
+await page.unroute("**/api/sync/connections/*/token");
+
+// ---------- Settings with unsaved changes (SKEIN-1260) ----------
+console.log("\nSettings with unsaved changes");
+
+const settingsPosts = [];
+page.on("request", r => {
+  if (r.method() === "POST" && new URL(r.url()).pathname === "/api/settings") settingsPosts.push(JSON.parse(r.postData() || "{}"));
+});
+const leaveShown = () => page.evaluate(() => {
+  const n = document.getElementById("set-leave");
+  return !n.hidden && n.getBoundingClientRect().height > 0 ? n.textContent.replace(/\s+/g, " ").trim() : "";
+});
+/** Settings on the GitHub pane with the App ID typed in, which Save would send and nothing else saves. */
+const editSettings = async value => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("github"));
+  await page.waitForFunction(() => settingsModal().classList.contains("open"));
+  await page.locator("#set-ghappid").fill(value);
+  settingsPosts.length = 0;
+};
+const storedAppId = () => page.evaluate(() => fetch("/api/settings").then(r => r.json()).then(s => s.github_app_id || ""));
+/** Kept open, saying so, with the edit still in the field. */
+const keptOpen = async value => {
+  const said = await leaveShown();
+  const field = await page.locator("#set-ghappid").inputValue();
+  if (!(await isOpen("settings")) || said !== "You have unsaved changes Save Discard" || field !== value || settingsPosts.length) {
+    throw new Error(`open ${await isOpen("settings")}, notice ${JSON.stringify(said)}, field ${JSON.stringify(field)}, saves ${settingsPosts.length}`);
+  }
+};
+
+// Each fails if that way out is pointed back at `closeSettings`: the dialog closes with the edit.
+await check("dirty Settings + Escape stays open and says there are unsaved changes", async () => {
+  await editSettings("4242");
+  await page.keyboard.press("Escape");
+  await keptOpen("4242");
+});
+await check("dirty Settings + its ✕ stays open and says there are unsaved changes", async () => {
+  await editSettings("4242");
+  await page.locator("#settings .set-x").click();
+  await keptOpen("4242");
+});
+await check("dirty Settings + a click outside stays open and says there are unsaved changes", async () => {
+  await editSettings("4242");
+  await page.mouse.click(BACKDROP.x, BACKDROP.y);
+  await keptOpen("4242");
+});
+// Fails if the global key handler (focus outside the dialog) still closes straight away.
+await check("dirty Settings + Escape with the focus outside the dialog stays open too", async () => {
+  await editSettings("4242");
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await page.keyboard.press("Escape");
+  await keptOpen("4242");
+});
+
+// Fails if Discard is not wired, or saves: the dialog stays, or a POST goes out.
+await check("Discard drops the edit and closes", async () => {
+  await editSettings("4242");
+  await page.keyboard.press("Escape");
+  await page.locator("#set-leave-discard").click();
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  await page.waitForTimeout(200);
+  const stored = await storedAppId();
+  if (settingsPosts.length || stored !== "") throw new Error(`saves ${settingsPosts.length}, stored ${JSON.stringify(stored)}`);
+});
+// Fails if `.set-leave` is dropped from the dialog's Enter guard: Enter on Discard saves the form.
+await check("Enter on Discard discards rather than saving", async () => {
+  await editSettings("4242");
+  await page.keyboard.press("Escape");
+  await page.locator("#set-leave-discard").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  await page.waitForTimeout(200);
+  if (settingsPosts.length || (await storedAppId()) !== "") throw new Error(`saves ${settingsPosts.length}`);
+});
+// Fails if Save on the notice is not wired to `saveSettings`: nothing is stored and it stays open.
+await check("Save on the notice saves the edit and closes", async () => {
+  await editSettings("4242");
+  await page.mouse.click(BACKDROP.x, BACKDROP.y);
+  await page.locator("#set-leave-save").click();
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  const stored = await storedAppId();
+  if (settingsPosts.length !== 1 || settingsPosts[0].github_app_id !== "4242" || stored !== "4242") {
+    throw new Error(`saves ${JSON.stringify(settingsPosts)}, stored ${JSON.stringify(stored)}`);
+  }
+  // Put it back, through the page, so nothing after this reads a stored App ID.
+  await editSettings("");
+  await page.locator("#set-go").click();
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+});
+
+// Fails if `leaveSettings` shows the notice whatever the flag says.
+for (const [how, act] of [
+  ["Escape", () => page.keyboard.press("Escape")],
+  ["its ✕", () => page.locator("#settings .set-x").click()],
+  ["a click outside", () => page.mouse.click(BACKDROP.x, BACKDROP.y)],
+]) {
+  await check(`Settings with nothing unsaved closes on ${how}, as before`, async () => {
+    await closeEverything();
+    await page.evaluate(() => openSettings("github"));
+    await page.waitForFunction(() => settingsModal().classList.contains("open"));
+    await act();
+    await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  });
+}
+// A repo card saves itself as you leave a field, so typing in one is nothing Save would send.
+// Fails if `formEdit` stops leaving the self-saving panes out: the flag goes up and Escape holds.
+await check("an edit on a card that saves itself does not hold Settings open", async () => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("repos"));
+  await unfoldRepoCard();
+  await page.waitForSelector('#settings.open #set-repos input:not([type=password]):not([type=checkbox])');
+  // Typed into and put back, so the card's own save has nothing to store.
+  const field = page.locator('#set-repos input:not([type=password]):not([type=checkbox])').first();
+  const was = await field.inputValue();
+  await field.focus();
+  await page.keyboard.type("x");
+  await page.keyboard.press("Backspace");
+  if ((await field.inputValue()) !== was) throw new Error("the field did not come back to what it was");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+});
+
+// ---------- the request popups keep what you were doing when they refresh (SKEIN-1261) ----------
+console.log("\nthe request popups, refreshed while you are in them");
+
+// Each list is a stubbed route the test adds to, and each refresh is the poll the page's own timer
+// calls — `pollAskq`, `pollGitq`, `pollSubq` — so the refresh happens when the test says.
+const asks = [{ id: "q-1", box: BOX, question: "Which port?", asked: "2026-10-22T10:00:00Z", state: "waiting" }];
+const answers = [];
+await page.route("**/api/fleet/asks", r => r.fulfill({ json: asks }));
+await page.route(/\/api\/fleet\/asks\/[^/]+$/, r => { answers.push(JSON.parse(r.request().postData() || "{}")); return r.fulfill({ json: {} }); });
+const grants = { ready: true, requests: [{ id: "w-1", box: BOX, repo: "acme/other", reason: "a fix there", asked: "2026-10-22T10:00:00Z", state: "pending" }], grants: [], credentials: [] };
+await page.route("**/api/fleet/git-grants", r => r.request().method() === "GET" ? r.fulfill({ json: grants }) : r.fulfill({ json: {} }));
+const pkgs = [{ id: "p-1", box: BOX, kind: "apt", packages: ["libnss3"], asked: "2026-10-22T10:00:00Z", state: "pending" }];
+await page.route("**/api/fleet/substrate", r => r.request().method() === "GET" ? r.fulfill({ json: pkgs }) : r.fulfill({ json: {} }));
+
+const replyId = `aq-reply-${BOX}/q-1`;
+// Fails if `loadAskq` rebuilds the list without `redrawKeeping`: the field comes back empty and
+// unfocused. The new question is the other half — a refresh that skipped the redraw would pass
+// the first and fail this one.
+await check("a typed answer survives a refresh of Questions, which still shows a new question", async () => {
+  await closeEverything();
+  await page.evaluate(() => openAskq());
+  const reply = page.locator(`[id="${replyId}"]`);
+  await reply.waitFor();
+  await reply.click();
+  await page.keyboard.type("port 8080");
+  asks.push({ id: "q-2", box: BOX, question: "Keep the old fixtures?", options: ["Yes", "No"], asked: "2026-10-22T10:01:00Z", state: "waiting" });
+  await page.evaluate(() => pollAskq());
+  await page.waitForFunction(() => document.getElementById("askq-list").textContent.includes("Keep the old fixtures?"));
+  const got = await reply.inputValue();
+  const at = await activeId();
+  if (got !== "port 8080" || at !== replyId) throw new Error(`field ${JSON.stringify(got)}, focus on ${at}`);
+  // And the caret where it was: typing on carries on at the end.
+  await page.keyboard.type("!");
+  if ((await reply.inputValue()) !== "port 8080!") throw new Error(`typing after the refresh gave ${JSON.stringify(await reply.inputValue())}`);
+});
+// Fails if the keydown listener on the list is removed: Enter sends nothing.
+await check("Enter in a question's answer field sends the answer", async () => {
+  answers.length = 0;
+  await page.locator(`[id="${replyId}"]`).press("Enter");
+  await page.waitForTimeout(300);
+  if (answers.length !== 1 || answers[0].answer !== "port 8080!" || answers[0].box !== BOX) throw new Error(`sent ${JSON.stringify(answers)}`);
+});
+
+// Fails if `loadGitq` rebuilds without `redrawKeeping`: the hours go back to 24 and keep unticks.
+await check("a changed duration and a ticked keep survive a refresh of Repo write access, which still shows a new request", async () => {
+  await closeEverything();
+  await page.evaluate(() => openGitq());
+  const hours = page.locator(`[id="gq-h-${BOX}/w-1"]`);
+  await hours.waitFor();
+  await hours.fill("6");
+  await page.locator(`[id="gq-keep-${BOX}/w-1"]`).check();
+  grants.requests.push({ id: "w-2", box: BOX, repo: "acme/third", reason: "another", asked: "2026-10-22T10:02:00Z", state: "pending" });
+  await page.evaluate(() => pollGitq());
+  await page.waitForFunction(() => document.getElementById("gitq-list").textContent.includes("acme/third"));
+  const got = [await hours.inputValue(), await page.locator(`[id="gq-keep-${BOX}/w-1"]`).isChecked()];
+  if (got[0] !== "6" || got[1] !== true) throw new Error(`hours ${got[0]}, keep ${got[1]}`);
+});
+
+// Fails if `loadSubq` rebuilds without `redrawKeeping`: remember comes back ticked.
+await check("an unticked remember survives a refresh of Package requests, which still shows a new request", async () => {
+  await closeEverything();
+  await page.evaluate(() => openSubq());
+  const rem = page.locator(`[id="sq-rem-${BOX}/p-1"]`);
+  await rem.waitFor();
+  await rem.uncheck();
+  pkgs.push({ id: "p-2", box: BOX, kind: "npm", packages: ["skein-test-pkg"], asked: "2026-10-22T10:03:00Z", state: "pending" });
+  await page.evaluate(() => pollSubq());
+  await page.waitForFunction(() => document.getElementById("subq-list").textContent.includes("skein-test-pkg"));
+  if (await rem.isChecked()) throw new Error("remember came back ticked");
+  if (!(await page.locator(`[id="sq-rem-${BOX}/p-2"]`).isChecked())) throw new Error("the new request's remember is not as rendered");
+});
+await page.unroute("**/api/fleet/asks");
+await page.unroute(/\/api\/fleet\/asks\/[^/]+$/);
+await page.unroute("**/api/fleet/git-grants");
+await page.unroute("**/api/fleet/substrate");
+await closeEverything();
 
 await check("no page errors while the popups were driven", () => {
   if (noise.length) throw new Error(noise.slice(0, 5).join(" | "));

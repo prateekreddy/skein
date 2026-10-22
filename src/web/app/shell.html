@@ -271,8 +271,15 @@
       <div class="set-main">
         <header class="set-top">
           <span class="set-h"><b id="set-htitle">Repositories</b><span id="set-hsub"></span></span>
-          <button type="button" class="set-x" onclick="closeSettings()" title="Close (esc)">✕</button>
+          <button type="button" class="set-x" onclick="leaveSettings()" title="Close (esc)">✕</button>
         </header>
+        <!-- Shown in place of closing while the form has unsaved changes (SKEIN-1260). Above the
+             panes rather than in the footer, which the self-saving panes hide. -->
+        <div class="set-leave" id="set-leave" role="alert" hidden>
+          <span>You have unsaved changes</span>
+          <button type="button" class="primary" id="set-leave-save">Save</button>
+          <button type="button" class="kbtn" id="set-leave-discard">Discard</button>
+        </div>
         <div class="set-scroll">
           <section class="set-pane on" data-pane="repos">
             <div id="set-repos" class="set-repos"></div>

@@ -251,8 +251,8 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 41
-tools/gates.sh --list | wc -l                        # → 22
+grep -c '^      - run:' .github/workflows/ci.yml     # → 42
+tools/gates.sh --list | wc -l                        # → 23
 ```
 
 | gate | what it enforces | where the exceptions are declared |
@@ -266,6 +266,7 @@ tools/gates.sh --list | wc -l                        # → 22
 | `source-check` | the Source law of §2.3 | `docs/sources.toml` |
 | `env-lock-check` | no `set_var` outside `env_lock()` | `docs/env-lock.toml` |
 | `fleet-pin-check` | a test that pins `$SKEIN_HOME` or `$SKEIN_FLEET_ROOT` says something about the other | `docs/fleet-pins.toml` |
+| `box-script-check` | a test runs a script from `src/store/` or `src/probe/` only through `box_shell`, which keeps it off the live store, the owner's inbox and their seen-file | a `box-script-check: not a box script` comment, with its reason |
 | `prose-check` | every backticked symbol in prose exists, and every `file:line` citation can be followed | `docs/prose-symbols.toml`, `docs/prose-debt.toml` |
 | `link-check` | every markdown link, and every backticked repo path, names a file git tracks; every record in `docs/decisions/` is in its README's index | `docs/links.toml` |
 | `line-cite-check` | every `file:line` cited in `docs/` still says what it said when it was cited | `docs/line-cites.toml`, and `historical = "<why>"` in it |
@@ -733,7 +734,7 @@ CI run stands behind that.
 bubblewrap and AppArmor defaults (SKEIN-1275):
 
 - the `check`, `test`, `citation` and `coverage` jobs, side by side: every gate `tools/gates.sh`
-  marks for CI, one step each, each in exactly one of them. That is 21 of the 22; `alone-check` is
+  marks for CI, one step each, each in exactly one of them. That is 22 of the 23; `alone-check` is
   the one CI does not run, for the reason under "The gate that is not in CI" above, and
   `gate-list-check` fails if that ever stops being the only one.
 - the `msrv` job: `cargo build --locked --all --all-targets` on the toolchain `rust-version` in

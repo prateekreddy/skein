@@ -346,6 +346,12 @@ depends_on = []
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
 
+[current.boxfile]
+# Nothing: it opens a file a box wrote and reads it, and knowing whose file it is belongs to the
+# caller. Every module that reads the store or a box's `claude-projects/` depends on it instead of
+# calling `fs::read_to_string` there (SKEIN-1257).
+depends_on = []
+
 [current.config]
 depends_on = ["runtime", "util"]
 
@@ -354,10 +360,12 @@ depends_on = ["runtime", "util"]
 # reach that produced it. §2.2 requires a signal to carry that; §2.3 is where the word is defined.
 # `repos`, not `config`, for the branch a diff is measured against: it is set per repository now
 # (`Repo::base_branch`, SKEIN-1208), so the base is read off the box's repo record.
-depends_on = ["answer", "place", "registry", "repos", "sbx", "source", "util"]
+# `boxfile` for the patch and shortstat the box wrote into the store (SKEIN-1257).
+depends_on = ["answer", "boxfile", "place", "registry", "repos", "sbx", "source", "util"]
 
 [current.digest]
-depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
+# `boxfile` for the journal and commit list, both written by the box (SKEIN-1257).
+depends_on = ["boxfile", "diff", "registry", "repos", "sbx", "signals", "util"]
 
 [current.files]
 # `source` for the same reason as `diff`: a listing says whether it was read by entering the box or
@@ -390,6 +398,9 @@ depends_on = [
   # (`disk::box_side_state`, SKEIN-1061).
   "asks",
   "attempt",
+  # `boxfile` for `realign_transcript`, which copies out of a box's `claude-projects/` and must not
+  # follow a link the box put there (SKEIN-1253).
+  "boxfile",
   "config",
   "dockerd",
   "gitgate",
@@ -709,7 +720,8 @@ depends_on = ["contracts", "moduledocs", "repos"]
 depends_on = ["kit", "place", "probes", "repos", "util"]
 
 [current.signals]
-depends_on = ["digest", "registry", "util"]
+# `boxfile` for every hook signal read out of the store, which the boxes write (SKEIN-1257).
+depends_on = ["boxfile", "digest", "registry", "util"]
 
 [current.stream]
 # `board` for the shape it carries, and nothing else. §14 lists `stream` beside `api` for the same
@@ -742,7 +754,7 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # Nothing, and that is the claim rather than an accident — but the claim this row makes is a
 # different one from `assets`, `knock` or `doorway` above, and it is worth saying which.
 #
-# **This whole unit is test code.** `src/lib.rs:76` is `mod testutil;` under the `#[cfg(test)]` on
+# **This whole unit is test code.** `src/lib.rs:77` is `mod testutil;` under the `#[cfg(test)]` on
 # the line above it, so
 # not one byte of `src/testutil.rs` is in a release build. The other empty rows say "this module
 # reaches nothing"; this one says "this module is not in the architecture", which is the same rule
@@ -751,8 +763,8 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # a test's reach says nothing about the design.
 #
 # It reached `place` and `registry` here until SKEIN-905, and that was the gate misreading, not the
-# code changing: `src/testutil.rs:8` is `use crate::place::{record_place, PlaceRecord};` and
-# `src/testutil.rs:9` is `use crate::registry::Sandbox;`, and both were counted as architecture
+# code changing: `src/testutil.rs:11` is `use crate::place::{record_place, PlaceRecord};` and
+# `src/testutil.rs:12` is `use crate::registry::Sandbox;`, and both were counted as architecture
 # because the cutter looked
 # for `#[cfg(test)]` INSIDE the file and this file's attribute is in its parent. The two edges are
 # still made, and `python3 tools/module-check.py --tests` still prints them, beside `util` — which
@@ -760,7 +772,7 @@ depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", 
 # `#[cfg(test)] mod tests` block.
 #
 # Empty rather than deleted, so the argument stays where the module is and the failure stays loud:
-# take the `#[cfg(test)]` off `src/lib.rs:76`'s declaration and `place` and `registry` come back,
+# take the `#[cfg(test)]` off `src/lib.rs:77`'s declaration and `place` and `registry` come back,
 # with nothing here allowing them.
 depends_on = []
 
@@ -770,7 +782,8 @@ depends_on = []
 depends_on = ["config", "place", "repos", "sbx", "secret", "util"]
 
 [current.transcript]
-depends_on = ["fleet", "place", "repos", "util"]
+# `boxfile` for the conversation tail, read out of a directory the box writes (SKEIN-1257).
+depends_on = ["boxfile", "fleet", "place", "repos", "util"]
 
 [current.prwork]
 # The half with consequences: `workflow` for what was decided, `github` to do it, `prq` for where a
@@ -949,4 +962,6 @@ depends_on = ["config", "health", "mailbox", "util"]
 # login home, not under any box (SKEIN-1074).
 # `ai` for which of skein's own call sites a session was — the labelled id and the ledger the model
 # call writes (`ai::site`). The label is decided where the call is made; this module only reads it.
-depends_on = ["ai", "config", "fleet"]
+# `boxfile` for each transcript the scan reads: the box writes them, and a FIFO among them held the
+# scan lock (SKEIN-1257).
+depends_on = ["ai", "boxfile", "config", "fleet"]

@@ -13,10 +13,10 @@
 use std::fs;
 mod common;
 
-use common::{have, skip, Scratch};
+use common::{box_shell, have, skip, Scratch};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const BOX: &str = "web-main";
 
@@ -53,7 +53,7 @@ impl Probe {
 
     /// Fire one hook, with its JSON payload on stdin exactly as the runtime delivers it.
     fn fire_with(&self, mode: &str, payload: &str) {
-        let mut child = Command::new("bash")
+        let mut child = box_shell(&self.root)
             .arg(Self::script())
             .arg(mode)
             .env("CLAUDE_PROJECT_DIR", self.root.join("tree"))
