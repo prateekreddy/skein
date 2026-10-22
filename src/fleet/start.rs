@@ -1579,15 +1579,15 @@ mod tests {
     #[test]
     fn provisioning_tells_the_kit_where_the_boxs_host_only_state_is() {
         let _g = env_lock();
-        std::env::set_var("SKEIN_HOME", tempdir());
-        std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", "/boxes");
         let script = provision_script("web-main", "/repos/web/store/.claude");
         assert!(
             script.contains(&format!("SKEIN_STATE='{}' ", box_state("web-main"))),
             "{script}"
         );
-        std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_FLEET_ROOT");
     }
 
     #[test]

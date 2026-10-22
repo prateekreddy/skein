@@ -703,7 +703,8 @@ mod tests {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
         let store = dir.join("store").join(".claude");
         let tree = dir.join("tree");
         let empty_source = dir.join("no-source"); // there is no checkout to seed from, as in-fleet
@@ -731,6 +732,9 @@ mod tests {
                 .env("HOME", &home)
                 .env("SKEIN_BOX", "demo-main")
                 .env("SKEIN_SOURCE", &empty_source)
+                // The bootstrap ends by reading the owner's inbox under `$SKEIN_STATE`; a test
+                // run inside a box inherits that box's real one.
+                .env_remove("SKEIN_STATE")
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap()
@@ -803,7 +807,6 @@ mod tests {
             "SECRET=skein-test-shared\n"
         );
         assert_eq!(fs::read_link(tree.join("CLAUDE.md")).unwrap(), linked);
-        env::remove_var("SKEIN_HOME");
     }
 
     /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather
@@ -1050,7 +1053,8 @@ mod tests {
         }
         let _lock = env_lock();
         let skein_home = tempdir();
-        env::set_var("SKEIN_HOME", &skein_home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &skein_home);
         let kit = KitBox::new("claude", None);
         let state = kit.dir.join("state/web-main");
 
@@ -1089,7 +1093,6 @@ mod tests {
             fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
             "from the host\n"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **An archive in a snapshot is listed before it is opened, and one carrying more than it may
@@ -1107,7 +1110,8 @@ mod tests {
         }
         let _lock = env_lock();
         let skein_home = tempdir();
-        env::set_var("SKEIN_HOME", &skein_home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &skein_home);
 
         let kit = KitBox::new("claude", None);
         let state = kit.dir.join("state/web-main");
@@ -1172,7 +1176,6 @@ mod tests {
             fs::read_to_string(kit.home.join(".claude/todos/t.json")).unwrap(),
             "[]\n"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **A repo that tracks `.claude/settings.json` stays clean when a box starts in it, and skein's
