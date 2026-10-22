@@ -33,7 +33,7 @@ pub fn recent_commits(name: &str) -> Vec<String> {
         .map(|s| s.join("diffs").join(format!("{name}.commits")))
         .filter(|p| p.exists())
     {
-        if let Ok(s) = fs::read_to_string(&path) {
+        if let Ok(s) = crate::boxfile::read_text(&path, crate::boxfile::SIGNAL_CAP) {
             let v: Vec<String> = s
                 .lines()
                 .map(|l| l.trim().to_string())
@@ -63,13 +63,17 @@ pub fn recent_commits(name: &str) -> Vec<String> {
 /// box's own). Falls back to reading `<dir>/.skein/journal.md` directly for a direct-mode box, where
 /// the host-mounted repo genuinely is the box's own working tree.
 pub fn read_journal(name: &str) -> Option<String> {
+    /// Only the tail is shown, but the whole file is read to find it; this bounds that.
+    const JOURNAL_READ_CAP: u64 = 16 << 20;
+    // Both copies are the box's to write, so both are read through `boxfile` (SKEIN-1257).
+    let read = |p: &Path| crate::boxfile::read_text(p, JOURNAL_READ_CAP).ok();
     let from_store = store_for_box(name)
         .map(|s| s.join("journals").join(format!("{name}.md")))
-        .and_then(|p| fs::read_to_string(p).ok());
+        .and_then(|p| read(&p));
     let dir = lookup_dir(name);
     let from_dir = dir
         .as_deref()
-        .and_then(|d| fs::read_to_string(Path::new(d).join(".skein").join("journal.md")).ok());
+        .and_then(|d| read(&Path::new(d).join(".skein").join("journal.md")));
     let txt = from_store.or(from_dir)?;
     let tail: Vec<&str> = txt.lines().rev().take(40).collect();
     let s: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");

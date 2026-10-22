@@ -360,10 +360,12 @@ depends_on = ["runtime", "util"]
 # reach that produced it. §2.2 requires a signal to carry that; §2.3 is where the word is defined.
 # `repos`, not `config`, for the branch a diff is measured against: it is set per repository now
 # (`Repo::base_branch`, SKEIN-1208), so the base is read off the box's repo record.
-depends_on = ["answer", "place", "registry", "repos", "sbx", "source", "util"]
+# `boxfile` for the patch and shortstat the box wrote into the store (SKEIN-1257).
+depends_on = ["answer", "boxfile", "place", "registry", "repos", "sbx", "source", "util"]
 
 [current.digest]
-depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
+# `boxfile` for the journal and commit list, both written by the box (SKEIN-1257).
+depends_on = ["boxfile", "diff", "registry", "repos", "sbx", "signals", "util"]
 
 [current.files]
 # `source` for the same reason as `diff`: a listing says whether it was read by entering the box or
@@ -718,7 +720,8 @@ depends_on = ["contracts", "moduledocs", "repos"]
 depends_on = ["kit", "place", "probes", "repos", "util"]
 
 [current.signals]
-depends_on = ["digest", "registry", "util"]
+# `boxfile` for every hook signal read out of the store, which the boxes write (SKEIN-1257).
+depends_on = ["boxfile", "digest", "registry", "util"]
 
 [current.stream]
 # `board` for the shape it carries, and nothing else. §14 lists `stream` beside `api` for the same
@@ -779,7 +782,8 @@ depends_on = []
 depends_on = ["config", "place", "repos", "sbx", "secret", "util"]
 
 [current.transcript]
-depends_on = ["fleet", "place", "repos", "util"]
+# `boxfile` for the conversation tail, read out of a directory the box writes (SKEIN-1257).
+depends_on = ["boxfile", "fleet", "place", "repos", "util"]
 
 [current.prwork]
 # The half with consequences: `workflow` for what was decided, `github` to do it, `prq` for where a
@@ -958,4 +962,6 @@ depends_on = ["config", "health", "mailbox", "util"]
 # login home, not under any box (SKEIN-1074).
 # `ai` for which of skein's own call sites a session was — the labelled id and the ledger the model
 # call writes (`ai::site`). The label is decided where the call is made; this module only reads it.
-depends_on = ["ai", "config", "fleet"]
+# `boxfile` for each transcript the scan reads: the box writes them, and a FIFO among them held the
+# scan lock (SKEIN-1257).
+depends_on = ["ai", "boxfile", "config", "fleet"]

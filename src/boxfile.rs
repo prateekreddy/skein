@@ -100,14 +100,46 @@ impl Dir {
     }
 }
 
+/// Make a FIFO at `path`, for a test that plants one where a box could.
+#[cfg(test)]
+pub(crate) fn plant_fifo(path: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo {}", path.display());
+}
+
+/// Run `read` on a thread and wait at most five seconds for it, so a reader that blocks on the FIFO
+/// at `fifo` fails the test rather than hanging the suite. On a timeout the FIFO is opened for
+/// writing, which releases the blocked reader, and the test panics with `what`.
+#[cfg(test)]
+pub(crate) fn within<T: Send + 'static>(
+    fifo: &Path,
+    what: &str,
+    read: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(answer) => answer,
+        Err(_) => {
+            let _ = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(fifo);
+            panic!("{what} waited on a FIFO instead of refusing it");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::tempdir;
     use std::fs;
-    use std::process::Command;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     // Fails if `O_NOFOLLOW` is dropped: the link is followed and the target's bytes come back.
     #[test]
@@ -133,25 +165,11 @@ mod tests {
     fn a_fifo_is_refused_at_once_rather_than_waited_on() {
         let dir = tempdir();
         let fifo = dir.join("status.json");
-        let made = Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo runs");
-        assert!(made.success(), "mkfifo {}", fifo.display());
-
-        let (tx, rx) = mpsc::channel();
+        plant_fifo(&fifo);
         let at = fifo.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(read(&at, SIGNAL_CAP).map(|b| b.len()));
+        let answer = within(&fifo, "reading a FIFO", move || {
+            read(&at, SIGNAL_CAP).map(|b| b.len())
         });
-        let answer = rx.recv_timeout(Duration::from_secs(5));
-        if answer.is_err() {
-            let _ = OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&fifo);
-        }
-        let answer = answer.expect("reading a FIFO hung instead of refusing it");
         assert!(answer.is_err(), "a FIFO was read as a file: {answer:?}");
     }
 

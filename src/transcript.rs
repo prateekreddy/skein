@@ -177,13 +177,18 @@ fn read_host_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String
             "no conversation record found for this box yet — the agent writes one as it runs",
         ));
     };
-    let mut file = fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Through `boxfile`: the box writes this directory, and a FIFO or a link to a device here
+    // parked or exhausted the request (SKEIN-1257). Read no further than `bytes` past the seek
+    // either, so a file still being appended to cannot grow the read.
+    let (mut file, meta) =
+        crate::boxfile::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let size = meta.len();
     let from = size.saturating_sub(bytes);
     file.seek(SeekFrom::Start(from))
         .map_err(|e| format!("seek {}: {e}", path.display()))?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
+    file.take(bytes)
+        .read_to_end(&mut buf)
         .map_err(|e| format!("read {}: {e}", path.display()))?;
     let body = String::from_utf8_lossy(&buf).into_owned();
     let complete = from == 0;
@@ -211,12 +216,19 @@ fn walk_jsonl(root: &std::path::Path) -> Vec<(std::path::PathBuf, std::time::Sys
     let Ok(entries) = fs::read_dir(root) else {
         return found;
     };
+    // `DirEntry::metadata` does not follow a link, and `Path::is_dir` did: a slug a box linked to
+    // its own parent was walked again at every level, down to the kernel's limit on links in one
+    // path, and each further such link multiplies that walk (SKEIN-1257). Real directories and
+    // regular files only.
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
             found.extend(walk_jsonl(&path));
-        } else if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+        } else if meta.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
+            if let Ok(mtime) = meta.modified() {
                 found.push((path, mtime));
             }
         }
@@ -452,6 +464,79 @@ mod tests {
         assert_eq!(
             parse_transcript_jsonl(write)[0].tools,
             vec!["Write(/src/lib.rs)"]
+        );
+    }
+
+    // The cockpit reads the newest `*.jsonl` under a fleet box's `claude-projects/`, which the box
+    // writes. Planted: a FIFO newer than the real record, and a slug linked to a directory outside
+    // holding a newer record still. Fails if the tail read opens plainly (the FIFO is newer than
+    // the real record, so the open waits for a writer and `within` fails), or if the walk follows
+    // the link (the outside record is the newest and the path below is not the real one).
+    #[test]
+    fn a_fifo_or_a_linked_slug_in_a_boxs_record_is_not_followed() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        crate::place::record_place(
+            "web-main",
+            &crate::place::PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 0,
+                home: String::new(),
+                tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
+                generation: "test-boot".into(),
+                ns_start: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let projects =
+            std::path::PathBuf::from(crate::fleet::box_state("web-main")).join("claude-projects");
+        let slug = projects.join("-boxes-web-main-tree");
+        fs::create_dir_all(&slug).unwrap();
+        fs::write(
+            slug.join("s.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"content\":\"ship it\"}}\n",
+        )
+        .unwrap();
+        let outside = home.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join("newest.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"content\":\"not this box's\"}}\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, slug.join("linked")).unwrap();
+        // The FIFO is the newest file: the record is stamped a minute into the past.
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(slug.join("s.jsonl"))
+            .and_then(|f| f.set_times(fs::FileTimes::new().set_modified(earlier)))
+            .unwrap();
+        let fifo = slug.join("z.jsonl");
+        crate::boxfile::plant_fifo(&fifo);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(outside.join("newest.jsonl"))
+            .and_then(|f| f.set_times(fs::FileTimes::new().set_modified(later)))
+            .unwrap();
+
+        let view = crate::boxfile::within(&fifo, "the transcript tail", || {
+            read_transcript("web-main", TRANSCRIPT_MIN_BYTES)
+        })
+        .expect("read");
+        assert_eq!(view.path, slug.join("s.jsonl").to_string_lossy());
+        assert_eq!(
+            view.messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["ship it"]
         );
     }
 }

@@ -11,7 +11,6 @@ use crate::sbx::{box_liveness, Liveness};
 use crate::util::valid_name;
 use crate::util::*;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::time::Duration;
 
 /// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
@@ -41,6 +40,10 @@ pub struct Diff {
 const DIFF_BASE_MARK: &str = "SKEIN_DIFF_BASE ";
 
 pub(crate) const DIFF_CAP: usize = 2_000_000;
+
+/// The most of a stored patch skein reads back. The box caps what it shows at [`DIFF_CAP`]; the file
+/// it writes is its own, so this is a bound on what a poll holds rather than a measure of a diff.
+const PATCH_READ_CAP: u64 = 64 << 20;
 
 /// The base-ref ladder, most specific first: the configured base branch on the remote, then the
 /// usual remote defaults, then their local counterparts as a last resort for a repo with no remote.
@@ -187,7 +190,7 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
     let path = store_for_box(name)?
         .join("diffs")
         .join(format!("{name}.patch"));
-    let patch = fs::read_to_string(&path).ok()?;
+    let patch = crate::boxfile::read_text(&path, PATCH_READ_CAP).ok()?;
     // *When* it was written is the whole question for a stored answer: "at its last turn end" is
     // reassuring if that was a minute ago and misleading if it was yesterday.
     let written = file_ago(&path).unwrap_or_default();
@@ -216,7 +219,9 @@ pub(crate) fn read_diffstat_file(name: &str) -> Option<DiffStat> {
     let path = store_for_box(name)?
         .join("diffs")
         .join(format!("{name}.json"));
-    let s = fs::read_to_string(path).ok()?;
+    // Through `boxfile`, because this runs on every board poll and the box writes this directory:
+    // a FIFO here parked a blocking-pool thread per poll per tab (SKEIN-1257).
+    let s = crate::boxfile::read_text(&path, crate::boxfile::SIGNAL_CAP).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;
     let get = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let stat = DiffStat {
@@ -245,7 +250,8 @@ pub fn changed_files(name: &str) -> Vec<String> {
         .ok()
         .and_then(|r| r.parent().map(|p| p.to_path_buf()))
     {
-        if let Ok(patch) = fs::read_to_string(reg.join("diffs").join(format!("{name}.patch"))) {
+        let path = reg.join("diffs").join(format!("{name}.patch"));
+        if let Ok(patch) = crate::boxfile::read_text(&path, PATCH_READ_CAP) {
             for line in patch.lines() {
                 if let Some(rest) = line.strip_prefix("+++ b/") {
                     let f = rest.trim();
@@ -422,5 +428,30 @@ mod tests {
         );
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
+    }
+
+    // The board reads `<store>/diffs/<name>.json` on every poll, and the box writes that directory.
+    // Fails if the read opens the path plainly again: with no writer, the FIFO open waits for ever
+    // and `within` fails after five seconds.
+    #[test]
+    fn a_fifo_where_the_diff_badge_is_read_is_no_badge_rather_than_a_hang() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &dir)
+            .set("SKEIN_FLEET_ROOT", dir.join("fleet"))
+            .set("SKEIN_REGISTRY", dir.join("sandboxes.json"))
+            .unset("SKEIN_SHARED");
+        fs::write(
+            dir.join("sandboxes.json"),
+            r#"{"fifo-box":{"branch":"b","dir":"/nope","lastSeen":"","status":""}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("diffs")).unwrap();
+        let fifo = dir.join("diffs").join("fifo-box.json");
+        crate::boxfile::plant_fifo(&fifo);
+        let stat =
+            crate::boxfile::within(&fifo, "the diff badge", || read_diffstat_file("fifo-box"));
+        assert_eq!(stat, None);
     }
 }

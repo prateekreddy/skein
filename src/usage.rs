@@ -636,9 +636,12 @@ fn walk_jsonl(root: &Path, out: &mut Vec<(PathBuf, u64, u128)>, notes: &mut Note
             notes.unreadable_files += 1;
             continue;
         };
+        // `DirEntry::metadata` does not follow a link, so a link here is neither: a box's
+        // `claude-projects/` is the box's to write, and a link or a FIFO named `*.jsonl` is not a
+        // transcript (SKEIN-1257).
         if meta.is_dir() {
             walk_jsonl(&path, out, notes);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+        } else if meta.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             let mtime = meta
                 .modified()
                 .ok()
@@ -650,9 +653,16 @@ fn walk_jsonl(root: &Path, out: &mut Vec<(PathBuf, u64, u128)>, notes: &mut Note
     }
 }
 
+/// The most of one transcript a scan reads. The largest measured on this fleet was 87MB; a file
+/// past this is counted as unreadable rather than held in memory whole.
+const TRANSCRIPT_READ_CAP: u64 = 512 << 20;
+
 /// Parse one transcript into its distinct turns, resolving duplicates within the file.
+///
+/// Read through [`crate::boxfile`]: the box writes this directory, and a FIFO here parked the scan
+/// while it held the scan lock, so every `/api/usage` behind it waited too (SKEIN-1257).
 fn scan_file(path: &Path, notes: &mut Notes) -> Vec<Turn> {
-    let body = match std::fs::read_to_string(path) {
+    let body = match crate::boxfile::read_text(path, TRANSCRIPT_READ_CAP) {
         Ok(b) => b,
         Err(_) => {
             notes.unreadable_files += 1;
@@ -1932,6 +1942,43 @@ echo "$id"
         assert!(
             r.own.unlabelled_in_boxes,
             "a box holds a skein session from before it was labelled, and the report does not say so"
+        );
+    }
+
+    // A box writes its own `claude-projects/`, and the scan reads every `*.jsonl` there while
+    // holding the scan lock. Planted beside a real transcript: a FIFO, which a plain open waits on
+    // for ever, and a link to `/dev/zero`, which a plain read fills memory from. Fails if
+    // `scan_file` opens plainly (the FIFO hangs and `within` fails), and if the walk lists
+    // anything but regular files (the fingerprint counts three files, not one).
+    #[test]
+    fn a_fifo_or_a_device_link_among_the_transcripts_is_skipped_not_read() {
+        let dir = crate::testutil::tempdir();
+        let slug = dir.join("slug");
+        std::fs::create_dir_all(&slug).unwrap();
+        std::fs::write(
+            slug.join("real.jsonl"),
+            line(
+                "m1",
+                "r1",
+                "claude-opus-4-1",
+                "2026-10-01T00:00:00Z",
+                (5, 7, 0, 0, 0),
+            ),
+        )
+        .unwrap();
+        let fifo = slug.join("stuck.jsonl");
+        crate::boxfile::plant_fifo(&fifo);
+        std::os::unix::fs::symlink("/dev/zero", slug.join("zero.jsonl")).unwrap();
+
+        let projects = dir.to_path_buf();
+        let (cells, _) =
+            crate::boxfile::within(&fifo, "the usage scan", move || cells_for(&projects));
+        let input: u64 = cells.values().map(|t| t.input).sum();
+        assert_eq!(input, 5, "the real transcript is still counted");
+        assert_eq!(
+            fingerprint(&dir).0,
+            1,
+            "only the regular file is a transcript"
         );
     }
 }
