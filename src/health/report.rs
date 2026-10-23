@@ -613,7 +613,22 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
              and minting App tokens",
             "install curl",
         ),
-        true => github_reach_health(&crate::place::fleet_sandbox()),
+        // Reachable is not the same as working: a credential GitHub refuses overrules the
+        // reachability line, naming the repositories left with nothing that works (SKEIN-1277).
+        // From the expiry line's hourly reading — no request of its own.
+        true => {
+            let fleet = crate::place::fleet_sandbox();
+            let slugs: Vec<String> = load_repos()
+                .iter()
+                .filter_map(crate::gitgate::repo_slug)
+                .collect();
+            credential_refusal_line(
+                github_reach_health(&fleet),
+                &credential_readings().unwrap_or_default(),
+                &slugs,
+                &fleet,
+            )
+        }
     };
 
     let repos = load_repos();

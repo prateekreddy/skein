@@ -545,7 +545,47 @@ pub struct CredentialLife {
     pub source: GhToken,
     /// What to call it in a sentence — `$GH_TOKEN`, or the label and repository its owner gave it.
     pub label: String,
+    /// The stored credential's id for a [`GhToken::WritePat`], so the repositories reading with it
+    /// can be named ([`refused_repos`]); empty for the other sources, which are one each.
+    pub id: String,
     pub life: Life,
+}
+
+impl Life {
+    /// **GitHub refused the credential itself** — the 401 a dead, revoked or mistyped token gets
+    /// (SKEIN-1277). Still an [`Life::Unanswered`] as far as its expiry goes, because there is no
+    /// expiry to read; but unlike a timeout it says something certain about everything that runs
+    /// on that credential, which is that none of it works.
+    pub fn refused(&self) -> bool {
+        matches!(self, Life::Unanswered(why) if unauthorized(why))
+    }
+}
+
+/// Which of `slugs` read with a credential GitHub refused in `lives` — the repositories with no
+/// working credential, for the health line that says so (SKEIN-1277).
+///
+/// "Read with" is [`credential_for_repo`]'s answer, the same one every call about the repository
+/// takes: its own stored token first, then `$GH_TOKEN`, the read token, `gh`. A repository whose
+/// stored token is fine is not named because `$GH_TOKEN` is refused — it never reaches it.
+pub fn refused_repos(lives: &[CredentialLife], slugs: &[String]) -> Vec<String> {
+    let refused: Vec<&CredentialLife> = lives.iter().filter(|c| c.life.refused()).collect();
+    if refused.is_empty() {
+        return Vec::new();
+    }
+    slugs
+        .iter()
+        .filter(|slug| {
+            let source = credential_for_repo(slug, Need::Read).0;
+            let id = match source {
+                GhToken::WritePat => crate::gitgate::credential_for(slug)
+                    .map(|(c, _)| c.id)
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            refused.iter().any(|c| c.source == source && c.id == id)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Whole days from `now` to the date GitHub put in `github-authentication-token-expiration`.
@@ -595,6 +635,7 @@ pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLif
             out.push(CredentialLife {
                 source,
                 label: source.label().to_string(),
+                id: String::new(),
                 life: life_of(&token, now),
             });
         }
@@ -624,6 +665,7 @@ pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLif
         out.push(CredentialLife {
             source: GhToken::WritePat,
             label,
+            id: found.id.clone(),
             life: life_of(&token, now),
         });
     }
