@@ -886,6 +886,10 @@ cited_by = ["docs/threat-model.md"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
+["src/box-session.sh:3254"]
+line = "exec bwrap \\"
+cited_by = ["docs/threat-model.md"]
+
 ["src/box-session.sh:3355"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
