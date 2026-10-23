@@ -74,11 +74,17 @@ What you *optionally* add is your own project content:
     shared-home/   durable project working files, exposed as $HOME/shared in every Claude/Codex
                    box. Real $HOME remains box-private. Writes are live across the repo's boxes;
                    coordinate concurrent edits (ordinary last-writer-wins filesystem semantics).
-    shared-paths.txt   one repo-relative path per line of GITIGNORED files/dirs the box
+    shared-paths.txt   one repo-relative path per line of GITIGNORED files the box
                    needs (CLAUDE.md, .env, local config, …). A --clone carries only
                    tracked files, so the bootstrap symlinks each of these from the
                    read-only host mirror into the box. Without this, CLAUDE.md and
                    .env are absent in the box. Lines starting with # are comments.
+                   Every box of the repo can write this list, so only a regular file
+                   at a relative path with no `..` and no hidden or .git directory on
+                   the way is surfaced; a directory, a link, or anything under a
+                   dot-directory is refused, and the box's start says so (SKEIN-1256).
+                   The one exception is `.codex/memory`, named in the bootstrap itself:
+                   a directory, surfaced while it holds only files and directories.
                    Add ` rw` after a path (e.g. `LOCAL_DEV.md rw`) to make it editable:
                    the file is seeded once into shared-rw/ (a writable store dir) and
                    symlinked from there instead — edits persist there and are shared
@@ -114,8 +120,9 @@ Managed by skein (don't edit):
     handoffs/      durable provider-neutral takeover briefs plus one-shot pending copies per target
                    runtime. Native provider transcripts remain separate; replacement boxes receive
                    a bounded context export while the original remains natively resumable.
-    skein/handoff-snapshots/ immutable replacement snapshots: Git bundle, staged/unstaged patches,
-                   untracked archive, shared memory/skills/hooks backup, transcript export, manifest.
+    skein/handoff-snapshots/ written only by `fleet::snapshot_box`, which nothing in production
+                   calls (SKEIN-1289), and never restored from: a takeover's snapshot goes into
+                   the replacement box's host-only state directory instead (SKEIN-1258).
     skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found,
                    how .claude was linked (linked | merged | no-store | failed), what that start
                    changed in .claude if anything (claude_note), whether shared-home

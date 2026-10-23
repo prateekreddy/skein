@@ -1349,80 +1349,80 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"skein: {mount:?} has a newline in it, so boxes cannot be told about it — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:429"]
+["src/fleet/start.rs:434"]
 line = "\"{why}\\n {name} IS running — its session and namespace came up — but it has \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:584"]
+["src/fleet/start.rs:589"]
 line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:601"]
+["src/fleet/start.rs:606"]
 line = "return Err(format!(\"invalid box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:612"]
+["src/fleet/start.rs:617"]
 line = "ensure_fleet(&sandbox)?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:654"]
+["src/fleet/start.rs:659"]
 line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:673"]
+["src/fleet/start.rs:678"]
 line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:702"]
+["src/fleet/start.rs:707"]
 line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:784"]
+["src/fleet/start.rs:789"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/start.rs:801"]
+["src/fleet/start.rs:806"]
 line = "eprintln!(\"skein: could not set {name}'s git identity ({e}); its first commit will ask who you are\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:809"]
+["src/fleet/start.rs:814"]
 line = "eprintln!(\"skein: {name} came up, but its conversation could not be located ({e})\")"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:817"]
+["src/fleet/start.rs:822"]
 line = "\"skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:827"]
+["src/fleet/start.rs:832"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:864"]
+["src/fleet/start.rs:869"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:924"]
+["src/fleet/start.rs:929"]
 line = "\"skein: {name} has a session nothing can enter — {why} — so it is being ended \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:942"]
+["src/fleet/start.rs:947"]
 line = "\"box {name} has no checkout in {} — `skein start {name}` to build one\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:960"]
+["src/fleet/start.rs:965"]
 line = "eprintln!(\"skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there\", record.sandbox);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:993"]
+["src/fleet/start.rs:998"]
 line = "eprintln!(\"skein: {name} had no live session, so it was restarted (its work is untouched)\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1024"]
+["src/fleet/start.rs:1029"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1850"]
+["src/fleet/start.rs:1872"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1600,7 +1600,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:527"]
+["src/kit/skein-startup.sh:570"]
 line = "merged=\"$(jq -s \"$retire\"'"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
@@ -1849,7 +1849,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
 cited_by = ["docs/architecture.md"]
 
-["src/store/sandbox-bootstrap.sh:268"]
+["src/store/sandbox-bootstrap.sh:354"]
 line = "if [ -n \"$wanted\" ] && [ \"$wanted\" != \"$(cat \"$marker\" 2>/dev/null || true)\" ] \\"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
@@ -1865,23 +1865,23 @@ cited_by = ["docs/citations.toml"]
 line = "pub fn pty_freed() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:195"]
+["src/takeover.rs:197"]
 line = "return Err(format!(\"copying {guest} exceeded {budget:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:200"]
+["src/takeover.rs:202"]
 line = "return Err(format!(\"waiting for artifact copy: {e}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:211"]
+["src/takeover.rs:213"]
 line = "return Err(format!(\"copying {guest}: {}\", stderr.trim()));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:319"]
+["src/takeover.rs:321"]
 line = "\"extracting shared context: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/takeover.rs:399"]
+["src/takeover.rs:401"]
 line = "\"{source} already uses {target_runtime}; use the same-provider tmux restart path\""
 cited_by = ["docs/recovery-survey.md"]
 

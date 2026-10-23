@@ -690,6 +690,246 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// The store is writable by every box of the repo, so `shared-paths.txt` is one box's say over
+    /// where a file lands in another box's checkout (SKEIN-1256). Only an entry of an ordinary shape
+    /// is surfaced — relative, no `..`, no hidden or `.git` directory on the way — and only as a
+    /// regular file that really sits in `shared-rw/`. A link an earlier start made for an entry that
+    /// no longer passes is taken away again.
+    ///
+    /// Fails if `shared_path_shape_ok` accepts every entry (the hook and the dot-directory config
+    /// are linked), or if `file_is_inside` accepts every file (the directory and the link are).
+    #[test]
+    fn a_shared_path_is_surfaced_only_in_an_ordinary_shape_and_only_as_a_regular_file() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        let store = dir.join("store").join(".claude");
+        let tree = dir.join("tree");
+        let empty_source = dir.join("no-source"); // there is no checkout to seed from, as in-fleet
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(&empty_source).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let rw = store.join("shared-rw");
+        let put = |rel: &str, body: &str| {
+            let p = rw.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        let run = || {
+            box_shell(&dir)
+                .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+                .env("CLAUDE_PROJECT_DIR", &tree)
+                .env("HOME", &home)
+                .env("SKEIN_BOX", "demo-main")
+                .env("SKEIN_SOURCE", &empty_source)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+
+        // First, an ordinary start, to learn the exact spelling this script links through.
+        put("CLAUDE.md", "# direction\n");
+        fs::write(store.join("shared-paths.txt"), "CLAUDE.md\n").unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let linked = fs::read_link(tree.join("CLAUDE.md")).expect("an ordinary file is surfaced");
+        let rw_spelled = linked.parent().unwrap().to_path_buf();
+
+        // What an older start would have left behind: a hook linked out of shared-rw/.
+        put(".git/hooks/pre-commit", "#!/bin/sh\n");
+        let hook = tree.join(".git/hooks/pre-commit");
+        symlink(rw_spelled.join(".git/hooks/pre-commit"), &hook).unwrap();
+        assert!(
+            fs::symlink_metadata(&hook).is_ok(),
+            "the planted link must exist before the run"
+        );
+
+        put(".cargo/config.toml", "[build]\n");
+        put("backend/.env", "SECRET=skein-test-shared\n");
+        fs::create_dir_all(rw.join("confdir")).unwrap();
+        fs::write(rw.join("confdir/inner"), "x").unwrap();
+        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
+        symlink(dir.join("outside.txt"), rw.join("linked.txt")).unwrap();
+        fs::write(store.join("escape"), "escape\n").unwrap();
+        fs::write(
+            store.join("shared-paths.txt"),
+            "CLAUDE.md\n.git/hooks/pre-commit\n.cargo/config.toml\n../escape\n/etc/hostname\n\
+             confdir\nlinked.txt\nbackend/.env\n",
+        )
+        .unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        for refused in [
+            ".git/hooks/pre-commit",
+            ".cargo/config.toml",
+            "confdir",
+            "linked.txt",
+        ] {
+            assert!(
+                fs::symlink_metadata(tree.join(refused)).is_err(),
+                "{refused} must not be surfaced into the checkout; stderr: {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!("not surfacing '{refused}'")),
+                "{refused} must be refused out loud: {stderr}"
+            );
+        }
+        assert!(
+            fs::symlink_metadata(dir.join("escape")).is_err(),
+            "an entry with '..' must not land outside the checkout"
+        );
+        assert!(
+            stderr.contains("not surfacing '../escape'")
+                && stderr.contains("not surfacing '/etc/hostname'"),
+            "{stderr}"
+        );
+        let exclude = fs::read_to_string(tree.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!exclude.contains("/.git/hooks"), "{exclude}");
+
+        // And the ordinary entries still arrive, through the store.
+        assert_eq!(
+            fs::read_to_string(tree.join("backend/.env")).unwrap(),
+            "SECRET=skein-test-shared\n"
+        );
+        assert_eq!(fs::read_link(tree.join("CLAUDE.md")).unwrap(), linked);
+    }
+
+    /// `.codex/memory` is the one directory skein shares through `shared-paths.txt`, so it is a
+    /// named exception to the shape rule, fixed in the bootstrap rather than read from the store
+    /// (SKEIN-1256). It must be a real directory in `shared-rw/` holding only files and
+    /// directories; every other entry under a hidden directory is still refused.
+    ///
+    /// Fails if `.codex/memory` leaves the exception list (the directory is not surfaced), if the
+    /// list stops being exact (`.codex/config.toml` or `.git/hooks/x` is surfaced), if
+    /// `is_excepted_dir` matches a prefix rather than the whole entry (`.codex/memory/../../.git/
+    /// hooks` is linked into `.git/hooks`, and `.codex/memoryX` is surfaced), or if the
+    /// `find` in `dir_is_inside` goes (a directory holding a link out of `shared-rw/` stays
+    /// surfaced).
+    #[test]
+    fn codex_memory_is_the_named_exception_and_nothing_else_under_a_hidden_directory_is() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        let store = dir.join("store").join(".claude");
+        let tree = dir.join("tree");
+        let empty_source = dir.join("no-source");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(&empty_source).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let rw = store.join("shared-rw");
+        for (rel, body) in [
+            (".codex/memory/note.md", "remembered\n"),
+            (".codex/config.toml", "[x]\n"),
+            (".git/hooks/x", "#!/bin/sh\n"),
+            (".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n"),
+            (".codex/memoryX/note.md", "not the exception\n"),
+        ] {
+            let p = rw.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        }
+        fs::write(
+            store.join("shared-paths.txt"),
+            // The climbing entry comes first: the exception is matched exactly, so it is shaped
+            // like any other entry and refused before `.codex/memory` is ever linked.
+            ".codex/memory/../../.git/hooks\n.codex/memoryX\n.codex/memory\n.codex/config.toml\n\
+             .git/hooks/x\n",
+        )
+        .unwrap();
+        let run = || {
+            box_shell(&dir)
+                .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+                .env("CLAUDE_PROJECT_DIR", &tree)
+                .env("HOME", &home)
+                .env("SKEIN_BOX", "demo-main")
+                .env("SKEIN_SOURCE", &empty_source)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            rw.join(".git/hooks/pre-commit"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // An entry that only STARTS with the exception's name is no exception: matched as a
+        // prefix, the climbing one would skip the shape rule and link shared-rw/'s hooks into
+        // this checkout's .git.
+        let hooks = tree.join(".git/hooks");
+        assert!(
+            !fs::symlink_metadata(&hooks)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+                && fs::read_dir(&hooks).unwrap().all(|e| !e
+                    .unwrap()
+                    .file_type()
+                    .unwrap()
+                    .is_symlink()),
+            "nothing in .git/hooks may be a link into shared-rw/: {stderr}"
+        );
+        assert!(
+            fs::symlink_metadata(tree.join(".codex/memoryX")).is_err(),
+            ".codex/memoryX is not the exception: {stderr}"
+        );
+        for refused in [".codex/memory/../../.git/hooks", ".codex/memoryX"] {
+            assert!(
+                stderr.contains(&format!("not surfacing '{refused}'")),
+                "{refused} must be refused out loud: {stderr}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(tree.join(".codex/memory/note.md")).unwrap_or_default(),
+            "remembered\n",
+            "the named exception must be surfaced: {stderr}"
+        );
+        for refused in [".codex/config.toml", ".git/hooks/x"] {
+            assert!(
+                fs::symlink_metadata(tree.join(refused)).is_err(),
+                "{refused} is under a hidden directory and is no exception: {stderr}"
+            );
+        }
+
+        // A link beneath the excepted directory that leads out of shared-rw/: the whole directory
+        // is refused at the next start, and the link the last start made is taken away.
+        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
+        symlink(dir.join("outside.txt"), rw.join(".codex/memory/out.md")).unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            fs::symlink_metadata(tree.join(".codex/memory")).is_err(),
+            "a directory holding a link out of shared-rw/ must not stay surfaced: {stderr}"
+        );
+        assert!(stderr.contains("not surfacing '.codex/memory'"), "{stderr}");
+    }
+
     /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather
     /// than a piece of it: skein's plugin and the kit installed under the fleet root's `.skein`
     /// (`probes::plugin_install_under`'s bytes, the way `fleet::install_launcher` writes them), a
@@ -827,6 +1067,238 @@ mod tests {
 
     fn have_jq() -> bool {
         Command::new("jq").arg("--version").output().is_ok()
+    }
+
+    /// A takeover's snapshot, written the way `takeover::prepare_replacement` writes one: a bundle
+    /// of the clone's HEAD, its manifest, and the two archives built from `untracked` and
+    /// `agent_state` (relative path, contents). Built in `stage`, a directory of the test's own.
+    fn handoff_snapshot(
+        kit: &KitBox,
+        at: &Path,
+        untracked: &[(&str, &str)],
+        agent_state: &[(&str, &str)],
+    ) {
+        fs::create_dir_all(at).unwrap();
+        kit.git(&[
+            "bundle",
+            "create",
+            &at.join("repo.bundle").to_string_lossy(),
+            "HEAD",
+        ]);
+        let head = kit.git(&["rev-parse", "HEAD"]);
+        fs::write(
+            at.join("manifest.json"),
+            format!("{{\"head\":\"{}\"}}\n", head.trim()),
+        )
+        .unwrap();
+        for (archive, members) in [
+            ("untracked.tgz", untracked),
+            ("agent-state.tgz", agent_state),
+        ] {
+            if members.is_empty() {
+                continue;
+            }
+            let stage = at.join(format!("{archive}.stage"));
+            for (rel, body) in members {
+                let p = stage.join(rel);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, body).unwrap();
+            }
+            let names: Vec<&str> = members.iter().map(|(rel, _)| *rel).collect();
+            let ok = Command::new("tar")
+                .arg("-C")
+                .arg(&stage)
+                .arg("-czf")
+                .arg(at.join(archive))
+                .args(&names)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "could not build {archive}");
+            fs::remove_dir_all(&stage).unwrap();
+        }
+    }
+
+    impl KitBox {
+        /// The kit, as [`KitBox::start`] runs it, with the box's host-only state directory named
+        /// (or not) and the launch spec asking for a handoff from `dir`; the outcome is returned
+        /// rather than asserted, because refusing is what some of these runs are for.
+        fn start_handoff(&self, dir: &str, state: Option<&Path>) -> std::process::Output {
+            let branch = self.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+            fs::write(
+                self.store.join("skein/launch/web-main.json"),
+                serde_json::json!({
+                    "agent": "claude",
+                    "branch": branch.trim(),
+                    "handoff": {"source": "web-old", "dir": dir},
+                })
+                .to_string(),
+            )
+            .unwrap();
+            // Through `box_shell`, because the kit runs the store's scripts in turn and must not
+            // find anything of the machine running the suite (SKEIN-1229).
+            let mut kit = box_shell(&self.dir);
+            kit.arg(self.root.join(".skein/skein-startup.sh"))
+                .env("HOME", &self.home)
+                .env("XDG_CONFIG_HOME", self.home.join(".config"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("SKEIN_HOME", self.dir.join("skein-home"))
+                .env("SKEIN_FLEET_ROOT", &self.root)
+                .env("SKEIN_PROVISION", "1")
+                .env("SKEIN_BOX", "web-main")
+                .env("SKEIN_STORE", &self.store)
+                .env("WORKSPACE_DIR", &self.tree)
+                .env("SKEIN_STARTUP_MARKERS", self.dir.join("markers"))
+                .env_remove("SKEIN_STATE")
+                .stdin(std::process::Stdio::null());
+            if let Some(state) = state {
+                kit.env("SKEIN_STATE", state);
+            }
+            kit.output().unwrap()
+        }
+    }
+
+    /// **A takeover's snapshot is restored only from the box's own host-only state directory**
+    /// (SKEIN-1258). The repo's store is writable by every box of the repo, so a snapshot there is
+    /// whatever a box made of it before the kit ran; `$SKEIN_STATE` is bound read-only into this box
+    /// and no other.
+    ///
+    /// What would make it fail: the kit accepting `skein/handoff-snapshots/…` in the store again
+    /// (the first run succeeds and restores the store's file); the kit restoring without
+    /// `$SKEIN_STATE` (the second run succeeds); the kit no longer restoring from the state
+    /// directory at all (the last run leaves `notes.txt` absent).
+    #[test]
+    fn a_handoff_is_restored_only_from_the_boxs_own_host_only_state_directory() {
+        if !have_jq() {
+            return skip(
+                "no jq here, and the kit reads the handoff out of the launch spec with jq",
+            );
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &skein_home);
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+
+        // The old place: the repo's store. Complete and well-formed, and still refused.
+        handoff_snapshot(
+            &kit,
+            &kit.store.join("skein/handoff-snapshots/web-main/r1"),
+            &[("notes.txt", "from the store\n")],
+            &[],
+        );
+        let out = kit.start_handoff("skein/handoff-snapshots/web-main/r1", Some(&state));
+        assert!(
+            !out.status.success(),
+            "a snapshot in the store must be refused: {out:?}"
+        );
+        assert!(!kit.tree.join("notes.txt").exists());
+
+        // The right place, but the kit was not told where this box's state is.
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[("notes.txt", "from the host\n")],
+            &[],
+        );
+        let out = kit.start_handoff("handoff/r1", None);
+        assert!(!out.status.success(), "no SKEIN_STATE, no restore: {out:?}");
+        assert!(!kit.tree.join("notes.txt").exists());
+
+        // A spec that tries to climb out of the state directory.
+        let out = kit.start_handoff("handoff/../../web-main/handoff/r1", Some(&state));
+        assert!(!out.status.success(), "{out:?}");
+
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
+            "from the host\n"
+        );
+    }
+
+    /// **An archive in a snapshot is listed before it is opened, and one carrying more than it may
+    /// is refused whole** (SKEIN-1258). The untracked-files archive may not reach under `.git`;
+    /// the agent-state archive may hold only the paths `fleet::agent_state_tar` names.
+    ///
+    /// What would make it fail: `archive_members_ok` returning success for everything (the hook
+    /// lands under `.git/hooks`, or `.bashrc` lands in `$HOME`).
+    #[test]
+    fn a_handoff_archive_carrying_more_than_it_may_is_refused_whole() {
+        if !have_jq() {
+            return skip(
+                "no jq here, and the kit reads the handoff out of the launch spec with jq",
+            );
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &skein_home);
+
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[
+                ("notes.txt", "work\n"),
+                (".git/hooks/post-checkout", "#!/bin/sh\n"),
+            ],
+            &[],
+        );
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(
+            !out.status.success(),
+            "an archive reaching under .git must be refused: {out:?}"
+        );
+        assert!(!kit.tree.join(".git/hooks/post-checkout").exists());
+        assert!(
+            !kit.tree.join("notes.txt").exists(),
+            "refused whole, not member by member"
+        );
+
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[("notes.txt", "work\n")],
+            &[(".claude/todos/t.json", "[]\n"), (".bashrc", "echo hi\n")],
+        );
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(
+            out.status.success(),
+            "the tree is intact, so the start goes on: {out:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
+            "work\n"
+        );
+        assert!(
+            !kit.home.join(".bashrc").exists(),
+            "only the named agent state may be restored"
+        );
+        assert!(
+            !kit.home.join(".claude/todos/t.json").exists(),
+            "refused whole"
+        );
+
+        // And the archive it should be, restored.
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        handoff_snapshot(
+            &kit,
+            &state.join("handoff/r1"),
+            &[("notes.txt", "work\n")],
+            &[(".claude/todos/t.json", "[]\n"), (".claude.json", "{}\n")],
+        );
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_to_string(kit.home.join(".claude/todos/t.json")).unwrap(),
+            "[]\n"
+        );
     }
 
     /// **A repo that tracks `.claude/settings.json` stays clean when a box starts in it, and skein's

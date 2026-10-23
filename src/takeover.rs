@@ -3,7 +3,9 @@
 //! Not a conversion. The source box is snapshotted and left alone, and a *new* single-runtime box
 //! is created from that snapshot — so a takeover that goes wrong costs a box, never the work. The
 //! snapshot is immutable by construction: it is streamed out of the source as a file, and nothing
-//! here writes back into the box it came from.
+//! here writes back into the box it came from. It lands in the TARGET's host-only state directory,
+//! never the repo's store: every box of the repo can write the store, the source box among them,
+//! and it keeps running while the replacement starts (SKEIN-1258).
 //!
 //! What crosses the boundary is deliberately narrow. The repository bundle and the worktree carry
 //! the code; a handoff brief carries what the agent was doing; the shared agent context is merged
@@ -426,8 +428,11 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         std::process::id()
     );
-    let relative = format!("skein/handoff-snapshots/{target}/{run}");
-    let snapshot = Path::new(&repo.store).join(&relative);
+    // Relative to the target's state directory, which is the form the launch spec carries and the
+    // kit validates: it restores only `handoff/<run>` under `$SKEIN_STATE`, which the launcher
+    // binds read-only into the target and into no other box.
+    let relative = format!("handoff/{run}");
+    let snapshot = Path::new(&crate::fleet::box_state(&target)).join(&relative);
     fs::create_dir_all(&snapshot).map_err(|e| format!("mkdir {}: {e}", snapshot.display()))?;
     let guest = format!("/tmp/skein-handoff-{}-{seq}", std::process::id());
     let export = runtime_adapter(&source_runtime)

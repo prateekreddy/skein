@@ -127,7 +127,8 @@ fi
 
 # --- surface gitignored shared paths from the repo's source tree ---------------------------------
 # A clone carries only TRACKED files, so gitignored ones the project needs (CLAUDE.md, .env, …) are
-# absent. Each non-comment line of <store>/shared-paths.txt is a repo-relative path (file or dir),
+# absent. Each non-comment line of <store>/shared-paths.txt is a repo-relative FILE path (a
+# directory is refused, and so is a path through a hidden directory: see the shape rule below),
 # optionally followed by `rw`, to surface into the clone. Repo-agnostic: the manifest is the
 # project's own list. Surfaced paths are added to the clone's .git/info/exclude so a careless
 # `git add -A` can't stage a host-absolute symlink (the tracked .gitignore is never touched).
@@ -152,12 +153,88 @@ if [ -f "$manifest" ]; then
   }
   exclude_path ".claude"                   # the store is surfaced by the kit, not this manifest
   rw_root="$store/shared-rw"
+  # **What may be surfaced is decided by its shape, and anything else is refused (SKEIN-1256).**
+  # The manifest and shared-rw/ both live in the store, which every box of the repo can write, so an
+  # entry is another box's say over where a file lands in THIS box's checkout — and where a file
+  # lands decides whether a tool runs it: under `.git/` it is a hook, under a dot-directory it is
+  # some tool's configuration. So an entry is surfaced only when it is a relative path with no `..`
+  # whose directories are all ordinary (none hidden, none `.git`), and only as a regular file — not
+  # a link, a FIFO or a directory — that really sits inside the directory it is linked from. Every
+  # refusal is said on stderr, and a link an earlier start made for an entry that no longer passes
+  # is removed.
+  shared_path_shape_ok() {                 # $1 = entry; 0 when its SHAPE may be surfaced
+    local rest="$1" comp
+    case "$rest" in "" | /* | */) return 1 ;; esac
+    while :; do
+      comp="${rest%%/*}"
+      case "$comp" in "" | . | .. | .git) return 1 ;; esac
+      [ "$comp" = "$rest" ] && return 0    # the file's own name, which may be dotted (`.env`)
+      case "$comp" in .*) return 1 ;; esac # a directory on the way to it may not be hidden
+      rest="${rest#*/}"
+    done
+  }
+  # A regular file, not a link, whose real directory is $2 or under it. `cd -P` resolves every link
+  # on the way, so a directory swapped for a link to somewhere else is caught here.
+  file_is_inside() {                       # $1 = file, $2 = the directory it must sit inside
+    local real base
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    real="$(cd -P "$(dirname "$1")" 2>/dev/null && pwd)" || return 1
+    base="$(cd -P "$2" 2>/dev/null && pwd)" || return 1
+    case "$real/" in "$base"/*) return 0 ;; esac
+    return 1
+  }
+  # **The named exceptions: directories skein itself shares through this list, and nothing else.**
+  # Fixed here, in skein's read-only copy of this script, and never read from the store, which any
+  # box can write. `.codex/memory` is Codex's memory directory. Claude's needs no entry: it reaches
+  # the store through the memory bridge below, not through the checkout. An excepted entry must be
+  # a real directory inside shared-rw/ (not a link), its link must land inside the checkout, and
+  # nothing beneath it may be anything but a regular file or a directory — so no link in it leads
+  # out of shared-rw/. That is checked at each start: a link a sibling plants in the directory
+  # after this box has started is not caught until the next one, the same exposure the store's own
+  # memory/ has (SKEIN-1308).
+  readonly shared_dir_exceptions=".codex/memory"
+  is_excepted_dir() {                      # $1 = entry; 0 when it is one of the named exceptions
+    case " $shared_dir_exceptions " in *" $1 "*) return 0 ;; esac
+    return 1
+  }
+  # A real directory, not a link, whose real path is $2 or under it, holding only regular files and
+  # directories. `find` does not follow links, so a link anywhere beneath it is found, not entered.
+  dir_is_inside() {                        # $1 = directory, $2 = the directory it must sit inside
+    local real base
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    real="$(cd -P "$1" 2>/dev/null && pwd)" || return 1
+    base="$(cd -P "$2" 2>/dev/null && pwd)" || return 1
+    case "$real/" in "$base"/*) ;; *) return 1 ;; esac
+    [ -z "$(find "$1" ! -type f ! -type d -print -quit 2>/dev/null)" ]
+  }
+  entry_is_inside() {                      # $1 = entry, $2 = its copy, $3 = where it must sit
+    if is_excepted_dir "$1"; then dir_is_inside "$2" "$3"; else file_is_inside "$2" "$3"; fi
+  }
+  # Only a link pointing exactly where this loop would have pointed it is removed, so nothing a
+  # person made by hand is touched.
+  unplant() {                              # $1 = entry
+    local d="$root/$1"
+    [ -L "$d" ] || return 0
+    case "$(readlink "$d")" in
+      "$rw_root/$1" | "${source_tree:-/nonexistent}/$1")
+        rm -f "$d" && echo "[skein-bootstrap] removed the link an earlier start made for '$1'" >&2 ;;
+    esac
+  }
+  refuse() {                               # $1 = entry, $2 = why
+    echo "[skein-bootstrap] shared-paths.txt: not surfacing '$1': $2" >&2
+    unplant "$1"
+  }
   while IFS= read -r line; do
     line="${line%%#*}"
     p="$(printf '%s' "$line" | awk '{print $1}')"
     flag="$(printf '%s' "$line" | awk '{print $2}')"
     [ -z "$p" ] && continue
+    if ! is_excepted_dir "$p" && ! shared_path_shape_ok "$p"; then
+      refuse "$p" "only a relative path with no '..' and no hidden or .git directory in it can be surfaced"
+      continue
+    fi
     dst="$root/$p"
+    src=""
     # Outside --clone mode the source tree is the repo's real work tree, and a box that can see it
     # at all sees it READ-WRITE. An RO entry
     # symlinked straight at it would let a box silently edit the host's own checkout, which the
@@ -170,33 +247,42 @@ if [ -f "$manifest" ]; then
       # the box against the read-only `$source_tree` bind — nothing on the host seeds `shared-rw/`
       # any more. Idempotent, so a settled store just skips it, and it does nothing at all when
       # there is no source tree to read.
-      if [ ! -e "$rwcopy" ] && [ -d "$source_tree" ]; then
+      if [ ! -e "$rwcopy" ] && [ ! -L "$rwcopy" ] && [ -d "$source_tree" ]; then
         mkdir -p "$(dirname "$rwcopy")" 2>/dev/null || true
-        [ -e "$source_tree/$p" ] && cp -a "$source_tree/$p" "$rwcopy" 2>/dev/null
+        entry_is_inside "$p" "$source_tree/$p" "$source_tree" && cp -a "$source_tree/$p" "$rwcopy" 2>/dev/null
       fi
-      [ -e "$rwcopy" ] || continue
-      # self-heal: an existing symlink from before this box was RW-flagged pointed at the RO source.
-      if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$rwcopy" ]; then
-        rm -f "$dst"
+      [ -e "$rwcopy" ] || [ -L "$rwcopy" ] || continue
+      if ! entry_is_inside "$p" "$rwcopy" "$rw_root"; then
+        refuse "$p" "its copy in shared-rw/ is not a regular file (or, for a named exception, a directory of only files and directories) inside shared-rw/"
+        continue
       fi
-      if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
-        mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-        ln -s "$rwcopy" "$dst" 2>/dev/null
-      fi
+      target="$rwcopy"
     else
       src="$source_tree/$p"
-      [ -e "$src" ] || continue
-      # self-heal: an existing symlink from before this path was RO-flagged pointed at the rw copy.
-      if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$src" ]; then
-        rm -f "$dst"
+      [ -e "$src" ] || [ -L "$src" ] || continue
+      if ! entry_is_inside "$p" "$src" "$source_tree"; then
+        refuse "$p" "it is not a regular file inside the source tree"
+        continue
       fi
-      if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
-        mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-        if ln -s "$src" "$dst" 2>/dev/null; then
-          # CLAUDE.md is read into context at session START — before this hook runs — so on the run
-          # that first links it, print it so this fresh clone still gets the project direction.
-          [ "$p" = "CLAUDE.md" ] && { echo "[skein-bootstrap] project direction (CLAUDE.md, freshly linked):"; echo "----- BEGIN CLAUDE.md -----"; cat "$src" 2>/dev/null; echo "----- END CLAUDE.md -----"; }
-        fi
+      target="$src"
+    fi
+    # self-heal: an existing symlink made before this entry changed shape (RO ↔ `rw`) points at
+    # the other copy.
+    if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$target" ]; then
+      rm -f "$dst"
+    fi
+    if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+      mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+      # The link must land in this checkout: a tracked link on the way would carry it elsewhere.
+      case "$(cd -P "$(dirname "$dst")" 2>/dev/null && pwd)/" in
+        "$(cd -P "$root" 2>/dev/null && pwd)"/*) ;;
+        *) refuse "$p" "a link on the way to it leaves this checkout"; continue ;;
+      esac
+      if ln -s "$target" "$dst" 2>/dev/null && [ "$target" = "${src:-}" ] && [ "$p" = "CLAUDE.md" ]; then
+        # CLAUDE.md is read into context at session START — before this hook runs — so on the run
+        # that first links it, print it so this fresh clone still gets the project direction.
+        echo "[skein-bootstrap] project direction (CLAUDE.md, freshly linked):"
+        echo "----- BEGIN CLAUDE.md -----"; cat "$src" 2>/dev/null; echo "----- END CLAUDE.md -----"
       fi
     fi
     exclude_path "$p"                       # idempotent; self-heals clones linked before this ran

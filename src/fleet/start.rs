@@ -369,21 +369,26 @@ fn setup_wait_script(markers: &str, wait_secs: u64) -> String {
 /// most of them fail *quietly*: a box whose store never got linked looks perfectly healthy and
 /// simply never reports. Two implementations of that would be two sets of ways to be silently dark.
 ///
-/// Four env vars carry what the script cannot work out for itself in a shared sandbox, because
+/// Five env vars carry what the script cannot work out for itself in a shared sandbox, because
 /// every signal it normally reads there belongs to the sandbox rather than to the box:
 ///   * `SKEIN_PROVISION` — say so explicitly, since `/run/sandbox/source` does not exist here;
 ///   * `SKEIN_BOX`       — the identity, or every box reads one launch spec and one boot report;
 ///   * `SKEIN_STORE`     — the repo's store, a directory inside the mounted workspace rather than
 ///     a mount of its own, so the script's scan would find nothing;
-///   * `WORKSPACE_DIR`   — the box's checkout, which is not this process's cwd.
+///   * `WORKSPACE_DIR`   — the box's checkout, which is not this process's cwd;
+///   * `SKEIN_STATE`     — the box's host-only state directory, bound read-only into it and into
+///     no other box, which is the one place the kit will restore a takeover's snapshot from
+///     (SKEIN-1258). The repo's store is writable by every box of the repo, so a snapshot there
+///     was whatever a box had made of it by the time the kit ran.
 ///
 /// **Must run inside the box's namespace**, not the sandbox: it writes `~/.codex`, `~/.claude` and
 /// `~/shared`, and outside the namespace those are the sandbox's, shared by every box.
 pub fn provision_script(name: &str, store: &str) -> String {
     format!(
         "SKEIN_PROVISION=1 SKEIN_BOX={name_q} SKEIN_STORE={store_q} WORKSPACE_DIR={tree_q} \
-         bash {script_q}",
+         SKEIN_STATE={state_q} bash {script_q}",
         name_q = sh_quote(name),
+        state_q = sh_quote(&box_state(name)),
         store_q = sh_quote(store),
         tree_q = sh_quote(&format!("{}/tree", box_root(name))),
         script_q = sh_quote(&box_provision_path()),
@@ -1568,6 +1573,23 @@ mod tests {
 
     // Every argument is quoted: a branch like `feat/auth` or a name with a space must reach the
     // launcher whole, and the launcher does its own refusing from there.
+    /// The kit restores a takeover's snapshot only from the box's host-only state directory, and
+    /// it learns where that is from this script alone (SKEIN-1258). Fails if provisioning stops
+    /// passing `SKEIN_STATE`, or passes anything other than the box's own state directory.
+    #[test]
+    fn provisioning_tells_the_kit_where_the_boxs_host_only_state_is() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", "/boxes");
+        let script = provision_script("web-main", "/repos/web/store/.claude");
+        assert!(
+            script.contains(&format!("SKEIN_STATE='{}' ", box_state("web-main"))),
+            "{script}"
+        );
+    }
+
     #[test]
     fn starting_a_box_hands_the_launcher_quoted_arguments() {
         // Takes the env lock and pins its own SKEIN_HOME: `session_script` reads the box's cgroup

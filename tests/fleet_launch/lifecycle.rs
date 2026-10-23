@@ -571,7 +571,8 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let relative = snapshot_box(BOX, &store.to_string_lossy(), "resize-run").expect("snapshot");
     assert!(
         relative.starts_with("skein/handoff-snapshots/"),
-        "the provisioning script refuses any path outside that prefix: {relative}"
+        "snapshot_box writes into the store, which the kit no longer restores from (SKEIN-1258, \
+         SKEIN-1289): {relative}"
     );
     let snap = store.join(&relative);
     for artifact in [
