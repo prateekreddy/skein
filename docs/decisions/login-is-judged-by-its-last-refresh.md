@@ -18,7 +18,7 @@ copy two boxes were already logged out of.
 
 `expiresAt` is the one usable signal. An access token can only be obtained by successfully using
 the refresh token, so a fresh `expiresAt` reports a refresh that happened, where
-`refreshTokenExpiresAt` is a claim about the future (`src/fleet/login.rs:290-294`). Evidence about
+`refreshTokenExpiresAt` is a claim about the future (`src/fleet/login.rs:362-366`). Evidence about
 the past beats a promise, the same distinction as
 [propagation-is-not-reporting.md](propagation-is-not-reporting.md).
 
@@ -35,11 +35,11 @@ hash reads a healthy fleet as orphaned.
 
 **Enforced at.**
 
-- `src/fleet/login.rs:282` — the host's election, in the heal script, with the two fields' jobs.
+- `src/fleet/login.rs:354` — the host's election, in the heal script, with the two fields' jobs.
 - `src/box-session.sh:1252` — `login_life`, the box's election at session start.
-- `src/fleet/login.rs:1255` — `the_two_elections_agree_on_which_login_is_best`, which asserts that
+- `src/fleet/login.rs:1325` — `the_two_elections_agree_on_which_login_is_best`, which asserts that
   they agree rather than what they answer.
 
 **Not yet enforced.** Reporting still judges a login by the claim: `login_state` reads
-`refreshTokenExpiresAt` (`src/fleet/login.rs:162`), so a fleet of orphaned copies can still report
+`refreshTokenExpiresAt` (`src/fleet/login.rs:234`), so a fleet of orphaned copies can still report
 as signed in.
