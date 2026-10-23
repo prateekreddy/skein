@@ -209,8 +209,8 @@ pub(super) fn git_scope_health() -> HealthCheck {
              access to its own repo"
         )),
         NotConfigured => HealthCheck::satisfied(format!(
-            "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
-             per-repo token to scope them"
+            "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App, or a write \
+             token on each repo's card under Settings → Repositories, to scope them"
         )),
         Unusable { why, refused } => HealthCheck::unsatisfied(
             format!(
@@ -220,7 +220,7 @@ pub(super) fn git_scope_health() -> HealthCheck {
                     false => format!(" Stored tokens refused — {}.", refused.join("; ")),
                 }
             ),
-            "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use",
+            "Settings → GitHub & keys → add a GitHub App, or a write token on the card of each repo in use under Settings → Repositories",
         ),
         Active { app, tokens } => HealthCheck::satisfied(format!(
             "on — a box's own token writes only its own repo{}.{}{}",
@@ -531,5 +531,38 @@ mod tests {
         let stale = sbx_health(&Some(Vec::new()), true);
         assert_eq!(stale.level, Level::Unknown, "{}", stale.detail);
         assert!(!stale.is_fault(), "{}", stale.detail);
+    }
+
+    /// **The scope line names a repo's write token by its one name and its one home** (SKEIN-1319).
+    /// SKEIN-1269 made it "write token", entered on the repo's card under Settings → Repositories;
+    /// this line, shown in the health banner and Settings → Diagnostics, still said "per-repo
+    /// token" with no place to put one.
+    ///
+    /// What would make it fail: either arm's old wording put back ("per-repo token", and no
+    /// Settings → Repositories), in the detail of a fresh fleet or the fix of one where an App was
+    /// tried and cannot work.
+    #[test]
+    fn the_scope_line_names_the_write_token_and_where_it_goes() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let mut config = crate::config::load_config();
+        config.scope_git_to_repo = true;
+        crate::config::save_config(&config).unwrap();
+        let fresh = git_scope_health();
+        config.github_app_id = "12345".into();
+        crate::config::save_config(&config).unwrap();
+        let broken = git_scope_health();
+        assert_eq!(broken.level, Level::Unsatisfied, "{}", broken.detail);
+
+        for words in [&fresh.detail, &broken.fix] {
+            assert!(!words.contains("per-repo token"), "the old name: {words}");
+            assert!(
+                words.contains("write token") && words.contains("Settings → Repositories"),
+                "no write token, or nowhere to put one: {words}"
+            );
+        }
     }
 }

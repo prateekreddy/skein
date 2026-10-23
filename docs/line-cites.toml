@@ -566,7 +566,7 @@ window = "skein::gitgate::BoxCredential::None => {\u000bprintln!(\u000b\"{WARN} 
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein.rs:929"]
-line = "println!(\" {DIM}Settings → GitHub & keys: a GitHub App, or a per-repo token. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}\");"
+line = "println!(\" {DIM}Settings → GitHub & keys: a GitHub App, or a write token on each repo's card under Settings → Repositories. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}\");"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein.rs:944"]
