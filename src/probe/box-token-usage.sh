@@ -10,7 +10,7 @@
 # cache_read_input_tokens, cache_creation_input_tokens} and `.message.content` carries tool_use
 # blocks ({type:"tool_use", name:...}). A single turn can include more than one assistant entry
 # (tool-call round trips), so this sums/counts every NEW assistant entry appended since the last
-# Stop, tracked via a per-vmid line-count offset (same idea as the mailbox's seenBy: never re-read
+# Stop, tracked via a per-transcript line-count offset (same idea as the mailbox's seenBy: never re-read
 # what's already been accounted for). Scoped to the MAIN transcript only — sub-agent token/tool
 # activity lives in separate transcript files and isn't aggregated here (a known gap, not silent: a
 # turn's logged total is a floor, not the whole cost, whenever sub-agents ran).
@@ -47,12 +47,35 @@ transcript="$(printf '%s' "$payload" | jq -r '.transcript_path // ""' 2>/dev/nul
 dir="$store/telemetry"
 off_dir="$dir/.offsets"
 mkdir -p "$off_dir" 2>/dev/null || exit 0
-off_file="$off_dir/$vmid"
+# One offset per TRANSCRIPT, not per box (SKEIN-1282). Every new session and every /clear starts a
+# new transcript file, so a single per-box count made the new file read as "nothing new" until it
+# outgrew the old one, and then skipped its first lines for good; two sessions in one box also
+# overwrote each other's count. The key is a checksum of the path, since the path itself is not a
+# file name.
+key="$(printf '%s' "$transcript" | cksum 2>/dev/null | cut -d' ' -f1)"
+[ -n "$key" ] || exit 0
+off_file="$off_dir/$vmid.$key"
+legacy_off="$off_dir/$vmid"
 
 total_lines=$(wc -l < "$transcript" 2>/dev/null || echo 0)
 case "$total_lines" in '' | *[!0-9]*) total_lines=0 ;; esac
-prev=$(cat "$off_file" 2>/dev/null || echo 0)
+if [ -f "$off_file" ]; then
+  prev=$(cat "$off_file" 2>/dev/null || echo 0)
+elif [ -f "$legacy_off" ]; then
+  # A box upgraded mid-session: the old per-box count most likely belongs to this transcript, so
+  # take it once rather than re-logging the whole session, and retire it.
+  prev=$(cat "$legacy_off" 2>/dev/null || echo 0)
+  rm -f "$legacy_off" 2>/dev/null || true
+else
+  prev=0
+fi
 case "$prev" in '' | *[!0-9]*) prev=0 ;; esac
+if [ "$total_lines" -lt "$prev" ]; then
+  # The transcript got shorter, so it was rewritten in place: start counting from where it is now
+  # rather than waiting, silently, for it to outgrow a count that no longer describes it.
+  printf '%s' "$total_lines" > "$off_file" 2>/dev/null || true
+  exit 0
+fi
 [ "$total_lines" -gt "$prev" ] || exit 0
 
 # Wall-clock turn duration, from the UserPromptSubmit-side marker (box-status.sh's mark_turn_start).

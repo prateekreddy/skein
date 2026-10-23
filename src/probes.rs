@@ -2698,7 +2698,7 @@ mod tests {
         // box-token-usage.sh finds its store from the checkout's `.claude/skein` link (box-self.sh),
         // so this is a checkout linked the way the kit links one, not the store's own parent.
         let project_dir = checkout_linked_to(&store);
-        let run = || -> std::process::Output {
+        let run_on = |transcript: &Path| -> std::process::Output {
             use std::io::Write as _;
             let mut child = box_shell(&home)
                 .arg(&script)
@@ -2720,6 +2720,7 @@ mod tests {
             .unwrap();
             child.wait_with_output().expect("run box-token-usage.sh")
         };
+        let run = || run_on(&transcript);
 
         assert!(run().status.success());
         let log = store.join("telemetry").join("boxA.jsonl");
@@ -2771,6 +2772,30 @@ mod tests {
             entries2[1]["tools"]["Read"], 2,
             "counts across both assistant entries"
         );
+
+        // A new session (or /clear) writes a NEW transcript, shorter than the old one. Its first
+        // turn is logged — with one count per box it read as "nothing new" until it outgrew the
+        // old transcript's four lines, then skipped them (SKEIN-1282).
+        let second = home.join("transcript-2.jsonl");
+        fs::write(
+            &second,
+            concat!(
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":9,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        assert!(run_on(&second).status.success());
+        let entries3: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries3.len(), 3, "a new session's first turn is logged");
+        assert_eq!(entries3[2]["input"], 9);
+        // And the first session, still open beside it, is not re-logged from the top.
+        assert!(run().status.success());
+        let lines_after: usize = fs::read_to_string(&log).unwrap().lines().count();
+        assert_eq!(lines_after, 3, "the old transcript keeps its own count");
         std::env::remove_var("SKEIN_HOME");
     }
 
