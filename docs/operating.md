@@ -390,8 +390,9 @@ on the proxy, so it still reaches GitHub as the account.) `skein doctor` also ca
 line: if the sandbox's egress policy blocks GitHub, the direct path cannot connect, and it prints the
 one `sbx policy allow network` command that clears it rather than silently falling back to the proxy.
 
-Prefer not to run an App? Store a fine-grained PAT per repository under **Settings → GitHub & keys →
-Without a GitHub App** (or on a repo's own card under **Repositories**). It is folded away because it
+Prefer not to run an App? Store a **write token** — a fine-grained GitHub token — on each repository's
+own card under **Settings → Repositories**; **Settings → GitHub & keys → Without a GitHub App** lists
+every stored one and takes one for a repository with no card. It is folded away because it
 is the path that asks for more than one credential — the App asks for one key and derives every token
 from it. One repository per token, enforced when stored *and* when used — a token covering three
 repos is write access to three repos for whichever box receives it, because the credential helper

@@ -533,7 +533,7 @@ function repoTokenRow(r) {
   // A <div>, not a <label>: a label hands a click on its text to its first control, and here that
   // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
   return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
-    + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
+    + `<span class="desc">a fine-grained GitHub token covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
     + `<div class="set-cred">${state}</div>${checked}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
@@ -954,7 +954,7 @@ function firstRunHtml(foreignN = 0) {
     // that discovers that from a failed push an hour later is the outcome this step exists to prevent.
     { done: !!h.git_credential,
       label: h.git_credential ? `boxes can push (${h.git_credential})` : "choose how boxes push",
-      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a per-repo token, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
+      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a write token on each repo's card, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
   ];
   // **The warden is information, not a step** (SKEIN-1184, `docs/decisions/warden-or-prompt.md`).
   // It used to gate "ready" on the reasoning that a first Launch created the fleet through it; a
@@ -1387,8 +1387,8 @@ function arUpdateDerived() {
     return;
   }
   hint.innerHTML = noSlug
-    ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
-    : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none.`;
+    ? "a fine-grained GitHub token for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
+    : `a fine-grained GitHub token covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none. Later, it is changed on the repo's card under Settings → Repositories.`;
 }
 // The source the non-GitHub warning was last shown for: pressing Add again on the same source is
 // the "anyway" (SKEIN-812). Cleared when the dialog opens, so a new visit asks again.

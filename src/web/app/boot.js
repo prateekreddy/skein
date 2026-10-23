@@ -1003,7 +1003,7 @@ const UPDATE_WORDS = {
   // exported $GH_TOKEN and for the host's `gh` login, which are renewed where they were set.
   tokenRefused: source => ({
     env: "GitHub refused the token in $GH_TOKEN, so the check asked without it. Set a new one where skein-server gets its environment (for a fleet: sbx secret set github --sandbox <fleet> on your host), then restart skein.",
-    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories, or under Settings → GitHub & keys → Repository tokens.",
+    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories.",
     read: "GitHub refused your read token, so the check asked without it. Paste a new one under Settings → GitHub & keys → Your GitHub identity.",
     gh: "GitHub refused the host's gh login, so the check asked without it. Run gh auth login again on the host, then restart skein.",
   })[source] || "your stored GitHub token was refused — replace it under Settings → GitHub & keys",

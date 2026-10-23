@@ -643,6 +643,37 @@ await check("Forget, answered OK, sends the DELETE for that token", async () => 
   }
 });
 
+// ---------- the write token: one name, one home (SKEIN-1269) ----------
+// Fails if the GitHub pane's row for a repo that has a card goes back to being a second editor
+// (its button prefilling the pane's own form), or if the card it sends you to is not opened with
+// the focus in that repo's token field.
+await check("a stored token's row in GitHub & keys sends you to its repo's card", async () => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("github"));
+  await page.waitForSelector('#settings.open #set-gitcreds .set-cred');
+  await page.evaluate(() => { document.getElementById("set-gitalt").open = true; });
+  await page.locator('#set-gitcreds button', { hasText: "on its card" }).click();
+  await page.waitForFunction(() => document.querySelector('.set-pane.on')?.dataset.pane === "repos");
+  const at = await page.evaluate(() => document.activeElement?.getAttribute("data-repotoken"));
+  if (at !== "acme/thing") throw new Error(`the focus is on ${at}`);
+});
+// Fails if any of the old names comes back into the page's words: "repository token", "repo
+// token" or "PAT" (a GitHub prefix inside a placeholder is not a name and is not counted).
+await check("the per-repo token is called a write token, and nothing else, in Settings and Add a repository", async () => {
+  await closeEverything();
+  const words = await page.evaluate(() => {
+    for (const d of document.querySelectorAll("#settings details")) d.open = true;
+    // The page's own words. Diagnostics is the server's health report, drawn as it comes, and its
+    // wording is the server's (captured separately).
+    const set = document.getElementById("settings").cloneNode(true);
+    set.querySelector("#set-diag")?.remove();
+    return set.textContent + " " + document.getElementById("addrepo").textContent;
+  });
+  const old = words.match(/repository tokens?|repo tokens?|\bPATs?\b/gi);
+  if (old) throw new Error(`old names: ${[...new Set(old)].join(", ")}`);
+  if (!/write token/i.test(words)) throw new Error("no \"write token\" either");
+});
+
 // A work-tracking connection with a stored Plane token, stubbed: storing a real one is a POST this
 // suite has no other use for. The DELETE is stubbed too, so a failing check deletes nothing real.
 const conn = { id: "skein-test-conn", label: "test backlog", gateway_url: "https://gateway.invalid/", token_set: true, ready: true, repos: [] };

@@ -753,7 +753,9 @@ function gitCredRow(c) {
       <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
       <span class="cslug">${esc((c.repos && c.repos.length ? c.repos.join(", ") : c.repo) || "?")}</span>
       <span class="cwhy">${why}</span>
-      ${c.shared ? "" : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
+      ${c.shared ? "" : cardFor(c.repo)
+        ? `<button type="button" class="kbtn ghost" onclick="showRepoToken(${esc(JSON.stringify(c.repo))})">${c.has_token ? "Replace" : "Add"} on its card</button>`
+        : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
       <button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>
     </div>`;
 }
@@ -778,7 +780,7 @@ function renderGitState(d) {
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
-  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} repository token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} write token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   if (!d.ready) {
     el.className = "set-state warn";
     // The App's problem is worth naming only when there *is* an App — "no App configured" would be
@@ -792,7 +794,7 @@ function renderGitState(d) {
     // saying nothing: they would go looking for the wrong problem when a push fails.
     el.innerHTML = d.account_token
       ? `<b>Not scoped.</b> Every box holds this account's <code>gh</code> token — whatever it reaches, read and write. `
-        + `Add a GitHub App or a repository token below to narrow that.${half}`
+        + `Add a GitHub App, or a write token on a repo's card, to narrow that.${half}`
       : `<b>No credential chosen.</b> Boxes read public repos anonymously and <b>cannot push anywhere</b>. `
         + `Pick one of the three below — an App is the one that needs no per-repo upkeep.${half}`;
     return;
@@ -823,7 +825,7 @@ function loadGitCreds() {
     const el = document.getElementById("set-gitcreds");
     if (el) {
       el.innerHTML = gitqCreds.length ? gitqCreds.map(gitCredRow).join("")
-        : `<div class="set-desc">None stored. On the App path you need none — it mints a per-repo token on its own. Add one here for a repo the App cannot reach, or if you would rather not run an App at all.</div>`;
+        : `<div class="set-desc">None stored. On the App path you need none — it mints one per push on its own. For a repo the App cannot reach, or if you would rather not run an App, a repo's write token goes on its card under Repositories.</div>`;
     }
     const rp = document.getElementById("set-readpat");
     if (rp) rp.placeholder = gitReadPatSet ? "a token is stored — paste to replace it" : "github_pat_… (read)";
@@ -846,9 +848,9 @@ function loadGitCreds() {
 // a call would actually send. A repository nothing can act on is said as a warning with the fix,
 // because that is the row a verdict or a merge will fail on.
 const IDENTITY_WORDS = {
-  source: { repo: "this repo's token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
+  source: { repo: "this repo's write token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
   row: (reads, writes) => `reads with ${reads} · posts and merges with ${writes}`,
-  cannotAct: "cannot post, merge or label here — store a token for it on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
+  cannotAct: "cannot post, merge or label here — store a write token on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
   noRepos: "No GitHub repositories yet. Each one you add is listed here with the credential skein uses for it.",
 };
 function renderIdentity(identity) {
@@ -887,6 +889,20 @@ function putReadPat(token) {
     .catch(e => notice(failText(e) || "could not store that token"));
 }
 
+// **A repo's write token has one home: its card** (SKEIN-1269). The token had four names and three
+// places to enter it; it is "write token" everywhere now, and this pane — a list of every stored
+// one — sends a repository that has a card to that card rather than being a second editor for it.
+// The form here stays for a repository with no card, which has nowhere else to go.
+const cardFor = slug => (repos || []).find(r => (r.slug || "").toLowerCase() === (slug || "").toLowerCase());
+function showRepoToken(slug) {
+  const r = cardFor(slug);
+  if (!r) return;
+  openRepos.add(r.id);
+  setPane("repos");
+  renderRepoList();
+  const field = document.querySelector(`#set-repos [data-repotoken="${CSS.escape(r.slug)}"]`);
+  if (field) { field.scrollIntoView({ block: "nearest" }); field.focus(); }
+}
 // Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
 // hurry. Retyping the repository to do it invites a typo that stores a *second* credential rather
 // than replacing the first, which then quietly keeps working.
@@ -912,7 +928,7 @@ function loadGitq() {
     // Keyed on `ready` rather than the App alone — someone using only their own tokens is set up.
     if (!d.ready) {
       html += `<div class="note">nothing is scoped yet — every box keeps the credential it already had. `
-        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App or a repository token goes.`
+        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App goes, and each repo's write token is on its card under Settings → Repositories.`
         + `${d.app_id && d.app_problem ? ` <b>${esc(d.app_problem)}</b>` : ""}</div>`;
     }
     html += reqs.length
@@ -928,7 +944,7 @@ function loadGitq() {
     if (d.ready) {
       html += `<div class="note" style="margin-top:10px">Tokens, the GitHub App and the scope switch live in
         <a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a>${
-          creds.length ? ` — ${creds.length} repository token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
+          creds.length ? ` — ${creds.length} write token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
     }
     redrawKeeping(list, html);
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
@@ -1032,7 +1048,7 @@ function decideGitq(key, approve) {
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
   if (sendingNow("gitq", key)) return;
   markSending("gitq", key, true);
-  return fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
+  fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, hours, ...shown }),
   // **A refusal says why, and the row is redrawn either way** (SKEIN-1034). The server answers a

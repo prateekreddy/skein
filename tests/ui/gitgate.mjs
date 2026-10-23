@@ -38,6 +38,9 @@ const source = [
   "gitLast", "renderReviewIdentityNote",
   // The per-repository "Your GitHub identity" rows (SKEIN-1179) and the words they are drawn in.
   "IDENTITY_WORDS", "renderIdentity",
+  // A card with a decision in flight is drawn disabled (SKEIN-1296), a refusal is read by one
+  // helper (SKEIN-1299), and a token row for a repo with a card points at the card (SKEIN-1269).
+  "inFlight", "sendingNow", "markSending", "busyAttr", "sendingNote", "refused", "failText", "cardFor",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -60,6 +63,9 @@ const scope = new Function(`
   let failing = null;
   ${grab("esc")}
   const toast = m => notes.push("toast:" + m);
+  const notice = m => notes.push("notice:" + m);
+  const CSS = { escape: s => s };
+  let repos = [];
   const pushNote = (body, tag) => notes.push({ body, tag });
   const badge = { n: null, title: "" };
   const document = {
@@ -87,6 +93,7 @@ const scope = new Function(`
       return null;
     },
     createElement: () => ({ className: "", textContent: "" }),
+    querySelector: () => null,
   };
   const fetch = (url, opts) => {
     if (opts && opts.method === "POST") {
@@ -128,7 +135,7 @@ const scope = new Function(`
     reset: () => {
       sent.length = 0; notes.length = 0; failing = null;
       payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
-      gitqAnnounced.clear(); gitqPrimed = false; gitqShown.clear();
+      gitqAnnounced.clear(); gitqPrimed = false; gitqShown.clear(); inFlight.clear();
       keep = { checked: false }; hours = { value: "24" }; alertsOn = true;
       fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {}, scrollIntoView: () => {} } };
       form = { plane: { value: "" }, conn: { value: "" }, review: { value: "false" }, token: { value: "" } };
@@ -459,7 +466,7 @@ T.renderGitState({ ready: true, app_ready: false, credentials: [
   { id: "a", repo: "a/b", has_token: true, problem: "" },
   { id: "c", repo: "", has_token: true, problem: "names 2 repositories" },
 ] });
-check("only usable tokens are counted", T.state().innerHTML.includes("1 repository token"), true);
+check("only usable tokens are counted", T.state().innerHTML.includes("1 write token"), true);
 
 // The payload that says there is no App also repaints the "Reviews act as" note (SKEIN-516): with
 // "app" chosen, the note that no App is set up is shown. `loadGitCreds` keeps the payload in
@@ -487,11 +494,11 @@ T.renderIdentity({ viewer: "repo", repos: [
   const rows = T.identityRows();
   const rowOf = slug => (rows.split(`data-identity="${slug}"`)[1] || "").split("</div>")[0];
   check("a repository with its own token reads and acts with it",
-    rowOf("acme/one").includes("reads with this repo&#39;s token · posts and merges with this repo&#39;s token"), true);
+    rowOf("acme/one").includes("reads with this repo&#39;s write token · posts and merges with this repo&#39;s write token"), true);
   check("one with only the read token reads with it and acts with nothing",
     /reads with your read token · posts and merges with nothing/.test(rowOf("acme/two")), true);
   check("and says it cannot post, merge or label, and what to add",
-    /cannot post, merge or label here — store a token for it on its card/.test(rowOf("acme/two")), true);
+    /cannot post, merge or label here — store a write token on its card/.test(rowOf("acme/two")), true);
   check("one covered by the environment names $GH_TOKEN",
     /reads with \$GH_TOKEN · posts and merges with \$GH_TOKEN/.test(rowOf("acme/three")), true);
   check("a repository that can act carries no warning", /cannot post/.test(rowOf("acme/one")), false);
