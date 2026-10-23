@@ -3099,18 +3099,32 @@ if [ -n "$docker_real" ] && [ -f "$docker_real" ]; then
     cat <<'DOCKERSHIM'
 # Find the verb. It is not always $1: `docker -H unix:///…  run` and `docker --context foo run` are
 # ordinary, and both of those options take a separate argument that must not be read as the verb.
+# `stamp_at` is the position of the word the stamps go after.
+#
+# `docker container run` and `docker container create` are the same two commands spelled through
+# the management group, and the verb found here is then `container`. The word after it is the one
+# that says run or create, and the stamps go after that, which is where docker accepts them
+# (SKEIN-1285). Missing it let a box's containers go unlabelled and survive its stop.
 verb=''
+stamp_at=0
 skip=0
+at=0
 for arg in "$@"; do
+  at=$((at + 1))
   if [ "$skip" = 1 ]; then skip=0; continue; fi
+  if [ -n "$verb" ]; then
+    case "$arg" in -*) ;; *) verb="container $arg"; stamp_at=$at; break ;; esac
+    continue
+  fi
   case "$arg" in
     -H | --host | -c | --context | --config | -l | --log-level) skip=1 ;;
     -*) ;;
-    *) verb="$arg"; break ;;
+    container) verb=container ;;
+    *) verb="$arg"; stamp_at=$at; break ;;
   esac
 done
 case "$verb" in
-  run | create) ;;
+  run | create | "container run" | "container create") ;;
   *) exec "$skein_docker" "$@" ;;
 esac
 
@@ -3135,12 +3149,12 @@ while [ "$seen" -lt "$count" ]; do
   arg="$1"
   shift
   set -- "$@" "$arg"
-  if [ "$placed" = 0 ] && [ "$arg" = "$verb" ]; then
+  seen=$((seen + 1))
+  if [ "$placed" = 0 ] && [ "$seen" = "$stamp_at" ]; then
     set -- "$@" --label "skein.box=$skein_box" \
       --cgroup-parent "/skein/containers/$skein_box"
     placed=1
   fi
-  seen=$((seen + 1))
 done
 exec "$skein_docker" "$@"
 DOCKERSHIM
