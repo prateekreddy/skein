@@ -703,7 +703,9 @@ depends_on = ["config", "repos", "util"]
 depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sbx", "tracking", "util", "warden_client"]
 
 [current.sbx]
-depends_on = ["fleet", "place", "registry", "util"]
+# `boxfile` for `branch_at`, which reads `.git` and `HEAD` out of a box's tree, a directory the box
+# writes (SKEIN-1301).
+depends_on = ["boxfile", "fleet", "place", "registry", "util"]
 
 [current.shape]
 # `contracts` and `moduledocs` because it is the join between them — a contract signal is
