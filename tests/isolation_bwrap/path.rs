@@ -381,7 +381,7 @@ fn session_block() -> String {
     let lines: Vec<&str> = src.lines().collect();
     let from = lines
         .iter()
-        .position(|l| *l == "exec bwrap \\")
+        .position(|l| *l == r#"exec "${box_runner[@]}" bwrap \"#)
         .expect("the launcher's final `exec bwrap` moved");
     let block = lines[from..].join("\n");
     for landmark in ["bash -lc", "new-session", "\"${pane_cmd[@]}\""] {
@@ -565,7 +565,7 @@ impl Started {
              export SKEIN_HOME={skein_home} SKEIN_FLEET_ROOT={fleet_root}\n\
              {paths}\n\
              tmp={tmp}\n\
-             exec {{tmp_fd}}<\"$tmp/.\"; tmp_at=\"/proc/$$/fd/$tmp_fd\"; bin_at=''; claude_at=''; codex_at=''\n\
+             exec {{tmp_fd}}<\"$tmp/.\"; tmp_at=\"/proc/$$/fd/$tmp_fd\"; bin_at=''; claude_at=''; codex_at=''; box_runner=()\n\
              tree={tree}\n\
              sock={sock}\n\
              pidfile={pidfile}\n\

@@ -189,9 +189,9 @@ if [ -f "$manifest" ]; then
   # the store through the memory bridge below, not through the checkout. An excepted entry must be
   # a real directory inside shared-rw/ (not a link), its link must land inside the checkout, and
   # nothing beneath it may be anything but a regular file or a directory — so no link in it leads
-  # out of shared-rw/. That is checked at each start: a link a sibling plants in the directory
-  # after this box has started is not caught until the next one, the same exposure the store's own
-  # memory/ has (SKEIN-1308).
+  # out of shared-rw/. That is checked at each start. A link a sibling plants in the directory
+  # after this box has started is not caught here until the next one, and is not followed in the
+  # meantime either: the launcher mounts the whole store `nosymfollow` in the box (SKEIN-1308).
   readonly shared_dir_exceptions=".codex/memory"
   is_excepted_dir() {                      # $1 = entry; 0 when it is one of the named exceptions
     case " $shared_dir_exceptions " in *" $1 "*) return 0 ;; esac

@@ -663,3 +663,76 @@ fn the_login_merge_reads_neither_side_through_a_link() {
         "the merge wrote through the link"
     );
 }
+
+/// **A link another box puts in the repo's shared store is not followed by this box** (SKEIN-1308).
+///
+/// The store is writable by every box of the repo, and its `memory/` and `shared-rw/.codex/memory`
+/// are where the agents keep their memory. Here a link stands in each, leading to a file in this
+/// box's own private home, as a sibling could leave it at any time. The box's pane reads and
+/// appends through both, the way an agent writing a memory note would, and says what happened.
+///
+/// What makes it fail, named before it was written and then done: starting bwrap without the
+/// `nosymfollow` mount (`box_runner=()` left empty). The reads then return the private file and
+/// the appends land in it.
+#[test]
+fn a_link_in_the_shared_store_is_not_followed_in_the_box() {
+    if !can_host_a_box() {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
+        );
+    }
+    let swap = Swap::new(scratch_named("swapstore"), "swapstore-main");
+    let store = swap.dir.join("store");
+    let private = swap.root().join("home/skein-test-private");
+    fs::create_dir_all(private.parent().unwrap()).unwrap();
+    fs::write(&private, DECOY).unwrap();
+    let planted = [
+        store.join("memory/note.md"),
+        store.join("shared-rw/.codex/memory/note.md"),
+    ];
+    for link in &planted {
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        // Where the box will see it: its own home is bound over `$HOME`.
+        symlink(swap.sandbox_home().join("skein-test-private"), link).unwrap();
+    }
+    fs::write(store.join("memory/plain.md"), "a note\n").unwrap();
+
+    let report = swap.root().join("tmp/skein-test-links");
+    let q = |p: &Path| skein::util::sh_quote(p.to_string_lossy().as_ref());
+    let pane = format!(
+        "{{ cat {plain} && echo plain-read; \
+           for l in {a} {b}; do cat \"$l\" && echo followed; echo appended >> \"$l\" || echo refused; done; \
+         }} > /tmp/skein-test-links.part 2>&1; mv /tmp/skein-test-links.part /tmp/skein-test-links; exec sleep 300",
+        plain = q(&store.join("memory/plain.md")),
+        a = q(&planted[0]),
+        b = q(&planted[1]),
+    );
+    let out = swap
+        .launcher(&pane)
+        .output()
+        .expect("bash to run the launcher");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    for _ in 0..50 {
+        if report.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    swap.stop(&out);
+    assert!(out.status.success(), "the box did not start: {stderr}");
+    let said = fs::read_to_string(&report).unwrap_or_else(|_| panic!("the pane never reported:\n{stderr}"));
+
+    assert!(
+        said.contains("plain-read"),
+        "the control: a regular file in the store could not be read from the box:\n{said}"
+    );
+    assert!(
+        !said.contains("followed") && said.matches("refused").count() == 2,
+        "a link in the shared store was followed from inside the box:\n{said}\n{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&private).unwrap(),
+        DECOY,
+        "the box's private file was written through a link in the shared store"
+    );
+}

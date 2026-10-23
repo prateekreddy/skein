@@ -2375,7 +2375,9 @@ if [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] && [ -d "$tree/.git
   fi
 fi
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
-# fleet, and the box has no use for it after this point.
+# fleet, and the box has no use for it after this point. The store's path is kept, as a plain
+# variable, for the mount that refuses links in it just before the box starts (SKEIN-1308).
+shared_store="${SKEIN_BOX_STORE-}"
 unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE
 
 # --- The fleet agent's token is not a box's to hold ----------------------------------------------
@@ -3233,6 +3235,64 @@ if [ -n "$announce" ]; then
   pane_cmd=(sh -c 'printf "\n%s\n\n" "$0"; exec "$@"' "$announce" "$@")
 fi
 
+# --- A link a sibling box puts in the shared store is not followed in this one (SKEIN-1308) -------
+#
+# The repo's store is writable by every box of the repo: its `memory/` is Claude's memory, its
+# `shared-rw/.codex/memory` is Codex's, `shared-home/` is `~/shared`. So a sibling can put a link
+# there at any time, `memory/note.md` leading to `~/.bashrc`, and this box's agent, reading and
+# writing its memory as it always does, reads and writes its own private file through it. The
+# bootstrap's shape check catches one at the next start; this closes it for the life of the box.
+#
+# The store is mounted `nosymfollow` in the box's namespace: a link that resides in it is never
+# followed, whoever made it and whenever (Linux 5.10). A link INTO the store, like the home's
+# memory link or the checkout's `.claude`, lives elsewhere and is followed as before, and so are
+# regular files and directories, which is everything skein puts there. The whole store rather than
+# the two memory directories, because a sibling can rename a directory inside the store away and
+# put a link at its name, and a rename detaches any mount on it in the other boxes; the store
+# itself is the one directory a box cannot rename.
+#
+# bwrap has no option for the flag, so the box is started one namespace deeper: `unshare` makes a
+# user and mount namespace this launcher holds every capability in, the store is bound over itself
+# and remounted `nosymfollow` there (by python, because mount(8) refuses anyone but uid 0 even with
+# the capability), and bwrap is run from inside it with no capabilities left, `setpriv` clearing
+# the ones `--keep-caps` carried. bwrap's own bind of the store copies the flag. `--propagation
+# slave` is what bwrap itself sets, so mounts the sandbox makes later still reach the box.
+box_runner=()
+if [ -n "$shared_store" ] && [ -d "$shared_store" ] && [ ! -L "$shared_store" ]; then
+  nosymfollow_py="$(cat <<'PY'
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+MS_BIND, MS_REMOUNT, MS_REC, MS_NOSYMFOLLOW = 4096, 32, 16384, 256
+# A bind remount sets the mount's flags outright, and one that drops a flag the parent namespace
+# locked (nosuid, nodev, ...) is refused, so every flag the store already has is kept.
+KEEP = {1: 1, 2: 2, 4: 4, 8: 8, 1024: 1024, 2048: 2048, 4096: 1 << 21}
+store = sys.argv[1].encode()
+if libc.mount(store, store, None, MS_BIND | MS_REC, None) != 0:
+    sys.exit(1)
+flags = MS_REMOUNT | MS_BIND | MS_NOSYMFOLLOW
+have = os.statvfs(sys.argv[1]).f_flag
+for st, ms in KEEP.items():
+    if have & st:
+        flags |= ms
+sys.exit(0 if libc.mount(None, store, None, flags, None) == 0 else 1)
+PY
+)"
+  nosymfollow_unsafe="skein: $box follows links in its repo's shared store, so a link another box \
+of the repo puts in memory/ or ~/shared can lead this box's agent into its own private files"
+  if command -v unshare >/dev/null 2>&1 && command -v setpriv >/dev/null 2>&1 \
+    && command -v python3 >/dev/null 2>&1 \
+    && unshare --user --map-current-user --mount --keep-caps -- true 2>/dev/null; then
+    box_runner=(unshare --user --map-current-user --mount --keep-caps --propagation slave --
+      /bin/sh -c 'python3 -I -c "$1" "$2" || printf "%s\n" "$3" >&2; shift 3; exec setpriv --ambient-caps -all --inh-caps -all -- "$@"'
+      skein-store-nosymfollow "$nosymfollow_py" "$shared_store"
+      "$nosymfollow_unsafe (the kernel refused a nosymfollow mount)")
+  else
+    echo "$nosymfollow_unsafe (this sandbox has no unprivileged user namespaces, or no unshare, setpriv or python3)" >&2
+  fi
+  unset nosymfollow_py nosymfollow_unsafe
+fi
+unset shared_store
+
 # The directories held open only for the launcher's own writes are closed rather than inherited by
 # the box; the ones bound by descriptor bwrap closes itself once it has bound them.
 for held in "$bin_at" "$claude_at" "$codex_at"; do
@@ -3242,7 +3302,7 @@ for held in "$bin_at" "$claude_at" "$codex_at"; do
 done
 unset held
 
-exec bwrap \
+exec "${box_runner[@]}" bwrap \
   --dev-bind / / \
   --bind-fd "${tmp_at##*/}" /tmp \
   "${binds[@]}" \
