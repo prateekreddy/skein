@@ -2799,6 +2799,91 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// **A box's stored diff is measured against the branch it was cloned from**, not the first
+    /// of `main`/`master` the box happens to have (SKEIN-1283).
+    ///
+    /// The real path end to end: `fleet::clone_script` clones a repo whose base is `develop` and
+    /// which also has a `master` that `develop` has moved past, the box fetches (so `origin/master`
+    /// exists, as it does in any box that has fetched once), commits one file, and the installed
+    /// `box-diff.sh` runs. What would make it fail: the clone no longer recording its base, or
+    /// `box-diff.sh` no longer putting the recorded base first — either way it measures against
+    /// `origin/master` and counts `develop`'s two files as the box's work.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_box_diff_is_measured_against_the_base_it_was_cloned_from() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = home.join("fleet");
+        fs::create_dir_all(&fleet).unwrap();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_FLEET_ROOT", &fleet);
+        let sh = |script: &str| {
+            let out = box_shell(&home)
+                .arg("-c")
+                .arg(script)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("spawn bash");
+            assert!(
+                out.status.success(),
+                "{script}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        // The remote: `master` with one commit, `develop` two commits past it.
+        let remote = home.join("remote");
+        let remote_q = sh_quote(&remote.to_string_lossy());
+        sh(&format!(
+            "set -e; git init -q -b master {remote_q}; cd {remote_q}; \
+             echo a > a; git add a; git commit -qm a; \
+             git checkout -qb develop; echo d1 > d1; echo d2 > d2; git add d1 d2; \
+             git commit -qm develop"
+        ));
+
+        sh(&crate::fleet::clone_script(
+            "b1",
+            &remote.to_string_lossy(),
+            "develop",
+            "feat/x",
+            "",
+        ));
+        let tree = fleet.join("b1").join("tree");
+        let tree_q = sh_quote(&tree.to_string_lossy());
+        sh(&format!(
+            "set -e; cd {tree_q}; git fetch -q origin; \
+             git rev-parse --verify -q origin/master >/dev/null; \
+             echo mine > mine; git add mine; git commit -qm mine"
+        ));
+
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(tree.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(store.join("skein"), tree.join(".claude/skein")).unwrap();
+        let out = box_shell(&home)
+            .arg(store.join("skein").join("bin").join("box-diff.sh"))
+            .env("SKEIN_BOX", "b1")
+            .env("CLAUDE_PROJECT_DIR", &tree)
+            .output()
+            .expect("run box-diff.sh");
+        assert!(out.status.success());
+        let stat: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.join("diffs").join("b1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stat["files"], 1,
+            "only the box's own file, not develop's two: {stat}"
+        );
+        let commits = fs::read_to_string(store.join("diffs").join("b1.commits")).unwrap();
+        assert_eq!(commits.trim(), "mine", "only the box's own commit");
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// **A freshly scaffolded store's `settings.json` carries no skein hook, and a box still
     /// reports its turn state — through the hooks of either variant of skein's plugin** (SKEIN-1062).
     ///

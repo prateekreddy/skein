@@ -73,6 +73,10 @@ pub(crate) fn diff_base_refs(repo: Option<&crate::repos::Repo>) -> Vec<String> {
 /// so the answer is uncommitted work rather than an unrelated-history diff). Shared by every
 /// question skein asks of a box's git, so the diff pane, the takeover brief's file list and its
 /// commits agree about what "the branch" means.
+///
+/// The branch the box was cloned from, which the clone records as `skein.base`, is tried before
+/// `refs` — the same first rung `box-diff.sh` uses, so the pane skein asks for and the diff the box
+/// stores measure against the same base (SKEIN-1283).
 fn base_script(refs: &[String]) -> String {
     let list = refs
         .iter()
@@ -81,7 +85,8 @@ fn base_script(refs: &[String]) -> String {
         .join(" ");
     format!(
         "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; cd \"$root\" || exit 1; \
-         base=''; for ref in {list}; do \
+         rec=\"$(git config --get skein.base 2>/dev/null)\"; \
+         base=''; for ref in ${{rec:+\"origin/$rec\"}} {list}; do \
            if git rev-parse --verify -q \"$ref\" >/dev/null 2>&1; then base=\"$ref\"; break; fi; \
          done; \
          range=HEAD; \
@@ -378,6 +383,29 @@ mod tests {
         assert_eq!(names.lines().collect::<Vec<_>>(), ["a.txt", "b.txt"]);
         let commits = run(commits_script(&refs));
         assert_eq!(commits.lines().collect::<Vec<_>>(), ["on the branch"]);
+
+        // A box cloned from a base that is neither `main` nor `master` records it, and the host's
+        // questions use it first, as the box's own `box-diff.sh` does (SKEIN-1283): measured
+        // against `main` the branch would also own "on develop" and `c.txt`.
+        git(&["checkout", "-q", "-b", "develop", "main"]);
+        fs::write(dir.join("c.txt"), "three\n").unwrap();
+        git(&["add", "c.txt"]);
+        git(&["commit", "-q", "-m", "on develop"]);
+        git(&["update-ref", "refs/remotes/origin/develop", "develop"]);
+        git(&["checkout", "-q", "-b", "feat2"]);
+        fs::write(dir.join("d.txt"), "four\n").unwrap();
+        git(&["add", "d.txt"]);
+        git(&["commit", "-q", "-m", "on feat2"]);
+        git(&["config", "skein.base", "develop"]);
+        // `a.txt` is still the uncommitted edit from above, carried across the checkouts.
+        assert_eq!(
+            run(names_script(&refs)).lines().collect::<Vec<_>>(),
+            ["a.txt", "d.txt"]
+        );
+        assert_eq!(
+            run(commits_script(&refs)).lines().collect::<Vec<_>>(),
+            ["on feat2"]
+        );
     }
 
     #[test]
