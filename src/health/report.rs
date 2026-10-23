@@ -778,15 +778,17 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         // that can take the sandbox down, since the ceiling is what "keeps one box's runaway build
         // from killing every other box" (`box-session.sh`). Reading "3.0 GiB across all boxes" with
         // no mention that one of them is outside that number is the reassuring half of the truth.
-        memory.level = Level::Unsatisfied;
-        memory.detail.push_str(&format!(
-            ". {} running outside that ceiling entirely: {}",
-            match uncapped_boxes.len() {
-                1 => "One box is".to_string(),
-                n => format!("{n} boxes are"),
-            },
-            uncapped_boxes.join(", ")
-        ));
+        memory.fails_also(
+            ". ",
+            &format!(
+                "{} running outside that ceiling entirely: {}",
+                match uncapped_boxes.len() {
+                    1 => "One box is".to_string(),
+                    n => format!("{n} boxes are"),
+                },
+                uncapped_boxes.join(", ")
+            ),
+        );
         // The two causes need different people. `no-limit-computed` is skein's own plan producing
         // nothing for this box; the other two are the sandbox refusing to delegate cgroups, which no
         // setting here fixes.
@@ -812,11 +814,10 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         };
     }
     if !dark_boxes.is_empty() {
-        probes.level = Level::Unsatisfied;
-        probes.detail.push_str(&format!(
-            "; no signals from running boxes: {}",
-            dark_boxes.join(", ")
-        ));
+        probes.fails_also(
+            "; ",
+            &format!("no signals from running boxes: {}", dark_boxes.join(", ")),
+        );
         // The check may already have carried a fix for a missing probe file; this reason has its
         // own, and a fault must never be left with an empty one.
         probes.fix = format!(
@@ -826,11 +827,13 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         );
     }
     if !misfiled_boxes.is_empty() {
-        probes.level = Level::Unsatisfied;
-        probes.detail.push_str(&format!(
-            "; hook signals filed under the wrong box's name, so they are refused: {}",
-            misfiled_boxes.join(", ")
-        ));
+        probes.fails_also(
+            "; ",
+            &format!(
+                "hook signals filed under the wrong box's name, so they are refused: {}",
+                misfiled_boxes.join(", ")
+            ),
+        );
         // Only when nothing else has already claimed the fix line: a dark box's restart is the
         // more urgent of the two, and a check may carry exactly one recipe.
         if probes.fix.is_empty() || dark_boxes.is_empty() {

@@ -12929,14 +12929,30 @@ function loadHealth() {
     // what to do; the rest stay in the tooltip until there is a diagnostics pane to put them in.
     const counted = new Set(health.counted || []);
     const lead = failed.find(key => counted.has(key));
-    const first = lead ? (health[lead]?.detail || "").split(".")[0] : "";
     // Everything failed that is not the headline — so when no counted check has failed and the
     // banner is up for stale sessions, an uncounted failure is still counted here, not dropped.
     const rest = failed.length - (lead ? 1 : 0);
     const extra = rest ? ` (+${rest} more)` : "";
-    banner.querySelector(".healthgo").textContent = lead
-      ? `${nameOf(lead)}: ${first}${extra}`
-      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} on old probes` : ""}${extra}`;
+    // **The problem first, then the fix** (SKEIN-1298). It read `{check}: {first sentence of
+    // detail}`, and a detail can open with what is fine — "box probes: installed for 3 managed
+    // repos; no signals from …". `problem` is the failing clause alone where the detail has both
+    // (`HealthCheck::fails_also`); a sentence ends at a full stop and a space, so "3.0 GiB" is not
+    // cut in two.
+    const sentence = text => (text || "").split(/\.(?:\s|$)/)[0].trim();
+    const many = (n, one, more) => n === 1 ? one : more;
+    const names = health.dark_boxes || [];
+    banner.querySelector(".healthgo").textContent = lead === "probes" && dark
+      ? `${dark} running ${many(dark, "box sends", "boxes send")} no signals (${names.join(", ")}) — restart ${many(dark, "it", "them")}: \`skein restart ${names[0]}\`.${extra}`
+      : lead
+      ? (() => {
+          const name = nameOf(lead), fix = sentence(health[lead]?.fix);
+          return `${name.charAt(0).toUpperCase()}${name.slice(1)} is failing: ${sentence(health[lead]?.problem || health[lead]?.detail) || "no reason given"}.${fix ? ` To fix: ${fix}.` : ""}${extra}`;
+        })()
+      : stale || dark
+      ? `${[stale && `${stale} ${many(stale, "box runs", "boxes run")} old probes`,
+            dark && (stale ? `${dark} ${many(dark, "sends", "send")} no signals` : `${dark} ${many(dark, "box sends", "boxes send")} no signals`)]
+            .filter(Boolean).join(" and ")} — restart ${many(stale + dark, "it", "them")} to update ${many(stale + dark, "its", "their")} probes.${extra}`
+      : `Something in the environment is failing — open the diagnostics.${extra}`;
     banner.title = [
       ...failed.map(key => `${nameOf(key)}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
       ...unsure.map(key => `${nameOf(key)}: could not be checked — ${health[key]?.detail || "no reason given"}`),

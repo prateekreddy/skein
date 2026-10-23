@@ -59,6 +59,16 @@ pub struct HealthCheck {
     /// sandbox with every box's unpushed work on it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub destructive: bool,
+    /// **The failing part of `detail` alone**, where `detail` also says what is fine (SKEIN-1298).
+    ///
+    /// A check that holds and is then found failing for one more reason keeps both halves in
+    /// `detail` — "installed for 3 managed repos; no signals from running boxes: a, b" — because
+    /// the diagnostics pane and `skein doctor` print the whole diagnosis. The banner has room for
+    /// one clause and must lead with the problem, so the failing clauses are kept here as well,
+    /// by [`HealthCheck::fails_also`]. Empty means `detail` is all problem (or there is none),
+    /// which is every check built faulty by [`HealthCheck::unsatisfied`].
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub problem: String,
 }
 
 impl HealthCheck {
@@ -68,6 +78,7 @@ impl HealthCheck {
             detail: detail.into(),
             fix: String::new(),
             destructive: false,
+            problem: String::new(),
         }
     }
 
@@ -79,6 +90,7 @@ impl HealthCheck {
             detail: detail.into(),
             fix: fix.into(),
             destructive: false,
+            problem: String::new(),
         }
     }
 
@@ -89,7 +101,25 @@ impl HealthCheck {
             detail: detail.into(),
             fix: String::new(),
             destructive: false,
+            problem: String::new(),
         }
+    }
+
+    /// Make this a fault for one more reason: `clause` is added to `detail` after `joined_by`, and
+    /// to [`HealthCheck::problem`], which then holds only what is failing. A check that was
+    /// already a fault brings its whole `detail` into `problem` first, since all of it was the
+    /// problem. The fix is the caller's: a reason added here usually needs its own.
+    pub fn fails_also(&mut self, joined_by: &str, clause: &str) {
+        if self.problem.is_empty() && self.is_fault() {
+            self.problem = self.detail.clone();
+        }
+        self.level = Level::Unsatisfied;
+        self.detail.push_str(joined_by);
+        self.detail.push_str(clause);
+        if !self.problem.is_empty() {
+            self.problem.push_str(joined_by);
+        }
+        self.problem.push_str(clause);
     }
 
     /// Mark the fix as one that destroys something, so nothing drives it.
@@ -131,6 +161,32 @@ mod tests {
             "the package version masquerading as a revision — it is 0.1.0 forever and identifies \
              nothing"
         );
+    }
+
+    /// **A check found failing on top of what holds keeps the failing part apart** (SKEIN-1298).
+    ///
+    /// The banner leads with `problem`; `detail` stays the whole diagnosis for the pane. What would
+    /// make it fail: `fails_also` copying `detail` into `problem` (the banner leads with "installed
+    /// for 3 managed repos" again), or not bringing an existing fault's detail along (a second
+    /// reason would hide the first).
+    #[test]
+    fn a_check_failing_on_top_of_what_holds_keeps_the_failing_part_apart() {
+        let mut probes = HealthCheck::satisfied("installed for 3 managed repos");
+        probes.fails_also("; ", "no signals from running boxes: a, b");
+        assert!(probes.is_fault());
+        assert_eq!(
+            probes.detail,
+            "installed for 3 managed repos; no signals from running boxes: a, b"
+        );
+        assert_eq!(probes.problem, "no signals from running boxes: a, b");
+
+        let mut broken = HealthCheck::unsatisfied("a's probe file is missing", "restart it");
+        broken.fails_also("; ", "no signals from running boxes: b");
+        assert_eq!(
+            broken.problem,
+            "a's probe file is missing; no signals from running boxes: b"
+        );
+        assert_eq!(broken.problem, broken.detail);
     }
 
     /// The three states, and what each one is allowed to cause.
@@ -178,6 +234,7 @@ mod tests {
                 detail: String::new(),
                 fix: String::new(),
                 destructive: false,
+                problem: String::new(),
             })
             .unwrap();
             assert!(

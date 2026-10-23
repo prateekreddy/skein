@@ -130,8 +130,8 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   await settle();
   const ban = w.ban();
   t.check("an unsatisfied counted check raises the row", !!ban, true);
-  t.check("the row names the check and says its first sentence, and stops there",
-    w.said(), "registry: the registry is unreachable");
+  t.check("the row says the check is failing, its first sentence, then the fix's first sentence",
+    w.said(), "Registry is failing: the registry is unreachable. To fix: check the network.");
   // The row is prepended to the body, not a pill laid over it: floating at the top covered the
   // dock's tab bar, which blocked exactly the work the warning was interrupting. Body's first
   // child pushes the app down and leaves no hole when it goes. Its sentence is a BUTTON, the one
@@ -152,7 +152,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   w.loadHealth();
   await settle();
   t.check("three failures give one sentence and a count of the rest",
-    w.said(), "registry: the registry is unreachable (+2 more)");
+    w.said(), "Registry is failing: the registry is unreachable. To fix: check the network. (+2 more)");
   // All three are still reachable — the row is the headline, the tooltip is the list.
   t.check("while every one of them is in the tooltip",
     ["registry", "sbx", "disk"].map(k => (w.ban()?.title || "").includes(`${k}: `)),
@@ -210,7 +210,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   // The owner's rule, in his words "a check that raised it": the one sentence a reader can read
   // and copy is always the reason the banner is up.
   t.check("the headline is the counted fault, not the uncounted one ahead of it in the list",
-    w.said(), "fleet disk: the disk is nearly full (+1 more)");
+    w.said(), "Fleet disk is failing: the disk is nearly full. To fix: clear build output. (+1 more)");
   t.check("and once the row is up for a counted reason, the uncounted check is named on it too",
     (w.ban()?.title || "").includes("ai enrichment: enrichment is off"), true);
 }
@@ -230,7 +230,7 @@ const unhealthy = checks => ({ ok: false, counted: COUNTED, labels: LABELS, ...c
   w.loadHealth();
   await settle();
   t.check("an uncounted fault does not take the headline from the reason the banner is up",
-    w.said(), "environment: probe updates · 1 on old probes (+1 more)");
+    w.said(), "1 box runs old probes — restart it to update its probes. (+1 more)");
   t.check("and it is still in the tooltip",
     (w.ban()?.title || "").includes("ai enrichment: enrichment is off"), true);
 }
@@ -250,7 +250,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check(`a throw in ${name} does not cost the banner`,
-    w.said(), "registry: the registry is unreachable");
+    w.said(), "Registry is failing: the registry is unreachable. To fix: check the network.");
   t.check(`and the throw from ${name} reaches the console, not a swallow`,
     w.state.logged.some(([how, said, e]) =>
       how === "error" && String(said).includes(name) && e?.message === `${name} fell over`),
@@ -295,7 +295,7 @@ for (const name of STEPS) {
   t.check("an unanswered check is reported in the tooltip, in those words",
     (w.ban()?.title || "").includes("box probes: could not be checked — the probe timed out"), true);
   t.check("and is not counted as a fault, so it does not inflate the headline",
-    w.said(), "registry: the registry is unreachable");
+    w.said(), "Registry is failing: the registry is unreachable. To fix: check the network.");
 }
 
 // --- `ok: false` that the page cannot NAME still says something a reader can act on --------------
@@ -310,7 +310,60 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("a fault with no named check still leaves a readable row",
-    w.said(), "environment: probe updates · 1 dark · 1 on old probes");
+    w.said(), "1 box runs old probes and 1 sends no signals — restart them to update their probes.");
+}
+
+// --- THE PROBLEM FIRST, THEN THE FIX (SKEIN-1298) --------------------------------------------------
+//
+// The row read `{check}: {first sentence of detail}`, and a detail can open with what is fine:
+// "box probes: installed for 3 managed repos; no signals from …" buried the one thing wrong. Each
+// shape below is the wording the coordinator settled on, against the report as the server sends it
+// — `problem` beside `detail` where the detail also says what holds (`HealthCheck::fails_also`).
+{
+  // Dark boxes: who, and the command that brings them back. Fails if the row goes back to the
+  // check's detail (it would open "installed for 3 managed repos").
+  const w = world();
+  w.state.health = unhealthy({
+    probes: { level: "unsatisfied",
+              detail: "installed for 3 managed repos; no signals from running boxes: example-one, example-two",
+              problem: "no signals from running boxes: example-one, example-two",
+              fix: "`skein restart example-one` — a box whose probes have never reported was started before they were installed" },
+    dark_boxes: ["example-one", "example-two"],
+  });
+  w.loadHealth();
+  await settle();
+  t.check("dark boxes are named, with the restart that fixes them",
+    w.said(), "2 running boxes send no signals (example-one, example-two) — restart them: `skein restart example-one`.");
+  w.state.health.dark_boxes = ["example-one"];
+  w.loadHealth();
+  await settle();
+  t.check("and one dark box is spoken of as one",
+    w.said(), "1 running box sends no signals (example-one) — restart it: `skein restart example-one`.");
+}
+{
+  // A counted check whose detail leads with success: the banner takes `problem`, not the detail's
+  // first sentence, and a full stop inside "3.0 GiB" would not end it either. Fails if `problem`
+  // is ignored (the row reads "Fleet memory is failing: 3.0 GiB across all boxes").
+  const w = world();
+  w.state.health = unhealthy({
+    memory: { level: "unsatisfied",
+              detail: "3.0 GiB across all boxes. One box is running outside that ceiling entirely: example-one",
+              problem: "One box is running outside that ceiling entirely: example-one",
+              fix: "`skein restart example-one` — a restart puts it under the current plan. It started before there was one." },
+  });
+  w.loadHealth();
+  await settle();
+  t.check("a counted check leads with its failing clause and then its fix's first sentence",
+    w.said(), "Fleet memory is failing: One box is running outside that ceiling entirely: example-one. To fix: `skein restart example-one` — a restart puts it under the current plan.");
+}
+{
+  // Only old and dark probes, no counted fault: one sentence about both, and what to do.
+  const w = world();
+  w.state.health = unhealthy({ stale_boxes: ["s1", "s2", "s3"], dark_boxes: ["d1"] });
+  w.loadHealth();
+  await settle();
+  t.check("old and dark probes alone are one sentence that says to restart",
+    w.said(), "3 boxes run old probes and 1 sends no signals — restart them to update their probes.");
 }
 
 // --- the row is the way to the diagnostics pane ---------------------------------------------------
@@ -345,7 +398,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("the banner names a check by the label the report serves",
-    w.said(), "example isolation: started before the current isolation");
+    w.said(), "Example isolation is failing: started before the current isolation. To fix: restart it.");
 
   const { reg, document } = stubDom(["set-diag", "set-diagn"]);
   const pane = new Function("document", "health", `
@@ -382,7 +435,7 @@ for (const name of STEPS) {
   fine.loadHealth();
   await settle();
   t.check("a dismissed row stays hidden across the next poll — the rule below is live",
-    [fine.said(), fine.hidden()], ["registry: the registry is unreachable", true]);
+    [fine.said(), fine.hidden()], ["Registry is failing: the registry is unreachable. To fix: check the network.", true]);
 
   const w = world({ decideThrows: true });
   w.state.health = health;
@@ -392,7 +445,7 @@ for (const name of STEPS) {
   w.loadHealth();
   await settle();
   t.check("and when deciding throws, the row is shown, saying what is wrong",
-    [w.said(), w.hidden()], ["registry: the registry is unreachable", false]);
+    [w.said(), w.hidden()], ["Registry is failing: the registry is unreachable. To fix: check the network.", false]);
   t.check("and the throw reaches the console under the row's name",
     w.state.logged.some(([how, said, e]) =>
       how === "error" && String(said).includes("healthban") && e?.message === "stillDismissed fell over"),
