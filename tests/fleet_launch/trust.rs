@@ -31,7 +31,9 @@ fn run_trust_block(home: &Path, tree: &Path) -> std::process::Output {
     Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail\nhome='{}'\ntree='{}'\n{life}\n{block}",
+            // `home_at` is the name the launcher writes through once it holds the directory open
+            // (SKEIN-1287); here the plain path stands in for the held one.
+            "set -uo pipefail\nhome='{}'\nhome_at=\"$home\"\ntree='{}'\n{life}\n{block}",
             home.display(),
             tree.display()
         ))

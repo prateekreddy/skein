@@ -499,11 +499,29 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         .expect("the sudo block moved");
     let to = lines
         .iter()
-        .position(|l| l.contains(r#"binds+=(--ro-bind "$root/bin/sudo""#))
+        .position(|l| l.contains(r#"binds+=(--ro-bind-fd "$new_fd" "$sudo_real")"#))
         .expect("the bind line moved");
     let block = format!(
-        "{}\n  binds+=(--ro-bind \"$root/bin/sudo\" \"$sudo_real\")\nfi",
+        "{}\n  binds+=(--ro-bind-fd \"$new_fd\" \"$sudo_real\")\nfi",
         lines[from..to].join("\n")
+    );
+    // What the launcher has in hand before this block: its write helpers, and the box's `bin` held
+    // open as `bin_at` (SKEIN-1287).
+    let lift = |name: &str| -> String {
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{name}() {{")))
+            .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+        let end = at + lines[at..].iter().position(|l| *l == "}").unwrap();
+        lines[at..=end].join("\n")
+    };
+    let held = format!(
+        "{}\n{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"; pin_dir bin_at \"$root/bin\"",
+        lift("real_name"),
+        lift("pin_dir"),
+        lift("open_new"),
+        lift("land_new"),
+        lift("drop_new"),
     );
 
     // The launcher has to be where the shim will look for it, which is the whole point.
@@ -512,11 +530,11 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
     fs::copy(&launcher, &installed).unwrap();
 
     let box_root = f.root.join("boxroot");
-    fs::create_dir_all(&box_root).unwrap();
+    fs::create_dir_all(box_root.join("bin")).unwrap();
     let made = Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail; binds=(); root={}; box=web-main; {block}",
+            "set -uo pipefail; binds=(); root={}; box=web-main; {held}\n{block}",
             box_root.display()
         ))
         .env("SKEIN_FLEET_ROOT", &f.root)
@@ -669,4 +687,80 @@ fn a_queue_a_box_cannot_write_does_not_claim_a_request_was_filed() {
         !advice.contains("Ask for it by running the install you wanted"),
         "the advice for a failed filing tells the agent to run the command that just failed"
     );
+}
+
+/// **The box files a package name only when the host would accept it** (SKEIN-1285).
+///
+/// Both sides check the shape of a name: the launcher's `valid_package` before filing, the host's
+/// `Request::problem` before installing. When the two disagree, a name the launcher accepts and the
+/// host refuses is filed and then sits pending for ever, a request nobody can approve. So this runs
+/// the launcher's check, lifted out of it, over names on both sides of the host's rule and compares.
+///
+/// What makes it fail, named before it was written and then done: the old single rule
+/// (`*[!A-Za-z0-9._+@/-]*` for every kind) back in `valid_package` — it accepts `a/b`, `./x.deb` and
+/// `@scope` for apt, which the host refuses.
+#[test]
+fn the_box_and_the_host_agree_on_what_a_package_name_is() {
+    let src =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh"))
+            .unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let lift = |name: &str| -> String {
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{name}() {{")))
+            .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+        let end = at + lines[at..].iter().position(|l| *l == "}").unwrap();
+        lines[at..=end].join("\n")
+    };
+    let functions = format!("{}\n{}", lift("valid_package"), lift("package_body"));
+    let names = [
+        "jq",
+        "libatk1.0-0",
+        "g++",
+        "python3-dev",
+        "@anthropic-ai/claude-code",
+        "@scope",
+        "@scope/",
+        "@/name",
+        "@scope/name/extra",
+        "a/b",
+        "./x.deb",
+        ".hidden",
+        "/abs/path",
+        "a..b",
+        "-o",
+        "--allow-downgrades",
+        "name@1.2.3",
+        "x y",
+        "",
+    ];
+    for kind in ["apt", "npm"] {
+        for name in names {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(format!("{functions}\nvalid_package \"$1\" \"$2\""))
+                .arg("skein-test")
+                .arg(kind)
+                .arg(name)
+                .output()
+                .expect("bash runs the launcher's package check");
+            let host = skein::substrate::Request {
+                id: "20260812-101010-1".into(),
+                box_name: "web-main".into(),
+                kind: kind.into(),
+                packages: vec![name.to_string()],
+                state: "pending".into(),
+                ..Default::default()
+            }
+            .problem()
+            .is_none();
+            assert_eq!(
+                out.status.success(),
+                host,
+                "for {kind} {name:?} the box says {} and the host says {host}",
+                out.status.success()
+            );
+        }
+    }
 }

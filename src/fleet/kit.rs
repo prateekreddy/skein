@@ -7,6 +7,26 @@ use super::*;
 /// The fleet sandbox hosts boxes from *many* repos, so it cannot be served out of any one repo's
 /// store — and shipping it through a store would put runtime tooling in shared data besides.
 pub(super) const BOX_SESSION_SH: &str = include_str!("../box-session.sh");
+
+/// The launcher's file-writing helpers (`open_new`, `land_new`, `drop_new`), lifted out of it for a
+/// test that runs one of its blocks on its own: since SKEIN-1287 every file the launcher writes
+/// under a box's root goes through them.
+#[cfg(test)]
+pub(super) fn launcher_write_helpers() -> String {
+    let lines: Vec<&str> = BOX_SESSION_SH.lines().collect();
+    ["open_new", "land_new", "drop_new"]
+        .iter()
+        .map(|name| {
+            let from = lines
+                .iter()
+                .position(|l| l.starts_with(&format!("{name}() {{")))
+                .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+            let to = from + lines[from..].iter().position(|l| *l == "}").unwrap();
+            lines[from..=to].join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 pub(super) const GIT_CREDENTIAL_SH: &str = include_str!("../git-credential-skein.sh");
 /// The fleet sandbox's own sbx kit — one startup command, and the only thing in that sandbox that
 /// survives its own restart.
@@ -278,7 +298,7 @@ mod tests {
             "a refusal with no way forward is the error message it replaced: {shim}"
         );
         assert!(
-            launcher.contains(r#"binds+=(--ro-bind "$root/bin/sudo" "$sudo_real")"#),
+            launcher.contains(r#"binds+=(--ro-bind-fd "$new_fd" "$sudo_real")"#),
             "the shim is written but never bound, so nothing in a box would ever run it"
         );
         // Inside the namespace only. `binds` is applied by the box's bwrap and by nothing else, so
@@ -343,10 +363,13 @@ mod tests {
         let block = BOX_SESSION_SH
             .lines()
             .skip_while(|l| !l.starts_with("sudo_real=$(command -v sudo"))
-            .take_while(|l| !l.contains(r#"binds+=(--ro-bind "$root/bin/sudo""#))
+            .take_while(|l| !l.contains(r#"binds+=(--ro-bind-fd "$new_fd" "$sudo_real")"#))
             .collect::<Vec<_>>()
             .join("\n")
-            + "\n  binds+=(--ro-bind \"$root/bin/sudo\" \"$sudo_real\")\nfi";
+            + "\n  binds+=(--ro-bind-fd \"$new_fd\" \"$sudo_real\")\nfi";
+        // The block writes through `$bin_at`, the box's `bin` as the launcher holds it (SKEIN-1287);
+        // the plain directory stands in for it here.
+        let helpers = launcher_write_helpers();
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
         let bin = root.join("fakebin");
@@ -379,6 +402,7 @@ mod tests {
                     // `set -u` an unset one would fail the block for a reason that has nothing to
                     // do with what this test is about.
                     "set -uo pipefail\nbinds=()\nroot={root}\nbox=testbox\nexport PATH={bin}:{tools}\n\
+                     {helpers}\nmkdir -p \"$root/bin\"; bin_at=\"$root/bin\"\n\
                      {block}\nprintf '%s\\n' \"${{binds[@]:-}}\"\n",
                     root = root.display(),
                     bin = bin.display(),

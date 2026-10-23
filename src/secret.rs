@@ -299,9 +299,10 @@ fn temp_beside(path: &Path) -> PathBuf {
 /// **`O_NOFOLLOW` is deliberately not spelled out beside it**, and the reason is worth keeping: the
 /// constant is per-architecture, not per-OS. `0o400000` on x86-64 is `O_LARGEFILE` on aarch64,
 /// where `O_NOFOLLOW` is `0o100000` — so a hand-written value taken from the common header is a
-/// protection that is silently absent on half the machines skein runs on, and `libc` is a
-/// dependency this crate does not otherwise have. `a_symlink_at_the_temp_path_is_not_followed`
-/// checks the property that is actually here rather than the flag that would imply it.
+/// protection that is silently absent on half the machines skein runs on. `libc::O_NOFOLLOW`
+/// would be the right spelling (`crate::boxfile` uses it), but `O_EXCL` already refuses the link,
+/// so it would add nothing. `a_symlink_at_the_temp_path_is_not_followed` checks the property that
+/// is actually here rather than the flag that would imply it.
 ///
 /// `pub(crate)` because `github::call_reading_headers` writes each request body with it: a file
 /// that is 0600 at birth and never somebody else's symlink is what that wants too (SKEIN-1022).

@@ -351,11 +351,18 @@ pub(crate) fn git_branch_for(dir: &str) -> Option<String> {
 }
 
 /// The branch `HEAD` names in the repository at `dir`, if `dir` is one.
+///
+/// `dir` is usually a box's tree, which the box writes and skein-server reads as the same user, so
+/// both files go through [`crate::boxfile`]: a link at `.git` or at `HEAD` is refused rather than
+/// followed, and a FIFO there answers `None` at once instead of parking the board's thread
+/// (SKEIN-1301).
 fn branch_at(dir: &std::path::Path) -> Option<String> {
+    use crate::boxfile::{read_text, SIGNAL_CAP};
     let dot = dir.join(".git");
-    // `read_to_string` on a directory fails, which is how the two `.git` shapes tell themselves
-    // apart without a second stat in the common case.
-    let git_dir = match std::fs::read_to_string(&dot) {
+    // Reading a directory fails, which is how the two `.git` shapes tell themselves apart without
+    // a second stat in the common case. The fallback asks about `.git` itself, not what a link
+    // there points at.
+    let git_dir = match read_text(&dot, SIGNAL_CAP) {
         Ok(text) => {
             let target = std::path::Path::new(text.trim().strip_prefix("gitdir:")?.trim());
             match target.is_absolute() {
@@ -363,12 +370,12 @@ fn branch_at(dir: &std::path::Path) -> Option<String> {
                 false => dir.join(target),
             }
         }
-        Err(_) if dot.is_dir() => dot,
+        Err(_) if std::fs::symlink_metadata(&dot).is_ok_and(|m| m.is_dir()) => dot,
         // No `.git` here. `dir` may still BE a repository — the shape `src/repos/` calls a mirror.
         Err(_) if dir.join("objects").is_dir() => dir.to_path_buf(),
         Err(_) => return None,
     };
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = read_text(&git_dir.join("HEAD"), SIGNAL_CAP).ok()?;
     let branch = head.trim().strip_prefix("ref: refs/heads/")?.trim();
     (!branch.is_empty()).then(|| branch.to_string())
 }
@@ -524,6 +531,46 @@ mod tests {
         assert_eq!(git_branch_for(""), None);
         // `tempdir()` is not inside a checkout, so nothing above it answers either.
         assert_eq!(git_branch_for(bare_dir.to_str().unwrap()), None);
+    }
+
+    /// A box writes its own tree, so what sits at `.git` and `.git/HEAD` is the box's choice.
+    ///
+    /// Fails if `branch_at` reads `HEAD` with a plain open again: the FIFO parks the reader past
+    /// `within`'s deadline. The two links fail it if either read follows a link, or if the
+    /// directory test on `.git` follows one — each link points at a real repository whose `HEAD`
+    /// names `elsewhere`, so following it answers `Some("elsewhere")` (SKEIN-1301).
+    #[test]
+    fn a_link_or_fifo_a_box_plants_at_its_git_head_is_not_read() {
+        let root = tempdir();
+        let real = root.join("real");
+        fs::create_dir_all(real.join(".git")).unwrap();
+        fs::write(real.join(".git/HEAD"), "ref: refs/heads/elsewhere\n").unwrap();
+        // The control: the target itself answers, so a `None` below is the refusal and not a
+        // fixture that could never answer.
+        assert_eq!(
+            git_branch_for(real.to_str().unwrap()).as_deref(),
+            Some("elsewhere")
+        );
+
+        let fifo_tree = root.join("fifo");
+        fs::create_dir_all(fifo_tree.join(".git")).unwrap();
+        let fifo = fifo_tree.join(".git/HEAD");
+        crate::boxfile::plant_fifo(&fifo);
+        let at = fifo_tree.to_str().unwrap().to_string();
+        let answer = crate::boxfile::within(&fifo, "reading a FIFO at .git/HEAD", move || {
+            git_branch_for(&at)
+        });
+        assert_eq!(answer, None);
+
+        let head_link = root.join("head-link");
+        fs::create_dir_all(head_link.join(".git")).unwrap();
+        std::os::unix::fs::symlink(real.join(".git/HEAD"), head_link.join(".git/HEAD")).unwrap();
+        assert_eq!(git_branch_for(head_link.to_str().unwrap()), None);
+
+        let dot_link = root.join("dot-link");
+        fs::create_dir_all(&dot_link).unwrap();
+        std::os::unix::fs::symlink(real.join(".git"), dot_link.join(".git")).unwrap();
+        assert_eq!(git_branch_for(dot_link.to_str().unwrap()), None);
     }
 
     /// The claim the measurement rests on: reading a branch forks nothing.

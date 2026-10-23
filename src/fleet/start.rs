@@ -1900,8 +1900,10 @@ mod tests {
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "set -uo pipefail; tmp={}; {block}",
-                crate::util::sh_quote(&tmp.to_string_lossy())
+                // `tmp_at` is the launcher's held `tmp` (SKEIN-1287); the plain path stands in.
+                "set -uo pipefail; tmp={}; tmp_at=\"$tmp\"\n{}\n{block}",
+                crate::util::sh_quote(&tmp.to_string_lossy()),
+                crate::fleet::kit::launcher_write_helpers(),
             ))
             .output()
             .unwrap();

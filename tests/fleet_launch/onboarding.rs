@@ -351,7 +351,9 @@ fn run_onboarding_block(home: &Path) -> std::process::Output {
     Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail\nhome='{}'\n{life}\n{block}",
+            // The held directories the launcher writes through (SKEIN-1287); here the plain paths
+            // stand in for them.
+            "set -uo pipefail\nhome='{}'\nhome_at=\"$home\"\nclaude_at=\"$home/.claude\"\n{life}\n{block}",
             home.display()
         ))
         .output()
