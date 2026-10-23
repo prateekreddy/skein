@@ -1468,6 +1468,8 @@ function loadResources() {
     // own services and the kernel, which is what the reserve keeps back.
     const other = Math.max(0, r.mem_used - r.boxes - r.docker);
     const workload = r.boxes + r.docker;
+    // "Free" is `df`'s Available (SKEIN-1315): total minus used counts the blocks a filesystem keeps
+    // back, and overstated the image store by a fifth. Zero means `df` did not answer that column.
     // A gauge with no denominator is dropped rather than drawn at zero: `df` cannot always see the
     // fleet root, and "disk 0.0/0.0G" reads as a full disk to anyone glancing at it.
     const rows = [
@@ -1484,14 +1486,14 @@ function loadResources() {
          `${GIB(r.mem_total - r.mem_used)}G still available`].join("\n")),
       r.disk_total && gaugeRow("disk", [{ w: pct(r.disk_used, r.disk_total), cls: "other" }],
         `${GIB(r.disk_used)}/${GIB(r.disk_total)}G`,
-        `${GIB(r.disk_total - r.disk_used)}G free on the filesystem holding every box's checkout`),
+        `${GIB(r.disk_avail || r.disk_total - r.disk_used)}G free on the filesystem holding every box's checkout`),
       // Its own row, not a segment of the one above: this is a different disk with a different
       // size, so the two do not share a denominator and a stacked bar would be a lie. Drawn in the
       // docker accent so the strip reads the same way down — this row and the docker segment of the
       // memory bar are the same thing's two costs.
       r.images_total && gaugeRow("images", [{ w: pct(r.images_used, r.images_total), cls: "docker" }],
         `${GIB(r.images_used)}/${GIB(r.images_total)}G`,
-        `${GIB(r.images_total - r.images_used)}G free on /var/lib/docker — images, volumes and build cache\n`
+        `${GIB(r.images_avail || r.images_total - r.images_used)}G free on /var/lib/docker — images, volumes and build cache\n`
         + `a separate disk from the boxes' own, fixed when the fleet was created: filling this one does not show up above`),
       // Load, not a percentage: CPU is deliberately uncapped and fair-shared, so what matters is
       // whether boxes are queueing for cores — which is load against core count, nothing else.

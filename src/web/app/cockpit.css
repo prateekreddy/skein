@@ -353,6 +353,8 @@
   .s-error .pill { color:var(--error); }
   .s-waiting .pill { color:var(--waiting); }
   .s-working .pill { color:var(--working); }
+  /* A stop or destroy this page is waiting on (SKEIN-1313): the pill says which, in the quiet colour. */
+  .row.acting .pill { color:var(--faint); }
   .s-done .pill { color:var(--done); }
   .s-idle .pill, .s-stale .pill, .s-ended .pill { color:var(--faint); }
 
@@ -1388,6 +1390,8 @@
   .msg .mt { margin-left:auto; font-variant-numeric:tabular-nums; }
   .msg .mb { color:var(--text); font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .msg .seen { color:var(--faint); font-size:11px; margin-top:3px; }
+  /* The server marks mail to a box its store no longer registers (SKEIN-1284): nobody will read it. */
+  .msg .gone { color:var(--attn); font-size:11px; margin-top:3px; }
   .mbx-list .note { color:var(--faint); text-align:center; padding:36px; }
   .mbx-compose { border-top:1px solid var(--border); padding:10px 12px; display:flex; flex-direction:column; gap:8px; background:var(--panel); }
   .mbx-compose .row1 { display:flex; gap:8px; } .mbx-compose .row2 { display:flex; align-items:center; gap:10px; }

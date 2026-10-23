@@ -9,32 +9,58 @@ function boxRunHtml() {
        + `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
 }
 // A box with a stop or destroy in flight, so a second press while the first is still running is
-// not a second request (SKEIN-1265). Each is a slow host-side act, and the toast saying it started
-// is the only sign it is under way.
-const boxActing = new Set();
+// not a second request (SKEIN-1265). Each is a slow host-side act, so the box's row says which one
+// is under way for as long as it is ("stopping…", "destroying…"; `updateRow` reads this), rather
+// than a toast that is gone in seconds (SKEIN-1313).
+const boxActing = new Map();
+function startActing(name, what) { boxActing.set(name, what); refreshRow(name); }
+function doneActing(name) { boxActing.delete(name); refreshRow(name); }
 function stopBox(name) {
   if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (!confirm(`Stop ${name}? This halts the box to free its compute. Nothing is lost — resume it later via attach.\n\nOther boxes keep running.`)) return;
   toast(`stopping ${name}…`);
-  boxActing.add(name);
+  startActing(name, "stopping");
   fetch(`/api/boxes/${encodeURIComponent(name)}/stop`, { method:"POST" }).then(r => r.json()).then(d => {
-    if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); refreshRow(name); }
+    if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); }
     else notice(`could not stop ${name}: ${d.error || "no reason given"}`);
   }).catch(e => notice(`could not stop ${name}: ${failText(e)}`))
-    .finally(() => boxActing.delete(name));
+    .finally(() => doneActing(name));
+}
+// What Destroy's confirm says about THIS box's work, from what the box itself answers
+// (`/api/boxes/<name>/unpushed`, SKEIN-1313): commits no remote has and uncommitted paths. A box
+// that cannot be asked gets the general warning, never "nothing to lose".
+function destroyQuestion(name, u) {
+  const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const tail = "Other boxes are untouched. This cannot be undone.";
+  if (!u || !u.known) {
+    return `Destroy ${name}?\n\nskein could not ask it whether it holds work no remote has. Any commits never pushed or fetched, and anything uncommitted, are LOST.\n\n${tail}`;
+  }
+  const lost = [u.commits ? n(u.commits, "commit never pushed or fetched", "commits never pushed or fetched") : "",
+                u.changes ? n(u.changes, "uncommitted change", "uncommitted changes") : ""].filter(Boolean);
+  if (!lost.length) {
+    return `Destroy ${name}?\n\nIt has no commits that are not on a remote and nothing uncommitted, so only the box and its disk go.\n\n${tail}`;
+  }
+  return `Destroy ${name}?\n\nIt holds work no remote has: ${lost.join(" and ")}. Destroying it LOSES that work.\n\n${tail}`;
 }
 function destroyBox(name) {
   if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
-  if (settings.confirm_destroy !== false
-      && !confirm(`Destroy ${name}?\n\nThis removes THIS BOX and reclaims its disk. Other boxes are untouched. In clone mode any commits in it that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
+  if (settings.confirm_destroy === false) return destroyNow(name);
+  toast(`asking ${name} what it has not pushed…`);
+  fetch(`/api/boxes/${encodeURIComponent(name)}/unpushed`).then(r => r.ok ? r.json() : null).catch(() => null)
+    .then(u => {
+      if (boxActing.has(name) || !confirm(destroyQuestion(name, u))) return;
+      destroyNow(name);
+    });
+}
+function destroyNow(name) {
   toast(`destroying ${name}…`);
-  boxActing.add(name);
+  startActing(name, "destroying");
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name);
       if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
     else notice(`could not destroy ${name}: ${d.error || "no reason given"}`);
   }).catch(e => notice(`could not destroy ${name}: ${failText(e)}`))
-    .finally(() => boxActing.delete(name));
+    .finally(() => doneActing(name));
 }
 function batchResume() {
   const ps = boxes.filter(b => b.pause === "proceed");

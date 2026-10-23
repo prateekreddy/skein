@@ -109,3 +109,45 @@ fn every_fix_line_names_a_command_the_cli_has() {
         unrunnable.join("\n  ")
     );
 }
+
+/// **A fix line names a repo's write token by its one name** (SKEIN-1319). SKEIN-1269 settled the
+/// cockpit on "write token", entered on the repo's card under Settings → Repositories; the health
+/// line and `skein doctor` went on saying "per-repo token", a name the cockpit no longer shows
+/// anywhere, so a person following them looked for a thing that is not there. Comments may keep
+/// the old phrase (it describes the mechanism), and so may a file's tests; a string a person is
+/// shown may not.
+///
+/// What would make it fail: `skein doctor`'s line in `src/bin/skein.rs`, or either line in
+/// `src/health/sandbox.rs`, saying "per-repo token" again.
+#[test]
+fn no_line_skein_prints_calls_a_write_token_a_per_repo_token() {
+    fn walk(dir: &Path, out: &mut Vec<String>, scanned: &mut usize) {
+        for entry in std::fs::read_dir(dir).expect("read src") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, out, scanned);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                *scanned += 1;
+                let text = std::fs::read_to_string(&path).expect("read a source file");
+                // A file's tests come after its code, and nobody is shown what a test asserts.
+                let lines = text.lines().take_while(|l| l.trim() != "#[cfg(test)]");
+                for (n, line) in lines.enumerate() {
+                    if line.contains("per-repo token") && !line.trim_start().starts_with("//") {
+                        out.push(format!("{}:{}", path.display(), n + 1));
+                    }
+                }
+            }
+        }
+    }
+    let (mut found, mut scanned) = (Vec::new(), 0);
+    walk(&root().join("src"), &mut found, &mut scanned);
+    assert!(
+        scanned > 50,
+        "scanned {scanned} files, so this proves nothing"
+    );
+    assert!(
+        found.is_empty(),
+        "say \"write token\", and where it goes (its repo's card under Settings → Repositories):\n  {}",
+        found.join("\n  ")
+    );
+}

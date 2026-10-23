@@ -150,6 +150,44 @@ pub(crate) fn in_box_commits(name: &str) -> Option<Vec<String>> {
     in_box_lines(name, &commits_script(&refs))
 }
 
+/// What a box holds that no remote has: the work a destroy takes with it (SKEIN-1313).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Unpushed {
+    /// Commits on any local branch that no remote-tracking ref has: never pushed, never fetched.
+    pub commits: u64,
+    /// Paths `git status` lists — staged, unstaged or untracked.
+    pub changes: u64,
+}
+
+/// Shell that prints [`Unpushed`]'s two numbers, one a line, and nothing at all when git cannot
+/// answer — so a checkout git cannot read is "could not ask", never "nothing to lose".
+pub(crate) const UNPUSHED_SCRIPT: &str =
+    "cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" || exit 1; \
+     c=\"$(git rev-list --count --branches --not --remotes 2>/dev/null)\" || exit 1; \
+     s=\"$(git status --porcelain 2>/dev/null)\" || exit 1; \
+     printf '%s\\n%s\\n' \"$c\" \"$(printf '%s' \"$s\" | grep -c .)\"";
+
+/// [`UNPUSHED_SCRIPT`]'s answer, or `None` when it is not two numbers.
+pub(crate) fn parse_unpushed(lines: &[String]) -> Option<Unpushed> {
+    match lines {
+        [c, s] => Some(Unpushed {
+            commits: c.parse().ok()?,
+            changes: s.parse().ok()?,
+        }),
+        _ => None,
+    }
+}
+
+/// [`Unpushed`] for a box, asked of the box itself; `None` when it is not running or git there
+/// could not answer. Never read from a file the box wrote earlier: a stale "nothing to lose" in
+/// front of a destroy is worse than "could not ask".
+pub fn box_unpushed(name: &str) -> Option<Unpushed> {
+    if !valid_name(name) {
+        return None;
+    }
+    parse_unpushed(&in_box_lines(name, UNPUSHED_SCRIPT)?)
+}
+
 /// Split the box's answer into (base, patch). A patch line can say anything, so only the *first*
 /// line is ever read as the marker.
 pub(crate) fn split_diff(raw: &str) -> (String, String) {
@@ -339,6 +377,67 @@ mod tests {
         assert_eq!(base, "HEAD");
         assert_eq!(patch, "diff --git a/x b/x\n");
         assert_eq!(split_diff("").0, "HEAD");
+    }
+
+    // What a destroy would take (SKEIN-1313), run with real git in a scratch repo: commits on every
+    // local branch that no remote-tracking ref has, and every path `git status` lists. Fails if the
+    // count is of HEAD alone (the commit on `other` is missed: 2, not 3), if a pushed commit is
+    // counted (4), if untracked files are left out (1 change, not 2), or if a directory git cannot
+    // read answers "0 and 0" — nothing to lose — rather than nothing.
+    #[test]
+    fn a_box_counts_the_commits_no_remote_has_and_its_uncommitted_paths() {
+        use std::process::Command;
+        let dir = tempdir();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&*dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let run = |at: &std::path::Path| {
+            let out = Command::new("sh")
+                .args(["-c", UNPUSHED_SCRIPT])
+                .current_dir(at)
+                .output()
+                .expect("sh runs");
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "pushed"]);
+        git(&["update-ref", "refs/remotes/origin/main", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&["branch", "other", "origin/main"]);
+        git(&["checkout", "-q", "other"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "on another branch"]);
+        fs::write(dir.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "tracked"]);
+        git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "three"]);
+        fs::write(dir.join("tracked.txt"), "edited\n").unwrap();
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+
+        assert_eq!(
+            parse_unpushed(&run(&dir)),
+            Some(Unpushed {
+                commits: 3,
+                changes: 2
+            })
+        );
+
+        let not_git = tempdir();
+        assert_eq!(run(&not_git), Vec::<String>::new());
+        assert_eq!(parse_unpushed(&[]), None);
+        assert_eq!(parse_unpushed(&["x".into(), "1".into()]), None);
     }
 
     // The scripts the box runs for the takeover brief, run here with real git in a scratch repo:

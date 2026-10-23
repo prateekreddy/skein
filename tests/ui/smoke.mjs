@@ -1126,6 +1126,26 @@ console.log("\nfleet gauges");
     }
   });
 
+  // SKEIN-1315. "Free" is `df`'s Available, which is less than total minus used by the blocks the
+  // filesystem keeps back; total minus used is only the fallback for a reading without it. Fails
+  // if either row goes back to subtracting (12.0G and 10.0G where 9.5G and 6.5G were served), or
+  // drops the fallback (FULL carries no Available, and says 0.0G free).
+  await check("the disk gauges' free figure is df's Available, and total minus used only without it", async () => {
+    const free = async () => Object.fromEntries((await strip())
+      .filter(g => g.key === "disk" || g.key === "images")
+      .map(g => [g.key, (g.hint.match(/([\d.]+)G free/) || [])[1]]));
+    const fallback = await free();
+    if (fallback.disk !== "12.0" || fallback.images !== "10.0") {
+      throw new Error(`with no Available the free figures read ${JSON.stringify(fallback)}`);
+    }
+    await draw({ ...FULL, disk_avail: 9728, images_avail: 6656 }, 4);
+    const avail = await free();
+    if (avail.disk !== "9.5" || avail.images !== "6.5") {
+      throw new Error(`with df's Available served the free figures read ${JSON.stringify(avail)}`);
+    }
+    await draw(FULL, 4);
+  });
+
   // The second. `df` cannot always see the fleet root, and a gauge drawn at zero reads as a FULL
   // disk to anyone glancing at it — which is the opposite of the truth and worse than silence.
   await check("a gauge with no denominator is dropped, not drawn at zero", async () => {

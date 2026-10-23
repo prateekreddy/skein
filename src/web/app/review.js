@@ -271,11 +271,11 @@ function revMoveSetAsideAside(repoId, file) {
         { method: "POST" })
     .then(r => r.json())
     .then(d => {
-      if (!d.ok) { toast("could not move it aside: " + String(d.error || "").split("\n")[0]); return; }
+      if (!d.ok) { notice(`could not move it aside: ${d.error || "no reason given"}`); return; }
       toast(`moved to ${d.moved_to} — your set-aside list starts empty; nothing was deleted`);
       loadReview(true);
     })
-    .catch(e => toast("could not move it aside: " + (e.message || e)));
+    .catch(e => notice(`could not move it aside: ${failText(e)}`));
 }
 
 // One list from many queues. Per-repo `fresh`/`as_of` survive the merge — one slow repo must not
@@ -1230,13 +1230,13 @@ function writeModule(path) {
     body: JSON.stringify({ path, repo: revModsRepo }),
   }).then(r => r.json()).then(d => {
     revWriting = "";
-    if (!d.ok) { toast(d.error || "could not write that note"); revModsPaint(); return; }
+    if (!d.ok) { notice(d.error || "could not write that note"); revModsPaint(); return; }
     toast(`note written for ${path}`);
     // The success arm paints through `loadModules`: what changes on screen is the row's state dot
     // and its stamp, and those are the server's answer rather than this one's, so re-reading them
     // IS the paint.
     loadModules();
-  }).catch(e => { revWriting = ""; toast(String(e.message || e).split("\n")[0]); revModsPaint(); });
+  }).catch(e => { revWriting = ""; notice(`could not write that note: ${failText(e)}`); revModsPaint(); });
 }
 
 // The answer to a press on the notes panel, painted NOW — while the panel is still what the reader
@@ -1469,8 +1469,8 @@ function revWorkflowPost(id, number, body) {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   })
     .then(r => r.json())
-    .then(d => { if (!d.ok) toast(d.error || "that did not stick"); loadWorkflows(); })
-    .catch(e => toast(String(e.message || e).split("\n")[0]));
+    .then(d => { if (!d.ok) notice(d.error || "that did not stick"); loadWorkflows(); })
+    .catch(e => notice(`that did not stick: ${failText(e)}`));
 }
 
 // Whether skein reads this repo's pull requests on its own.
@@ -1536,7 +1536,7 @@ function revSetReadingFor(id, on) {
   })
     .then(r => r.json())
     .then(d => {
-      if (!d.ok) { toast(d.error || "that did not stick"); return false; }
+      if (!d.ok) { notice(d.error || "that did not stick"); return false; }
       toast(on
         ? `skein will read the pull requests waiting on you in ${id}, and the ones you opened`
         : `skein will not read anything in ${id} unless you ask`);
@@ -1545,7 +1545,7 @@ function revSetReadingFor(id, on) {
       loadWorkflows();
       return true;
     })
-    .catch(e => { toast(String(e.message || e).split("\n")[0]); return false; });
+    .catch(e => { notice(`that did not stick: ${failText(e)}`); return false; });
 }
 
 // Every repo the merged queue is showing, in one press.
@@ -1588,7 +1588,7 @@ function toggleWorkflowEditor() {
       if (d.error) toast("the workflow file has a problem — fix it before editing here");
       renderReview();
     })
-    .catch(e => toast(String(e.message || e).split("\n")[0]));
+    .catch(e => notice(`could not read the workflows: ${failText(e)}`));
 }
 
 // Every word, from the server, so the page never invents one.
@@ -1706,7 +1706,7 @@ function revEditSave() {
       // The answer can land after the editor was closed, and setting `revEdit` then would open it
       // again — so the next press of "workflows", meant to open it, closed it (SKEIN-1271). The
       // save happened either way; what an answer may not do is reopen what the person closed. A
-      // refusal with the editor shut is said in a toast, because `revEditSaying` with no editor
+      // refusal with the editor shut is said in a notice, because `revEditSaying` with no editor
       // reads as "the workflow file could not be read", which is not what went wrong.
       const open = revEdit !== null;
       if (open) revEditSaying = d.ok ? "" : (d.error || "that did not save");
@@ -1715,11 +1715,11 @@ function revEditSave() {
         toast("workflows saved");
         loadWorkflows();
       } else if (!open) {
-        toast(`workflows not saved: ${String(d.error || "that did not save").split("\n")[0]}`);
+        notice(`workflows not saved: ${d.error || "that did not save"}`);
       }
       renderReview();
     })
-    .catch(e => toast(String(e.message || e).split("\n")[0]));
+    .catch(e => notice(`workflows not saved: ${failText(e)}`));
 }
 
 function revEditHtml() {

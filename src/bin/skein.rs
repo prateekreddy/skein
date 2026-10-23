@@ -926,7 +926,7 @@ fn cmd_doctor() -> Result<(), String> {
             // from there — and a person who tries it gets a refusal, from the one line that was
             // supposed to be their way out.
             {
-                println!("              {DIM}Settings → GitHub & keys: a GitHub App, or a per-repo token. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}");
+                println!("              {DIM}Settings → GitHub & keys: a GitHub App, or a write token on each repo's card under Settings → Repositories. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}");
             }
         }
         other => println!("{OK} boxes push    with {}", other.label()),

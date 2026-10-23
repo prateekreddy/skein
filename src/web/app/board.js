@@ -278,8 +278,8 @@ function resumeBox(name) {
   toast(`continuing ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/resume`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { toast(`continued ${name}`); refreshRow(name); }
-    else toast("continue failed: " + (d.error || "").split("\n")[0]);
-  }).catch(() => toast("continue failed"));
+    else notice(`could not continue ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not continue ${name}: ${failText(e)}`));
 }
 // Boxes with a restart in flight, so a second press cannot send a second restart on top of the first.
 const restartingAgents = new Set();
@@ -332,7 +332,7 @@ async function restartAgent(name) {
     if (session) { session.dead = true; reconnectSession(name, "agent"); }
     else openTerminal(name, runtime);
     toast(`restarted ${runtimeLabel(runtime)} in ${name}`);
-  }).catch(error => toast(`restart failed: ${error.message}`)).finally(done);
+  }).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);
 }
 function updateRow(el, b, showRepo) {
   const g = groupOf(b.state);
@@ -380,9 +380,12 @@ function updateRow(el, b, showRepo) {
   // The state pill, plus a `◐` when only half the signal produced it (hook edges, no screen). One
   // glyph rather than a sentence: on a fleet of older boxes this is true of every row, and it is a
   // caveat on how the state was derived, not a problem with the box.
+  // A stop or destroy this page sent and is waiting on says so in place of the state, which is
+  // about to change and would otherwise sit unchanged until it does (SKEIN-1313).
   const pill = el.querySelector(".pill"),
-        half = screenHalf(b);
-  const pillHtml = esc(labelOf(b.state)) + (half ? ` <i class="hdot"></i>` : "");
+        half = screenHalf(b), acting = boxActing.get(b.name);
+  el.classList.toggle("acting", !!acting);
+  const pillHtml = acting ? esc(`${acting}…`) : esc(labelOf(b.state)) + (half ? ` <i class="hdot"></i>` : "");
   if (pill.dataset.html !== pillHtml) { pill.dataset.html = pillHtml; pill.innerHTML = pillHtml; }
   pill.title = half ? `${half[0]} — ${half[1]}\n\n${half[2]}` : "";
   // Aged from the observation rather than from the string the server formatted. The stream no
@@ -468,7 +471,7 @@ function updateRow(el, b, showRepo) {
   pc.title = showChip ? (KTIP[b.blocked_kind] || (p === "proceed" ? "click to continue this box" : "")) : "";
   // dedupe: the actionable chip (needs you / proceed?) already names what's owed, so drop the
   // right-side state word on those rows — no printing "needs you" twice.
-  el.querySelector(".pill").style.display = showChip ? "none" : "";
+  el.querySelector(".pill").style.display = showChip && !acting ? "none" : "";
 }
 // pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
 const PCHIP = { "needs-input":"needs you", fork:"asks", proceed:"proceed?" };
@@ -732,7 +735,7 @@ function takeOver(name, runtime) {
   }).then(replacement => {
     toast(`replacement ready: ${replacement.target}`);
     showBox(replacement.target, "term", "agent", runtime);
-  }).catch(error => toast("takeover failed: " + String(error.message || error).split("\n")[0]));
+  }).catch(error => notice(`takeover failed: ${failText(error)}`));
 }
 function openShell(name) { showBox(name, "term", "shell"); }
 function openDiff(name) { showBox(name, "diff"); }
