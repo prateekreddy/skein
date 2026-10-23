@@ -25,5 +25,10 @@ export const NEEDS_YOU = ["error", "attn", "waiting"];
 
 export const owedIn = list => list.filter(b => NEEDS_YOU.includes(groupOf(b.state)));
 
+// One word per thing a person can tell apart. `live` and `running` are both a box at work, and the
+// board counts them as "working" — so the pill says so too, rather than ACTIVE on one row and
+// WORKING on the next for the same state (SKEIN-1298). `compacting` keeps its own word: it is a
+// working box that will not answer for a while, which is worth knowing.
 export const labelOf = s =>
-  ["needs-input", "needs-decision", "blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
+  ["needs-input", "needs-decision", "blocked"].includes(s) ? "decision"
+    : s === "live" || s === "running" ? "working" : s;

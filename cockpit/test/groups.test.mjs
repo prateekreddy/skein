@@ -29,6 +29,9 @@ test("`waiting` is owed to you, and one place says so", () => {
 
 test("the words a person reads are not the words the wire uses", () => {
   assert.equal(labelOf("needs-decision"), "decision");
-  assert.equal(labelOf("live"), "active");
+  // The pill uses the word the counts use: a `live` box is counted as working, so it says working.
+  assert.equal(labelOf("live"), "working");
+  assert.equal(labelOf("running"), "working");
+  assert.equal(labelOf("compacting"), "compacting");
   assert.equal(labelOf("working"), "working");
 });

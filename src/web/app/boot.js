@@ -768,8 +768,8 @@ function renderLoginBanner(expired) {
   // claiming a death date nothing here can know. Rendered identically, a person cannot tell a
   // credential that is dead from one that was dead a moment ago.
   ban.querySelector(".banbody").innerHTML = expired.map(l => `<span>${l.witness === "refusal"
-      ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
-      : `the fleet's ${esc(l.runtime)} login expired ${esc(l.expired_at)} — summaries, critiques and workflows are declining model calls`}</span>`
+      ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
+      : `the fleet's ${esc(l.runtime)} login expired ${esc(localStamp(l.expired_at))} — summaries, critiques and workflows are declining model calls`}</span>`
     + `<button type="button" class="loginfix" onclick="openLoginTerminal(${esc(JSON.stringify(l.runtime))})">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
   banDismissable(ban, "loginban", loginProblems(expired));
 }
