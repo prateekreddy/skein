@@ -170,6 +170,59 @@ await check("Files says it is asking the box while it waits", async () => {
   } finally { release(); await page.unroute(`**/api/boxes/${BOX}/files*`); }
 });
 
+// ---------- a second click (SKEIN-1296) ----------
+console.log("\na decision is sent once");
+
+/** Hold every POST to `pattern` for 1s, counting them, answering ok. */
+const holdPosts = async pattern => {
+  const posts = [];
+  await page.route(pattern, async r => {
+    if (r.request().method() !== "POST") return r.fallback();
+    posts.push(1);
+    await new Promise(res => setTimeout(res, 1000));
+    return r.fulfill({ json: {} });
+  });
+  return posts;
+};
+const cardState = (panel, button) => page.evaluate(([p, b]) => {
+  const btn = [...document.querySelectorAll(`#${p}-list button`)].find(x => x.textContent.includes(b));
+  const note = document.querySelector(`#${p}-list .sq-sending`);
+  return { disabled: !!btn?.disabled, sending: !!note && !note.hidden && note.getClientRects().length > 0 };
+}, [panel, button]);
+
+// Fails if `sendAskq` loses its in-flight guard (two POSTs), or the card is not drawn from the
+// in-flight set (the poll in the middle brings the button back live).
+await check("a double click on Send answer sends one answer, and the card says sending until it lands", async () => {
+  await closeEverything();
+  const posts = await holdPosts(/\/api\/fleet\/asks\/[^/]+$/);
+  try {
+    await page.evaluate(() => openAskq());
+    await page.locator(`[id="aq-reply-${BOX}/q-1"]`).fill("8080");
+    await page.locator("#askq button", { hasText: "Send answer" }).dblclick();
+    await page.evaluate(() => pollAskq());
+    await page.waitForTimeout(300);
+    const during = await cardState("askq", "Send answer");
+    await page.waitForTimeout(1200);
+    if (posts.length !== 1) throw new Error(`${posts.length} answers sent`);
+    if (!during.disabled || !during.sending) throw new Error(`while sending: ${JSON.stringify(during)}`);
+  } finally { await page.unroute(/\/api\/fleet\/asks\/[^/]+$/); }
+});
+
+// Fails if `decideSubq` loses its in-flight guard: a double click approves twice.
+await check("a double click on Approve & install sends one approval, and the card says sending", async () => {
+  await closeEverything();
+  const posts = await holdPosts(/\/api\/fleet\/substrate\/[^/]+$/);
+  try {
+    await page.evaluate(() => openSubq());
+    await page.locator("#subq button", { hasText: "Approve" }).dblclick();
+    await page.waitForTimeout(300);
+    const during = await cardState("subq", "Approve");
+    await page.waitForTimeout(1200);
+    if (posts.length !== 1) throw new Error(`${posts.length} approvals sent`);
+    if (!during.disabled || !during.sending) throw new Error(`while sending: ${JSON.stringify(during)}`);
+  } finally { await page.unroute(/\/api\/fleet\/substrate\/[^/]+$/); }
+});
+
 // ---------- an error stays, every line of it (SKEIN-1265, SKEIN-1245) ----------
 console.log("\nan error or a report stays until it is closed");
 
