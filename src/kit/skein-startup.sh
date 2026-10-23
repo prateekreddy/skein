@@ -393,23 +393,13 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
     || { echo "[skein-kit] this box has a handoff to restore but no host-only state directory to restore it from (SKEIN_STATE)" >&2; exit 1; }
   snapshot="$box_state/$handoff_dir"
   [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] handoff bundle missing" >&2; exit 1; }
-  # Two bundle shapes reach here. A cross-runtime takeover bundles HEAD alone, because it is moving
-  # one branch to a new box. A fleet resize bundles --all, because it is reconstructing a box that
-  # may have been carrying several local branches — and restoring only HEAD there would silently
-  # drop the rest, which looks like a clean box rather than like lost work. So prefer every branch
-  # and fall back, rather than assuming either shape.
+  # One producer writes this bundle: a takeover (takeover::prepare_replacement), which bundles HEAD
+  # alone, because it moves one branch to a new box. So the restore takes the bundle's HEAD, the
+  # commit the manifest records, and nothing else the bundle might carry.
   restored=""
-  if git -C "$clone_root" fetch "$snapshot/repo.bundle" \
-       'refs/heads/*:refs/remotes/snapshot/*' >/dev/null 2>&1 \
-     && git -C "$clone_root" rev-parse --verify -q "refs/remotes/snapshot/$branch" >/dev/null; then
-    git -C "$clone_root" checkout -B "$branch" "refs/remotes/snapshot/$branch" 2>/dev/null \
-      && restored="all-branches"
-  fi
-  if [ -z "$restored" ]; then
-    git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD >/dev/null 2>&1 \
-      && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD 2>/dev/null \
-      && restored="head"
-  fi
+  git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD >/dev/null 2>&1 \
+    && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD 2>/dev/null \
+    && restored="head"
   # A bundle with no ref this clone can use is fatal ONLY if the clone is not already there. The
   # snapshot records the commit it was taken at, so that is answerable rather than a guess: when the
   # fresh clone's HEAD is already that commit, the bundle had nothing to add and the patches below

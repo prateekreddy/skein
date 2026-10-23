@@ -1309,6 +1309,62 @@ mod tests {
         );
     }
 
+    /// **A snapshot's bundle is restored from its HEAD, the commit its manifest records**
+    /// (SKEIN-1321). The one producer, `takeover::prepare_replacement`, bundles HEAD alone; the kit
+    /// used to prefer `refs/heads/<branch>` from the bundle, for a fleet resize's `--all` bundle
+    /// that nothing has written since SKEIN-1289.
+    ///
+    /// What would make it fail: the all-branches attempt put back (the bundle here also carries
+    /// the box's branch at an older commit, and the restore lands there instead of on HEAD).
+    #[test]
+    fn a_handoff_bundle_is_restored_from_its_head() {
+        if !have_jq() {
+            return skip(
+                "no jq here, and the kit reads the handoff out of the launch spec with jq",
+            );
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &skein_home);
+
+        let kit = KitBox::new("claude", None);
+        let state = kit.dir.join("state/web-main");
+        let at = state.join("handoff/r1");
+        fs::create_dir_all(&at).unwrap();
+        let base = kit.git(&["rev-parse", "HEAD"]).trim().to_string();
+        let branch = kit
+            .git(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .trim()
+            .to_string();
+        kit.git(&["commit", "-q", "--allow-empty", "-m", "on the branch"]);
+        kit.git(&["checkout", "-q", "--detach"]);
+        kit.git(&["commit", "-q", "--allow-empty", "-m", "the box's HEAD"]);
+        let head = kit.git(&["rev-parse", "HEAD"]).trim().to_string();
+        kit.git(&[
+            "bundle",
+            "create",
+            &at.join("repo.bundle").to_string_lossy(),
+            "HEAD",
+            &format!("refs/heads/{branch}"),
+        ]);
+        fs::write(
+            at.join("manifest.json"),
+            format!("{{\"head\":\"{head}\"}}\n"),
+        )
+        .unwrap();
+        kit.git(&["checkout", "-q", &branch]);
+        kit.git(&["reset", "-q", "--hard", &base]);
+
+        let out = kit.start_handoff("handoff/r1", Some(&state));
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(kit.git(&["rev-parse", "HEAD"]).trim(), head);
+        assert_eq!(
+            kit.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+            branch
+        );
+    }
+
     /// **A repo that tracks `.claude/settings.json` stays clean when a box starts in it, and skein's
     /// settings go into the box's own `settings.local.json`** (SKEIN-1048).
     ///
