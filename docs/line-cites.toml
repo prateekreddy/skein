@@ -1849,7 +1849,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
 cited_by = ["docs/architecture.md"]
 
-["src/store/sandbox-bootstrap.sh:327"]
+["src/store/sandbox-bootstrap.sh:354"]
 line = "if [ -n \"$wanted\" ] && [ \"$wanted\" != \"$(cat \"$marker\" 2>/dev/null || true)\" ] \\"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
