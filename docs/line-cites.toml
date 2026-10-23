@@ -862,36 +862,28 @@ cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2440"]
+["src/box-session.sh:2438"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2441"]
+["src/box-session.sh:2439"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2504"]
+["src/box-session.sh:2502"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2629"]
+["src/box-session.sh:2627"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2768"]
+["src/box-session.sh:2766"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3197"]
+["src/box-session.sh:3195"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:3269"]
-line = "box_runner=()"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:3314"]
-line = "exec \"${box_runner[@]}\" bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:3355"]
