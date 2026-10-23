@@ -273,6 +273,11 @@ const { log } = await startServer({
     // Belt and braces with the `no_proxy` a box already sets, because CI sets neither.
     NO_PROXY: "127.0.0.1,localhost,::1",
     no_proxy: "127.0.0.1,localhost,::1",
+    // A terminal tmux will not draw on, pinned, because that is what the server has wherever nobody
+    // started it from a terminal — a CI runner, a service manager — and the box terminal is xterm.js
+    // in the page whatever the server was started from (SKEIN-1310). Inherited, the run only ever
+    // tested whichever TERM the person running it happened to have, which was always a good one.
+    TERM: "dumb",
   },
 });
 const browser = await chromium.launch();
@@ -704,18 +709,40 @@ await check("launching a box creates no fleet — not by skein, not through the 
 // waits, found that same box provisioned.
 await check("and the box ends up on the board", async () => {
   const starts = path.join(fx.root, "home", "starts", "my-project-main.err");
-  for (const deadline = Date.now() + 60_000; Date.now() < deadline && !fs.existsSync(starts); ) {
+  const t0 = Date.now();
+  let polls = 0;
+  for (const deadline = t0 + 60_000; Date.now() < deadline && !fs.existsSync(starts); ) {
     const boxes = await (await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).json();
+    polls++;
     if (boxes.some(b => b.name === "my-project-main")) return;
     await settle(250);
   }
+  const waited = `${polls} polls over ${Date.now() - t0}ms`;
   const why = fs.existsSync(starts) ? fs.readFileSync(starts, "utf8") : "(nothing recorded)";
   // What the create terminal itself said. The whole reason this suite exists is that the CLI is not
   // where onboarding happens, so the terminal's own text is the evidence, not a re-run by hand.
+  // **From xterm's buffer, not from the DOM** (SKEIN-1310): the cockpit keeps xterm's canvas
+  // renderer, so `.xterm-rows` is not a reliable copy of what was said. It came back empty in both
+  // jobs of run 39905176082; the buffer, read in run 39907282050's copy of the same failure, held
+  // the whole start and then tmux's refusal.
   const pane = await page.evaluate(() => {
-    const rows = document.querySelector(".xterm-rows");
-    return rows ? rows.innerText.split("\n").filter(l => l.trim()).slice(-14).join("\n") : "(no terminal on screen)";
+    const s = sessions.get("my-project-main");
+    if (!s) return "(no terminal session for my-project-main)";
+    const buf = s.term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < buf.length; i++) {
+      const l = buf.getLine(i)?.translateToString(true) || "";
+      if (l.trim()) lines.push(l);
+    }
+    return `${lines.slice(-30).join("\n")}\n(socket readyState ${s.ws.readyState})`;
   });
+  // Whether the start placed the box, and whether the server lists it now. A record here with the
+  // box absent from the board is a different failure from a start that never got that far.
+  const places = path.join(fx.root, "home", "places");
+  const placed = fs.existsSync(places)
+    ? fs.readdirSync(places).map(f => `${f}: ${fs.readFileSync(path.join(places, f), "utf8").replace(/\s+/g, " ").slice(0, 160)}`).join("\n") || "(empty)"
+    : "(no places directory)";
+  const now = await (await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).json();
   // Defensively: `sbx` is not invoked at all on a normal in-fleet run, so this file often does not
   // exist — and a failure message that throws ENOENT reading its own evidence reports nothing about
   // the failure it was called for. That is exactly what happened while this suite was being
@@ -724,7 +751,48 @@ await check("and the box ends up on the board", async () => {
   const calls = fs.existsSync(log)
     ? fs.readFileSync(log, "utf8").split("\n").slice(-10).join("\n")
     : "(sbx was never invoked, which is normal in-fleet)";
-  throw new Error(`the first box never appeared.\n--- terminal ---\n${pane}\n--- recorded ---\n${why}\n--- last sbx calls ---\n${calls}`);
+  throw new Error(`the first box never appeared (${waited}).\n--- terminal ---\n${pane}\n--- recorded ---\n${why}\n--- placed ---\n${placed}\n--- listed now ---\n${JSON.stringify(now.map(b => b.name))}\n--- last sbx calls ---\n${calls}`);
+});
+
+// **The create terminal ends attached to the box's agent session, as a tmux client of it**
+// (SKEIN-1310). The launch is `skein start <box> --attach`, and the attach is a `tmux
+// attach-session` drawing on the pane in the page. It used to inherit the server's own `TERM`, and
+// where the server has none worth the name tmux refused — "open terminal failed: terminal does not
+// support clear" — so the box started, the terminal closed, and `skein start` recorded `env exited
+// non-zero` as why its start had failed. That record is also what the check above stops on, so
+// master went red whenever the refusal landed before a poll saw the box listed.
+//
+// Asked of tmux rather than read off the page: a client on the box's own socket is the attach
+// having happened, and the terminal it names is the one the server handed it. The suite pins the
+// server's `TERM` to `dumb` above, so an inherited one fails here on every machine and not only in CI.
+await check("the create terminal attaches to the box's session, whatever TERM the server has", async () => {
+  const rec = JSON.parse(fs.readFileSync(path.join(fx.root, "home", "places", "my-project-main.json"), "utf8"));
+  const starts = path.join(fx.root, "home", "starts", "my-project-main.err");
+  const said = () => page.evaluate(() => {
+    const s = sessions.get("my-project-main");
+    if (!s) return "";
+    const buf = s.term.buffer.active, lines = [];
+    for (let i = 0; i < buf.length; i++) {
+      const l = buf.getLine(i)?.translateToString(true) || "";
+      if (l.trim()) lines.push(l);
+    }
+    return lines.slice(-20).join("\n");
+  });
+  for (const deadline = Date.now() + 60_000; Date.now() < deadline; ) {
+    const out = spawnSync("tmux", ["-S", rec.sock, "list-clients", "-F", "#{client_termname}"], { encoding: "utf8" });
+    const clients = (out.stdout || "").split("\n").filter(Boolean);
+    if (clients.length) {
+      if (!clients.includes("xterm-256color"))
+        throw new Error(`the box's session has a client, but on terminal ${JSON.stringify(clients)}, not the page's xterm-256color`);
+      return;
+    }
+    const pane = await said();
+    if (/open terminal failed/.test(pane) || fs.existsSync(starts))
+      throw new Error(`the create terminal never attached to the box it started.\n--- recorded ---\n${
+        fs.existsSync(starts) ? fs.readFileSync(starts, "utf8") : "(nothing recorded)"}\n--- terminal ---\n${pane}`);
+    await settle(500);
+  }
+  throw new Error(`no client attached to ${rec.sock} within 60s.\n--- terminal ---\n${await said()}`);
 });
 
 // **The box's home is the one under the fleet root, not `guest-home`** (SKEIN-627).

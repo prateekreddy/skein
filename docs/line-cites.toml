@@ -373,27 +373,27 @@ cited_by = ["docs/recovery-survey.md"]
 line = "let _ = socket.send(Message::Text(format!(\"skein: {e}\\r\\n\"))).await;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:240"]
+["src/bin/skein-server/terminal.rs:238"]
 line = ".send(Message::Text(format!(\"\\r\\nskein: {why}\\r\\n\")))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:270"]
+["src/bin/skein-server/terminal.rs:286"]
 line = "\"skein: too many terminals open — {PTY_MAX} at once is the limit. Close another terminal \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:276"]
+["src/bin/skein-server/terminal.rs:292"]
 line = "fn watching_for_box(name: &str) -> String {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:304"]
+["src/bin/skein-server/terminal.rs:320"]
 line = "terminal by itself: use Try again below.\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:405"]
+["src/bin/skein-server/terminal.rs:421"]
 line = "const AFTER_NO_WATCH: &str = \"no-watch\";"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:410"]
+["src/bin/skein-server/terminal.rs:426"]
 line = "const AFTER_RETRY: &str = \"retry\";"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -402,32 +402,32 @@ line = "}"
 window = "if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }\u000b}\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:638"]
+["src/bin/skein-server/terminal.rs:654"]
 line = "pub(super) async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:644"]
+["src/bin/skein-server/terminal.rs:660"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
 window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:647"]
+["src/bin/skein-server/terminal.rs:663"]
 line = "return (StatusCode::BAD_REQUEST, \"unsupported runtime\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:667"]
+["src/bin/skein-server/terminal.rs:683"]
 line = "// the login surface is a modal that closes with its socket, and one that reopened itself over"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:677"]
+["src/bin/skein-server/terminal.rs:693"]
 line = "terminal and press log in again.\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:718"]
+["src/bin/skein-server/terminal.rs:732"]
 line = "vec![format!(\"logged in, but the post-login share failed: {e}\")]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/terminal.rs:729"]
+["src/bin/skein-server/terminal.rs:743"]
 line = "\"skein: login exited {code} — nothing changed\\r\\n\""
 cited_by = ["docs/recovery-survey.md"]
 

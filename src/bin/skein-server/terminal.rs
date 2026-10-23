@@ -207,9 +207,7 @@ async fn terminal_session(
             }
         }
     };
-    for (k, v) in std::env::vars() {
-        cmd.env(k, v);
-    }
+    browser_terminal_env(&mut cmd);
     // Run launch/attach from the repo ($SKEIN_REPO, else cwd) so a *relative* command resolves —
     // e.g. SKEIN_LAUNCH_CMD='dev-sandbox/setup-sandbox.sh {branch}' works without an absolute path.
     let run_dir = std::env::var("SKEIN_REPO")
@@ -255,6 +253,24 @@ async fn terminal_session(
         )
         .await;
     }
+}
+
+/// The environment of a process whose terminal is a pane in the cockpit: the server's own, so
+/// `sbx`, `bash` and skein resolve on `PATH` — **except what describes the terminal**, which is
+/// xterm.js in a browser tab and never the one the server was started from (SKEIN-1310).
+///
+/// The server's `TERM` is whatever launched it: `tmux-256color` under the fleet's `server.tmux`,
+/// and `dumb` or nothing at all under a CI runner, a service manager or `docker exec` without `-t`. Inherited,
+/// it reached the `tmux attach-session` every box terminal ends in, and tmux refuses to draw on a
+/// terminal it cannot clear — "open terminal failed: terminal does not support clear", exit 1 — so
+/// the box started, its terminal closed at once, and `skein start` recorded `env exited non-zero` as
+/// the reason its start failed. xterm.js implements xterm's 256-colour sequences, so that is what is
+/// said.
+fn browser_terminal_env(cmd: &mut CommandBuilder) {
+    for (k, v) in std::env::vars() {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
 }
 
 /// What a person sees when every terminal slot is taken, in both places it can happen.
@@ -704,9 +720,7 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
         cmd.arg(a);
     }
     // Propagate env so `sbx`/`bash` resolve on PATH, exactly as the box terminal does.
-    for (k, v) in std::env::vars() {
-        cmd.env(k, v);
-    }
+    browser_terminal_env(&mut cmd);
     // `AFTER_NO_WATCH` for the pump's own failures too, and not the box terminal's `AFTER_RETRY`: the
     // cap refusal above says why a login modal must not reopen itself.
     match pump_pty(&mut socket, cmd, AFTER_NO_WATCH).await {
