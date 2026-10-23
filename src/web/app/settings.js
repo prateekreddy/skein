@@ -233,7 +233,7 @@ function trackWork(name) {
   if (!name || tracking.has(name)) return;
   tracking.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(d.note || `${name} is tracking work`))
     .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
     .finally(() => { tracking.delete(name); });
@@ -247,7 +247,7 @@ function refreshDocs(name, replace) {
   if (!name || refreshingDocs.has(name)) return;
   refreshingDocs.add(name); renderDockbar();
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync/refresh${replace ? "?replace=1" : ""}`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${name}: ${d.note || "done"}`))
     .catch(e => toast(`couldn't update ${name}: ${e.message}`))
     .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
@@ -305,7 +305,7 @@ function saveConnection(card) {
   return fetch("/api/sync/connections", {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
   })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => {
       syncStatus = s;
       // Confirm at the card, not only in a toast: the toast is gone before you've read the next
@@ -320,7 +320,7 @@ function forgetConnectionToken(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
   if (!confirm(`Forget the Plane token for ${(c && c.label) || id}? Boxes already running keep theirs; a new box on this connection gets none until you paste another.`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
     .catch(e => toast(e.message));
 }
@@ -328,7 +328,7 @@ function removeConnection(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
   if (c && c.repos.length && !confirm(`${id} is used by ${c.repos.join(", ")}. Remove it anyway?`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
     .catch(e => toast(e.message));
 }
@@ -678,7 +678,7 @@ function saveRepoField(input) {
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => {
       // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
       const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
@@ -696,7 +696,7 @@ function pullRepo(x) {
   if (x.classList.contains("busy")) return;
   x.classList.add("busy"); x.textContent = "…";
   fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${id}: ${(d.summary || "pulled").split("\n")[0]}`))
     .catch(e => toast(`pull failed: ${e.message}`))
     .finally(() => { x.classList.remove("busy"); x.textContent = "⟳"; });
@@ -704,7 +704,7 @@ function pullRepo(x) {
 function removeRepo(id) {
   if (!confirm(`Unregister repo "${id}"? Its clone and store stay on disk; only skein's registration is removed.`)) return;
   fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
     .catch(e => toast(`remove failed: ${e.message}`));
 }
@@ -759,7 +759,7 @@ function settingsPayload() {
 function saveSettingsQuiet() {
   return fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"},
                                   body: JSON.stringify(settingsPayload()) })
-    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { settings = s; return s; });
 }
 // The box plugin's own after-Save line, approved with its switch (SKEIN-1057): said only when the
@@ -773,7 +773,7 @@ function saveSettings() {
       renderDockbar(); closeSettings();
       toast((settings.box_plugin !== false) !== pluginWas ? BOX_PLUGIN_SAVED : "settings saved");
     })
-    .catch(e => toast(`couldn't save: ${e.message}`));
+    .catch(e => toast(`couldn't save: ${failText(e)}`));
 }
 // A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole
 // difference between this and the fleet's own memory and CPUs, which are fixed at sandbox creation
@@ -1199,7 +1199,7 @@ function saveBoxSettings() {
   const privileged = document.getElementById("bs-priv").value === "1";
   const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); });
+  }).then(async r => { if (!r.ok) throw await refused(r); });
   // Absent vs empty is the whole grammar here: cleared field ⇒ inherit again, not "set to nothing".
   Promise.all([
     post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) }),
@@ -1400,7 +1400,7 @@ function submitAddRepo() {
   if (share) body.share = share;
   else if (token) body.token = token;
   fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(res => {
       settle();
       // The host resolved which GitHub repository this is, from the URL it cloned — carried on the
@@ -1463,7 +1463,7 @@ function arApplySettings(repo) {
   if (Object.keys(body).length) {
     jobs.push(fetch(`/api/repos/${encodeURIComponent(repo.id)}/settings`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await r.text()) || r.statusText}`); })
+    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await refused(r)).message}`); })
       .catch(e => problems.push(`settings not saved: ${e.message}`)));
   }
   // No token here any more: it went with the clone (SKEIN-1231), and the host said if it was not

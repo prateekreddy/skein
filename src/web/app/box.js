@@ -383,6 +383,9 @@ function loadFiles(name, path, file) {
   if (path !== undefined) st.path = path;
   if (file !== undefined) st.file = file;
   filesState.set(name, st);
+  // Entering the pane says it is waiting, as the diff does (SKEIN-1299); a step inside it keeps the
+  // listing on screen until the next one lands.
+  if (path === undefined) filespane.innerHTML = `<div class="fview"><div class="note">asking the box…</div></div>`;
   fetch(`/api/boxes/${encodeURIComponent(name)}/files?path=${encodeURIComponent(st.path)}`)
     .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
     .then(d => {
@@ -486,7 +489,7 @@ function loadFileContent(name, path) {
 // (a git fork in a sandbox), which is why this says "asking the box" rather than "loading".
 function loadDiff(name) {
   diffpane.innerHTML = `<div class="diff"><div class="note">asking the box…</div></div>`;
-  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(r => r.json()).then(d => {
+  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(async r => { if (!r.ok) throw await refused(r); return r.json(); }).then(d => {
     if (view.box !== name || view.mode !== "diff") return;
     // An empty patch is an answer, and the server's note says which one — "nothing changed" and
     // "the box isn't running" look identical otherwise.
@@ -494,7 +497,10 @@ function loadDiff(name) {
       ? diffBanner(d) + renderDiff(d.patch)
       : `<div class="diff"><div class="note">${esc(d.note || "no changes on this branch yet")}</div></div>`;
     renderComments(name);
-  }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
+  }).catch(e => {
+    if (view.box !== name || view.mode !== "diff") return;
+    diffpane.innerHTML = `<div class="diff"><div class="note">could not load the diff — ${esc(failText(e))}</div></div>`;
+  });
 }
 // One renderer for provenance, used by every pane that shows a value skein read from somewhere.
 // The server sends TWO provenance fields beside the value, and they answer different questions.

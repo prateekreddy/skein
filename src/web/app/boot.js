@@ -1372,6 +1372,25 @@ function openLoginTerminal(runtime) {
 // server ends and a flow you abandon leave through the same door.
 function closeLoginTerminal() { try { loginTermState?.ws.close(); } catch {} }
 
+// ---------- feedback: what a refusal says ----------
+// **The server's reason, not its status line** (SKEIN-1299). A refused write answers with a sentence
+// — "Read-only file system", "request r1 is already granted — …" — and half the page threw that away
+// for `r.statusText` or a fixed "could not record that decision", while the other half read it. One
+// helper now, so every refusal reads the same way: the body as the server wrote it (a JSON
+// `{"error": …}` unwrapped), else the status line, else the code.
+async function refused(r) {
+  let body = "";
+  try { body = (await r.text()).trim(); } catch { /* no body */ }
+  try { const j = JSON.parse(body); if (j && typeof j.error === "string") body = j.error.trim(); } catch { /* not JSON */ }
+  return new Error(body || r.statusText || `HTTP ${r.status}`);
+}
+// What to say for a failure that may never have reached the server at all: fetch's own "Failed to
+// fetch" names the browser's problem, not the person's.
+function failText(e) {
+  const m = String((e && e.message) || e || "").trim();
+  return !m || m === "Failed to fetch" || m === "Load failed" ? "the host is not answering" : m;
+}
+
 // ---------- fleet gauges ----------
 // Every box in the fleet shares one VM's memory, disk and cores, and until this strip existed the
 // only way to see how much of any of them was left was to ask the sandbox by hand — usually after

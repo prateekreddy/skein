@@ -378,8 +378,8 @@ function sendMail() {
   if (!body) { ta.focus(); return; }
   hint.textContent = "sending…";
   fetch("/api/mailbox", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ to, body, kind }) })
-    .then(r => { if (!r.ok) throw 0; ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
-    .catch(() => hint.textContent = "send failed");
+    .then(async r => { if (!r.ok) throw await refused(r); ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
+    .catch(e => hint.textContent = `not sent: ${failText(e)}`);
 }
 document.getElementById("mbx-send").addEventListener("click", sendMail);
 document.getElementById("mbx-body").addEventListener("keydown", e => {
@@ -495,8 +495,8 @@ function decideSubq(key, approve) {
   fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
-  }).then(r => { if (!r.ok) throw 0; loadSubq(); })
-    .catch(() => toast("could not record that decision"));
+  }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })
+    .catch(e => toast(`could not record that decision: ${failText(e)}`));
 }
 
 // The badge, so a request does not wait unseen for someone to open the panel.
@@ -595,8 +595,8 @@ function sendAskq(key, body) {
   return fetch("/api/fleet/asks/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...shown, ...body }),
-  }).then(r => { if (!r.ok) throw 0; askqShown.delete(key); loadAskq(); pollAskq(); })
-    .catch(() => toast("could not record that decision"));
+  }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); })
+    .catch(e => toast(`could not record that decision: ${failText(e)}`));
 }
 
 // `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
@@ -853,7 +853,7 @@ function clearReadPat() {
 function putReadPat(token) {
   return fetch("/api/fleet/git-read-token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); })
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
     .catch(e => toast(String(e.message || "could not store that token")));
 }
 
@@ -946,7 +946,7 @@ function storeGitCred(repo, token) {
   return fetch("/api/fleet/repo-token", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Replace a stored token and nothing else — how a shared token is rotated from any card that shares
@@ -955,7 +955,7 @@ function rotateGitCred(id, token) {
   return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Point an existing repo at the token another repo has (SKEIN-1241). The host asks GitHub whether
@@ -965,7 +965,7 @@ function joinGitShare(repo, share) {
   return fetch("/api/fleet/repo-share", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, share }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Returns its promise, so a caller — the test, or anything wanting to store then act — can wait
@@ -987,8 +987,8 @@ function removeGitCred(id) {
   const which = reposPhrase(c && (c.repos && c.repos.length ? c.repos : [c.repo])) || "this repository";
   if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; return loadGitCreds(); })
-    .catch(() => toast("could not forget that token"));
+    .then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
+    .catch(e => toast(`could not forget that token: ${failText(e)}`));
 }
 
 function decideGitq(key, approve) {
@@ -1011,13 +1011,13 @@ function decideGitq(key, approve) {
   }).then(r => r.ok ? loadGitq() : r.text().then(why => {
     toast(why.trim() || "could not record that decision");
     return loadGitq();
-  })).catch(() => toast("could not record that decision"));
+  })).catch(e => toast(`could not record that decision: ${failText(e)}`));
 }
 
 function revokeGitq(box, repo) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; loadGitq(); })
-    .catch(() => toast("could not revoke that grant"));
+    .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); })
+    .catch(e => toast(`could not revoke that grant: ${failText(e)}`));
 }
 
 function paintGitqBadge(n) {
