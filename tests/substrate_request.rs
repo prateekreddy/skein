@@ -701,8 +701,9 @@ fn a_queue_a_box_cannot_write_does_not_claim_a_request_was_filed() {
 /// `@scope` for apt, which the host refuses.
 #[test]
 fn the_box_and_the_host_agree_on_what_a_package_name_is() {
-    let src = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh"))
-        .unwrap();
+    let src =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh"))
+            .unwrap();
     let lines: Vec<&str> = src.lines().collect();
     let lift = |name: &str| -> String {
         let at = lines
