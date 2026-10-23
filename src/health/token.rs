@@ -150,6 +150,8 @@ pub fn token_expiry_health() -> HealthCheck {
 pub(crate) fn credential_readings() -> Option<Vec<crate::prq::CredentialLife>> {
     static GATE: crate::util::Gate<Vec<crate::prq::CredentialLife>> = crate::util::Gate::new();
     static READ_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Whether the reading the gate holds has a refusal in it, which decides how long it is believed.
+    static REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if crate::util::in_test() {
         return Option::None;
     }
@@ -157,9 +159,30 @@ pub(crate) fn credential_readings() -> Option<Vec<crate::prq::CredentialLife>> {
     if READ_AT.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
         GATE.invalidate();
     }
-    GATE.get(std::time::Duration::from_secs(60 * 60), || {
-        Some(crate::prq::credential_lives(chrono::Utc::now()))
+    let fresh = readings_fresh(REFUSED.load(std::sync::atomic::Ordering::Relaxed));
+    GATE.get(fresh, || {
+        let lives = crate::prq::credential_lives(chrono::Utc::now());
+        REFUSED.store(
+            lives.iter().any(|c| c.life.refused()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Some(lives)
     })
+}
+
+/// How long a credential reading is believed: an hour, or **five minutes when GitHub refused a
+/// credential in it** (SKEIN-1277).
+///
+/// Storing, replacing or forgetting a token in Settings re-reads at once
+/// ([`crate::gitgate::credentials_generation`]), but the commonest fix happens where skein cannot
+/// see it — `gh auth login` again, a new `$GH_TOKEN` for the sandbox — and an hour-long refusal
+/// would go on calling a fixed fleet broken. A healthy reading keeps the hour: it is only an
+/// expiry date, and asking every five minutes would spend a request per credential for nothing.
+pub(crate) fn readings_fresh(refused: bool) -> std::time::Duration {
+    match refused {
+        true => std::time::Duration::from_secs(5 * 60),
+        false => std::time::Duration::from_secs(60 * 60),
+    }
 }
 
 /// **The GitHub line is not satisfied while GitHub refuses a credential skein holds** (SKEIN-1277).
@@ -360,6 +383,24 @@ mod tests {
         assert!(
             !credential_refusal_line(reachable, &slow, &slugs, "thing-fleet").is_fault(),
             "a GitHub that did not answer has refused nothing"
+        );
+    }
+
+    /// **A refusal is re-read within minutes; a healthy reading keeps the hour** (SKEIN-1277).
+    ///
+    /// A token fixed outside skein — `gh auth login`, a new `$GH_TOKEN` — bumps nothing skein can
+    /// see, so a refused reading must age out on its own and soon. What makes this fail: one TTL for
+    /// both (either assertion, depending on which), e.g. `true => 60 * 60`.
+    #[test]
+    fn a_refused_reading_is_re_read_within_minutes_and_a_healthy_one_keeps_the_hour() {
+        use std::time::Duration;
+        assert!(
+            readings_fresh(true) <= Duration::from_secs(5 * 60),
+            "a refusal must not stand for an hour after the token is fixed outside skein"
+        );
+        assert!(
+            readings_fresh(false) >= Duration::from_secs(60 * 60),
+            "a healthy reading is only an expiry date, and keeps the hourly gate"
         );
     }
 
