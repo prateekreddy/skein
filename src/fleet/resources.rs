@@ -32,6 +32,12 @@ pub struct FleetResources {
     pub docker: u64,
     pub disk_total: u64,
     pub disk_used: u64,
+    /// What a new file can actually have, from `df`'s own *Available* column (SKEIN-1286).
+    ///
+    /// **Not `disk_total - disk_used`.** A filesystem keeps blocks back that no ordinary writer can
+    /// use, so the difference overstates the room: measured on the owner's fleet, the image store
+    /// said 21G free by subtraction and had about 17G. Zero when `df` did not answer.
+    pub disk_avail: u64,
     /// `/var/lib/docker` — images, volumes and build cache. **A different disk from the one above**,
     /// and that is why it is measured separately rather than folded in: sbx gives a sandbox two, a
     /// root filesystem sized by `DOCKER_SANDBOXES_ROOT_SIZE` and this one by
@@ -44,6 +50,8 @@ pub struct FleetResources {
     /// Zero when Docker shares the boxes' filesystem, so the same bytes are never drawn twice.
     pub images_total: u64,
     pub images_used: u64,
+    /// The image store's [`FleetResources::disk_avail`]: `df`'s Available, not total minus used.
+    pub images_avail: u64,
     pub cpus: u64,
     pub load1: f64,
     pub load5: f64,
@@ -283,9 +291,9 @@ fn resource_script() -> String {
          echo \"cpus $(nproc 2>/dev/null || echo 0)\"; \
          awk '{{print \"load1\", $1; print \"load5\", $2}}' /proc/loadavg; \
          df -Pm {root} 2>/dev/null \
-         | awk 'NR==2{{print \"disk_dev\", $1; print \"disk_total\", $2; print \"disk_used\", $3}}'; \
+         | awk 'NR==2{{print \"disk_dev\", $1; print \"disk_total\", $2; print \"disk_used\", $3; print \"disk_avail\", $4}}'; \
          df -Pm {docker} 2>/dev/null \
-         | awk 'NR==2{{print \"images_dev\", $1; print \"images_total\", $2; print \"images_used\", $3}}'; \
+         | awk 'NR==2{{print \"images_dev\", $1; print \"images_total\", $2; print \"images_used\", $3; print \"images_avail\", $4}}'; \
          for c in skein skein/containers docker; do \
          awk -v c=$c '/^anon /{{print c, int($2/1048576)}}' \
          /sys/fs/cgroup/$c/memory.stat 2>/dev/null; done",
@@ -337,9 +345,11 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
             "docker" => outside = number(),
             "disk_total" => r.disk_total = number(),
             "disk_used" => r.disk_used = number(),
+            "disk_avail" => r.disk_avail = number(),
             "disk_dev" => root_dev = value.to_string(),
             "images_total" => r.images_total = number(),
             "images_used" => r.images_used = number(),
+            "images_avail" => r.images_avail = number(),
             "images_dev" => images_dev = value.to_string(),
             "cpus" => r.cpus = number(),
             "load1" => r.load1 = value.parse().unwrap_or(0.0),
@@ -373,6 +383,7 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
     if !images_dev.is_empty() && images_dev == root_dev {
         r.images_total = 0;
         r.images_used = 0;
+        r.images_avail = 0;
     }
     (r.mem_total > 0).then_some(r)
 }
@@ -581,6 +592,32 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// **The script asks `df` for what is available, and the parser reads it** (SKEIN-1286): the
+    /// real [`resource_script`], run here by `sh` against a fixture fleet root, so the column it
+    /// prints is the column `df` puts Available in. What would make it fail: the script no longer
+    /// printing `disk_avail`, or printing a column that is not a number.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_resource_script_reports_what_df_says_is_available() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &home);
+        let out = std::process::Command::new("sh")
+            .args(["-c", &resource_script()])
+            .output()
+            .expect("sh runs");
+        let r = parse_resources(&String::from_utf8_lossy(&out.stdout)).expect("a memory total");
+        assert!(r.disk_total > 0, "df answered about the fixture root");
+        assert!(
+            r.disk_avail > 0 && r.disk_avail <= r.disk_total,
+            "Available read from df: {} of {}",
+            r.disk_avail,
+            r.disk_total
+        );
+    }
+
     /// Two disks or one, drawn honestly either way.
     ///
     /// sbx gives a sandbox a root filesystem and a separate `/var/lib/docker`, sized by two
@@ -599,6 +636,20 @@ b idle 5000000 4 1048576 1048576
         ))
         .unwrap();
         assert_eq!((two.disk_used, two.images_used), (20986, 45433));
+
+        // What is AVAILABLE is df's own fourth column, not total minus used: a filesystem's
+        // reserved blocks are in neither, so subtraction claims room nobody can write to
+        // (SKEIN-1286). The reply here is the image store from the sweep that found it.
+        let reserved = parse_resources(&format!(
+            "{head}disk_dev overlay\ndisk_total 60168\ndisk_used 20986\ndisk_avail 36100\n\
+             images_dev /dev/vdd\nimages_total 50089\nimages_used 28500\nimages_avail 17400\n"
+        ))
+        .unwrap();
+        assert_eq!((reserved.disk_avail, reserved.images_avail), (36100, 17400));
+        assert!(
+            reserved.images_avail < reserved.images_total - reserved.images_used,
+            "the fixture must have reserved blocks, or it tells subtraction from df apart by nothing"
+        );
 
         // One filesystem answering both questions: the boxes' gauge already counts these bytes.
         let one = parse_resources(&format!(

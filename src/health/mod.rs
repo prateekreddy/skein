@@ -28,6 +28,7 @@ mod scratch;
 #[cfg(test)]
 mod testkit;
 mod token;
+mod volume;
 
 pub use check::*;
 pub use disk::*;

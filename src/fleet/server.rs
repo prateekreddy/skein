@@ -101,6 +101,40 @@ fn regex_literal(text: &str) -> String {
 ///
 /// A script that dies for any *other* reason still has its file and is still restarted. This ends
 /// only the case where there is nothing left to restart it with.
+/// How large the server's log grows before it is moved aside to `server.log.1`, in bytes.
+const SERVER_LOG_MAX: u64 = 10 << 20;
+
+/// The server's own log: everything the doorway and the server print, on the volume, so it can be
+/// read after the fact (SKEIN-1286). Until this, that output went only to a detached tmux pane,
+/// whose scrollback is all there was.
+pub fn server_log_path() -> String {
+    skein_home()
+        .join("server.log")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `command`, with everything it prints still printed and also appended to `log`, which is moved
+/// to `<log>.1` (replacing the one before) once it passes `max` bytes — two files, never more.
+///
+/// **A separate reader, not a redirection in the server.** Lines the server prints as it exits are
+/// the ones most worth keeping, and a reader in another process drains them after it has gone,
+/// where a thread inside it would die with it. The pane still gets every line, so
+/// [`doorway_pane_command`] answers as it always has. `PYTHONUNBUFFERED`, because the doorway is
+/// python and a pipe would otherwise hold its lines back until a buffer filled.
+fn logged(command: &str, log: &str, max: u64) -> String {
+    let log = sh_quote(log);
+    format!(
+        "{{ PYTHONUNBUFFERED=1 {command} }} 2>&1 | {{ \
+           n=$(( $(cat {log} 2>/dev/null | wc -c) + 0 )); \
+           while IFS= read -r line || [ -n \"$line\" ]; do \
+             printf '%s\\n' \"$line\"; printf '%s\\n' \"$line\" >> {log}; \
+             n=$((n + ${{#line}} + 1)); \
+             if [ \"$n\" -gt {max} ]; then mv -f {log} {log}.1; n=0; fi; \
+           done; }}; "
+    )
+}
+
 fn supervised(script: &str, body: &str) -> String {
     format!("while [ -f {} ]; do {body} done", sh_quote(script))
 }
@@ -441,13 +475,20 @@ pub fn start_server(sandbox: &str) -> Result<(), String> {
         &server_doorway_path(),
         &format!(
             "began=$(date +%s); \
-             SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp}; \
+             {doorway} \
              [ $(($(date +%s) - began)) -lt 5 ] && sleep 2;",
-            home = sh_quote(&skein_home().to_string_lossy()),
-            doorway = sh_quote(&server_doorway_path()),
-            port = server_sandbox_port(),
-            server = sh_quote(&server_path()),
-            stamp = sh_quote(&server_door_stamp_path()),
+            doorway = logged(
+                &format!(
+                    "SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp};",
+                    home = sh_quote(&skein_home().to_string_lossy()),
+                    doorway = sh_quote(&server_doorway_path()),
+                    port = server_sandbox_port(),
+                    server = sh_quote(&server_path()),
+                    stamp = sh_quote(&server_door_stamp_path()),
+                ),
+                &server_log_path(),
+                SERVER_LOG_MAX,
+            ),
         ),
     );
     // The socket lives under `private/`, which — unlike the `.skein` it used to sit in — is not
@@ -847,6 +888,46 @@ pub fn fleet_serve_mounts() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// **What the server prints reaches its log and still reaches the pane, and the log is moved
+    /// aside rather than growing** (SKEIN-1286). Run by `sh` for real, with a small cap.
+    ///
+    /// What would make it fail: the log not written (the first assertion), the pane losing its
+    /// copy (the second), a last line with no newline dropped — the line a crash prints — or no
+    /// rotation, so `<log>.1` never appears and the log passes its cap.
+    #[test]
+    fn the_servers_output_is_kept_in_a_log_that_is_moved_aside_when_full() {
+        let dir = crate::testutil::tempdir();
+        let log = dir.join("server.log");
+        let run = |command: &str| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &logged(command, &log.to_string_lossy(), 64)])
+                .output()
+                .expect("sh runs");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let pane = run("printf 'listening\\n'; printf 'giving up' >&2;");
+        let kept = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(kept, "listening\ngiving up\n");
+        assert_eq!(pane, "listening\ngiving up\n");
+
+        run("i=0; while [ $i -lt 20 ]; do echo line-$i; i=$((i+1)); done;");
+        let old = std::fs::read_to_string(dir.join("server.log.1")).expect("moved aside once full");
+        assert!(
+            old.len() as u64 > 64 && !old.contains("line-19"),
+            "what was moved aside is a full log of older lines: {old}"
+        );
+        let now = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            now.len() <= 64 + 8,
+            "the log stays near its cap: {} bytes",
+            now.len()
+        );
+        assert!(
+            format!("{old}{now}").contains("line-19"),
+            "the newest line is kept: {now}"
+        );
+    }
+
     use super::*;
     use crate::testutil::*;
 
