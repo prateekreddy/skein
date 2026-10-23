@@ -837,7 +837,8 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
@@ -893,7 +894,6 @@ mod tests {
             Some(inode),
             "the mailbox lock must be the same file afterwards, never deleted and remade"
         );
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **Mail to a box that no longer exists is kept and said, not pruned** (SKEIN-1284).
@@ -907,7 +907,8 @@ mod tests {
     fn mail_to_a_box_that_no_longer_exists_is_kept_and_flagged() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
@@ -1011,7 +1012,6 @@ mod tests {
             msgs.iter().all(|m| !m.recipient_gone),
             "an empty (or unreadable) registry flags nothing"
         );
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A broadcast is held open by a registry key that is not a box** (SKEIN-259).

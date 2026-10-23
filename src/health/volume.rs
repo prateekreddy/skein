@@ -139,11 +139,11 @@ mod tests {
     #[test]
     fn df_is_read_by_its_available_column() {
         let out = "Filesystem     1048576-blocks   Used Available Capacity Mounted on\n\
-                   /dev/disk3s5          948000 828000    120000      88% /Users\n";
+                   /dev/disk3s5          948000 828000    120000      88% /v\n";
         assert_eq!(
-            parse_df("/Users/x/.skein", out),
+            parse_df("/v/.skein", out),
             Some(VolumeDisk {
-                path: "/Users/x/.skein".into(),
+                path: "/v/.skein".into(),
                 total: 948000,
                 used: 828000,
                 avail: 120000

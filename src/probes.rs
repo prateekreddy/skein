@@ -2815,8 +2815,9 @@ mod tests {
         let home = tempdir();
         let fleet = home.join("fleet");
         fs::create_dir_all(&fleet).unwrap();
-        std::env::set_var("SKEIN_HOME", &home);
-        std::env::set_var("SKEIN_FLEET_ROOT", &fleet);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
         let sh = |script: &str| {
             let out = box_shell(&home)
                 .arg("-c")
@@ -2879,8 +2880,6 @@ mod tests {
         );
         let commits = fs::read_to_string(store.join("diffs").join("b1.commits")).unwrap();
         assert_eq!(commits.trim(), "mine", "only the box's own commit");
-        std::env::remove_var("SKEIN_FLEET_ROOT");
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A freshly scaffolded store's `settings.json` carries no skein hook, and a box still
