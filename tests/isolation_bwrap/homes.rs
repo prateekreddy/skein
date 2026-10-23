@@ -37,7 +37,7 @@ fn path_lists_block() -> String {
 
 /// The launcher's `$HOME` bind construction, lifted out of the script it lives in.
 ///
-/// From `binds=(--bind "$home" "$HOME")` — the first thing in the box's mount list — down to the
+/// From `binds=(--bind-fd "${home_at##*/}" "$HOME")` — the first thing in the box's mount list — down to the
 /// read-only bind of the npm prefix, which is the last of the binds decided from the path lists
 /// above. Everything after it needs `$state` and `$root`, which belong to other tests.
 ///
@@ -49,7 +49,7 @@ fn home_binds_block() -> String {
     let lines: Vec<&str> = src.lines().collect();
     let from = lines
         .iter()
-        .position(|l| *l == r#"binds=(--bind "$home" "$HOME")"#)
+        .position(|l| *l == r#"binds=(--bind-fd "${home_at##*/}" "$HOME")"#)
         .expect("the launcher's `$HOME` bind construction moved");
     let to = lines[from..]
         .iter()
@@ -64,7 +64,7 @@ fn home_binds_block() -> String {
         r#"for rel in "${share_paths[@]}"; do"#,
         r#"for rel in "${overlay_paths[@]}"; do"#,
         "--tmp-overlay",
-        r#"binds+=(--bind "$home/.local/state" "$HOME/.local/state")"#,
+        r#"binds+=(--bind-fd "${state_at##*/}" "$HOME/.local/state")"#,
     ] {
         assert!(
             block.contains(landmark),
@@ -157,12 +157,18 @@ impl Homes {
              export HOME={home}\n\
              home={boxhome}\n\
              box={boxname}\n\
+             root=\"$home\"\n\
+             {helpers}\n\
+             mkdir -p \"$home/.local/state\"\n\
+             pin_dir home_at \"$home\"\n\
+             pin_dir state_at \"$home/.local/state\"\n\
              {lists}\n\
              {block}\n\
              exec bwrap --dev-bind / / \"${{binds[@]}}\" -- /bin/sh -c {probe} skein-probe\n",
             home = skein::util::sh_quote(self.shared.to_string_lossy().as_ref()),
             boxhome = skein::util::sh_quote(self.dir.join(box_name).to_string_lossy().as_ref()),
             boxname = skein::util::sh_quote(box_name),
+            helpers = launcher_helpers(),
             lists = path_lists_block(),
             block = rewrite(home_binds_block()),
             probe = skein::util::sh_quote(probe),

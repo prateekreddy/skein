@@ -367,28 +367,29 @@ fn build_git_shim_for(
         .expect("the git shim block moved");
     let to = lines
         .iter()
-        .position(|l| l.contains(r#"binds+=(--ro-bind "$root/bin/git" "$git_real")"#))
+        .position(|l| l.contains(r#"binds+=(--ro-bind-fd "$new_fd" "$git_real")"#))
         .expect("the bind line moved");
     // `to` is the last line of the block, so the slice stops just short of it — and short of the
     // `fi` that closes the whole thing. Both are restored, exactly as the sudo shim's test does.
     let block = format!(
         "{}\n{}\nfi",
         lines[from..to].join("\n"),
-        r#"    binds+=(--ro-bind "$root/bin/git" "$git_real")"#
+        r#"    binds+=(--ro-bind-fd "$new_fd" "$git_real")"#
     );
 
     let installed = fleet.join(".skein/box-session.sh");
     fs::create_dir_all(installed.parent().unwrap()).unwrap();
     fs::copy(&launcher, &installed).unwrap();
-    fs::create_dir_all(box_root).unwrap();
+    fs::create_dir_all(box_root.join("bin")).unwrap();
 
     let mut builder = Command::new("bash");
     builder
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail; binds=(); root={}; box={box_name}; skein_launcher={}; {block}",
+            "set -uo pipefail; binds=(); root={}; box={box_name}; skein_launcher={}; {}\n{block}",
             box_root.display(),
             installed.display(),
+            held_dirs(),
         ))
         .env("SKEIN_FLEET_ROOT", fleet)
         // Pinned beside the fleet root because the two are coupled: a scope that pins one and says
@@ -473,6 +474,32 @@ fn shim_target(path: &std::path::Path) -> Option<String> {
         .map(|v| v.trim_matches('\'').to_string())
 }
 
+/// What the launcher has in hand before its shim blocks run, set up the way it sets them up: the
+/// write helpers lifted out of it (`pin_dir`, `open_new`, `land_new`, `drop_new`), and the box's
+/// `bin` and home held open as `bin_at` and `home_at` (SKEIN-1287). Needs `$root` and `$box` set.
+fn held_dirs() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let lift = |name: &str| -> String {
+        let from = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{name}() {{")))
+            .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+        let to = from + lines[from..].iter().position(|l| *l == "}").unwrap();
+        lines[from..=to].join("\n")
+    };
+    format!(
+        "{}\n{}\n{}\n{}\n{}\nmkdir -p \"$root/bin\" \"$root/home\"; \
+         root_real=\"$(cd -P -- \"$root\" && pwd -P)\"; \
+         pin_dir bin_at \"$root/bin\"; pin_dir home_at \"$root/home\"",
+        lift("real_name"),
+        lift("pin_dir"),
+        lift("open_new"),
+        lift("land_new"),
+        lift("drop_new"),
+    )
+}
+
 /// The whole `SKEIN_GIT_SCOPE` block, lifted from the launcher rather than copied — the same rule
 /// [`build_git_shim`] follows, so a change to the launcher is a change to what this runs.
 ///
@@ -514,7 +541,8 @@ fn a_scoped_box_routes_github_direct_and_a_fleet_box_does_not() {
         let prelude = format!(
             "set -uo pipefail; binds=(); root={root}; home={home}; state={state}; box=web-main; \
              export SKEIN_FLEET_ROOT={fleet}; unset SKEIN_BOX_REPO SSH_AUTH_SOCK; \
-             no_proxy='localhost,127.0.0.1'; NO_PROXY='localhost,127.0.0.1';",
+             no_proxy='localhost,127.0.0.1'; NO_PROXY='localhost,127.0.0.1';\n{held}",
+            held = held_dirs(),
             root = root.display(),
             home = home.display(),
             state = state.display(),

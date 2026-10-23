@@ -36,7 +36,9 @@ fn run_telemetry_block(home: &Path, setting: Option<&str>) -> std::process::Outp
     Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail\nhome='{}'\n{set}{block}",
+            // `claude_at` is the held `~/.claude` the launcher writes through (SKEIN-1287); here the
+            // plain path stands in for it.
+            "set -uo pipefail\nhome='{}'\nclaude_at=\"$home/.claude\"\n{set}{block}",
             home.display()
         ))
         .output()

@@ -88,16 +88,23 @@ impl Swap {
     /// Run the launcher as skein's `session_script` would, with an environment holding only what
     /// this fixture names: every path it can reach at fleet scope is inside the scratch directory.
     fn start(&self) -> Output {
+        self.launcher("exec sleep 300")
+            .output()
+            .expect("bash to run the launcher")
+    }
+
+    /// The launcher's command line for this box, with `pane` as the box's pane command.
+    fn launcher(&self, pane: &str) -> Command {
         let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh");
-        Command::new("bash")
-            .arg(&launcher)
+        let mut cmd = Command::new("bash");
+        cmd.arg(&launcher)
             .arg(&self.name)
             .arg(self.root())
             .arg(self.dir.join("pid").join(&self.name))
             .arg("skein-shell")
             .arg(self.dir.join("state").join(&self.name))
             .arg("")
-            .args(["bash", "-lc", "exec sleep 300"])
+            .args(["bash", "-lc", pane])
             .env_clear()
             .env("HOME", self.sandbox_home())
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
@@ -110,9 +117,8 @@ impl Swap {
             .env("SKEIN_BOX_REPO", "skein-test/repo")
             .env("SKEIN_BOX_PEERS", "0")
             .env("SKEIN_BOX_PRIVILEGED", "0")
-            .env("SKEIN_BOX_STORE", self.dir.join("store"))
-            .output()
-            .expect("bash to run the launcher")
+            .env("SKEIN_BOX_STORE", self.dir.join("store"));
+        cmd
     }
 
     /// End a box this fixture started, and wait for its namespace to go.
@@ -419,5 +425,262 @@ fn a_dotfile_link_inside_the_home_is_followed_and_a_foreign_git_directory_is_not
     assert!(
         stderr.contains("not a directory of its own"),
         "the launcher skipped the store record without saying why:\n{stderr}"
+    );
+}
+
+/// **A box process that outlives a restart cannot swap a directory between the launcher's check
+/// and its use** (SKEIN-1287).
+///
+/// Nothing unshares a box's pid namespace, so a `setsid` from inside a box is still running while
+/// the box restarts, and it can rename the box's `home`, `tmp`, `~/.local/state` and `bin` and put
+/// links to elsewhere in their place after `own_dir` has passed them. Here the test plays that
+/// process: it makes the swaps the moment the launcher's start id appears, which is after the
+/// checks and before any bind, and the launcher still has python and the shims to run. Each link
+/// leads to a decoy directory outside the root, standing for another box's home or the fleet's
+/// state, and every decoy must come through untouched.
+///
+/// Two starts. In the first `home`, `tmp` and `~/.local/state` are swapped and the box must still
+/// start on the directories it was checked with: the pane writes a marker into `$HOME`, `/tmp` and
+/// `~/.local/state`, and they land in the moved-aside originals. In the second `bin` is swapped,
+/// and the shims must land in the moved-aside `bin`. That start need not succeed — the shims' mount
+/// points are under `bin` inside the box's own namespace too, and a box that breaks its own start
+/// is refused nothing it was owed.
+///
+/// What makes it fail, named before it was written and then done: binding `home` by name again
+/// (`--bind "$home" "$HOME"` in place of `--bind-fd`) mounts the decoy as HOME, so the pane's
+/// marker lands in it; writing the shims into `$root/bin` rather than `$bin_at` puts them in the
+/// bin decoy.
+#[test]
+fn a_directory_swapped_after_it_was_checked_is_not_what_the_box_gets() {
+    if !can_host_a_box() {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
+        );
+    }
+    let pane = "touch \"$HOME/skein-test-was-home\" /tmp/skein-test-was-tmp \
+                \"$HOME/.local/state/skein-test-was-state\"; exec sleep 300";
+    for (i, (swaps, must_start, landed)) in [
+        (
+            &["home", "tmp", "home.moved/.local/state"][..],
+            true,
+            &[
+                "home.moved/skein-test-was-home",
+                "tmp.moved/skein-test-was-tmp",
+                "home.moved/.local/state.moved/skein-test-was-state",
+            ][..],
+        ),
+        (
+            &["bin"][..],
+            false,
+            &["bin.moved/git", "bin.moved/sudo"][..],
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("swaprace-{i}");
+        let swap = Swap::new(scratch_named(&name), &name);
+        let root = swap.root();
+        for d in ["home/.local/state", "tmp", "bin"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        // The sandbox's own `~/.local`, as every real fleet has: the box's `~/.local` is an overlay
+        // of it, so the mount point for the box's state is in that overlay rather than in the box's
+        // home, where the swap leaves a link.
+        fs::create_dir_all(swap.sandbox_home().join(".local/state")).unwrap();
+        let decoys: Vec<(String, PathBuf)> = swaps
+            .iter()
+            .map(|rel| {
+                (
+                    rel.to_string(),
+                    swap.decoy_dir(&format!("race-{}", rel.replace('/', "_"))),
+                )
+            })
+            .collect();
+        let before: Vec<Vec<String>> = decoys.iter().map(|(_, d)| listing(d)).collect();
+
+        let child = swap
+            .launcher(pane)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("bash to run the launcher");
+        let start_id = root.join("tmp/skein-start-id");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !start_id.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let swapped = start_id.exists();
+        if swapped {
+            for (rel, decoy) in &decoys {
+                let at = root.join(rel);
+                fs::rename(&at, root.join(format!("{rel}.moved"))).unwrap();
+                symlink(decoy, &at).unwrap();
+            }
+        }
+        let out = child.wait_with_output().expect("the launcher to finish");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        // The pane's markers are written once tmux has started it; give it a moment.
+        if must_start {
+            for _ in 0..50 {
+                if landed.iter().all(|l| root.join(l).exists()) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        let up = swap.running();
+        swap.stop(&out);
+
+        assert!(
+            swapped,
+            "the start id never appeared, so nothing was swapped:\n{stderr}"
+        );
+        if must_start {
+            assert!(
+                out.status.success() && up,
+                "with {swaps:?} swapped, the box did not start on the directories it was checked \
+                 with (exit {:?}, running: {up}):\n{stderr}",
+                out.status.code()
+            );
+        }
+        for ((rel, d), was) in decoys.iter().zip(&before) {
+            assert_eq!(
+                &listing(d),
+                was,
+                "something reached the decoy behind {rel} through the link swapped in after the \
+                 check:\n{stderr}"
+            );
+        }
+        for l in landed
+            .iter()
+            .filter(|l| must_start || have(l.rsplit('/').next().unwrap()))
+        {
+            assert!(
+                root.join(l).is_file(),
+                "with {swaps:?} swapped, {l} is missing: the launcher did not keep to the \
+                 directory it had checked\n{stderr}"
+            );
+        }
+    }
+}
+
+/// **A box's credentials file that is a link is not read as the box's login** (SKEIN-1303).
+///
+/// The login merge is the one place a box's file can reach the fleet's canonical copy: when the
+/// fleet holds no login, a box's login heals it. A box that links its `.credentials.json` to some
+/// other login file would, through a reader that follows links, choose the credential every box
+/// started afterwards is seeded from. Here the link leads to a decoy holding a valid-looking login
+/// and the fleet holds none, which is exactly the case where the box's copy would be promoted.
+///
+/// What makes it fail, named before it was written and then done: opening the file without
+/// `O_NOFOLLOW` in both `login_life` and `merge_login` (either one alone stops it, which the test
+/// below checks one at a time). The decoy's login then counts as the box's, the vacuum clause
+/// copies it up, and the sandbox's `.credentials.json` appears holding the decoy's token.
+#[test]
+fn a_box_credentials_file_that_is_a_link_is_not_its_login() {
+    if !can_host_a_box() {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux/git, so it cannot host a box",
+        );
+    }
+    let swap = Swap::new(scratch_named("swaplogin"), "swaplogin-main");
+    let decoy = swap.decoy_file("login");
+    let login = r#"{"claudeAiOauth":{"accessToken":"skein-test-decoy-access","refreshToken":"skein-test-decoy-refresh","expiresAt":9999999999999}}"#;
+    fs::write(&decoy, login).unwrap();
+    let before = decoy_state(&decoy);
+    swap.plant("home/.claude/.credentials.json", &decoy);
+    let canon = swap.sandbox_home().join(".claude/.credentials.json");
+    assert!(
+        !canon.exists(),
+        "the fixture fleet must hold no login of its own"
+    );
+
+    let out = swap.start();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    swap.stop(&out);
+    assert!(out.status.success(), "the box did not start: {stderr}");
+
+    assert!(
+        !fs::read_to_string(&canon)
+            .unwrap_or_default()
+            .contains("skein-test-decoy"),
+        "the login a box's link led to was promoted to the fleet's copy"
+    );
+    assert_eq!(
+        decoy_state(&decoy),
+        before,
+        "the file the link led to was changed"
+    );
+}
+
+/// **Each of the two readers in the login merge refuses a link on its own** (SKEIN-1303).
+///
+/// The whole-launcher test above needs both to be broken before it fails, because either one alone
+/// stops the promotion. This runs each by itself, lifted out of the launcher:
+///
+/// * `login_life` on a link to a valid login answers "no login". Fails if its open loses
+///   `O_NOFOLLOW`: the decoy's login is then judged the box's.
+/// * `merge_login` into a box's copy that is a link replaces the link with a file holding the
+///   login, and nothing else from what the link led to. Fails if its read of the destination
+///   loses `O_NOFOLLOW`: the decoy's other keys are merged in and copied into the box.
+#[test]
+fn the_login_merge_reads_neither_side_through_a_link() {
+    use super::onboarding::launcher_block;
+    let dir = scratch_named("swapmerge");
+    let decoy = dir.join("decoy.json");
+    fs::write(
+        &decoy,
+        r#"{"claudeAiOauth":{"accessToken":"skein-test-decoy","expiresAt":9999999999999},"skein-test-other":"from-the-decoy"}"#,
+    )
+    .unwrap();
+    let canon = dir.join("canon.json");
+    fs::write(
+        &canon,
+        r#"{"claudeAiOauth":{"accessToken":"skein-test-canon","expiresAt":9999999999999}}"#,
+    )
+    .unwrap();
+    let mine = dir.join("mine.json");
+    symlink(&decoy, &mine).unwrap();
+    let run = |call: String| {
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "set -uo pipefail\n{}\n{}\n{call}",
+                launcher_block("login_life() {", "}"),
+                launcher_block("merge_login() {", "}"),
+            ))
+            .output()
+            .expect("bash runs the launcher's login functions")
+    };
+    let q = |p: &Path| skein::util::sh_quote(p.to_string_lossy().as_ref());
+
+    let life = run(format!("login_life {}", q(&mine)));
+    assert!(
+        !life.status.success(),
+        "login_life read a login through a link: {}",
+        String::from_utf8_lossy(&life.stdout)
+    );
+    assert!(
+        run(format!("login_life {}", q(&decoy))).status.success(),
+        "the control: the decoy read by its own name is a login"
+    );
+
+    let merged = run(format!("merge_login {} {}", q(&canon), q(&mine)));
+    assert!(merged.status.success(), "merge_login failed");
+    assert!(
+        fs::symlink_metadata(&mine).unwrap().file_type().is_file(),
+        "the box's copy is still a link after the merge"
+    );
+    let now = fs::read_to_string(&mine).unwrap();
+    assert!(
+        now.contains("skein-test-canon") && !now.contains("from-the-decoy"),
+        "the merge read the far end of the box's link into the box's copy: {now}"
+    );
+    assert!(
+        fs::read_to_string(&decoy)
+            .unwrap()
+            .contains("skein-test-decoy"),
+        "the merge wrote through the link"
     );
 }

@@ -448,6 +448,37 @@ mod tests {
         );
     }
 
+    /// `docker container run` and `docker container create` are `run` and `create` spelled through
+    /// the management group, and they are stamped after the word that says which (SKEIN-1285).
+    /// Anything else under `container` passes through untouched.
+    ///
+    /// Fails if the shim reads only the first word again: `container` is then not `run` or
+    /// `create`, the call is passed through, and the container carries no label.
+    #[test]
+    fn a_container_run_through_the_management_group_is_stamped_too() {
+        for sub in ["run", "create"] {
+            let argv = docker_shim_argv("web-x", &["container", sub, "-d", "img"]);
+            assert_eq!(
+                argv,
+                vec![
+                    "container",
+                    sub,
+                    "--label",
+                    "skein.box=web-x",
+                    "--cgroup-parent",
+                    "/skein/containers/web-x",
+                    "-d",
+                    "img",
+                ]
+            );
+        }
+        assert_eq!(
+            docker_shim_argv("web-x", &["container", "ls", "-a"]),
+            vec!["container", "ls", "-a"],
+            "a container command that makes nothing was stamped"
+        );
+    }
+
     /// The verb is not always `$1`, and the options that precede it can take arguments of their own.
     /// Reading `unix:///var/run/docker.sock` as the verb would stamp nothing and say nothing.
     #[test]
