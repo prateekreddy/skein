@@ -1806,7 +1806,6 @@ for a in sys.argv[2:]:
     /// Followed, that login is the best in the fleet, and the heal copies it into every sibling
     /// and, because the fleet's own copy is dead, into `$HOME` too. Fails if `own` opens the file
     /// without `O_NOFOLLOW`: the decoy's token then turns up in the dead box and in `$HOME`.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_box_cannot_elect_a_login_it_linked_to() {
         let _g = crate::testutil::env_lock();
@@ -1858,7 +1857,6 @@ for a in sys.argv[2:]:
     /// read as the fleet's own, ranked below a fresher box's, and the heal wrote the fresher login
     /// "into the box" — through the link, over `$HOME`'s. Fails if `held_dir` walks without
     /// `O_NOFOLLOW`: `$HOME`'s copy then carries the box's token.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_box_cannot_route_the_heals_write_through_a_linked_directory() {
         let _g = crate::testutil::env_lock();
