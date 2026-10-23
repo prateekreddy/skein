@@ -2796,6 +2796,41 @@ mod tests {
         assert!(run().status.success());
         let lines_after: usize = fs::read_to_string(&log).unwrap().lines().count();
         assert_eq!(lines_after, 3, "the old transcript keeps its own count");
+
+        // The SAME path rewritten shorter, then a new turn appended to it. The rewrite itself is
+        // not re-logged — what it holds was counted when it was first written — but the count
+        // moves down to where the file now is, so the next turn is logged. Left at the old count,
+        // the new turn would wait silently until the file outgrew four lines (SKEIN-1282).
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        assert!(run().status.success());
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":11,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"content":[]}}}}"#).unwrap();
+        drop(f);
+        assert!(run().status.success());
+        let entries4: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            entries4.last().map(|e| e["input"].clone()),
+            Some(serde_json::json!(11)),
+            "the turn after an in-place rewrite is logged: {entries4:?}"
+        );
+        assert_eq!(
+            entries4.len(),
+            4,
+            "and the rewrite itself is not: {entries4:?}"
+        );
         std::env::remove_var("SKEIN_HOME");
     }
 
