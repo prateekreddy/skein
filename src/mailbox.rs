@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// The one lock every read-modify-write of a message in a store's `mailbox/` holds — `mailbox.sh`'s
+/// `$lock` and [`relay_cross_project_mail`] — and which nothing ever deletes (SKEIN-1284).
+const MAILBOX_LOCK: &str = ".lock";
+
 /// One cross-box message in the shared `mailbox/` (written by mailbox.sh or skein).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
@@ -52,6 +56,19 @@ pub struct Message {
     /// script to do — produces a message that *says* skein and *arrived* as a box.
     #[serde(default, skip_serializing)]
     pub arrived: String,
+    /// **Addressed to one box that its store no longer registers** — a box since destroyed, so the
+    /// message will never be seen and `mailbox.sh prune` keeps it for ever (SKEIN-1284). Shown, not
+    /// deleted: what a deleted box left behind is the owner's to clear, not skein's.
+    ///
+    /// Worked out when the message is read, like `arrived`, and never read from the file; written
+    /// out only when true, so a message skein writes back (the relay's `relayedTo`) never carries it.
+    #[serde(
+        default,
+        rename = "recipientGone",
+        skip_deserializing,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub recipient_gone: bool,
 }
 
 /// Where skein puts a message for one box: under its state directory, which is bound **read-only**
@@ -83,7 +100,10 @@ pub fn attribution(m: &Message) -> String {
 pub fn load_mailbox() -> Vec<Message> {
     let mut out = Vec::new();
     for store in all_stores() {
-        read_into(&store.join("mailbox"), "box", &mut out);
+        let mut found = Vec::new();
+        read_into(&store.join("mailbox"), "box", &mut found);
+        mark_recipients_gone(&mut found, &sandboxes_in(&store));
+        out.extend(found);
     }
     // And what skein wrote, which lives per box under a directory no box can write. Read second and
     // marked differently, because these two directories are the whole of how "from you" is told
@@ -99,6 +119,19 @@ pub fn load_mailbox() -> Vec<Message> {
     }
     out.sort_by(|a, b| b.ts.cmp(&a.ts));
     out
+}
+
+/// Flag each message addressed to one box the store's registry no longer has ([`Message::recipient_gone`]).
+///
+/// Says nothing when the registry is empty: [`sandboxes_in`] reads an unreadable registry as empty,
+/// and "every box is gone" read off a file that could not be read would flag every message there.
+/// The same rule as `mailbox.sh`'s `recipient_gone`.
+fn mark_recipients_gone(messages: &mut [Message], registry: &BTreeMap<String, Sandbox>) {
+    for m in messages {
+        let to = m.to.as_str();
+        let direct = !matches!(to, "" | "broadcast" | "all-projects") && !to.starts_with("project:");
+        m.recipient_gone = !registry.is_empty() && direct && !registry.contains_key(to);
+    }
 }
 
 /// Read one directory of messages, stamping each with **where it was found**.
@@ -214,6 +247,7 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
         relayed_to: vec![],
         origin_project: String::new(),
         arrived: String::new(),
+        recipient_gone: false,
     };
     let id = format!("{}-skein", now.timestamp_nanos_opt().unwrap_or(0));
     let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
@@ -365,6 +399,7 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
                     // arrives exactly as its original did: as a box. Nothing about crossing a
                     // project boundary makes it the owner's.
                     arrived: String::new(),
+                    recipient_gone: false,
                 };
                 let Ok(json) = serde_json::to_string(&copy) else {
                     continue;
@@ -381,9 +416,11 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
                 continue;
             }
 
-            // Mark the origin message's relayedTo, locked the same way mailbox.sh locks a message
-            // file to mark seenBy — so a box's concurrent seenBy update can't race this update.
-            let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+            // Mark the origin message's relayedTo under the mailbox's one lock, the file mailbox.sh
+            // holds to mark seenBy — so a box's concurrent seenBy update can't race this update.
+            // Never removed: a lock file deleted by its holder is a lock the next writer cannot see
+            // (SKEIN-1284).
+            let lock_path = mailbox_dir.join(MAILBOX_LOCK);
             let lock = match fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -412,7 +449,6 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
                 write_atomic(&path, &mailbox_dir, &bytes)
             })();
             let _ = lock.unlock();
-            let _ = fs::remove_file(&lock_path);
             if let Err(e) = result {
                 errs.push(format!("{}: {e}", path.display()));
             }
@@ -692,6 +728,7 @@ mod tests {
             relayed_to: vec![],
             origin_project: String::new(),
             arrived: String::new(),
+            recipient_gone: false,
         };
         fs::write(
             store_a.join("mailbox").join("1.json"),
@@ -733,6 +770,13 @@ mod tests {
         )
         .unwrap();
         assert!(!origin.relayed_to.is_empty());
+        // Under the mailbox's one lock, which stays where it is: a holder that deletes its lock
+        // file on the way out hands the next writer a different file to lock (SKEIN-1284).
+        assert!(
+            store_a.join("mailbox").join(MAILBOX_LOCK).exists(),
+            "the relay must lock the file mailbox.sh locks, and leave it in place"
+        );
+        assert!(!store_a.join("mailbox").join("1.json.lock").exists());
 
         // project:<id> direct addressing: only the named project gets a copy, also rewritten to
         // that project's own broadcast (never delivered as a literal "project:b" no box matches).
@@ -747,6 +791,7 @@ mod tests {
             relayed_to: vec![],
             origin_project: String::new(),
             arrived: String::new(),
+            recipient_gone: false,
         };
         fs::write(
             store_a.join("mailbox").join("2.json"),
@@ -774,6 +819,198 @@ mod tests {
 
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    /// **Marking a message seen waits for the mailbox's one lock, and that lock is never
+    /// replaced** (SKEIN-1284).
+    ///
+    /// Each message had its own lock file, deleted by whoever held it. A reader already waiting on
+    /// the deleted file then held a lock no later reader could see, and two readers marked `seenBy`
+    /// at once — one mark lost, the message redelivered. Here the test holds `mailbox/.lock` for
+    /// two seconds while a box reads its inbox. What would make it fail: the script locking any
+    /// other file (it would not wait — the elapsed-time assertion), or deleting the lock it holds
+    /// (the inode assertion).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn marking_mail_seen_waits_for_the_one_mailbox_lock_and_never_replaces_it() {
+        use std::os::unix::fs::MetadataExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh")
+        };
+        assert!(run("boxA", &["send", "--to", "boxB", "--body", "held"])
+            .status
+            .success());
+
+        let lock = store.join("mailbox").join(MAILBOX_LOCK);
+        fs::write(&lock, "").unwrap();
+        let inode = fs::metadata(&lock).unwrap().ino();
+        let mut holder = Command::new("flock")
+            .arg(&lock)
+            .args(["sleep", "2"])
+            .spawn()
+            .expect("flock");
+        // Held before the reader starts, or the wait below proves nothing.
+        let held = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            !Command::new("flock")
+                .args(["-n"])
+                .arg(&lock)
+                .arg("true")
+                .status()
+                .unwrap()
+                .success()
+        });
+        assert!(held, "the test never got the lock it means to hold");
+
+        let started = std::time::Instant::now();
+        let inbox = run("boxB", &["inbox"]);
+        let waited = started.elapsed();
+        holder.wait().unwrap();
+        assert!(
+            String::from_utf8_lossy(&inbox.stdout).contains("held"),
+            "delivered once the lock was free: {}",
+            String::from_utf8_lossy(&inbox.stdout)
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(1000),
+            "the reader marked seenBy without waiting for the mailbox lock ({waited:?})"
+        );
+        assert_eq!(
+            fs::metadata(&lock).map(|m| m.ino()).ok(),
+            Some(inode),
+            "the mailbox lock must be the same file afterwards, never deleted and remade"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Mail to a box that no longer exists is kept and said, not pruned** (SKEIN-1284).
+    ///
+    /// Such a message is never seen, so `prune` can never call it complete; the owner asked that
+    /// what a deleted box left behind not be deleted for them. So `prune` keeps it and says how
+    /// many, `list` marks it, and the server's view flags it. What would make it fail: dropping
+    /// the flag from `list` or the count from `prune`, or a prune that deletes it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mail_to_a_box_that_no_longer_exists_is_kept_and_flagged() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        fs::write(
+            store.join("sandboxes.json"),
+            r#"{"boxA":{"at":"x"},"boxB":{"at":"x"}}"#,
+        )
+        .unwrap();
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh")
+        };
+        for (to, body) in [("boxGone", "to the departed"), ("boxB", "to a live box")] {
+            assert!(run("boxA", &["send", "--to", to, "--body", body])
+                .status
+                .success());
+        }
+        assert!(run("boxB", &["inbox"]).status.success());
+        let files: Vec<_> = fs::read_dir(store.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        assert_eq!(files.len(), 2);
+        for f in &files {
+            assert!(Command::new("touch")
+                .arg("-d")
+                .arg("40 days ago")
+                .arg(f)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let gone_file = files
+            .iter()
+            .find(|f| fs::read_to_string(f).unwrap().contains("boxGone"))
+            .unwrap()
+            .clone();
+
+        let list = String::from_utf8_lossy(&run("boxA", &["list"]).stdout).into_owned();
+        let gone_line = list.lines().find(|l| l.contains("boxGone")).unwrap_or("");
+        assert!(
+            gone_line.contains("no longer exists"),
+            "list must mark mail to a box that is gone: {list}"
+        );
+        assert!(
+            !list
+                .lines()
+                .find(|l| l.contains("to a live box"))
+                .unwrap_or("")
+                .contains("no longer exists"),
+            "and only that mail: {list}"
+        );
+
+        let prune = String::from_utf8_lossy(&run("boxA", &["prune"]).stdout).into_owned();
+        assert!(gone_file.exists(), "kept: {prune}");
+        assert!(
+            prune.contains("kept 1 message(s) addressed to a box that no longer exists"),
+            "{prune}"
+        );
+        assert_eq!(
+            fs::read_dir(store.join("mailbox"))
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count(),
+            1,
+            "the seen message to a live box is pruned as before: {prune}"
+        );
+
+        // And the server's own view says the same.
+        let mut msgs: Vec<Message> = vec![
+            serde_json::from_str(&fs::read_to_string(&gone_file).unwrap()).unwrap(),
+            serde_json::from_str(r#"{"from":"boxA","to":"boxB","body":"x"}"#).unwrap(),
+            serde_json::from_str(r#"{"from":"boxA","to":"broadcast","body":"x"}"#).unwrap(),
+        ];
+        let registry = sandboxes_in(&store);
+        assert_eq!(registry.len(), 2, "the fixture registry reads");
+        mark_recipients_gone(&mut msgs, &registry);
+        assert_eq!(
+            msgs.iter().map(|m| m.recipient_gone).collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        let json = serde_json::to_value(&msgs[0]).unwrap();
+        assert_eq!(json["recipientGone"], true, "the flag reaches the API");
+        assert!(
+            serde_json::to_value(&msgs[1])
+                .unwrap()
+                .get("recipientGone")
+                .is_none(),
+            "and is never written for a message that is fine"
+        );
+        mark_recipients_gone(&mut msgs, &BTreeMap::new());
+        assert!(
+            msgs.iter().all(|m| !m.recipient_gone),
+            "an empty (or unreadable) registry flags nothing"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **A broadcast is held open by a registry key that is not a box** (SKEIN-259).
