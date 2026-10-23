@@ -781,120 +781,120 @@ cited_by = ["docs/recovery-survey.md"]
 line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:876"]
+["src/box-session.sh:888"]
 line = "own_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:897"]
+["src/box-session.sh:911"]
 line = "pin_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:981"]
+["src/box-session.sh:990"]
 line = "open_new \"$tmp_at\" skein-start-id && printf '%s\\n' \"$start_id\" >&\"$new_fd\" && land_new =rw || { drop_new; exit 1; }"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1052"]
+["src/box-session.sh:1061"]
 line = "seed_paths=(\".codex\" \".gitconfig\" \".bashrc\" \".profile\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1071"]
+["src/box-session.sh:1080"]
 line = "share_paths=(\".cargo\" \".rustup\" \".npm\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1098"]
+["src/box-session.sh:1107"]
 line = "overlay_paths=(\".local\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1227"]
+["src/box-session.sh:1236"]
 line = "login_life() {"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/box-session.sh:1425"]
+["src/box-session.sh:1434"]
 line = "merge_login \"$mine\" \"$canon\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1641"]
+["src/box-session.sh:1650"]
 line = "data[\"crossSessionInbound\"] = \"accept\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1749"]
+["src/box-session.sh:1758"]
 line = "[ -e \"$HOME/$rel\" ] && binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1789"]
+["src/box-session.sh:1798"]
 line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1823"]
+["src/box-session.sh:1832"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1848"]
+["src/box-session.sh:1857"]
 line = "&& binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2131"]
+["src/box-session.sh:2140"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2178"]
+["src/box-session.sh:2187"]
 line = "binds+=(--tmpfs \"$fleet_root_dir\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2221"]
+["src/box-session.sh:2230"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2289"]
+["src/box-session.sh:2298"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2313"]
+["src/box-session.sh:2322"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2338"]
+["src/box-session.sh:2347"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2346"]
+["src/box-session.sh:2355"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2431"]
+["src/box-session.sh:2440"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2432"]
+["src/box-session.sh:2441"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2495"]
+["src/box-session.sh:2504"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2620"]
+["src/box-session.sh:2629"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2759"]
+["src/box-session.sh:2768"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3188"]
+["src/box-session.sh:3197"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3260"]
+["src/box-session.sh:3269"]
 line = "box_runner=()"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3305"]
+["src/box-session.sh:3314"]
 line = "exec \"${box_runner[@]}\" bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3346"]
+["src/box-session.sh:3355"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
