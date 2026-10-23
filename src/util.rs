@@ -281,20 +281,73 @@ pub fn load_dotenv() {
 /// The directory flush is deliberately best-effort. Without it the rename itself can be lost, and
 /// the file that comes back is the whole OLD one — a write that did not happen, never a corrupt
 /// one — so a filesystem that refuses to fsync a directory must not fail every write skein makes.
+/// Eight bytes nobody outside this process can predict: from `/dev/urandom`, or failing that the
+/// clock's nanoseconds and the stack address mixed together — a weaker answer that still is not a
+/// counter starting at 0.
+fn unguessable() -> u64 {
+    use std::io::Read;
+    let mut b = [0u8; 8];
+    if fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .is_ok()
+    {
+        return u64::from_ne_bytes(b);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ (&b as *const _ as u64).rotate_left(32)
+}
+
 pub(crate) fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     // pid + per-call counter: a pid-only temp name let two threads of the same process writing
     // into the same dir clobber each other's temp mid-write and rename the wrong bytes into place.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".skein.tmp.{}.{n}", std::process::id()));
+    // **The temporary is a NEW file, never an existing one** (SKEIN-1320). Several callers write
+    // into a directory a box can write (see that item's audit), and `File::create` on a guessable
+    // name followed whatever link a box had put there, truncating and writing the file it named.
+    // `create_new` refuses any existing name — a link included, which `O_NOFOLLOW` makes certain —
+    // so a planted name costs a retry and never a write; and eight random bytes in the name make
+    // the next one unguessable, so a box cannot plant them all. The mode is `File::create`'s own
+    // (0666 less the umask): boxes read many of these files as another uid.
+    let mut opened = None;
+    for _ in 0..16 {
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(
+            ".skein.tmp.{}.{n}.{:016x}",
+            std::process::id(),
+            unguessable()
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
+            Ok(f) => {
+                opened = Some((f, tmp));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("writing temp: {e}")),
+        }
+    }
+    let Some((mut f, tmp)) = opened else {
+        return Err(format!(
+            "writing temp: no free temporary name in {}",
+            dir.display()
+        ));
+    };
     // The temp is removed on every failure below, not only on a failed rename: a half-written temp
     // left behind is a file nothing will ever rename into place and nothing will ever clean up.
     let flushed = (|| -> std::io::Result<()> {
-        let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()
     })();
+    drop(f);
     if let Err(e) = flushed {
         let _ = fs::remove_file(&tmp);
         return Err(format!("writing temp: {e}"));
@@ -2042,6 +2095,35 @@ mod tests {
     /// The rest is behaviour, and it is the reason `fs::write` could not simply be kept: the flush
     /// adds two more ways to fail after the temp file exists, and a temp nothing will ever rename
     /// into place is litter that nothing will ever clean up either.
+    /// **A link a box planted at a temporary name is never written through** (SKEIN-1320).
+    ///
+    /// The temporary used to be `.skein.tmp.<pid>.<n>`, opened with `File::create`: a box that
+    /// planted links at those names in a directory it can write had the host truncate and write
+    /// the files they named. Links are planted here at every name the old scheme would pick for
+    /// its first five thousand writes. What would make it fail: `File::create` again (the victim is
+    /// written), or a temporary opened through a link by any other means.
+    #[test]
+    fn a_link_at_a_temporary_name_is_never_written_through() {
+        let dir = tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        for n in 0..5000 {
+            let _ = std::os::unix::fs::symlink(
+                &victim,
+                dir.join(format!(".skein.tmp.{}.{n}", std::process::id())),
+            );
+        }
+        let path = dir.join("thing.json");
+        write_atomic(&path, dir, b"{\"new\":true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"new\":true}");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_file());
+    }
+
     #[test]
     fn an_atomic_write_is_flushed_before_the_rename_and_leaves_no_temp_behind() {
         let src = include_str!("util.rs");
