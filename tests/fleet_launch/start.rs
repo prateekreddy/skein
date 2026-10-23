@@ -481,20 +481,6 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "a killed server is a stopped box, and the sweep must see it"
     );
 
-    // A snapshot exists to rescue work, so it must not need the box's session. Taken here, with the
-    // server dead — the state resize hit on the first real run, where it refused with an nsenter
-    // error and left the work it was trying to save unreachable.
-    let snap = snapshot_box(name, repo.store.as_str(), "test-run").expect("snapshot a dead box");
-    let bundle = store.join(&snap).join("repo.bundle");
-    assert!(
-        bundle.exists() && bundle.metadata().map(|m| m.len()).unwrap_or(0) > 0,
-        "the box's commits must be saved even with no session: {}",
-        bundle.display()
-    );
-    assert!(
-        store.join(&snap).join("agent-state.tgz").exists(),
-        "and its private agent state with them"
-    );
     // A setting that arrived after this box's last provisioning, as SKEIN-1218's default did for
     // every box on the fleet: gone from the box's own file, so only a kit run can bring it back.
     fs::remove_file(&local_settings).expect("remove the box's settings.local.json");

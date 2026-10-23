@@ -242,8 +242,8 @@ pub fn room_for_another(standing: usize) -> Option<String> {
 /// 1. `fleet::start_box` with [`Purpose::Review`], which refuses rather than adopts if a box of
 ///    that name exists for another purpose (`fleet::refuse_a_repurpose`), and keeps the checkout
 ///    and the session if this one already exists.
-/// 2. `fleet::stand_at_head_script`, run in the sandbox exactly as `fleet::snapshot_box` runs its
-///    own in-checkout script — the script does its own `cd`, fetches `refs/pull/<n>/head` when the
+/// 2. `fleet::stand_at_head_script`, run in the sandbox rather than through the box's session —
+///    the script does its own `cd`, fetches `refs/pull/<n>/head` when the
 ///    commit is not there already, checks out detached, and cleans the tree. Detached because there
 ///    is no branch to be on, and because nothing about reviewing should be able to push.
 /// 3. The round itself, which is **not here**: giving the box its instruction is the dispatch, and

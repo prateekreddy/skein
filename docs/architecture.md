@@ -563,8 +563,8 @@ skein's files or signal it; neither side's relationship to `sudo` changes.
 
 ### 7.3 Resize is a byte copy, and that was a decision
 
-`snapshot_box` — a git bundle plus two patches plus an ignored-file sweep — **has no production
-caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`archive_script` and
+The bundle-and-patches snapshot — a git bundle plus two patches plus an ignored-file sweep — had no
+production caller and is deleted (SKEIN-1289). Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`archive_script` and
 `restore_script` in `src/fleet/resize.rs`), which is why it demands 1.2× the box size free before starting.
 `box_archive`'s doc comment records the move away from reconstruction: *"the reconstruction is
 slower, less faithful, and it is where the fragility lives."* (Cited by name, not by line: the line

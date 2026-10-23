@@ -9,8 +9,9 @@ pub(super) fn box_archive(name: &str, run: &str) -> String {
 
 /// Copy one box out of the sandbox, whole, onto the host.
 ///
-/// A **byte copy, not a reconstruction.** [`snapshot_box`] writes a git bundle, two patches and a
-/// tarball of untracked files, from which the box is rebuilt on a fresh clone — that is the right
+/// A **byte copy, not a reconstruction.** The snapshot this replaced (deleted by
+/// SKEIN-1289) wrote a git bundle, two patches and a tarball of untracked files, from which the box
+/// was rebuilt on a fresh clone — that is the right
 /// shape for a migration, where the destination is a different sandbox and often a different repo
 /// state. It is the wrong shape here, where the destination is the same box in a rebuilt VM: the
 /// reconstruction is slower (it re-clones), less faithful (the box comes back reassembled rather
@@ -78,8 +79,7 @@ pub(super) fn archive_script(name: &str, archive: &str) -> String {
 /// Put one box back into a freshly rebuilt sandbox, exactly as it was, and drop the copy.
 ///
 /// **Nothing calls it since [`resize_fleet`] stopped rebuilding** (SKEIN-679), and it is `pub`
-/// rather than deleted, for the reason [`snapshot_box`] is also `pub` with no production caller.
-/// Three things pin it. `docs/architecture.md` §7.3 and `docs/inventory.md` name [`restore_script`]
+/// rather than deleted. Three things pin it. `docs/architecture.md` §7.3 and `docs/inventory.md` name [`restore_script`]
 /// as the mechanism resize keeps; `docs/parity.md` requires the byte copy not be removed — "nothing
 /// here is removed; the requirement is that resize keeps carrying every box's work"; and the
 /// escaping-archive test in this file is what establishes that `tar` refuses a member trying to

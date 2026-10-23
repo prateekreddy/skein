@@ -44,15 +44,15 @@ cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:615"]
+["docs/architecture.md:616"]
 line = "## 8. The host warden"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:666"]
+["docs/architecture.md:667"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1758"]
+["docs/architecture.md:1759"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -64,7 +64,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "| publish a port | `sbx ports --publish`; withdraw it with `sbx ports --unpublish` (`sbx ports --help`). An earlier revision of this row said **no unpublish exists**, quoting a nine-verb list recalled from memory — it is false, and the port-burning dance it justified in `ensure_fleet_agent_port` was built on it |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/inventory.md:257"]
+["docs/inventory.md:258"]
 line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
@@ -1007,10 +1007,6 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/fleet.rs:8346"]
 historical = "`save_boxes`' twin: one of the six `no fleet sandbox configured` guards SKEIN-756 deleted, and this is the line it stood on at `e8ff146`, the commit that wrote the survey — checked with `git show e8ff146:src/fleet.rs | sed -n '8346p'`, which prints the guard. `src/fleet.rs:2059` carries the family's reason; these five used to be relative `:N` addresses in the same cell, which no reader resolved and no ledger held, and SKEIN-876 spelled them out. The address is the 2026-09-09 measurement and is meant to stay put: the message is gone from the tree, so there is nothing to re-point it at."
 cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/checkout.rs:423"]
-line = "origin_repair_script(\"web-main\", \"/Users/you/work/web\", \"git@github.com:o/r.git\");"
-cited_by = ["docs/prose-symbols.toml"]
 
 ["src/fleet/create.rs:22"]
 line = "/// command that makes the sandbox, at the only moment nothing is racing for the number."

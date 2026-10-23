@@ -96,7 +96,8 @@ Note the last one contains the resize mechanism, which is the next finding.
 
 ## 2. Resize does not do what the architecture says
 
-`grep -rn "snapshot_box" src/ tests/` → **no production caller.** Two test call sites only.
+The bundle-and-patches snapshot had **no production caller** — two test call sites
+only — and is deleted (SKEIN-1289).
 
 The architecture describes resize as carrying "the delta — unpushed commits, index and worktree
 patches, untracked files" and claims "that is what today's snapshot already does". It is not.

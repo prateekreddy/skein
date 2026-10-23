@@ -365,8 +365,8 @@ if [ -r "$spec" ] && command -v jq >/dev/null 2>&1; then
 fi
 handoff_marker="$clone_root/.git/skein-handoff-restored"
 # Every member of archive $1 is one this restore may write. `tree`: a relative path with no `..`
-# and nothing under a `.git` directory. `home`: only the agent-state paths `fleet::agent_state_tar`
-# names, as regular files or directories.
+# and nothing under a `.git` directory. `home`: only the agent-state paths named below (prompt
+# history, todos, `.claude.json`), as regular files or directories.
 archive_members_ok() {
   tar -tzf "$1" >/dev/null 2>&1 || return 1
   case "$2" in
@@ -452,7 +452,7 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
   # it had before, so the transcript's cwd slug still addresses it and the runtime's own --continue
   # finds the session rather than opening a new one against a familiar-looking tree. Extracted OVER
   # the seeded HOME, so the credentials seeded from the sandbox stay as they are — the snapshot
-  # deliberately carries no auth of its own (see fleet::agent_state_tar).
+  # deliberately carries no auth of its own.
   if [ -s "$snapshot/agent-state.tgz" ]; then
     if archive_members_ok "$snapshot/agent-state.tgz" home; then
       tar -C "$HOME" -xzf "$snapshot/agent-state.tgz" \
