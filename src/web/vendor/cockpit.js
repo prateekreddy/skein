@@ -42,6 +42,21 @@ function ageNow(secs, sinceMs) {
   return ago(secs + Math.max(0, Math.floor((sinceMs || 0) / 1000)));
 }
 
+// A moment the server wrote as UTC (`2026-09-24T10:12:00Z`), in the reader's own time zone.
+//
+// Every request and mailbox time used to be the server's string with its `T` and `Z` cut off, which
+// is UTC printed with nothing left on it to say so — read, naturally, as local time, and wrong by
+// the reader's whole offset (SKEIN-1264). `short` is the clock time alone, for a line that already
+// sits under a dated one. Something that is not a time comes back as it was, never as "Invalid Date".
+function localStamp(iso, short = false) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const two = n => String(n).padStart(2, "0");
+  const time = `${two(d.getHours())}:${two(d.getMinutes())}`;
+  return short ? time : `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${time}`;
+}
+
 // ── announce.mjs ──
 // What to announce, and on which channel. The decision only — the speaking and the notifying are
 // the caller's, because a function that reaches for `speechSynthesis` is one that has to be mocked
