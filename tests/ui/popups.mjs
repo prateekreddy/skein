@@ -210,15 +210,33 @@ await check("Ctrl+Shift+C in a Settings field is left to the field, not answered
   await page.evaluate(() => {
     oscClipboard = "skein-test-terminal-offer";
     window.__fieldKeys = [];
+    window.__keyFocus = [];
     // The C alone: Playwright presses Control and Shift first, and those reach the field either way.
     document.getElementById("set-ghappid").addEventListener("keydown", e => {
       if (e.key === "c" || e.key === "C") window.__fieldKeys.push({ key: e.key, prevented: e.defaultPrevented });
     });
+    // Where the focus was when the C arrived, read at the window before any handler of the page's.
+    // "The field saw []" alone cannot tell the clipboard handler swallowing the key from the focus
+    // having left the field before the key was pressed (SKEIN-1304, SKEIN-1305); this says which.
+    window.addEventListener("keydown", e => {
+      if (e.key === "c" || e.key === "C") {
+        const a = document.activeElement;
+        window.__keyFocus.push(a?.id || (a?.className ? `${a.tagName}.${a.className}` : a?.tagName));
+      }
+    }, true);
   });
   await setClipboard("");
+  // The precondition, asserted rather than assumed: a chord pressed anywhere but the field proves
+  // nothing about how the field is treated.
+  const before = await activeId();
+  if (before !== "set-ghappid") throw new Error(`the focus is on ${before}, not the field, before the chord`);
   await page.keyboard.press("Control+Shift+C");
   const keys = await page.evaluate(() => window.__fieldKeys);
+  const at = await page.evaluate(() => window.__keyFocus);
   const clip = await readClipboard();
+  if (at.length !== 1 || at[0] !== "set-ghappid") {
+    throw new Error(`the focus left the field before the C arrived: it was on ${JSON.stringify(at)}`);
+  }
   if (keys.length !== 1 || keys[0].prevented || clip === "skein-test-terminal-offer") {
     throw new Error(`the field saw ${JSON.stringify(keys)}; the clipboard holds ${JSON.stringify(clip)}`);
   }
