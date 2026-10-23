@@ -494,3 +494,70 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
         "a repo with no remote anywhere has nothing to name — and no token field to offer"
     );
 }
+
+/// **Forgetting a write token answers once the boxes' copies are taken back, and says what could
+/// not be** (SKEIN-1278).
+///
+/// The route used to answer 204 at once and run the withdrawal behind the reply, throwing away
+/// everything it said — so "Forget" read as done while a box could still hold the token, and
+/// nobody was told. Here one box's token directory is a symbolic link, which `refresh_tokens`
+/// refuses to write through or empty and says so; that sentence has to be in the reply, under the
+/// box's name.
+///
+/// What makes this fail: putting the withdrawal back behind the reply (`tokio::spawn_blocking`
+/// without waiting) — the reply is then a bare 204 with no `problems` — or dropping the box name
+/// from `refresh_every_box`'s lines.
+#[test]
+fn forgetting_a_write_token_answers_with_what_the_boxes_could_not_give_back() {
+    let home = token_home("forget-token");
+    let places = home.to_path_buf().join("places");
+    std::fs::create_dir_all(&places).unwrap();
+    std::fs::write(
+        places.join("thing-held.json"),
+        r#"{"sandbox":"skein-fleet","ns_pid":1,"home":"/boxes/thing-held/home","tree":"/boxes/thing-held/tree","sock":"/boxes/thing-held/session.sock"}"#,
+    )
+    .unwrap();
+    let state = home.to_path_buf().join("boxes/thing-held");
+    std::fs::create_dir_all(&state).unwrap();
+    let elsewhere = home.to_path_buf().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, state.join("git-tokens")).unwrap();
+
+    let (child, addr) = serving(
+        skein_server()
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env_remove("SKEIN_SHARED")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let _kid = Kid(child);
+
+    let raw = format!(
+        "DELETE /api/fleet/git-credentials/acme-thing HTTP/1.1\r\nHost: {addr}\r\n\
+         Authorization: Bearer {API_TOKEN}\r\nConnection: close\r\n\r\n"
+    );
+    let (st, body) = send(&addr, "DELETE a write token", raw.as_bytes());
+    assert_eq!(st, 200, "the reply carries what the boxes said: {body}");
+    let said: serde_json::Value =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap_or("")).expect("JSON");
+    let problems: Vec<&str> = said["problems"]
+        .as_array()
+        .expect("a list of problems")
+        .iter()
+        .filter_map(|p| p.as_str())
+        .collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("thing-held: ") && p.contains("symbolic link")),
+        "the box that could not be given back to is named, with why: {problems:?}"
+    );
+    assert!(
+        std::fs::read_dir(&elsewhere).unwrap().next().is_none(),
+        "and nothing was written through the link"
+    );
+}
