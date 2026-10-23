@@ -71,6 +71,11 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         true => Duration::ZERO,
         false => Duration::from_secs(60),
     };
+    // Forced is a person asking for GitHub's answer now, and that includes who they are and which
+    // teams they can see — remembered for ten minutes otherwise (SKEIN-1280).
+    if force {
+        super::credentials::forget_viewer();
+    }
     queue_within(repo, max_age)
 }
 

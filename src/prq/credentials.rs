@@ -494,8 +494,9 @@ fn remember_viewer(key: String, answer: &ViewerAnswer) {
     *seen = Some((key, Instant::now(), answer.clone()));
 }
 
-/// Forget who GitHub said you are, so the next [`viewer`] asks.
-fn forget_viewer() {
+/// Forget who GitHub said you are, so the next [`viewer`] asks — and a queue refresh a person
+/// forces asks it ([`queue`]), so pressing refresh after fixing a token's `read:org` shows it.
+pub(super) fn forget_viewer() {
     if let Ok(mut seen) = VIEWER.lock() {
         *seen = None;
     }
