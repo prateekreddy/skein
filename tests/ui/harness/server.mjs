@@ -11,6 +11,7 @@
 // beats six — and then the code around them was copied anyway.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serverBinary } from "../lift.mjs";
@@ -118,6 +119,31 @@ function fixtureBase(env) {
       "directory beside both of them to put a home in");
   }
   return base;
+}
+
+/**
+ * The port the fleet's own cockpit listens on — `fleet::server_sandbox_port`'s default
+ * (src/fleet/install.rs), and the one every bookmark of the live cockpit names.
+ *
+ * A suite's server must never be handed it as the port of the doorway it supervises (SKEIN-1290).
+ * `heal_fleet` starts that doorway at boot, as `server-doorway.py <$SKEIN_SERVER_PORT>` in a tmux
+ * session under the fixture's fleet root, and with the variable unset it is this number: on a
+ * machine where the live cockpit holds the port the fixture's doorway fails to bind and respawns
+ * every two seconds for the life of the suite, and on one where it does not, a fixture server sits
+ * where the owner's browser expects the real one.
+ */
+export const LIVE_COCKPIT_PORT = 7878;
+
+/** A loopback port nothing was listening on a moment ago, asked of the kernel. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
 }
 
 /** [`fixtureBase`]'s home: `server-home` inside the fixture, stamped with the sentinel. */
@@ -328,7 +354,19 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
   delete childEnv.TMUX;
   delete childEnv.TMUX_PANE;
   childEnv.TMUX_TMPDIR = fixtureTmuxDir(base);
+  // **The doorway the server supervises gets a port of its own, never the live cockpit's**
+  // (SKEIN-1290) — see [`LIVE_COCKPIT_PORT`]. Before the spread, because `restart.mjs` names the
+  // port its doorway is stamped with and has to win; the refusal after the spread is what stops any
+  // suite, or the runner's own environment, putting the live port back.
+  childEnv.SKEIN_SERVER_PORT = String(await freePort());
   const spawnEnv = { ...childEnv, ...env };
+  if (!/^[1-9][0-9]*$/.test(spawnEnv.SKEIN_SERVER_PORT || "") || Number(spawnEnv.SKEIN_SERVER_PORT) === LIVE_COCKPIT_PORT) {
+    throw new Error(
+      `startServer will not start a server whose fleet doorway would listen on ` +
+        `${JSON.stringify(spawnEnv.SKEIN_SERVER_PORT ?? "")}: that is, or falls back to, ${LIVE_COCKPIT_PORT}, the ` +
+        "live cockpit's port (SKEIN-1290). Say nothing and the harness picks a free one, or name another",
+    );
+  }
   if (!spawnEnv.SKEIN_CLAUDE_BIN) {
     throw new Error(
       "startServer will not start a server with $SKEIN_CLAUDE_BIN empty: that is `claude` off $PATH, " +
