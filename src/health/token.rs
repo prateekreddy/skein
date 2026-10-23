@@ -133,18 +133,102 @@ pub(crate) fn token_expiry_line(lives: &[crate::prq::CredentialLife], fleet: &st
 /// network is a test that fails for somebody else's reason. The sentences are proven through
 /// [`token_expiry_line`], which needs neither.
 pub fn token_expiry_health() -> HealthCheck {
-    static GATE: crate::util::Gate<HealthCheck> = crate::util::Gate::new();
-    if crate::util::in_test() {
-        return HealthCheck::unknown("not asked from a test");
+    match credential_readings() {
+        Some(lives) => token_expiry_line(&lives, &crate::place::fleet_sandbox()),
+        Option::None if crate::util::in_test() => HealthCheck::unknown("not asked from a test"),
+        Option::None => HealthCheck::unknown("skein has not been able to ask GitHub yet"),
     }
-    let fleet = crate::place::fleet_sandbox();
-    GATE.get(std::time::Duration::from_secs(60 * 60), move || {
-        Some(token_expiry_line(
-            &crate::prq::credential_lives(chrono::Utc::now()),
-            &fleet,
-        ))
+}
+
+/// What GitHub said about every credential skein holds, behind the hourly gate
+/// [`token_expiry_health`] describes — one reading, read by the expiry line and by the GitHub line
+/// ([`credential_refusal_line`]), so asking it for both costs nothing more (SKEIN-1277).
+///
+/// **Asked again at once when a credential is stored, replaced or forgotten**: a reading that says
+/// a token is refused must not outlive the token, or the person who just replaced it is told for
+/// an hour that the new one is refused. `None` from a test, which must not reach GitHub.
+pub(crate) fn credential_readings() -> Option<Vec<crate::prq::CredentialLife>> {
+    static GATE: crate::util::Gate<Vec<crate::prq::CredentialLife>> = crate::util::Gate::new();
+    static READ_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Whether the reading the gate holds has a refusal in it, which decides how long it is believed.
+    static REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if crate::util::in_test() {
+        return Option::None;
+    }
+    let now = crate::gitgate::credentials_generation();
+    if READ_AT.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
+        GATE.invalidate();
+    }
+    let fresh = readings_fresh(REFUSED.load(std::sync::atomic::Ordering::Relaxed));
+    GATE.get(fresh, || {
+        let lives = crate::prq::credential_lives(chrono::Utc::now());
+        REFUSED.store(
+            lives.iter().any(|c| c.life.refused()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Some(lives)
     })
-    .unwrap_or_else(|| HealthCheck::unknown("skein has not been able to ask GitHub yet"))
+}
+
+/// How long a credential reading is believed: an hour, or **five minutes when GitHub refused a
+/// credential in it** (SKEIN-1277).
+///
+/// Storing, replacing or forgetting a token in Settings re-reads at once
+/// ([`crate::gitgate::credentials_generation`]), but the commonest fix happens where skein cannot
+/// see it — `gh auth login` again, a new `$GH_TOKEN` for the sandbox — and an hour-long refusal
+/// would go on calling a fixed fleet broken. A healthy reading keeps the hour: it is only an
+/// expiry date, and asking every five minutes would spend a request per credential for nothing.
+pub(crate) fn readings_fresh(refused: bool) -> std::time::Duration {
+    match refused {
+        true => std::time::Duration::from_secs(5 * 60),
+        false => std::time::Duration::from_secs(60 * 60),
+    }
+}
+
+/// **The GitHub line is not satisfied while GitHub refuses a credential skein holds** (SKEIN-1277).
+///
+/// `reach` is the reachability line. It said "the token skein holds is the one GitHub sees" from a
+/// connection alone, while that token was being answered 401 — live, on a fleet whose review queue
+/// for one repository failed 401 and two more repositories read with the same refused `$GH_TOKEN`.
+/// Pure, over the readings and the repositories, so the sentence is proven without a network.
+///
+/// Only a satisfied reach line is overruled: a blocked GitHub is the more urgent of the two, and a
+/// check carries one recipe.
+pub(crate) fn credential_refusal_line(
+    reach: HealthCheck,
+    lives: &[crate::prq::CredentialLife],
+    slugs: &[String],
+    fleet: &str,
+) -> HealthCheck {
+    if reach.is_fault() {
+        return reach;
+    }
+    let Some(first) = lives.iter().find(|c| c.life.refused()) else {
+        return reach;
+    };
+    let refused: Vec<String> = lives
+        .iter()
+        .filter(|c| c.life.refused())
+        .map(|c| c.label.clone())
+        .collect();
+    let repos = crate::prq::refused_repos(lives, slugs);
+    let reach_them = match repos.as_slice() {
+        [] => "No managed repository reads with it; anything else that uses it fails".to_string(),
+        some => format!(
+            "{} repositor{} ha{} no working credential: {}",
+            some.len(),
+            if some.len() == 1 { "y" } else { "ies" },
+            if some.len() == 1 { "s" } else { "ve" },
+            some.join(", ")
+        ),
+    };
+    HealthCheck::unsatisfied(
+        format!(
+            "GitHub is reachable, but it refuses {} (401 Bad credentials). {reach_them}",
+            refused.join(" and ")
+        ),
+        renew_recipe(first.source, fleet),
+    )
 }
 
 #[cfg(test)]
@@ -158,6 +242,7 @@ mod tests {
         crate::prq::CredentialLife {
             source: crate::prq::GhToken::Environment,
             label: label.to_string(),
+            id: String::new(),
             life,
         }
     }
@@ -241,6 +326,81 @@ mod tests {
             gone.detail.contains("expired 3 day(s) ago"),
             "a credential already past its date must say so, not count down to it: {}",
             gone.detail
+        );
+    }
+
+    /// **GitHub reachable is not GitHub working: a refused credential makes the GitHub line a
+    /// fault, naming the repositories left with nothing that works** (SKEIN-1277).
+    ///
+    /// Live: `$GH_TOKEN` answered 401 while this line read "the token skein holds is the one
+    /// GitHub sees", and two repositories with no token of their own fell back to it. Here three
+    /// repositories, one with a stored token of its own; `$GH_TOKEN` is refused.
+    ///
+    /// What makes this fail: returning `reach` whatever the readings say (`a refused credential is
+    /// a fault`); naming every repository rather than the ones reading with the refused credential
+    /// (`a repository with its own working token is not named`); or a `refused()` that does not
+    /// recognise GitHub's 401 sentence.
+    #[test]
+    fn a_credential_github_refuses_is_a_fault_on_the_github_line_naming_its_repositories() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("GH_TOKEN", "skein-test-gho-refused")
+            .unset("GITHUB_TOKEN");
+        crate::gitgate::set_write_credential("own", "", &["acme/own".into()]).unwrap();
+        crate::gitgate::set_credential_token("own", "skein-test-pat-own").unwrap();
+        let slugs: Vec<String> = ["acme/own", "acme/other", "acme/third"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let reachable = HealthCheck::satisfied("available");
+        let refused = [reading(
+            "$GH_TOKEN",
+            crate::prq::Life::Unanswered("GitHub answered 401: Bad credentials".into()),
+        )];
+
+        let line = credential_refusal_line(reachable.clone(), &refused, &slugs, "thing-fleet");
+        assert!(line.is_fault(), "a refused credential is a fault: {line:?}");
+        assert!(
+            line.detail.contains("$GH_TOKEN")
+                && line.detail.contains("acme/other")
+                && line.detail.contains("acme/third"),
+            "it names the credential and the repositories reading with it: {}",
+            line.detail
+        );
+        assert!(
+            !line.detail.contains("acme/own"),
+            "a repository with its own working token is not named: {}",
+            line.detail
+        );
+        assert!(line.fix.contains("sbx secret set github"), "{}", line.fix);
+
+        let slow = [reading(
+            "$GH_TOKEN",
+            crate::prq::Life::Unanswered("GitHub did not answer within 10s".into()),
+        )];
+        assert!(
+            !credential_refusal_line(reachable, &slow, &slugs, "thing-fleet").is_fault(),
+            "a GitHub that did not answer has refused nothing"
+        );
+    }
+
+    /// **A refusal is re-read within minutes; a healthy reading keeps the hour** (SKEIN-1277).
+    ///
+    /// A token fixed outside skein — `gh auth login`, a new `$GH_TOKEN` — bumps nothing skein can
+    /// see, so a refused reading must age out on its own and soon. What makes this fail: one TTL for
+    /// both (either assertion, depending on which), e.g. `true => 60 * 60`.
+    #[test]
+    fn a_refused_reading_is_re_read_within_minutes_and_a_healthy_one_keeps_the_hour() {
+        use std::time::Duration;
+        assert!(
+            readings_fresh(true) <= Duration::from_secs(5 * 60),
+            "a refusal must not stand for an hour after the token is fixed outside skein"
+        );
+        assert!(
+            readings_fresh(false) >= Duration::from_secs(60 * 60),
+            "a healthy reading is only an expiry date, and keeps the hourly gate"
         );
     }
 

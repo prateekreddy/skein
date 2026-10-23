@@ -220,6 +220,23 @@ pub fn sighting_failure() -> Option<String> {
     SIGHTING_WHY.lock().ok().and_then(|why| why.clone())
 }
 
+/// A 5xx that is a proxy saying nothing is listening, rather than the warden saying something: its
+/// body is not the JSON every warden reply is, and it names a refused connection. What the proxy
+/// said, in its own words, for the sentence; `None` for anything else (SKEIN-1279).
+fn refused_on_the_way(raw: &str) -> Option<String> {
+    let code: u16 = raw.split(' ').nth(1)?.parse().ok()?;
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .trim();
+    let from_a_warden =
+        serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| v.is_object());
+    let refused = body.to_ascii_lowercase().contains("connection refused");
+    ((500..600).contains(&code) && !from_a_warden && refused)
+        .then(|| format!("{code}: {}", body.chars().take(160).collect::<String>()))
+}
+
 /// A non-200 in the warden's own words, or the first of the body when it did not send any.
 fn refusal(code: u16, said: &str) -> String {
     let why = serde_json::from_str::<serde_json::Value>(said)
@@ -583,6 +600,17 @@ impl Warden {
         self.send_within(method, path, body, REPLY)
     }
 
+    /// The sentence for a warden that is not there, whatever said so. [`sighting`] reads "is not
+    /// answering on" as nobody being on the other end, so every way of learning that ends here.
+    fn not_answering(&self, why: impl std::fmt::Display) -> String {
+        format!(
+            "the host warden is not answering on {}:{} ({why}). Fleet create and destroy go \
+             through it — start it with `skein-warden`, somewhere a person can approve what it \
+             asks (architecture §8).",
+            self.host, self.port
+        )
+    }
+
     /// Connect, with a timeout — see [`CONNECT`].
     fn connect(&self) -> std::io::Result<TcpStream> {
         use std::net::ToSocketAddrs;
@@ -634,14 +662,7 @@ impl Warden {
             host = self.host,
             port = self.port,
         );
-        let mut stream = self.connect().map_err(|e| {
-            format!(
-                "the host warden is not answering on {}:{} ({e}). Fleet create and destroy go \
-                 through it — start it with `skein-warden`, somewhere a person can approve what it \
-                 asks (architecture §8).",
-                self.host, self.port
-            )
-        })?;
+        let mut stream = self.connect().map_err(|e| self.not_answering(e))?;
         stream.set_read_timeout(Some(reply)).ok();
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         // Presented on every request, including the two that only report: after 4c the bind is not
@@ -661,9 +682,25 @@ impl Warden {
             .write_all(request.as_bytes())
             .map_err(|e| format!("the warden closed the connection: {e}"))?;
         let mut raw = String::new();
-        stream
-            .read_to_string(&mut raw)
-            .map_err(|e| format!("the warden's reply could not be read: {e}"))?;
+        if let Err(e) = stream.read_to_string(&mut raw) {
+            // Reset before a single byte: closed on, not answered — see below.
+            if raw.is_empty() && e.kind() == std::io::ErrorKind::ConnectionReset {
+                return Err(self.not_answering(e));
+            }
+            return Err(format!("the warden's reply could not be read: {e}"));
+        }
+        // **Nobody there, said by something in between** (SKEIN-1279). From inside the sandbox the
+        // host is reached through the sandbox's own network, and with no warden running that
+        // answers in one of two ways rather than refusing the connection: it accepts and closes
+        // with nothing said, or its proxy answers a 5xx whose body is its own "connection refused".
+        // Both read as "something that is not a warden is on this port", which sent the owner
+        // hunting a port conflict when the fix was to start the warden.
+        if raw.trim().is_empty() {
+            return Err(self.not_answering("the connection closed with no reply"));
+        }
+        if let Some(said) = refused_on_the_way(&raw) {
+            return Err(self.not_answering(said));
+        }
         let code: u16 = raw
             .split(' ')
             .nth(1)
@@ -1360,6 +1397,60 @@ mod tests {
         assert!(
             why.contains("skein-warden"),
             "the error has to say how to fix it: {why}"
+        );
+    }
+
+    /// **A warden that is not running is not "something else on its port"** (SKEIN-1279).
+    ///
+    /// Live, from inside the sandbox: with no warden on the host the connection is not refused —
+    /// it is accepted and closed with nothing said, or the sandbox proxy answers `500` with its own
+    /// "connection refused". Both used to reach the health line as [`Unseen::Answered`] and its
+    /// port-conflict fix. Each is asserted to come back as the not-answering sentence, which is
+    /// what [`sighting`] reads as [`Unseen::Unreachable`] and whose fix is to start the warden.
+    ///
+    /// What makes this fail: dropping the empty-reply arm in `send_within` (the first assertion
+    /// gets "not HTTP"), or dropping `refused_on_the_way` (the second gets the warden's refusal).
+    /// The third holds the other side: a warden's own JSON 500 that happens to mention a refused
+    /// connection is still the warden answering.
+    #[test]
+    fn a_warden_that_is_not_running_is_told_apart_from_a_stranger_on_its_port() {
+        let silent = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    // Read the request, then close with nothing said — what the sandbox's network
+                    // did with no warden behind it.
+                    let mut raw = [0u8; 4096];
+                    let _ = stream.read(&mut raw);
+                    drop(stream);
+                }
+            });
+            port
+        };
+        let why = Warden::at("127.0.0.1", silent).glance().unwrap_err();
+        assert!(why.contains("is not answering on"), "empty reply: {why}");
+        assert!(why.contains("skein-warden"), "and says to start it: {why}");
+
+        let proxied = fake_warden(|_| {
+            (
+                500,
+                "proxy: dial tcp 192.168.65.254:7879: connect: connection refused".into(),
+            )
+        });
+        let why = Warden::at("127.0.0.1", proxied).glance().unwrap_err();
+        assert!(why.contains("is not answering on"), "proxy refusal: {why}");
+
+        let warden_said = fake_warden(|_| {
+            (
+                500,
+                r#"{"error":"sbx: connection refused by the docker daemon"}"#.into(),
+            )
+        });
+        let why = Warden::at("127.0.0.1", warden_said).glance().unwrap_err();
+        assert!(
+            !why.contains("is not answering on") && why.contains("refused to say"),
+            "a warden's own refusal is the warden answering: {why}"
         );
     }
 

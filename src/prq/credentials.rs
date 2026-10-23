@@ -130,9 +130,31 @@ pub fn host_token() -> Result<crate::secret::Secret, String> {
 /// credential does not ([`host_credential`], [`credential_for_repo`]) — no rate limit can
 /// manufacture "no token at all" — and nothing read there is written down at all except `gh`'s
 /// answer, so a token stored, replaced or forgotten in Settings is what the next call uses.
+///
+/// **And an answer is believed for [`GITHUB_SAID_FRESH`], not for the life of the process**
+/// (SKEIN-1281). "About once a year" still happens: a repository whose default branch moved from
+/// `master` to `main` kept `master` as its trunk until a restart, and the merge train's
+/// `base:trunk` claimed nothing in between. Two REST calls per repository per half hour is what
+/// that costs.
 fn what_github_said<T: Clone>(
-    memo: &std::sync::Mutex<std::collections::BTreeMap<String, T>>,
+    memo: &GithubSaid<T>,
     slug: &str,
+    ask: impl FnOnce() -> Result<T, String>,
+) -> Option<T> {
+    believed_for(memo, slug, GITHUB_SAID_FRESH, ask)
+}
+
+/// How long [`what_github_said`] believes an answer.
+const GITHUB_SAID_FRESH: Duration = Duration::from_secs(30 * 60);
+
+/// A per-repository memo of what GitHub said, and when.
+type GithubSaid<T> = std::sync::Mutex<std::collections::BTreeMap<String, (Instant, T)>>;
+
+/// [`what_github_said`] with its freshness named, so a test can age an answer without waiting.
+fn believed_for<T: Clone>(
+    memo: &GithubSaid<T>,
+    slug: &str,
+    fresh: Duration,
     ask: impl FnOnce() -> Result<T, String>,
 ) -> Option<T> {
     // Poison-tolerant like the hold in `crate::github`: the value is a cached answer, and there is
@@ -141,11 +163,19 @@ fn what_github_said<T: Clone>(
         Ok(seen) => seen,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some(known) = seen.get(slug) {
-        return Some(known.clone());
+    if let Some((at, known)) = seen.get(slug) {
+        if at.elapsed() < fresh {
+            return Some(known.clone());
+        }
     }
-    let answer = ask().ok()?;
-    seen.insert(slug.to_string(), answer.clone());
+    // A refusal now leaves an aged answer where it was rather than forgetting it, and does not
+    // refresh its clock: the next caller asks again, and nothing is believed that GitHub did not
+    // say.
+    let answer = match ask() {
+        Ok(answer) => answer,
+        Err(_) => return seen.get(slug).map(|(_, known)| known.clone()),
+    };
+    seen.insert(slug.to_string(), (Instant::now(), answer.clone()));
     Some(answer)
 }
 
@@ -206,7 +236,7 @@ pub(super) fn record_rename(id: &str, was: &str, now: &str) -> Result<bool, Stri
     crate::repos::follow_rename(id, was, now).map(|()| true)
 }
 
-static RENAMES: std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>> =
+static RENAMES: GithubSaid<Option<String>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Forget the resolved names, for tests and for a caller that has just been told one changed.
@@ -245,8 +275,7 @@ pub fn trunk_of(slug: &str) -> String {
     .unwrap_or_default()
 }
 
-static TRUNKS: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static TRUNKS: GithubSaid<String> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// Forget the resolved trunks — for tests, like [`forget_renames`] above.
 pub fn forget_trunks() {
@@ -263,6 +292,7 @@ pub fn forget_trunks() {
 /// test whose stub `gh` on `PATH` is never asked passes for the wrong reason.
 pub fn forget_host_token() {
     crate::gitgate::forget_gh_login();
+    forget_viewer();
 }
 
 /// The GitHub repository a managed repo maps to, as `owner/name`.
@@ -320,8 +350,41 @@ pub fn slug_for_write(repo: &Repo) -> Result<String, String> {
 /// This is [`what_github_said`]'s rule in the shape a `Result` inside a `Result` would give: an
 /// empty list is an ANSWER and is used as one; a refusal is not turned into one.
 pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
-    let token = host_token()?;
-    let user = crate::github::get_json("/user", &token).map_err(|e| {
+    let (source, token) = host_credential();
+    let Some(mut token) = token else {
+        return Err(host_token().err().unwrap_or_default());
+    };
+    // **Asked once per ten minutes, not once per repo per refresh** (SKEIN-1280). The answer names
+    // no repository, and it was asked again for every repository on every queue refresh: two
+    // GitHub calls per repo per open tab, to learn the same login. Remembered against which
+    // credential answered, so a token stored, replaced or forgotten in Settings — or a different
+    // source winning — asks again at once rather than after the ten minutes.
+    let key_now = || {
+        format!(
+            "{}|{}|{}|{}",
+            source.key(),
+            crate::gitgate::credentials_generation(),
+            crate::github::api_base(),
+            skein_home().display()
+        )
+    };
+    let mut key = key_now();
+    if let Some(known) = remembered_viewer(&key) {
+        return Ok(known);
+    }
+    let mut asked = crate::github::get_json("/user", &token);
+    // **A `gh` login GitHub turns away is asked for again, once** (SKEIN-1281). It is the one
+    // credential remembered for the life of the process, so a `gh auth login` or a rotated `gh`
+    // token on the host went unseen until a restart while every call answered 401 on the old one.
+    if source == GhToken::GhCli && asked.as_ref().is_err_and(|e| unauthorized(e)) {
+        crate::gitgate::forget_gh_login();
+        if let Some(fresh) = crate::gitgate::gh_login() {
+            token = fresh;
+            asked = crate::github::get_json("/user", &token);
+        }
+        key = key_now();
+    }
+    let user = asked.map_err(|e| {
         // Which credential this ran on, and every way to change it. The queue is about *your* pull
         // requests, so it needs a token that names a user — and the answer used to be "run
         // `gh auth login`", as if that were the only one.
@@ -330,7 +393,7 @@ pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
              a user — export GH_TOKEN, add a read token under Settings → GitHub & keys → Your \
              GitHub identity, or store a token on a repository's card under Settings → \
              Repositories.",
-            host_token_source().label()
+            source.label()
         )
     })?;
     let login = user
@@ -343,20 +406,100 @@ pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
     }
     // Best-effort, and the failure is returned AS a failure. A body that is not an array is the
     // same non-answer as a 403: neither is GitHub telling us the list is empty.
-    let teams = crate::github::get_json("/user/teams?per_page=100", &token)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .map(|teams| {
-            teams
-                .iter()
-                .filter_map(|t| {
-                    let org = t.get("organization")?.get("login")?.as_str()?;
-                    let slug = t.get("slug")?.as_str()?;
-                    Some(format!("{org}/{slug}"))
-                })
-                .collect()
-        });
-    Ok((login, teams))
+    let (teams, answered) = match teams_of(&token) {
+        Ok(teams) => (Some(teams), true),
+        // A 403 or 404 is GitHub saying it will not tell this token — `read:org` missing — which is
+        // an answer and is remembered like one. Anything else (a rate-limit hold, the network) is
+        // GitHub not having been asked, and remembering it would show the `read:org` sentence for
+        // ten minutes about a scope that is fine — [`what_github_said`]'s rule.
+        Err(why) => (None, turned_down(&why)),
+    };
+    let answer = (login, teams);
+    if answered {
+        remember_viewer(key, &answer);
+    }
+    Ok(answer)
+}
+
+/// Every team the token's owner is in, a page at a time (SKEIN-1280). One page of a hundred used to
+/// be the whole list, so somebody in more than a hundred teams lost the rest without a word — and
+/// a review requested of a lost team was never in their queue.
+///
+/// Any page that does not answer fails the whole list: a partial list read as complete is exactly
+/// the "you are in no such team" [`viewer`] exists not to say. Ten pages is a thousand teams, and
+/// past that the list is called unknown rather than silently cut.
+fn teams_of(token: &crate::secret::Secret) -> Result<Vec<String>, String> {
+    const PAGE: usize = 100;
+    const PAGES: usize = 10;
+    let mut out = Vec::new();
+    for page in 1..=PAGES {
+        let body =
+            crate::github::get_json(&format!("/user/teams?per_page={PAGE}&page={page}"), token)?;
+        let teams = body
+            .as_array()
+            .ok_or("GitHub's list of your teams was not a list")?;
+        out.extend(teams.iter().filter_map(|t| {
+            let org = t.get("organization")?.get("login")?.as_str()?;
+            let slug = t.get("slug")?.as_str()?;
+            Some(format!("{org}/{slug}"))
+        }));
+        if teams.len() < PAGE {
+            return Ok(out);
+        }
+    }
+    Err(format!("more than {} teams", PAGE * PAGES))
+}
+
+/// Whether `why` is GitHub's 401: the credential itself was refused.
+fn unauthorized(why: &str) -> bool {
+    why.strip_prefix("GitHub said ")
+        .or_else(|| why.strip_prefix("GitHub answered "))
+        .is_some_and(|said| said.starts_with("401"))
+}
+
+/// Whether `why` is GitHub turning the request down — a 403 or 404 that is not a rate limit —
+/// rather than GitHub not having been asked.
+fn turned_down(why: &str) -> bool {
+    let said = why
+        .strip_prefix("GitHub said ")
+        .or_else(|| why.strip_prefix("GitHub answered "))
+        .unwrap_or("");
+    (said.starts_with("403") || said.starts_with("404"))
+        && !why.to_ascii_lowercase().contains("rate limit")
+}
+
+/// How long [`viewer`]'s answer is remembered — the badge poller's interval, so the slowest thing
+/// asking for a queue asks GitHub who you are at most once per poll.
+const VIEWER_FRESH: Duration = Duration::from_secs(600);
+
+type ViewerAnswer = (String, Option<Vec<String>>);
+
+static VIEWER: Mutex<Option<(String, Instant, ViewerAnswer)>> = Mutex::new(None);
+
+fn remembered_viewer(key: &str) -> Option<ViewerAnswer> {
+    let seen = match VIEWER.lock() {
+        Ok(seen) => seen,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    seen.as_ref()
+        .filter(|(k, at, _)| k == key && at.elapsed() < VIEWER_FRESH)
+        .map(|(_, _, answer)| answer.clone())
+}
+
+fn remember_viewer(key: String, answer: &ViewerAnswer) {
+    let mut seen = match VIEWER.lock() {
+        Ok(seen) => seen,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *seen = Some((key, Instant::now(), answer.clone()));
+}
+
+/// Forget who GitHub said you are, so the next [`viewer`] asks — and a queue refresh a person
+/// forces asks it ([`queue`]), so pressing refresh after fixing a token's `read:org` shows it.
+pub(super) fn forget_viewer() {
+    if let Ok(mut seen) = VIEWER.lock() {
+        *seen = None;
+    }
 }
 
 // ---------- how long each credential has left (SKEIN-928) ----------
@@ -403,7 +546,47 @@ pub struct CredentialLife {
     pub source: GhToken,
     /// What to call it in a sentence — `$GH_TOKEN`, or the label and repository its owner gave it.
     pub label: String,
+    /// The stored credential's id for a [`GhToken::WritePat`], so the repositories reading with it
+    /// can be named ([`refused_repos`]); empty for the other sources, which are one each.
+    pub id: String,
     pub life: Life,
+}
+
+impl Life {
+    /// **GitHub refused the credential itself** — the 401 a dead, revoked or mistyped token gets
+    /// (SKEIN-1277). Still an [`Life::Unanswered`] as far as its expiry goes, because there is no
+    /// expiry to read; but unlike a timeout it says something certain about everything that runs
+    /// on that credential, which is that none of it works.
+    pub fn refused(&self) -> bool {
+        matches!(self, Life::Unanswered(why) if unauthorized(why))
+    }
+}
+
+/// Which of `slugs` read with a credential GitHub refused in `lives` — the repositories with no
+/// working credential, for the health line that says so (SKEIN-1277).
+///
+/// "Read with" is [`credential_for_repo`]'s answer, the same one every call about the repository
+/// takes: its own stored token first, then `$GH_TOKEN`, the read token, `gh`. A repository whose
+/// stored token is fine is not named because `$GH_TOKEN` is refused — it never reaches it.
+pub fn refused_repos(lives: &[CredentialLife], slugs: &[String]) -> Vec<String> {
+    let refused: Vec<&CredentialLife> = lives.iter().filter(|c| c.life.refused()).collect();
+    if refused.is_empty() {
+        return Vec::new();
+    }
+    slugs
+        .iter()
+        .filter(|slug| {
+            let source = credential_for_repo(slug, Need::Read).0;
+            let id = match source {
+                GhToken::WritePat => crate::gitgate::credential_for(slug)
+                    .map(|(c, _)| c.id)
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            refused.iter().any(|c| c.source == source && c.id == id)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Whole days from `now` to the date GitHub put in `github-authentication-token-expiration`.
@@ -453,6 +636,7 @@ pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLif
             out.push(CredentialLife {
                 source,
                 label: source.label().to_string(),
+                id: String::new(),
                 life: life_of(&token, now),
             });
         }
@@ -482,6 +666,7 @@ pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLif
         out.push(CredentialLife {
             source: GhToken::WritePat,
             label,
+            id: found.id.clone(),
             life: life_of(&token, now),
         });
     }
@@ -492,6 +677,207 @@ pub fn credential_lives(now: chrono::DateTime<chrono::Utc>) -> Vec<CredentialLif
 mod tests {
     use super::*;
     use crate::prq::fixtures::{batched_repo, recording_github, routing_github, wired};
+
+    /// **What GitHub said about a repository is believed for a while, not for ever** (SKEIN-1281).
+    ///
+    /// The trunk and the rename were remembered for the life of the server, so a repository moved
+    /// from `master` to `main` stalled the merge train until a restart. What makes this fail:
+    /// dropping the age check in `believed_for` (`an aged answer is asked again` sees the first
+    /// answer and one ask); or forgetting the aged answer when the re-ask is refused (`a refusal
+    /// keeps the last answer` gets `None`).
+    #[test]
+    fn what_github_said_ages_out_and_a_refusal_keeps_the_last_answer() {
+        static MEMO: GithubSaid<String> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+        let long = Duration::from_secs(3600);
+        assert_eq!(
+            believed_for(&MEMO, "acme/thing", long, || Ok("master".to_string())),
+            Some("master".into())
+        );
+        assert_eq!(
+            believed_for(&MEMO, "acme/thing", long, || Ok("main".to_string())),
+            Some("master".into()),
+            "a fresh answer is not asked again"
+        );
+        let mut asks = 0;
+        assert_eq!(
+            believed_for(&MEMO, "acme/thing", Duration::ZERO, || {
+                asks += 1;
+                Ok("main".to_string())
+            }),
+            Some("main".into()),
+            "an aged answer is asked again"
+        );
+        assert_eq!(asks, 1, "an aged answer is asked again");
+        assert_eq!(
+            believed_for(&MEMO, "acme/thing", Duration::ZERO, || Err("held".into())),
+            Some("main".into()),
+            "a refusal keeps the last answer rather than inventing none"
+        );
+    }
+
+    /// **A `gh` login GitHub refuses is asked for again** (SKEIN-1281).
+    ///
+    /// `gh`'s token is the one credential remembered per process; rotate it on the host (or run
+    /// `gh auth login` again) and every call went on presenting the old one, answered 401, until a
+    /// restart. Here `gh` hands out an old token first and a new one after; GitHub refuses the old.
+    /// What makes this fail: dropping the 401 retry in `viewer` — the answer is then the 401.
+    #[test]
+    fn a_refused_gh_login_is_asked_for_again_once() {
+        use std::io::{BufRead, BufReader, Write};
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home)
+            .unset("GH_TOKEN")
+            .unset("GITHUB_TOKEN");
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let mut new_token = false;
+                while reader.read_line(&mut line).unwrap_or(0) > 0 && !line.trim().is_empty() {
+                    new_token |= line
+                        .to_ascii_lowercase()
+                        .contains("bearer skein-test-gho-new");
+                    line.clear();
+                }
+                let (status, body) = match new_token {
+                    true => ("200 OK", r#"{"login":"me"}"#),
+                    false => ("401 Unauthorized", r#"{"message":"Bad credentials"}"#),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        env.set("SKEIN_GITHUB_API", &base);
+
+        // `gh` answers the old token the first time it is asked and the new one after.
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let asked = home.join("gh-asked");
+        std::fs::write(
+            bin.join("gh"),
+            format!(
+                "#!/usr/bin/env bash\n[ \"$1 $2\" = \"auth token\" ] || exit 1\n\
+                 if [ -e {asked} ]; then echo skein-test-gho-new; else touch {asked}; \
+                 echo skein-test-gho-old; fi\n",
+                asked = asked.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        env.set("PATH", format!("{}:{path}", bin.display()));
+
+        forget_host_token();
+        let answer = viewer();
+        forget_host_token();
+        assert_eq!(
+            answer.map(|(login, _)| login),
+            Ok("me".to_string()),
+            "the refused `gh` token was not asked for again"
+        );
+    }
+
+    /// **"Who am I" is asked once, not once per repository per refresh, and every team is read**
+    /// (SKEIN-1280).
+    ///
+    /// Three refreshes of three repositories used to be eighteen calls to learn one login; and the
+    /// team list was one page of a hundred, so the hundred-and-first team was never asked about.
+    ///
+    /// What makes this fail: dropping the `remembered_viewer` lookup (the second call asks GitHub
+    /// again — `asked once, then remembered`); reading only the first page of teams (`every team`
+    /// counts 100); and not bumping the generation when a credential is stored (`a credential
+    /// stored in Settings is asked about at once`).
+    #[test]
+    fn who_you_are_is_asked_once_and_every_page_of_teams_is_read() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorder = asked.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).ok();
+                let path = first.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 && !line.trim().is_empty() {
+                    line.clear();
+                }
+                recorder.lock().unwrap().push(path.clone());
+                let team =
+                    |n: usize| format!(r#"{{"slug":"t{n}","organization":{{"login":"acme"}}}}"#);
+                let body = if path.starts_with("/user/teams") {
+                    let teams: Vec<String> = match path.rsplit("&page=").next() {
+                        Some("1") => (0..100).map(team).collect(),
+                        Some("2") => vec![team(100)],
+                        _ => Vec::new(),
+                    };
+                    format!("[{}]", teams.join(","))
+                } else {
+                    r#"{"login":"me"}"#.to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        let _wired = wired(&base);
+        let users = || {
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| *p == "/user")
+                .count()
+        };
+
+        let (login, teams) = viewer().expect("GitHub answered");
+        assert_eq!(login, "me");
+        assert_eq!(
+            teams.as_ref().map(Vec::len),
+            Some(101),
+            "every team, across pages: {teams:?}"
+        );
+        assert!(teams.unwrap().contains(&"acme/t100".to_string()));
+
+        let _ = viewer();
+        let _ = viewer();
+        assert_eq!(
+            users(),
+            1,
+            "asked once, then remembered: {:?}",
+            asked.lock().unwrap()
+        );
+
+        crate::gitgate::set_read_pat("skein-test-pat-read").unwrap();
+        let _ = viewer();
+        assert_eq!(
+            users(),
+            2,
+            "a credential stored in Settings is asked about at once, not after the memo lapses"
+        );
+        crate::gitgate::set_read_pat("").unwrap();
+    }
 
     /// **GitHub's expiry date, counted the way a person would count it** (SKEIN-928).
     ///
