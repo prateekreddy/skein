@@ -440,9 +440,27 @@ pub fn doorway_pane_command() -> String {
     )
 }
 
-/// The pane command [`start_server`] gives tmux: `src/door.sh`'s definitions, then a supervisor
-/// loop running the doorway through `skein_logged`. start-door.sh's loop is the same words; the
-/// `start_door_sh_supervises_the_way_start_server_does` test holds the two together.
+/// `skein_logged`'s definition, cut out of `src/door.sh` whole: from its first line to the `}` that
+/// closes it at column 0. Only the function and not the file, because the pane command travels as
+/// one tmux argument under tmux's 16 KB ceiling (`TMUX_COMMAND_CEILING`), and door.sh's comments
+/// would spend it.
+fn skein_logged_definition() -> &'static str {
+    let start = DOOR_SH
+        .find("\nskein_logged() {\n")
+        .expect("src/door.sh defines skein_logged")
+        + 1;
+    let end = start
+        + DOOR_SH[start..]
+            .find("\n}\n")
+            .expect("skein_logged closes at column 0")
+        + 3;
+    &DOOR_SH[start..end]
+}
+
+/// The pane command [`start_server`] gives tmux: door.sh's `skein_logged`, then a supervisor loop
+/// running the doorway through it. start-door.sh's loop is the same words, and it hands its pane
+/// the same function with `declare -f`; `start_door_sh_supervises_the_way_start_server_does`
+/// holds the two together.
 fn server_supervisor() -> String {
     let body = supervised(
         &server_doorway_path(),
@@ -464,7 +482,7 @@ fn server_supervisor() -> String {
             ),
         ),
     );
-    format!("{DOOR_SH}\n{body}")
+    format!("{}\n{body}", skein_logged_definition())
 }
 
 /// Start the doorway, which opens the socket and only then runs the server behind it.
@@ -1732,9 +1750,21 @@ mod tests {
         pins.set("SKEIN_FLEET_ROOT", tmp.join("fleet"))
             .set("SKEIN_HOME", tmp.join("home"));
         let pane = server_supervisor();
+        let defined = skein_logged_definition();
         assert!(
-            pane.starts_with(DOOR_SH),
-            "start_server's pane does not define src/door.sh's functions"
+            defined.starts_with("skein_logged() {\n") && defined.ends_with("\n}\n"),
+            "skein_logged was not cut out of src/door.sh whole:\n{defined}"
+        );
+        assert!(
+            pane.starts_with(defined),
+            "start_server's pane does not define src/door.sh's skein_logged"
+        );
+        // One tmux argument, quoted once more by `start_server`: well under the ceiling, so the
+        // definition riding along cannot be what starts refusing the cockpit's door.
+        assert!(
+            sh_quote(&pane).len() < TMUX_COMMAND_CEILING / 4,
+            "the pane command is {} bytes",
+            sh_quote(&pane).len()
         );
         assert!(
             pane.contains(&format!(
