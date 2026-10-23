@@ -1750,7 +1750,10 @@ fn noskip_check_fails_a_handed_over_run_on_a_broken_test_and_only_then() {
     ];
     for (name, log, want, why) in cases {
         let (got, said) = noskip_judges(&dir, name, &log);
-        assert_eq!(got, want, "{name}: {why}; it exited {got} and said:\n{said}");
+        assert_eq!(
+            got, want,
+            "{name}: {why}; it exited {got} and said:\n{said}"
+        );
     }
 }
 
@@ -1812,5 +1815,9 @@ fn every_github_action_the_workflows_use_runs_on_node_24() {
         seen >= 5,
         "found only {seen} `uses: actions/…` lines in .github/workflows, so this reads the wrong files"
     );
-    assert!(wrong.is_empty(), "actions still on Node 20:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "actions still on Node 20:\n{}",
+        wrong.join("\n")
+    );
 }

@@ -1893,7 +1893,8 @@ mod tests {
     #[test]
     fn an_attach_that_fails_after_the_box_started_is_not_recorded_as_a_failed_start() {
         let _env = env_lock();
-        let home = std::env::temp_dir().join(format!("skein-test-cli-{}-start", std::process::id()));
+        let home =
+            std::env::temp_dir().join(format!("skein-test-cli-{}-start", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         struct PutBack(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -1918,7 +1919,9 @@ mod tests {
 
         let said = super::settle_start(
             "web-main",
-            Err(super::StartFailed::Attach("env exited non-zero (exit status: 1)".into())),
+            Err(super::StartFailed::Attach(
+                "env exited non-zero (exit status: 1)".into(),
+            )),
         )
         .expect_err("a failed attach still fails the command");
         assert!(
@@ -1933,7 +1936,9 @@ mod tests {
 
         let said = super::settle_start(
             "web-main",
-            Err(super::StartFailed::Start("no branch for box web-main".into())),
+            Err(super::StartFailed::Start(
+                "no branch for box web-main".into(),
+            )),
         )
         .expect_err("a failed start fails the command");
         assert_eq!(said, "no branch for box web-main");
