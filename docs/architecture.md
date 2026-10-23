@@ -60,8 +60,9 @@ the output side of a *requested* decision, and conflating the two is what §9.5.
 hook logs, per-box status, mailbox messages. **Many writers by design** — every box writes these
 continuously — so the rule is one file per writer, or a documented lock protocol, never "one writer".
 
-Today's code already needs this discipline (`flock` on `.sandboxes.lock`, per-message `.lock` files
-in the mailbox) and today's code also violates it where it matters most: `config.json` and
+Today's code already needs this discipline (`flock` on `.sandboxes.lock`, one never-deleted `.lock`
+for the whole mailbox — per-message lock files that their holder deleted lost `seenBy` marks,
+SKEIN-1284) and today's code also violates it where it matters most: `config.json` and
 `repos.json` are unsynchronised read-modify-write with no locking, so two cockpit tabs saving
 settings is silent last-write-wins. Declared state gets a lock or an owner. That is not optional.
 
@@ -562,8 +563,8 @@ skein's files or signal it; neither side's relationship to `sudo` changes.
 
 ### 7.3 Resize is a byte copy, and that was a decision
 
-`snapshot_box` — a git bundle plus two patches plus an ignored-file sweep — **has no production
-caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`archive_script` and
+The bundle-and-patches snapshot — a git bundle plus two patches plus an ignored-file sweep — had no
+production caller and is deleted (SKEIN-1289). Real resize is `sudo tar` of the whole box tree and `tar -xf` back (`archive_script` and
 `restore_script` in `src/fleet/resize.rs`), which is why it demands 1.2× the box size free before starting.
 `box_archive`'s doc comment records the move away from reconstruction: *"the reconstruction is
 slower, less faithful, and it is where the fragility lives."* (Cited by name, not by line: the line

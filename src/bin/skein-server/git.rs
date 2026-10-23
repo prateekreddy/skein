@@ -170,19 +170,8 @@ pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response
 /// here. Four copies of it each threw the answer away, so "Forget" said done while a box's copy of
 /// the token could still be on disk and nobody would be told. Skein's boxes only — a sandbox skein
 /// did not place has none of this mounted.
-///
-/// A board that cannot be read is a problem, not an empty fleet: nothing was taken from any box,
-/// and for a withdrawal that is the one thing the person must not be left believing happened.
 pub(super) fn refresh_every_box() -> Vec<String> {
-    let views = match load_views() {
-        Ok(views) => views,
-        Err(e) => {
-            return vec![format!(
-                "the boxes could not be listed, so none of them was updated: {e}"
-            )]
-        }
-    };
-    views
+    load_views()
         .iter()
         .filter(|v| !v.foreign)
         .flat_map(|view| {

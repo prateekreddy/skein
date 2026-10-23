@@ -47,6 +47,32 @@ command -v jq >/dev/null 2>&1 || {
 }
 box="$here/mailbox"
 mkdir -p "$box"
+# One lock for every read-modify-write of a message in this mailbox, held by this script and by
+# skein's relay (`mailbox::relay_cross_project_mail`) alike, and NEVER unlinked. Each message used to
+# have its own `<msg>.lock` that the holder deleted on its way out: a reader already waiting on the
+# deleted file then held a lock nobody else could see, the next reader made a fresh file and locked
+# that, and the two marked `seenBy` at once — one mark lost, the message redelivered, the Stop hook
+# blocked again (SKEIN-1284). A lock that is removed is no lock.
+lock="$box/.lock"
+# **What is at `$lock` is whatever a box put there**, since every box writes this directory. So it
+# is used only when it is a regular file and not a link, it is opened READ-only (`flock` needs
+# nothing more), and it is never truncated or written: a link planted there, pointing at some other
+# box's settings, is then neither followed for writing nor emptied. Made if missing from a fresh
+# file of our own, hard-linked into place, which fails rather than replacing one another box has
+# just made — replacing it would hand the two of them different files to lock. When it is the wrong
+# shape, the steps that need it are skipped and said, and nothing is marked or deleted.
+lock_ready() {
+  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+    _fresh="$(mktemp "$box/.lock.XXXXXX" 2>/dev/null)" \
+      && { ln "$_fresh" "$lock" 2>/dev/null || mv -n "$_fresh" "$lock" 2>/dev/null; }
+    rm -f "${_fresh-}" 2>/dev/null
+  fi
+  [ -f "$lock" ] && [ ! -L "$lock" ] && return 0
+  [ -n "${_lock_said-}" ] && return 1
+  _lock_said=1
+  echo "[skein-mailbox] $lock is not a plain file, so shared mail was neither marked nor pruned; remove it and the next turn makes a fresh one" >&2
+  return 1
+}
 # Where the OWNER's messages are, and the reason there are two directories rather than one.
 #
 # `$box` above is in the shared store: every box can write it, so a message found there is one any
@@ -93,31 +119,60 @@ cmd="${1:-inbox}"; shift || true
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?'; }
 
+# Every registered box EXCEPT the sandbox's own name — see `notabox` above. Prints nothing at all
+# when the registry cannot be read, which is not the same answer as "no boxes".
+registered_boxes() {
+  jq -c --arg notabox "$notabox" '[keys[] | select($notabox == "" or . != $notabox)]' \
+    "$here/sandboxes.json" 2>/dev/null
+}
+
+# Whether a message is addressed to one box that is no longer registered here. Such a message is
+# never seen, so it is never pruned (SKEIN-1284). Only said when the registry was read and names at
+# least one box: an unreadable or empty registry would otherwise call every direct message orphaned.
+recipient_gone() { # $1 = message file, $2 = registered_boxes output
+  [ -n "${2:-}" ] && [ "$2" != "[]" ] || return 1
+  jq -e --argjson boxes "$2" '
+    (.to // "broadcast") as $to
+    | ($to != "" and $to != "broadcast" and $to != "all-projects" and ($to | startswith("project:") | not))
+      and ($boxes | index($to)) == null
+  ' "$1" >/dev/null 2>&1
+}
+
 # Delete only messages whose intended recipients have all seen them. A direct message is complete
 # once its target has seen it; a broadcast is complete once every currently registered box other
 # than its sender has seen it. Corrupt/ambiguous messages are retained for inspection.
 prune_seen() { # $1 = age in days, $2 = noisy (0/1)
-  local days="${1:-30}" noisy="${2:-0}" cutoff boxes mt f
+  local days="${1:-30}" noisy="${2:-0}" cutoff boxes mt f gone=0
   cutoff="$(date -u -d "-$days days" +%s 2>/dev/null || echo 0)"
   [ "$cutoff" -gt 0 ] || return 0
-  # Every registered box EXCEPT the sandbox's own name — see `notabox` above.
-  boxes="$(jq -c --arg notabox "$notabox" '[keys[] | select($notabox == "" or . != $notabox)]' \
-    "$here/sandboxes.json" 2>/dev/null || echo '[]')"
+  lock_ready || return 0
+  boxes="$(registered_boxes)"
   for f in "$box"/*.json; do
     [ -e "$f" ] || break
     mt="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
     [ "$mt" -lt "$cutoff" ] || continue
-    if jq -e --argjson boxes "$boxes" '
+    # Kept, and counted: mail to a box that no longer exists can never be seen, so it is never
+    # complete — and records a deleted box left behind are not this script's to delete.
+    if recipient_gone "$f" "$boxes"; then
+      gone=$((gone+1))
+      continue
+    fi
+    # Under the mailbox lock, so a reader marking this message cannot write it back after it is gone.
+    if ( flock -w 5 9 || exit 1; jq -e --argjson boxes "${boxes:-[]}" '
       (.seenBy // []) as $seen | (.from // "") as $from | (.to // "broadcast") as $to
       | if ($to == "broadcast" or $to == "all-projects") then
           ([$boxes[] | select(. != $from)]) as $recipients
           | ($recipients | length) > 0 and (($recipients - $seen) | length) == 0
         else $seen | index($to) != null end
-    ' "$f" >/dev/null 2>&1; then
-      rm -f "$f" "$f.lock" 2>/dev/null || true
+    ' "$f" >/dev/null 2>&1 && rm -f "$f" ) 9<"$lock"; then
+      # `$f.lock` is the per-message lock this script used before SKEIN-1284; gone with its message.
+      rm -f "$f.lock" 2>/dev/null || true
       [ "$noisy" = "1" ] && echo "pruned $(basename "$f")"
     fi
   done
+  if [ "$noisy" = "1" ] && [ "$gone" -gt 0 ]; then
+    echo "kept $gone message(s) addressed to a box that no longer exists; \`mailbox.sh list\` marks them"
+  fi
 }
 
 case "$cmd" in
@@ -161,8 +216,10 @@ case "$cmd" in
     fi
     found=0
     out=""
+    shared=1
+    lock_ready || shared=0
     for f in "$box"/*.json; do
-      [ -e "$f" ] || break
+      [ "$shared" = 1 ] && [ -e "$f" ] || break
       # Lock/read/mark/rename before surfacing. If marking fails, emit nothing: showing an unmarked
       # message would make it repeat forever and could trap Stop in a continuation loop.
       line="$({
@@ -178,8 +235,7 @@ case "$cmd" in
         # **The name is shown with the fact that nobody checked it.** A name rendered as a name is
         # how one box speaks as another — or as you.
         jq -r '"  • [\(.kind // "note")] from \(.from // "?") (a box; this name is not checked) on \(.branch // "?"): \(.body // "")"' "$f" 2>/dev/null
-      } 8>"$f.lock")" || { rm -f "$f.lock" 2>/dev/null || true; continue; }
-      rm -f "$f.lock" 2>/dev/null || true
+      } 8<"$lock")" || continue
       if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
         echo "[mailbox] unread hand-off for $vmid:"
       fi
@@ -229,9 +285,12 @@ case "$cmd" in
     ;;
 
   list)
+    boxes="$(registered_boxes)"
     for f in "$box"/*.json; do
       [ -e "$f" ] || { echo "(empty)"; break; }
-      jq -r '"[\(.ts)] \(.from)→\(.to) [\(.kind)] \(.branch): \(.body)  seenBy=\(.seenBy // [])"' "$f" 2>/dev/null || true
+      gone=""
+      recipient_gone "$f" "$boxes" && gone="  (that box no longer exists; this is never delivered or pruned)"
+      jq -r --arg gone "$gone" '"[\(.ts)] \(.from)→\(.to) [\(.kind)] \(.branch): \(.body)  seenBy=\(.seenBy // [])\($gone)"' "$f" 2>/dev/null || true
     done
     ;;
 

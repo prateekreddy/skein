@@ -26,7 +26,7 @@ use skein::config::{load_config, save_config, Config};
 use skein::fleet::{
     anchor_from_launch, box_root, box_session_path, box_sock, box_state, clone_script,
     ensure_box_session, fleet_liveness, forget_fleet_liveness, heal_fleet, install_launcher,
-    provision_script, resize_fleet, server_tmux_sock_in, session_script, snapshot_box, start_box,
+    provision_script, resize_fleet, server_tmux_sock_in, session_script, start_box,
 };
 use skein::kit::ensure_store;
 use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_record, PlaceRecord};

@@ -65,6 +65,9 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
             up_q = sh_quote(upstream),
         )
     };
+    // `skein.base` records the branch the clone actually stands on — the configured base, or the
+    // remote's default when that fallback ran — so `box-diff.sh`, inside the box, measures the
+    // branch against what it was cut from rather than guessing `main` (SKEIN-1283).
     format!(
         "set -e; \
          if [ -e {tree_q}/.git ]; then echo 'skein: {name} already has a checkout; destroy the box first' >&2; exit 1; fi; \
@@ -72,6 +75,7 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
          {clone}; \
          cd {tree_q}; \
          git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'; \
+         git config skein.base \"$(git symbolic-ref --short HEAD)\" || true; \
          git checkout -B {branch_q}{remotes}",
         root_q = sh_quote(&root),
         branch_q = sh_quote(branch),

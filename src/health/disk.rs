@@ -9,7 +9,7 @@ use super::*;
 /// runs out of space fails somewhere in the middle, and the box it failed in is usually not the box
 /// that took the space. The per-box chip marks at 80% of a box's own allowance, which is a
 /// different question — that one is "who is taking it", this one is "is there any left".
-const DISK_FULL_PCT: u64 = 85;
+pub(super) const DISK_FULL_PCT: u64 = 85;
 
 /// Is there room left on the fleet's filesystems — the one the boxes are on, and the one Docker
 /// keeps its images on?
@@ -41,6 +41,21 @@ const DISK_FULL_PCT: u64 = 85;
 /// **nothing has arrived since this process started**, where a `disk_total` of 0 means a reading
 /// arrived and carried no total.
 pub fn disk_health() -> HealthCheck {
+    // The disk skein's volume is on, and each box against its own allowance, are read whatever the
+    // sandbox answered: neither comes from it (SKEIN-1286, `health::volume`).
+    let over = super::volume::over_allowance(
+        &crate::fleet::fleet_disk_usage(),
+        crate::fleet::box_disk_limit,
+    );
+    super::volume::with_volume_and_allowances(
+        fleet_disk_health(),
+        super::volume::volume_disk(),
+        &over,
+    )
+}
+
+/// The fleet's own two filesystems: the half of [`disk_health`] the sandbox answers.
+fn fleet_disk_health() -> HealthCheck {
     let Some(r) = crate::fleet::fleet_resources() else {
         return HealthCheck::unknown(format!(
             "the sandbox has not answered the disk reading since skein started, and which half \
@@ -203,19 +218,27 @@ fn disk_verdict(
     let boxes_pct = pct(r.disk_used, r.disk_total);
     // Zero total means Docker shares the boxes' filesystem — the same bytes, already counted.
     let images_pct = pct(r.images_used, r.images_total);
+    // What can still be written, from `df`'s Available rather than total minus used, which counts
+    // the blocks a filesystem keeps back (SKEIN-1286). Said only when `df` gave it.
+    let avail = |mib: u64| match mib {
+        0 => String::new(),
+        _ => format!(", {} available", gib(mib)),
+    };
     let boxes_line = format!(
-        "the boxes' disk is {}% full ({} of {})",
+        "the boxes' disk is {}% full ({} of {}{})",
         boxes_pct,
         gib(r.disk_used),
-        gib(r.disk_total)
+        gib(r.disk_total),
+        avail(r.disk_avail)
     );
     let images_line = match r.images_total {
         0 => "Docker shares that filesystem, so there is no separate image store".to_string(),
         _ => format!(
-            "the image store is {}% full ({} of {})",
+            "the image store is {}% full ({} of {}{})",
             images_pct,
             gib(r.images_used),
-            gib(r.images_total)
+            gib(r.images_total),
+            avail(r.images_avail)
         ),
     };
     let detail = format!("{boxes_line}; {images_line}");

@@ -730,7 +730,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
              needs `skein restart <box>`, which reprovisions it",
         ),
     };
-    let views = load_views().unwrap_or_default();
+    let views = load_views();
     let dark_boxes = views
         .iter()
         .filter(|view| view.hook_health == "never")

@@ -19,9 +19,13 @@ vmid="$(skein_box_name)" || exit 0
 dir="$store/diffs"
 mkdir -p "$dir" 2>/dev/null || exit 0
 
-# Find the merge-base against the nearest base branch.
+# Find the merge-base against the nearest base branch. The branch this box was cloned from comes
+# first: skein records it in the checkout's `skein.base` when it clones (`fleet::clone_script`), so a
+# repo based on, say, `develop` is measured against `develop` and not against a `main` it also has
+# (SKEIN-1283). A box cloned before that was recorded falls through to the usual names.
+recorded="$(git -C "$root" config --get skein.base 2>/dev/null || true)"
 base=""
-for ref in origin/main origin/master main master; do
+for ref in ${recorded:+"origin/$recorded"} origin/main origin/master main master; do
   if git -C "$root" rev-parse --verify -q "$ref" >/dev/null 2>&1; then
     base="$ref"
     break

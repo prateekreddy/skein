@@ -172,9 +172,25 @@ pub struct Look {
 struct Running {
     output: Mutex<String>,
     state: Mutex<State>,
-    since: Instant,
+    /// When it ended, which is where [`RETENTION`] counts from; `None` while it runs.
+    ended: Mutex<Option<Instant>>,
     started_at: String,
     say: tokio::sync::broadcast::Sender<String>,
+}
+
+/// Drop every act that ended more than [`RETENTION`] before `now`.
+///
+/// Counted from when it **ended**, not when it started (SKEIN-1285). Counted from the start, a create
+/// that ran for twenty-nine minutes was readable for one more, and one that ran past the window was
+/// forgotten at the first `begin` after it finished — before the person who started it could read
+/// why it failed.
+fn forget_finished(acts: &mut HashMap<String, std::sync::Arc<Running>>, now: Instant) {
+    acts.retain(
+        |_, act| match *act.ended.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(at) => now.saturating_duration_since(at) < RETENTION,
+            None => true,
+        },
+    );
 }
 
 fn registry() -> &'static Mutex<HashMap<String, std::sync::Arc<Running>>> {
@@ -213,13 +229,7 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
     let mut acts = registry().lock().unwrap_or_else(|e| e.into_inner());
     // Finished acts past their window go here, so the registry is pruned by use rather than by a
     // timer — a server nobody is asking anything of has nothing to forget.
-    acts.retain(|_, act| {
-        let ended = matches!(
-            *act.state.lock().unwrap_or_else(|e| e.into_inner()),
-            State::Ended { .. }
-        );
-        !ended || act.since.elapsed() < RETENTION
-    });
+    forget_finished(&mut acts, Instant::now());
     if let Some(existing) = acts.get(id) {
         if matches!(
             *existing.state.lock().unwrap_or_else(|e| e.into_inner()),
@@ -251,7 +261,7 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
     let act = std::sync::Arc::new(Running {
         output: Mutex::new(String::new()),
         state: Mutex::new(State::Running),
-        since: Instant::now(),
+        ended: Mutex::new(None),
         started_at: chrono::Utc::now().to_rfc3339(),
         say,
     });
@@ -314,6 +324,7 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        *waiting.ended.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         *waiting.state.lock().unwrap_or_else(|e| e.into_inner()) = State::Ended { code };
         // A watcher blocked on the stream has to learn that there will be no more, and a closed
         // channel is the only signal that cannot be mistaken for a slow act.
@@ -398,6 +409,37 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("{id} never finished");
+    }
+
+    /// **A finished act stays readable for [`RETENTION`] after it ENDED** (SKEIN-1285).
+    ///
+    /// An act that started forty minutes ago and ended one minute ago is kept; one that ended
+    /// thirty-one minutes ago is not; a running one is kept however old. What would make it fail:
+    /// counting the window from the start again — the long create is then forgotten a minute after
+    /// it finished.
+    #[test]
+    fn a_finished_act_is_kept_for_the_window_after_it_ended_not_after_it_started() {
+        let t0 = Instant::now();
+        let act = |ended: Option<Duration>| {
+            std::sync::Arc::new(Running {
+                output: Mutex::new(String::new()),
+                state: Mutex::new(match ended {
+                    Some(_) => State::Ended { code: 0 },
+                    None => State::Running,
+                }),
+                ended: Mutex::new(ended.map(|d| t0 + d)),
+                started_at: String::new(),
+                say: tokio::sync::broadcast::channel(1).0,
+            })
+        };
+        let mut acts = HashMap::new();
+        acts.insert("long".to_string(), act(Some(Duration::from_secs(40 * 60))));
+        acts.insert("old".to_string(), act(Some(Duration::from_secs(10 * 60))));
+        acts.insert("running".to_string(), act(None));
+        forget_finished(&mut acts, t0 + Duration::from_secs(41 * 60));
+        let mut kept: Vec<_> = acts.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, ["long", "running"]);
     }
 
     /// [`begin`], with the environment held still across the spawn — and nothing else.
@@ -611,6 +653,16 @@ mod tests {
         assert_eq!(
             look("act-hello").map(|l| l.state),
             Some(State::Ended { code: 3 })
+        );
+        // And it knows when it ended, which is what its retention counts from (SKEIN-1285).
+        let ended = registry()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("act-hello")
+            .map(|a| *a.ended.lock().unwrap_or_else(|e| e.into_inner()));
+        assert!(
+            matches!(ended, Some(Some(_))),
+            "an ended act with no end time is never forgotten: {ended:?}"
         );
     }
 

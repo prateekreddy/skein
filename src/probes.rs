@@ -2698,7 +2698,7 @@ mod tests {
         // box-token-usage.sh finds its store from the checkout's `.claude/skein` link (box-self.sh),
         // so this is a checkout linked the way the kit links one, not the store's own parent.
         let project_dir = checkout_linked_to(&store);
-        let run = || -> std::process::Output {
+        let run_on = |transcript: &Path| -> std::process::Output {
             use std::io::Write as _;
             let mut child = box_shell(&home)
                 .arg(&script)
@@ -2720,6 +2720,7 @@ mod tests {
             .unwrap();
             child.wait_with_output().expect("run box-token-usage.sh")
         };
+        let run = || run_on(&transcript);
 
         assert!(run().status.success());
         let log = store.join("telemetry").join("boxA.jsonl");
@@ -2771,7 +2772,149 @@ mod tests {
             entries2[1]["tools"]["Read"], 2,
             "counts across both assistant entries"
         );
+
+        // A new session (or /clear) writes a NEW transcript, shorter than the old one. Its first
+        // turn is logged — with one count per box it read as "nothing new" until it outgrew the
+        // old transcript's four lines, then skipped them (SKEIN-1282).
+        let second = home.join("transcript-2.jsonl");
+        fs::write(
+            &second,
+            concat!(
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":9,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        assert!(run_on(&second).status.success());
+        let entries3: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries3.len(), 3, "a new session's first turn is logged");
+        assert_eq!(entries3[2]["input"], 9);
+        // And the first session, still open beside it, is not re-logged from the top.
+        assert!(run().status.success());
+        let lines_after: usize = fs::read_to_string(&log).unwrap().lines().count();
+        assert_eq!(lines_after, 3, "the old transcript keeps its own count");
+
+        // The SAME path rewritten shorter, then a new turn appended to it. The rewrite itself is
+        // not re-logged — what it holds was counted when it was first written — but the count
+        // moves down to where the file now is, so the next turn is logged. Left at the old count,
+        // the new turn would wait silently until the file outgrew four lines (SKEIN-1282).
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        assert!(run().status.success());
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":11,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"content":[]}}}}"#).unwrap();
+        drop(f);
+        assert!(run().status.success());
+        let entries4: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            entries4.last().map(|e| e["input"].clone()),
+            Some(serde_json::json!(11)),
+            "the turn after an in-place rewrite is logged: {entries4:?}"
+        );
+        assert_eq!(
+            entries4.len(),
+            4,
+            "and the rewrite itself is not: {entries4:?}"
+        );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A box's stored diff is measured against the branch it was cloned from**, not the first
+    /// of `main`/`master` the box happens to have (SKEIN-1283).
+    ///
+    /// The real path end to end: `fleet::clone_script` clones a repo whose base is `develop` and
+    /// which also has a `master` that `develop` has moved past, the box fetches (so `origin/master`
+    /// exists, as it does in any box that has fetched once), commits one file, and the installed
+    /// `box-diff.sh` runs. What would make it fail: the clone no longer recording its base, or
+    /// `box-diff.sh` no longer putting the recorded base first — either way it measures against
+    /// `origin/master` and counts `develop`'s two files as the box's work.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_box_diff_is_measured_against_the_base_it_was_cloned_from() {
+        let _g = env_lock();
+        let home = tempdir();
+        let fleet = home.join("fleet");
+        fs::create_dir_all(&fleet).unwrap();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        let sh = |script: &str| {
+            let out = box_shell(&home)
+                .arg("-c")
+                .arg(script)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("spawn bash");
+            assert!(
+                out.status.success(),
+                "{script}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        // The remote: `master` with one commit, `develop` two commits past it.
+        let remote = home.join("remote");
+        let remote_q = sh_quote(&remote.to_string_lossy());
+        sh(&format!(
+            "set -e; git init -q -b master {remote_q}; cd {remote_q}; \
+             echo a > a; git add a; git commit -qm a; \
+             git checkout -qb develop; echo d1 > d1; echo d2 > d2; git add d1 d2; \
+             git commit -qm develop"
+        ));
+
+        sh(&crate::fleet::clone_script(
+            "b1",
+            &remote.to_string_lossy(),
+            "develop",
+            "feat/x",
+            "",
+        ));
+        let tree = fleet.join("b1").join("tree");
+        let tree_q = sh_quote(&tree.to_string_lossy());
+        sh(&format!(
+            "set -e; cd {tree_q}; git fetch -q origin; \
+             git rev-parse --verify -q origin/master >/dev/null; \
+             echo mine > mine; git add mine; git commit -qm mine"
+        ));
+
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(tree.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(store.join("skein"), tree.join(".claude/skein")).unwrap();
+        let out = box_shell(&home)
+            .arg(store.join("skein").join("bin").join("box-diff.sh"))
+            .env("SKEIN_BOX", "b1")
+            .env("CLAUDE_PROJECT_DIR", &tree)
+            .output()
+            .expect("run box-diff.sh");
+        assert!(out.status.success());
+        let stat: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store.join("diffs").join("b1.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            stat["files"], 1,
+            "only the box's own file, not develop's two: {stat}"
+        );
+        let commits = fs::read_to_string(store.join("diffs").join("b1.commits")).unwrap();
+        assert_eq!(commits.trim(), "mine", "only the box's own commit");
     }
 
     /// **A freshly scaffolded store's `settings.json` carries no skein hook, and a box still

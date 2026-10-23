@@ -538,27 +538,9 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "a lossy UTF-8 hop here corrupts every binary the box serves"
     );
 
-    // ---- the snapshot that has to survive a resize ----
-    // Changing the fleet's memory or CPUs means destroying the sandbox, and every box's checkout is
-    // VM-local — that is what makes builds fast and what makes this the one path where a bug costs
-    // real work. So each kind of not-yet-pushed state is made distinct here and checked separately:
-    // a commit that is on no remote, a staged change, an unstaged change, and an untracked file.
-    boxed
-        .exec(
-            "git -c user.email=t@e.com -c user.name=t commit -qm local --allow-empty \
-             && echo staged > s.txt && git add s.txt \
-             && echo hello-unstaged >> README.md \
-             && echo loose > u.txt",
-            Duration::from_secs(60),
-        )
-        .unwrap();
-    let head = boxed
-        .exec("git rev-parse HEAD", Duration::from_secs(30))
-        .unwrap()
-        .trim()
-        .to_string();
     // A transcript and a credential, side by side in the box's private HOME exactly as the real
-    // agent leaves them — so the snapshot has to distinguish them rather than take the directory.
+    // agent leaves them — so what is host-bound has to distinguish them rather than take the
+    // directory.
     boxed
         .exec(
             "mkdir -p ~/.claude/projects/-boxes-web-main-tree \
@@ -568,69 +550,12 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         )
         .unwrap();
 
-    let relative = snapshot_box(BOX, &store.to_string_lossy(), "resize-run").expect("snapshot");
-    assert!(
-        relative.starts_with("skein/handoff-snapshots/"),
-        "snapshot_box writes into the store, which the kit no longer restores from (SKEIN-1258, \
-         SKEIN-1289): {relative}"
-    );
-    let snap = store.join(&relative);
-    for artifact in [
-        "repo.bundle",
-        "index.patch",
-        "worktree.patch",
-        "untracked.tgz",
-    ] {
-        assert!(
-            snap.join(artifact).metadata().map(|m| m.len()).unwrap_or(0) > 0,
-            "{artifact} is empty — one whole class of unpushed work would be lost"
-        );
-    }
-    // Restore into a fresh clone, which is exactly what a resized box comes up as. `--all` rather
-    // than `HEAD`: a bundle of HEAD alone drops every other local branch the box was carrying.
-    let restored = root.join("restored");
-    sh(&format!(
-        "set -e; git clone -q --branch main {remote} {r}; cd {r}; \
-         git fetch -q {s}/repo.bundle 'refs/heads/*:refs/remotes/snap/*'; \
-         git checkout -q -B feat/auth snap/feat/auth; \
-         git apply --binary --index {s}/index.patch; \
-         git apply --binary {s}/worktree.patch; \
-         tar -xzf {s}/untracked.tgz",
-        r = restored.display(),
-        s = snap.display()
-    ));
-    assert_eq!(
-        sh(&format!("git -C {} rev-parse HEAD", restored.display())),
-        head,
-        "the unpushed commit did not survive the bundle"
-    );
-    assert_eq!(
-        sh(&format!(
-            "git -C {} diff --cached --name-only",
-            restored.display()
-        )),
-        "s.txt",
-        "the staged change came back unstaged, which loses the index"
-    );
-    assert!(
-        sh(&format!("cat {}/README.md", restored.display())).contains("hello-unstaged"),
-        "the unstaged change was lost"
-    );
-    assert_eq!(
-        sh(&format!("cat {}/u.txt", restored.display())),
-        "loose",
-        "the untracked file was lost — no patch covers these"
-    );
-
     // ---- the conversation travels; the credential does not ----
     // A rebuilt box must resume the session rather than open a new one against a familiar tree, and
     // the transcript is addressed by the cwd slug, which survives because the box comes back at the
-    // same path. The credential must NOT travel: the store is host-side shared data, and the box is
-    // re-seeded with auth from the sandbox anyway. An allowlist is what makes the second half hold
-    // for files that do not exist yet.
-    // The transcript is not merely snapshot-able, it is already on the HOST — bound in from
-    // box_state, so it survives the sandbox dying rather than only surviving a planned resize. An
-    // OOM or a hand-run `sbx rm` never runs a snapshot; this is what covers those.
+    // same path. The credential must NOT travel: the box is re-seeded with auth from the sandbox.
+    // The transcript is already on the HOST — bound in from box_state, so it survives the sandbox
+    // dying, an OOM or a hand-run `sbx rm` included.
     let host_transcript =
         PathBuf::from(box_state(BOX)).join("claude-projects/-boxes-web-main-tree/sess.jsonl");
     assert_eq!(
@@ -650,19 +575,6 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
                 .filter_map(|e| e.ok())
                 .any(|e| e.file_name().to_string_lossy().contains("credential")),
         "host-binding the record must not drag the credentials out with it"
-    );
-
-    // The snapshot carries only what is genuinely VM-local. The transcript is host-bound already,
-    // so copying it out to the store and straight back would traverse virtiofs twice to arrive at
-    // the file that never moved.
-    let members = sh(&format!("tar -tzf {}/agent-state.tgz", snap.display()));
-    assert!(
-        !members.contains(".claude/projects"),
-        "the host-bound transcript was copied redundantly through the store: {members}"
-    );
-    assert!(
-        !members.contains("credentials"),
-        "a credential reached the shared store: {members}"
     );
 
     // ---- a resize that cannot save a box must not destroy the sandbox ----

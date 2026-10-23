@@ -7,12 +7,107 @@ use crate::registry::all_stores;
 use crate::registry::parse_registry;
 use crate::registry::Sandbox;
 use crate::repos::load_repos;
-use crate::util::*;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// The one lock every read-modify-write of a message in a store's `mailbox/` holds — `mailbox.sh`'s
+/// `$lock` and [`relay_cross_project_mail`] — and which nothing ever deletes (SKEIN-1284).
+const MAILBOX_LOCK: &str = ".lock";
+
+/// The most of one message skein reads. A message is a few hundred bytes; this is room for a long
+/// body and nothing a sweep or a poll should ever hold.
+const MESSAGE_CAP: u64 = 4 << 20;
+
+/// One message file a box could have written, read **only if it is a regular file** within
+/// [`MESSAGE_CAP`] — never through a link, never waiting on a FIFO (`boxfile::read_text`,
+/// `O_NOFOLLOW | O_NONBLOCK`; SKEIN-1318). `Err` says why the file was not read, naming it; `Ok(None)`
+/// is a file that was read and is not a message, which is not news.
+fn read_message(path: &Path) -> Result<Option<Message>, String> {
+    let txt = crate::boxfile::read_text(path, MESSAGE_CAP)
+        .map_err(|e| format!("{}: not read: {e}", path.display()))?;
+    Ok(serde_json::from_str::<Message>(&txt).ok())
+}
+
+/// Write `bytes` to `dir/name` without following anything a box put there (SKEIN-1318).
+///
+/// `dir` may be a mailbox every box writes, so a link can sit at `name` or at any guessable
+/// temporary name. The temporary is made with `create_new` and `O_NOFOLLOW`, which refuse an
+/// existing name — link or not — instead of writing through it, and the rename then replaces
+/// whatever is at `name` (a link included) rather than writing into what it points at.
+fn write_fresh(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..16 {
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tmp = dir.join(format!(".skein-mail.{}.{n}.{nanos}", std::process::id()));
+        let mut f = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", tmp.display())),
+        };
+        let written = f.write_all(bytes).and_then(|()| f.sync_all());
+        drop(f);
+        let placed = written.and_then(|()| fs::rename(&tmp, dir.join(name)));
+        if let Err(e) = placed {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("{}: {e}", dir.join(name).display()));
+        }
+        return Ok(());
+    }
+    Err(format!("{}: no free temporary name", dir.display()))
+}
+
+/// How long the relay waits for the mailbox lock — `mailbox.sh`'s `flock -w 5`.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Take the mailbox's one lock, or say why not — **within `wait`, and never through a link**.
+///
+/// `mailbox/` is written by every box, so what sits at `.lock` is whatever a box put there. A
+/// symlink is refused rather than followed and a FIFO is refused rather than waited on
+/// (`boxfile::open`, `O_NOFOLLOW | O_NONBLOCK`, regular files only); the file is only ever opened
+/// for reading, which is all `flock` needs, so nothing it names is written. And the wait is
+/// bounded: a box that holds the lock for ever must not stall the host's relay with it.
+/// A missing lock is created with `create_new`, which never follows a link either.
+fn lock_mailbox(dir: &Path, wait: std::time::Duration) -> Result<fs::File, String> {
+    use fs2::FileExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join(MAILBOX_LOCK);
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path);
+    let (file, _) = crate::boxfile::open(&path)
+        .map_err(|e| format!("the mailbox lock is not a plain file, so it was not used: {e}"))?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "the mailbox lock was held for more than {}s: {e}",
+                    wait.as_secs()
+                ))
+            }
+        }
+    }
+}
 
 /// One cross-box message in the shared `mailbox/` (written by mailbox.sh or skein).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -52,6 +147,19 @@ pub struct Message {
     /// script to do — produces a message that *says* skein and *arrived* as a box.
     #[serde(default, skip_serializing)]
     pub arrived: String,
+    /// **Addressed to one box that its store no longer registers** — a box since destroyed, so the
+    /// message will never be seen and `mailbox.sh prune` keeps it for ever (SKEIN-1284). Shown, not
+    /// deleted: what a deleted box left behind is the owner's to clear, not skein's.
+    ///
+    /// Worked out when the message is read, like `arrived`, and never read from the file; written
+    /// out only when true, so a message skein writes back (the relay's `relayedTo`) never carries it.
+    #[serde(
+        default,
+        rename = "recipientGone",
+        skip_deserializing,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub recipient_gone: bool,
 }
 
 /// Where skein puts a message for one box: under its state directory, which is bound **read-only**
@@ -83,7 +191,10 @@ pub fn attribution(m: &Message) -> String {
 pub fn load_mailbox() -> Vec<Message> {
     let mut out = Vec::new();
     for store in all_stores() {
-        read_into(&store.join("mailbox"), "box", &mut out);
+        let mut found = Vec::new();
+        read_into(&store.join("mailbox"), "box", &mut found);
+        mark_recipients_gone(&mut found, &sandboxes_in(&store));
+        out.extend(found);
     }
     // And what skein wrote, which lives per box under a directory no box can write. Read second and
     // marked differently, because these two directories are the whole of how "from you" is told
@@ -101,6 +212,20 @@ pub fn load_mailbox() -> Vec<Message> {
     out
 }
 
+/// Flag each message addressed to one box the store's registry no longer has ([`Message::recipient_gone`]).
+///
+/// Says nothing when the registry is empty: [`sandboxes_in`] reads an unreadable registry as empty,
+/// and "every box is gone" read off a file that could not be read would flag every message there.
+/// The same rule as `mailbox.sh`'s `recipient_gone`.
+fn mark_recipients_gone(messages: &mut [Message], registry: &BTreeMap<String, Sandbox>) {
+    for m in messages {
+        let to = m.to.as_str();
+        let direct =
+            !matches!(to, "" | "broadcast" | "all-projects") && !to.starts_with("project:");
+        m.recipient_gone = !registry.is_empty() && direct && !registry.contains_key(to);
+    }
+}
+
 /// Read one directory of messages, stamping each with **where it was found**.
 ///
 /// The stamp is applied after parsing, so a `arrived` written into the file is overwritten rather
@@ -114,11 +239,15 @@ fn read_into(dir: &Path, arrived: &str, out: &mut Vec<Message>) {
         if p.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(txt) = fs::read_to_string(&p) {
-            if let Ok(mut m) = serde_json::from_str::<Message>(&txt) {
+        // Through `read_message`, and a file that is not a plain one is skipped and said: a box
+        // can plant a link to any host file under a `.json` name (SKEIN-1318).
+        match read_message(&p) {
+            Ok(Some(mut m)) => {
                 m.arrived = arrived.to_string();
                 out.push(m);
             }
+            Ok(None) => {}
+            Err(e) => eprintln!("skein: mailbox: {e}"),
         }
     }
 }
@@ -214,6 +343,7 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
         relayed_to: vec![],
         origin_project: String::new(),
         arrived: String::new(),
+        recipient_gone: false,
     };
     let id = format!("{}-skein", now.timestamp_nanos_opt().unwrap_or(0));
     let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
@@ -224,7 +354,7 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
             last_err = format!("inbox dir: {e}");
             continue;
         }
-        match fs::write(dir.join(format!("{id}.json")), &json) {
+        match write_fresh(&dir, &format!("{id}.json"), json.as_bytes()) {
             Ok(()) => wrote = true,
             Err(e) => last_err = format!("write: {e}"),
         }
@@ -249,7 +379,8 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
 /// cross-project message its delivery *this sweep*; the relay marks `relayedTo` only on a message
 /// it actually copied, so the next sweep delivers it once the file parses.
 pub(crate) fn sandboxes_in(store: &Path) -> BTreeMap<String, Sandbox> {
-    fs::read_to_string(store.join("sandboxes.json"))
+    // Box-written, so read as one (SKEIN-1318): a link here would otherwise be followed.
+    crate::boxfile::read_text(&store.join("sandboxes.json"), MESSAGE_CAP)
         .ok()
         .and_then(|data| parse_registry(&data).ok())
         .and_then(|v| serde_json::from_value(v).ok())
@@ -270,7 +401,6 @@ pub(crate) fn sandboxes_in(store: &Path) -> BTreeMap<String, Sandbox> {
 /// sweep never re-delivers the same message twice. Host-only — never called from inside a box.
 /// Best-effort: a single unreadable/unwritable message is skipped, not fatal to the sweep.
 pub fn relay_cross_project_mail() -> Result<(), String> {
-    use fs2::FileExt;
     let stores = all_stores();
     if stores.len() < 2 {
         return Ok(()); // nothing to relay across when there's only one (or zero) managed project
@@ -295,11 +425,13 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let Ok(txt) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(msg) = serde_json::from_str::<Message>(&txt) else {
-                continue;
+            let msg = match read_message(&path) {
+                Ok(Some(msg)) => msg,
+                Ok(None) => continue,
+                Err(e) => {
+                    errs.push(e);
+                    continue;
+                }
             };
 
             // Resolve destination stores this message hasn't already reached.
@@ -365,6 +497,7 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
                     // arrives exactly as its original did: as a box. Nothing about crossing a
                     // project boundary makes it the owner's.
                     arrived: String::new(),
+                    recipient_gone: false,
                 };
                 let Ok(json) = serde_json::to_string(&copy) else {
                     continue;
@@ -372,7 +505,7 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
                 // The origin filename (timestamp-vmid-pid) is already unique per message, and each
                 // target writes into its own store's mailbox dir, so "-relay" alone can't collide.
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("msg");
-                match fs::write(dest_dir.join(format!("{stem}-relay.json")), &json) {
+                match write_fresh(&dest_dir, &format!("{stem}-relay.json"), json.as_bytes()) {
                     Ok(()) => relayed_now.push(target.display().to_string()),
                     Err(e) => errs.push(format!("{}: write: {e}", target.display())),
                 }
@@ -381,38 +514,33 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
                 continue;
             }
 
-            // Mark the origin message's relayedTo, locked the same way mailbox.sh locks a message
-            // file to mark seenBy — so a box's concurrent seenBy update can't race this update.
-            let lock_path = PathBuf::from(format!("{}.lock", path.display()));
-            let lock = match fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)
-            {
+            // Mark the origin message's relayedTo under the mailbox's one lock, the file mailbox.sh
+            // holds to mark seenBy — so a box's concurrent seenBy update can't race this update.
+            // Never removed: a lock file deleted by its holder is a lock the next writer cannot see
+            // (SKEIN-1284).
+            let lock = match lock_mailbox(&mailbox_dir, LOCK_WAIT) {
                 Ok(f) => f,
                 Err(e) => {
-                    errs.push(format!("{}: lock open: {e}", path.display()));
+                    errs.push(format!("{}: {e}", path.display()));
                     continue;
                 }
             };
-            if lock.lock_exclusive().is_err() {
-                errs.push(format!("{}: lock", path.display()));
-                continue;
-            }
             let result = (|| -> Result<(), String> {
-                let txt = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                let mut cur: Message = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
+                let mut cur: Message =
+                    read_message(&path)?.ok_or("no longer a message under the lock")?;
                 for t in &relayed_now {
                     if !cur.relayed_to.contains(t) {
                         cur.relayed_to.push(t.clone());
                     }
                 }
                 let bytes = serde_json::to_vec_pretty(&cur).map_err(|e| e.to_string())?;
-                write_atomic(&path, &mailbox_dir, &bytes)
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                write_fresh(&mailbox_dir, name, &bytes)
             })();
             let _ = lock.unlock();
-            let _ = fs::remove_file(&lock_path);
             if let Err(e) = result {
                 errs.push(format!("{}: {e}", path.display()));
             }
@@ -692,6 +820,7 @@ mod tests {
             relayed_to: vec![],
             origin_project: String::new(),
             arrived: String::new(),
+            recipient_gone: false,
         };
         fs::write(
             store_a.join("mailbox").join("1.json"),
@@ -733,6 +862,13 @@ mod tests {
         )
         .unwrap();
         assert!(!origin.relayed_to.is_empty());
+        // Under the mailbox's one lock, which stays where it is: a holder that deletes its lock
+        // file on the way out hands the next writer a different file to lock (SKEIN-1284).
+        assert!(
+            store_a.join("mailbox").join(MAILBOX_LOCK).exists(),
+            "the relay must lock the file mailbox.sh locks, and leave it in place"
+        );
+        assert!(!store_a.join("mailbox").join("1.json.lock").exists());
 
         // project:<id> direct addressing: only the named project gets a copy, also rewritten to
         // that project's own broadcast (never delivered as a literal "project:b" no box matches).
@@ -747,6 +883,7 @@ mod tests {
             relayed_to: vec![],
             origin_project: String::new(),
             arrived: String::new(),
+            recipient_gone: false,
         };
         fs::write(
             store_a.join("mailbox").join("2.json"),
@@ -774,6 +911,400 @@ mod tests {
 
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    /// **Marking a message seen waits for the mailbox's one lock, and that lock is never
+    /// replaced** (SKEIN-1284).
+    ///
+    /// Each message had its own lock file, deleted by whoever held it. A reader already waiting on
+    /// the deleted file then held a lock no later reader could see, and two readers marked `seenBy`
+    /// at once — one mark lost, the message redelivered. Here the test holds `mailbox/.lock` for
+    /// two seconds while a box reads its inbox. What would make it fail: the script locking any
+    /// other file (it would not wait — the elapsed-time assertion), or deleting the lock it holds
+    /// (the inode assertion).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn marking_mail_seen_waits_for_the_one_mailbox_lock_and_never_replaces_it() {
+        use std::os::unix::fs::MetadataExt;
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh")
+        };
+        assert!(run("boxA", &["send", "--to", "boxB", "--body", "held"])
+            .status
+            .success());
+
+        let lock = store.join("mailbox").join(MAILBOX_LOCK);
+        fs::write(&lock, "").unwrap();
+        let inode = fs::metadata(&lock).unwrap().ino();
+        let mut holder = Command::new("flock")
+            .arg(&lock)
+            .args(["sleep", "2"])
+            .spawn()
+            .expect("flock");
+        // Held before the reader starts, or the wait below proves nothing.
+        let held = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            !Command::new("flock")
+                .args(["-n"])
+                .arg(&lock)
+                .arg("true")
+                .status()
+                .unwrap()
+                .success()
+        });
+        assert!(held, "the test never got the lock it means to hold");
+
+        let started = std::time::Instant::now();
+        let inbox = run("boxB", &["inbox"]);
+        let waited = started.elapsed();
+        holder.wait().unwrap();
+        assert!(
+            String::from_utf8_lossy(&inbox.stdout).contains("held"),
+            "delivered once the lock was free: {}",
+            String::from_utf8_lossy(&inbox.stdout)
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(1000),
+            "the reader marked seenBy without waiting for the mailbox lock ({waited:?})"
+        );
+        assert_eq!(
+            fs::metadata(&lock).map(|m| m.ino()).ok(),
+            Some(inode),
+            "the mailbox lock must be the same file afterwards, never deleted and remade"
+        );
+    }
+
+    /// **A message file a box planted is read only if it is a plain file** — by the relay and by
+    /// the mailbox view — and what the relay writes never goes through a link (SKEIN-1318).
+    ///
+    /// `mailbox/` is written by every box. A link named `*.json` pointing at a host file used to be
+    /// read, and relayed into other projects if it parsed; a FIFO stalled the sweep and the API; and
+    /// a link at the relay's destination name was written through. What would make it fail: reading
+    /// messages with `fs::read_to_string` again (the host file's body appears, or the FIFO stalls
+    /// past five seconds), or writing the copy with `fs::write` (the link's target is overwritten).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_planted_message_is_never_followed_or_waited_on_and_the_control_still_travels() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        env.set(
+            "SKEIN_REGISTRY",
+            home.join("no-such-dir").join("sandboxes.json"),
+        );
+        let store_a = home.join("repos").join("a").join("store").join(".claude");
+        let store_b = home.join("repos").join("b").join("store").join(".claude");
+        fs::create_dir_all(store_a.join("mailbox")).unwrap();
+        fs::create_dir_all(store_b.join("mailbox")).unwrap();
+        let repo = |id: &str, store: &Path| Repo {
+            id: id.into(),
+            source: id.into(),
+            store: store.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        save_repos(&[repo("a", &store_a), repo("b", &store_b)]).unwrap();
+
+        let message = |body: &str| {
+            format!(
+                r#"{{"from":"boxA","to":"all-projects","kind":"note","branch":"main","body":"{body}","ts":"1","seenBy":[],"relayedTo":[],"originProject":""}}"#
+            )
+        };
+        let mailbox = store_a.join("mailbox");
+        fs::write(mailbox.join("1-control.json"), message("control")).unwrap();
+        // A host file shaped like a message, and a link to it.
+        let host = home.join("host-file.json");
+        fs::write(&host, message("HOST-SECRET")).unwrap();
+        std::os::unix::fs::symlink(&host, mailbox.join("2-link.json")).unwrap();
+        // A FIFO under a message's name.
+        let fifo = mailbox.join("3-fifo.json");
+        crate::boxfile::plant_fifo(&fifo);
+        // And a link where the relay will write the control's copy in the other project.
+        let victim = home.join("victim");
+        fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(
+            &victim,
+            store_b.join("mailbox").join("1-control-relay.json"),
+        )
+        .unwrap();
+
+        let swept = crate::boxfile::within(&fifo, "the relay", relay_cross_project_mail);
+        let err = swept.expect_err("the planted files are named in the errors");
+        assert!(
+            err.contains("2-link.json") && err.contains("3-fifo.json"),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "keep",
+            "the relay wrote through a link at its destination"
+        );
+        let copy = store_b.join("mailbox").join("1-control-relay.json");
+        assert!(fs::symlink_metadata(&copy).unwrap().file_type().is_file());
+        let relayed: Vec<String> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .filter_map(|e| fs::read_to_string(e.path()).ok())
+            .collect();
+        assert!(
+            relayed.iter().any(|t| t.contains("control")),
+            "the control is relayed: {relayed:?}"
+        );
+        assert!(
+            !relayed.iter().any(|t| t.contains("HOST-SECRET")),
+            "a host file was relayed through a planted link: {relayed:?}"
+        );
+
+        let listed = crate::boxfile::within(&fifo, "the mailbox view", load_mailbox);
+        let bodies: Vec<&str> = listed.iter().map(|m| m.body.as_str()).collect();
+        assert!(bodies.contains(&"control"), "{bodies:?}");
+        assert!(!bodies.contains(&"HOST-SECRET"), "{bodies:?}");
+    }
+
+    /// **What a box plants at `mailbox/.lock` is never followed, written or waited on** — by the
+    /// box's own hook (SKEIN-1284 review).
+    ///
+    /// Every box writes `mailbox/`, so box B can put a link there pointing at box A's settings, or a
+    /// FIFO. The script opened the lock with `>`, which would have emptied whatever the link named,
+    /// and an open of a FIFO waits for a writer that never comes. What would make it fail: opening
+    /// the lock for writing again (the target is emptied), or using it without checking its shape
+    /// (the FIFO hangs the hook past five seconds, or the message is marked through the link).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_planted_mailbox_lock_is_never_followed_emptied_or_waited_on() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            let child = box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("run mailbox.sh");
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(child.wait_with_output());
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(8))
+                .expect("mailbox.sh waited on what was planted at its lock")
+                .expect("mailbox.sh ran")
+        };
+        assert!(run("boxA", &["send", "--to", "boxB", "--body", "planted"])
+            .status
+            .success());
+        let lock = store.join("mailbox").join(MAILBOX_LOCK);
+
+        // A link to another box's settings.
+        let victim = home.join("settings.json");
+        fs::write(&victim, "{\"precious\":true}").unwrap();
+        let _ = fs::remove_file(&lock);
+        std::os::unix::fs::symlink(&victim, &lock).unwrap();
+        let linked = run("boxB", &["inbox"]);
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "{\"precious\":true}",
+            "the hook emptied what the planted link named"
+        );
+        assert!(
+            String::from_utf8_lossy(&linked.stderr).contains("is not a plain file"),
+            "the skipped step is said: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&linked.stdout).contains("planted"),
+            "nothing is delivered — and so marked — without the lock"
+        );
+
+        // A FIFO.
+        fs::remove_file(&lock).unwrap();
+        crate::boxfile::plant_fifo(&lock);
+        let fifo = run("boxB", &["inbox"]);
+        assert!(String::from_utf8_lossy(&fifo.stderr).contains("is not a plain file"));
+
+        // And with the plant gone, the next turn makes a fresh lock and delivers.
+        fs::remove_file(&lock).unwrap();
+        let clean = run("boxB", &["inbox"]);
+        assert!(String::from_utf8_lossy(&clean.stdout).contains("planted"));
+        assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_file());
+    }
+
+    /// **The relay's lock refuses a link, and gives up on a lock held too long** (SKEIN-1284
+    /// review). A box can plant a link at `.lock`, or hold the lock for ever; the host's relay must
+    /// neither follow the first nor wait out the second. What would make it fail: opening the lock
+    /// through the link (the call succeeds), or an unbounded `lock_exclusive` (the second call does
+    /// not return within the test's deadline).
+    #[test]
+    fn the_relay_lock_refuses_a_link_and_gives_up_on_a_held_lock() {
+        use fs2::FileExt;
+        let dir = tempdir();
+        let victim = dir.join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let linked = dir.join("linked");
+        fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&victim, linked.join(MAILBOX_LOCK)).unwrap();
+        assert!(
+            lock_mailbox(&linked, std::time::Duration::from_millis(100)).is_err(),
+            "a link at the lock was used"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+
+        let held = dir.join("held");
+        fs::create_dir_all(&held).unwrap();
+        let first = lock_mailbox(&held, std::time::Duration::from_millis(100)).expect("free lock");
+        let holder = fs::File::open(held.join(MAILBOX_LOCK)).unwrap();
+        drop(first);
+        holder.lock_exclusive().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let held_dir = held.clone();
+        std::thread::spawn(move || {
+            let _ =
+                tx.send(lock_mailbox(&held_dir, std::time::Duration::from_millis(300)).is_err());
+        });
+        let gave_up = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the relay waited on a held lock past its bound");
+        assert!(gave_up, "a held lock was taken");
+        holder.unlock().unwrap();
+    }
+
+    /// **Mail to a box that no longer exists is kept and said, not pruned** (SKEIN-1284).
+    ///
+    /// Such a message is never seen, so `prune` can never call it complete; the owner asked that
+    /// what a deleted box left behind not be deleted for them. So `prune` keeps it and says how
+    /// many, `list` marks it, and the server's view flags it. What would make it fail: dropping
+    /// the flag from `list` or the count from `prune`, or a prune that deletes it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mail_to_a_box_that_no_longer_exists_is_kept_and_flagged() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        fs::write(
+            store.join("sandboxes.json"),
+            r#"{"boxA":{"at":"x"},"boxB":{"at":"x"}}"#,
+        )
+        .unwrap();
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh")
+        };
+        for (to, body) in [("boxGone", "to the departed"), ("boxB", "to a live box")] {
+            assert!(run("boxA", &["send", "--to", to, "--body", body])
+                .status
+                .success());
+        }
+        assert!(run("boxB", &["inbox"]).status.success());
+        let files: Vec<_> = fs::read_dir(store.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        assert_eq!(files.len(), 2);
+        for f in &files {
+            assert!(Command::new("touch")
+                .arg("-d")
+                .arg("40 days ago")
+                .arg(f)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let gone_file = files
+            .iter()
+            .find(|f| fs::read_to_string(f).unwrap().contains("boxGone"))
+            .unwrap()
+            .clone();
+
+        let list = String::from_utf8_lossy(&run("boxA", &["list"]).stdout).into_owned();
+        let gone_line = list.lines().find(|l| l.contains("boxGone")).unwrap_or("");
+        assert!(
+            gone_line.contains("no longer exists"),
+            "list must mark mail to a box that is gone: {list}"
+        );
+        assert!(
+            !list
+                .lines()
+                .find(|l| l.contains("to a live box"))
+                .unwrap_or("")
+                .contains("no longer exists"),
+            "and only that mail: {list}"
+        );
+
+        let prune = String::from_utf8_lossy(&run("boxA", &["prune"]).stdout).into_owned();
+        assert!(gone_file.exists(), "kept: {prune}");
+        assert!(
+            prune.contains("kept 1 message(s) addressed to a box that no longer exists"),
+            "{prune}"
+        );
+        assert_eq!(
+            fs::read_dir(store.join("mailbox"))
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count(),
+            1,
+            "the seen message to a live box is pruned as before: {prune}"
+        );
+
+        // And the server's own view says the same.
+        let mut msgs: Vec<Message> = vec![
+            serde_json::from_str(&fs::read_to_string(&gone_file).unwrap()).unwrap(),
+            serde_json::from_str(r#"{"from":"boxA","to":"boxB","body":"x"}"#).unwrap(),
+            serde_json::from_str(r#"{"from":"boxA","to":"broadcast","body":"x"}"#).unwrap(),
+        ];
+        let registry = sandboxes_in(&store);
+        assert_eq!(registry.len(), 2, "the fixture registry reads");
+        mark_recipients_gone(&mut msgs, &registry);
+        assert_eq!(
+            msgs.iter().map(|m| m.recipient_gone).collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        let json = serde_json::to_value(&msgs[0]).unwrap();
+        assert_eq!(json["recipientGone"], true, "the flag reaches the API");
+        assert!(
+            serde_json::to_value(&msgs[1])
+                .unwrap()
+                .get("recipientGone")
+                .is_none(),
+            "and is never written for a message that is fine"
+        );
+        mark_recipients_gone(&mut msgs, &BTreeMap::new());
+        assert!(
+            msgs.iter().all(|m| !m.recipient_gone),
+            "an empty (or unreadable) registry flags nothing"
+        );
     }
 
     /// **A broadcast is held open by a registry key that is not a box** (SKEIN-259).

@@ -518,7 +518,10 @@ depends_on = ["place", "sbx"]
 # mechanism is *which directory* a message was found in — the shared store's mailbox is writable
 # from inside every box, and the state directory is bound read-only into one — so the module that
 # reads mail has to be able to name the second.
-depends_on = ["fleet", "registry", "repos", "util"]
+# `boxfile` for one call: the relay opens the mailbox's lock with `boxfile::open`, because what sits
+# at `mailbox/.lock` is whatever a box put there — a link is refused, a FIFO is not waited on
+# (SKEIN-1284).
+depends_on = ["boxfile", "fleet", "registry", "repos", "util"]
 
 [current.moduledocs]
 depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]

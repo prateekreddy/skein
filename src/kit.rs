@@ -1220,7 +1220,7 @@ mod tests {
 
     /// **An archive in a snapshot is listed before it is opened, and one carrying more than it may
     /// is refused whole** (SKEIN-1258). The untracked-files archive may not reach under `.git`;
-    /// the agent-state archive may hold only the paths `fleet::agent_state_tar` names.
+    /// the agent-state archive may hold only the agent-state paths `archive_members_ok` names.
     ///
     /// What would make it fail: `archive_members_ok` returning success for everything (the hook
     /// lands under `.git/hooks`, or `.bashrc` lands in `$HOME`).

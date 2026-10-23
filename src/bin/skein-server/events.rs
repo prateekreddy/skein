@@ -119,7 +119,7 @@ fn start_producing() {
             // On the blocking pool: `load_views` is 1-2s of synchronous work for a busy fleet, and
             // running it on an async worker starves every terminal socket scheduled there. That was
             // the "typing lags only when the box is idle" freeze.
-            let views = tokio::task::spawn_blocking(|| load_views().unwrap_or_default())
+            let views = tokio::task::spawn_blocking(load_views)
                 .await
                 .unwrap_or_default();
             skein::stream::publish(views);

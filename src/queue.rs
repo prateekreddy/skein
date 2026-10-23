@@ -200,22 +200,17 @@ pub fn who_needs_you() -> Vec<Row> {
         })
         .collect();
 
-    rows.extend(
-        crate::board::load_views()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|view| Row {
-                source: Source::Box,
-                need: need_of_box(&view),
-                repo: view.repo.clone(),
-                name: view.name.clone(),
-                headline: view.headline.clone().unwrap_or_default(),
-                state: view.state.clone(),
-                waiting_secs: view.age_secs,
-                url: format!("/#box={}", view.name),
-                fix: String::new(),
-            }),
-    );
+    rows.extend(crate::board::load_views().into_iter().map(|view| Row {
+        source: Source::Box,
+        need: need_of_box(&view),
+        repo: view.repo.clone(),
+        name: view.name.clone(),
+        headline: view.headline.clone().unwrap_or_default(),
+        state: view.state.clone(),
+        waiting_secs: view.age_secs,
+        url: format!("/#box={}", view.name),
+        fix: String::new(),
+    }));
 
     for repo in crate::repos::load_repos() {
         if !repo.review_queue {

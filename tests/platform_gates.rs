@@ -78,6 +78,30 @@ const GATED: &[(&str, &str)] = &[
         "drives box-token-usage.sh in the userland it is installed into",
     ),
     (
+        "a_box_diff_is_measured_against_the_base_it_was_cloned_from",
+        "drives box-diff.sh, and the clone script, in the userland they are installed into",
+    ),
+    (
+        "marking_mail_seen_waits_for_the_one_mailbox_lock_and_never_replaces_it",
+        "holds the mailbox lock with util-linux `flock` and reads the lock file's inode",
+    ),
+    (
+        "mail_to_a_box_that_no_longer_exists_is_kept_and_flagged",
+        "runs mailbox.sh's list and prune, and ages messages with GNU `touch -d`",
+    ),
+    (
+        "a_planted_message_is_never_followed_or_waited_on_and_the_control_still_travels",
+        "plants a FIFO with `mkfifo` and relies on Linux's O_NOFOLLOW and O_NONBLOCK semantics",
+    ),
+    (
+        "a_planted_mailbox_lock_is_never_followed_emptied_or_waited_on",
+        "runs mailbox.sh against a planted link and a FIFO made with `mkfifo`",
+    ),
+    (
+        "the_resource_script_reports_what_df_says_is_available",
+        "runs the sandbox's resource script, which reads /proc and GNU `df -P` columns",
+    ),
+    (
         "codex_status_line_setup_defaults_without_overriding_user_choice",
         "runs Codex's interactive_setup, which uses `sed -i` with no argument (GNU)",
     ),
