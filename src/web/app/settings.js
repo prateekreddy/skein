@@ -1567,7 +1567,7 @@ settingsModal().addEventListener("keydown", e => {
     e.preventDefault();
     const own = e.target.matches?.(OWN_SAVE) ? ownSaveAction(e.target) : null;
     (own || saveSettings)();
-  } else if (e.key === "Escape") { e.preventDefault(); leaveSettings(); }
+  }
   e.stopPropagation();
 });
 // Section nav, and any edit flips the footer's unsaved-changes flag.
@@ -1589,7 +1589,6 @@ document.getElementById("bs-go").addEventListener("click", saveBoxSettings);
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
-  else if (e.key === "Escape") { e.preventDefault(); closeNewBox(); }
   e.stopPropagation();
 });
 document.getElementById("ar-go").addEventListener("click", submitAddRepo);
@@ -1602,8 +1601,7 @@ nbRepo.addEventListener("change", fillRepoSelect);
 // probed (SKEIN-806): a repo is a remote, and "found: folder" affirmed what add_repo refuses.
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
-  if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
-  else if (e.key === "Escape") { e.preventDefault(); closeAddRepo(); }
+  if (enterSubmits(e)) { e.preventDefault(); submitAddRepo(); }
   e.stopPropagation();
 });
 

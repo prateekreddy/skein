@@ -21,10 +21,10 @@ function loadOverlay() {
   if (!ov) {
     ov = document.createElement("div"); ov.id = "load"; document.body.append(ov);
     ov.addEventListener("click", e => { if (e.target.classList.contains("x")) ov.classList.remove("open"); });
-    closeOnBackdrop(ov, () => ov.classList.remove("open"));
+    registerDialog(ov, () => ov.classList.remove("open"));
   }
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Load by box</b>`
-    + `<span class="sub">right now</span><span class="x">✕</span></div><div class="away-list"></div></div>`;
+    + `<span class="sub">right now</span><button type="button" class="x" aria-label="Close">✕</button></div><div class="away-list"></div></div>`;
   return ov;
 }
 function renderLoad(ov, rows) {
@@ -70,6 +70,11 @@ function markSeen() {
 async function showAwayDigest() {
   let away;
   try { away = await (await fetch("/api/away")).json(); } catch { return; }
+  // **Not over a popup** (SKEIN-1292). It used to open over New box mid-typing, take the clicks
+  // meant for Launch, and leave Escape to close the dialog under it with the branch typed in it. It
+  // waits for the last popup to close instead, and asks again then — so it says what happened up to
+  // the moment it is read, and nothing is marked seen until it has been.
+  if (popupOpen()) { whenNoDialog(showAwayDigest); return; }
   const items = awayItems(away.moments || [], boxes, groupOf);
   if (!items.length) { markSeen(); return; }
   renderAwayOverlay(items, away.since);
@@ -92,12 +97,12 @@ function awayOnFirstBoard() {
 function renderAwayOverlay(items, since) {
   let ov = document.getElementById("away");
   const close = () => { ov.classList.remove("open"); markSeen(); };
-  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); closeOnBackdrop(ov, close); }
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); registerDialog(ov, close); }
   // `since` is the server's mark; empty means nobody has looked since skein started keeping one.
   const t = Date.parse(since);
   const when = Number.isNaN(t) ? "since skein started" : `since ${new Date(t).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}`;
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>While you were away</b>`
-    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><span class="x">✕</span></div>`
+    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><button type="button" class="x" aria-label="Close">✕</button></div>`
     + `<div class="away-list"></div></div>`;
   const list = ov.querySelector(".away-list");
   for (const it of items) {
@@ -132,14 +137,144 @@ function closeOnBackdrop(ov, close) {
     if (outside) close();
   });
 }
-// `#away` and `#load` are made when first shown, and are wired where they are made. **The login
-// terminal (`#loginterm`) is left out on purpose**: that popup is a login in progress, closing it
-// ends the login, and a stray click beside it is no reason to — it closes by its ✕ only.
+// ---------- the dialog layer: one helper every popup goes through ----------
+// What a popup does as a dialog, said once rather than per popup (SKEIN-1247, 1268, 1292). Each was
+// patched on its own before, and each patch covered what its author was looking at: Escape reached
+// six of the twelve, `role="dialog"` one, focus moved into three and came back from none, and a
+// fleet key pressed with Questions open moved the board behind it. So the popups only say how they
+// close; this does the rest, from the one fact every popup already has — the `open` class.
+//
+// * **Watched, not called.** Every way a popup opens or closes ends in that class changing — its
+//   opener, its ✕, a click outside, a row that closes it and goes somewhere, a test's bare
+//   `classList.remove` — so the bookkeeping follows the class rather than trusting each path to
+//   remember a call.
+// * **A stack, so only the top one reacts.** Escape closes the popup opened last and nothing under
+//   it, Tab stays inside it, and it is drawn above the ones under it: Add a repository opened from
+//   Settings used to sit behind Settings, because the two share one z-index and Settings comes later
+//   in the page.
+// * **Focus goes in and comes back.** In to the popup's first field (or its close button when it
+//   has none) unless its opener already put it somewhere inside; back, on close, to wherever it was
+//   before the popup opened — unless something else has taken it since, which is not ours to undo.
+// * **Escape belongs to the popup** — except the login terminal's, where Escape is a key the agent
+//   in it needs; that popup closes by its ✕ alone, as it does on a click outside.
+const dialogClose = new Map();      // overlay -> what Escape and a click outside do, or null
+const dialogStack = [];             // open overlays, the one on top last
+const dialogReturn = new WeakMap(); // overlay -> where the focus was before it opened
+const afterDialogs = new Set();     // what waits for the last popup to close
+// Every focus the page has seen lately, newest last, with `document.body` for "nothing" — so the
+// place to return to can be found after an opener has already moved the focus into its popup.
+const focusTrail = [];
+const noteFocus = el => { focusTrail.push(el); if (focusTrail.length > 30) focusTrail.shift(); };
+document.addEventListener("focusin", e => noteFocus(e.target), true);
+document.addEventListener("focusout", e => { if (!e.relatedTarget) noteFocus(document.body); }, true);
+const FOCUSABLE = "input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), "
+  + "button:not([disabled]), a[href], summary, [tabindex]:not([tabindex='-1'])";
+const FIELD = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([disabled]), select:not([disabled]), textarea:not([disabled])";
+const shownEl = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+function topDialog() {
+  for (let i = dialogStack.length - 1; i >= 0; i--) if (dialogStack[i].classList.contains("open")) return dialogStack[i];
+  return null;
+}
+// The card is the dialog; the overlay around it is only the backdrop. Re-applied at every open,
+// because `#away` and `#load` rebuild their card each time they are drawn.
+function dialogCard(ov) {
+  const card = ov.querySelector("[role=dialog]") || ov.firstElementChild || ov;
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  if (!card.hasAttribute("aria-label")) {
+    const head = card.querySelector(".mbx-head b, .nb-head b, .away-head b");
+    card.setAttribute("aria-label", (head && head.textContent.trim()) || ov.id);
+  }
+  if (!card.hasAttribute("tabindex")) card.setAttribute("tabindex", "-1");
+  return card;
+}
+function focusIntoDialog(ov) {
+  const card = dialogCard(ov);
+  const first = [...ov.querySelectorAll(FIELD)].find(shownEl)
+    || [...ov.querySelectorAll(".x")].find(shownEl) || card;
+  try { first.focus({ preventScroll: true }); } catch { /* detached */ }
+}
+function dialogChanged(ov) {
+  const open = ov.classList.contains("open");
+  const at = dialogStack.indexOf(ov);
+  if (open && at < 0) {
+    const under = dialogStack.filter(o => o.classList.contains("open"));
+    dialogStack.push(ov);
+    ov.setAttribute("aria-hidden", "false");
+    dialogCard(ov);
+    ov.style.zIndex = "";
+    const z = o => parseInt(getComputedStyle(o).zIndex, 10) || 0;
+    const top = Math.max(0, ...under.map(z));
+    if (under.length && top >= z(ov)) ov.style.zIndex = String(top + 1);
+    const back = [...focusTrail].reverse().find(el => !ov.contains(el));
+    dialogReturn.set(ov, back || null);
+    if (!ov.contains(document.activeElement)) focusIntoDialog(ov);
+  } else if (!open && at >= 0) {
+    dialogStack.splice(at, 1);
+    ov.setAttribute("aria-hidden", "true");
+    ov.style.zIndex = "";
+    const back = dialogReturn.get(ov);
+    dialogReturn.delete(ov);
+    const now = document.activeElement;
+    if (!now || now === document.body || ov.contains(now)) {
+      if (back && back !== document.body && back.isConnected && shownEl(back)) {
+        try { back.focus({ preventScroll: true }); } catch { /* gone */ }
+      } else if (ov.contains(now)) now.blur();
+    }
+    if (!topDialog() && afterDialogs.size) {
+      const waiting = [...afterDialogs];
+      afterDialogs.clear();
+      setTimeout(() => waiting.forEach(fn => fn()), 0);
+    }
+  }
+}
+// `close` is what Escape and a click outside do; null leaves both to the popup (the login terminal).
+function registerDialog(ov, close) {
+  if (!ov || dialogClose.has(ov)) return;
+  dialogClose.set(ov, close);
+  if (close) closeOnBackdrop(ov, close);
+  new MutationObserver(() => dialogChanged(ov)).observe(ov, { attributes: true, attributeFilter: ["class"] });
+  dialogChanged(ov);
+}
+// **Enter submits a popup's form only from a field in it** (SKEIN-1267, 1268). On a button — a
+// close, a Forget, a Cancel — Enter is that button's own press, and on a summary it unfolds it; a
+// form-wide Enter that took those too saved, or submitted, instead. Not mid-composition either: an
+// IME's Enter picks a candidate, it does not send.
+function enterSubmits(e) {
+  if (e.key !== "Enter" || e.isComposing) return false;
+  const t = e.target;
+  if (t.tagName === "SELECT") return true;
+  return t.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|color|range)$/i.test(t.type);
+}
+// Run `fn` now if no popup is open, else once the last one has closed.
+function whenNoDialog(fn) { if (popupOpen()) afterDialogs.add(fn); else fn(); }
+// First in the capture phase at the window, so a popup's Escape is the popup's whatever has the
+// focus — a field inside it, the page behind it, or nothing — and no listener after it sees the key.
+window.addEventListener("keydown", e => {
+  const top = topDialog();
+  if (!top) return;
+  if (e.key === "Escape" && !e.isComposing) {
+    const close = dialogClose.get(top);
+    if (!close) return;
+    e.preventDefault(); e.stopPropagation();
+    close();
+  } else if (e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.target.closest?.(".xterm")) {
+    const items = [...top.querySelectorAll(FOCUSABLE)].filter(shownEl);
+    const i = items.indexOf(document.activeElement);
+    if (!items.length) { e.preventDefault(); return; }
+    if (i < 0) { e.preventDefault(); items[e.shiftKey ? items.length - 1 : 0].focus(); }
+    else if (!e.shiftKey && i === items.length - 1) { e.preventDefault(); items[0].focus(); }
+    else if (e.shiftKey && i === 0) { e.preventDefault(); items[items.length - 1].focus(); }
+  }
+}, true);
+// `#away` and `#load` are made when first shown, and are registered where they are made. **The
+// login terminal closes by its ✕ alone**: that popup is a login in progress, closing it ends the
+// login, and neither a stray click beside it nor an Escape meant for the agent inside is a reason.
 for (const [id, close] of [
   ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
-  ["askq", closeAskq],
-]) closeOnBackdrop(document.getElementById(id), close);
+  ["askq", closeAskq], ["loginterm", null],
+]) registerDialog(document.getElementById(id), close);
 
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
@@ -202,7 +337,6 @@ palInput.addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { e.preventDefault(); setPalSel(Math.min(palSel+1, palItems.length-1)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "ArrowUp") { e.preventDefault(); setPalSel(Math.max(palSel-1,0)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "Enter") { e.preventDefault(); runPal(); }
-  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
 });
 
 // ---------- mailbox (cross-box hand-offs + broadcast) ----------

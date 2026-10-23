@@ -71,7 +71,7 @@
   </div>
 
   <div id="pal" aria-hidden="true">
-    <div class="pal-card">
+    <div class="pal-card" aria-label="Command palette">
       <input id="pal-input" placeholder="Search boxes and actions…" autocomplete="off" spellcheck="false" />
       <div class="pal-list" id="pal-list"></div>
       <div class="pal-foot"><span><kbd>↵</kbd> run</span><span><kbd>↑↓</kbd> move</span><span><kbd>esc</kbd> close</span></div>
@@ -80,7 +80,7 @@
 
   <div id="mbx" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Mailbox</b><span class="sub">cross-box hand-offs · the shared brain</span><span class="x" onclick="closeMailbox()">✕</span></div>
+      <div class="mbx-head"><b>Mailbox</b><span class="sub">cross-box hand-offs · the shared brain</span><button type="button" class="x" aria-label="Close" onclick="closeMailbox()">✕</button></div>
       <div class="mbx-list" id="mbx-list"></div>
       <div class="mbx-compose">
         <div class="row1">
@@ -99,14 +99,14 @@
 
   <div id="askq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Questions</b><span class="x" onclick="closeAskq()">✕</span></div>
+      <div class="mbx-head"><b>Questions</b><button type="button" class="x" aria-label="Close" onclick="closeAskq()">✕</button></div>
       <div class="mbx-list" id="askq-list"></div>
     </div>
   </div>
 
   <div id="subq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><span class="x" onclick="closeSubq()">✕</span></div>
+      <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><button type="button" class="x" aria-label="Close" onclick="closeSubq()">✕</button></div>
       <div class="mbx-list" id="subq-list"></div>
     </div>
   </div>
@@ -115,21 +115,21 @@
        The coaching line is here as well as on the socket, because the socket's copy scrolls. -->
   <div id="loginterm" aria-hidden="true">
     <div class="mbx-card lt-card">
-      <div class="mbx-head"><b>Log in</b><span class="sub" id="lt-coach">type /login inside, then /exit when done</span><span class="x" onclick="closeLoginTerminal()">✕</span></div>
+      <div class="mbx-head"><b>Log in</b><span class="sub" id="lt-coach">type /login inside, then /exit when done</span><button type="button" class="x" aria-label="Close" onclick="closeLoginTerminal()">✕</button></div>
       <div id="lt-host"></div>
     </div>
   </div>
 
   <div id="gitq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Repo write access</b><span class="sub">boxes asking to write a repo that is not their own</span><span class="x" onclick="closeGitq()">✕</span></div>
+      <div class="mbx-head"><b>Repo write access</b><span class="sub">boxes asking to write a repo that is not their own</span><button type="button" class="x" aria-label="Close" onclick="closeGitq()">✕</button></div>
       <div class="mbx-list" id="gitq-list"></div>
     </div>
   </div>
 
   <div id="newbox" aria-hidden="true">
     <div class="nb-card">
-      <div class="nb-head"><b>Launch a box</b><span class="x" onclick="closeNewBox()">✕</span></div>
+      <div class="nb-head"><b>Launch a box</b><button type="button" class="x" aria-label="Close" onclick="closeNewBox()">✕</button></div>
       <label class="nb-lbl" id="nb-repo-lbl" style="display:none">repo</label>
       <select id="nb-repo" style="display:none"></select>
       <label class="nb-lbl">branch name</label>
@@ -152,8 +152,8 @@
   <!-- One box's own settings. Everything here is an EXCEPTION to a default; each field says what it
        would be if left blank, so the panel reads as "what does this box do" rather than a form. -->
   <div id="boxset" aria-hidden="true">
-    <div class="nb-card" style="max-width:560px">
-      <div class="nb-head"><b id="bs-title">Box settings</b><span class="x" onclick="closeBoxSettings()">✕</span></div>
+    <div class="nb-card" style="max-width:560px" aria-label="Box settings">
+      <div class="nb-head"><b id="bs-title">Box settings</b><button type="button" class="x" aria-label="Close" onclick="closeBoxSettings()">✕</button></div>
       <label class="nb-lbl">work tracking</label>
       <select id="bs-sync"></select>
       <label class="nb-lbl">commit as — from next start</label>
@@ -187,7 +187,7 @@
 
   <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
-      <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
+      <div class="nb-head"><b>Add a repository</b><button type="button" class="x" aria-label="Close" onclick="closeAddRepo()">✕</button></div>
       <label class="nb-lbl">git URL</label>
       <div class="path-row">
         <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   git@github.com:org/repo.git" autocomplete="off" spellcheck="false" />
@@ -271,7 +271,7 @@
       <div class="set-main">
         <header class="set-top">
           <span class="set-h"><b id="set-htitle">Repositories</b><span id="set-hsub"></span></span>
-          <button type="button" class="set-x" onclick="leaveSettings()" title="Close (esc)">✕</button>
+          <button type="button" class="set-x" onclick="leaveSettings()" title="Close (esc)" aria-label="Close">✕</button>
         </header>
         <!-- Shown in place of closing while the form has unsaved changes (SKEIN-1260). Above the
              panes rather than in the footer, which the self-saving panes hide. -->

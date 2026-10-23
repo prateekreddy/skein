@@ -2,14 +2,11 @@
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") { e.preventDefault(); openNewBox(); return; }
-  const away = document.getElementById("away");
-  if (away?.classList.contains("open")) { if (e.key === "Escape") away.classList.remove("open"); return; }
-  if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
-  if (newbox.classList.contains("open")) return;
-  if (pal.classList.contains("open")) return;
-  // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks
-  // to the fleet keymap from an open dialog moves the selection behind it.
-  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") leaveSettings(); return; }
+  // **No fleet key acts behind a popup** (SKEIN-1247). A popup's own keys — Escape, Tab — are the
+  // dialog layer's (`registerDialog` in panels.js), and every other key is the popup's or nobody's:
+  // with Questions open, j and k used to walk the board behind it. One test against the one list
+  // of popups, rather than a line per popup that a new popup has to remember to add.
+  if (popupOpen()) return;
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. **The decision is `shortcutFor`, tested in node**: what
   // is DOM-shaped is knowing where the focus is, and that is what is passed in.
