@@ -401,6 +401,30 @@ await check("a click outside the mailbox closes it the way its ✕ does, stoppin
   if (poll !== null) throw new Error(`the poller is still ${poll}`);
 });
 
+// SKEIN-1315. The server marks mail to a box its store no longer registers (`recipientGone`,
+// SKEIN-1284); nobody will read it, and the list says so on that message and no other. Served from
+// a stub so no real mail is involved. Fails if the mark is dropped, or drawn on every message.
+await check("mail to a box that no longer exists says so, and other mail does not", async () => {
+  await closeEverything();
+  const msgs = [
+    { from: "host", to: "skein-test-gone", kind: "note", ts: "2026-10-23T10:00:00Z", body: "to a gone box", recipientGone: true },
+    { from: "host", to: "skein-test-live", kind: "note", ts: "2026-10-23T10:01:00Z", body: "to a live box" },
+  ];
+  await page.route("**/api/mailbox", r => r.request().method() === "GET" ? r.fulfill({ json: msgs }) : r.fallback());
+  try {
+    await page.evaluate(() => openMailbox());
+    await page.waitForFunction(() => document.querySelectorAll("#mbx-list .msg").length === 2);
+    const got = await page.$$eval("#mbx-list .msg", ms => ms.map(m => ({
+      body: m.querySelector(".mb").textContent, gone: m.querySelector(".gone")?.textContent || "",
+    })));
+    const gone = got.find(m => m.body === "to a gone box"), live = got.find(m => m.body === "to a live box");
+    if (gone.gone !== "to a box that no longer exists" || live.gone) throw new Error(JSON.stringify(got));
+  } finally {
+    await page.evaluate(() => closeMailbox());
+    await page.unroute("**/api/mailbox");
+  }
+});
+
 // The exception. Fails if #loginterm is given `closeOnBackdrop` like the others.
 await check("the login terminal does not close on a click outside, and does on its ✕", async () => {
   await closeEverything();

@@ -372,6 +372,7 @@ function loadMailbox() {
           <span class="kind">${esc(m.kind||"note")}</span>
           <span class="mt">${esc(localStamp(m.ts))}</span></div>
         <div class="mb">${esc(m.body||"")}</div>
+        ${m.recipientGone?`<div class="gone">to a box that no longer exists</div>`:""}
         ${(m.seenBy&&m.seenBy.length)?`<div class="seen">seen by ${m.seenBy.map(esc).join(", ")}</div>`:""}
       </div>`).join("");
   }).catch(() => { list.innerHTML = `<div class="note">could not load mailbox</div>`; });
