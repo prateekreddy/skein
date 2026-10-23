@@ -206,7 +206,12 @@ function ensureSection(id, repoId) {
   if (!s) {
     const section = document.createElement("div"); section.className = "group"; section.dataset.sid = id;
     const head = document.createElement("div"); head.className = "ghead";
-    head.innerHTML = `<span class="gcaret"></span><span class="glabel"></span><span class="gc"></span><span class="gpull" title="Sync to remote (git pull --ff-only)">⟳</span><span class="gadd" title="New box in this repo">＋</span>`;
+    // Buttons, so Tab reaches them; and the ＋ is drawn, because the fullwidth glyph is missing from
+    // the fonts a phone falls back to and rendered as an empty box (SKEIN-1300).
+    head.innerHTML = `<span class="gcaret"></span><span class="glabel"></span><span class="gc"></span>`
+      + `<button type="button" class="gpull" title="Sync to remote (git pull --ff-only)" aria-label="Sync to remote">⟳</button>`
+      + `<button type="button" class="gadd" title="New box in this repo" aria-label="New box in this repo">`
+      + `<svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
     const rows = document.createElement("div"); rows.className = "grows";
     section.append(head, rows); fleet.append(section);
     const add = head.querySelector(".gadd"), pull = head.querySelector(".gpull");
@@ -245,8 +250,25 @@ function makeRow(name) {
   });
   // mousemove, not mouseenter: rows shift under a stationary cursor every tick, and mouseenter on
   // the row that arrived under it yanked the j/k keyboard selection to wherever the mouse rested
-  el.addEventListener("mousemove", () => { select(name, true); armResourcePop(name, el); });
+  //
+  // Not over the headline or task line: that is where somebody reads a long question, and the card
+  // opening over it put the resource figures where the rest of the sentence was (SKEIN-1295).
+  el.addEventListener("mousemove", e => {
+    select(name, true);
+    if (e.target.closest?.(".headline, .taskline")) hideResourcePop();
+    else armResourcePop(name, el);
+  });
   el.addEventListener("mouseleave", hideResourcePop);
+  // Reachable by Tab, and opened by Enter or Space like any other control (SKEIN-1300): j/k only
+  // works once you know it exists, and a keyboard user should not need to.
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.addEventListener("focus", () => select(name, true));
+  el.addEventListener("keydown", e => {
+    if (e.target !== el || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault(); e.stopPropagation();
+    openTerminal(name);
+  });
   return el;
 }
 // One-click continue for a single box paused on a trivial "proceed?" — the per-box sibling of the
@@ -259,8 +281,47 @@ function resumeBox(name) {
     else toast("continue failed: " + (d.error || "").split("\n")[0]);
   }).catch(() => toast("continue failed"));
 }
-function restartAgent(name) {
+// Boxes with a restart in flight, so a second press cannot send a second restart on top of the first.
+const restartingAgents = new Set();
+// Restart ends the agent's process mid-turn, so a box that is WORKING asks first and says what it
+// costs. One that is not working — idle, waiting, done, asking — restarts at once: there is no turn
+// to interrupt, and a question in front of the cheap case teaches people to click through the
+// expensive one (SKEIN-1262). Stop and Destroy already ask; this was the one that did not.
+//
+// Asked in the page rather than with `confirm()`, whose buttons say OK and Cancel: the button that
+// does it says Restart. Cancel has the focus, so a stray Enter costs nothing.
+const RESTART_COST = "Restart cuts off what the agent is doing right now. Its conversation and the "
+  + "files it wrote stay, and it picks up where it left off.";
+function askRestart(name, label) {
+  return new Promise(answer => {
+    document.getElementById("rsask")?.remove();
+    const el = document.createElement("div");
+    el.id = "rsask"; el.className = "open";
+    el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true");
+    el.innerHTML = `<div class="nb-card" style="max-width:440px">`
+      + `<div class="nb-head"><b>Restart ${esc(label)} in ${esc(name)}?</b></div>`
+      + `<div class="rs-body">${esc(RESTART_COST)}</div>`
+      + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
+      + `<button type="button" class="primary" data-a="yes">Restart</button></div></div>`;
+    const done = yes => { el.remove(); document.removeEventListener("keydown", key, true); answer(yes); };
+    const key = e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); } };
+    el.addEventListener("click", e => {
+      const a = e.target.closest("[data-a]")?.dataset.a;
+      if (a) done(a === "yes"); else if (e.target === el) done(false);
+    });
+    document.addEventListener("keydown", key, true);
+    document.body.append(el);
+    el.querySelector('[data-a="no"]').focus();
+  });
+}
+async function restartAgent(name) {
+  if (restartingAgents.has(name)) return;
   const runtime = activeSession()?.box === name ? activeSession().runtime : agentOf(name);
+  if (groupOf(stateOf(name)) === "working" && !(await askRestart(name, runtimeLabel(runtime)))) return;
+  if (restartingAgents.has(name)) return;
+  restartingAgents.add(name);
+  renderDockbar();
+  const done = () => { restartingAgents.delete(name); renderDockbar(); };
   toast(`restarting ${runtimeLabel(runtime)} in ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/restart-agent`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ runtime })
@@ -270,7 +331,7 @@ function restartAgent(name) {
     if (session) { session.dead = true; reconnectSession(name, "agent"); }
     else openTerminal(name, runtime);
     toast(`restarted ${runtimeLabel(runtime)} in ${name}`);
-  }).catch(error => toast(`restart failed: ${error.message}`));
+  }).catch(error => toast(`restart failed: ${error.message}`)).finally(done);
 }
 function updateRow(el, b, showRepo) {
   const g = groupOf(b.state);
@@ -382,35 +443,53 @@ function updateRow(el, b, showRepo) {
   const pauseHead = ((p && p !== "none") || outcome) ? b.headline : "";
   const task = b.task || "";
   const hl = pauseHead || task;
-  el.classList.toggle("has-head", !!hl);
-  el.classList.toggle("live-head", !pauseHead && !!task && hl === task);
-  el.querySelector(".htext").textContent = hl || "";
-  const showTask = task && task !== hl;
-  el.classList.toggle("has-task", !!showTask);
-  el.querySelector(".ttext").textContent = showTask ? task : "";
-  const pc = el.querySelector(".pchip");
   // A screen-observed block is worth showing even with no headline: a trust prompt or an expired
   // login has no "last message" at all, and those are exactly the boxes that used to look fine.
   const showChip = !!(chip && (pauseHead || b.blocked_kind));
+  // The chip lives inside `.headline`, which is drawn only on a `has-head` row — so a row with a
+  // chip and no text has to count as having a head, or the chip is set and never seen (SKEIN-1291).
+  el.classList.toggle("has-head", !!hl || showChip);
+  el.classList.toggle("live-head", !pauseHead && !!task && hl === task);
+  // The headline is cut to one line, so the whole of it is on hover: a question you cannot read to
+  // the end is one you cannot answer from the board (SKEIN-1295).
+  const htext = el.querySelector(".htext");
+  htext.textContent = hl || "";
+  htext.title = hl || "";
+  const showTask = task && task !== hl;
+  el.classList.toggle("has-task", !!showTask);
+  const ttext = el.querySelector(".ttext");
+  ttext.textContent = showTask ? task : "";
+  ttext.title = showTask ? task : "";
+  const pc = el.querySelector(".pchip");
   pc.className = "pchip" + (showChip ? " " + (b.blocked_kind ? "k-" + b.blocked_kind : p) : "");
   pc.textContent = showChip ? chip : "";
   pc.style.display = showChip ? "" : "none";
   pc.title = showChip ? (KTIP[b.blocked_kind] || (p === "proceed" ? "click to continue this box" : "")) : "";
-  // dedupe: the actionable chip (decision / proceed?) already names what's owed, so drop the
-  // right-side state word on those rows — no printing "decision" twice.
+  // dedupe: the actionable chip (needs you / proceed?) already names what's owed, so drop the
+  // right-side state word on those rows — no printing "needs you" twice.
   el.querySelector(".pill").style.display = showChip ? "none" : "";
 }
 // pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
-const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
+const PCHIP = { "needs-input":"needs you", fork:"asks", proceed:"proceed?" };
 // blocked_kind → chip label + tooltip. Observed from the box's screen rather than inferred, so these
 // win over PCHIP above; `trust` and `auth` are states no hook can report at all.
-const KCHIP = { permission:"decision", question:"asks", trust:"trust?", auth:"sign in" };
+const KCHIP = { permission:"needs you", question:"asks", trust:"trust?", auth:"sign in" };
 const KTIP = {
   permission: "a tool is waiting for your approval",
   question:   "it asked you something and is waiting",
   trust:      "it can't start until you trust this folder",
   auth:       "signed out or out of quota — click to sign in here; every box inherits the login",
 };
+// Whether the server has told this page what the fleet is yet. Until it has, an empty `boxes` is
+// "not loaded", not "no boxes": the health poll redraws the board on its own schedule, and on a slow
+// server it landed first and showed an established fleet "0 boxes" and the first-run checklist
+// (SKEIN-1293). Set only by `fleetArrived`, which is what every real snapshot goes through.
+let fleetKnown = false;
+function fleetArrived(snapshot) {
+  if (!Array.isArray(snapshot)) return;   // an error body is not a fleet
+  fleetKnown = true;
+  render(snapshot);
+}
 // Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
@@ -426,6 +505,19 @@ function render(snapshot) {
   for (const b of mine) (counts[groupOf(b.state)] ??= []).push(b);
   // "need you" includes error: a box that broke is the thing you most need to know about
   const need = (counts.error?.length||0) + (counts.attn?.length||0) + (counts.waiting?.length||0), working = counts.working?.length||0, done = counts.done?.length||0;
+  // Nothing from the server yet: say so, and draw neither a count nor the first run.
+  if (!fleetKnown) {
+    document.getElementById("counts").innerHTML = `<span class="seg">loading…</span>`;
+    document.getElementById("contall").style.display = "none";
+    if (!fleet.querySelector(".empty.loading")) {
+      fleet.querySelector(".empty")?.remove();
+      for (const [, s] of sectionEls) s.section.style.display = "none";
+      const e = document.createElement("div"); e.className = "empty loading";
+      e.textContent = "Loading the board…";
+      fleet.append(e);
+    }
+    return;
+  }
   document.getElementById("counts").innerHTML =
     `<span class="seg"><span class="n">${mine.length}</span> boxes</span>`
     + (boardFilter.trim() ? `<span class="seg filt">filtered</span>` : "")
@@ -1246,7 +1338,13 @@ function renderDockbar() {
   // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
   const at = dockbar.querySelector("#dattach"); if (at) at.onclick = e => pickAttachment(e.shiftKey);
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
-  const restart = dockbar.querySelector("#drestart"); if (restart) restart.onclick = () => restartAgent(view.box);
+  const restart = dockbar.querySelector("#drestart");
+  if (restart) {
+    restart.onclick = () => restartAgent(view.box);
+    // Held down while one is in flight: a second press would restart the session the first just
+    // brought back (SKEIN-1262).
+    if (restartingAgents.has(view.box)) { restart.disabled = true; restart.textContent = "Restarting…"; }
+  }
   const ar = dockbar.querySelector("#dstop"); if (ar) ar.onclick = () => stopBox(view.box);
   const ds = dockbar.querySelector("#ddestroy"); if (ds) ds.onclick = () => destroyBox(view.box);
   const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");

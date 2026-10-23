@@ -106,7 +106,7 @@ export const sayName = n => String(n || "").replace(/[-_]+/g, " ").replace(/([A-
 
 // What a box that just stopped is actually asking. The kind matters more than the words: "wants
 // permission" and "needs you to sign in" want completely different things from you, and a single
-// "needs a decision" for both is what makes you go and look — which is the cost this is removing.
+// "needs you" for both is what makes you go and look — which is the cost this is removing.
 export const VERB = {
   permission: "wants permission",
   question: "asks",
@@ -155,9 +155,9 @@ export function utteranceFor(b, group) {
   if (group === "error") return head ? `${name} hit an error. ${head}` : `${name} hit an error.`;
   if (group === "done") return `${name} finished.`;
   // A box that ended its turn. Distinct from `attn` on purpose: nothing is blocking it, it has said
-  // its piece and stopped, so "needs a decision" would overstate what it is asking for.
+  // its piece and stopped, so "needs you" would overstate what it is asking for.
   if (group === "waiting") return head ? `${name} is waiting. ${head}` : `${name} is waiting.`;
-  const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
+  const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs you");
   // Trust and auth are self-explaining — appending the box's last words to them adds length and no
   // information, because the ask is the state itself rather than anything the agent said.
   if (!head || b.blocked_kind === "trust" || b.blocked_kind === "auth") return `${name} ${verb}.`;
@@ -171,5 +171,5 @@ export function utteranceFor(b, group) {
 export function noteFor(b, group) {
   if (group === "error") return "hit an error";
   if (group === "waiting") return "is waiting";
-  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
+  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs you");
 }

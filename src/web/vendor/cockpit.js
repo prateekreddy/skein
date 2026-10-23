@@ -42,6 +42,21 @@ function ageNow(secs, sinceMs) {
   return ago(secs + Math.max(0, Math.floor((sinceMs || 0) / 1000)));
 }
 
+// A moment the server wrote as UTC (`2026-09-24T10:12:00Z`), in the reader's own time zone.
+//
+// Every request and mailbox time used to be the server's string with its `T` and `Z` cut off, which
+// is UTC printed with nothing left on it to say so — read, naturally, as local time, and wrong by
+// the reader's whole offset (SKEIN-1264). `short` is the clock time alone, for a line that already
+// sits under a dated one. Something that is not a time comes back as it was, never as "Invalid Date".
+function localStamp(iso, short = false) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const two = n => String(n).padStart(2, "0");
+  const time = `${two(d.getHours())}:${two(d.getMinutes())}`;
+  return short ? time : `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${time}`;
+}
+
 // ── announce.mjs ──
 // What to announce, and on which channel. The decision only — the speaking and the notifying are
 // the caller's, because a function that reaches for `speechSynthesis` is one that has to be mocked
@@ -151,7 +166,7 @@ const sayName = n => String(n || "").replace(/[-_]+/g, " ").replace(/([A-Za-z])(
 
 // What a box that just stopped is actually asking. The kind matters more than the words: "wants
 // permission" and "needs you to sign in" want completely different things from you, and a single
-// "needs a decision" for both is what makes you go and look — which is the cost this is removing.
+// "needs you" for both is what makes you go and look — which is the cost this is removing.
 const VERB = {
   permission: "wants permission",
   question: "asks",
@@ -200,9 +215,9 @@ function utteranceFor(b, group) {
   if (group === "error") return head ? `${name} hit an error. ${head}` : `${name} hit an error.`;
   if (group === "done") return `${name} finished.`;
   // A box that ended its turn. Distinct from `attn` on purpose: nothing is blocking it, it has said
-  // its piece and stopped, so "needs a decision" would overstate what it is asking for.
+  // its piece and stopped, so "needs you" would overstate what it is asking for.
   if (group === "waiting") return head ? `${name} is waiting. ${head}` : `${name} is waiting.`;
-  const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
+  const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs you");
   // Trust and auth are self-explaining — appending the box's last words to them adds length and no
   // information, because the ask is the state itself rather than anything the agent said.
   if (!head || b.blocked_kind === "trust" || b.blocked_kind === "auth") return `${name} ${verb}.`;
@@ -216,7 +231,7 @@ function utteranceFor(b, group) {
 function noteFor(b, group) {
   if (group === "error") return "hit an error";
   if (group === "waiting") return "is waiting";
-  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
+  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs you");
 }
 
 // ── away.mjs ──
@@ -233,7 +248,7 @@ function noteFor(b, group) {
 // What a box that ENDED UP in each group did while you were away, and how high it sorts: what needs
 // you first, then what finished, then what merely moved.
 const SAID = {
-  attn: [0, "now needs a decision"],
+  attn: [0, "now needs you"],
   waiting: [0, "is waiting for your next instruction"],
   error: [0, "hit an error"],
   done: [1, "finished"],
@@ -557,8 +572,15 @@ const NEEDS_YOU = ["error", "attn", "waiting"];
 
 const owedIn = list => list.filter(b => NEEDS_YOU.includes(groupOf(b.state)));
 
+// One word per thing a person can tell apart. The state that waits on a person is "needs you"
+// wherever it is read — the pill, the section, a notification — and never "decision" on one and
+// "needs-input" (the wire's word) on another (SKEIN-1298). `live` and `running` are both a box at work, and the
+// board counts them as "working" — so the pill says so too, rather than ACTIVE on one row and
+// WORKING on the next for the same state (SKEIN-1298). `compacting` keeps its own word: it is a
+// working box that will not answer for a while, which is worth knowing.
 const labelOf = s =>
-  ["needs-input", "needs-decision", "blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
+  ["needs-input", "needs-decision", "blocked"].includes(s) ? "needs you"
+    : s === "live" || s === "running" ? "working" : s;
 
 // ── held.mjs ──
 // The note beside a Settings control that an environment variable is holding right now.

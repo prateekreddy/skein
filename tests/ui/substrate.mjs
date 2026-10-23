@@ -11,7 +11,7 @@
 //      already. It must be announced once and then be quiet, however long it waits.
 //
 //   node tests/ui/substrate.mjs
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, pure } from "./lift.mjs";
 
 const source = [
   // Lifted with `decideSubq`, which closes over it — see the note in `gitgate.mjs`.
@@ -25,6 +25,7 @@ const scope = new Function(`
   let panelOpen = false;
   let queue = [];
   ${grab("esc")}
+  ${pure("ago")}
   const toast = m => notes.push("toast:" + m);
   const pushNote = (body, tag) => notes.push({ body, tag });
   const badge = { n: null, title: "" };
