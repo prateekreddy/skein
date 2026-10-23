@@ -755,7 +755,10 @@ mod tests {
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "set -uo pipefail\nhome={home}\nexport HOME={sandbox}\n{block}\n",
+                // The held directories the launcher reaches the box's home through (SKEIN-1287);
+                // the plain paths stand in for them here.
+                "set -uo pipefail\nhome={home}\nhome_at=\"$home\"\nclaude_at=\"$home/.claude\"\n\
+                 codex_at=''\nexport HOME={sandbox}\n{block}\n",
                 home = home.display(),
                 sandbox = sandbox.display(),
             ))
