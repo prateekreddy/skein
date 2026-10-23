@@ -36,7 +36,7 @@ fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
                 .append(true)
                 .open(root.join("hits.log"))
             {
-                let _ = f.write_all(b"x\n");
+                let _ = writeln!(f, "{}", req.path);
             }
         }
         let path = &req.path;
@@ -930,9 +930,12 @@ fn an_expired_repo_refreshes_once_no_matter_how_many_panes_ask() {
     r.id = "mq-guard".into();
     skein::repos::save_repos(&[r.clone()]).unwrap();
     let hits = || {
+        // The queue's searches only: a refresh the person forces also asks who they are
+        // (SKEIN-1280), and the background refresh measured below rightly does not.
         std::fs::read_to_string(dir.join("hits.log"))
             .unwrap_or_default()
             .lines()
+            .filter(|path| !path.starts_with("/user"))
             .count()
     };
 
