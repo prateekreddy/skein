@@ -1,7 +1,8 @@
-# Finding the cockpit's doorway, and reloading it. One implementation for both of skein's ways in:
-# `fleet::door_pid` and `fleet::reload_server` (src/fleet/server.rs) embed this file with
-# include_str!, and bootstrap.sh's start-door.sh, which runs before any skein binary exists,
-# carries it byte for byte between the `>>> door.sh` and `<<< door.sh` marker lines.
+# Finding the cockpit's doorway, reloading it, and keeping what it prints. One implementation for
+# both of skein's ways in: `fleet::door_pid`, `fleet::reload_server` and `fleet::start_server`
+# (src/fleet/server.rs) embed this file with include_str!, and bootstrap.sh's start-door.sh, which
+# runs before any skein binary exists, carries it byte for byte between the `>>> door.sh` and
+# `<<< door.sh` marker lines.
 # `fleet::server`'s `the_doorway_is_found_one_way` fails when that copy differs. Edit this file,
 # then paste it there.
 #
@@ -66,4 +67,42 @@ skein_door_reload() {
     || return 1
   kill -USR1 "$_door_target" 2>/dev/null || return 1
   printf '%s\n' "$_door_target"
+}
+
+# skein_logged LOG MAX COMMAND [ARG...]
+#
+# Run COMMAND with everything it prints still printed, and also appended to LOG, which is moved to
+# LOG.1 (replacing the one before) once it passes MAX bytes: two files, never more (SKEIN-1286).
+# Both supervisors run the doorway through this, `fleet::start_server`'s and start-door.sh's, so a
+# cockpit writes `$SKEIN_HOME/server.log` however it was started (SKEIN-1317).
+#
+# A separate reader, not a redirection in the server: the lines a server prints as it exits are the
+# ones most worth keeping, and a reader in another process drains them after it has gone. Through a
+# FIFO, not a pipe, so COMMAND stays the calling shell's own child: skein_supervised_door finds the
+# doorway as the child of the pane's shell, and a pipeline would make it a grandchild. The reader
+# is not waited for, because something the server started can hold its output open and the
+# supervisor must not hang on that. If the FIFO cannot be made, COMMAND runs unlogged.
+# `PYTHONUNBUFFERED`, because the doorway is python and would otherwise hold its lines back.
+skein_logged() {
+  _log_file=$1
+  _log_max=$2
+  shift 2
+  if _log_dir=$(mktemp -d 2>/dev/null) && mkfifo "$_log_dir/out" 2>/dev/null; then
+    {
+      _log_n=$(($(cat "$_log_file" 2>/dev/null | wc -c) + 0))
+      while IFS= read -r _log_line || [ -n "$_log_line" ]; do
+        printf '%s\n' "$_log_line"
+        printf '%s\n' "$_log_line" >>"$_log_file"
+        _log_n=$((_log_n + ${#_log_line} + 1))
+        if [ "$_log_n" -gt "$_log_max" ]; then
+          mv -f "$_log_file" "$_log_file.1"
+          _log_n=0
+        fi
+      done
+    } <"$_log_dir/out" &
+    PYTHONUNBUFFERED=1 "$@" >"$_log_dir/out" 2>&1
+    rm -rf "$_log_dir"
+  else
+    "$@"
+  fi
 }

@@ -834,9 +834,15 @@ fi
 # ever, and 105 of those were measured before the condition was added. The `sleep` is conditional so
 # a crash-loop backs off while a doorway that had been up is replaced in the time python takes to
 # start — that gap is the port standing empty.
+#
+# The doorway runs through door.sh's `skein_logged`, so what it and the server print is kept in
+# `$skein_home/server.log` as well as in the pane, moved aside past `log_max` bytes — the same
+# reader and the same cap `fleet::start_server` uses (SKEIN-1317). The pane's shell has none of
+# this script's functions, so the definition travels in front of the loop (`declare -f`, below).
+log_max=10485760
 supervise="while [ -f '$doorway' ]; do \
 began=\$(date +%s); \
-SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
+skein_logged '$skein_home/server.log' $log_max env SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
 [ \$((\$(date +%s) - began)) -lt 5 ] && sleep 2; \
 done"
 
@@ -868,10 +874,11 @@ supervising() { tmux -S "$1" has-session -t skein-server 2>/dev/null; }
 # The doorway the stamp names, and the reload: the same bytes `fleet::door_pid` and
 # `fleet::reload_server` run, so the two ways into a cockpit cannot pick different processes.
 # >>> door.sh — a byte-for-byte copy of src/door.sh; edit that file, not this
-# Finding the cockpit's doorway, and reloading it. One implementation for both of skein's ways in:
-# `fleet::door_pid` and `fleet::reload_server` (src/fleet/server.rs) embed this file with
-# include_str!, and bootstrap.sh's start-door.sh, which runs before any skein binary exists,
-# carries it byte for byte between the `>>> door.sh` and `<<< door.sh` marker lines.
+# Finding the cockpit's doorway, reloading it, and keeping what it prints. One implementation for
+# both of skein's ways in: `fleet::door_pid`, `fleet::reload_server` and `fleet::start_server`
+# (src/fleet/server.rs) embed this file with include_str!, and bootstrap.sh's start-door.sh, which
+# runs before any skein binary exists, carries it byte for byte between the `>>> door.sh` and
+# `<<< door.sh` marker lines.
 # `fleet::server`'s `the_doorway_is_found_one_way` fails when that copy differs. Edit this file,
 # then paste it there.
 #
@@ -936,6 +943,44 @@ skein_door_reload() {
     || return 1
   kill -USR1 "$_door_target" 2>/dev/null || return 1
   printf '%s\n' "$_door_target"
+}
+
+# skein_logged LOG MAX COMMAND [ARG...]
+#
+# Run COMMAND with everything it prints still printed, and also appended to LOG, which is moved to
+# LOG.1 (replacing the one before) once it passes MAX bytes: two files, never more (SKEIN-1286).
+# Both supervisors run the doorway through this, `fleet::start_server`'s and start-door.sh's, so a
+# cockpit writes `$SKEIN_HOME/server.log` however it was started (SKEIN-1317).
+#
+# A separate reader, not a redirection in the server: the lines a server prints as it exits are the
+# ones most worth keeping, and a reader in another process drains them after it has gone. Through a
+# FIFO, not a pipe, so COMMAND stays the calling shell's own child: skein_supervised_door finds the
+# doorway as the child of the pane's shell, and a pipeline would make it a grandchild. The reader
+# is not waited for, because something the server started can hold its output open and the
+# supervisor must not hang on that. If the FIFO cannot be made, COMMAND runs unlogged.
+# `PYTHONUNBUFFERED`, because the doorway is python and would otherwise hold its lines back.
+skein_logged() {
+  _log_file=$1
+  _log_max=$2
+  shift 2
+  if _log_dir=$(mktemp -d 2>/dev/null) && mkfifo "$_log_dir/out" 2>/dev/null; then
+    {
+      _log_n=$(($(cat "$_log_file" 2>/dev/null | wc -c) + 0))
+      while IFS= read -r _log_line || [ -n "$_log_line" ]; do
+        printf '%s\n' "$_log_line"
+        printf '%s\n' "$_log_line" >>"$_log_file"
+        _log_n=$((_log_n + ${#_log_line} + 1))
+        if [ "$_log_n" -gt "$_log_max" ]; then
+          mv -f "$_log_file" "$_log_file.1"
+          _log_n=0
+        fi
+      done
+    } <"$_log_dir/out" &
+    PYTHONUNBUFFERED=1 "$@" >"$_log_dir/out" 2>&1
+    rm -rf "$_log_dir"
+  else
+    "$@"
+  fi
 }
 # <<< door.sh
 
@@ -1004,7 +1049,8 @@ else
   # A socket file left by a sandbox that stopped is a file with no server behind it. tmux clears
   # its own stale socket on the way to starting a new one, so this is a plain `new-session` and
   # not a `rm` — and a `rm` here would be a race against a door that IS running.
-  tmux -S "$sock" new-session -d -s skein-server "$supervise"
+  tmux -S "$sock" new-session -d -s skein-server "$(declare -f skein_logged)
+$supervise"
   say "the cockpit's door is open on :$port"
 fi
 DOOR

@@ -1187,6 +1187,8 @@ if os.environ.get("LISTEN_FDS") == "1":
     server.socket = socket.socket(fileno=3)
 else:
     server = http.server.HTTPServer(("", int(os.environ["STALE_PORT"])), Health)
+# One line on the way up, so a supervisor's log has something of the server's to keep (SKEIN-1317).
+print("stand-in serving " + BUILD, flush=True)
 server.serve_forever()
 "#;
 
@@ -1494,6 +1496,21 @@ fn bootstrap_on_a_fresh_fleet_starts_one_supervisor_serving_what_it_built() {
         fleet.answering().as_deref(),
         Some("aaaa111"),
         "the cockpit is not serving the build the install just made:\n{said}"
+    );
+    // **And it keeps what the server says** (SKEIN-1317). A door start-door.sh opened ran the
+    // doorway bare, so a cockpit that had only ever been installed had no server.log at all. Fails
+    // if start-door.sh's loop stops calling door.sh's `skein_logged`.
+    let mut kept = String::new();
+    for _ in 0..50 {
+        kept = fs::read_to_string(fleet.home.join("server.log")).unwrap_or_default();
+        if kept.contains("stand-in serving aaaa111") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        kept.contains("stand-in serving aaaa111"),
+        "the door a first install opened keeps no server.log of what its server printed: {kept:?}"
     );
     assert!(
         said.contains("answers as aaaa111"),
