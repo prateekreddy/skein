@@ -84,23 +84,6 @@ fn regex_literal(text: &str) -> String {
         .collect()
 }
 
-/// A supervisor loop around `script`: run `body` for ever, and stop when `script` itself is gone.
-///
-/// **The stopping condition is the whole reason this is a function.** Both of skein's supervisors
-/// used to say `while true`, and a fleet deleted out from under either of them left a bash
-/// restarting a python script that no longer existed, twice a second, until the machine was
-/// rebooted. Every integration fixture deletes its fleet root on the way out and so does a fleet a
-/// person destroys; 105 doorway loops and one agent loop were alive on one box when somebody
-/// finally read `ps`. Fixing one and leaving the other is how the second one was found, which is
-/// why the reasoning lives here rather than twice.
-///
-/// Safe as a *condition* rather than as a race in both places, for different reasons. The doorway
-/// is renamed into place ([`install_doorway`]), so its path is never momentarily absent. The agent
-/// is written with `cat >`, which truncates rather than unlinks — the file exists throughout, and a
-/// half-written one is a python that fails and is retried, exactly as before.
-///
-/// A script that dies for any *other* reason still has its file and is still restarted. This ends
-/// only the case where there is nothing left to restart it with.
 /// How large the server's log grows before it is moved aside to `server.log.1`, in bytes.
 const SERVER_LOG_MAX: u64 = 10 << 20;
 
@@ -146,6 +129,23 @@ fn logged(command: &str, log: &str, max: u64) -> String {
     )
 }
 
+/// A supervisor loop around `script`: run `body` for ever, and stop when `script` itself is gone.
+///
+/// **The stopping condition is the whole reason this is a function.** Both of skein's supervisors
+/// used to say `while true`, and a fleet deleted out from under either of them left a bash
+/// restarting a python script that no longer existed, twice a second, until the machine was
+/// rebooted. Every integration fixture deletes its fleet root on the way out and so does a fleet a
+/// person destroys; 105 doorway loops and one agent loop were alive on one box when somebody
+/// finally read `ps`. Fixing one and leaving the other is how the second one was found, which is
+/// why the reasoning lives here rather than twice.
+///
+/// Safe as a *condition* rather than as a race in both places, for different reasons. The doorway
+/// is renamed into place ([`install_doorway`]), so its path is never momentarily absent. The agent
+/// is written with `cat >`, which truncates rather than unlinks — the file exists throughout, and a
+/// half-written one is a python that fails and is retried, exactly as before.
+///
+/// A script that dies for any *other* reason still has its file and is still restarted. This ends
+/// only the case where there is nothing left to restart it with.
 fn supervised(script: &str, body: &str) -> String {
     format!("while [ -f {} ]; do {body} done", sh_quote(script))
 }
