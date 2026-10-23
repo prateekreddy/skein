@@ -223,6 +223,83 @@ await check("a double click on Approve & install sends one approval, and the car
   } finally { await page.unroute(/\/api\/fleet\/substrate\/[^/]+$/); }
 });
 
+// ---------- a refusal is not a success (SKEIN-1266) ----------
+console.log("\na refusal stops a launch and a save says which part");
+
+// Fails if `launchBox` goes back to catching only network errors: the box launches (a session
+// for it opens, the dialog closes) with the refused choice silently dropped. The second half is
+// the way back: the same launch with the choice accepted does go through.
+await check("New box with a refused choice does not launch, says why, and launches once it is accepted", async () => {
+  await closeEverything();
+  const name = "acme-skein-test-refused";
+  let refuse = true;
+  await page.route(`**/api/boxes/${name}/git-scope`, r => refuse
+    ? r.fulfill({ status: 400, body: "no GitHub App or write token to scope this box with" })
+    : r.fulfill({ json: { ok: true } }));
+  try {
+    await page.evaluate(() => openNewBox());
+    await until(() => document.getElementById("nb-gitscope").options.length > 1);
+    await page.locator("#nb-branch").fill("skein-test-refused");
+    await page.locator("#nb-gitscope").selectOption("repo");
+    await page.locator("#nb-go").click();
+    await until(() => document.getElementById("nb-msg").textContent.includes("Not launched"));
+    const after = await page.evaluate(n => ({
+      open: document.getElementById("newbox").classList.contains("open"),
+      session: sessions.has(sidOf(n, "agent")),
+      said: document.getElementById("nb-msg").textContent,
+      branch: document.getElementById("nb-branch").value,
+    }), name);
+    if (!after.open || after.session || !after.said.includes("github access — no GitHub App or write token") || after.branch !== "skein-test-refused") {
+      throw new Error(JSON.stringify(after));
+    }
+    refuse = false;
+    await page.locator("#nb-go").click();
+    await until(() => !document.getElementById("newbox").classList.contains("open"));
+    if (!(await page.evaluate(n => sessions.has(sidOf(n, "agent")), name))) throw new Error("accepted, but nothing launched");
+    await page.evaluate(n => closeSession(sidOf(n, "agent")), name);
+  } finally { await page.unroute(`**/api/boxes/${name}/git-scope`); }
+});
+
+// Fails if `saveBoxSettings` goes back to one Promise.all and a toast: the dialog closes, and
+// nothing says the other four saved or which one did not.
+await check("Box settings with one refused write stays open and says which saved and which did not", async () => {
+  await closeEverything();
+  await page.route(`**/api/boxes/${BOX}/disk`, r => r.fulfill({ status: 400, body: "not a size: lots" }));
+  try {
+    await page.evaluate(box => openBoxSettings(box), BOX);
+    await until(() => !document.getElementById("bs-go").disabled);
+    await page.locator("#bs-disk").fill("lots");
+    await page.locator("#bs-go").click();
+    await until(() => document.getElementById("bs-msg").textContent.includes("Not saved"));
+    const said = await page.evaluate(() => document.getElementById("bs-msg").textContent);
+    if (!(await page.evaluate(() => document.getElementById("boxset").classList.contains("open")))) throw new Error("closed");
+    if (!said.includes("disk allowance — not a size: lots") || !/Saved: work tracking, commit as, github access, workshop box/.test(said)) {
+      throw new Error(JSON.stringify(said));
+    }
+  } finally { await page.unroute(`**/api/boxes/${BOX}/disk`); }
+});
+
+// Fails if `openBoxSettings` waits for its loads before adding `open` again: nothing is on screen
+// while they are held.
+await check("Box settings opens at once and says it is loading, with Save off until it has loaded", async () => {
+  await closeEverything();
+  let release;
+  const held = new Promise(res => { release = res; });
+  await page.route(`**/api/boxes/${BOX}/settings`, async r => { if (r.request().method() === "GET") await held; return r.fallback(); });
+  try {
+    await page.evaluate(box => openBoxSettings(box), BOX);
+    await page.waitForTimeout(300);
+    const during = await page.evaluate(() => ({
+      open: document.getElementById("boxset").classList.contains("open"),
+      said: document.getElementById("bs-msg").textContent,
+      save: document.getElementById("bs-go").disabled,
+    }));
+    release();
+    await until(() => !document.getElementById("bs-go").disabled);
+    if (!during.open || !during.said.includes("asking") || !during.save) throw new Error(JSON.stringify(during));
+  } finally { release(); await page.unroute(`**/api/boxes/${BOX}/settings`); await closeEverything(); }
+});
+
 // ---------- an error stays, every line of it (SKEIN-1265, SKEIN-1245) ----------
 console.log("\nan error or a report stays until it is closed");
 

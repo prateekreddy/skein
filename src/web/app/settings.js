@@ -912,7 +912,7 @@ function currentRepoId() {
 // `launchBox` had an `exists` on the plan to branch on before offering to create the fleet — and
 // that branch is gone (SKEIN-627). Nothing else in this dialog reads the plan, and fetching it on
 // every open bought a round trip nobody looked at.
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; nbSetMsg(""); clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
 
 // A box belongs to a repo. With none registered there is nothing to clone, nothing to name it
 // after, and nothing for the agent to open — `currentRepoId` falls back to the literal string
@@ -1110,10 +1110,29 @@ function showResourcePop(name, row) {
 // One box's own settings. Every field is blank-means-inherit, and the placeholder is what it would
 // inherit — so leaving the panel untouched is always the same as never opening it.
 let boxSettingsFor = "";
+// **Open at once, and say it is loading** (SKEIN-1266). The dialog used to appear only once two
+// requests had answered, so a press on the box's settings did nothing visible for as long as they
+// took — and showed nothing at all when one failed. It opens now with every control disabled and a
+// line saying it is asking; the answer fills it, a failure says why, and a ticket keeps a late
+// answer for a box whose dialog has since closed or moved on from filling it.
+let boxSetTicket = 0;
+const boxSetControls = () => document.querySelectorAll("#boxset select, #boxset input, #boxset .bs-actions button, #bs-go");
+function bsSetMsg(text, kind) {
+  const el = document.getElementById("bs-msg");
+  el.textContent = text; el.className = "ar-msg" + (kind ? " " + kind : ""); el.style.display = text ? "" : "none";
+}
 function openBoxSettings(name) {
   boxSettingsFor = name;
-  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(r => r.json())])
+  const ticket = ++boxSetTicket;
+  document.getElementById("bs-title").textContent = name;
+  for (const c of boxSetControls()) c.disabled = true;
+  bsSetMsg("asking for this box's settings…");
+  document.getElementById("boxset").classList.add("open");
+  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(async r => { if (!r.ok) throw await refused(r); return r.json(); })])
     .then(([, cur]) => {
+      if (ticket !== boxSetTicket || !document.getElementById("boxset").classList.contains("open")) return;
+      for (const c of boxSetControls()) c.disabled = false;
+      bsSetMsg("");
       document.getElementById("bs-title").textContent = name;
       const conns = syncStatus.connections || [];
       document.getElementById("bs-sync").innerHTML = [
@@ -1184,11 +1203,13 @@ function openBoxSettings(name) {
       }
       document.getElementById("bs-note").textContent =
         "Blank inherits the fleet default; `none` means unlimited. Disk is measured, not enforced — one filesystem serves every box.";
-      document.getElementById("boxset").classList.add("open");
     })
-    .catch(e => toast(`settings: ${e.message}`));
+    .catch(e => {
+      if (ticket !== boxSetTicket) return;
+      bsSetMsg(`could not read ${name}'s settings: ${failText(e)}. Close this and open it again.`, "err");
+    });
 }
-function closeBoxSettings() { document.getElementById("boxset").classList.remove("open"); }
+function closeBoxSettings() { boxSetTicket++; document.getElementById("boxset").classList.remove("open"); }
 function saveBoxSettings() {
   const name = boxSettingsFor;
   const sync = document.getElementById("bs-sync").value;
@@ -1201,15 +1222,27 @@ function saveBoxSettings() {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   }).then(async r => { if (!r.ok) throw await refused(r); });
   // Absent vs empty is the whole grammar here: cleared field ⇒ inherit again, not "set to nothing".
-  Promise.all([
-    post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) }),
-    post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {}),
-    post("disk", { limit: disk || null }),
-    post("git-scope", { scope: gitScope || null }),
-    post("privileged", { on: privileged }),
-  ])
-    .then(() => { toast(`${name}: settings saved`); closeBoxSettings(); refresh(); })
-    .catch(e => toast(`settings: ${e.message}`));
+  //
+  // **Five writes, and each one's answer is said** (SKEIN-1266). One failure used to reject the
+  // lot with a toast naming nothing, while the other four had saved. Now the dialog stays open
+  // and says which saved and which did not, with the server's reason for each refusal.
+  const writes = [
+    ["work tracking", () => post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) })],
+    ["commit as", () => post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {})],
+    ["disk allowance", () => post("disk", { limit: disk || null })],
+    ["github access", () => post("git-scope", { scope: gitScope || null })],
+    ["workshop box", () => post("privileged", { on: privileged })],
+  ];
+  const go = document.getElementById("bs-go");
+  go.disabled = true;
+  bsSetMsg("saving…");
+  return Promise.allSettled(writes.map(([, w]) => w())).then(results => {
+    const saved = [], refusedHere = [];
+    results.forEach((x, i) => x.status === "fulfilled" ? saved.push(writes[i][0]) : refusedHere.push(`${writes[i][0]} — ${failText(x.reason)}`));
+    if (!refusedHere.length) { bsSetMsg(""); toast(`${name}: settings saved`); closeBoxSettings(); refresh(); return; }
+    bsSetMsg((saved.length ? `Saved: ${saved.join(", ")}.\n` : "") + `Not saved:\n${refusedHere.join("\n")}`, "err");
+    refresh();
+  }).finally(() => { go.disabled = false; });
 }
 function askDiskLimit(name) { openBoxSettings(name); }
 // The launch dialog's copy of the box-settings control. Empty is inheritance, and the label says
@@ -1260,7 +1293,7 @@ function fillSyncSelect() {
 // are all decisions the launcher reads *as the box comes up*, and a second launch path would be a
 // second place for those to be forgotten.
 function openNewBoxFor(repoId, branch) {
-  newbox.classList.add("open"); nbBranch.value = branch || ""; clearIdentityFields();
+  newbox.classList.add("open"); nbBranch.value = branch || ""; nbSetMsg(""); clearIdentityFields();
   Promise.all([loadRepos(), loadSync()]).then(() => {
     if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
     fillSyncSelect(); fillGitScopeSelect();
@@ -1529,16 +1562,23 @@ function launchBox(branch) {
   const gitName = document.getElementById("nb-gitname").value.trim();
   const gitEmail = document.getElementById("nb-gitemail").value.trim();
   const gitScope = document.getElementById("nb-gitscope").value;
-  closeNewBox();
-  select(name);
-  view = { box: name, mode: "term", kind: "agent" };
+  const go = document.getElementById("nb-go");
+  if (go.dataset.busy) return;
   // Before the launch, not after: provisioning reads the choice, so a token minted against the
   // repo's default and corrected afterwards would already be the wrong one.
+  //
+  // **A refused choice stops the launch** (SKEIN-1266). Only a network failure used to count, so a
+  // tracking, committer or GitHub-access choice the server refused launched the box with the
+  // default instead, and nothing said so. Each refusal is named with the server's reason, the
+  // dialog stays open with what was chosen in it, and nothing is launched.
   const post = (path, body, what) =>
     fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).catch(e => toast(`could not set ${what}: ${e.message}`));
-  const chosen = Promise.all([
+    }).then(async r => { if (!r.ok) throw await refused(r); })
+      .catch(e => { throw new Error(`${what} — ${failText(e)}`); });
+  nbSetMsg("");
+  go.dataset.busy = "1"; go.disabled = true; go.textContent = "launching…";
+  const chosen = Promise.allSettled([
     sync === "" ? null : post("tracking", { connection: sync === "none" ? "" : sync }, "work tracking"),
     (gitName || gitEmail) ? post("identity", { name: gitName, email: gitEmail }, "the committer") : null,
     // Same reason as the two above, and more sharply: the launcher reads this as the box comes up to
@@ -1546,8 +1586,23 @@ function launchBox(branch) {
     // box's first turn — the one most likely to push — would run under the choice not made.
     gitScope === "" ? null : post("git-scope", { scope: gitScope }, "github access"),
   ].filter(Boolean));
-  chosen.then(() => { if (!sessions.has(name)) createSession(name, "agent", branch, agent); });
-  applyView();
+  return chosen.then(results => {
+    const bad = results.filter(x => x.status === "rejected").map(x => x.reason.message);
+    if (bad.length) {
+      nbSetMsg(`Not launched — skein refused ${bad.length === 1 ? "a choice" : "choices"} made here:\n${bad.join("\n")}\n`
+        + `Change ${bad.length === 1 ? "it" : "them"}, or set ${bad.length === 1 ? "it" : "them"} back to the default, and launch again.`);
+      return;
+    }
+    closeNewBox();
+    select(name);
+    view = { box: name, mode: "term", kind: "agent" };
+    if (!sessions.has(name)) createSession(name, "agent", branch, agent);
+    applyView();
+  }).finally(() => { delete go.dataset.busy; go.textContent = "Launch →"; gateLaunch(); });
+}
+function nbSetMsg(text) {
+  const el = document.getElementById("nb-msg");
+  el.textContent = text; el.className = "ar-msg" + (text ? " err" : ""); el.style.display = text ? "" : "none";
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
 document.getElementById("set-leave-save").addEventListener("click", saveSettings);
