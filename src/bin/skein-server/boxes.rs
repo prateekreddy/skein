@@ -233,7 +233,7 @@ pub(super) async fn act_stream(
 /// picture once should not have to open a stream to get it, and it is what a client re-syncs from
 /// when it is told it has fallen behind.
 pub(super) async fn api_boxes() -> Json<Vec<BoxView>> {
-    let views = tokio::task::spawn_blocking(|| load_views())
+    let views = tokio::task::spawn_blocking(load_views)
         .await
         .unwrap_or_default();
     Json(views)
