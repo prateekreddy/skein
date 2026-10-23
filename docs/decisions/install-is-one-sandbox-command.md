@@ -29,7 +29,7 @@ everyone will, so both routes to a privileged act are first-class.
   builds with a toolchain of its own, and `bootstrap.sh` is the whole install.
 - `README.md:131-134` — re-running the same lines is also the repair, because there is no skein on
   the host to repair with.
-- `src/warden_client.rs:1014` — the three-part prompt.
+- `src/warden_client.rs:1051` — the three-part prompt.
 
 What nothing enforces: the first command is written by hand in the README, because nothing can
 prompt for it before skein exists. A change to the install that forgets to update those lines is

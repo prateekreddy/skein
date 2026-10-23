@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:584"]
+["src/bin/skein-server/main.rs:578"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:594"]
+["src/bin/skein-server/main.rs:588"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:685"]
+["src/bin/skein-server/main.rs:679"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:691"]
+["src/bin/skein-server/main.rs:685"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1452,12 +1452,12 @@ line = "return Err(format!(\"not a credential id: {id:?}\"));"
 window = "if !valid_credential_id(id) {\u000breturn Err(format!(\"not a credential id: {id:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:754"]
+["src/gitgate/credentials.rs:755"]
 line = "return Err(format!(\"not a credential id: {id:?}\"));"
 window = "if !valid_credential_id(id) {\u000breturn Err(format!(\"not a credential id: {id:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:1055"]
+["src/gitgate/credentials.rs:1074"]
 line = "pub fn credential_for_repo(slug: &str, need: Need) -> (GhToken, Option<Secret>) {"
 cited_by = ["docs/decisions/one-identity.md"]
 
@@ -1556,12 +1556,12 @@ line = "false => HealthCheck::unsatisfied("
 window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:702"]
+["src/health/report.rs:717"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:712"]
+["src/health/report.rs:727"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
@@ -2007,27 +2007,27 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1014"]
+["src/warden_client.rs:1051"]
 line = "pub struct Prompt {"
 cited_by = ["docs/decisions/install-is-one-sandbox-command.md", "docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1060"]
+["src/warden_client.rs:1097"]
 line = "/// **The rule**: for each privileged act, a warden that has that capability performs it; otherwise"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1069"]
+["src/warden_client.rs:1106"]
 line = "/// **Selection is detection, not configuration.** There is no setting and no first-run question: a"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1091"]
+["src/warden_client.rs:1128"]
 line = "pub fn perform(act: &Act) -> Performed {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1168"]
+["src/warden_client.rs:1205"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/warden_client.rs:1648"]
+["src/warden_client.rs:1739"]
 line = "fn every_prompt_says_the_command_why_it_is_wanted_and_what_declining_costs() {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
