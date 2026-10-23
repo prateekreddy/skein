@@ -812,7 +812,9 @@ mod tests {
     /// directories; every other entry under a hidden directory is still refused.
     ///
     /// Fails if `.codex/memory` leaves the exception list (the directory is not surfaced), if the
-    /// list stops being exact (`.codex/config.toml` or `.git/hooks/x` is surfaced), or if the
+    /// list stops being exact (`.codex/config.toml` or `.git/hooks/x` is surfaced), if
+    /// `is_excepted_dir` matches a prefix rather than the whole entry (`.codex/memory/../../.git/
+    /// hooks` is linked into `.git/hooks`, and `.codex/memoryX` is surfaced), or if the
     /// `find` in `dir_is_inside` goes (a directory holding a link out of `shared-rw/` stays
     /// surfaced).
     #[test]
@@ -841,6 +843,8 @@ mod tests {
             (".codex/memory/note.md", "remembered\n"),
             (".codex/config.toml", "[x]\n"),
             (".git/hooks/x", "#!/bin/sh\n"),
+            (".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n"),
+            (".codex/memoryX/note.md", "not the exception\n"),
         ] {
             let p = rw.join(rel);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -848,7 +852,10 @@ mod tests {
         }
         fs::write(
             store.join("shared-paths.txt"),
-            ".codex/memory\n.codex/config.toml\n.git/hooks/x\n",
+            // The climbing entry comes first: the exception is matched exactly, so it is shaped
+            // like any other entry and refused before `.codex/memory` is ever linked.
+            ".codex/memory/../../.git/hooks\n.codex/memoryX\n.codex/memory\n.codex/config.toml\n\
+             .git/hooks/x\n",
         )
         .unwrap();
         let run = || {
@@ -862,9 +869,41 @@ mod tests {
                 .output()
                 .unwrap()
         };
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            rw.join(".git/hooks/pre-commit"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         let out = run();
         assert!(out.status.success(), "{out:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // An entry that only STARTS with the exception's name is no exception: matched as a
+        // prefix, the climbing one would skip the shape rule and link shared-rw/'s hooks into
+        // this checkout's .git.
+        let hooks = tree.join(".git/hooks");
+        assert!(
+            !fs::symlink_metadata(&hooks)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+                && fs::read_dir(&hooks).unwrap().all(|e| !e
+                    .unwrap()
+                    .file_type()
+                    .unwrap()
+                    .is_symlink()),
+            "nothing in .git/hooks may be a link into shared-rw/: {stderr}"
+        );
+        assert!(
+            fs::symlink_metadata(tree.join(".codex/memoryX")).is_err(),
+            ".codex/memoryX is not the exception: {stderr}"
+        );
+        for refused in [".codex/memory/../../.git/hooks", ".codex/memoryX"] {
+            assert!(
+                stderr.contains(&format!("not surfacing '{refused}'")),
+                "{refused} must be refused out loud: {stderr}"
+            );
+        }
         assert_eq!(
             fs::read_to_string(tree.join(".codex/memory/note.md")).unwrap_or_default(),
             "remembered\n",
