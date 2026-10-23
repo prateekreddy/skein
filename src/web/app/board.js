@@ -287,13 +287,38 @@ const restartingAgents = new Set();
 // costs. One that is not working — idle, waiting, done, asking — restarts at once: there is no turn
 // to interrupt, and a question in front of the cheap case teaches people to click through the
 // expensive one (SKEIN-1262). Stop and Destroy already ask; this was the one that did not.
-function restartAgent(name) {
+//
+// Asked in the page rather than with `confirm()`, whose buttons say OK and Cancel: the button that
+// does it says Restart. Cancel has the focus, so a stray Enter costs nothing.
+const RESTART_COST = "Restart cuts off what the agent is doing right now. Its conversation and the "
+  + "files it wrote stay, and it picks up where it left off.";
+function askRestart(name, label) {
+  return new Promise(answer => {
+    document.getElementById("rsask")?.remove();
+    const el = document.createElement("div");
+    el.id = "rsask"; el.className = "open";
+    el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true");
+    el.innerHTML = `<div class="nb-card" style="max-width:440px">`
+      + `<div class="nb-head"><b>Restart ${esc(label)} in ${esc(name)}?</b></div>`
+      + `<div class="rs-body">${esc(RESTART_COST)}</div>`
+      + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
+      + `<button type="button" class="primary" data-a="yes">Restart</button></div></div>`;
+    const done = yes => { el.remove(); document.removeEventListener("keydown", key, true); answer(yes); };
+    const key = e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); } };
+    el.addEventListener("click", e => {
+      const a = e.target.closest("[data-a]")?.dataset.a;
+      if (a) done(a === "yes"); else if (e.target === el) done(false);
+    });
+    document.addEventListener("keydown", key, true);
+    document.body.append(el);
+    el.querySelector('[data-a="no"]').focus();
+  });
+}
+async function restartAgent(name) {
   if (restartingAgents.has(name)) return;
   const runtime = activeSession()?.box === name ? activeSession().runtime : agentOf(name);
-  if (groupOf(stateOf(name)) === "working"
-      && !confirm(`Restart ${runtimeLabel(runtime)} in ${name}? It is working right now.\n\n`
-        + `The turn in progress is cut off; the conversation and the files it has written stay, `
-        + `and the agent resumes its session afterwards.`)) return;
+  if (groupOf(stateOf(name)) === "working" && !(await askRestart(name, runtimeLabel(runtime)))) return;
+  if (restartingAgents.has(name)) return;
   restartingAgents.add(name);
   renderDockbar();
   const done = () => { restartingAgents.delete(name); renderDockbar(); };
@@ -440,15 +465,15 @@ function updateRow(el, b, showRepo) {
   pc.textContent = showChip ? chip : "";
   pc.style.display = showChip ? "" : "none";
   pc.title = showChip ? (KTIP[b.blocked_kind] || (p === "proceed" ? "click to continue this box" : "")) : "";
-  // dedupe: the actionable chip (decision / proceed?) already names what's owed, so drop the
-  // right-side state word on those rows — no printing "decision" twice.
+  // dedupe: the actionable chip (needs you / proceed?) already names what's owed, so drop the
+  // right-side state word on those rows — no printing "needs you" twice.
   el.querySelector(".pill").style.display = showChip ? "none" : "";
 }
 // pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
-const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
+const PCHIP = { "needs-input":"needs you", fork:"asks", proceed:"proceed?" };
 // blocked_kind → chip label + tooltip. Observed from the box's screen rather than inferred, so these
 // win over PCHIP above; `trust` and `auth` are states no hook can report at all.
-const KCHIP = { permission:"decision", question:"asks", trust:"trust?", auth:"sign in" };
+const KCHIP = { permission:"needs you", question:"asks", trust:"trust?", auth:"sign in" };
 const KTIP = {
   permission: "a tool is waiting for your approval",
   question:   "it asked you something and is waiting",

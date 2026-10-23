@@ -160,6 +160,30 @@ try {
       { overText, overName }, { overText: false, overName: true });
     await page.mouse.move(5, 5);
 
+    // SKEIN-1298: one name for the state that waits on a person. **What would make this fail:** the
+    // chip back to "decision" (`PCHIP`), as the sweep found it beside a "needs you" section.
+    value("the chip on a box that needs you says 'needs you', as its section does",
+      await page.evaluate(s => [document.querySelector(s + " .pchip").textContent,
+        document.querySelector('.group[data-sid="needs"] .glabel').textContent], row("web-feat-auth")),
+      ["needs you", "⚠ needs you"]);
+    // SKEIN-1298: one task-line style. **What would make this fail:** the working box's task drawn
+    // in blue monospace (`.row.live-head .htext`) while the task under a question is faint sans.
+    value("a box's task looks the same as the only line under a working box and under a question",
+      await page.evaluate(([a, b]) => {
+        const look = (el, line) => { const c = getComputedStyle(el), m = getComputedStyle(line, "::before");
+          return [c.color, c.fontFamily, c.fontSize, m.content, m.color]; };
+        const x = document.querySelector(a), y = document.querySelector(b);
+        return JSON.stringify(look(x.querySelector(".htext"), x.querySelector(".headline")))
+          === JSON.stringify(look(y.querySelector(".ttext"), y.querySelector(".taskline")));
+      }, [row("web-main"), row("web-feat-auth")]), true);
+    // SKEIN-1298: one badge. **What would make this fail:** `#gitqbtn` left out of the badge rule —
+    // its count drawn as grey text beside the icon.
+    value("the write-access count is the same badge as the questions count",
+      await page.evaluate(() => { paintGitqBadge(2); paintAskqBadge(1);
+        const look = sel => { const c = getComputedStyle(document.querySelector(sel));
+          return [c.position, c.backgroundColor, c.color, c.borderRadius, c.fontSize]; };
+        return JSON.stringify(look("#gitqbtn .badge")) === JSON.stringify(look("#askqbtn .badge")); }), true);
+
     // SKEIN-1300: the board is reachable by keyboard. **What would make this fail:** rows without a
     // tabindex — Tab walks the header and the section buttons and never lands on a box.
     let landed = "";
@@ -183,17 +207,37 @@ try {
       await new Promise(res => setTimeout(res, 1500));
       await r.fulfill({ json: { ok: true } }).catch(() => {});
     });
-    const asked = [];
-    page.on("dialog", d => { asked.push(d.message()); d.dismiss(); });
+    // A native dialog would be the old `confirm()`, whose buttons say OK and Cancel.
+    const native = [];
+    page.on("dialog", d => { native.push(d.message()); d.dismiss(); });
+    const ask = () => page.evaluate(() => { const d = document.getElementById("rsask");
+      return d ? { title: d.querySelector(".nb-head b").textContent, body: d.querySelector(".rs-body").textContent,
+                   buttons: [...d.querySelectorAll("button")].map(b => b.textContent),
+                   focus: document.activeElement?.textContent || "" } : null; });
     await page.evaluate(() => openDiff("web-main"));
     await page.waitForTimeout(300);
     await page.click("#drestart");
-    await page.waitForTimeout(400);
-    // **What would make this fail:** `restartAgent` posting without asking — the confirm is skipped
-    // and the restart is sent.
-    value("Restart on a working box asks first, names the cost, and a No sends nothing",
-      { asked: asked.length, says: /working right now/.test(asked[0] || "") && /cut off/.test(asked[0] || ""), sent: restarts.slice() },
-      { asked: 1, says: true, sent: [] });
+    await page.waitForTimeout(300);
+    // **What would make this fail:** `restartAgent` posting without asking, or asking with
+    // `confirm()` — no in-page question, or one whose buttons are not Restart and Cancel.
+    value("Restart on a working box asks first, in the coordinator's words, with Restart and Cancel",
+      await ask(), { title: "Restart Claude in web-main?",
+        body: "Restart cuts off what the agent is doing right now. Its conversation and the files it wrote stay, and it picks up where it left off.",
+        buttons: ["Cancel", "Restart"], focus: "Cancel" });
+    await page.click('#rsask [data-a="no"]');
+    await page.waitForTimeout(200);
+    await page.click("#drestart");
+    await page.waitForTimeout(200);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
+    value("Cancel and Escape each close it and send nothing",
+      { open: await ask(), sent: restarts.slice(), native: native.length }, { open: null, sent: [], native: 0 });
+    await page.click("#drestart");
+    await page.waitForTimeout(200);
+    await page.click('#rsask [data-a="yes"]');
+    await page.waitForTimeout(300);
+    value("and Restart restarts it", { open: await ask(), sent: restarts.slice() }, { open: null, sent: ["web-main"] });
+    await page.waitForFunction(() => !document.getElementById("drestart")?.disabled, null, { timeout: 8000 }).catch(() => {});
     await page.evaluate(() => openDiff("web-idle"));
     await page.waitForTimeout(300);
     await page.click("#drestart");
@@ -201,9 +245,9 @@ try {
     // **What would make this fail:** asking on every box — a question in front of the cheap case.
     // And the button held down while the restart is in flight, so a second press cannot follow it.
     value("Restart on an idle box goes straight away, and is held down while it is in flight",
-      { asked: asked.length, sent: restarts.slice(),
+      { asked: await ask(), sent: restarts.slice(),
         held: await page.evaluate(() => { const b = document.getElementById("drestart"); return { disabled: b.disabled, text: b.textContent }; }) },
-      { asked: 1, sent: ["web-idle"], held: { disabled: true, text: "Restarting…" } });
+      { asked: null, sent: ["web-main", "web-idle"], held: { disabled: true, text: "Restarting…" } });
     await page.waitForFunction(() => !document.getElementById("drestart")?.disabled, null, { timeout: 8000 }).catch(() => {});
     value("and it comes back once the restart has answered",
       await page.evaluate(() => document.getElementById("drestart")?.disabled), false);
@@ -247,6 +291,18 @@ try {
     value("on a touch screen, the section's sync and ＋ are a thumb's size",
       await page.evaluate(() => [".gpull", ".gadd"].map(s => { const r = document.querySelector('.group[data-sid="repo:web"] ' + s).getBoundingClientRect();
         return r.width >= 40 && r.height >= 40; })), [true, true]);
+
+    // SKEIN-1300: an agent tab and a shell tab of one box can be told apart on a narrow tab strip.
+    // **What would make this fail:** the kind inside the truncated name (`.tl`), where the ellipsis
+    // cuts it off and both tabs read "web-feat-a…".
+    await page.evaluate(() => { openTerminal("web-feat-auth"); openShell("web-feat-auth"); });
+    await page.waitForTimeout(500);
+    value("the agent and shell tabs of one box each show their kind, in full",
+      await page.evaluate(() => [...document.querySelectorAll("#tabs .tab")].map(t => {
+        const k = t.querySelector(".tk"), r = k?.getBoundingClientRect(), box = t.getBoundingClientRect();
+        const clip = k?.closest(".tl")?.getBoundingClientRect();
+        return k && r.width > 0 && r.right <= box.right && (!clip || r.right <= clip.right) ? k.textContent : `cut: ${k?.textContent}`;
+      })), ["Claude", "shell"]);
 
     // SKEIN-1263: the Files tab. **What would make this fail:** `.flist` at a fixed 260px beside the
     // file view, or the name not truncating — the size column is pushed out of the row.
