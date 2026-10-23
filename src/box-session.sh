@@ -369,11 +369,27 @@ valid_box() {
 # spliced into a `sudo apt-get install` that runs as ROOT in the sandbox, so a name shaped like an
 # option or a path traversal must never reach the queue — approving a request must not be a way to
 # get an argument of your choosing onto a privileged command line.
+#
+# `valid_package <kind> <name>`, and the same rule as the host's `package_is_nameable` in
+# src/substrate.rs, per kind (SKEIN-1285). It used to admit `/` and `@` anywhere for both kinds,
+# which the host refuses, so `./x.deb` or `a/b` was filed and then sat pending as a name nobody
+# could approve. `/` is legitimate in one place only, an npm scope: `@scope/name`.
 valid_package() {
+  local name="$2" scope
+  case "$name" in
+    "" | -* | .* | *..*) return 1 ;; # empty, shaped like a flag, a hidden or relative path, a climb
+  esac
+  if [ "$1" = npm ] && [ "${name#@}" != "$name" ]; then
+    scope="${name#@}"
+    case "$scope" in */*) ;; *) return 1 ;; esac
+    package_body "${scope%%/*}" && package_body "${scope#*/}"
+    return
+  fi
+  package_body "$name"
+}
+package_body() {
   case "$1" in
-    "" | -*) return 1 ;;          # empty, or shaped like a flag
-    *..*) return 1 ;;             # traversal, however it is spelled
-    *[!A-Za-z0-9._+@/-]*) return 1 ;;
+    "" | *[!A-Za-z0-9._+-]*) return 1 ;;
   esac
   return 0
 }
@@ -435,7 +451,7 @@ request_package() {
   local -a packages=()
   for arg in "$@"; do
     case "$arg" in -*) continue ;; esac
-    if ! valid_package "$arg"; then
+    if ! valid_package "$kind" "$arg"; then
       echo "skein: '$arg' is not a package name that can be asked for" >&2
       return 3
     fi

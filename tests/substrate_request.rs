@@ -688,3 +688,78 @@ fn a_queue_a_box_cannot_write_does_not_claim_a_request_was_filed() {
         "the advice for a failed filing tells the agent to run the command that just failed"
     );
 }
+
+/// **The box files a package name only when the host would accept it** (SKEIN-1285).
+///
+/// Both sides check the shape of a name: the launcher's `valid_package` before filing, the host's
+/// `Request::problem` before installing. When the two disagree, a name the launcher accepts and the
+/// host refuses is filed and then sits pending for ever, a request nobody can approve. So this runs
+/// the launcher's check, lifted out of it, over names on both sides of the host's rule and compares.
+///
+/// What makes it fail, named before it was written and then done: the old single rule
+/// (`*[!A-Za-z0-9._+@/-]*` for every kind) back in `valid_package` — it accepts `a/b`, `./x.deb` and
+/// `@scope` for apt, which the host refuses.
+#[test]
+fn the_box_and_the_host_agree_on_what_a_package_name_is() {
+    let src = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh"))
+        .unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let lift = |name: &str| -> String {
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{name}() {{")))
+            .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+        let end = at + lines[at..].iter().position(|l| *l == "}").unwrap();
+        lines[at..=end].join("\n")
+    };
+    let functions = format!("{}\n{}", lift("valid_package"), lift("package_body"));
+    let names = [
+        "jq",
+        "libatk1.0-0",
+        "g++",
+        "python3-dev",
+        "@anthropic-ai/claude-code",
+        "@scope",
+        "@scope/",
+        "@/name",
+        "@scope/name/extra",
+        "a/b",
+        "./x.deb",
+        ".hidden",
+        "/abs/path",
+        "a..b",
+        "-o",
+        "--allow-downgrades",
+        "name@1.2.3",
+        "x y",
+        "",
+    ];
+    for kind in ["apt", "npm"] {
+        for name in names {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(format!("{functions}\nvalid_package \"$1\" \"$2\""))
+                .arg("skein-test")
+                .arg(kind)
+                .arg(name)
+                .output()
+                .expect("bash runs the launcher's package check");
+            let host = skein::substrate::Request {
+                id: "20260812-101010-1".into(),
+                box_name: "web-main".into(),
+                kind: kind.into(),
+                packages: vec![name.to_string()],
+                state: "pending".into(),
+                ..Default::default()
+            }
+            .problem()
+            .is_none();
+            assert_eq!(
+                out.status.success(),
+                host,
+                "for {kind} {name:?} the box says {} and the host says {host}",
+                out.status.success()
+            );
+        }
+    }
+}
