@@ -183,6 +183,33 @@ if [ -f "$manifest" ]; then
     case "$real/" in "$base"/*) return 0 ;; esac
     return 1
   }
+  # **The named exceptions: directories skein itself shares through this list, and nothing else.**
+  # Fixed here, in skein's read-only copy of this script, and never read from the store, which any
+  # box can write. `.codex/memory` is Codex's memory directory. Claude's needs no entry: it reaches
+  # the store through the memory bridge below, not through the checkout. An excepted entry must be
+  # a real directory inside shared-rw/ (not a link), its link must land inside the checkout, and
+  # nothing beneath it may be anything but a regular file or a directory — so no link in it leads
+  # out of shared-rw/. That is checked at each start: a link a sibling plants in the directory
+  # after this box has started is not caught until the next one, the same exposure the store's own
+  # memory/ has (SKEIN-1308).
+  readonly shared_dir_exceptions=".codex/memory"
+  is_excepted_dir() {                      # $1 = entry; 0 when it is one of the named exceptions
+    case " $shared_dir_exceptions " in *" $1 "*) return 0 ;; esac
+    return 1
+  }
+  # A real directory, not a link, whose real path is $2 or under it, holding only regular files and
+  # directories. `find` does not follow links, so a link anywhere beneath it is found, not entered.
+  dir_is_inside() {                        # $1 = directory, $2 = the directory it must sit inside
+    local real base
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    real="$(cd -P "$1" 2>/dev/null && pwd)" || return 1
+    base="$(cd -P "$2" 2>/dev/null && pwd)" || return 1
+    case "$real/" in "$base"/*) ;; *) return 1 ;; esac
+    [ -z "$(find "$1" ! -type f ! -type d -print -quit 2>/dev/null)" ]
+  }
+  entry_is_inside() {                      # $1 = entry, $2 = its copy, $3 = where it must sit
+    if is_excepted_dir "$1"; then dir_is_inside "$2" "$3"; else file_is_inside "$2" "$3"; fi
+  }
   # Only a link pointing exactly where this loop would have pointed it is removed, so nothing a
   # person made by hand is touched.
   unplant() {                              # $1 = entry
@@ -202,7 +229,7 @@ if [ -f "$manifest" ]; then
     p="$(printf '%s' "$line" | awk '{print $1}')"
     flag="$(printf '%s' "$line" | awk '{print $2}')"
     [ -z "$p" ] && continue
-    if ! shared_path_shape_ok "$p"; then
+    if ! is_excepted_dir "$p" && ! shared_path_shape_ok "$p"; then
       refuse "$p" "only a relative path with no '..' and no hidden or .git directory in it can be surfaced"
       continue
     fi
@@ -222,18 +249,18 @@ if [ -f "$manifest" ]; then
       # there is no source tree to read.
       if [ ! -e "$rwcopy" ] && [ ! -L "$rwcopy" ] && [ -d "$source_tree" ]; then
         mkdir -p "$(dirname "$rwcopy")" 2>/dev/null || true
-        file_is_inside "$source_tree/$p" "$source_tree" && cp -a "$source_tree/$p" "$rwcopy" 2>/dev/null
+        entry_is_inside "$p" "$source_tree/$p" "$source_tree" && cp -a "$source_tree/$p" "$rwcopy" 2>/dev/null
       fi
       [ -e "$rwcopy" ] || [ -L "$rwcopy" ] || continue
-      if ! file_is_inside "$rwcopy" "$rw_root"; then
-        refuse "$p" "its copy in shared-rw/ is not a regular file inside shared-rw/"
+      if ! entry_is_inside "$p" "$rwcopy" "$rw_root"; then
+        refuse "$p" "its copy in shared-rw/ is not a regular file (or, for a named exception, a directory of only files and directories) inside shared-rw/"
         continue
       fi
       target="$rwcopy"
     else
       src="$source_tree/$p"
       [ -e "$src" ] || [ -L "$src" ] || continue
-      if ! file_is_inside "$src" "$source_tree"; then
+      if ! entry_is_inside "$p" "$src" "$source_tree"; then
         refuse "$p" "it is not a regular file inside the source tree"
         continue
       fi

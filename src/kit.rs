@@ -806,6 +806,91 @@ mod tests {
         assert_eq!(fs::read_link(tree.join("CLAUDE.md")).unwrap(), linked);
     }
 
+    /// `.codex/memory` is the one directory skein shares through `shared-paths.txt`, so it is a
+    /// named exception to the shape rule, fixed in the bootstrap rather than read from the store
+    /// (SKEIN-1256). It must be a real directory in `shared-rw/` holding only files and
+    /// directories; every other entry under a hidden directory is still refused.
+    ///
+    /// Fails if `.codex/memory` leaves the exception list (the directory is not surfaced), if the
+    /// list stops being exact (`.codex/config.toml` or `.git/hooks/x` is surfaced), or if the
+    /// `find` in `dir_is_inside` goes (a directory holding a link out of `shared-rw/` stays
+    /// surfaced).
+    #[test]
+    fn codex_memory_is_the_named_exception_and_nothing_else_under_a_hidden_directory_is() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        let store = dir.join("store").join(".claude");
+        let tree = dir.join("tree");
+        let empty_source = dir.join("no-source");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(&empty_source).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let rw = store.join("shared-rw");
+        for (rel, body) in [
+            (".codex/memory/note.md", "remembered\n"),
+            (".codex/config.toml", "[x]\n"),
+            (".git/hooks/x", "#!/bin/sh\n"),
+        ] {
+            let p = rw.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        }
+        fs::write(
+            store.join("shared-paths.txt"),
+            ".codex/memory\n.codex/config.toml\n.git/hooks/x\n",
+        )
+        .unwrap();
+        let run = || {
+            box_shell(&dir)
+                .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+                .env("CLAUDE_PROJECT_DIR", &tree)
+                .env("HOME", &home)
+                .env("SKEIN_BOX", "demo-main")
+                .env("SKEIN_SOURCE", &empty_source)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            fs::read_to_string(tree.join(".codex/memory/note.md")).unwrap_or_default(),
+            "remembered\n",
+            "the named exception must be surfaced: {stderr}"
+        );
+        for refused in [".codex/config.toml", ".git/hooks/x"] {
+            assert!(
+                fs::symlink_metadata(tree.join(refused)).is_err(),
+                "{refused} is under a hidden directory and is no exception: {stderr}"
+            );
+        }
+
+        // A link beneath the excepted directory that leads out of shared-rw/: the whole directory
+        // is refused at the next start, and the link the last start made is taken away.
+        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
+        symlink(dir.join("outside.txt"), rw.join(".codex/memory/out.md")).unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            fs::symlink_metadata(tree.join(".codex/memory")).is_err(),
+            "a directory holding a link out of shared-rw/ must not stay surfaced: {stderr}"
+        );
+        assert!(stderr.contains("not surfacing '.codex/memory'"), "{stderr}");
+    }
+
     /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather
     /// than a piece of it: skein's plugin and the kit installed under the fleet root's `.skein`
     /// (`probes::plugin_install_under`'s bytes, the way `fleet::install_launcher` writes them), a

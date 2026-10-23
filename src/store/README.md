@@ -83,6 +83,8 @@ What you *optionally* add is your own project content:
                    at a relative path with no `..` and no hidden or .git directory on
                    the way is surfaced; a directory, a link, or anything under a
                    dot-directory is refused, and the box's start says so (SKEIN-1256).
+                   The one exception is `.codex/memory`, named in the bootstrap itself:
+                   a directory, surfaced while it holds only files and directories.
                    Add ` rw` after a path (e.g. `LOCAL_DEV.md rw`) to make it editable:
                    the file is seeded once into shared-rw/ (a writable store dir) and
                    symlinked from there instead — edits persist there and are shared
