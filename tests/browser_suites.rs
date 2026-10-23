@@ -137,7 +137,7 @@ const NODE_SUITES: [&str; 30] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 17] = [
+const BROWSER_SUITES: [&str; 18] = [
     "actfail",
     // Adding a private repository from the add dialog, with a pasted token and with the token
     // another repo has: the clone uses the token chosen, a refused one is never saved, a share
@@ -157,6 +157,11 @@ const BROWSER_SUITES: [&str; 17] = [
     // A write request answered twice from the panel: the server's refusal in the toast, and the row
     // redrawn in its real state (SKEIN-1034).
     "gitqrefused",
+    // The board and a box's toolbar at a phone's, a laptop's and a desktop's width, measured as
+    // rectangles and hit tests: Destroy on screen at 1280, no sideways scroll at 390, a question
+    // readable in full, a signed-out box that says so, a slow board that says it is loading, and
+    // Restart that asks only when the agent is working (SKEIN-1262 … SKEIN-1300).
+    "layout",
     "onboarding",
     "panecover",
     // Popups over a box terminal: a paste or copy in a popup's field stays in the field and puts
