@@ -551,6 +551,26 @@ await check("\"While you were away\" waits for an open popup to close, then show
   }
 });
 
+// A close before Settings' loads answer (SKEIN-1306). Fails if `openSettings` adds `open` when
+// its loads answer whatever happened since: the late answer reopens the closed dialog.
+await check("Settings closed before its loads answer stays closed, and opens again when asked", async () => {
+  await closeEverything();
+  await page.route("**/api/settings", async r => {
+    if (r.request().method() === "GET") await new Promise(res => setTimeout(res, 400));
+    return r.fallback();
+  });
+  try {
+    await page.evaluate(() => { openSettings("github"); closeSettings(); });
+    await page.waitForTimeout(900);
+    if (await isOpen("settings")) throw new Error("the late answer reopened Settings");
+    await page.evaluate(() => openSettings("github"));
+    await page.waitForFunction(() => settingsModal().classList.contains("open"), null, { timeout: 3000 });
+  } finally {
+    await page.unroute("**/api/settings");
+    await closeEverything();
+  }
+});
+
 // ---------- Forget asks first, and a title is not a button (SKEIN-1259) ----------
 console.log("\nForget, on a repo's write token and a connection's Plane token");
 

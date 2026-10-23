@@ -134,7 +134,13 @@ function markDirty(on) {
 // you leave a field. Nothing in them is something Save would send, so the footer drops its buttons
 // there and an edit in one raises no unsaved-changes flag.
 const SET_SELF_SAVING = ["keys", "repos", "tracking", "diag", "update", "usage"];
+// **Which open is the live one** (SKEIN-1306). The dialog opens when its loads answer, and a close
+// before then used to be undone by the answer: Settings came back over whatever the person had moved
+// on to and took the focus. Every open takes a ticket and every close spends one, so an answer
+// whose open has been closed, or overtaken by a newer open, does nothing.
+let settingsTicket = 0;
 function openSettings(pane = "repos") {
+  const ticket = ++settingsTicket;
   loadFleetPlan().then(renderFleetPlanNotes);
   // What this sandbox HAS, measured inside it, above the three fields that are only what the next
   // create asks for (`sandboxSize`). The same reading the gauge strip draws from.
@@ -147,6 +153,7 @@ function openSettings(pane = "repos") {
   // it lands after the dialog is open — and "after the dialog is open" is precisely the window in
   // which a rebuild button that had not yet been hidden would be clickable.
   Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
+    if (ticket !== settingsTicket) return;
     // `!== false` would read an absent field as chosen, which is exactly the default this stopped
     // being. Unset means nobody picked the account token, so the switch is off.
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret === true;
@@ -702,7 +709,7 @@ function removeRepo(id) {
     .catch(e => toast(`remove failed: ${e.message}`));
 }
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
-function closeSettings() { settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
+function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
 // **Escape, ✕ and a click outside ask first when there is something to lose** (SKEIN-1260, the
 // owner's decision of 2026-10-22). They used to close straight away, and reopening reset the form
 // from what was stored — so since SKEIN-1246 made a click outside close it, one stray click threw
