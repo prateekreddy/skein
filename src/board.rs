@@ -37,7 +37,10 @@ use std::env;
 use std::path::Path;
 
 /// The fleet, enriched and sorted "who needs me first" (tier asc, then name).
-pub fn load_views() -> Result<Vec<BoxView>, String> {
+///
+/// Not a `Result`: no path through the body returned `Err`, and a `Result` that is never `Err` had
+/// its callers writing `unwrap_or_default()` for a case that does not exist (SKEIN-1285).
+pub fn load_views() -> Vec<BoxView> {
     // **Which boxes exist is a question the placements answer, and `sbx ls` cannot** — see the
     // module note. `fleet` is never empty: `load_config` repairs a blank name, which is what makes
     // `placed_boxes` unconditional here rather than one arm of a fork.
@@ -292,7 +295,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             .then(a.pause.rank().cmp(&b.pause.rank()))
             .then(a.name.cmp(&b.name))
     });
-    Ok(views)
+    views
 }
 
 /// A registry entry enriched for display — what the CLI table and the web API both render.
@@ -490,7 +493,7 @@ mod tests {
         )
         .unwrap();
 
-        let names: Vec<String> = load_views().unwrap().into_iter().map(|v| v.name).collect();
+        let names: Vec<String> = load_views().into_iter().map(|v| v.name).collect();
         assert!(
             names.iter().any(|n| n == "demo-task"),
             "a placed box must appear even though sbx has never heard of it: {names:?}"
@@ -555,7 +558,6 @@ mod tests {
         }
 
         let rows: Vec<(String, bool, bool)> = load_views()
-            .unwrap()
             .into_iter()
             .map(|v| (v.name, v.managed, v.foreign))
             .collect();
@@ -642,7 +644,6 @@ mod tests {
 
         let tagged = || -> Vec<(String, bool)> {
             load_views()
-                .unwrap()
                 .into_iter()
                 .map(|v| (v.name, v.foreign))
                 .collect()
@@ -757,7 +758,6 @@ mod tests {
         let cover_of = || -> String {
             crate::fleet::disturbing_liveness(|| ());
             load_views()
-                .unwrap()
                 .into_iter()
                 .find(|v| v.name == "demo-task")
                 .expect("the placed box is on the board")

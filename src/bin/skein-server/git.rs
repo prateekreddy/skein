@@ -167,11 +167,7 @@ pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response
 /// without waiting for the next tick.
 fn refresh_every_box() {
     tokio::task::spawn_blocking(|| {
-        for view in load_views()
-            .unwrap_or_default()
-            .iter()
-            .filter(|v| !v.foreign)
-        {
+        for view in load_views().iter().filter(|v| !v.foreign) {
             let _ = skein::gitgate::refresh_tokens(&view.name);
         }
     });
@@ -246,11 +242,7 @@ pub(super) async fn api_git_read_token(Json(r): Json<ReadTokenReq>) -> Response 
     // Reads are placed by the same sweep that places writes, so a token stored now reaches the
     // boxes without waiting for the next tick.
     tokio::task::spawn_blocking(|| {
-        for view in load_views()
-            .unwrap_or_default()
-            .iter()
-            .filter(|v| !v.foreign)
-        {
+        for view in load_views().iter().filter(|v| !v.foreign) {
             let _ = skein::gitgate::refresh_tokens(&view.name);
         }
     });
@@ -263,11 +255,7 @@ pub(super) async fn api_git_credential_remove(Path(id): Path<String>) -> Respons
         Ok(()) => {
             // Withdrawn from every box that held it, rather than left live for up to a tick.
             tokio::task::spawn_blocking(|| {
-                for view in load_views()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|v| !v.foreign)
-                {
+                for view in load_views().iter().filter(|v| !v.foreign) {
                     let _ = skein::gitgate::refresh_tokens(&view.name);
                 }
             });

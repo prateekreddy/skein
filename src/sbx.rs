@@ -891,7 +891,6 @@ mod tests {
 
         let state_of = || {
             load_views()
-                .unwrap()
                 .into_iter()
                 .find(|v| v.name == "demo-task")
                 .expect("the migrated box must still be on the board")

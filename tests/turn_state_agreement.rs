@@ -98,7 +98,7 @@ fn the_board_the_session_digest_and_the_handoff_agree_about_a_box_whose_prompt_w
     )
     .unwrap();
 
-    let views = skein::board::load_views().expect("a board tick");
+    let views = skein::board::load_views();
     let board = views
         .iter()
         .find(|v| v.name == NAME)

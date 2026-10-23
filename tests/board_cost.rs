@@ -116,7 +116,7 @@ const COLD_SIGNALS: [skein::signal::Signal; 2] = [
 /// Count what one tick forks, with the log cleared first.
 fn tick(log: &Path) -> u32 {
     fs::write(log, "").unwrap();
-    skein::board::load_views().expect("a board tick");
+    skein::board::load_views();
     fs::read_to_string(log).unwrap().lines().count() as u32
 }
 
@@ -172,7 +172,7 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
     // ---- cold: nothing remembered, so every gated signal pays ----
     let cold = tick(&log);
     assert_eq!(
-        skein::board::load_views().unwrap().len(),
+        skein::board::load_views().len(),
         BOXES as usize,
         "the fixture must actually put every box on the board, or the per-box cost is untested"
     );

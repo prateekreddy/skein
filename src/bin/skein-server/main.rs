@@ -329,11 +329,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
                 // Skein's boxes only. A sandbox skein did not place has none of this mounted, so a
                 // token minted for it is written to a host directory nothing will ever read — and
                 // re-minted every twenty minutes for as long as that sandbox exists.
-                for view in load_views()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|v| !v.foreign)
-                {
+                for view in load_views().iter().filter(|v| !v.foreign) {
                     for problem in skein::gitgate::refresh_tokens(&view.name) {
                         eprintln!("skein: git token for {}: {problem}", view.name);
                     }

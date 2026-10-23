@@ -363,7 +363,7 @@ fn cmd_ls() -> Result<(), String> {
         eprintln!("skein: mailbox relay: {e}");
     }
     // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
-    let views = skein::board::load_views()?;
+    let views = skein::board::load_views();
     if views.is_empty() {
         println!(
             "{DIM}the skein is empty — add a repo (skein add <git-url>) then launch a box{RESET}"

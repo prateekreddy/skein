@@ -162,7 +162,6 @@ pub fn cover_health(uncovered: &[String]) -> HealthCheck {
 /// rather than from a report.
 pub fn uncapped_boxes() -> Vec<String> {
     crate::board::load_views()
-        .unwrap_or_default()
         .into_iter()
         .filter(|view| !view.ceiling.is_empty() && !crate::fleet::is_capped(&view.ceiling))
         .map(|view| view.name)
@@ -175,7 +174,6 @@ pub fn uncapped_boxes() -> Vec<String> {
 /// report, and the CLI is where somebody looks when the cockpit is the thing that is not running.
 pub fn uncovered_boxes() -> Vec<String> {
     crate::board::load_views()
-        .unwrap_or_default()
         .into_iter()
         .filter(|view| view.cover == "older")
         .map(|view| view.name)

@@ -11,7 +11,6 @@ use super::*;
 pub(super) async fn api_agents_behind() -> Json<serde_json::Value> {
     let found = tokio::task::spawn_blocking(|| {
         let boxes: Vec<skein::fleet::BoxTurn> = load_views()
-            .unwrap_or_default()
             .into_iter()
             .map(|v| skein::fleet::BoxTurn {
                 name: v.name,
@@ -71,7 +70,6 @@ pub(super) async fn api_restart_onto_update(Path(name): Path<String>) -> Json<se
             &name,
             |name| {
                 load_views()
-                    .ok()?
                     .into_iter()
                     .find(|v| v.name == name)
                     .map(|v| v.state)

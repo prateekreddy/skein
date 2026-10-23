@@ -129,7 +129,7 @@ fn the_board_will_not_show_one_boxs_screen_as_another_boxs_turn_state() {
     observation(&status, OTHER, Some(OWNER), BUSY); // OWNER's screen, under OTHER's name
     observation(&status, LEGACY, None, BUSY); // an observer that cannot say
 
-    let views = skein::board::load_views().expect("a board tick");
+    let views = skein::board::load_views();
     let row = |name: &str| {
         views
             .iter()

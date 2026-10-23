@@ -125,7 +125,7 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
         );
     }
 
-    let views = skein::board::load_views().expect("a board tick");
+    let views = skein::board::load_views();
     let row = |name: &str| {
         views
             .iter()
