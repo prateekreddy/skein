@@ -785,8 +785,12 @@ cited_by = ["docs/threat-model.md"]
 line = "own_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:914"]
-line = "fresh=\"$(mktemp \"$tmp/.skein-start-id.XXXXXX\")\" && printf '%s\\n' \"$start_id\" >\"$fresh\" && chmod =rw \"$fresh\" && mv -fT \"$fresh\" \"$tmp/skein-start-id\" || { rm -f \"${fresh-}\"; exit 1; }"
+["src/box-session.sh:897"]
+line = "pin_dir() {"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:981"]
+line = "open_new \"$tmp_at\" skein-start-id && printf '%s\\n' \"$start_id\" >&\"$new_fd\" && land_new =rw || { drop_new; exit 1; }"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:1052"]
@@ -813,16 +817,16 @@ cited_by = ["docs/threat-model.md"]
 line = "data[\"crossSessionInbound\"] = \"accept\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1694"]
-line = "binds+=(--bind \"$home/.local/state\" \"$HOME/.local/state\")"
-cited_by = ["docs/threat-model.md"]
-
 ["src/box-session.sh:1749"]
 line = "[ -e \"$HOME/$rel\" ] && binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:1789"]
 line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1823"]
+line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:1848"]
@@ -874,16 +878,20 @@ cited_by = ["docs/threat-model.md"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2624"]
-line = "binds+=(--ro-bind \"$root/no-ssh-agent\" \"$SSH_AUTH_SOCK\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:3077"]
-line = "exec bwrap \\"
+["src/box-session.sh:2759"]
+line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:3188"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:3260"]
+line = "box_runner=()"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:3305"]
+line = "exec \"${box_runner[@]}\" bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:3346"]
