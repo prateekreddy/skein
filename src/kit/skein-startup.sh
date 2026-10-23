@@ -368,7 +368,7 @@ handoff_marker="$clone_root/.git/skein-handoff-restored"
 # and nothing under a `.git` directory.
 #
 # There is no `home` case, and no agent-state archive is restored into `$HOME`: the only producer
-# of one was `fleet::snapshot_box`, which SKEIN-1289 deleted, and `takeover::prepare_replacement`
+# of one was the fleet's own snapshot of a box, which SKEIN-1289 deleted, and `prepare_replacement`
 # writes none, so the restore that read one was reachable only from a test (SKEIN-1314). An
 # `agent-state.tgz` found in a snapshot is left where it is.
 archive_members_ok() {
