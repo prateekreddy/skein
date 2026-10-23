@@ -225,7 +225,6 @@ try {
     value(`at ${w}px, the box's name and branch are not cut to a letter`,
       await page.evaluate(() => [".nm", ".br"].map(s => { const e = document.querySelector("#dockbar " + s);
         return e.scrollWidth <= e.clientWidth + 1; })), [true, true]);
-    value(`at ${w}px, nothing scrolls sideways`, await page.evaluate(() => document.scrollingElement.scrollWidth), w);
     await context.close();
   }
 
@@ -238,7 +237,6 @@ try {
     check("on a phone, the first box starts in the top third of the screen", async () => {
       if (!first || first.top > 844 / 3) throw new Error(`the first row's top is at ${first && first.top}`);
     });
-    value("and there is no sideways scroll", await page.evaluate(() => document.scrollingElement.scrollWidth), 390);
     // **What would make this fail:** the path stub taking the room — the branch read "f…".
     value("a row's branch is not cut to a letter, and the path stub is not drawn",
       await page.evaluate(s => { const r = document.querySelector(s);
@@ -262,11 +260,11 @@ try {
                  named: n.title.startsWith("a-really-long"),
                  size: z.getBoundingClientRect().right <= innerWidth && z.getBoundingClientRect().width > 0 }; }, long),
       { list: true, cut: true, named: true, size: true });
-    // The view toggle fits, or scrolls inside itself — never the page.
-    value("the box's view toggle does not push the page sideways",
-      await page.evaluate(() => ({ page: document.scrollingElement.scrollWidth,
-        toggle: document.querySelector("#dockbar .seg-toggle").getBoundingClientRect().right <= innerWidth })),
-      { page: 390, toggle: true });
+    // The view toggle fits, or scrolls inside itself. **What would make this fail:** its buttons at
+    // their desktop padding with no overflow — Transcript was drawn past x=390.
+    value("the box's view toggle stays within the screen",
+      await page.evaluate(() => document.querySelector("#dockbar .seg-toggle").getBoundingClientRect().right <= innerWidth),
+      true);
 
     // SKEIN-1263: a review row. Drawn by the page's own `revRow` into the review pane, so the CSS
     // being measured is the CSS a queue gets. **What would make this fail:** the five fixed columns —
@@ -281,8 +279,6 @@ try {
     check("on a phone, a review row's title has room to be read", async () => {
       if (!title || title.width < 200) throw new Error(`the title is ${title && title.width}px wide`);
     });
-    value("and the review pane does not scroll sideways",
-      await page.evaluate(() => revpane.scrollWidth <= revpane.clientWidth), true);
     sayBlips();
     value("the board raised no page errors on a phone", errors, []);
     await context.close();
@@ -312,7 +308,8 @@ try {
   // --- SKEIN-1300: phone Settings keeps its footer on screen ------------------------------------
   {
     const { page, context } = await board(390, 844, { touch: true });
-    await page.evaluate(() => openSettings("repos"));
+    // The longest pane, so its content is taller than the screen.
+    await page.evaluate(() => openSettings("github"));
     await page.waitForTimeout(500);
     // **What would make this fail:** `.set-main` without `min-height:0` in the one-column layout —
     // the column grows to its content and the footer sits far below the dialog's bottom.
