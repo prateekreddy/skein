@@ -77,6 +77,16 @@ pub(crate) fn with_volume_and_allowances(
     over: &[(String, u64, u64)],
 ) -> HealthCheck {
     let mut details: Vec<String> = vec![fleet.detail.clone()];
+    // The clauses that are failing, apart from the ones that are fine (SKEIN-1298): the banner
+    // leads with these, and a full volume behind a healthy fleet disk must not read as "the
+    // fleet's disk is 40% full".
+    let mut failing: Vec<String> = Vec::new();
+    if fleet.is_fault() {
+        failing.push(match fleet.problem.is_empty() {
+            true => fleet.detail.clone(),
+            false => fleet.problem.clone(),
+        });
+    }
     let mut fixes: Vec<String> = Vec::new();
     if let Some(v) = &volume {
         let pct = v.used * 100 / v.total;
@@ -89,6 +99,7 @@ pub(crate) fn with_volume_and_allowances(
             gib(v.avail)
         ));
         if pct >= DISK_FULL_PCT {
+            failing.push(details.last().cloned().unwrap_or_default());
             fixes.push(format!(
                 "free space on the disk that holds {} — `du -sh {}/*` shows what skein itself \
                  keeps there",
@@ -111,6 +122,7 @@ pub(crate) fn with_volume_and_allowances(
             "{} box(es) hold more than their own disk allowance: {named}{more}",
             over.len()
         ));
+        failing.push(details.last().cloned().unwrap_or_default());
         fixes.push(
             "clear that box's build output, or raise its allowance in the box's ⚙ Box settings"
                 .to_string(),
@@ -118,13 +130,25 @@ pub(crate) fn with_volume_and_allowances(
     }
     let detail = details.join("; ");
     if fixes.is_empty() {
-        return HealthCheck { detail, ..fleet };
+        let problem = failing.join("; ");
+        return HealthCheck {
+            problem: match problem == detail {
+                true => String::new(),
+                false => problem,
+            },
+            detail,
+            ..fleet
+        };
     }
     let fix = match fleet.fix.is_empty() {
         true => fixes.join("; "),
         false => format!("{}\n{}", fixes.join("; "), fleet.fix),
     };
-    let check = HealthCheck::unsatisfied(detail, fix);
+    let problem = failing.join("; ");
+    let mut check = HealthCheck::unsatisfied(detail, fix);
+    if problem != check.detail {
+        check.problem = problem;
+    }
     match fleet.destructive {
         true => check.destroys(),
         false => check,
@@ -209,6 +233,12 @@ mod tests {
         let host = with_volume_and_allowances(fine(), Some(full.clone()), &[]);
         assert_eq!(host.level, Level::Unsatisfied, "{}", host.detail);
         assert!(host.fix.contains("du -sh /v/*"), "{}", host.fix);
+        // The banner's clause is the failing reading alone, never the fleet disk that is fine
+        // (SKEIN-1298). Fails if `failing` is dropped and `problem` left empty or set to `detail`.
+        assert_eq!(
+            host.problem,
+            "the disk holding skein's volume (/v) is 88% full (0.9G of 1.0G, 0.1G available)"
+        );
 
         let over = [("a".to_string(), 10_517_u64, 10_240_u64)];
         let boxed = with_volume_and_allowances(fine(), None, &over);

@@ -15,8 +15,66 @@ use super::*;
 ///
 /// Interpolated into a `format!`, so it carries no `{}` of its own to escape — which is the second
 /// reason it is here rather than inline.
+///
+/// **Every file is reached without following a link below its home** (SKEIN-1316). A box writes
+/// its own HOME, and this runs at fleet scope as the same uid, so a plain `open` of a box's
+/// `.claude/.credentials.json` reads whatever the box linked there — another login the uid can
+/// read, which the election then spreads to the box's siblings and, on the vacuum clause, to the
+/// fleet's own copy. A link at `.claude` itself does the same for writes: the merge lands in the
+/// directory the box chose, `$HOME/.claude` included, past the guard on that copy. So `held_dir`
+/// opens the home (the sandbox's `$HOME`, or the fleet root, both named by skein rather than by a
+/// box) and walks every component under it with `O_NOFOLLOW`, and `own` opens the file in that
+/// held directory with `O_NOFOLLOW | O_NONBLOCK` and keeps it only if `fstat` says it is a regular
+/// file: the launcher's `login_life` and `merge_login` read a box's copy the same way (SKEIN-1303),
+/// and `boxfile` is the host's spelling of the same rule.
 const LOGIN_MERGE_PY: &str = r#"
+import secrets, stat
+
 KEYS = ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY")
+# The directories a path is measured from: named by skein, never by a box. Below the longest one
+# that contains a path, nothing is followed.
+ANCHORS = tuple(a for a in (os.environ.get("HOME", ""), os.environ.get("SKEIN_LOGIN_ROOT", "")) if a)
+
+
+def held_dir(path, make=False):
+    """A descriptor for the directory at `path`, reached from its anchor without following a link.
+
+    With `make`, a missing directory under the anchor is created, mode 0700, as the walk reaches it.
+    Raises OSError for a link, a non-directory, or a path under no anchor."""
+    under = [a for a in ANCHORS if path == a or path.startswith(a.rstrip("/") + "/")]
+    if not under:
+        raise OSError(path + " is under no home skein knows")
+    anchor = max(under, key=len)
+    fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in [p for p in path[len(anchor):].split("/") if p]:
+            if make:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            below = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = below
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def own(path):
+    """`(json, stat)` of the regular file at `path`, or OSError/ValueError — never a link's target,
+    never a FIFO's writer, never a file reached through a linked directory."""
+    where = held_dir(os.path.dirname(path))
+    try:
+        fd = os.open(os.path.basename(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=where)
+    finally:
+        os.close(where)
+    with os.fdopen(fd) as f:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(path + " is not a regular file")
+        return json.load(f), st
 
 
 def blocks(data):
@@ -30,7 +88,7 @@ def carries(path):
 
     Those grants survive a logout, so counting them would make every corpse look alive."""
     try:
-        data = json.load(open(path))
+        data, _ = own(path)
     except Exception:
         return False
     if not isinstance(data, dict):
@@ -45,9 +103,9 @@ def merged(source_path, dest_path):
 
     `mcpOAuth` in particular stays where it is: that block holds per-box grants for MCP servers, and
     a box's work-tracking gateway belongs to its repository."""
-    src = json.load(open(source_path))
+    src, _ = own(source_path)
     try:
-        dst = json.load(open(dest_path))
+        dst, _ = own(dest_path)
     except Exception:
         dst = {}
     if not isinstance(dst, dict):
@@ -74,32 +132,46 @@ def place(source_path, dest_path, times=None):
     `login_written_ms` reads this file's mtime as the evidence that a credential was REPLACED since a
     refusal was recorded against it, so rewriting identical bytes would clear every remembered
     refusal, for ever."""
-    want = merged(source_path, dest_path)
     try:
-        have = json.load(open(dest_path))
+        want = merged(source_path, dest_path)
+    except Exception:
+        return False
+    try:
+        have, _ = own(dest_path)
     except Exception:
         have = None
     if have == want:
         return False
-    where = os.path.dirname(dest_path)
-    os.makedirs(where, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=where)
+    # Written inside the held directory, by name relative to it: a link at `.claude` (or anywhere
+    # under the home) refuses the write rather than carrying it somewhere the box chose. The
+    # temporary is a new file under an unguessable name — mode "x", so an existing name, a link
+    # included, is refused rather than opened — at 0600 from its creation (a umask only narrows
+    # it), and the rename replaces whatever was at the name rather than writing through it.
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(want, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dest_path)
+        where = held_dir(os.path.dirname(dest_path), make=True)
     except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
         return False
-    if times is not None:
+    name = os.path.basename(dest_path)
+    tmp = ".skein-login-" + secrets.token_hex(8)
+    try:
         try:
-            os.utime(dest_path, ns=times)
-        except OSError:
-            pass
+            opener = lambda path, flags: os.open(path, flags | os.O_NOFOLLOW, 0o600, dir_fd=where)
+            with open(tmp, "x", opener=opener) as f:
+                json.dump(want, f)
+            os.replace(tmp, name, src_dir_fd=where, dst_dir_fd=where)
+        except Exception:
+            try:
+                os.unlink(tmp, dir_fd=where)
+            except OSError:
+                pass
+            return False
+        if times is not None:
+            try:
+                os.utime(name, ns=times, dir_fd=where, follow_symlinks=False)
+            except (OSError, NotImplementedError):
+                pass
+    finally:
+        os.close(where)
     return True
 "#;
 
@@ -276,7 +348,7 @@ pub(super) fn heal_logins_script(refused: Option<(&str, i64)>) -> String {
 command -v python3 >/dev/null 2>&1 || exit 0
 for pair in {files}; do
   rel="${{pair%%|*}}"; refused="${{pair##*|}}"
-  python3 - "$refused" "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
+  SKEIN_LOGIN_ROOT={root} python3 - "$refused" "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
 import hashlib, json, os, sys, tempfile, time
 
 # WHICH COPY IS THE FLEET'S LOGIN, and which of the others have to be given it.
@@ -321,7 +393,7 @@ def rank(path):
     a live fleet. `the_two_elections_agree_on_which_login_is_best` runs both over one fixture set
     and is what holds them together."""
     try:
-        data = json.load(open(path))
+        data, st = own(path)
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -342,11 +414,7 @@ def rank(path):
                 break
     if not found:
         return None
-    try:
-        written = os.path.getmtime(path)
-    except OSError:
-        written = 0
-    return (worked, written)
+    return (worked, st.st_mtime)
 
 
 # An unmatched glob arrives as its own pattern — a fleet whose boxes have no credentials yet
@@ -364,7 +432,7 @@ def digest(path):
     reason. Truncated: this is an identity check between two things skein wrote, not a signature,
     and a short name keeps the sidecar readable by a person looking at a fleet."""
     try:
-        data = json.load(open(path))
+        data, _ = own(path)
     except Exception:
         return ""
     if not isinstance(data, dict):
@@ -392,7 +460,7 @@ def digest(path):
 home_path = sys.argv[2]
 evidence_path = os.path.join(os.path.dirname(home_path), "login_evidence.json")
 try:
-    evidence = json.load(open(evidence_path))
+    evidence, _ = own(evidence_path)
     if not isinstance(evidence, dict):
         evidence = {{}}
 except Exception:
@@ -428,8 +496,8 @@ if best is None:
     sys.exit(0)
 top, source = best
 try:
-    stamp = os.stat(source)
-except OSError:
+    _, stamp = own(source)
+except Exception:
     sys.exit(0)
 for key, path in ranked:
     # STRICTLY WORSE, and not merely dead — which is the whole of SKEIN-488.
@@ -653,7 +721,7 @@ for rel in {files}; do
   src="$HOME/$rel"
   [ -s "$src" ] || continue
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$rel" "$src" {root}/*/ <<'SKEIN_SHARE'
+    SKEIN_LOGIN_ROOT={root} python3 - "$rel" "$src" {root}/*/ <<'SKEIN_SHARE'
 import json, os, sys, tempfile
 {merge}
 
@@ -676,7 +744,7 @@ for root in sys.argv[3:]:
     # Named when the box HOLDS it, which is not the same as "was written": a box that already had
     # this login was reached too, and `place` deliberately writes nothing when there is no change.
     try:
-        if json.load(open(dst)) == merged(source, dst):
+        if own(dst)[0] == merged(source, dst):
             print(os.path.basename(root.rstrip("/")))
     except Exception:
         pass
@@ -1194,6 +1262,8 @@ mod tests {
                 .arg("-c")
                 .arg(&judge)
                 .arg(&p)
+                // `rank` reads only below a home skein names (SKEIN-1316).
+                .env("SKEIN_LOGIN_ROOT", root)
                 .output()
                 .expect("python3 to run the heal script's rank()");
             let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1357,6 +1427,9 @@ mod tests {
                 .arg(&code)
                 .arg("_")
                 .args(&paths)
+                // The heal reads a file only below a home skein names (SKEIN-1316); the fixtures'
+                // directory stands in for the fleet root. The launcher's half ignores it.
+                .env("SKEIN_LOGIN_ROOT", root)
                 .output()
                 .unwrap_or_else(|e| panic!("{program} to run: {e}"));
             assert!(
@@ -1706,6 +1779,124 @@ for a in sys.argv[2:]:
             .filter(|n| n != ".credentials.json" && n != "settings.json")
             .collect();
         assert!(strays.is_empty(), "left behind: {strays:?}");
+    }
+
+    /// Run the heal script once over a fixture `$HOME` and fleet root, failing on a bad exit.
+    fn run_heal(home: &std::path::Path, boxes: &std::path::Path) -> String {
+        std::env::set_var("SKEIN_FLEET_ROOT", boxes);
+        let script = heal_logins_script(None);
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", home)
+            .output()
+            .expect("bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// **A box's credentials file that is a link is no login at all** (SKEIN-1316).
+    ///
+    /// A box links its `.credentials.json` to a login it does not own — anything the uid can read.
+    /// Followed, that login is the best in the fleet, and the heal copies it into every sibling
+    /// and, because the fleet's own copy is dead, into `$HOME` too. Fails if `own` opens the file
+    /// without `O_NOFOLLOW`: the decoy's token then turns up in the dead box and in `$HOME`.
+    #[test]
+    fn a_box_cannot_elect_a_login_it_linked_to() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+        let elsewhere = crate::testutil::tempdir();
+        let elsewhere = elsewhere.as_ref() as &std::path::Path;
+        let future = 32_503_680_000_000i64;
+        let corpse = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1,"refreshTokenExpiresAt":1}}"#;
+        let put = |at: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, body).unwrap();
+        };
+        put(&home.join(".claude/.credentials.json"), corpse);
+        put(&boxes.join("dead/home/.claude/.credentials.json"), corpse);
+        let decoy = elsewhere.join("decoy.json");
+        put(
+            &decoy,
+            &format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"decoy-token","refreshToken":"r","expiresAt":{future},"refreshTokenExpiresAt":{future}}}}}"#
+            ),
+        );
+        std::fs::create_dir_all(boxes.join("sneak/home/.claude")).unwrap();
+        std::os::unix::fs::symlink(&decoy, boxes.join("sneak/home/.claude/.credentials.json"))
+            .unwrap();
+
+        let told = run_heal(home, boxes);
+
+        for at in [
+            home.join(".claude/.credentials.json"),
+            boxes.join("dead/home/.claude/.credentials.json"),
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(&at).unwrap(),
+                corpse,
+                "{} was given the login a box linked to: the heal followed the link",
+                at.display()
+            );
+        }
+        assert!(told.trim().is_empty(), "the heal wrote: {told}");
+    }
+
+    /// **A box's `.claude` that is a link is never written through** (SKEIN-1316).
+    ///
+    /// The fleet's copy works and no refusal is recorded, so a box may not replace it (ISO-5). A
+    /// box that links its `.claude` directory to `$HOME/.claude` used to get there anyway: its copy
+    /// read as the fleet's own, ranked below a fresher box's, and the heal wrote the fresher login
+    /// "into the box" — through the link, over `$HOME`'s. Fails if `held_dir` walks without
+    /// `O_NOFOLLOW`: `$HOME`'s copy then carries the box's token.
+    #[test]
+    fn a_box_cannot_route_the_heals_write_through_a_linked_directory() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+        let future = 32_503_680_000_000i64;
+        let cred = |token: &str, expires: i64| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"r","expiresAt":{expires},"refreshTokenExpiresAt":{future}}}}}"#
+            )
+        };
+        let put = |at: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, body).unwrap();
+        };
+        let fleets = cred("fleet-token", 100);
+        put(&home.join(".claude/.credentials.json"), &fleets);
+        put(
+            &boxes.join("fresh/home/.claude/.credentials.json"),
+            &cred("box-token", 200),
+        );
+        std::fs::create_dir_all(boxes.join("sneak/home")).unwrap();
+        std::os::unix::fs::symlink(home.join(".claude"), boxes.join("sneak/home/.claude")).unwrap();
+
+        run_heal(home, boxes);
+
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude/.credentials.json")).unwrap(),
+            fleets,
+            "a box's login replaced the fleet's working copy through a directory the box linked"
+        );
+        let strays: Vec<_> = std::fs::read_dir(home.join(".claude"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != ".credentials.json")
+            .collect();
+        assert!(strays.is_empty(), "left in $HOME/.claude: {strays:?}");
     }
 
     /// **A copy the fleet has moved past is replaced, even though it swears it is alive.**

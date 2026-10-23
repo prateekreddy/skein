@@ -11,7 +11,7 @@ dead one); it never decides one.
 **Decided by.** Settled by the incident below; the rule was already written in the code, twice.
 
 **Why.** A dead token still seeds boxes, because a later heal can replace it, and nothing can replace
-a void (`src/fleet/login.rs:144-148`). The move function was changed for a day to decide with the
+a void (`src/fleet/login.rs:216-220`). The move function was changed for a day to decide with the
 reporting judgement. With the fleet's credential expired, both copies read as expired, the match
 fell through to neither side, and the last leg of the login chain moved nothing — in exactly the
 state where somebody is trying to log back in. It was reported from use within a day.
@@ -31,8 +31,8 @@ failing to refresh rewrites its own file on every attempt.
 
 **Enforced at.**
 
-- `src/fleet/login.rs:125` — `carries_login`, presence only, and never expiry.
-- `src/fleet/login.rs:205-206` — `RuntimeLogin` is reporting only: nothing that seeds or heals reads
+- `src/fleet/login.rs:197` — `carries_login`, presence only, and never expiry.
+- `src/fleet/login.rs:277-278` — `RuntimeLogin` is reporting only: nothing that seeds or heals reads
   it.
 - `src/fleet/fleetlogin.rs:439` — the move, and the incident, where it is decided.
 - `src/fleet/fleetlogin.rs:882` — `an_expired_credential_propagates_exactly_as_far_as_a_live_one`,

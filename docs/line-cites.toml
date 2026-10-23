@@ -1198,31 +1198,31 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"invalid session name {session:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/login.rs:125"]
+["src/fleet/login.rs:197"]
 line = "pub(super) fn carries_login(bytes: &[u8]) -> bool {"
 cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
 
-["src/fleet/login.rs:144"]
+["src/fleet/login.rs:216"]
 line = "/// That was the right question for propagation (a dead token still seeds boxes — a heal can replace"
 cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
 
-["src/fleet/login.rs:162"]
+["src/fleet/login.rs:234"]
 line = "/// **`refreshTokenExpiresAt`, not `expiresAt`** — the same eyes as the launcher's heal script"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/fleet/login.rs:205"]
+["src/fleet/login.rs:277"]
 line = "/// One runtime's login as the host reports it. Reporting only — nothing that seeds or heals reads"
 cited_by = ["docs/decisions/propagation-is-not-reporting.md"]
 
-["src/fleet/login.rs:282"]
+["src/fleet/login.rs:354"]
 line = "# WHICH COPY IS THE FLEET'S LOGIN, and which of the others have to be given it."
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/fleet/login.rs:290"]
+["src/fleet/login.rs:362"]
 line = "# `expiresAt` decides WHICH CANDIDATE WINS, and that half was missing. It is the only evidence IN"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/fleet/login.rs:1255"]
+["src/fleet/login.rs:1325"]
 line = "fn the_two_elections_agree_on_which_login_is_best() {"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
@@ -1321,19 +1321,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:185"]
+["src/fleet/server.rs:162"]
 line = "return Err(format!(\"invalid session name {session:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:270"]
+["src/fleet/server.rs:247"]
 line = "/// session; the same call with a short one created it. `MAX_IMSGSIZE` is 16384 and the header eats"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/server.rs:410"]
+["src/fleet/server.rs:387"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:623"]
+["src/fleet/server.rs:626"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1497,15 +1497,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub fix: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/check.rs:76"]
+["src/health/check.rs:87"]
 line = "pub fn unsatisfied(detail: impl Into<String>, fix: impl Into<String>) -> HealthCheck {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/check.rs:85"]
+["src/health/check.rs:97"]
 line = "/// Could not be answered — `detail` says why it could not, not what is wrong."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/check.rs:155"]
+["src/health/check.rs:211"]
 line = "assert!(HealthCheck::unknown(\"x\").fix.is_empty());"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1600,7 +1600,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:570"]
+["src/kit/skein-startup.sh:551"]
 line = "merged=\"$(jq -s \"$retire\"'"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 
@@ -2104,36 +2104,36 @@ cited_by = ["docs/recovery-survey.md"]
 line = "es.onerror = () => { document.getElementById(\"live\").classList.remove(\"on\"); document.getElementById(\"livetext\").textContent = \"reconnecting…\"; };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:722"]
-line = "const extra = rest ? ` (+${rest} more)` : \"\";"
+["src/web/app/boot.js:735"]
+line = "return `${name.charAt(0).toUpperCase()}${name.slice(1)} is failing: ${sentence(health[lead]?.problem || health[lead]?.detail) || \"no reason given\"}.${fix ? ` To fix: ${fix}.` : \"\"}${extra}`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:768"]
+["src/web/app/boot.js:784"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1248"]
+["src/web/app/boot.js:1264"]
 line = "if (!r.ok) { notice(`could not start the update: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1274"]
+["src/web/app/boot.js:1290"]
 line = "updateTail = setTimeout(step, 1500);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1291"]
+["src/web/app/boot.js:1307"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1366"]
+["src/web/app/boot.js:1382"]
 line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1559"]
+["src/web/app/boot.js:1575"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1567"]
+["src/web/app/boot.js:1583"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 

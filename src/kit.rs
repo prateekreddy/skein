@@ -1070,13 +1070,15 @@ mod tests {
     }
 
     /// A takeover's snapshot, written the way `takeover::prepare_replacement` writes one: a bundle
-    /// of the clone's HEAD, its manifest, and the two archives built from `untracked` and
-    /// `agent_state` (relative path, contents). Built in `stage`, a directory of the test's own.
+    /// of the clone's HEAD, its manifest, and `untracked.tgz` built from `untracked` (relative
+    /// path, contents). `unproduced` builds an `agent-state.tgz` beside them, which nothing has
+    /// written since SKEIN-1289 and the kit must leave alone (SKEIN-1314). Built in `stage`, a
+    /// directory of the test's own.
     fn handoff_snapshot(
         kit: &KitBox,
         at: &Path,
         untracked: &[(&str, &str)],
-        agent_state: &[(&str, &str)],
+        unproduced: &[(&str, &str)],
     ) {
         fs::create_dir_all(at).unwrap();
         kit.git(&[
@@ -1093,7 +1095,7 @@ mod tests {
         .unwrap();
         for (archive, members) in [
             ("untracked.tgz", untracked),
-            ("agent-state.tgz", agent_state),
+            ("agent-state.tgz", unproduced),
         ] {
             if members.is_empty() {
                 continue;
@@ -1219,11 +1221,10 @@ mod tests {
     }
 
     /// **An archive in a snapshot is listed before it is opened, and one carrying more than it may
-    /// is refused whole** (SKEIN-1258). The untracked-files archive may not reach under `.git`;
-    /// the agent-state archive may hold only the agent-state paths `archive_members_ok` names.
+    /// is refused whole** (SKEIN-1258). The untracked-files archive may not reach under `.git`.
     ///
     /// What would make it fail: `archive_members_ok` returning success for everything (the hook
-    /// lands under `.git/hooks`, or `.bashrc` lands in `$HOME`).
+    /// lands under `.git/hooks`).
     #[test]
     fn a_handoff_archive_carrying_more_than_it_may_is_refused_whole() {
         if !have_jq() {
@@ -1257,34 +1258,30 @@ mod tests {
             !kit.tree.join("notes.txt").exists(),
             "refused whole, not member by member"
         );
+    }
 
-        let kit = KitBox::new("claude", None);
-        let state = kit.dir.join("state/web-main");
-        handoff_snapshot(
-            &kit,
-            &state.join("handoff/r1"),
-            &[("notes.txt", "work\n")],
-            &[(".claude/todos/t.json", "[]\n"), (".bashrc", "echo hi\n")],
-        );
-        let out = kit.start_handoff("handoff/r1", Some(&state));
-        assert!(
-            out.status.success(),
-            "the tree is intact, so the start goes on: {out:?}"
-        );
-        assert_eq!(
-            fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
-            "work\n"
-        );
-        assert!(
-            !kit.home.join(".bashrc").exists(),
-            "only the named agent state may be restored"
-        );
-        assert!(
-            !kit.home.join(".claude/todos/t.json").exists(),
-            "refused whole"
-        );
+    /// **An agent-state archive in a snapshot is not restored** (SKEIN-1314).
+    ///
+    /// The kit unpacked `agent-state.tgz` into `$HOME` — prompt history, todos, `.claude.json` —
+    /// for a fleet resize's snapshot, whose producer SKEIN-1289 deleted; a takeover writes none.
+    /// The restore is gone, and an archive found anyway is left where it is while the tree is
+    /// restored as usual.
+    ///
+    /// What would make it fail: the kit's restore branch put back (the todo and `.claude.json`
+    /// land in `$HOME`). The tree assertion is the control: the snapshot was restored, so the
+    /// absence below is not a start that never reached the handoff.
+    #[test]
+    fn an_agent_state_archive_in_a_snapshot_is_left_alone() {
+        if !have_jq() {
+            return skip(
+                "no jq here, and the kit reads the handoff out of the launch spec with jq",
+            );
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &skein_home);
 
-        // And the archive it should be, restored.
         let kit = KitBox::new("claude", None);
         let state = kit.dir.join("state/web-main");
         handoff_snapshot(
@@ -1296,8 +1293,19 @@ mod tests {
         let out = kit.start_handoff("handoff/r1", Some(&state));
         assert!(out.status.success(), "{out:?}");
         assert_eq!(
-            fs::read_to_string(kit.home.join(".claude/todos/t.json")).unwrap(),
-            "[]\n"
+            fs::read_to_string(kit.tree.join("notes.txt")).unwrap(),
+            "work\n"
+        );
+        assert!(
+            !kit.home.join(".claude/todos/t.json").exists(),
+            "an agent-state archive nothing produces was unpacked into $HOME"
+        );
+        assert_ne!(
+            fs::read_to_string(kit.home.join(".claude.json"))
+                .ok()
+                .as_deref(),
+            Some("{}\n"),
+            "an agent-state archive nothing produces replaced .claude.json"
         );
     }
 

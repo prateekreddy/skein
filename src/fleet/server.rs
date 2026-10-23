@@ -97,36 +97,13 @@ pub fn server_log_path() -> String {
         .into_owned()
 }
 
-/// `command` (a list ending in `;`), with everything it prints still printed and also appended to
-/// `log`, which is moved to `<log>.1` (replacing the one before) once it passes `max` bytes — two
-/// files, never more.
-///
-/// **A separate reader, not a redirection in the server.** Lines the server prints as it exits are
-/// the ones most worth keeping, and a reader in another process drains them after it has gone,
-/// where a thread inside it would die with it. The pane still gets every line, so
-/// [`doorway_pane_command`] answers as it always has.
-///
-/// **Through a FIFO, not a pipe, so the doorway stays the supervisor's own child.** door.sh's
-/// `skein_supervised_door` finds the doorway as the CHILD of the pane's shell; a pipeline forks
-/// each side into a subshell and makes it a grandchild, and an unstamped doorway could then no
-/// longer be re-stamped (`a_door_that_lost_its_stamp_is_re_stamped_without_closing`). A
-/// redirected `{ …; }` runs in the shell itself. The reader is not waited for: something the
-/// server started can hold its output open, and the supervisor must not hang on that. If the FIFO
-/// cannot be made, `command` runs as it did before, unlogged. `PYTHONUNBUFFERED`, because the
-/// doorway is python and would otherwise hold its lines back until a buffer filled.
-fn logged(command: &str, log: &str, max: u64) -> String {
-    let log = sh_quote(log);
-    format!(
-        "if logd=$(mktemp -d 2>/dev/null) && mkfifo \"$logd/out\" 2>/dev/null; then \
-           {{ n=$(( $(cat {log} 2>/dev/null | wc -c) + 0 )); \
-             while IFS= read -r line || [ -n \"$line\" ]; do \
-               printf '%s\\n' \"$line\"; printf '%s\\n' \"$line\" >> {log}; \
-               n=$((n + ${{#line}} + 1)); \
-               if [ \"$n\" -gt {max} ]; then mv -f {log} {log}.1; n=0; fi; \
-             done; }} < \"$logd/out\" & \
-           {{ PYTHONUNBUFFERED=1 {command} }} > \"$logd/out\" 2>&1; rm -rf \"$logd\"; \
-         else {command} fi; "
-    )
+/// `argv` (shell words, already quoted) run through `src/door.sh`'s `skein_logged`: everything it
+/// prints still printed, and also appended to `log`, moved to `<log>.1` past `max` bytes. The
+/// reader and its reasons live in door.sh, because start-door.sh runs the same supervisor before
+/// any skein binary exists and carries that file byte for byte (SKEIN-1317); a script that calls
+/// this must start with [`DOOR_SH`] so the function is defined.
+fn logged(argv: &str, log: &str, max: u64) -> String {
+    format!("skein_logged {} {max} {argv};", sh_quote(log))
 }
 
 /// A supervisor loop around `script`: run `body` for ever, and stop when `script` itself is gone.
@@ -463,6 +440,51 @@ pub fn doorway_pane_command() -> String {
     )
 }
 
+/// `skein_logged`'s definition, cut out of `src/door.sh` whole: from its first line to the `}` that
+/// closes it at column 0. Only the function and not the file, because the pane command travels as
+/// one tmux argument under tmux's 16 KB ceiling (`TMUX_COMMAND_CEILING`), and door.sh's comments
+/// would spend it.
+fn skein_logged_definition() -> &'static str {
+    let start = DOOR_SH
+        .find("\nskein_logged() {\n")
+        .expect("src/door.sh defines skein_logged")
+        + 1;
+    let end = start
+        + DOOR_SH[start..]
+            .find("\n}\n")
+            .expect("skein_logged closes at column 0")
+        + 3;
+    &DOOR_SH[start..end]
+}
+
+/// The pane command [`start_server`] gives tmux: door.sh's `skein_logged`, then a supervisor loop
+/// running the doorway through it. start-door.sh's loop is the same words, and it hands its pane
+/// the same function with `declare -f`; `start_door_sh_supervises_the_way_start_server_does`
+/// holds the two together.
+fn server_supervisor() -> String {
+    let body = supervised(
+        &server_doorway_path(),
+        &format!(
+            "began=$(date +%s); \
+             {doorway} \
+             [ $(($(date +%s) - began)) -lt 5 ] && sleep 2;",
+            doorway = logged(
+                &format!(
+                    "env SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp}",
+                    home = sh_quote(&skein_home().to_string_lossy()),
+                    doorway = sh_quote(&server_doorway_path()),
+                    port = server_sandbox_port(),
+                    server = sh_quote(&server_path()),
+                    stamp = sh_quote(&server_door_stamp_path()),
+                ),
+                &server_log_path(),
+                SERVER_LOG_MAX,
+            ),
+        ),
+    );
+    format!("{}\n{body}", skein_logged_definition())
+}
+
 /// Start the doorway, which opens the socket and only then runs the server behind it.
 ///
 /// The ordering the item exists for is not enforced here — it is *structural*: there is no
@@ -482,26 +504,7 @@ pub fn doorway_pane_command() -> String {
 /// that is decided and why.
 pub fn start_server(sandbox: &str) -> Result<(), String> {
     let sock = server_tmux_sock();
-    let inner = supervised(
-        &server_doorway_path(),
-        &format!(
-            "began=$(date +%s); \
-             {doorway} \
-             [ $(($(date +%s) - began)) -lt 5 ] && sleep 2;",
-            doorway = logged(
-                &format!(
-                    "SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp};",
-                    home = sh_quote(&skein_home().to_string_lossy()),
-                    doorway = sh_quote(&server_doorway_path()),
-                    port = server_sandbox_port(),
-                    server = sh_quote(&server_path()),
-                    stamp = sh_quote(&server_door_stamp_path()),
-                ),
-                &server_log_path(),
-                SERVER_LOG_MAX,
-            ),
-        ),
-    );
+    let inner = server_supervisor();
     // The socket lives under `private/`, which — unlike the `.skein` it used to sit in — is not
     // already there on a fleet that has never started a box: `box-session.sh` makes it at box start
     // and `bootstrap.sh` does not make it at all. tmux does not create a socket's parent, so without
@@ -911,7 +914,17 @@ mod tests {
         let log = dir.join("server.log");
         let run = |command: &str| {
             let out = std::process::Command::new("sh")
-                .args(["-c", &logged(command, &log.to_string_lossy(), 64)])
+                .args([
+                    "-c",
+                    &format!(
+                        "{DOOR_SH}\n{}",
+                        logged(
+                            &format!("sh -c {}", sh_quote(command)),
+                            &log.to_string_lossy(),
+                            64
+                        )
+                    ),
+                ])
                 .output()
                 .expect("sh runs");
             String::from_utf8_lossy(&out.stdout).into_owned()
@@ -1715,6 +1728,71 @@ mod tests {
         .unwrap();
         assert_eq!(*said.lock().unwrap(), vec!["not held".to_string()]);
         assert_eq!(publishes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// **Both supervisors log the doorway through one reader** (SKEIN-1317).
+    ///
+    /// `start_server` ran the doorway through a reader that keeps `server.log`; start-door.sh,
+    /// which bootstrap.sh writes and runs before any skein binary exists, ran it bare. The reader
+    /// is now `src/door.sh`'s `skein_logged`, whose one copy in start-door.sh
+    /// `the_doorway_is_found_one_way` holds byte for byte. What each assertion catches:
+    /// - `start_server`'s pane command not defining it, or not calling it — the Rust path unlogged;
+    /// - start-door.sh's loop not calling it, or calling it with another file or another cap;
+    /// - start-door.sh's pane not given the definition, so the call fails and nothing starts.
+    ///
+    /// That a fresh install's door does write the log is `tests/fleet_move.rs`'s
+    /// `bootstrap_on_a_fresh_fleet_starts_one_supervisor_serving_what_it_built`, for real.
+    #[test]
+    fn start_door_sh_supervises_the_way_start_server_does() {
+        let _g = crate::testutil::env_lock();
+        let tmp = crate::testutil::tempdir();
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", tmp.join("fleet"))
+            .set("SKEIN_HOME", tmp.join("home"));
+        let pane = server_supervisor();
+        let defined = skein_logged_definition();
+        assert!(
+            defined.starts_with("skein_logged() {\n") && defined.ends_with("\n}\n"),
+            "skein_logged was not cut out of src/door.sh whole:\n{defined}"
+        );
+        assert!(
+            pane.starts_with(defined),
+            "start_server's pane does not define src/door.sh's skein_logged"
+        );
+        // One tmux argument, quoted once more by `start_server`: well under the ceiling, so the
+        // definition riding along cannot be what starts refusing the cockpit's door.
+        assert!(
+            sh_quote(&pane).len() < TMUX_COMMAND_CEILING / 4,
+            "the pane command is {} bytes",
+            sh_quote(&pane).len()
+        );
+        assert!(
+            pane.contains(&format!(
+                "skein_logged {} {SERVER_LOG_MAX} env SKEIN_HOME=",
+                sh_quote(&server_log_path())
+            )),
+            "start_server does not run the doorway through skein_logged into server.log:\n{pane}"
+        );
+
+        let bootstrap = include_str!("../../bootstrap.sh");
+        assert!(
+            bootstrap.contains(&format!("\nlog_max={SERVER_LOG_MAX}\n")),
+            "start-door.sh's cap is not fleet::SERVER_LOG_MAX"
+        );
+        assert!(
+            bootstrap.contains(
+                "skein_logged '$skein_home/server.log' $log_max env SKEIN_HOME='$skein_home' \
+                 python3 '$doorway'"
+            ),
+            "start-door.sh's supervisor does not run the doorway through skein_logged into the \
+             volume's server.log"
+        );
+        assert!(
+            bootstrap.contains(
+                "new-session -d -s skein-server \"$(declare -f skein_logged)\n$supervise\""
+            ),
+            "start-door.sh's pane is not given skein_logged's definition"
+        );
     }
 
     /// **The doorway is found, and reloaded, one way** (SKEIN-1199).

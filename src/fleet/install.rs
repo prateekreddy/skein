@@ -1690,9 +1690,11 @@ mod tests {
             out.status.success(),
             "the bootstrap failed with one volume mounted:\n{said}\nit ran:\n{ran}"
         );
+        // From `new-session` to the end, not that line alone: the supervisor argument opens with
+        // `skein_logged`'s definition, which spans lines (SKEIN-1317).
         let started = ran
-            .lines()
-            .find(|l| l.contains("new-session"))
+            .find("new-session")
+            .map(|at| &ran[at..])
             .unwrap_or_else(|| panic!("no supervisor was started:\n{ran}"));
         assert!(
             started.contains(&format!("SKEIN_HOME='{}'", volume.display())),
