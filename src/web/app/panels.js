@@ -21,10 +21,10 @@ function loadOverlay() {
   if (!ov) {
     ov = document.createElement("div"); ov.id = "load"; document.body.append(ov);
     ov.addEventListener("click", e => { if (e.target.classList.contains("x")) ov.classList.remove("open"); });
-    closeOnBackdrop(ov, () => ov.classList.remove("open"));
+    registerDialog(ov, () => ov.classList.remove("open"));
   }
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Load by box</b>`
-    + `<span class="sub">right now</span><span class="x">✕</span></div><div class="away-list"></div></div>`;
+    + `<span class="sub">right now</span><button type="button" class="x" aria-label="Close">✕</button></div><div class="away-list"></div></div>`;
   return ov;
 }
 function renderLoad(ov, rows) {
@@ -70,6 +70,11 @@ function markSeen() {
 async function showAwayDigest() {
   let away;
   try { away = await (await fetch("/api/away")).json(); } catch { return; }
+  // **Not over a popup** (SKEIN-1292). It used to open over New box mid-typing, take the clicks
+  // meant for Launch, and leave Escape to close the dialog under it with the branch typed in it. It
+  // waits for the last popup to close instead, and asks again then — so it says what happened up to
+  // the moment it is read, and nothing is marked seen until it has been.
+  if (popupOpen()) { whenNoDialog(showAwayDigest); return; }
   const items = awayItems(away.moments || [], boxes, groupOf);
   if (!items.length) { markSeen(); return; }
   renderAwayOverlay(items, away.since);
@@ -92,12 +97,12 @@ function awayOnFirstBoard() {
 function renderAwayOverlay(items, since) {
   let ov = document.getElementById("away");
   const close = () => { ov.classList.remove("open"); markSeen(); };
-  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); closeOnBackdrop(ov, close); }
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); registerDialog(ov, close); }
   // `since` is the server's mark; empty means nobody has looked since skein started keeping one.
   const t = Date.parse(since);
   const when = Number.isNaN(t) ? "since skein started" : `since ${new Date(t).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}`;
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>While you were away</b>`
-    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><span class="x">✕</span></div>`
+    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><button type="button" class="x" aria-label="Close">✕</button></div>`
     + `<div class="away-list"></div></div>`;
   const list = ov.querySelector(".away-list");
   for (const it of items) {
@@ -115,7 +120,7 @@ function renderAwayOverlay(items, since) {
 // Every overlay that sits over the page as a dialog. Two things read this list: the terminal's
 // clipboard keys, which leave every chord to the browser while one is open (SKEIN-1246 — a paste
 // into a Settings field landed in the box terminal behind it), and the wiring below.
-const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load"];
+const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load", "rsask"];
 function popupOpen() { return POPUP_IDS.some(id => document.getElementById(id)?.classList.contains("open")); }
 // A click on the backdrop closes the popup through the close function its ✕ and Escape use, so a
 // click outside loses exactly what those lose and nothing more. **Both the press and the release
@@ -132,14 +137,147 @@ function closeOnBackdrop(ov, close) {
     if (outside) close();
   });
 }
-// `#away` and `#load` are made when first shown, and are wired where they are made. **The login
-// terminal (`#loginterm`) is left out on purpose**: that popup is a login in progress, closing it
-// ends the login, and a stray click beside it is no reason to — it closes by its ✕ only.
+// ---------- the dialog layer: one helper every popup goes through ----------
+// What a popup does as a dialog, said once rather than per popup (SKEIN-1247, 1268, 1292). Each was
+// patched on its own before, and each patch covered what its author was looking at: Escape reached
+// six of the twelve, `role="dialog"` one, focus moved into three and came back from none, and a
+// fleet key pressed with Questions open moved the board behind it. So the popups only say how they
+// close; this does the rest, from the one fact every popup already has — the `open` class.
+//
+// * **Watched, not called.** Every way a popup opens or closes ends in that class changing — its
+//   opener, its ✕, a click outside, a row that closes it and goes somewhere, a test's bare
+//   `classList.remove` — so the bookkeeping follows the class rather than trusting each path to
+//   remember a call.
+// * **A stack, so only the top one reacts.** Escape closes the popup opened last and nothing under
+//   it, Tab stays inside it, and it is drawn above the ones under it: Add a repository opened from
+//   Settings used to sit behind Settings, because the two share one z-index and Settings comes later
+//   in the page.
+// * **Focus goes in and comes back.** In to the popup's first field (or its close button when it
+//   has none) unless its opener already put it somewhere inside; back, on close, to wherever it was
+//   before the popup opened — unless something else has taken it since, which is not ours to undo.
+// * **Escape belongs to the popup** — except the login terminal's, where Escape is a key the agent
+//   in it needs; that popup closes by its ✕ alone, as it does on a click outside.
+const dialogClose = new Map();      // overlay -> what Escape and a click outside do, or null
+const dialogStack = [];             // open overlays, the one on top last
+const dialogReturn = new WeakMap(); // overlay -> where the focus was before it opened
+const afterDialogs = new Set();     // what waits for the last popup to close
+// Every focus the page has seen lately, newest last, with `document.body` for "nothing" — so the
+// place to return to can be found after an opener has already moved the focus into its popup.
+const focusTrail = [];
+const noteFocus = el => { focusTrail.push(el); if (focusTrail.length > 30) focusTrail.shift(); };
+document.addEventListener("focusin", e => noteFocus(e.target), true);
+document.addEventListener("focusout", e => { if (!e.relatedTarget) noteFocus(document.body); }, true);
+const FOCUSABLE = "input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), "
+  + "button:not([disabled]), a[href], summary, [tabindex]:not([tabindex='-1'])";
+const FIELD = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([disabled]), select:not([disabled]), textarea:not([disabled])";
+const shownEl = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+function topDialog() {
+  for (let i = dialogStack.length - 1; i >= 0; i--) if (dialogStack[i].classList.contains("open")) return dialogStack[i];
+  return null;
+}
+// The card is the dialog; the overlay around it is only the backdrop. Re-applied at every open,
+// because `#away` and `#load` rebuild their card each time they are drawn.
+function dialogCard(ov) {
+  const card = ov.querySelector("[role=dialog]") || ov.firstElementChild || ov;
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  if (!card.hasAttribute("aria-label")) {
+    const head = card.querySelector(".mbx-head b, .nb-head b, .away-head b");
+    card.setAttribute("aria-label", (head && head.textContent.trim()) || ov.id);
+  }
+  if (!card.hasAttribute("tabindex")) card.setAttribute("tabindex", "-1");
+  return card;
+}
+function focusIntoDialog(ov) {
+  const card = dialogCard(ov);
+  const first = [...ov.querySelectorAll(FIELD)].find(shownEl)
+    || [...ov.querySelectorAll(".x")].find(shownEl) || card;
+  try { first.focus({ preventScroll: true }); } catch { /* detached */ }
+}
+function dialogChanged(ov) {
+  const open = ov.classList.contains("open");
+  const at = dialogStack.indexOf(ov);
+  if (open && at < 0) {
+    const under = dialogStack.filter(o => o.classList.contains("open"));
+    dialogStack.push(ov);
+    ov.setAttribute("aria-hidden", "false");
+    dialogCard(ov);
+    ov.style.zIndex = "";
+    const z = o => parseInt(getComputedStyle(o).zIndex, 10) || 0;
+    const top = Math.max(0, ...under.map(z));
+    if (under.length && top >= z(ov)) ov.style.zIndex = String(top + 1);
+    const back = [...focusTrail].reverse().find(el => !ov.contains(el));
+    dialogReturn.set(ov, back || null);
+    if (!ov.contains(document.activeElement)) focusIntoDialog(ov);
+  } else if (!open && at >= 0) {
+    dialogStack.splice(at, 1);
+    ov.setAttribute("aria-hidden", "true");
+    ov.style.zIndex = "";
+    let back = dialogReturn.get(ov);
+    dialogReturn.delete(ov);
+    // A toolbar redrawn while the popup was open has replaced the button that opened it; the one
+    // standing in its place, by id, is where the focus goes back to.
+    if (back && !back.isConnected && back.id) back = document.getElementById(back.id);
+    const now = document.activeElement;
+    if (!now || now === document.body || ov.contains(now)) {
+      if (back && back !== document.body && back.isConnected && shownEl(back)) {
+        try { back.focus({ preventScroll: true }); } catch { /* gone */ }
+      } else if (ov.contains(now)) now.blur();
+    }
+    if (!topDialog() && afterDialogs.size) {
+      const waiting = [...afterDialogs];
+      afterDialogs.clear();
+      setTimeout(() => waiting.forEach(fn => fn()), 0);
+    }
+  }
+}
+// `close` is what Escape and a click outside do; null leaves both to the popup (the login terminal).
+function registerDialog(ov, close) {
+  if (!ov || dialogClose.has(ov)) return;
+  dialogClose.set(ov, close);
+  if (close) closeOnBackdrop(ov, close);
+  new MutationObserver(() => dialogChanged(ov)).observe(ov, { attributes: true, attributeFilter: ["class"] });
+  dialogChanged(ov);
+}
+// **Enter submits a popup's form only from a field in it** (SKEIN-1267, 1268). On a button — a
+// close, a Forget, a Cancel — Enter is that button's own press, and on a summary it unfolds it; a
+// form-wide Enter that took those too saved, or submitted, instead. Not mid-composition either: an
+// IME's Enter picks a candidate, it does not send.
+function enterSubmits(e) {
+  if (e.key !== "Enter" || e.isComposing) return false;
+  const t = e.target;
+  if (t.tagName === "SELECT") return true;
+  return t.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|color|range)$/i.test(t.type);
+}
+// Run `fn` now if no popup is open, else once the last one has closed.
+function whenNoDialog(fn) { if (popupOpen()) afterDialogs.add(fn); else fn.call(null); }
+// First in the capture phase at the window, so a popup's Escape is the popup's whatever has the
+// focus — a field inside it, the page behind it, or nothing — and no listener after it sees the key.
+window.addEventListener("keydown", e => {
+  const top = topDialog();
+  if (!top) return;
+  if (e.key === "Escape" && !e.isComposing) {
+    const close = dialogClose.get(top);
+    if (!close) return;
+    e.preventDefault(); e.stopPropagation();
+    close();
+  } else if (e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.target.closest?.(".xterm")) {
+    const items = [...top.querySelectorAll(FOCUSABLE)].filter(shownEl);
+    const i = items.indexOf(document.activeElement);
+    if (!items.length) { e.preventDefault(); return; }
+    if (i < 0) { e.preventDefault(); items[e.shiftKey ? items.length - 1 : 0].focus(); }
+    else if (!e.shiftKey && i === items.length - 1) { e.preventDefault(); items[0].focus(); }
+    else if (e.shiftKey && i === 0) { e.preventDefault(); items[items.length - 1].focus(); }
+  }
+}, true);
+// `#away` and `#load` are made when first shown, and are registered where they are made. **The
+// login terminal closes by its ✕ alone**: that popup is a login in progress, closing it ends the
+// login, and neither a stray click beside it nor an Escape meant for the agent inside is a reason.
 for (const [id, close] of [
   ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
-  ["askq", closeAskq],
-]) closeOnBackdrop(document.getElementById(id), close);
+  ["askq", closeAskq], ["loginterm", null],
+]) registerDialog(document.getElementById(id), close);
 
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
@@ -202,7 +340,6 @@ palInput.addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { e.preventDefault(); setPalSel(Math.min(palSel+1, palItems.length-1)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "ArrowUp") { e.preventDefault(); setPalSel(Math.max(palSel-1,0)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "Enter") { e.preventDefault(); runPal(); }
-  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
 });
 
 // ---------- mailbox (cross-box hand-offs + broadcast) ----------
@@ -218,8 +355,10 @@ function closeMailbox() {
 }
 function fillRecipients() {
   const sel = document.getElementById("mbx-to"), cur = sel.value;
+  // **Boxes that can read it** (SKEIN-1300): an ended box has no session to hand a message to, and
+  // listing every box that ever ran made a list of fourteen to find the three live ones in.
   sel.innerHTML = `<option value="broadcast">📢 broadcast — all boxes</option>`
-    + boxes.map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
+    + boxes.filter(b => groupOf(b.state) !== "ended").map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
   if (cur) sel.value = cur;
 }
 function loadMailbox() {
@@ -244,8 +383,8 @@ function sendMail() {
   if (!body) { ta.focus(); return; }
   hint.textContent = "sending…";
   fetch("/api/mailbox", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ to, body, kind }) })
-    .then(r => { if (!r.ok) throw 0; ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
-    .catch(() => hint.textContent = "send failed");
+    .then(async r => { if (!r.ok) throw await refused(r); ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
+    .catch(e => hint.textContent = `not sent: ${failText(e)}`);
 }
 document.getElementById("mbx-send").addEventListener("click", sendMail);
 document.getElementById("mbx-body").addEventListener("keydown", e => {
@@ -279,6 +418,25 @@ function redrawKeeping(list, html) {
     if (caret) try { back.setSelectionRange(caret[0], caret[1]); } catch { /* not a text field */ }
   }
 }
+
+// **One decision, one request** (SKEIN-1296). "Send answer" and "Approve & install" stayed live while
+// their request was in flight, so a double click posted it twice — and an approval installs for the
+// whole fleet. A card with a decision in flight has every control disabled and says "sending…"
+// until the answer lands; the set is what the card is drawn from, so a refresh of the list while the
+// request is out draws it still sending rather than live again.
+const inFlight = new Set();
+const sendingNow = (panel, key) => inFlight.has(panel + "\n" + key);
+function markSending(panel, key, on) {
+  if (on) inFlight.add(panel + "\n" + key); else inFlight.delete(panel + "\n" + key);
+  const card = document.querySelector(`#${panel}-list [data-card="${CSS.escape(key)}"]`);
+  if (!card) return;
+  for (const c of card.querySelectorAll("button, input")) c.disabled = on;
+  const said = card.querySelector(".sq-sending");
+  if (said) said.hidden = !on;
+}
+// What a card adds to its controls and its row while it is sending.
+const busyAttr = (panel, key) => sendingNow(panel, key) ? " disabled" : "";
+const sendingNote = (panel, key) => `<span class="sq-meta sq-sending"${sendingNow(panel, key) ? "" : " hidden"}>sending…</span>`;
 
 // ---------- package requests (a box asks, the fleet's owner decides) ----------
 //
@@ -318,17 +476,19 @@ function subqCard(r) {
   const why = (r.why || "").trim();
   const key = (r.box || "") + "/" + r.id;
   if (pending) subqShown.set(key, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
+  const busy = busyAttr("subq", key);
   return `
-    <div class="msg">
+    <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
       <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${why ? `<div class="sq-log">why: ${esc(why)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
-          <label><input type="checkbox" checked id="sq-rem-${esc(key)}" /> remember for rebuilt sandboxes</label>
-          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(key))}, true)">Approve &amp; install</button>
-          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(key))}, false)">Deny</button>
+          <label><input type="checkbox" checked id="sq-rem-${esc(key)}"${busy} /> remember for rebuilt sandboxes</label>
+          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(key))}, true)"${busy}>Approve &amp; install</button>
+          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(key))}, false)"${busy}>Deny</button>
+          ${sendingNote("subq", key)}
           <span class="sq-meta">runs as root for the whole fleet</span>` : ""}
         ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
         ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
@@ -358,11 +518,14 @@ function decideSubq(key, approve) {
   const remember = approve ? !!(rem && rem.checked) : false;
   const shown = subqShown.get(key);
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
+  if (sendingNow("subq", key)) return;
+  markSending("subq", key, true);
   fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
-  }).then(r => { if (!r.ok) throw 0; loadSubq(); })
-    .catch(() => toast("could not record that decision"));
+  }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })
+    .catch(e => notice(`could not record that decision: ${failText(e)}`))
+    .finally(() => markSending("subq", key, false));
 }
 
 // The badge, so a request does not wait unseen for someone to open the panel.
@@ -422,21 +585,22 @@ function askqCard(a) {
   const k = esc(JSON.stringify(key));
   const options = a.options || [];
   let row;
+  const busy = busyAttr("askq", key);
   if (a.state === "waiting") {
     askqShown.set(key, { box: a.box || "", question: a.question || "", options });
     // The buttons carry the option's INDEX, never its text: a label is the box's words, and the
     // only place they go is inside the escaped button face.
     row = (options.length
-      ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})">${esc(o)}</button>`).join("")
-      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
-      + `<button class="kbtn ghost" onclick="dismissAskq(${k})">Dismiss</button>`;
+      ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})"${busy}>${esc(o)}</button>`).join("")
+      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}"${busy} /><button class="kbtn primary" onclick="answerAskq(${k}, -1)"${busy}>Send answer</button>`)
+      + `<button class="kbtn ghost" onclick="dismissAskq(${k})"${busy}>Dismiss</button>` + sendingNote("askq", key);
   } else if (a.state === "answered") {
     row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc(localStamp(a.decided, true))}</span>`;
   } else {
     row = `<span class="sq-meta">dismissed without an answer · ${esc(localStamp(a.decided, true))}</span>`;
   }
   return `
-    <div class="msg">
+    <div class="msg" data-card="${esc(key)}">
       <div class="sq-meta">question · asked by <b>${esc(a.box || "?")}</b> — its own words, unverified · ${esc(localStamp(a.asked))}</div>
       <div class="aq-body">${esc(a.question || "")}</div>
       <div class="sq-row">${row}</div>
@@ -457,12 +621,15 @@ function loadAskq() {
 function sendAskq(key, body) {
   const shown = askqShown.get(key);
   if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }
+  if (sendingNow("askq", key)) return;
+  markSending("askq", key, true);
   const id = key.slice(key.indexOf("/") + 1);
   return fetch("/api/fleet/asks/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...shown, ...body }),
-  }).then(r => { if (!r.ok) throw 0; askqShown.delete(key); loadAskq(); pollAskq(); })
-    .catch(() => toast("could not record that decision"));
+  }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); })
+    .catch(e => notice(`could not record that decision: ${failText(e)}`))
+    .finally(() => markSending("askq", key, false));
 }
 
 // `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
@@ -536,18 +703,20 @@ function gitqCard(r) {
   const reason = (r.reason || "").trim();
   const key = (r.box || "") + "/" + r.id;
   if (pending) gitqShown.set(key, { box: r.box || "", repo: r.repo || "" });
+  const busy = busyAttr("gitq", key);
   return `
-    <div class="msg">
+    <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc(r.repo || "?")}</div>
       <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${reason ? `<div class="sq-log">${esc(reason)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
-          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}" /> hours
-            <input type="checkbox" id="gq-keep-${esc(key)}" /> keep indefinitely</label>
-          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)">Grant write</button>
-          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(key))}, false)">Deny</button>` : ""}
+          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}"${busy} /> hours
+            <input type="checkbox" id="gq-keep-${esc(key)}"${busy} /> keep indefinitely</label>
+          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)"${busy}>Grant write</button>
+          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(key))}, false)"${busy}>Deny</button>
+          ${sendingNote("gitq", key)}` : ""}
       </div>
     </div>`;
 }
@@ -589,7 +758,9 @@ function gitCredRow(c) {
       <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
       <span class="cslug">${esc((c.repos && c.repos.length ? c.repos.join(", ") : c.repo) || "?")}</span>
       <span class="cwhy">${why}</span>
-      ${c.shared ? "" : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
+      ${c.shared ? "" : cardFor(c.repo)
+        ? `<button type="button" class="kbtn ghost" onclick="showRepoToken(${esc(JSON.stringify(c.repo))})">${c.has_token ? "Replace" : "Add"} on its card</button>`
+        : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
       <button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>
     </div>`;
 }
@@ -614,7 +785,7 @@ function renderGitState(d) {
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
-  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} repository token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} write token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   if (!d.ready) {
     el.className = "set-state warn";
     // The App's problem is worth naming only when there *is* an App — "no App configured" would be
@@ -628,7 +799,7 @@ function renderGitState(d) {
     // saying nothing: they would go looking for the wrong problem when a push fails.
     el.innerHTML = d.account_token
       ? `<b>Not scoped.</b> Every box holds this account's <code>gh</code> token — whatever it reaches, read and write. `
-        + `Add a GitHub App or a repository token below to narrow that.${half}`
+        + `Add a GitHub App, or a write token on a repo's card, to narrow that.${half}`
       : `<b>No credential chosen.</b> Boxes read public repos anonymously and <b>cannot push anywhere</b>. `
         + `Pick one of the three below — an App is the one that needs no per-repo upkeep.${half}`;
     return;
@@ -659,7 +830,7 @@ function loadGitCreds() {
     const el = document.getElementById("set-gitcreds");
     if (el) {
       el.innerHTML = gitqCreds.length ? gitqCreds.map(gitCredRow).join("")
-        : `<div class="set-desc">None stored. On the App path you need none — it mints a per-repo token on its own. Add one here for a repo the App cannot reach, or if you would rather not run an App at all.</div>`;
+        : `<div class="set-desc">None stored. On the App path you need none — it mints one per push on its own. For a repo the App cannot reach, or if you would rather not run an App, a repo's write token goes on its card under Repositories.</div>`;
     }
     const rp = document.getElementById("set-readpat");
     if (rp) rp.placeholder = gitReadPatSet ? "a token is stored — paste to replace it" : "github_pat_… (read)";
@@ -682,9 +853,9 @@ function loadGitCreds() {
 // a call would actually send. A repository nothing can act on is said as a warning with the fix,
 // because that is the row a verdict or a merge will fail on.
 const IDENTITY_WORDS = {
-  source: { repo: "this repo's token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
+  source: { repo: "this repo's write token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
   row: (reads, writes) => `reads with ${reads} · posts and merges with ${writes}`,
-  cannotAct: "cannot post, merge or label here — store a token for it on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
+  cannotAct: "cannot post, merge or label here — store a write token on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
   noRepos: "No GitHub repositories yet. Each one you add is listed here with the credential skein uses for it.",
 };
 function renderIdentity(identity) {
@@ -719,10 +890,24 @@ function clearReadPat() {
 function putReadPat(token) {
   return fetch("/api/fleet/git-read-token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return r.json().catch(() => ({})).then(d => { const spoke = saidByBoxes(d); return loadGitCreds().then(() => spoke); }); })
-    .catch(e => toast(String(e.message || "could not store that token")));
+  }).then(async r => { if (!r.ok) throw await refused(r); return r.json().catch(() => ({})).then(d => { const spoke = saidByBoxes(d); return loadGitCreds().then(() => spoke); }); })
+    .catch(e => notice(failText(e) || "could not store that token"));
 }
 
+// **A repo's write token has one home: its card** (SKEIN-1269). The token had four names and three
+// places to enter it; it is "write token" everywhere now, and this pane — a list of every stored
+// one — sends a repository that has a card to that card rather than being a second editor for it.
+// The form here stays for a repository with no card, which has nowhere else to go.
+const cardFor = slug => (repos || []).find(r => (r.slug || "").toLowerCase() === (slug || "").toLowerCase());
+function showRepoToken(slug) {
+  const r = cardFor(slug);
+  if (!r) return;
+  openRepos.add(r.id);
+  setPane("repos");
+  renderRepoList();
+  const field = document.querySelector(`#set-repos [data-repotoken="${CSS.escape(r.slug)}"]`);
+  if (field) { field.scrollIntoView({ block: "nearest" }); field.focus(); }
+}
 // Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
 // hurry. Retyping the repository to do it invites a typo that stores a *second* credential rather
 // than replacing the first, which then quietly keeps working.
@@ -748,7 +933,7 @@ function loadGitq() {
     // Keyed on `ready` rather than the App alone — someone using only their own tokens is set up.
     if (!d.ready) {
       html += `<div class="note">nothing is scoped yet — every box keeps the credential it already had. `
-        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App or a repository token goes.`
+        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App goes, and each repo's write token is on its card under Settings → Repositories.`
         + `${d.app_id && d.app_problem ? ` <b>${esc(d.app_problem)}</b>` : ""}</div>`;
     }
     html += reqs.length
@@ -764,7 +949,7 @@ function loadGitq() {
     if (d.ready) {
       html += `<div class="note" style="margin-top:10px">Tokens, the GitHub App and the scope switch live in
         <a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a>${
-          creds.length ? ` — ${creds.length} repository token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
+          creds.length ? ` — ${creds.length} write token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
     }
     redrawKeeping(list, html);
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
@@ -812,7 +997,7 @@ function storeGitCred(repo, token) {
   return fetch("/api/fleet/repo-token", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Replace a stored token and nothing else — how a shared token is rotated from any card that shares
@@ -821,7 +1006,7 @@ function rotateGitCred(id, token) {
   return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Point an existing repo at the token another repo has (SKEIN-1241). The host asks GitHub whether
@@ -831,7 +1016,7 @@ function joinGitShare(repo, share) {
   return fetch("/api/fleet/repo-share", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, share }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Returns its promise, so a caller — the test, or anything wanting to store then act — can wait
@@ -843,7 +1028,7 @@ function addGitCred() {
   return storeGitCred(repo, token).then(() => {
     document.getElementById("set-c-token").value = "";
     document.getElementById("set-c-repo").value = "";
-  }).catch(e => toast(String(e.message || "could not store that token")));
+  }).catch(e => notice(failText(e) || "could not store that token"));
 }
 
 // Asks first, as `clearReadPat` does: Forget sits beside Store and Replace, and one stray press
@@ -853,9 +1038,9 @@ function removeGitCred(id) {
   const which = reposPhrase(c && (c.repos && c.repos.length ? c.repos : [c.repo])) || "this repository";
   if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; return r.json().catch(() => ({})); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json().catch(() => ({})); })
     .then(d => { saidByBoxes(d); return loadGitCreds(); })
-    .catch(() => toast("could not forget that token"));
+    .catch(e => notice(`could not forget that token: ${failText(e)}`));
 }
 
 // The host answers a forgotten token once every box's copy is taken back, with what each box said
@@ -876,6 +1061,8 @@ function decideGitq(key, approve) {
   const hours = approve ? (keep && keep.checked ? 0 : Math.max(1, parseInt(hrs && hrs.value, 10) || 24)) : 24;
   const shown = gitqShown.get(key);
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
+  if (sendingNow("gitq", key)) return;
+  markSending("gitq", key, true);
   fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, hours, ...shown }),
@@ -885,15 +1072,16 @@ function decideGitq(key, approve) {
   // pressing learns the row they pressed on was stale. The reload is what makes the row show the
   // real state, so the button that was just refused goes.
   }).then(r => r.ok ? loadGitq() : r.text().then(why => {
-    toast(why.trim() || "could not record that decision");
+    notice(why.trim() || "could not record that decision");
     return loadGitq();
-  })).catch(() => toast("could not record that decision"));
+  })).catch(e => notice(`could not record that decision: ${failText(e)}`))
+    .finally(() => markSending("gitq", key, false));
 }
 
 function revokeGitq(box, repo) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; loadGitq(); })
-    .catch(() => toast("could not revoke that grant"));
+    .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); })
+    .catch(e => notice(`could not revoke that grant: ${failText(e)}`));
 }
 
 function paintGitqBadge(n) {

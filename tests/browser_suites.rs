@@ -137,7 +137,7 @@ const NODE_SUITES: [&str; 30] = [
 /// `connections` is here rather than in the node tier because the thing it measures does not exist
 /// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
 /// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 18] = [
+const BROWSER_SUITES: [&str; 19] = [
     "actfail",
     // Adding a private repository from the add dialog, with a pasted token and with the token
     // another repo has: the clone uses the token chosen, a refused one is never saved, a share
@@ -154,6 +154,11 @@ const BROWSER_SUITES: [&str; 18] = [
     // because the claims are a page's — a button inside a button, a press reaching the row under
     // it, a reload — and because time is Playwright's clock.
     "dismiss",
+    // What the page says when a request fails or takes a while: the server's reason for a refusal,
+    // an error that stays until it is closed, a report kept line by line, a button that cannot send
+    // twice, and a launch or a box's settings that do not take a refusal for success (SKEIN-1299,
+    // 1265, 1245, 1296, 1266). Here because each claim is what a person sees after a real click.
+    "feedback",
     // A write request answered twice from the panel: the server's refusal in the toast, and the row
     // redrawn in its real state (SKEIN-1034).
     "gitqrefused",

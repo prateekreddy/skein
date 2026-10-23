@@ -232,6 +232,9 @@ try {
     await page.waitForTimeout(200);
     value("Cancel and Escape each close it and send nothing",
       { open: await ask(), sent: restarts.slice(), native: native.length }, { open: null, sent: [], native: 0 });
+    // **What would make this fail:** the question closing outside the dialog layer
+    // (`registerDialog`, SKEIN-1268) — the focus is left on nothing instead of the button pressed.
+    value("and the focus goes back to Restart", await page.evaluate(() => document.activeElement?.id), "drestart");
     await page.click("#drestart");
     await page.waitForTimeout(200);
     await page.click('#rsask [data-a="yes"]');

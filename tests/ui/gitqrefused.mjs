@@ -88,7 +88,8 @@ try {
   const said = "request r1 is already granted — a request is answered once; to take back a grant, revoke it";
   let toast = "";
   await until(async () => {
-    toast = await page.$eval("#toast", e => e.textContent.trim()).catch(() => "");
+    // A notice since SKEIN-1265: a refusal stays until closed rather than going with the toast.
+    toast = await page.$eval("#notice .nt-text", e => e.textContent.trim()).catch(() => "");
     return toast === said;
   });
   check("a refused answer shows the server's reason, not a generic failure", toast, said);

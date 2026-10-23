@@ -16,6 +16,9 @@ import { grab, harness, pure } from "./lift.mjs";
 const source = [
   // Lifted with `decideSubq`, which closes over it — see the note in `gitgate.mjs`.
   "subqShown", "subqAnnounced", "subqPrimed", "decideSubq", "pollSubq", "paintSubqBadge", "subqCard",
+  // A card with a decision in flight is drawn from this set (SKEIN-1296), and a refusal is read by
+  // one helper (SKEIN-1299).
+  "inFlight", "sendingNow", "markSending", "busyAttr", "sendingNote", "refused", "failText",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -27,6 +30,8 @@ const scope = new Function(`
   ${grab("esc")}
   ${pure("ago")}
   const toast = m => notes.push("toast:" + m);
+  const notice = m => notes.push("notice:" + m);
+  const CSS = { escape: s => s };
   const pushNote = (body, tag) => notes.push({ body, tag });
   const badge = { n: null, title: "" };
   const document = {
@@ -45,6 +50,7 @@ const scope = new Function(`
       return null;
     },
     createElement: () => ({ className: "", textContent: "" }),
+    querySelector: () => null,
   };
   const fetch = (url, opts) => {
     if (opts && opts.method === "POST") {
@@ -67,7 +73,7 @@ const scope = new Function(`
     retick: () => { checkbox.checked = true; },
     reset: () => {
       sent.length = 0; notes.length = 0; queue = [];
-      subqAnnounced.clear(); subqPrimed = false; subqShown.clear();
+      subqAnnounced.clear(); subqPrimed = false; subqShown.clear(); inFlight.clear();
       checkbox = { checked: true }; alertsOn = true;
     },
   };

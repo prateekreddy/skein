@@ -417,6 +417,178 @@ await check("the login terminal does not close on a click outside, and does on i
   await page.waitForFunction(() => !document.getElementById("loginterm").classList.contains("open"));
 });
 
+// ---------- every popup is a dialog: focus, Escape, its close, and the keys behind it ----------
+// One helper in panels.js, `registerDialog`, does this for every popup (SKEIN-1247, 1268, 1292).
+console.log("\nevery popup as a dialog");
+
+// Where the focus is before each popup opens: a header button, which the page cannot mistake for
+// anything inside a popup.
+const BEFORE = "mbxbtn";
+const openFrom = async (id, opener) => {
+  await closeEverything();
+  await page.locator(`#${BEFORE}`).focus();
+  await page.evaluate(`(${opener})(${JSON.stringify(BOX)})`);
+  await page.waitForFunction(i => document.getElementById(i)?.classList.contains("open"), id);
+};
+const focusInside = id => page.evaluate(i => {
+  const a = document.activeElement;
+  return !!a && a !== document.body && document.getElementById(i).contains(a);
+}, id);
+const filterOpen = () => page.evaluate(() => !!fsearchEl?.classList.contains("on"));
+
+// The control the fleet-key checks lean on: "/" opens the board filter when nothing is open. Fails
+// if "/" is no longer the filter's key, which would make the checks below pass for nothing.
+await check("with no popup open, \"/\" opens the board filter", async () => {
+  await closeEverything();
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await page.keyboard.press("/");
+  const on = await filterOpen();
+  await page.evaluate(() => closeFilter());
+  if (!on) throw new Error("the filter did not open");
+});
+
+for (const [id, opener] of POPUPS) {
+  // Fails if the dialog layer stops moving the focus in (Questions, Package requests, Repo write
+  // access, Box settings, the digest and Load left it on the button that opened them), or stops
+  // handling Escape for a popup (four had none: SKEIN-1247), or stops putting the focus back.
+  await check(`#${id}: the focus goes in, Escape closes it, and the focus comes back`, async () => {
+    await openFrom(id, opener);
+    if (!(await focusInside(id))) throw new Error(`focus stayed on ${await activeId()}`);
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(i => !document.getElementById(i).classList.contains("open"), id);
+    const at = await page.waitForFunction(b => document.activeElement?.id === b, BEFORE, { timeout: 1000 })
+      .then(() => BEFORE, async () => activeId());
+    if (at !== BEFORE) throw new Error(`the focus came back to ${at}, not #${BEFORE}`);
+    // And it opens again: a close that broke the next open would read as a close here.
+    await page.evaluate(`(${opener})(${JSON.stringify(BOX)})`);
+    await page.waitForFunction(i => document.getElementById(i)?.classList.contains("open"), id);
+  });
+  // Fails if a popup's card loses `role="dialog"`/`aria-modal`/its name, if its ✕ is a <span>
+  // again (Tab never reaches it), if Tab walks out of the popup into the page behind it, or if Enter
+  // on the ✕ does something other than press it (Add a repository submitted its form).
+  await check(`#${id} is a named modal dialog whose ✕ Tab reaches and Enter presses`, async () => {
+    await openFrom(id, opener);
+    const card = await page.evaluate(i => {
+      const d = document.getElementById(i).querySelector('[role="dialog"]');
+      return d ? { modal: d.getAttribute("aria-modal"), name: d.getAttribute("aria-label") || "" } : null;
+    }, id);
+    if (!card || card.modal !== "true" || !card.name.trim()) throw new Error(`dialog ${JSON.stringify(card)}`);
+    if (id === "pal") return;   // the palette has no ✕: Escape is its close
+    let reached = false;
+    for (let n = 0; n < 60 && !reached; n++) {
+      await page.keyboard.press("Tab");
+      if (!(await focusInside(id))) throw new Error(`Tab left the dialog for ${await activeId()}`);
+      reached = await page.evaluate(() => {
+        const a = document.activeElement;
+        return a?.tagName === "BUTTON" && /^(x|set-x)$/.test(a.className) && a.getAttribute("aria-label") === "Close";
+      });
+    }
+    if (!reached) throw new Error("Tab never reached a button labelled Close");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(i => !document.getElementById(i).classList.contains("open"), id, { timeout: 2000 });
+  });
+  // Fails if the fleet keymap is reached with a popup open (boot.js's global keydown returning only
+  // for some popups): "/" opens the board filter behind the dialog. The focus is on nothing, as
+  // after a click on the popup's text, so the key is not a field's.
+  await check(`#${id} open: a fleet key does nothing behind it`, async () => {
+    await openFrom(id, opener);
+    await page.evaluate(() => document.activeElement?.blur?.());
+    await page.keyboard.press("/");
+    const on = await filterOpen();
+    if (on) { await page.evaluate(() => closeFilter()); throw new Error("\"/\" opened the board filter behind the popup"); }
+    if (!(await isOpen(id))) throw new Error("the popup closed");
+  });
+}
+
+// Escape in the login terminal is the agent's (a TUI's cancel), not a close. Fails if it is
+// registered with a close like the others.
+await check("Escape in the login terminal goes to the terminal and leaves it open", async () => {
+  await closeEverything();
+  await page.evaluate(() => openLoginTerminal("claude"));
+  await page.waitForFunction(() => loginTermState?.ws.readyState === 1);
+  loginFrames.length = 0;
+  await page.evaluate(() => loginTermState.term.focus());
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  const open = await page.evaluate(() => document.getElementById("loginterm").classList.contains("open"));
+  const got = loginFrames.map(f => typeof f === "string" ? f : Buffer.from(f).toString("latin1")).join("");
+  await page.locator("#loginterm .x").click();
+  await page.waitForFunction(() => !document.getElementById("loginterm").classList.contains("open"));
+  if (!open || !got.includes("\x1b")) throw new Error(`open ${open}, the terminal got ${JSON.stringify(got)}`);
+});
+
+// A popup over a popup: Add a repository, from Settings' own button. Fails if the later popup is
+// not lifted above the earlier one (the two share a z-index and Settings comes later in the page,
+// so Add a repository was drawn behind it), or if Escape closes more than the top one.
+await check("a popup opened from another is on top, and Escape closes only it", async () => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("repos"));
+  await page.waitForFunction(() => settingsModal().classList.contains("open"));
+  await page.locator("#settings .set-add").click();
+  await page.waitForFunction(() => document.getElementById("addrepo").classList.contains("open"));
+  const onTop = await page.evaluate(() => {
+    const r = document.querySelector("#addrepo .nb-card").getBoundingClientRect();
+    return document.getElementById("addrepo").contains(document.elementFromPoint(r.left + r.width / 2, r.top + 20));
+  });
+  if (!onTop) throw new Error("Add a repository is drawn under Settings");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !document.getElementById("addrepo").classList.contains("open"));
+  if (!(await isOpen("settings"))) throw new Error("Escape closed Settings as well");
+  if (!(await focusInside("settings"))) throw new Error(`the focus did not go back into Settings: ${await activeId()}`);
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+});
+
+// The digest that arrives while a popup is open (SKEIN-1292). Fails if `showAwayDigest` draws
+// over the popup — the digest opens, and the Escape below closes it instead of New box — or if the
+// deferred digest never comes back once the popup is gone.
+await check("\"While you were away\" waits for an open popup to close, then shows", async () => {
+  await closeEverything();
+  const seen = [];
+  await page.route("**/api/away", r => r.fulfill({ json: { since: "", moments: [{ name: "skein-test-gone", from: "working", to: "done" }] } }));
+  await page.route("**/api/away/seen", r => { seen.push(1); return r.fulfill({ json: {} }); });
+  try {
+    await page.evaluate(() => openNewBox());
+    await page.waitForFunction(() => document.getElementById("newbox").classList.contains("open"));
+    await page.locator("#nb-branch").fill("keep-me");
+    await page.evaluate(() => showAwayDigest());
+    await page.waitForTimeout(500);
+    const awayNow = await page.evaluate(() => !!document.getElementById("away")?.classList.contains("open"));
+    if (awayNow) throw new Error("the digest opened over New box");
+    if (!(await isOpen("newbox")) || (await page.locator("#nb-branch").inputValue()) !== "keep-me") throw new Error("New box lost what was typed");
+    if (seen.length) throw new Error("marked seen before it was shown");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.getElementById("newbox").classList.contains("open"));
+    await page.waitForFunction(() => document.getElementById("away")?.classList.contains("open"), null, { timeout: 2000 });
+    const said = await page.evaluate(() => document.getElementById("away").textContent);
+    if (!said.includes("skein-test-gone")) throw new Error(`the digest said ${JSON.stringify(said)}`);
+  } finally {
+    await page.unroute("**/api/away");
+    await page.unroute("**/api/away/seen");
+    await closeEverything();
+  }
+});
+
+// A close before Settings' loads answer (SKEIN-1306). Fails if `openSettings` adds `open` when
+// its loads answer whatever happened since: the late answer reopens the closed dialog.
+await check("Settings closed before its loads answer stays closed, and opens again when asked", async () => {
+  await closeEverything();
+  await page.route("**/api/settings", async r => {
+    if (r.request().method() === "GET") await new Promise(res => setTimeout(res, 400));
+    return r.fallback();
+  });
+  try {
+    await page.evaluate(() => { openSettings("github"); closeSettings(); });
+    await page.waitForTimeout(900);
+    if (await isOpen("settings")) throw new Error("the late answer reopened Settings");
+    await page.evaluate(() => openSettings("github"));
+    await page.waitForFunction(() => settingsModal().classList.contains("open"), null, { timeout: 3000 });
+  } finally {
+    await page.unroute("**/api/settings");
+    await closeEverything();
+  }
+});
+
 // ---------- Forget asks first, and a title is not a button (SKEIN-1259) ----------
 console.log("\nForget, on a repo's write token and a connection's Plane token");
 
@@ -487,6 +659,37 @@ await check("Forget, answered OK, sends the DELETE for that token", async () => 
   if (deletes.join() !== "/api/fleet/git-credentials/acme-thing" || dialogs.length !== 1) {
     throw new Error(`DELETEs ${JSON.stringify(deletes)}, asked ${JSON.stringify(dialogs)}`);
   }
+});
+
+// ---------- the write token: one name, one home (SKEIN-1269) ----------
+// Fails if the GitHub pane's row for a repo that has a card goes back to being a second editor
+// (its button prefilling the pane's own form), or if the card it sends you to is not opened with
+// the focus in that repo's token field.
+await check("a stored token's row in GitHub & keys sends you to its repo's card", async () => {
+  await closeEverything();
+  await page.evaluate(() => openSettings("github"));
+  await page.waitForSelector('#settings.open #set-gitcreds .set-cred');
+  await page.evaluate(() => { document.getElementById("set-gitalt").open = true; });
+  await page.locator('#set-gitcreds button', { hasText: "on its card" }).click();
+  await page.waitForFunction(() => document.querySelector('.set-pane.on')?.dataset.pane === "repos");
+  const at = await page.evaluate(() => document.activeElement?.getAttribute("data-repotoken"));
+  if (at !== "acme/thing") throw new Error(`the focus is on ${at}`);
+});
+// Fails if any of the old names comes back into the page's words: "repository token", "repo
+// token" or "PAT" (a GitHub prefix inside a placeholder is not a name and is not counted).
+await check("the per-repo token is called a write token, and nothing else, in Settings and Add a repository", async () => {
+  await closeEverything();
+  const words = await page.evaluate(() => {
+    for (const d of document.querySelectorAll("#settings details")) d.open = true;
+    // The page's own words. Diagnostics is the server's health report, drawn as it comes, and its
+    // wording is the server's (captured separately).
+    const set = document.getElementById("settings").cloneNode(true);
+    set.querySelector("#set-diag")?.remove();
+    return set.textContent + " " + document.getElementById("addrepo").textContent;
+  });
+  const old = words.match(/repository tokens?|repo tokens?|\bPATs?\b/gi);
+  if (old) throw new Error(`old names: ${[...new Set(old)].join(", ")}`);
+  if (!/write token/i.test(words)) throw new Error("no \"write token\" either");
 });
 
 // A work-tracking connection with a stored Plane token, stubbed: storing a real one is a POST this
@@ -584,6 +787,38 @@ await check("Enter on Discard discards rather than saving", async () => {
   await page.waitForFunction(() => !settingsModal().classList.contains("open"));
   await page.waitForTimeout(200);
   if (settingsPosts.length || (await storedAppId()) !== "") throw new Error(`saves ${settingsPosts.length}`);
+});
+// Enter on a button or a summary is that control's own press (SKEIN-1267). Each fails if the
+// dialog's Enter handler goes back to saving from anywhere: a POST goes out with the typed App ID.
+await check("Enter on Settings' Cancel cancels, and saves nothing", async () => {
+  await editSettings("4242");
+  await page.locator("#settings .set-foot button", { hasText: "Cancel" }).focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  await page.waitForTimeout(200);
+  if (settingsPosts.length || (await storedAppId()) !== "") throw new Error(`saves ${settingsPosts.length}`);
+});
+await check("Enter on a summary in Settings unfolds it, and saves nothing", async () => {
+  await editSettings("4242");
+  const was = await page.evaluate(() => document.getElementById("set-ghalt").open);
+  await page.locator("#set-ghalt > summary").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  const now = await page.evaluate(() => document.getElementById("set-ghalt").open);
+  if (now === was || settingsPosts.length || !(await isOpen("settings"))) {
+    throw new Error(`open ${was} -> ${now}, saves ${settingsPosts.length}, dialog open ${await isOpen("settings")}`);
+  }
+  await page.evaluate(() => discardSettings());
+});
+// The other half: Enter in a field still saves. Fails if `enterSubmits` stops counting a text input.
+await check("Enter in a Settings field still saves", async () => {
+  await editSettings("4242");
+  await page.locator("#set-ghappid").press("Enter");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  if (settingsPosts.length !== 1 || settingsPosts[0].github_app_id !== "4242") throw new Error(`saves ${JSON.stringify(settingsPosts)}`);
+  await editSettings("");
+  await page.locator("#set-go").click();
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
 });
 // Fails if Save on the notice is not wired to `saveSettings`: nothing is stored and it stays open.
 await check("Save on the notice saves the edit and closes", async () => {
@@ -709,6 +944,90 @@ await page.unroute(/\/api\/fleet\/asks\/[^/]+$/);
 await page.unroute("**/api/fleet/git-grants");
 await page.unroute("**/api/fleet/substrate");
 await closeEverything();
+
+// ---------- the hover card, the mailbox list, and Settings on a phone (SKEIN-1300) ----------
+console.log("\nthe hover card, the mailbox list, Settings on a phone");
+
+// Fails if the card goes back to being drawn under the row (it covers the next rows), or a figure
+// the sandbox did not report goes back to "…".
+await check("the resource card sits beside its row, and a figure nobody measured says so", async () => {
+  await closeEverything();
+  let release;
+  const held = new Promise(res => { release = res; });
+  await page.route("**/api/fleet/load", async r => { await held; return r.fulfill({ json: [] }); });
+  try {
+    await page.evaluate(() => {
+      loadCache = { at: 0, rows: [], inflight: null };
+      for (const [id, top] of [["skein-test-row1", 200], ["skein-test-row2", 232]]) {
+        const r = document.createElement("div"); r.id = id;
+        r.style.cssText = `position:fixed;left:0;top:${top}px;width:300px;height:30px`;
+        document.body.append(r);
+      }
+      rpopFor = "skein-test-box";
+      showResourcePop("skein-test-box", document.getElementById("skein-test-row1"));
+    });
+    const during = await page.evaluate(() => document.getElementById("rpop").textContent);
+    release();
+    await page.waitForFunction(() => document.getElementById("rpop").textContent.includes("not measured"));
+    const got = await page.evaluate(() => {
+      const c = document.getElementById("rpop").getBoundingClientRect();
+      const next = document.getElementById("skein-test-row2").getBoundingClientRect();
+      const covers = c.left < next.right && c.right > next.left && c.top < next.bottom && c.bottom > next.top;
+      return { covers, text: document.getElementById("rpop").textContent };
+    });
+    if (!during.includes("measuring…")) throw new Error(`while asking it said ${JSON.stringify(during)}`);
+    if (got.covers || got.text.includes("…")) throw new Error(JSON.stringify(got));
+  } finally {
+    release();
+    await page.unroute("**/api/fleet/load");
+    await page.evaluate(() => { hideResourcePop(); document.getElementById("skein-test-row1")?.remove(); document.getElementById("skein-test-row2")?.remove(); });
+  }
+});
+
+// A phone, for the two checks that are about one.
+const phone = await context.newPage();
+phone.setDefaultTimeout(5000);
+phone.on("pageerror", e => noise.push(`[pageerror phone] ${e.message}`));
+await phone.setViewportSize({ width: 390, height: 844 });
+await phone.routeWebSocket(/\/api\/boxes\/[^/]+\/terminal/, () => {});
+await phone.goto(`${origin}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
+await phone.waitForFunction(() => typeof openSettings === "function");
+
+// Fails if `fillRecipients` lists ended boxes again, or the select keeps its content's width
+// (`min-width:0` dropped) and runs off a phone.
+await check("the mailbox lists only boxes that can read it, and fits a phone", async () => {
+  const got = await phone.evaluate(() => {
+    boxes = [{ name: "skein-test-live", state: "working" },
+             { name: "skein-test-ended", state: "ended" },
+             { name: "skein-test-" + "a-very-long-branch-name-".repeat(3), state: "waiting" }];
+    openMailbox();
+    const sel = document.getElementById("mbx-to");
+    const out = { names: [...sel.options].map(o => o.value), right: sel.getBoundingClientRect().right };
+    closeMailbox();
+    return out;
+  });
+  if (got.names.includes("skein-test-ended") || !got.names.includes("skein-test-live") || got.right > 390) {
+    throw new Error(JSON.stringify(got));
+  }
+});
+
+// Fails if `setPane` stops bringing the active section's button into view: on a phone the rail
+// scrolls sideways and the last sections are off its edge.
+await check("on a phone, the Settings section opened is in view on its rail", async () => {
+  for (const pane of ["keys", "repos"]) {
+    await phone.evaluate(p => { closeSettings(); openSettings(p); }, pane);
+    await phone.waitForFunction(() => settingsModal().classList.contains("open"));
+    await phone.waitForTimeout(400);
+    const at = await phone.evaluate(p => {
+      const b = document.querySelector(`.set-navi[data-pane="${p}"]`).getBoundingClientRect();
+      const rail = document.querySelector(".set-nav").getBoundingClientRect();
+      return { b: [b.left, b.right], rail: [rail.left, rail.right] };
+    }, pane);
+    if (at.b[0] < at.rail[0] - 1 || at.b[1] > at.rail[1] + 1) throw new Error(`${pane}: ${JSON.stringify(at)}`);
+  }
+  await phone.evaluate(() => closeSettings());
+});
+await phone.close();
 
 await check("no page errors while the popups were driven", () => {
   if (noise.length) throw new Error(noise.slice(0, 5).join(" | "));
