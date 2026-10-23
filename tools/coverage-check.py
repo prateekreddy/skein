@@ -19,6 +19,15 @@ a record of how much of the code a test already reaches, and a change that lower
 point fails. When the measured number rises by a point or more this says so and names the value to
 write — raising it is a one-line change a person makes, never something this script commits.
 
+ONE RUN FOR TWO GATES (SKEIN-1273). `--no-skip-log L` runs the measurement with
+`$SKEIN_TESTS_NO_SKIP` set and keeps everything the suite printed in `L`, whose first line names the
+switch. CI's `coverage` job then hands `L` to `noskip-check`, which judges the skips in it AND the
+failures — so the job is red when a test fails, which `--ignore-run-fail` alone never made it, and
+the suite runs once where it ran twice. Under the switch a skip is a panic rather than an early
+return, which leaves the number where it was: the lines after the guard ran in neither case.
+Beside the number this prints what the run passed and failed, because a number measured over a
+run that broke wholesale is low for a reason the number cannot say.
+
 REFUSES RATHER THAN PASSES QUIETLY. A report that counted no lines, a floor file that does not
 parse, or a measurement that never produced a report is exit 2 with the reason — never a green,
 because "I measured nothing" is not "coverage is fine" (the SKEIN-647 shape).
@@ -27,6 +36,7 @@ Usage:
 
     python3 tools/coverage-check.py rust                 # measure, then compare
     python3 tools/coverage-check.py rust --from F        # compare a `cargo llvm-cov --json` export
+    python3 tools/coverage-check.py rust --no-skip-log L # measure under SKEIN_TESTS_NO_SKIP=1, log to L
     python3 tools/coverage-check.py cockpit              # measure, then compare
     python3 tools/coverage-check.py cockpit --from F     # compare an lcov file node wrote
 
@@ -36,6 +46,7 @@ Exit codes: 0 at or above the floor, 1 below it, 2 no valid measurement (or call
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -53,6 +64,10 @@ FLOOR_FILE = os.path.join(ROOT, "docs", "coverage-floor.toml")
 # the crates the REPORT covers: without it `warden/src` is compiled, tested, and then left out of
 # the number, which is what a first measurement here did.
 RUST_IGNORE = r"(^|/)tests/"
+
+# The first line of a `--no-skip-log`, which `tools/noskip-check.py` refuses a log without.
+NO_SKIP_MARK = "SKEIN_TESTS_NO_SKIP=1"
+RESULT_LINE = re.compile(r"(?m)^test result: \w+\. (\d+) passed; (\d+) failed;")
 
 # The cockpit's test command, the `cockpit-tests` gate's own glob, plus coverage.
 COCKPIT_INCLUDE = "cockpit/src/**"
@@ -89,10 +104,13 @@ def rust_from_json(path):
         refuse(f"{path} is not a `cargo llvm-cov --json` export: {e!r}")
 
 
-def rust_measure(out):
+def rust_measure(out, log=None):
     # `--ignore-run-fail`: a failing test is the `test` gate's red, and this job reports coverage of
     # the run that happened rather than no number at all. A run that broke wholesale reaches the
-    # floor check with a number far below it, so it cannot pass by accident. It also runs every
+    # floor check with a number far below it, so it cannot pass by accident — but one flaky test
+    # lowers the number by what it would have covered and the step stays green, which is why CI
+    # runs this with `--no-skip-log` and hands the log to `noskip-check`, which fails on any test
+    # that failed and was not a skip (SKEIN-1273). It also runs every
     # binary past a failing one, which is `--no-fail-fast` — and cargo-llvm-cov refuses the two
     # together, so that flag, which the `test` gate passes, is absent here on purpose.
     cmd = [
@@ -100,10 +118,38 @@ def rust_measure(out):
         "--ignore-filename-regex", RUST_IGNORE,
         "--json", "--summary-only", "--output-path", out,
     ]
-    print("coverage-check: " + " ".join(cmd), flush=True)
-    status = subprocess.call(cmd, cwd=ROOT)
+    if log is None:
+        print("coverage-check: " + " ".join(cmd), flush=True)
+        status = subprocess.call(cmd, cwd=ROOT)
+    else:
+        said = f"coverage-check: {NO_SKIP_MARK} " + " ".join(cmd)
+        print(said, flush=True)
+        env = dict(os.environ, SKEIN_TESTS_NO_SKIP="1")
+        try:
+            sink = open(log, "w", encoding="utf-8")
+        except OSError as e:
+            refuse(f"cannot write the run's log to {log}: {e}")
+        with sink:
+            sink.write(said + "\n")
+            # Teed rather than captured: the job's own log still shows the run as it goes.
+            proc = subprocess.Popen(
+                cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace",
+            )
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sink.write(line)
+            status = proc.wait()
+        sys.stdout.flush()
     if status != 0 or not os.path.exists(out):
         refuse(f"`cargo llvm-cov` exited {status} and produced no report")
+
+
+def what_ran(log):
+    """`passed, failed, binaries` summed over a run's `test result:` lines."""
+    with open(log, encoding="utf-8", errors="replace") as f:
+        found = RESULT_LINE.findall(f.read())
+    return sum(int(p) for p, _ in found), sum(int(f) for _, f in found), len(found)
 
 
 def cockpit_from_lcov(path):
@@ -166,19 +212,29 @@ def verdict(kind, covered, count, floor):
 
 def main(argv):
     if len(argv) not in (1, 3) or argv[0] not in ("rust", "cockpit") or (
-        len(argv) == 3 and argv[1] != "--from"
-    ):
+        len(argv) == 3 and argv[1] not in ("--from", "--no-skip-log")
+    ) or (len(argv) == 3 and argv[1] == "--no-skip-log" and argv[0] != "rust"):
         print(__doc__.split("Usage:")[1].split("Exit codes")[0].rstrip(), file=sys.stderr)
         return 2
     kind = argv[0]
     floor = read_floor(kind)
-    given = argv[2] if len(argv) == 3 else None
+    given = argv[2] if len(argv) == 3 and argv[1] == "--from" else None
+    log = argv[2] if len(argv) == 3 and argv[1] == "--no-skip-log" else None
     with tempfile.TemporaryDirectory() as tmp:
         if kind == "rust":
             path = given or os.path.join(tmp, "llvm-cov.json")
             if not given:
-                rust_measure(path)
+                rust_measure(path, log)
             covered, count = rust_from_json(path)
+            if log:
+                passed, failed, binaries = what_ran(log)
+                print(
+                    f"coverage-check: measured over a run of {binaries} test binaries under "
+                    f"{NO_SKIP_MARK}: {passed} passed, {failed} failed. A skip is a failure under "
+                    f"the switch, so `noskip-check` on {log} says which failures are skips and "
+                    f"fails the job on any that are not.",
+                    flush=True,
+                )
         else:
             path = given or os.path.join(tmp, "cockpit.lcov")
             if not given:

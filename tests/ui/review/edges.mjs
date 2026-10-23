@@ -519,6 +519,14 @@ await check("a box that ran out of time offers the box again or here instead, an
 // which is exactly what `revChains` reads (`base_ref` → `head_ref`), so this is the real stack
 // renderer and not a stand-in for it.
 await check("a verdict pressed on a stack step is acknowledged where it was pressed", async () => {
+  // **No queue load may land while the stack exists only in this page** (SKEIN-1307). The stack is
+  // an edit to `revQueue`, and any `loadReview` that lands afterwards puts the server's copy back
+  // and takes the stack with it — a load already in flight, or the stale-answer chase, which
+  // re-asks at 4s, 8s, 16s… after a `fresh: false` answer. Under the instrumented coverage run that
+  // happened inside the wait below: "the pane holds {"stacks":0,…}" (run 39871111922). The same two
+  // steps `refreshQueue` in setup.mjs takes before its own load, for the same reason.
+  await page.waitForFunction(() => !revLoading, null, { timeout: 20000 });
+  await page.evaluate(() => { clearTimeout(revStaleTimer); revStaleTimer = null; });
   const built = await page.evaluate(k => {
     const all = revQueue.prs || [];
     const step = all.find(p => (p.repo_id + "#" + p.number) === k);

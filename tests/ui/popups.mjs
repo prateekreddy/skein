@@ -149,9 +149,16 @@ const closeEverything = () => page.evaluate(() => {
 // ---------- paste and copy with Settings open over the terminal ----------
 console.log("\nSettings open over a box terminal");
 
-/** Settings on the GitHub pane, with focus in its plain-text GitHub App ID field, emptied. */
+/** Settings on the GitHub pane, with focus in its plain-text GitHub App ID field, emptied.
+ *
+ *  **Closed first, so the wait below waits for THIS open** (SKEIN-1304). `openSettings` adds the
+ *  `open` class, and moves focus to the dialog's shell, only once its loads answer — so with
+ *  Settings still open from the check before, the wait returned at once, this focused the field,
+ *  and the late answer then took focus away from it: the keypress reached the shell, and the
+ *  field's listener saw nothing (master run 39862044533, "the field saw []"). Closed, the class can
+ *  only come back from this call's answer, in the same task that moves the focus. */
 const focusSettingsField = async () => {
-  await page.evaluate(() => openSettings("github"));
+  await page.evaluate(() => { closeSettings(); openSettings("github"); });
   await page.waitForFunction(() => settingsModal().classList.contains("open"));
   await page.locator("#set-ghappid").fill("");
   await page.locator("#set-ghappid").focus();

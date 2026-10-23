@@ -229,18 +229,20 @@ gets used for.
 `.github/workflows/ci.yml` invokes those same gates, one step per gate, as `tools/gates.sh run
 <name>` — so that a red X in the UI still names the gate that failed while the command it runs is
 written down only once. The gates are spread over four jobs that run side by side — `check` (every
-gate that reads the tree rather than running it), `test` (`submodule-check` and the suite), `noskip`
-(`noskip-check`) and `citation` (`citation-check`) — because one job running them in turn took thirty
-minutes a push (SKEIN-1228); each gate is still one step in one job, so a red X still names it.
-Twenty-seven of the workflow's `- run:` steps are not gates. Seven are in the `test` job and the
-same seven in `noskip`, the two set up alike so that a skip means the same in both: four
+gate that reads the tree rather than running it), `test` (`submodule-check` and the suite),
+`citation` (`citation-check`) and `coverage`, whose `noskip-check` step judges the log of that job's
+own run of the suite rather than running it again (SKEIN-1273) — because one job running them in turn
+took thirty minutes a push (SKEIN-1228); each gate is still one step in one job, so a red X still
+names it. Twenty of the workflow's `- run:` steps are not gates. Seven are in the `test` job and the
+same seven in `coverage`, the two set up alike so that a skip means the same in both: four
 prepare the machine, one builds the bubblewrap release pinned by its checksum in the workflow's
 `env:` (the runner's own is too old to overlay `~/.local`, SKEIN-1217), one proves bwrap actually
 works, one proves it is that release and that it overlays. One in `check` runs gitleaks — a release
 pinned by its checksum, with `.gitleaks.toml` as its allow-list, and not a gate only because a
 contributor's machine has no gitleaks — and one in `citation` deepens the clone for the step after
 it. Two are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds every
-target at it, and nine are the `coverage` job, which holds line coverage at a floor — both under
+target at it, and two more are the `coverage` job's measurements, which hold line coverage at a
+floor — both under
 "Releases, and what CI covers" below. The step that reports
 what the run skipped used to be an eighth — advisory, and therefore never acted on, which is what
 made `noskip-check` a gate instead (SKEIN-558, SKEIN-881). **The rest are gates that can fail your
@@ -249,7 +251,7 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 49
+grep -c '^      - run:' .github/workflows/ci.yml     # → 42
 tools/gates.sh --list | wc -l                        # → 23
 ```
 
@@ -275,7 +277,7 @@ tools/gates.sh --list | wc -l                        # → 23
 | `cockpit-tests` | the cockpit's pure functions | — |
 | `cockpit-bundle` | the committed bundle is not stale | — |
 | `fixture-root-check` | every browser suite that drives a real server builds its fixture under the fixture root, not `os.tmpdir()` | — |
-| `noskip-check` | the suite again under `$SKEIN_TESTS_NO_SKIP`, failing on a skip inside a test binary whose every declared requirement this machine has — and reporting, only, about the rest | `ENVIRONMENTAL` in `tools/noskip-check.py` |
+| `noskip-check` | the suite again under `$SKEIN_TESTS_NO_SKIP` (in CI, the `coverage` job's run of it, handed over as `$SKEIN_NOSKIP_FROM`), failing on a skip inside a test binary whose every declared requirement this machine has — and reporting, only, about the rest — and on any test in that run that failed and was not a skip | `ENVIRONMENTAL` in `tools/noskip-check.py` |
 | `gate-list-check` | this table, `ci.yml` and `tools/` itself still name the set `tools/gates.sh` defines | the `ci` column, and `not_a_gate`, in `tools/gates.sh` |
 | `citation-check` | every commit sha cited in `docs/` is still reachable | `docs/citations.toml` |
 
@@ -728,17 +730,20 @@ with the exceptions in `GATED` (see "Be honest with yourself about what you can 
 CI run stands behind that.
 
 **What CI runs.** `.github/workflows/ci.yml`, on every branch push and pull request, on
-`ubuntu-latest`:
+`ubuntu-24.04` — named rather than `ubuntu-latest`, because the workflow argues from that image's
+bubblewrap and AppArmor defaults (SKEIN-1275):
 
-- the `check`, `test`, `noskip` and `citation` jobs, side by side: every gate `tools/gates.sh`
-  marks for CI, one step each, each in exactly one of them. That is 21 of the 22; `alone-check` is
+- the `check`, `test`, `citation` and `coverage` jobs, side by side: every gate `tools/gates.sh`
+  marks for CI, one step each, each in exactly one of them. That is 22 of the 23; `alone-check` is
   the one CI does not run, for the reason under "The gate that is not in CI" above, and
   `gate-list-check` fails if that ever stops being the only one.
 - the `msrv` job: `cargo build --locked --all --all-targets` on the toolchain `rust-version` in
   `Cargo.toml` names. That version was measured, not picked, and the comment beside it says how;
   the job reads it from `Cargo.toml`, so the number exists once. It is a build, not a second run of
   the gates — though `clippy` in the `check` job also reads it, and fails on an API newer than it.
-- the `coverage` job: line coverage, which fails a change that lowers it below the floor.
+- the `coverage` job: line coverage, which fails a change that lowers it below the floor, measured
+  over a run of the suite under `$SKEIN_TESTS_NO_SKIP` whose log `noskip-check` then judges — so
+  the suite runs twice a push, in `test` and here, and both runs go red on a failing test.
 
 **The coverage floor.** `tools/coverage-check.py` measures two numbers and compares each with its
 floor in `docs/coverage-floor.toml`: `rust`, the line coverage of `src/` and `warden/src/` over the

@@ -190,7 +190,8 @@ set -u
 #     `tools/gates.sh run test` rather than a second copy of the command, so it follows `test` too
 #     and, locally, costs execution rather than a compile. It is the gate that can fail a change
 #     over a SKIP, scoped to the binaries whose declared requirements this machine answers for
-#     (SKEIN-881). In CI it is a job of its own beside `test`, and pays for its own build there.
+#     (SKEIN-881). In CI it runs nothing: the `coverage` job runs the suite under the switch and
+#     hands its log over as `$SKEIN_NOSKIP_FROM` (SKEIN-1273).
 #   * `citation-check` is last, because it is the only gate that reads git history. In CI it has a
 #     job of its own that deepens the shallow clone before calling it (see the `citation` job in
 #     ci.yml).

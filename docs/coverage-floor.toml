@@ -20,7 +20,15 @@
 # collected (that needs a nightly compiler).
 # Counted: the 126 files under `src/` and `warden/src/`; the harness in `tests/` is not.
 # Measured 87.98% — 56846 of 64614 lines.
-floor = 87
+#
+# Raised to 88 (SKEIN-1276), from CI's `coverage` job rather than a local run: `python3
+# tools/coverage-check.py rust --no-skip-log`, under `$SKEIN_TESTS_NO_SKIP`, on ubuntu-24.04 with
+# every requirement installed. Measured 89.04% — 67832 of 76185 lines, over 46 test binaries — in
+# run 39871111922, at 249e217; earlier runs on master measured 88.80% to 88.89%. 88 rather than
+# the 89 that rounding down would give: one run at 89.04 is too close to the line to hold it, and
+# that run had one failing browser test, which lowers the number. Raised only once a failing test
+# fails this job (SKEIN-1273), so a flake can no longer lower the measurement while it stays green.
+floor = 88
 
 [cockpit]
 # `node --test --experimental-test-coverage --test-coverage-include='cockpit/src/**'` over

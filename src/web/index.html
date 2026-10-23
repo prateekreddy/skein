@@ -5004,11 +5004,19 @@ function revEditSave() {
   })
     .then(r => r.json())
     .then(d => {
-      revEditSaying = d.ok ? "" : (d.error || "that did not save");
+      // The answer can land after the editor was closed, and setting `revEdit` then would open it
+      // again — so the next press of "workflows", meant to open it, closed it (SKEIN-1271). The
+      // save happened either way; what an answer may not do is reopen what the person closed. A
+      // refusal with the editor shut is said in a toast, because `revEditSaying` with no editor
+      // reads as "the workflow file could not be read", which is not what went wrong.
+      const open = revEdit !== null;
+      if (open) revEditSaying = d.ok ? "" : (d.error || "that did not save");
       if (d.ok) {
-        revEdit = { workflow: d.workflow || [] };   // what skein will read back, not what was sent
+        if (open) revEdit = { workflow: d.workflow || [] };   // what skein will read back, not what was sent
         toast("workflows saved");
         loadWorkflows();
+      } else if (!open) {
+        toast(`workflows not saved: ${String(d.error || "that did not save").split("\n")[0]}`);
       }
       renderReview();
     })

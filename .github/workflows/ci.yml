@@ -9,8 +9,7 @@ on:
   pull_request:
   workflow_call:
 
-# **The bubblewrap the `test`, `noskip` and `coverage` jobs build, pinned once for all three
-# (SKEIN-1217).** An exact upstream release, and the sha256 of its tarball, which each job checks
+# **The bubblewrap the `test` and `coverage` jobs build, pinned once for both (SKEIN-1217).** An exact upstream release, and the sha256 of its tarball, which each job checks
 # before it builds.
 #
 # Why build one at all: `ubuntu-24.04` ships bubblewrap 0.9.0, which answers `bwrap: Unknown option
@@ -43,34 +42,49 @@ env:
 #   check     every gate that reads the tree rather than running it — fmt, clippy, the doc gates,
 #             gitleaks, the cockpit's node gates. No bubblewrap, no browser: nothing here needs one.
 #   test      `submodule-check`, then the suite — on the pinned bubblewrap, with tmux and chromium.
-#   noskip    the suite again under `$SKEIN_TESTS_NO_SKIP`, on the same machine setup as `test`.
 #   citation  `citation-check`, the one gate that reads history, on a clone deepened to commits only.
-#   msrv, coverage   as before.
+#   msrv      the declared MSRV, built at.
+#   coverage  the suite again, instrumented and under `$SKEIN_TESTS_NO_SKIP`: line coverage held at
+#             its floor, and `noskip-check` judging that same run's log.
 #
 # **Every gate is still exactly one `- run: tools/gates.sh run <name>` step in exactly one job**,
 # and `gate-list-check` still fails when that stops being true in either direction, so splitting the
 # job did not make room for a gate to fall out of it. A red job still names the gate that failed,
 # because each gate is still its own step.
 #
-# `test` and `noskip` build the same thing, so they share one Rust cache (`shared-key` below): the
-# dependency build is paid once and restored by both. They run the suite twice, as they did before,
-# and that is deliberate rather than overlooked — `noskip-check` judges only the SKIPS in its run,
-# and a skip under `$SKEIN_TESTS_NO_SKIP` is a panic, so reading the `test` gate's verdict out of
-# that run too would mean telling a skip's panic from a real failure in the log, which is a second
-# definition of the `test` gate somewhere other than `tools/gates.sh`. Two runners at once cost
-# minutes, not wall clock.
+# **The suite runs twice a push, not three times (SKEIN-1273).** It ran in `test`, again in a job
+# of its own for `noskip-check`, and a third time instrumented in `coverage` — 462 s, 515 s and
+# 531 s of runner in run 39585619280 — and two of the three could not go red on a broken test:
+# `noskip-check` judged only the skips, and the coverage run passes `--ignore-run-fail`. Now the
+# `coverage` job makes its instrumented run under the switch and keeps the log, and `noskip-check`
+# judges that log: its skips as before, and every failure that is not a skip, so the job is red
+# whenever a test is. `test` stays a run of its own, and the `test` gate's verdict stays exactly the
+# command `tools/gates.sh` writes down: under the switch a skip is a panic, so reading that verdict
+# out of a no-skip run would be a second definition of the gate — which is why SKEIN-1228 kept the
+# two runs apart, and why the switch went to the coverage run rather than into `test`.
 #
-# The two long scripts three jobs share — the pinned bubblewrap's build and its overlay proof — are
+# The two long scripts both jobs share — the pinned bubblewrap's build and its overlay proof — are
 # written once, as a YAML anchor (`run: &name`) in the `test` job and an alias (`run: *name`) in
-# `noskip` and `coverage`, so those jobs cannot drift apart on what building or proving bwrap is.
-# The one-line steps are written out in each job, the apt line deliberately:
-# `tests/platform_gates.rs` reads it per job to hold every job that runs the suite to at least what
-# the `coverage` job installs.
+# `coverage`, so the two cannot drift apart on what building or proving bwrap is. The one-line
+# steps are written out in each job, the apt line deliberately: `tests/platform_gates.rs` reads it
+# per job to hold every job that runs the suite to at least what the `coverage` job installs.
+#
+# **Every job runs on `ubuntu-24.04`, named rather than `ubuntu-latest` (SKEIN-1275).**
+# `ubuntu-latest` moves to the next Ubuntu on GitHub's schedule — from 2026-10-19, with a notice on
+# every job saying so — and this file argues from 24.04 in two places: the bubblewrap it ships
+# (0.9.0, above) and `kernel.apparmor_restrict_unprivileged_userns=1`, which the `test` job turns off.
+# A runner that changed under those arguments would make them wrong without a line here changing.
+# Move the pin on purpose, and re-read both when you do.
+#
+# The actions are on majors that run on Node 24 — `actions/checkout@v7`, `actions/setup-node@v7`
+# and `actions/cache@v6`, each read from its own `action.yml` (`using: node24`); the Node 20 majors
+# put a deprecation notice on every job. `Swatinem/rust-cache@v2` already runs on Node 24, and
+# `dtolnay/rust-toolchain` and `taiki-e/install-action` are composite, with no Node of their own.
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # `submodule-check` is in the `test` job, beside the tests it is the precondition of; this
           # job's gates read the tree, and the submodule is still here so that a gate reading every
@@ -201,9 +215,9 @@ jobs:
       # tracked file on every box with sync, and nothing else would say so (SKEIN-1158).
       - run: tools/gates.sh run claude-md-check
       # The three node gates below import nothing but node's own modules, so this job needs node
-      # and not the browser tier's `npm install`. Pinned rather than whatever `ubuntu-latest`
+      # and not the browser tier's `npm install`. Pinned rather than whatever the runner image
       # preinstalls, for the reason given on the same step in the `test` job.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
@@ -221,9 +235,9 @@ jobs:
 
   # **The suite, on a machine where none of its guards has a reason to skip.**
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # `upstream/sync` is a submodule and two drift tests read it —
           # `the_shipped_skill_is_upstreams_verbatim` and
@@ -239,8 +253,9 @@ jobs:
           # working is a named red step rather than two tests going quiet (SKEIN-826).
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
-      # One cache for this job and `noskip`, which compile exactly the same targets. Without the
-      # shared key each job gets a cache of its own, keyed by job, and pays for the same build.
+      # Keyed `suite` from when this job and a `noskip` job compiled the same targets and shared
+      # it (SKEIN-1273 folded that run into `coverage`, which builds instrumented and keeps its own).
+      # Left as it is, because renaming a key throws the cache away once for nothing.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: suite
@@ -251,8 +266,7 @@ jobs:
       # `fleet_launch`, `fleet_move` and `server`, and whether the runner image carries it was
       # written down nowhere (SKEIN-1094). Installing it makes the question moot rather than
       # answered. `every_job_that_runs_the_suite_installs_every_package_the_coverage_job_does` in
-      # `tests/platform_gates.rs` keeps this line, and the `noskip` job's, from falling behind the
-      # coverage job's again.
+      # `tests/platform_gates.rs` keeps this line from falling behind the coverage job's again.
       #
       # bubblewrap is no longer apt's (SKEIN-1217): the step after this builds the release pinned
       # in `env:` at the top of this file, and the rest of this line is what that build needs —
@@ -327,9 +341,9 @@ jobs:
           echo "bubblewrap $BWRAP_VERSION overlays: the write inside landed in the upper layer only"
       # Node BEFORE `cargo test`, because `cargo test` shells out to it: `cockpit::tests::
       # the_cockpit_bundle_is_not_stale` runs `node cockpit/build.mjs --check`, and the suites
-      # listed in `tests/browser_suites.rs` run from there too. It passed only because `ubuntu-latest` preinstalls some
+      # listed in `tests/browser_suites.rs` run from there too. It passed only because the runner image preinstalls some
       # node — never the version pinned here, so the suites ran on a toolchain nothing declared.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # **The browser tier, which CI has never once run.**
@@ -349,7 +363,7 @@ jobs:
       # Cached because the download is the entire cost — the browser is ~150 MB and the suites
       # themselves are about a minute. Keyed on `package.json`, which is what pins the playwright
       # version; a miss re-downloads, which is the same as today's every-run cost and no worse.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('tests/ui/package.json') }}
@@ -377,89 +391,6 @@ jobs:
       # reports everything beats two that each report the first thing.
       - run: tools/gates.sh run test
 
-  # **What the suite skipped — reported, and able to fail the build (SKEIN-558, SKEIN-881).**
-  #
-  # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
-  # output — a skipped test passes — so the notice is invisible in exactly the run where it
-  # matters. That is how eighteen silent skips survived here, and how SKEIN-549's two tests
-  # died on this runner for 27 days while reading as fine. `$SKEIN_TESTS_NO_SKIP` inverts it:
-  # every skip becomes a named panic (`tests/common/mod.rs`, `NO_SKIP`), and cargo cannot hide
-  # a failing test's output.
-  #
-  # The mechanism itself is no longer the unverified half. `tests/harness.rs`'s
-  # `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips` proves both arms —
-  # an ordinary early return without the variable, and with it a panic naming the guard and the
-  # reason — and the `test` job runs it.
-  #
-  # **This gate used to be non-blocking, and the argument for that had a hole in it.** It read:
-  # a scoped no-skip run "needs a hand-kept list of what a runner image happens to provide,
-  # sitting beside `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody
-  # else's platform is exactly the thing that goes stale without saying so". True about a list,
-  # and a list was never the only option. Whether THIS runner has tmux is not a fact anybody
-  # writes down: it is a question you ask the machine you are standing on, at the moment you
-  # need the answer. `tools/noskip-check.py` reads the requirements out of
-  # `tests/common/mod.rs`, probes each one here, and fails the build for a skip inside a binary
-  # whose every declared requirement this machine answers for — reporting, and nothing more,
-  # about the rest. Both halves are derived and nothing about this image is written down.
-  #
-  # Why it had to stop being advisory: two `upstream/sync` drift guards skipped on every run
-  # for as long as anyone had been running them. This switch DID find them and this summary DID
-  # list them, and because the step could not fail they sat as expected failures until somebody
-  # was sent to look (SKEIN-826). Two failures everyone has learned to expect is how a switch
-  # stops being run at all.
-  #
-  # **AND IT MUST NOT REPORT AN ALL-CLEAR FROM A RUN THAT NEVER HAPPENED.** This step used to
-  # decide between "these skipped" and "nothing skipped" on one question — does the log hold a
-  # `SKIPPED at` line — which a log holds neither of when the build failed, when a gate refused,
-  # or when `tools/gates.sh` exited 3 because HEAD moved under it. All three produce zero
-  # matches, and the step was `set +e`, so the summary said "Nothing: every guard in the suite
-  # found what it needed" about a run that had asked nothing and been told nothing. That is the
-  # same defect one layer up from the one the switch exists for — a display reporting on
-  # something other than what it names — and the fix is the same shape: require POSITIVE
-  # evidence the run happened before reading anything into its silence. `^test result:` is that
-  # evidence, one line per test binary, and the count is printed so a run that reported on three
-  # binaries cannot be mistaken for one that reported on all of them (SKEIN-826). That rule now
-  # lives in the tool, which also FAILS on that silence rather than printing Unknown into a
-  # green step — except for the two `tools/gates.sh` exit codes documented as neither a pass nor
-  # a failure.
-  #
-  # It still goes through `tools/gates.sh run test`, so this report does not become a second
-  # place the test command is written down. **It is a job of its own, beside `test` rather than
-  # after it** (SKEIN-1228): it used to follow `test` in one job to reuse that build, which saved a
-  # compile and cost the whole run of the suite in wall clock. The machine it runs on is set up
-  # exactly as the `test` job's is — the same steps, the two long ones by alias — because a
-  # requirement this job lacked would turn a hostable binary report-only here and quietly narrow
-  # what the gate can fail.
-  noskip:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The two `upstream/sync` drift guards skip without it, and here a skip in the `lib`
-          # binary is a failure — which is how this gate found them the first time (SKEIN-826).
-          submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: suite
-      - run: sudo apt-get update && sudo apt-get install -y tmux meson ninja-build libcap-dev pkg-config
-      - run: *bwrap-build
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - run: bwrap --dev-bind / / -- /bin/true
-      - run: *bwrap-overlays
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - run: npm install
-        working-directory: tests/ui
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('tests/ui/package.json') }}
-      - run: npx playwright install --with-deps chromium
-        working-directory: tests/ui
-      - run: tools/gates.sh run noskip-check
-
   # **Commit-sha citations in `docs/`, in a job of their own.** A history rewrite invalidates every
   # one of them at once, without touching a document — it has happened here already, and the
   # rewrite over the archive branches (SKEIN-652, SKEIN-605) is scoped and not yet run.
@@ -482,9 +413,9 @@ jobs:
   # would make any gate after it that touches history pay a lazy fetch per object: in `check`,
   # `line-cite-check` reads `git blame` when history is there. Here nothing follows it.
   citation:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
             git fetch --unshallow --filter=tree:0 --no-recurse-submodules origin
@@ -506,9 +437,9 @@ jobs:
   # second toolchain installed to answer it, and `gates.sh` has no way yet to say "not answerable on
   # this machine" for a Rust version.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Exactly one `rust-version = "x.y"` line, or the job fails naming what it found — an empty
       # read would otherwise hand `rust-toolchain` an empty toolchain and build on whatever that
       # defaults to, which is the silent-success shape this repository keeps paying for.
@@ -552,9 +483,9 @@ jobs:
   # bubblewrap (SKEIN-1217): the floor is measured where the launcher overlays `~/.local`, which is
   # what a fleet does, so this job builds the same release, from the same `env:` pin, and proves it.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
@@ -573,12 +504,12 @@ jobs:
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - run: bwrap --dev-bind / / -- /bin/true
       - run: *bwrap-overlays
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - run: npm install
         working-directory: tests/ui
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('tests/ui/package.json') }}
@@ -589,5 +520,63 @@ jobs:
       # numbers beats two that each report the first.
       - run: python3 tools/coverage-check.py cockpit
         id: cockpit
-      - run: python3 tools/coverage-check.py rust
+      - run: python3 tools/coverage-check.py rust --no-skip-log "$RUNNER_TEMP/suite.log"
+        id: rust
         if: success() || steps.cockpit.outcome == 'failure'
+      # **What the suite skipped — reported, and able to fail the build (SKEIN-558, SKEIN-881).**
+      #
+      # `common::skip` prints a notice and returns, and `cargo test` CAPTURES a passing test's
+      # output — a skipped test passes — so the notice is invisible in exactly the run where it
+      # matters. That is how eighteen silent skips survived here, and how SKEIN-549's two tests
+      # died on this runner for 27 days while reading as fine. `$SKEIN_TESTS_NO_SKIP` inverts it:
+      # every skip becomes a named panic (`tests/common/mod.rs`, `NO_SKIP`), and cargo cannot hide
+      # a failing test's output.
+      #
+      # The mechanism itself is no longer the unverified half. `tests/harness.rs`'s
+      # `a_skip_becomes_a_failure_when_the_run_asked_for_a_run_with_no_skips` proves both arms —
+      # an ordinary early return without the variable, and with it a panic naming the guard and the
+      # reason — and the `test` job runs it.
+      #
+      # **This gate used to be non-blocking, and the argument for that had a hole in it.** It read:
+      # a scoped no-skip run "needs a hand-kept list of what a runner image happens to provide,
+      # sitting beside `common::REQUIREMENTS`, which is derived — and a hand-kept list of somebody
+      # else's platform is exactly the thing that goes stale without saying so". True about a list,
+      # and a list was never the only option. Whether THIS runner has tmux is not a fact anybody
+      # writes down: it is a question you ask the machine you are standing on, at the moment you
+      # need the answer. `tools/noskip-check.py` reads the requirements out of
+      # `tests/common/mod.rs`, probes each one here, and fails the build for a skip inside a binary
+      # whose every declared requirement this machine answers for — reporting, and nothing more,
+      # about the rest. Both halves are derived and nothing about this image is written down.
+      #
+      # Why it had to stop being advisory: two `upstream/sync` drift guards skipped on every run
+      # for as long as anyone had been running them. This switch DID find them and this summary DID
+      # list them, and because the step could not fail they sat as expected failures until somebody
+      # was sent to look (SKEIN-826). Two failures everyone has learned to expect is how a switch
+      # stops being run at all.
+      #
+      # **AND IT MUST NOT REPORT AN ALL-CLEAR FROM A RUN THAT NEVER HAPPENED.** This step used to
+      # decide between "these skipped" and "nothing skipped" on one question — does the log hold a
+      # `SKIPPED at` line — which a log holds neither of when the build failed, when a gate refused,
+      # or when `tools/gates.sh` exited 3 because HEAD moved under it. All three produce zero
+      # matches, and the step was `set +e`, so the summary said "Nothing: every guard in the suite
+      # found what it needed" about a run that had asked nothing and been told nothing. That is the
+      # same defect one layer up from the one the switch exists for — a display reporting on
+      # something other than what it names — and the fix is the same shape: require POSITIVE
+      # evidence the run happened before reading anything into its silence. `^test result:` is that
+      # evidence, one line per test binary, and the count is printed so a run that reported on three
+      # binaries cannot be mistaken for one that reported on all of them (SKEIN-826). That rule now
+      # lives in the tool, which also FAILS on that silence rather than printing Unknown into a
+      # green step — except for the two `tools/gates.sh` exit codes documented as neither a pass nor
+      # a failure.
+      #
+      # **It judges this job's run rather than making one of its own** (SKEIN-1273). The step above
+      # ran the suite under `$SKEIN_TESTS_NO_SKIP` and kept its log, and `$SKEIN_NOSKIP_FROM` hands
+      # that log over, so `tools/gates.sh run noskip-check` reads it instead of running the suite
+      # again. The tool refuses a log whose first line does not name the switch, and it fails on
+      # a test that failed for any reason but a skip, which is what makes this job red on a broken
+      # test where `--ignore-run-fail` kept it green. It runs whenever the measurement ran at all,
+      # below the floor included, because one red that names both beats two runs that each name one.
+      - run: tools/gates.sh run noskip-check
+        if: ${{ !cancelled() && (steps.rust.outcome == 'success' || steps.rust.outcome == 'failure') }}
+        env:
+          SKEIN_NOSKIP_FROM: ${{ runner.temp }}/suite.log

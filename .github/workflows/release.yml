@@ -41,7 +41,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The tag names the version the release claims, and `Cargo.toml` names the version the
       # binaries report. Refuse to publish a `v0.2.0` whose `skein --version` says 0.1.0.
       - run: |
