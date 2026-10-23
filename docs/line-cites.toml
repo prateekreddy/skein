@@ -2035,51 +2035,51 @@ cited_by = ["docs/decisions/warden-or-prompt.md"]
 line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:309"]
-line = "}).catch(error => toast(`restart failed: ${error.message}`)).finally(done);"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/web/app/board.js:281"]
 line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:306"]
+["src/web/app/board.js:331"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:732"]
+["src/web/app/board.js:334"]
+line = "}).catch(error => toast(`restart failed: ${error.message}`)).finally(done);"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/board.js:757"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:783"]
+["src/web/app/board.js:808"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:787"]
+["src/web/app/board.js:812"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:796"]
+["src/web/app/board.js:821"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:834"]
+["src/web/app/board.js:859"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:835"]
+["src/web/app/board.js:860"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:925"]
+["src/web/app/board.js:950"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1150"]
+["src/web/app/board.js:1175"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1182"]
+["src/web/app/board.js:1207"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
