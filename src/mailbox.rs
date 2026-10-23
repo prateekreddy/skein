@@ -129,7 +129,8 @@ pub fn load_mailbox() -> Vec<Message> {
 fn mark_recipients_gone(messages: &mut [Message], registry: &BTreeMap<String, Sandbox>) {
     for m in messages {
         let to = m.to.as_str();
-        let direct = !matches!(to, "" | "broadcast" | "all-projects") && !to.starts_with("project:");
+        let direct =
+            !matches!(to, "" | "broadcast" | "all-projects") && !to.starts_with("project:");
         m.recipient_gone = !registry.is_empty() && direct && !registry.contains_key(to);
     }
 }

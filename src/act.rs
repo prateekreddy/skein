@@ -185,10 +185,12 @@ struct Running {
 /// forgotten at the first `begin` after it finished — before the person who started it could read
 /// why it failed.
 fn forget_finished(acts: &mut HashMap<String, std::sync::Arc<Running>>, now: Instant) {
-    acts.retain(|_, act| match *act.ended.lock().unwrap_or_else(|e| e.into_inner()) {
-        Some(at) => now.saturating_duration_since(at) < RETENTION,
-        None => true,
-    });
+    acts.retain(
+        |_, act| match *act.ended.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(at) => now.saturating_duration_since(at) < RETENTION,
+            None => true,
+        },
+    );
 }
 
 fn registry() -> &'static Mutex<HashMap<String, std::sync::Arc<Running>>> {

@@ -2870,10 +2870,9 @@ mod tests {
             .output()
             .expect("run box-diff.sh");
         assert!(out.status.success());
-        let stat: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(store.join("diffs").join("b1.json")).unwrap(),
-        )
-        .unwrap();
+        let stat: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store.join("diffs").join("b1.json")).unwrap())
+                .unwrap();
         assert_eq!(
             stat["files"], 1,
             "only the box's own file, not develop's two: {stat}"
