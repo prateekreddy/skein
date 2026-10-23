@@ -855,9 +855,21 @@ root_real="$(cd -P -- "$root" 2>/dev/null && pwd -P)" || {
   echo "skein: $box cannot start: its root $root cannot be entered" >&2
   exit 1
 }
+# Where `$1` really is: a path under `$root` as the root really is, or one under a directory
+# already held (`$home_at/.claude`, SKEIN-1287) under where that directory really is.
+real_name() {
+  local held
+  case "$1" in
+    "/proc/$$/fd/"*)
+      held="${1#"/proc/$$/fd/"}"
+      printf '%s/%s' "$(readlink -- "/proc/$$/fd/${held%%/*}" 2>/dev/null)" "${held#*/}" ;;
+    *) printf '%s' "$root_real${1#"$root"}" ;;
+  esac
+}
 # Why `$1` is not a directory of this box's own, or nothing when it is.
 own_dir_problem() {
-  local want="$root_real${1#"$root"}" got
+  local want got
+  want="$(real_name "$1")"
   if [ -L "$1" ]; then
     printf 'is a symbolic link (to %s)' "$(readlink -- "$1" 2>/dev/null)"
   elif [ ! -d "$1" ]; then
@@ -881,9 +893,11 @@ own_dir() {
   [ -e "$1" ] || [ -L "$1" ] || [ "${2-}" = make ] || return 0
   why="$(own_dir_problem "$1")"
   [ -z "$why" ] && return 0
-  echo "skein: $box cannot start: $1 $why. The launcher binds or writes this path at fleet \
+  local named="$1"
+  case "$1" in "/proc/$$/fd/"*) named="$(real_name "$1")" ;; esac
+  echo "skein: $box cannot start: $named $why. The launcher binds or writes this path at fleet \
 scope, so it must be a real directory belonging to the box. If the box's own directory was moved \
-aside, move it back to $1; otherwise move this one aside from outside the box and start the box \
+aside, move it back to $named; otherwise move this one aside from outside the box and start the box \
 again, and an empty one is made." >&2
   exit 1
 }
@@ -895,14 +909,9 @@ again, and an empty one is made." >&2
 # component of that path, which is what `bwrap --bind-fd` takes. With `soft`, a directory that fails
 # is not held and the call fails, rather than refusing the start.
 pin_dir() {
-  local fd want="$root_real${2#"$root"}" got='' held shown="$2"
-  case "$2" in
-    "/proc/$$/fd/"*)
-      held="${2#"/proc/$$/fd/"}"
-      want="$(readlink -- "/proc/$$/fd/${held%%/*}" 2>/dev/null)/${held#*/}"
-      shown="$want"
-      ;;
-  esac
+  local fd want got='' shown="$2"
+  want="$(real_name "$2")"
+  case "$2" in "/proc/$$/fd/"*) shown="$want" ;; esac
   if exec {fd}<"$2/."; then
     got="$(readlink -- "/proc/$$/fd/$fd" 2>/dev/null)"
     if [ "$got" = "$want" ] && [ -O "/proc/$$/fd/$fd" ]; then
@@ -1137,8 +1146,8 @@ done
 # through a temporary file made in the directory itself, so the directory has to be the box's
 # (SKEIN-1255), and is held open from here on like the others (SKEIN-1287). `.codex` passes when
 # absent; the credential loop below makes and holds it only if it has a login to put there.
-own_dir "$home/.claude"
-own_dir "$home/.codex"
+own_dir "$home_at/.claude"
+own_dir "$home_at/.codex"
 pin_dir claude_at "$home_at/.claude"
 codex_at=''
 [ -e "$home_at/.codex" ] || [ -L "$home_at/.codex" ] && pin_dir codex_at "$home_at/.codex"

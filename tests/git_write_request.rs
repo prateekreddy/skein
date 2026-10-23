@@ -489,9 +489,10 @@ fn held_dirs() -> String {
         lines[from..=to].join("\n")
     };
     format!(
-        "{}\n{}\n{}\n{}\nmkdir -p \"$root/bin\" \"$root/home\"; \
+        "{}\n{}\n{}\n{}\n{}\nmkdir -p \"$root/bin\" \"$root/home\"; \
          root_real=\"$(cd -P -- \"$root\" && pwd -P)\"; \
          pin_dir bin_at \"$root/bin\"; pin_dir home_at \"$root/home\"",
+        lift("real_name"),
         lift("pin_dir"),
         lift("open_new"),
         lift("land_new"),

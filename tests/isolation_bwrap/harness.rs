@@ -37,7 +37,8 @@ pub(super) fn launcher_helpers() -> String {
         lines[from..=to].join("\n")
     };
     format!(
-        "{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"",
+        "{}\n{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"",
+        lift("real_name"),
         lift("pin_dir"),
         lift("open_new"),
         lift("land_new"),

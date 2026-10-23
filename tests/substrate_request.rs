@@ -516,7 +516,8 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         lines[at..=end].join("\n")
     };
     let held = format!(
-        "{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"; pin_dir bin_at \"$root/bin\"",
+        "{}\n{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"; pin_dir bin_at \"$root/bin\"",
+        lift("real_name"),
         lift("pin_dir"),
         lift("open_new"),
         lift("land_new"),
