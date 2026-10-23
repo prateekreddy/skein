@@ -54,6 +54,25 @@ mkdir -p "$box"
 # that, and the two marked `seenBy` at once — one mark lost, the message redelivered, the Stop hook
 # blocked again (SKEIN-1284). A lock that is removed is no lock.
 lock="$box/.lock"
+# **What is at `$lock` is whatever a box put there**, since every box writes this directory. So it
+# is used only when it is a regular file and not a link, it is opened READ-only (`flock` needs
+# nothing more), and it is never truncated or written: a link planted there, pointing at some other
+# box's settings, is then neither followed for writing nor emptied. Made if missing from a fresh
+# file of our own, hard-linked into place, which fails rather than replacing one another box has
+# just made — replacing it would hand the two of them different files to lock. When it is the wrong
+# shape, the steps that need it are skipped and said, and nothing is marked or deleted.
+lock_ready() {
+  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+    _fresh="$(mktemp "$box/.lock.XXXXXX" 2>/dev/null)" \
+      && { ln "$_fresh" "$lock" 2>/dev/null || mv -n "$_fresh" "$lock" 2>/dev/null; }
+    rm -f "${_fresh-}" 2>/dev/null
+  fi
+  [ -f "$lock" ] && [ ! -L "$lock" ] && return 0
+  [ -n "${_lock_said-}" ] && return 1
+  _lock_said=1
+  echo "[skein-mailbox] $lock is not a plain file, so shared mail was neither marked nor pruned; remove it and the next turn makes a fresh one" >&2
+  return 1
+}
 # Where the OWNER's messages are, and the reason there are two directories rather than one.
 #
 # `$box` above is in the shared store: every box can write it, so a message found there is one any
@@ -126,6 +145,7 @@ prune_seen() { # $1 = age in days, $2 = noisy (0/1)
   local days="${1:-30}" noisy="${2:-0}" cutoff boxes mt f gone=0
   cutoff="$(date -u -d "-$days days" +%s 2>/dev/null || echo 0)"
   [ "$cutoff" -gt 0 ] || return 0
+  lock_ready || return 0
   boxes="$(registered_boxes)"
   for f in "$box"/*.json; do
     [ -e "$f" ] || break
@@ -144,7 +164,7 @@ prune_seen() { # $1 = age in days, $2 = noisy (0/1)
           ([$boxes[] | select(. != $from)]) as $recipients
           | ($recipients | length) > 0 and (($recipients - $seen) | length) == 0
         else $seen | index($to) != null end
-    ' "$f" >/dev/null 2>&1 && rm -f "$f" ) 9>"$lock"; then
+    ' "$f" >/dev/null 2>&1 && rm -f "$f" ) 9<"$lock"; then
       # `$f.lock` is the per-message lock this script used before SKEIN-1284; gone with its message.
       rm -f "$f.lock" 2>/dev/null || true
       [ "$noisy" = "1" ] && echo "pruned $(basename "$f")"
@@ -196,8 +216,10 @@ case "$cmd" in
     fi
     found=0
     out=""
+    shared=1
+    lock_ready || shared=0
     for f in "$box"/*.json; do
-      [ -e "$f" ] || break
+      [ "$shared" = 1 ] && [ -e "$f" ] || break
       # Lock/read/mark/rename before surfacing. If marking fails, emit nothing: showing an unmarked
       # message would make it repeat forever and could trap Stop in a continuation loop.
       line="$({
@@ -213,7 +235,7 @@ case "$cmd" in
         # **The name is shown with the fact that nobody checked it.** A name rendered as a name is
         # how one box speaks as another — or as you.
         jq -r '"  • [\(.kind // "note")] from \(.from // "?") (a box; this name is not checked) on \(.branch // "?"): \(.body // "")"' "$f" 2>/dev/null
-      } 8>"$lock")" || continue
+      } 8<"$lock")" || continue
       if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
         echo "[mailbox] unread hand-off for $vmid:"
       fi

@@ -18,6 +18,45 @@ use std::path::{Path, PathBuf};
 /// `$lock` and [`relay_cross_project_mail`] — and which nothing ever deletes (SKEIN-1284).
 const MAILBOX_LOCK: &str = ".lock";
 
+/// How long the relay waits for the mailbox lock — `mailbox.sh`'s `flock -w 5`.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Take the mailbox's one lock, or say why not — **within `wait`, and never through a link**.
+///
+/// `mailbox/` is written by every box, so what sits at `.lock` is whatever a box put there. A
+/// symlink is refused rather than followed and a FIFO is refused rather than waited on
+/// (`boxfile::open`, `O_NOFOLLOW | O_NONBLOCK`, regular files only); the file is only ever opened
+/// for reading, which is all `flock` needs, so nothing it names is written. And the wait is
+/// bounded: a box that holds the lock for ever must not stall the host's relay with it.
+/// A missing lock is created with `create_new`, which never follows a link either.
+fn lock_mailbox(dir: &Path, wait: std::time::Duration) -> Result<fs::File, String> {
+    use fs2::FileExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join(MAILBOX_LOCK);
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path);
+    let (file, _) = crate::boxfile::open(&path)
+        .map_err(|e| format!("the mailbox lock is not a plain file, so it was not used: {e}"))?;
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "the mailbox lock was held for more than {}s: {e}",
+                    wait.as_secs()
+                ))
+            }
+        }
+    }
+}
+
 /// One cross-box message in the shared `mailbox/` (written by mailbox.sh or skein).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
@@ -421,23 +460,13 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
             // holds to mark seenBy — so a box's concurrent seenBy update can't race this update.
             // Never removed: a lock file deleted by its holder is a lock the next writer cannot see
             // (SKEIN-1284).
-            let lock_path = mailbox_dir.join(MAILBOX_LOCK);
-            let lock = match fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock_path)
-            {
+            let lock = match lock_mailbox(&mailbox_dir, LOCK_WAIT) {
                 Ok(f) => f,
                 Err(e) => {
-                    errs.push(format!("{}: lock open: {e}", path.display()));
+                    errs.push(format!("{}: {e}", path.display()));
                     continue;
                 }
             };
-            if lock.lock_exclusive().is_err() {
-                errs.push(format!("{}: lock", path.display()));
-                continue;
-            }
             let result = (|| -> Result<(), String> {
                 let txt = fs::read_to_string(&path).map_err(|e| e.to_string())?;
                 let mut cur: Message = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
@@ -894,6 +923,120 @@ mod tests {
             Some(inode),
             "the mailbox lock must be the same file afterwards, never deleted and remade"
         );
+    }
+
+    /// **What a box plants at `mailbox/.lock` is never followed, written or waited on** — by the
+    /// box's own hook (SKEIN-1284 review).
+    ///
+    /// Every box writes `mailbox/`, so box B can put a link there pointing at box A's settings, or a
+    /// FIFO. The script opened the lock with `>`, which would have emptied whatever the link named,
+    /// and an open of a FIFO waits for a writer that never comes. What would make it fail: opening
+    /// the lock for writing again (the target is emptied), or using it without checking its shape
+    /// (the FIFO hangs the hook past five seconds, or the message is marked through the link).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_planted_mailbox_lock_is_never_followed_emptied_or_waited_on() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            let child = box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("run mailbox.sh");
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(child.wait_with_output());
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(8))
+                .expect("mailbox.sh waited on what was planted at its lock")
+                .expect("mailbox.sh ran")
+        };
+        assert!(run("boxA", &["send", "--to", "boxB", "--body", "planted"])
+            .status
+            .success());
+        let lock = store.join("mailbox").join(MAILBOX_LOCK);
+
+        // A link to another box's settings.
+        let victim = home.join("settings.json");
+        fs::write(&victim, "{\"precious\":true}").unwrap();
+        let _ = fs::remove_file(&lock);
+        std::os::unix::fs::symlink(&victim, &lock).unwrap();
+        let linked = run("boxB", &["inbox"]);
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "{\"precious\":true}",
+            "the hook emptied what the planted link named"
+        );
+        assert!(
+            String::from_utf8_lossy(&linked.stderr).contains("is not a plain file"),
+            "the skipped step is said: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&linked.stdout).contains("planted"),
+            "nothing is delivered — and so marked — without the lock"
+        );
+
+        // A FIFO.
+        fs::remove_file(&lock).unwrap();
+        crate::boxfile::plant_fifo(&lock);
+        let fifo = run("boxB", &["inbox"]);
+        assert!(String::from_utf8_lossy(&fifo.stderr).contains("is not a plain file"));
+
+        // And with the plant gone, the next turn makes a fresh lock and delivers.
+        fs::remove_file(&lock).unwrap();
+        let clean = run("boxB", &["inbox"]);
+        assert!(String::from_utf8_lossy(&clean.stdout).contains("planted"));
+        assert!(fs::symlink_metadata(&lock).unwrap().file_type().is_file());
+    }
+
+    /// **The relay's lock refuses a link, and gives up on a lock held too long** (SKEIN-1284
+    /// review). A box can plant a link at `.lock`, or hold the lock for ever; the host's relay must
+    /// neither follow the first nor wait out the second. What would make it fail: opening the lock
+    /// through the link (the call succeeds), or an unbounded `lock_exclusive` (the second call does
+    /// not return within the test's deadline).
+    #[test]
+    fn the_relay_lock_refuses_a_link_and_gives_up_on_a_held_lock() {
+        use fs2::FileExt;
+        let dir = tempdir();
+        let victim = dir.join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let linked = dir.join("linked");
+        fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&victim, linked.join(MAILBOX_LOCK)).unwrap();
+        assert!(
+            lock_mailbox(&linked, std::time::Duration::from_millis(100)).is_err(),
+            "a link at the lock was used"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+
+        let held = dir.join("held");
+        fs::create_dir_all(&held).unwrap();
+        let first = lock_mailbox(&held, std::time::Duration::from_millis(100)).expect("free lock");
+        let holder = fs::File::open(held.join(MAILBOX_LOCK)).unwrap();
+        drop(first);
+        holder.lock_exclusive().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let held_dir = held.clone();
+        std::thread::spawn(move || {
+            let _ =
+                tx.send(lock_mailbox(&held_dir, std::time::Duration::from_millis(300)).is_err());
+        });
+        let gave_up = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the relay waited on a held lock past its bound");
+        assert!(gave_up, "a held lock was taken");
+        holder.unlock().unwrap();
     }
 
     /// **Mail to a box that no longer exists is kept and said, not pruned** (SKEIN-1284).
