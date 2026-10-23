@@ -2035,51 +2035,51 @@ cited_by = ["docs/decisions/warden-or-prompt.md"]
 line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:259"]
+["src/web/app/board.js:309"]
+line = "}).catch(error => toast(`restart failed: ${error.message}`)).finally(done);"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/web/app/board.js:281"]
 line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:270"]
+["src/web/app/board.js:306"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:273"]
-line = "}).catch(error => toast(`restart failed: ${error.message}`));"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/web/app/board.js:665"]
+["src/web/app/board.js:732"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:716"]
+["src/web/app/board.js:783"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:720"]
+["src/web/app/board.js:787"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:729"]
+["src/web/app/board.js:796"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:767"]
+["src/web/app/board.js:834"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:768"]
+["src/web/app/board.js:835"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:858"]
+["src/web/app/board.js:925"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1083"]
+["src/web/app/board.js:1150"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1115"]
+["src/web/app/board.js:1182"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2109,7 +2109,7 @@ line = "const extra = rest ? ` (+${rest} more)` : \"\";"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/boot.js:771"]
-line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
+line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/boot.js:1251"]
@@ -2157,19 +2157,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "toast(`something went wrong in the page: ${line}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:236"]
+["src/web/app/box.js:237"]
 line = "sesspane.innerHTML = `<div class=\"sess\"><div class=\"note\">loading…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:482"]
+["src/web/app/box.js:483"]
 line = ".catch(e => { fv.innerHTML = `<div class=\"note\">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:488"]
+["src/web/app/box.js:489"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">asking the box…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:497"]
+["src/web/app/box.js:498"]
 line = "}).catch(() => { diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load diff</div></div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
