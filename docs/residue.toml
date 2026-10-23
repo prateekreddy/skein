@@ -96,6 +96,7 @@
 [messages]
 "api.githubcopilot.com" = "GitHub's own Copilot API endpoint, named in 7bf8dd6's message to record a MEASUREMENT rather than a reach: it was found presenting a real certificate, which is why it is deliberately absent from the NO_PROXY set that commit installs. Declared rather than reworded because that measurement is the reason the set has the shape it does, and a commit that cannot say why it excluded a host is a worse public record than one that names a host this code never speaks to"
 "claude.ai" = "the session link in the trailer this project's assisted commits carry — a page about the commit, not a host any of this code reaches"
+"t@e.com" = "the fixture address a fleet-launch test used for its throwaway commits, named in b2557b3's message as the allowance that commit dropped because its last use was deleted with the snapshot_box test section (SKEIN-1289). Declared rather than reworded because the commit already had others on top and its sha had been reported"
 "noreply@anthropic.com" = "the co-author line's no-reply mailbox, which belongs to a company rather than a person and receives nothing"
 "prateekreddyy@gmail.com" = "the author and committer of every commit in this repository. Declared rather than exempted in code, because the entry is what makes a commit written under any OTHER address fail this gate — which has happened here, and is the mistake worth catching while it is still unpushed"
 

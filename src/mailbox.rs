@@ -344,7 +344,6 @@ pub(crate) fn sandboxes_in(store: &Path) -> BTreeMap<String, Sandbox> {
 /// sweep never re-delivers the same message twice. Host-only — never called from inside a box.
 /// Best-effort: a single unreadable/unwritable message is skipped, not fatal to the sweep.
 pub fn relay_cross_project_mail() -> Result<(), String> {
-    use fs2::FileExt;
     let stores = all_stores();
     if stores.len() < 2 {
         return Ok(()); // nothing to relay across when there's only one (or zero) managed project

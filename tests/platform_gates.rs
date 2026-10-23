@@ -90,6 +90,10 @@ const GATED: &[(&str, &str)] = &[
         "runs mailbox.sh's list and prune, and ages messages with GNU `touch -d`",
     ),
     (
+        "a_planted_mailbox_lock_is_never_followed_emptied_or_waited_on",
+        "runs mailbox.sh against a planted link and a FIFO made with `mkfifo`",
+    ),
+    (
         "the_resource_script_reports_what_df_says_is_available",
         "runs the sandbox's resource script, which reads /proc and GNU `df -P` columns",
     ),
