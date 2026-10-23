@@ -14,7 +14,7 @@ test("several moments for one box become one line about where it ended up", () =
     [{ name: "alpha", state: "needs-input", headline: "which schema?" }],
     groupOf,
   );
-  assert.deepEqual(items.map(i => [i.name, i.kind, i.text]), [["alpha", "attn", "now needs a decision — which schema?"]]);
+  assert.deepEqual(items.map(i => [i.name, i.kind, i.text]), [["alpha", "attn", "now needs you — which schema?"]]);
 });
 
 test("a box that went somewhere and came back is not news", () => {

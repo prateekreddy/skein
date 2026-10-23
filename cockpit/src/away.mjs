@@ -11,7 +11,7 @@
 // What a box that ENDED UP in each group did while you were away, and how high it sorts: what needs
 // you first, then what finished, then what merely moved.
 const SAID = {
-  attn: [0, "now needs a decision"],
+  attn: [0, "now needs you"],
   waiting: [0, "is waiting for your next instruction"],
   error: [0, "hit an error"],
   done: [1, "finished"],
