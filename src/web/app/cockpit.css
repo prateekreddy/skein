@@ -444,6 +444,16 @@
     opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
   #toast.show { opacity:1; transform:none; pointer-events:auto; }
   #toast a { color:var(--accent); text-decoration:none; }
+  /* An error or a report that stays until closed, every line kept (SKEIN-1265, 1245). Above the
+     toast's corner, so a later "saved" does not cover it, and above every popup. */
+  #notice { position:fixed; right:18px; bottom:64px; z-index:130; display:none; gap:10px; align-items:flex-start;
+    max-width:min(560px,calc(100vw - 36px)); max-height:50vh; overflow:auto; background:var(--overlay); color:var(--text);
+    border:1px solid var(--border-3); border-left:3px solid var(--accent); border-radius:9px; padding:10px 12px 10px 14px;
+    font-size:13px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  #notice.show { display:flex; }
+  #notice.error { border-left-color:var(--attn); }
+  #notice .nt-text { flex:1; white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
+  #notice .x { color:var(--dim); cursor:pointer; }
   /* What it heard, shown while it hears it. A voice command that misfires is invisible otherwise —
      you would only see the effect and have to guess at the cause — so the words are always on
      screen before they are acted on. Centred and low, out of the way of the board and the tabs. */

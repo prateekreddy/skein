@@ -1309,13 +1309,14 @@ async function pressUpdateAgents(btn) {
     const r = await fetch("/api/update-agents", { method: "POST" }).then(r => r.json());
     // What MOVED, not that it ran: the server answers `claude: 1.2.3 -> 1.2.9`, which is a fact
     // somebody can check, and "done" is not.
-    toast(r.ok ? r.text : `could not update: ${r.error}`);
+    // A report of several lines, one per CLI — kept on screen, line by line, until closed.
+    if (r.ok) notice(r.text, "report"); else notice(`could not update the agent CLIs: ${r.error}`);
     // Only on success, and by re-reading rather than by hiding the offer: the pane draws what the
     // server says is installed, so an install that moved one CLI and not the other still shows the
     // one that is left. Removing the row on the press would have claimed both.
     if (r.ok) loadUpdate();
   } catch (e) {
-    toast(`could not update: ${e}`);
+    notice(`could not update the agent CLIs: ${failText(e)}`);
   } finally {
     btn.disabled = false;
     btn.textContent = "update agents";
@@ -1389,6 +1390,25 @@ async function refused(r) {
 function failText(e) {
   const m = String((e && e.message) || e || "").trim();
   return !m || m === "Failed to fetch" || m === "Load failed" ? "the host is not answering" : m;
+}
+
+// **Where a failure is said** (SKEIN-1265, SKEIN-1245). A failure used to go into the toast, which
+// hides after 3.5 seconds and several callers had cut to its first line — so the part that said why
+// was gone before it could be read, and the agent-CLI update's several-line report read as one
+// run-on line. A notice keeps every line and stays until its ✕ is pressed. `kind` is "error" (said
+// as an alert) or "report" (a result worth reading, said politely). The toast stays for what is
+// fine to miss: "saved", "stopping…".
+function notice(text, kind = "error") {
+  let n = document.getElementById("notice");
+  if (!n) {
+    n = document.createElement("div"); n.id = "notice"; document.body.append(n);
+    n.innerHTML = `<div class="nt-text"></div><button type="button" class="x" aria-label="Close">✕</button>`;
+    n.querySelector(".x").addEventListener("click", () => n.classList.remove("show"));
+  }
+  n.className = kind === "report" ? "report" : "error";
+  n.setAttribute("role", kind === "report" ? "status" : "alert");
+  n.querySelector(".nt-text").textContent = String(text == null ? "" : text).trim();
+  n.classList.add("show");
 }
 
 // ---------- fleet gauges ----------

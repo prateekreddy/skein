@@ -170,6 +170,91 @@ await check("Files says it is asking the box while it waits", async () => {
   } finally { release(); await page.unroute(`**/api/boxes/${BOX}/files*`); }
 });
 
+// ---------- an error stays, every line of it (SKEIN-1265, SKEIN-1245) ----------
+console.log("\nan error or a report stays until it is closed");
+
+/** The notice as a person sees it: shown, its kind, and how many lines its text takes on screen. */
+const noticeNow = () => page.evaluate(() => {
+  const n = document.getElementById("notice");
+  if (!n || !n.classList.contains("show") || !n.getClientRects().length) return null;
+  const t = n.querySelector(".nt-text");
+  const lh = parseFloat(getComputedStyle(t).lineHeight) || 16;
+  return { kind: n.className.replace("show", "").trim(), text: t.textContent, lines: Math.round(t.getBoundingClientRect().height / lh) };
+});
+
+// Fails if a refusal goes back to the toast (gone after 3.5s), if the notice drops its line breaks
+// (`white-space` back to normal: one line), or if a later toast takes it away.
+await check("a refused save is said in a notice that keeps every line and outlives the toast", async () => {
+  await closeEverything();
+  await page.route("**/api/settings", r => r.request().method() === "POST"
+    ? r.fulfill({ status: 500, body: "the config could not be written\nRead-only file system\nfree some space and save again" }) : r.fallback());
+  try {
+    await page.evaluate(() => openSettings("github"));
+    await until(() => settingsModal().classList.contains("open"));
+    await page.locator("#set-ghappid").fill("77");
+    await page.locator("#set-go").click();
+    await until(() => document.getElementById("notice")?.classList.contains("show"));
+    await page.evaluate(() => toast("something else, later"));
+    await page.waitForTimeout(4500);
+    const n = await noticeNow();
+    if (!n || n.kind !== "error" || !n.text.includes("free some space and save again") || n.lines < 3) {
+      throw new Error(`notice ${JSON.stringify(n)}`);
+    }
+    // And its ✕ closes it — the one way it goes.
+    await page.locator("#notice .x").click();
+    if (await noticeNow()) throw new Error("the ✕ did not close it");
+  } finally {
+    await page.unroute("**/api/settings");
+    await page.evaluate(() => discardSettings());
+  }
+});
+
+// The agent-CLI update's report (SKEIN-1245). Fails if `pressUpdateAgents` toasts it again: no
+// notice, or one line, or gone after 3.5 seconds.
+await check("the agent-CLI update's report stays on screen, one line per CLI, until closed", async () => {
+  await closeEverything();
+  const text = "claude: 2.1.0 -> 2.1.4\ncodex: 0.9.1 (already current)\nboxes pick the new one up at their next restart";
+  await page.route("**/api/update-agents", r => r.fulfill({ json: { ok: true, text } }));
+  try {
+    await page.evaluate(() => {
+      const b = document.createElement("button"); b.id = "skein-test-upd"; document.body.append(b);
+      return pressUpdateAgents(b);
+    });
+    await page.waitForTimeout(4000);
+    const n = await noticeNow();
+    if (!n || n.kind !== "report" || n.text !== text || n.lines < 3) throw new Error(`notice ${JSON.stringify(n)}`);
+    await page.locator("#notice .x").click();
+  } finally {
+    await page.unroute("**/api/update-agents");
+    await page.evaluate(() => document.getElementById("skein-test-upd")?.remove());
+  }
+});
+
+// Stop, pressed twice while the first is in flight, and refused (SKEIN-1265). Fails if `stopBox`
+// loses its in-flight guard (two POSTs), or cuts the refusal to its first line again.
+await check("Stop pressed twice sends one request, and its refusal is said whole", async () => {
+  await closeEverything();
+  const stops = [];
+  await page.route(`**/api/boxes/${BOX}/stop`, async r => {
+    stops.push(1);
+    await new Promise(res => setTimeout(res, 800));
+    return r.fulfill({ json: { ok: false, error: "sbx stop failed\nthe sandbox is busy resizing; try again in a minute" } });
+  });
+  const accept = d => d.accept().catch(() => {});
+  page.on("dialog", accept);
+  try {
+    await page.evaluate(box => { stopBox(box); stopBox(box); }, BOX);
+    await until(() => document.getElementById("notice")?.classList.contains("show"), 3000);
+    const n = await noticeNow();
+    if (stops.length !== 1) throw new Error(`${stops.length} stop requests`);
+    if (!n || !n.text.includes("try again in a minute")) throw new Error(`notice ${JSON.stringify(n)}`);
+    await page.locator("#notice .x").click();
+  } finally {
+    page.off("dialog", accept);
+    await page.unroute(`**/api/boxes/${BOX}/stop`);
+  }
+});
+
 await page.evaluate(() => { view = { box: null, mode: "term", kind: "agent" }; applyView(); });
 
 await check("no page errors while feedback was driven", () => {

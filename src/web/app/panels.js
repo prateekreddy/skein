@@ -496,7 +496,7 @@ function decideSubq(key, approve) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
   }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })
-    .catch(e => toast(`could not record that decision: ${failText(e)}`));
+    .catch(e => notice(`could not record that decision: ${failText(e)}`));
 }
 
 // The badge, so a request does not wait unseen for someone to open the panel.
@@ -596,7 +596,7 @@ function sendAskq(key, body) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...shown, ...body }),
   }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); })
-    .catch(e => toast(`could not record that decision: ${failText(e)}`));
+    .catch(e => notice(`could not record that decision: ${failText(e)}`));
 }
 
 // `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
@@ -854,7 +854,7 @@ function putReadPat(token) {
   return fetch("/api/fleet/git-read-token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
   }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
-    .catch(e => toast(String(e.message || "could not store that token")));
+    .catch(e => notice(failText(e) || "could not store that token"));
 }
 
 // Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
@@ -977,7 +977,7 @@ function addGitCred() {
   return storeGitCred(repo, token).then(() => {
     document.getElementById("set-c-token").value = "";
     document.getElementById("set-c-repo").value = "";
-  }).catch(e => toast(String(e.message || "could not store that token")));
+  }).catch(e => notice(failText(e) || "could not store that token"));
 }
 
 // Asks first, as `clearReadPat` does: Forget sits beside Store and Replace, and one stray press
@@ -988,7 +988,7 @@ function removeGitCred(id) {
   if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
-    .catch(e => toast(`could not forget that token: ${failText(e)}`));
+    .catch(e => notice(`could not forget that token: ${failText(e)}`));
 }
 
 function decideGitq(key, approve) {
@@ -1009,15 +1009,15 @@ function decideGitq(key, approve) {
   // pressing learns the row they pressed on was stale. The reload is what makes the row show the
   // real state, so the button that was just refused goes.
   }).then(r => r.ok ? loadGitq() : r.text().then(why => {
-    toast(why.trim() || "could not record that decision");
+    notice(why.trim() || "could not record that decision");
     return loadGitq();
-  })).catch(e => toast(`could not record that decision: ${failText(e)}`));
+  })).catch(e => notice(`could not record that decision: ${failText(e)}`));
 }
 
 function revokeGitq(box, repo) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); })
-    .catch(e => toast(`could not revoke that grant: ${failText(e)}`));
+    .catch(e => notice(`could not revoke that grant: ${failText(e)}`));
 }
 
 function paintGitqBadge(n) {

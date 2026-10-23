@@ -270,7 +270,8 @@ try {
 
   // --- a card asks GitHub about a token before saving it (SKEIN-1239) ---------------------------
   const tokenFile = id => fs.readFileSync(path.join(fx.home, "github-pats", id), "utf8").trim();
-  const toastText = async () => ((await page.textContent("#toast").catch(() => "")) || "").trim();
+  // A refusal is a notice now, which keeps every line until closed (SKEIN-1265), not the toast.
+  const toastText = async () => ((await page.textContent("#notice .nt-text").catch(() => "")) || "").trim();
   api.state.refuse.add(WRONG);
   await cardBody().locator(`[data-repotoken="acme/second"]`).fill(WRONG);
   await cardBody().locator("button", { hasText: "Store" }).click();

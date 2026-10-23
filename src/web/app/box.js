@@ -8,23 +8,33 @@ function boxRunHtml() {
   return `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`
        + `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
 }
+// A box with a stop or destroy in flight, so a second press while the first is still running is
+// not a second request (SKEIN-1265). Each is a slow host-side act, and the toast saying it started
+// is the only sign it is under way.
+const boxActing = new Set();
 function stopBox(name) {
+  if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (!confirm(`Stop ${name}? This halts the box to free its compute. Nothing is lost — resume it later via attach.\n\nOther boxes keep running.`)) return;
   toast(`stopping ${name}…`);
+  boxActing.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/stop`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); refreshRow(name); }
-    else toast("stop failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("stop failed"));
+    else notice(`could not stop ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not stop ${name}: ${failText(e)}`))
+    .finally(() => boxActing.delete(name));
 }
 function destroyBox(name) {
+  if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (settings.confirm_destroy !== false
       && !confirm(`Destroy ${name}?\n\nThis removes THIS BOX and reclaims its disk. Other boxes are untouched. In clone mode any commits in it that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
   toast(`destroying ${name}…`);
+  boxActing.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name);
       if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
-    else toast("destroy failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("destroy failed"));
+    else notice(`could not destroy ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not destroy ${name}: ${failText(e)}`))
+    .finally(() => boxActing.delete(name));
 }
 function batchResume() {
   const ps = boxes.filter(b => b.pause === "proceed");
@@ -37,11 +47,11 @@ function batchResume() {
     body: JSON.stringify({ names: ps.map(b => b.name) })
   }).then(r => r.json()).then(d => {
     const n = (d.resumed || []).length, h = (d.held || []).length;
-    if (!d.ok) { toast(d.error || "continue failed"); if (h && d.held[0]) select(d.held[0]); return; }
+    if (!d.ok) { notice(d.error || "could not continue those boxes"); if (h && d.held[0]) select(d.held[0]); return; }
     // held = boxes the AI safety gate flagged as a real decision (only when SKEIN_AI=on) — route to one
     toast(`continuing ${n}${h ? ` · held ${h} for your eyes` : ""}`);
     if (h && d.held[0]) select(d.held[0]);
-  }).catch(() => toast("continue failed"));
+  }).catch(e => notice(`could not continue those boxes: ${failText(e)}`));
 }
 
 // An error nobody can see is an error nobody can report.

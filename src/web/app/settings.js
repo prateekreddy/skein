@@ -235,7 +235,7 @@ function trackWork(name) {
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(d.note || `${name} is tracking work`))
-    .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't wire ${name}: ${failText(e)}`))
     .finally(() => { tracking.delete(name); });
 }
 // Re-apply the work-tracking documents to a box that already has them. `replace` (shift-click) is
@@ -249,7 +249,7 @@ function refreshDocs(name, replace) {
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync/refresh${replace ? "?replace=1" : ""}`, { method:"POST" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${name}: ${d.note || "done"}`))
-    .catch(e => toast(`couldn't update ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't update ${name}: ${failText(e)}`))
     .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
 }
 // One card per connection. A gateway URL and the token that mints at it are one thing — a token is
@@ -314,7 +314,7 @@ function saveConnection(card) {
       const flag = document.querySelector(`[data-saved="${CSS.escape("conn-" + (id || (s.connections.at(-1) || {}).id || ""))}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
     })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function forgetConnectionToken(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
@@ -322,7 +322,7 @@ function forgetConnectionToken(id) {
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function removeConnection(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
@@ -330,7 +330,7 @@ function removeConnection(id) {
   fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 // A new card is a card, not a prompt() — it starts blank in the list and saves like any other once
 // it has a URL, so adding one and editing one are the same two fields in the same place.
@@ -623,7 +623,7 @@ function renderRepoList() {
     joinGitShare(slug, pick.value).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => { b.disabled = false; toast(String(e.message || "could not use that token")); });
+    }).catch(e => { b.disabled = false; notice(failText(e) || "could not use that token"); });
   }));
   // Two buttons can spend the card's one token field: "Store" / "Use for … alone" (this repo's own
   // token) and, on a shared card, "Replace for all" (the shared file) — SKEIN-1231.
@@ -637,7 +637,7 @@ function renderRepoList() {
     send(token).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => toast(String(e.message || "could not store that token")));
+    }).catch(e => notice(failText(e) || "could not store that token"));
   };
   el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () =>
     spend(b, b.dataset.storetoken, token => storeGitCred(b.dataset.storetoken, token))));
@@ -687,7 +687,7 @@ function saveRepoField(input) {
       // here changes what the other pane is entitled to say about a Remove.
       Promise.all([loadRepos(), loadSync()]).then(() => { renderRepoList(); renderSync(); });
     })
-    .catch(e => { toast(`${id}: ${e.message}`); input.focus(); });
+    .catch(e => { notice(`${id}: ${failText(e)}`); input.focus(); });
 }
 // Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
 // carries the repo id in data-id and shows a brief busy state. Used by each repo's sidebar header.
@@ -698,7 +698,7 @@ function pullRepo(x) {
   fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:"POST" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${id}: ${(d.summary || "pulled").split("\n")[0]}`))
-    .catch(e => toast(`pull failed: ${e.message}`))
+    .catch(e => notice(`pull failed: ${failText(e)}`))
     .finally(() => { x.classList.remove("busy"); x.textContent = "⟳"; });
 }
 function removeRepo(id) {
@@ -706,7 +706,7 @@ function removeRepo(id) {
   fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
-    .catch(e => toast(`remove failed: ${e.message}`));
+    .catch(e => notice(`remove failed: ${failText(e)}`));
 }
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
 function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
@@ -773,7 +773,7 @@ function saveSettings() {
       renderDockbar(); closeSettings();
       toast((settings.box_plugin !== false) !== pluginWas ? BOX_PLUGIN_SAVED : "settings saved");
     })
-    .catch(e => toast(`couldn't save: ${failText(e)}`));
+    .catch(e => notice(`couldn't save: ${failText(e)}`));
 }
 // A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole
 // difference between this and the fleet's own memory and CPUs, which are fixed at sandbox creation
@@ -791,7 +791,7 @@ function applyBoxLimits() {
         ? `ceilings applied; ${failed.join(", ")} has no cgroup and was left as it is`
         : "ceilings applied to every running box");
     })
-    .catch(e => toast(`couldn't apply: ${e.message}`))
+    .catch(e => notice(`couldn't apply: ${failText(e)}`))
     .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
 }
 

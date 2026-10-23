@@ -452,6 +452,16 @@
     opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
   #toast.show { opacity:1; transform:none; pointer-events:auto; }
   #toast a { color:var(--accent); text-decoration:none; }
+  /* An error or a report that stays until closed, every line kept (SKEIN-1265, 1245). Above the
+     toast's corner, so a later "saved" does not cover it, and above every popup. */
+  #notice { position:fixed; right:18px; bottom:64px; z-index:130; display:none; gap:10px; align-items:flex-start;
+    max-width:min(560px,calc(100vw - 36px)); max-height:50vh; overflow:auto; background:var(--overlay); color:var(--text);
+    border:1px solid var(--border-3); border-left:3px solid var(--accent); border-radius:9px; padding:10px 12px 10px 14px;
+    font-size:13px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  #notice.show { display:flex; }
+  #notice.error { border-left-color:var(--attn); }
+  #notice .nt-text { flex:1; white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
+  #notice .x { color:var(--dim); cursor:pointer; }
   /* What it heard, shown while it hears it. A voice command that misfires is invisible otherwise —
      you would only see the effect and have to guess at the cause — so the words are always on
      screen before they are acted on. Centred and low, out of the way of the board and the tabs. */
@@ -7697,23 +7707,33 @@ function boxRunHtml() {
   return `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`
        + `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
 }
+// A box with a stop or destroy in flight, so a second press while the first is still running is
+// not a second request (SKEIN-1265). Each is a slow host-side act, and the toast saying it started
+// is the only sign it is under way.
+const boxActing = new Set();
 function stopBox(name) {
+  if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (!confirm(`Stop ${name}? This halts the box to free its compute. Nothing is lost — resume it later via attach.\n\nOther boxes keep running.`)) return;
   toast(`stopping ${name}…`);
+  boxActing.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/stop`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); refreshRow(name); }
-    else toast("stop failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("stop failed"));
+    else notice(`could not stop ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not stop ${name}: ${failText(e)}`))
+    .finally(() => boxActing.delete(name));
 }
 function destroyBox(name) {
+  if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (settings.confirm_destroy !== false
       && !confirm(`Destroy ${name}?\n\nThis removes THIS BOX and reclaims its disk. Other boxes are untouched. In clone mode any commits in it that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
   toast(`destroying ${name}…`);
+  boxActing.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name);
       if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
-    else toast("destroy failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("destroy failed"));
+    else notice(`could not destroy ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not destroy ${name}: ${failText(e)}`))
+    .finally(() => boxActing.delete(name));
 }
 function batchResume() {
   const ps = boxes.filter(b => b.pause === "proceed");
@@ -7726,11 +7746,11 @@ function batchResume() {
     body: JSON.stringify({ names: ps.map(b => b.name) })
   }).then(r => r.json()).then(d => {
     const n = (d.resumed || []).length, h = (d.held || []).length;
-    if (!d.ok) { toast(d.error || "continue failed"); if (h && d.held[0]) select(d.held[0]); return; }
+    if (!d.ok) { notice(d.error || "could not continue those boxes"); if (h && d.held[0]) select(d.held[0]); return; }
     // held = boxes the AI safety gate flagged as a real decision (only when SKEIN_AI=on) — route to one
     toast(`continuing ${n}${h ? ` · held ${h} for your eyes` : ""}`);
     if (h && d.held[0]) select(d.held[0]);
-  }).catch(() => toast("continue failed"));
+  }).catch(e => notice(`could not continue those boxes: ${failText(e)}`));
 }
 
 // An error nobody can see is an error nobody can report.
@@ -9532,7 +9552,7 @@ function decideSubq(key, approve) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
   }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })
-    .catch(e => toast(`could not record that decision: ${failText(e)}`));
+    .catch(e => notice(`could not record that decision: ${failText(e)}`));
 }
 
 // The badge, so a request does not wait unseen for someone to open the panel.
@@ -9632,7 +9652,7 @@ function sendAskq(key, body) {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...shown, ...body }),
   }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); })
-    .catch(e => toast(`could not record that decision: ${failText(e)}`));
+    .catch(e => notice(`could not record that decision: ${failText(e)}`));
 }
 
 // `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
@@ -9890,7 +9910,7 @@ function putReadPat(token) {
   return fetch("/api/fleet/git-read-token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
   }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
-    .catch(e => toast(String(e.message || "could not store that token")));
+    .catch(e => notice(failText(e) || "could not store that token"));
 }
 
 // Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
@@ -10013,7 +10033,7 @@ function addGitCred() {
   return storeGitCred(repo, token).then(() => {
     document.getElementById("set-c-token").value = "";
     document.getElementById("set-c-repo").value = "";
-  }).catch(e => toast(String(e.message || "could not store that token")));
+  }).catch(e => notice(failText(e) || "could not store that token"));
 }
 
 // Asks first, as `clearReadPat` does: Forget sits beside Store and Replace, and one stray press
@@ -10024,7 +10044,7 @@ function removeGitCred(id) {
   if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
-    .catch(e => toast(`could not forget that token: ${failText(e)}`));
+    .catch(e => notice(`could not forget that token: ${failText(e)}`));
 }
 
 function decideGitq(key, approve) {
@@ -10045,15 +10065,15 @@ function decideGitq(key, approve) {
   // pressing learns the row they pressed on was stale. The reload is what makes the row show the
   // real state, so the button that was just refused goes.
   }).then(r => r.ok ? loadGitq() : r.text().then(why => {
-    toast(why.trim() || "could not record that decision");
+    notice(why.trim() || "could not record that decision");
     return loadGitq();
-  })).catch(e => toast(`could not record that decision: ${failText(e)}`));
+  })).catch(e => notice(`could not record that decision: ${failText(e)}`));
 }
 
 function revokeGitq(box, repo) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); })
-    .catch(e => toast(`could not revoke that grant: ${failText(e)}`));
+    .catch(e => notice(`could not revoke that grant: ${failText(e)}`));
 }
 
 function paintGitqBadge(n) {
@@ -10429,7 +10449,7 @@ function trackWork(name) {
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(d.note || `${name} is tracking work`))
-    .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't wire ${name}: ${failText(e)}`))
     .finally(() => { tracking.delete(name); });
 }
 // Re-apply the work-tracking documents to a box that already has them. `replace` (shift-click) is
@@ -10443,7 +10463,7 @@ function refreshDocs(name, replace) {
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync/refresh${replace ? "?replace=1" : ""}`, { method:"POST" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${name}: ${d.note || "done"}`))
-    .catch(e => toast(`couldn't update ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't update ${name}: ${failText(e)}`))
     .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
 }
 // One card per connection. A gateway URL and the token that mints at it are one thing — a token is
@@ -10508,7 +10528,7 @@ function saveConnection(card) {
       const flag = document.querySelector(`[data-saved="${CSS.escape("conn-" + (id || (s.connections.at(-1) || {}).id || ""))}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
     })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function forgetConnectionToken(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
@@ -10516,7 +10536,7 @@ function forgetConnectionToken(id) {
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function removeConnection(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
@@ -10524,7 +10544,7 @@ function removeConnection(id) {
   fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 // A new card is a card, not a prompt() — it starts blank in the list and saves like any other once
 // it has a URL, so adding one and editing one are the same two fields in the same place.
@@ -10817,7 +10837,7 @@ function renderRepoList() {
     joinGitShare(slug, pick.value).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => { b.disabled = false; toast(String(e.message || "could not use that token")); });
+    }).catch(e => { b.disabled = false; notice(failText(e) || "could not use that token"); });
   }));
   // Two buttons can spend the card's one token field: "Store" / "Use for … alone" (this repo's own
   // token) and, on a shared card, "Replace for all" (the shared file) — SKEIN-1231.
@@ -10831,7 +10851,7 @@ function renderRepoList() {
     send(token).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => toast(String(e.message || "could not store that token")));
+    }).catch(e => notice(failText(e) || "could not store that token"));
   };
   el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () =>
     spend(b, b.dataset.storetoken, token => storeGitCred(b.dataset.storetoken, token))));
@@ -10881,7 +10901,7 @@ function saveRepoField(input) {
       // here changes what the other pane is entitled to say about a Remove.
       Promise.all([loadRepos(), loadSync()]).then(() => { renderRepoList(); renderSync(); });
     })
-    .catch(e => { toast(`${id}: ${e.message}`); input.focus(); });
+    .catch(e => { notice(`${id}: ${failText(e)}`); input.focus(); });
 }
 // Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
 // carries the repo id in data-id and shows a brief busy state. Used by each repo's sidebar header.
@@ -10892,7 +10912,7 @@ function pullRepo(x) {
   fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:"POST" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${id}: ${(d.summary || "pulled").split("\n")[0]}`))
-    .catch(e => toast(`pull failed: ${e.message}`))
+    .catch(e => notice(`pull failed: ${failText(e)}`))
     .finally(() => { x.classList.remove("busy"); x.textContent = "⟳"; });
 }
 function removeRepo(id) {
@@ -10900,7 +10920,7 @@ function removeRepo(id) {
   fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
-    .catch(e => toast(`remove failed: ${e.message}`));
+    .catch(e => notice(`remove failed: ${failText(e)}`));
 }
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
 function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
@@ -10967,7 +10987,7 @@ function saveSettings() {
       renderDockbar(); closeSettings();
       toast((settings.box_plugin !== false) !== pluginWas ? BOX_PLUGIN_SAVED : "settings saved");
     })
-    .catch(e => toast(`couldn't save: ${failText(e)}`));
+    .catch(e => notice(`couldn't save: ${failText(e)}`));
 }
 // A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole
 // difference between this and the fleet's own memory and CPUs, which are fixed at sandbox creation
@@ -10985,7 +11005,7 @@ function applyBoxLimits() {
         ? `ceilings applied; ${failed.join(", ")} has no cgroup and was left as it is`
         : "ceilings applied to every running box");
     })
-    .catch(e => toast(`couldn't apply: ${e.message}`))
+    .catch(e => notice(`couldn't apply: ${failText(e)}`))
     .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
 }
 
@@ -13175,13 +13195,14 @@ async function pressUpdateAgents(btn) {
     const r = await fetch("/api/update-agents", { method: "POST" }).then(r => r.json());
     // What MOVED, not that it ran: the server answers `claude: 1.2.3 -> 1.2.9`, which is a fact
     // somebody can check, and "done" is not.
-    toast(r.ok ? r.text : `could not update: ${r.error}`);
+    // A report of several lines, one per CLI — kept on screen, line by line, until closed.
+    if (r.ok) notice(r.text, "report"); else notice(`could not update the agent CLIs: ${r.error}`);
     // Only on success, and by re-reading rather than by hiding the offer: the pane draws what the
     // server says is installed, so an install that moved one CLI and not the other still shows the
     // one that is left. Removing the row on the press would have claimed both.
     if (r.ok) loadUpdate();
   } catch (e) {
-    toast(`could not update: ${e}`);
+    notice(`could not update the agent CLIs: ${failText(e)}`);
   } finally {
     btn.disabled = false;
     btn.textContent = "update agents";
@@ -13255,6 +13276,25 @@ async function refused(r) {
 function failText(e) {
   const m = String((e && e.message) || e || "").trim();
   return !m || m === "Failed to fetch" || m === "Load failed" ? "the host is not answering" : m;
+}
+
+// **Where a failure is said** (SKEIN-1265, SKEIN-1245). A failure used to go into the toast, which
+// hides after 3.5 seconds and several callers had cut to its first line — so the part that said why
+// was gone before it could be read, and the agent-CLI update's several-line report read as one
+// run-on line. A notice keeps every line and stays until its ✕ is pressed. `kind` is "error" (said
+// as an alert) or "report" (a result worth reading, said politely). The toast stays for what is
+// fine to miss: "saved", "stopping…".
+function notice(text, kind = "error") {
+  let n = document.getElementById("notice");
+  if (!n) {
+    n = document.createElement("div"); n.id = "notice"; document.body.append(n);
+    n.innerHTML = `<div class="nt-text"></div><button type="button" class="x" aria-label="Close">✕</button>`;
+    n.querySelector(".x").addEventListener("click", () => n.classList.remove("show"));
+  }
+  n.className = kind === "report" ? "report" : "error";
+  n.setAttribute("role", kind === "report" ? "status" : "alert");
+  n.querySelector(".nt-text").textContent = String(text == null ? "" : text).trim();
+  n.classList.add("show");
 }
 
 // ---------- fleet gauges ----------
