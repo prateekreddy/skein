@@ -319,6 +319,28 @@ pub(super) async fn api_diff(Path(name): Path<String>) -> Response {
     }
 }
 
+/// What a destroy would take with it: commits no remote has and uncommitted paths, asked of the box
+/// (SKEIN-1313). `{"known": false}` when it cannot be asked, so the confirm says that rather than
+/// guessing in either direction.
+pub(super) async fn api_unpushed(Path(name): Path<String>) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let got = tokio::task::spawn_blocking(move || skein::diff::box_unpushed(&name))
+        .await
+        .ok()
+        .flatten();
+    match got {
+        Some(u) => Json(serde_json::json!({
+            "known": true,
+            "commits": u.commits,
+            "changes": u.changes,
+        }))
+        .into_response(),
+        None => Json(serde_json::json!({ "known": false })).into_response(),
+    }
+}
+
 /// List a directory in a box's host-side workspace (`?path=rel/dir`, default root). Traversal,
 /// absolute paths, and symlink escapes are rejected in the lib (resolve_in_workspace).
 pub(super) async fn api_files(

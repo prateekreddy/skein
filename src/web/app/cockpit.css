@@ -353,6 +353,8 @@
   .s-error .pill { color:var(--error); }
   .s-waiting .pill { color:var(--waiting); }
   .s-working .pill { color:var(--working); }
+  /* A stop or destroy this page is waiting on (SKEIN-1313): the pill says which, in the quiet colour. */
+  .row.acting .pill { color:var(--faint); }
   .s-done .pill { color:var(--done); }
   .s-idle .pill, .s-stale .pill, .s-ended .pill { color:var(--faint); }
 

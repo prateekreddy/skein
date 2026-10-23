@@ -405,6 +405,102 @@ await check("Stop pressed twice sends one request, and its refusal is said whole
   }
 });
 
+// ---------- a stop or destroy in flight, and what Destroy would lose (SKEIN-1313) ----------
+console.log("\nstop and destroy, while they run");
+
+// The box's row, drawn by the real `render`; the next snapshot from the server takes it away again,
+// so each read draws it first. `pill` is the state word on the right of the row.
+const ROW = { name: BOX, repo: "acme", state: "working", agent: "claude" };
+const pillNow = () => page.evaluate(row => {
+  render([row]);
+  return document.querySelector(`#fleet [data-name="${row.name}"] .pill`)?.textContent.trim() ?? null;
+}, ROW);
+
+// Fails if `updateRow` stops reading `boxActing` (the row says "working" throughout), or the set is
+// not cleared and the row refreshed when the stop answers (it says "stopping…" for ever).
+await check("a box's row says stopping… while its stop is in flight, and its state once it answers", async () => {
+  await closeEverything();
+  let answer;
+  const answered = new Promise(res => { answer = res; });
+  await page.route(`**/api/boxes/${BOX}/stop`, async r => { await answered; return r.fulfill({ json: { ok: true } }); });
+  const accept = d => d.accept().catch(() => {});
+  page.on("dialog", accept);
+  try {
+    const before = await pillNow();
+    await page.evaluate(box => stopBox(box), BOX);
+    const during = await pillNow();
+    answer();
+    await until(() => !boxActing.size);
+    const after = await pillNow();
+    if (during !== "stopping…" || before === during || after !== before) {
+      throw new Error(JSON.stringify({ before, during, after }));
+    }
+  } finally {
+    page.off("dialog", accept);
+    await page.unroute(`**/api/boxes/${BOX}/stop`);
+  }
+});
+
+// Fails if `destroyBox` confirms with the general sentence instead of asking the box
+// (`/api/boxes/<name>/unpushed`), reads a box it could not ask as having nothing to lose, or the
+// row does not say "destroying…" once it is accepted.
+await check("Destroy's confirm says what THIS box would lose, and its row says destroying…", async () => {
+  await closeEverything();
+  let reply = {};
+  await page.route(`**/api/boxes/${BOX}/unpushed`, r => r.fulfill({ json: reply }));
+  let answer;
+  const answered = new Promise(res => { answer = res; });
+  await page.route(`**/api/boxes/${BOX}/destroy`, async r => { await answered; return r.fulfill({ json: { ok: true } }); });
+  let accept = false;
+  const asked = [];
+  const onDialog = d => { asked.push(d.message()); (accept ? d.accept() : d.dismiss()).catch(() => {}); };
+  page.on("dialog", onDialog);
+  const ask = async r => {
+    reply = r;
+    const n = asked.length;
+    await page.evaluate(box => destroyBox(box), BOX);
+    for (let i = 0; i < 30 && asked.length === n; i++) await page.waitForTimeout(100);
+    return asked[n] || "";
+  };
+  try {
+    const lots = await ask({ known: true, commits: 2, changes: 1 });
+    if (!lots.includes("2 commits never pushed or fetched and 1 uncommitted change")) throw new Error(`with work: ${lots}`);
+    const none = await ask({ known: true, commits: 0, changes: 0 });
+    if (!none.includes("nothing uncommitted, so only the box and its disk go")) throw new Error(`with none: ${none}`);
+    const unknown = await ask({ known: false });
+    if (!unknown.includes("could not ask it") || unknown.includes("only the box and its disk go")) throw new Error(`unasked: ${unknown}`);
+    accept = true;
+    await ask({ known: true, commits: 0, changes: 0 });
+    const during = await pillNow();
+    answer();
+    await until(() => !boxActing.size);
+    if (during !== "destroying…") throw new Error(`the row said ${JSON.stringify(during)} while the destroy ran`);
+  } finally {
+    page.off("dialog", onDialog);
+    await page.unroute(`**/api/boxes/${BOX}/unpushed`);
+    await page.unroute(`**/api/boxes/${BOX}/destroy`);
+  }
+});
+
+// Fails if `resumeBox` (board.js) or `revMoveSetAsideAside` (review.js) goes back to a toast cut to
+// its first line: the reason is on the second.
+await check("a refused continue and a refused move-aside are said whole, in a notice", async () => {
+  for (const [route, act] of [
+    [`**/api/boxes/${BOX}/resume`, () => page.evaluate(box => resumeBox(box), BOX)],
+    ["**/api/repos/acme/set-aside/*/move-aside", () => page.evaluate(() => revMoveSetAsideAside("acme", "snoozed.json"))],
+  ]) {
+    await closeEverything();
+    await page.route(route, r => r.fulfill({ json: { ok: false, error: "refused\nthe reason is on this line" } }));
+    try {
+      await act();
+      await until(() => document.getElementById("notice")?.classList.contains("show"));
+      const n = await noticeNow();
+      if (!n || n.kind !== "error" || !n.text.includes("the reason is on this line")) throw new Error(`${route}: notice ${JSON.stringify(n)}`);
+      await page.locator("#notice .x").click();
+    } finally { await page.unroute(route); }
+  }
+});
+
 await page.evaluate(() => { view = { box: null, mode: "term", kind: "agent" }; applyView(); });
 
 await check("no page errors while feedback was driven", () => {

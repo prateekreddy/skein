@@ -478,6 +478,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/boxes/:name/diff", get(api_diff))
+        .route("/api/boxes/:name/unpushed", get(api_unpushed))
         .route("/api/boxes/:name/session", get(api_session))
         .route("/api/boxes/:name/statusline", get(api_statusline))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
