@@ -144,8 +144,9 @@ def place(source_path, dest_path, times=None):
         return False
     # Written inside the held directory, by name relative to it: a link at `.claude` (or anywhere
     # under the home) refuses the write rather than carrying it somewhere the box chose. The
-    # temporary is a new file under an unguessable name, mode 0600 from its creation, and the
-    # rename replaces whatever was at the name — a link included — rather than writing through it.
+    # temporary is a new file under an unguessable name — mode "x", so an existing name, a link
+    # included, is refused rather than opened — at 0600 from its creation (a umask only narrows
+    # it), and the rename replaces whatever was at the name rather than writing through it.
     try:
         where = held_dir(os.path.dirname(dest_path), make=True)
     except Exception:
@@ -154,9 +155,8 @@ def place(source_path, dest_path, times=None):
     tmp = ".skein-login-" + secrets.token_hex(8)
     try:
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=where)
-            with os.fdopen(fd, "w") as f:
-                os.fchmod(fd, 0o600)
+            opener = lambda path, flags: os.open(path, flags | os.O_NOFOLLOW, 0o600, dir_fd=where)
+            with open(tmp, "x", opener=opener) as f:
                 json.dump(want, f)
             os.replace(tmp, name, src_dir_fd=where, dst_dir_fd=where)
         except Exception:

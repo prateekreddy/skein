@@ -94,7 +94,8 @@ WRITERS = {
         1,
         "LOGIN_MERGE_PY runs inside the fleet sandbox and writes a login into a box's HOME there; "
         "`crate::secret` writes on the filesystem THIS process stands on. Same order as the "
-        "writer: mkstemp (0600 at birth), then chmod, then rename.",
+        "writer's rule: a new file at 0600 from its creation, then a rename (SKEIN-1316: made by "
+        "name inside a directory held without following links).",
     ),
     "src/fleet/login.rs::share_login_script": (
         1,
