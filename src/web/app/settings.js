@@ -1562,8 +1562,10 @@ function ownSaveAction(el) {
   return null;
 }
 settingsModal().addEventListener("keydown", e => {
-  // Not on the unsaved-changes notice: Enter on its Discard must discard, not save.
-  if (e.key === "Enter" && !e.target.closest(".set-navi, .set-leave")) {
+  // Enter saves from a field and from nowhere else (SKEIN-1267): on Forget, Apply, Update, Cancel
+  // or a summary it is that control's own press, which a form-wide Enter used to turn into a save.
+  // `enterSubmits` (panels.js) is the one rule every popup's form uses.
+  if (enterSubmits(e) && !e.target.closest(".set-leave")) {
     e.preventDefault();
     const own = e.target.matches?.(OWN_SAVE) ? ownSaveAction(e.target) : null;
     (own || saveSettings)();

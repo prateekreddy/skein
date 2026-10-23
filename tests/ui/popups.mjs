@@ -719,6 +719,38 @@ await check("Enter on Discard discards rather than saving", async () => {
   await page.waitForTimeout(200);
   if (settingsPosts.length || (await storedAppId()) !== "") throw new Error(`saves ${settingsPosts.length}`);
 });
+// Enter on a button or a summary is that control's own press (SKEIN-1267). Each fails if the
+// dialog's Enter handler goes back to saving from anywhere: a POST goes out with the typed App ID.
+await check("Enter on Settings' Cancel cancels, and saves nothing", async () => {
+  await editSettings("4242");
+  await page.locator("#settings .set-foot button", { hasText: "Cancel" }).focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  await page.waitForTimeout(200);
+  if (settingsPosts.length || (await storedAppId()) !== "") throw new Error(`saves ${settingsPosts.length}`);
+});
+await check("Enter on a summary in Settings unfolds it, and saves nothing", async () => {
+  await editSettings("4242");
+  const was = await page.evaluate(() => document.getElementById("set-ghalt").open);
+  await page.locator("#set-ghalt > summary").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  const now = await page.evaluate(() => document.getElementById("set-ghalt").open);
+  if (now === was || settingsPosts.length || !(await isOpen("settings"))) {
+    throw new Error(`open ${was} -> ${now}, saves ${settingsPosts.length}, dialog open ${await isOpen("settings")}`);
+  }
+  await page.evaluate(() => discardSettings());
+});
+// The other half: Enter in a field still saves. Fails if `enterSubmits` stops counting a text input.
+await check("Enter in a Settings field still saves", async () => {
+  await editSettings("4242");
+  await page.locator("#set-ghappid").press("Enter");
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+  if (settingsPosts.length !== 1 || settingsPosts[0].github_app_id !== "4242") throw new Error(`saves ${JSON.stringify(settingsPosts)}`);
+  await editSettings("");
+  await page.locator("#set-go").click();
+  await page.waitForFunction(() => !settingsModal().classList.contains("open"));
+});
 // Fails if Save on the notice is not wired to `saveSettings`: nothing is stored and it stays open.
 await check("Save on the notice saves the edit and closes", async () => {
   await editSettings("4242");
