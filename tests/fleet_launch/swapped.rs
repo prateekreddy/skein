@@ -97,8 +97,7 @@ impl Swap {
     fn launcher(&self, pane: &str) -> Command {
         let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh");
         let mut cmd = Command::new("bash");
-        cmd
-            .arg(&launcher)
+        cmd.arg(&launcher)
             .arg(&self.name)
             .arg(self.root())
             .arg(self.dir.join("pid").join(&self.name))
@@ -470,7 +469,11 @@ fn a_directory_swapped_after_it_was_checked_is_not_what_the_box_gets() {
                 "home.moved/.local/state.moved/skein-test-was-state",
             ][..],
         ),
-        (&["bin"][..], false, &["bin.moved/git", "bin.moved/sudo"][..]),
+        (
+            &["bin"][..],
+            false,
+            &["bin.moved/git", "bin.moved/sudo"][..],
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -487,7 +490,12 @@ fn a_directory_swapped_after_it_was_checked_is_not_what_the_box_gets() {
         fs::create_dir_all(swap.sandbox_home().join(".local/state")).unwrap();
         let decoys: Vec<(String, PathBuf)> = swaps
             .iter()
-            .map(|rel| (rel.to_string(), swap.decoy_dir(&format!("race-{}", rel.replace('/', "_")))))
+            .map(|rel| {
+                (
+                    rel.to_string(),
+                    swap.decoy_dir(&format!("race-{}", rel.replace('/', "_"))),
+                )
+            })
             .collect();
         let before: Vec<Vec<String>> = decoys.iter().map(|(_, d)| listing(d)).collect();
 
@@ -524,7 +532,10 @@ fn a_directory_swapped_after_it_was_checked_is_not_what_the_box_gets() {
         let up = swap.running();
         swap.stop(&out);
 
-        assert!(swapped, "the start id never appeared, so nothing was swapped:\n{stderr}");
+        assert!(
+            swapped,
+            "the start id never appeared, so nothing was swapped:\n{stderr}"
+        );
         if must_start {
             assert!(
                 out.status.success() && up,
@@ -541,7 +552,10 @@ fn a_directory_swapped_after_it_was_checked_is_not_what_the_box_gets() {
                  check:\n{stderr}"
             );
         }
-        for l in landed.iter().filter(|l| must_start || have(l.rsplit('/').next().unwrap())) {
+        for l in landed
+            .iter()
+            .filter(|l| must_start || have(l.rsplit('/').next().unwrap()))
+        {
             assert!(
                 root.join(l).is_file(),
                 "with {swaps:?} swapped, {l} is missing: the launcher did not keep to the \
@@ -577,7 +591,10 @@ fn a_box_credentials_file_that_is_a_link_is_not_its_login() {
     let before = decoy_state(&decoy);
     swap.plant("home/.claude/.credentials.json", &decoy);
     let canon = swap.sandbox_home().join(".claude/.credentials.json");
-    assert!(!canon.exists(), "the fixture fleet must hold no login of its own");
+    assert!(
+        !canon.exists(),
+        "the fixture fleet must hold no login of its own"
+    );
 
     let out = swap.start();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -590,7 +607,11 @@ fn a_box_credentials_file_that_is_a_link_is_not_its_login() {
             .contains("skein-test-decoy"),
         "the login a box's link led to was promoted to the fleet's copy"
     );
-    assert_eq!(decoy_state(&decoy), before, "the file the link led to was changed");
+    assert_eq!(
+        decoy_state(&decoy),
+        before,
+        "the file the link led to was changed"
+    );
 }
 
 /// **Each of the two readers in the login merge refuses a link on its own** (SKEIN-1303).
@@ -720,7 +741,8 @@ fn a_link_in_the_shared_store_is_not_followed_in_the_box() {
     }
     swap.stop(&out);
     assert!(out.status.success(), "the box did not start: {stderr}");
-    let said = fs::read_to_string(&report).unwrap_or_else(|_| panic!("the pane never reported:\n{stderr}"));
+    let said = fs::read_to_string(&report)
+        .unwrap_or_else(|_| panic!("the pane never reported:\n{stderr}"));
 
     assert!(
         said.contains("plain-read"),
