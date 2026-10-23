@@ -11,11 +11,11 @@ test("voice and alerts are independent switches", () => {
   // condition, and turning alerts off silenced the voice — which is invisible in the source unless
   // you already know to look.
   const both = announcementsFor(boxes(1), { ...away, voiceOn: true, alertsOn: true });
-  assert.equal(both.say, "b 1 needs a decision.");
+  assert.equal(both.say, "b 1 needs you.");
   assert.equal(both.notes.length, 1);
 
   const voiceOnly = announcementsFor(boxes(1), { ...away, voiceOn: true, alertsOn: false });
-  assert.equal(voiceOnly.say, "b 1 needs a decision.", "turning alerts off silenced the voice");
+  assert.equal(voiceOnly.say, "b 1 needs you.", "turning alerts off silenced the voice");
   assert.deepEqual(voiceOnly.notes, []);
   assert.equal(voiceOnly.beep, false);
 
@@ -36,7 +36,7 @@ test("being at the board is not being interrupted", () => {
   const on = { voiceOn: true, alertsOn: true };
   assert.equal(announcementsFor(boxes(1), { ...on, awayForMs: 0 }).say, "");
   assert.equal(announcementsFor(boxes(1), { ...on, awayForMs: OWED_GRACE_MS - 1 }).say, "");
-  assert.equal(announcementsFor(boxes(1), { ...on, awayForMs: OWED_GRACE_MS }).say, "b 1 needs a decision.");
+  assert.equal(announcementsFor(boxes(1), { ...on, awayForMs: OWED_GRACE_MS }).say, "b 1 needs you.");
 });
 
 test("a sentence already being read is deferred, not swallowed", () => {
@@ -44,13 +44,13 @@ test("a sentence already being read is deferred, not swallowed", () => {
   // next tick. Taking the credit here would silence them permanently.
   const on = { ...away, voiceOn: true, alertsOn: true };
   assert.equal(announcementsFor(boxes(1), { ...on, speakingAlready: true }).say, "");
-  assert.equal(announcementsFor(boxes(1), on).say, "b 1 needs a decision.");
+  assert.equal(announcementsFor(boxes(1), on).say, "b 1 needs you.");
 });
 
 test("past a couple, a count is all anybody can act on", () => {
   // Six banners stacked on a lock screen is the same nag wearing a different hat, and nine box
   // names read aloud is not something anybody hears.
-  assert.equal(sentenceFor(boxes(1)), "b 1 needs a decision.");
+  assert.equal(sentenceFor(boxes(1)), "b 1 needs you.");
   assert.equal(sentenceFor(boxes(2)), "b 1 and b 2 need you");
   assert.equal(sentenceFor(boxes(9)), "9 boxes need you");
   assert.equal(sentenceFor([]), "");
@@ -98,7 +98,7 @@ test("what is unbearable out loud is taken out of a headline", () => {
 
 test("the kind of ask is the part worth hearing", () => {
   // "wants permission" and "needs you to sign in" want completely different things from you, and one
-  // "needs a decision" for both is what makes somebody go and look.
+  // "needs you" for both is what makes somebody go and look.
   const asking = { name: "proj-s6", blocked_kind: "permission", headline: "Run `rm -rf /b/build`?" };
   assert.equal(utteranceFor(asking, "attn"), "proj s 6 wants permission. Run rm -rf build?");
   assert.equal(
@@ -113,7 +113,7 @@ test("the kind of ask is the part worth hearing", () => {
   // The headline is appended as the box said it — no terminal period is added, here or in
   // `waiting`. Pinned because it is the kind of thing a tidy-up would "fix" into a difference.
   assert.equal(utteranceFor({ name: "a", headline: "boom" }, "error"), "a hit an error. boom");
-  // `waiting` is not `attn`: nothing is blocking it, so "needs a decision" would overstate the ask.
+  // `waiting` is not `attn`: nothing is blocking it, so "needs you" would overstate the ask.
   assert.equal(utteranceFor({ name: "a", headline: "done for now" }, "waiting"),
     "a is waiting. done for now");
 });
@@ -154,5 +154,5 @@ test("a banner says the same thing in fewer words", () => {
   assert.equal(noteFor({}, "waiting"), "is waiting");
   assert.equal(noteFor({}, "error"), "hit an error");
   assert.equal(noteFor({ pause: "proceed" }, "attn"), "wants to continue");
-  assert.equal(noteFor({}, "attn"), "needs a decision");
+  assert.equal(noteFor({}, "attn"), "needs you");
 });

@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:584"]
+["src/bin/skein-server/main.rs:578"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:594"]
+["src/bin/skein-server/main.rs:588"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:685"]
+["src/bin/skein-server/main.rs:679"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:691"]
+["src/bin/skein-server/main.rs:685"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -660,56 +660,56 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"could not refresh {} — a box created now clones from the remote instead\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1495"]
+["src/bin/skein.rs:1534"]
 line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1500"]
+["src/bin/skein.rs:1539"]
 line = "return Err(format!(\"unsupported runtime {agent:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1536"]
+["src/bin/skein.rs:1569"]
 line = "let Some((program, args)) = argv.split_first() else {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1540"]
+["src/bin/skein.rs:1573"]
 line = "Ok(s) if s.success() => Ok(()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1542"]
+["src/bin/skein.rs:1577"]
 line = "Err(e) if e.kind() == ErrorKind::NotFound => Err(match program.as_str() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1545"]
+["src/bin/skein.rs:1580"]
 line = "}),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1653"]
+["src/bin/skein.rs:1688"]
 line = "\"{} of {} box{} could not be copied out ({}) — that work is still only inside {sandbox}, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1689"]
+["src/bin/skein.rs:1724"]
 line = "let asked = [(\"memory\", memory), (\"cpus\", cpus), (\"disk\", disk)]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1691"]
+["src/bin/skein.rs:1726"]
 line = ".filter(|(_, v)| !v.trim().is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1696"]
+["src/bin/skein.rs:1731"]
 line = "\"\\n\\nThe size you asked for ({asked}) is not in that create line — it renders the size \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1720"]
+["src/bin/skein.rs:1755"]
 line = "return Err(format!(\"unsupported runtime {runtime:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1746"]
+["src/bin/skein.rs:1781"]
 line = "return Err(format!("
 window = ".join(\", \");\u000breturn Err(format!(\u000b\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1747"]
+["src/bin/skein.rs:1782"]
 line = "\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1452,12 +1452,12 @@ line = "return Err(format!(\"not a credential id: {id:?}\"));"
 window = "if !valid_credential_id(id) {\u000breturn Err(format!(\"not a credential id: {id:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:754"]
+["src/gitgate/credentials.rs:755"]
 line = "return Err(format!(\"not a credential id: {id:?}\"));"
 window = "if !valid_credential_id(id) {\u000breturn Err(format!(\"not a credential id: {id:?}\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/credentials.rs:1055"]
+["src/gitgate/credentials.rs:1074"]
 line = "pub fn credential_for_repo(slug: &str, need: Need) -> (GhToken, Option<Secret>) {"
 cited_by = ["docs/decisions/one-identity.md"]
 
@@ -1556,12 +1556,12 @@ line = "false => HealthCheck::unsatisfied("
 window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:702"]
+["src/health/report.rs:717"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:712"]
+["src/health/report.rs:727"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
@@ -2007,27 +2007,27 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1014"]
+["src/warden_client.rs:1051"]
 line = "pub struct Prompt {"
 cited_by = ["docs/decisions/install-is-one-sandbox-command.md", "docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1060"]
+["src/warden_client.rs:1097"]
 line = "/// **The rule**: for each privileged act, a warden that has that capability performs it; otherwise"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1069"]
+["src/warden_client.rs:1106"]
 line = "/// **Selection is detection, not configuration.** There is no setting and no first-run question: a"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1091"]
+["src/warden_client.rs:1128"]
 line = "pub fn perform(act: &Act) -> Performed {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1168"]
+["src/warden_client.rs:1205"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/warden_client.rs:1648"]
+["src/warden_client.rs:1739"]
 line = "fn every_prompt_says_the_command_why_it_is_wanted_and_what_declining_costs() {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
@@ -2035,51 +2035,51 @@ cited_by = ["docs/decisions/warden-or-prompt.md"]
 line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:259"]
+["src/web/app/board.js:281"]
 line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:270"]
+["src/web/app/board.js:331"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:273"]
-line = "}).catch(error => toast(`restart failed: ${error.message}`));"
+["src/web/app/board.js:334"]
+line = "}).catch(error => toast(`restart failed: ${error.message}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:665"]
+["src/web/app/board.js:757"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:716"]
+["src/web/app/board.js:808"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:720"]
+["src/web/app/board.js:812"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:729"]
+["src/web/app/board.js:821"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:767"]
+["src/web/app/board.js:859"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:768"]
+["src/web/app/board.js:860"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:858"]
+["src/web/app/board.js:950"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1083"]
+["src/web/app/board.js:1175"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1115"]
+["src/web/app/board.js:1207"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2109,7 +2109,7 @@ line = "const extra = rest ? ` (+${rest} more)` : \"\";"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/boot.js:771"]
-line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
+line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/boot.js:1251"]
@@ -2157,19 +2157,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "toast(`something went wrong in the page: ${line}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:236"]
+["src/web/app/box.js:237"]
 line = "sesspane.innerHTML = `<div class=\"sess\"><div class=\"note\">loading…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:482"]
+["src/web/app/box.js:483"]
 line = ".catch(e => { fv.innerHTML = `<div class=\"note\">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:488"]
+["src/web/app/box.js:489"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">asking the box…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:497"]
+["src/web/app/box.js:498"]
 line = "}).catch(() => { diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load diff</div></div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 

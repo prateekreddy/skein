@@ -1464,18 +1464,57 @@ fn cmd_restart(name: &str, opts: &[String]) -> Result<(), String> {
 /// does not exist until the session runs, and provisioning has to go through the placement that pid
 /// produces. `skein attach` then behaves exactly as it always has.
 fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
-    let out = start_the_box(name, opts);
-    // The cockpit runs this in a PTY that closes when it returns, and the browser then reconnects
-    // into a fresh terminal holding none of the output. Keep the reason where that reconnect will
-    // read it — including the failures that happen before `start_box` is reached at all, which is
-    // where "no registered repo for box X" lives.
-    if let Err(why) = &out {
-        skein::fleet::remember_start_failure(name, why);
-    }
-    out
+    settle_start(name, start_the_box(name, opts))
 }
 
-fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
+/// Why `skein start` did not finish: the box never came up, or it came up and only the terminal
+/// attach that `--attach` asks for afterwards failed.
+#[derive(Debug)]
+enum StartFailed {
+    Start(String),
+    Attach(String),
+}
+
+/// What a finished `skein start` leaves behind for the terminal that asks later.
+///
+/// The cockpit runs this in a PTY that closes when it returns, and the browser then reconnects
+/// into a fresh terminal holding none of the output. So a start that failed keeps its reason where
+/// that reconnect will read it — including the failures that happen before `start_box` is reached
+/// at all, which is where "no registered repo for box X" lives.
+///
+/// **An attach that failed after the box came up is not a failed start** (SKEIN-1311). `start_box`
+/// has already succeeded and dropped any earlier reason by then, and the box is up, placed and
+/// listed; recording the attach's error as the start's would have the reconnect present a working
+/// box as "its last start failed", which `fleet::start`'s own contract calls worse than no reason
+/// at all. It still fails the command, saying the box is up and how to attach again.
+fn settle_start(name: &str, out: Result<(), StartFailed>) -> Result<(), String> {
+    match out {
+        Ok(()) => Ok(()),
+        Err(StartFailed::Start(why)) => {
+            skein::fleet::remember_start_failure(name, &why);
+            Err(why)
+        }
+        Err(StartFailed::Attach(why)) => Err(format!(
+            "{name} is up, but this terminal could not attach to it: {why}. \
+             `skein attach {name}` attaches again."
+        )),
+    }
+}
+
+fn start_the_box(name: &str, opts: &[String]) -> Result<(), StartFailed> {
+    let agent = bring_up(name, opts).map_err(StartFailed::Start)?;
+    // `--attach` exists so the cockpit's create-a-box terminal can hand off into the agent without
+    // the caller having to name the box's placement — which does not exist until the box is up.
+    // Resolved here, after the box is real.
+    if opts.iter().any(|o| o == "--attach") {
+        return run_attach(&skein::sandbox::initial_attach_argv_as(name, &agent))
+            .map_err(StartFailed::Attach);
+    }
+    Ok(())
+}
+
+/// Everything `skein start` does before the attach: the box brought up, and the runtime it runs.
+fn bring_up(name: &str, opts: &[String]) -> Result<String, String> {
     // **Not answerable with `--uncovered`, and saying so is the point.** A box whose name matches
     // no repository is uncovered (`fleet::refuse_if_uncovered`), but that is the smaller half of
     // what is missing here: there is no remote to clone from and no store to link, so there is no
@@ -1518,13 +1557,7 @@ fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
         skein::place::Purpose::Manual,
     )?;
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
-    // `--attach` exists so the cockpit's create-a-box terminal can hand off into the agent without
-    // the caller having to name the box's placement — which does not exist until the line above has
-    // run. Resolved here, after the box is real.
-    if opts.iter().any(|o| o == "--attach") {
-        return run_attach(&skein::sandbox::initial_attach_argv_as(name, &agent));
-    }
-    Ok(())
+    Ok(agent)
 }
 
 /// Run an already-built attach argv, reporting the one failure worth naming.
@@ -1538,7 +1571,9 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
     };
     match Command::new(program).args(args).status() {
         Ok(s) if s.success() => Ok(()),
-        Ok(_) => Err(format!("{program} exited non-zero")),
+        // The status, not just "non-zero": what the child said went to this terminal, which the
+        // cockpit's reconnect does not keep, so its exit code is the part of the reason left.
+        Ok(s) => Err(format!("{program} exited non-zero ({s})")),
         Err(e) if e.kind() == ErrorKind::NotFound => Err(match program.as_str() {
             "sbx" => "sbx not found on PATH — attaching from the host needs the sbx CLI".into(),
             other => format!("{other} not found on PATH"),
@@ -1843,6 +1878,74 @@ mod tests {
         assert!(
             why.contains("Default agent") && why.contains("--agent <runtime>"),
             "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// **A box that came up and only failed to attach is not recorded as a failed start**
+    /// (SKEIN-1311). The record under `starts/` is what the cockpit's reconnect reads to tell a
+    /// person "its last start failed"; an attach failure written there presented a working box that
+    /// way, after `start_box` had already cleared the record for succeeding.
+    ///
+    /// What would make it fail: `settle_start` recording the attach arm too (the record appears),
+    /// or no longer recording the start arm (the record is missing), or the attach error no
+    /// longer saying the box is up and how to attach again.
+    #[test]
+    fn an_attach_that_fails_after_the_box_started_is_not_recorded_as_a_failed_start() {
+        let _env = env_lock();
+        let home =
+            std::env::temp_dir().join(format!("skein-test-cli-{}-start", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        struct PutBack(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                for (name, was) in self.0.drain(..) {
+                    match was {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _put_back = PutBack(
+            ["SKEIN_HOME", "SKEIN_FLEET_ROOT"]
+                .map(|name| (name, std::env::var_os(name)))
+                .into(),
+        );
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_FLEET_ROOT", &home);
+        let record = home.join("starts").join("web-main.err");
+
+        let said = super::settle_start(
+            "web-main",
+            Err(super::StartFailed::Attach(
+                "env exited non-zero (exit status: 1)".into(),
+            )),
+        )
+        .expect_err("a failed attach still fails the command");
+        assert!(
+            !record.exists(),
+            "an attach failure was recorded as the start's: {:?}",
+            std::fs::read_to_string(&record)
+        );
+        assert!(
+            said.contains("web-main is up") && said.contains("skein attach web-main"),
+            "{said}"
+        );
+
+        let said = super::settle_start(
+            "web-main",
+            Err(super::StartFailed::Start(
+                "no branch for box web-main".into(),
+            )),
+        )
+        .expect_err("a failed start fails the command");
+        assert_eq!(said, "no branch for box web-main");
+        assert_eq!(
+            std::fs::read_to_string(&record).ok().as_deref(),
+            Some("no branch for box web-main"),
+            "a failed start must leave its reason for the reconnect to read"
         );
         let _ = std::fs::remove_dir_all(&home);
     }

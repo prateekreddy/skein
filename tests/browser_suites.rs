@@ -162,6 +162,11 @@ const BROWSER_SUITES: [&str; 18] = [
     // A write request answered twice from the panel: the server's refusal in the toast, and the row
     // redrawn in its real state (SKEIN-1034).
     "gitqrefused",
+    // The board and a box's toolbar at a phone's, a laptop's and a desktop's width, measured as
+    // rectangles and hit tests: Destroy on screen at 1280, no sideways scroll at 390, a question
+    // readable in full, a signed-out box that says so, a slow board that says it is loading, and
+    // Restart that asks only when the agent is working (SKEIN-1262 … SKEIN-1300).
+    "layout",
     "onboarding",
     "panecover",
     // Popups over a box terminal: a paste or copy in a popup's field stays in the field and puts

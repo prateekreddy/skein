@@ -46,8 +46,8 @@ mod fixtures;
 
 pub use credentials::{
     credential_for_repo, credential_lives, days_until, forget_host_token, forget_renames,
-    forget_trunks, host_token, host_token_source, repo_slug, repo_token_source, slug_for_write,
-    token_for, trunk_of, viewer, CredentialLife, GhToken, Life, Need,
+    forget_trunks, host_token, host_token_source, refused_repos, repo_slug, repo_token_source,
+    slug_for_write, token_for, trunk_of, viewer, CredentialLife, GhToken, Life, Need,
 };
 pub use refresh::{
     counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue, StoppedPr,

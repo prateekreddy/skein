@@ -1132,10 +1132,12 @@ mod tests {
             first.blind_spots
         );
 
-        // The hold is engaged: the next refresh is refused before the wire — viewer() is the
-        // first call a refresh makes, and it never leaves the process.
+        // The hold is engaged: the next refresh is refused before the wire. Who you are is already
+        // known — `viewer()` is remembered (SKEIN-1280) — so it is the search that is refused at
+        // home, and the refresh says so rather than failing outright.
         let second = queue(&batched_repo("acme/batch-limited"), true)
-            .expect_err("a held refresh cannot even identify the viewer");
+            .map(|q| q.blind_spots.join(" | "))
+            .unwrap_or_else(|why| why);
         assert!(
             second.contains("not calling GitHub"),
             "the refusal says what is happening: {second}"

@@ -1653,3 +1653,171 @@ fn the_release_publish_step_uploads_into_an_existing_release_and_creates_a_missi
         "with no release yet, publish must create it as it always did, --verify-tag included"
     );
 }
+
+/// Run `tools/noskip-check.py` on `log` the way CI's `coverage` job does — the log handed over in
+/// `$SKEIN_NOSKIP_FROM`, nothing run — and return its exit code with everything it printed.
+fn noskip_judges(dir: &Path, name: &str, log: &str) -> (i32, String) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = dir.join(name);
+    std::fs::write(&path, log).unwrap();
+    let out = std::process::Command::new("python3")
+        .arg(root.join("tools/noskip-check.py"))
+        .current_dir(root)
+        .env("SKEIN_NOSKIP_FROM", &path)
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .output()
+        .expect("python3 runs tools/noskip-check.py");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().unwrap_or(-1), said)
+}
+
+/// **`noskip-check` fails CI on a broken test, and on nothing else** (SKEIN-1309).
+///
+/// Since SKEIN-1273 CI's `coverage` job runs the suite once and hands its log to this gate in
+/// `$SKEIN_NOSKIP_FROM`; that gate, not cargo's exit code, is what turns a failed test red. It was
+/// only ever checked by hand, so it is run here on five logs shaped like the ones cargo writes:
+/// a log not made under the switch is refused (2); a failed test, a binary that died without a
+/// result line, and cargo's coloured `error: test failed` each fail it (1); a clean run passes (0).
+///
+/// **What makes it fail:** `failed_tests` returning nothing (the failed-test and died cases come
+/// back 0); the `died` count dropped (the died case comes back 0); the `ANSI` strip removed (the
+/// coloured case comes back 0, since its only failure signal is the coloured line); the marker
+/// check in `read_given_log` dropped (the unmarked case comes back 0). Each was run against the
+/// gate and failed exactly the cases named.
+#[test]
+fn noskip_check_fails_a_handed_over_run_on_a_broken_test_and_only_then() {
+    let dir = common::Scratch::temp("skein-noskip-judge");
+    let mark = "coverage-check: SKEIN_TESTS_NO_SKIP=1 cargo test --all --no-fail-fast\n";
+    let clean = "     Running tests/example.rs (target/debug/deps/example-0)\n\n\
+                 running 1 test\n\
+                 test passes ... ok\n\n\
+                 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; \
+                 finished in 0.00s\n\n";
+    let failed = "     Running tests/broken.rs (target/debug/deps/broken-0)\n\n\
+                  running 1 test\n\
+                  test it_breaks ... FAILED\n\n\
+                  failures:\n\n\
+                  ---- it_breaks stdout ----\n\n\
+                  thread 'it_breaks' (4242) panicked at the fixture test, line 3:\n\
+                  assertion failed: false\n\n\n\
+                  failures:\n    it_breaks\n\n\
+                  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; \
+                  finished in 0.00s\n\n\
+                  error: test failed, to rerun pass `--test broken`\n";
+    let died = "     Running tests/dies.rs (target/debug/deps/dies-0)\n\n\
+                running 1 test\n\
+                error: test failed, to rerun pass `--test dies`\n\n\
+                Caused by:\n  process didn't exit successfully (signal: 9, SIGKILL: kill)\n";
+    let coloured = "     Running tests/dies.rs (target/debug/deps/dies-0)\n\n\
+                    running 1 test\n\
+                    \x1b[1m\x1b[91merror\x1b[0m: test failed, to rerun pass `--test dies`\n";
+
+    let cases: [(&str, String, i32, &str); 5] = [
+        (
+            "unmarked.log",
+            clean.to_string(),
+            2,
+            "a log whose first line does not name SKEIN_TESTS_NO_SKIP=1 must be refused",
+        ),
+        (
+            "failed.log",
+            format!("{mark}{clean}{failed}"),
+            1,
+            "a test that failed, and not by skipping, must fail the gate",
+        ),
+        (
+            "died.log",
+            format!("{mark}{clean}{died}"),
+            1,
+            "a binary cargo says failed but that reported no result must fail the gate",
+        ),
+        (
+            "coloured.log",
+            format!("{mark}{clean}{coloured}"),
+            1,
+            "cargo's coloured `error: test failed` must be read as the plain one is",
+        ),
+        (
+            "clean.log",
+            format!("{mark}{clean}"),
+            0,
+            "a run in which every test passed must pass the gate",
+        ),
+    ];
+    for (name, log, want, why) in cases {
+        let (got, said) = noskip_judges(&dir, name, &log);
+        assert_eq!(
+            got, want,
+            "{name}: {why}; it exited {got} and said:\n{said}"
+        );
+    }
+}
+
+/// **Every `actions/*` step in the workflows is on a major that runs on Node 24** (SKEIN-1275,
+/// SKEIN-1288). GitHub puts a deprecation notice on every job that runs a Node 20 action and will
+/// stop running them; `release.yml` kept `upload-artifact@v4` and `download-artifact@v4` after
+/// `ci.yml` had moved, because no branch push runs it and nothing read it.
+///
+/// The table is the first Node 24 major of each action, read from that action's own `action.yml`
+/// (`runs.using`) at the tag. An `actions/*` action not in it fails here, so adding one means
+/// reading its `action.yml` first.
+///
+/// **What makes it fail:** any `actions/*@vN` in `.github/workflows/` put back below its row —
+/// `upload-artifact@v4` in `release.yml` is the case that was there.
+#[test]
+fn every_github_action_the_workflows_use_runs_on_node_24() {
+    const FIRST_NODE24_MAJOR: &[(&str, u32)] = &[
+        ("actions/cache", 5),
+        ("actions/checkout", 5),
+        ("actions/download-artifact", 7),
+        ("actions/setup-node", 5),
+        ("actions/upload-artifact", 6),
+    ];
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let mut seen = 0;
+    let mut wrong = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the workflows directory") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        for (n, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+            let Some(at) = line.find("uses: actions/") else {
+                continue;
+            };
+            let spec = line[at + "uses: ".len()..].trim();
+            let (action, version) = spec.split_once('@').unwrap_or((spec, ""));
+            seen += 1;
+            let major = version
+                .strip_prefix('v')
+                .and_then(|v| v.split('.').next())
+                .and_then(|v| v.parse::<u32>().ok());
+            match (FIRST_NODE24_MAJOR.iter().find(|(a, _)| *a == action), major) {
+                (Some((_, floor)), Some(m)) if m >= *floor => {}
+                (Some((_, floor)), _) => wrong.push(format!(
+                    "{file}:{}: {spec} — the first Node 24 major is v{floor}",
+                    n + 1
+                )),
+                (None, _) => wrong.push(format!(
+                    "{file}:{}: {spec} — not in this test's table; read its action.yml's \
+                     `runs.using` and add the first major that says node24",
+                    n + 1
+                )),
+            }
+        }
+    }
+    assert!(
+        seen >= 5,
+        "found only {seen} `uses: actions/…` lines in .github/workflows, so this reads the wrong files"
+    );
+    assert!(
+        wrong.is_empty(),
+        "actions still on Node 20:\n{}",
+        wrong.join("\n")
+    );
+}

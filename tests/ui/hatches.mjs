@@ -33,7 +33,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
 import { spawnSync } from "node:child_process";
-import { FIXTURE_AGENT_STUB, FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
+import { FIXTURE_AGENT_STUB, FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, LIVE_COCKPIT_PORT, startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
 import { stub } from "./harness/github.mjs";
 
@@ -386,6 +386,55 @@ try {
       delete process.env.TMUX_PANE;
       spawnSync("tmux", ["-S", theirs, "kill-server"], { stdio: "ignore" });
     }
+  }
+
+  // 7. **The doorway a suite's server supervises never listens on the live cockpit's port**
+  //    (SKEIN-1290). `heal_fleet` starts `server-doorway.py <$SKEIN_SERVER_PORT>` under the fixture's
+  //    fleet root at boot, and with the variable unset that is 7878: a read-only review found one in
+  //    a respawn loop on this box beside the real cockpit. Read from the doorway process's own argv,
+  //    so what is asserted is the port it was told to take, not the value this file passed in. The
+  //    second arm asks for the live port and must be refused.
+  //
+  //    **What makes it fail:** the `SKEIN_SERVER_PORT` pin in `startServer` deleted (the doorway's
+  //    argv says 7878), or the refusal after the spread deleted (the second arm starts a server).
+  {
+    // A fleet root of its own, so the doorways the servers of the checks above started are not
+    // counted with this one's.
+    const fleet = path.join(fx.root, "fleet-doorway");
+    fs.mkdirSync(fleet, { recursive: true });
+    const { srv } = await serverWith({ SKEIN_FLEET_ROOT: fleet });
+    const pinned = childVar(srv, "SKEIN_SERVER_PORT");
+    const doorwayPorts = () => {
+      const ports = [];
+      for (const pid of fs.readdirSync("/proc").filter(d => /^\d+$/.test(d))) {
+        let argv;
+        try { argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0"); } catch { continue; }
+        const at = argv.findIndex(a => a.startsWith(fleet + path.sep) && a.endsWith("server-doorway.py"));
+        if (at !== -1 && /python/.test(path.basename(argv[0]))) ports.push(argv[at + 1]);
+      }
+      return ports;
+    };
+    let ports = [];
+    for (let i = 0; i < 100 && !ports.length; i++) {
+      ports = doorwayPorts();
+      if (!ports.length) await new Promise(r => setTimeout(r, 100));
+    }
+    let livePort = "";
+    try {
+      await serverWith({ SKEIN_SERVER_PORT: String(LIVE_COCKPIT_PORT) });
+      livePort = "a server was started";
+    } catch (e) {
+      livePort = String(e.message).includes("live cockpit's port") ? "refused" : String(e.message);
+    }
+    t.check(
+      "a suite's fleet doorway is given a port of its own, never the live cockpit's, and asking for that one is refused",
+      { aDoorwayStarted: ports.length > 0,
+        itsPortIsTheOnePinned: ports.length > 0 && ports.every(p => p === pinned),
+        itsPortIsTheLiveOne: ports.includes(String(LIVE_COCKPIT_PORT)),
+        whenTheSuiteAsksForTheLiveOne: livePort },
+      { aDoorwayStarted: true, itsPortIsTheOnePinned: true, itsPortIsTheLiveOne: false,
+        whenTheSuiteAsksForTheLiveOne: "refused" },
+    );
   }
 
   // Two further checks were here, and they are gone rather than retargeted. They asserted a

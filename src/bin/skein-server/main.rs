@@ -325,18 +325,12 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
             tick.tick().await;
             let _ = tokio::task::spawn_blocking(|| {
                 // The board's own list, so a destroyed box is not minted for and a box skein cannot
-                // currently see is simply skipped this round rather than losing its token.
-                // Skein's boxes only. A sandbox skein did not place has none of this mounted, so a
-                // token minted for it is written to a host directory nothing will ever read — and
-                // re-minted every twenty minutes for as long as that sandbox exists.
-                for view in load_views()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|v| !v.foreign)
-                {
-                    for problem in skein::gitgate::refresh_tokens(&view.name) {
-                        eprintln!("skein: git token for {}: {problem}", view.name);
-                    }
+                // currently see is simply skipped this round rather than losing its token. Skein's
+                // boxes only: a sandbox skein did not place has none of this mounted, so a token
+                // minted for it is written to a host directory nothing will ever read. The same
+                // loop a stored or forgotten token runs (SKEIN-1278).
+                for problem in refresh_every_box() {
+                    eprintln!("skein: git token for {problem}");
                 }
                 // A token saved while GitHub could not be asked is asked about here, and its card
                 // cleared or told what GitHub said (SKEIN-1239). Nothing is asked when none is.

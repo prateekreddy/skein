@@ -729,6 +729,7 @@ pub fn set_credential_token(id: &str, token: &str) -> Result<(), String> {
     if !valid_credential_id(id) {
         return Err(format!("not a credential id: {id:?}"));
     }
+    credentials_changed();
     let path = credential_token_path(id);
     let token = token.trim();
     if token.is_empty() {
@@ -891,6 +892,7 @@ pub fn read_pat() -> Option<Secret> {
 
 /// Store (or, empty, forget) the optional read-only PAT.
 pub fn set_read_pat(token: &str) -> Result<(), String> {
+    credentials_changed();
     let home = crate::config::skein_home();
     let path = home.join("github-read-token");
     let token = token.trim();
@@ -1004,7 +1006,8 @@ static GH_CLI: std::sync::Mutex<Option<Option<Secret>>> = std::sync::Mutex::new(
 /// the badge poll — would turn a host with no credential from slow to unusable. So `gh` is asked
 /// once per process, and a host given a `gh` login after startup needs a restart. The routes the
 /// cockpit sends a person to — Settings, which writes the files [`credential_for`] and [`read_pat`]
-/// read — do not.
+/// read — do not. A login GitHub refuses with a 401 is asked for again, once, by `prq::viewer`
+/// (SKEIN-1281), so a `gh` token rotated on the host is picked up without one.
 pub fn gh_login() -> Option<Secret> {
     let mut asked = match GH_CLI.lock() {
         Ok(asked) => asked,
@@ -1028,6 +1031,22 @@ pub fn forget_gh_login() {
     if let Ok(mut asked) = GH_CLI.lock() {
         *asked = None;
     }
+    credentials_changed();
+}
+
+/// Bumped whenever a credential skein holds is stored, replaced or forgotten here, so an answer
+/// remembered from GitHub about "whichever token was in use" can tell it is about a token that may
+/// be gone (SKEIN-1280: `prq::viewer`). A count rather than the token itself, so nothing holding
+/// the memo ever holds a credential.
+static CREDENTIALS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn credentials_changed() {
+    CREDENTIALS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`CREDENTIALS_GENERATION`].
+pub fn credentials_generation() -> u64 {
+    CREDENTIALS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// **The one resolver for a GitHub credential about one repository** (SKEIN-953, the owner's

@@ -190,11 +190,12 @@ function renderTabs() {
       + glyph(`\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`);
     if (t.title !== title) t.title = title;
     const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
-    const label = esc(s.box) + (s.kind === "shell"
-      ? ` <span class="tk">sh</span>`
-      : ` <span class="tk">${esc((s.runtime || "agent").slice(0,2))}</span>`)
-      + (half ? ` <i class="hdot thalf"></i>` : "");
-    const html = `${lead}<span class="tl">${label}</span><span class="tx" title="close">✕</span>`;
+    // The kind is OUTSIDE the truncated name, and a word rather than two letters: the agent tab and
+    // the shell tab of one box are the same name, and with the kind inside the ellipsis a narrow tab
+    // strip showed two identical tabs (SKEIN-1300).
+    const kind = s.kind === "shell" ? "shell" : runtimeLabel(s.runtime || "agent");
+    const html = `${lead}<span class="tl">${esc(s.box)}</span><span class="tk">${esc(kind)}</span>`
+      + (half ? `<i class="hdot thalf"></i>` : "") + `<span class="tx" title="close">✕</span>`;
     if (t.dataset.html !== html) { t.dataset.html = html; t.innerHTML = html; }
     if (tabsEl.children[pos] !== t) tabsEl.insertBefore(t, tabsEl.children[pos] || null);
     pos++;
@@ -430,8 +431,8 @@ function renderFiles(name, d, st) {
     const p = d.path ? `${d.path}/${e.name}` : e.name;
     const on = st.file === p ? " on" : "";
     return e.dir
-      ? `<div class="fent fdir" data-d="${esc(p)}"><span class="fi">▸</span>${esc(e.name)}/</div>`
-      : `<div class="fent${on}" data-f="${esc(p)}"><span class="fi">·</span>${esc(e.name)}<span class="fsz">${fmtSize(e.size)}</span></div>`;
+      ? `<div class="fent fdir" data-d="${esc(p)}"><span class="fi">▸</span><span class="fnm" title="${esc(e.name)}/">${esc(e.name)}/</span></div>`
+      : `<div class="fent${on}" data-f="${esc(p)}"><span class="fi">·</span><span class="fnm" title="${esc(e.name)}">${esc(e.name)}</span><span class="fsz">${fmtSize(e.size)}</span></div>`;
   }).join("");
   // Which tree answered is not a detail: a clone-mode box's host clone is a different branch, and
   // a listing that doesn't say so is quietly showing you the wrong files.

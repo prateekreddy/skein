@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { ago, ageNow } from "../src/ago.mjs";
+import { ago, ageNow, localStamp } from "../src/ago.mjs";
 
 test("the same words the server used to send", () => {
   // Matched against `util::ago` deliberately: the point of moving it is one formatter, not a
@@ -34,4 +34,23 @@ test("a row ages while the board receives nothing", () => {
   // A clock that steps backwards makes a row look freshly seen rather than negative.
   assert.equal(ageNow(10, -50_000), "10s ago");
   assert.equal(ageNow(10, undefined), "10s ago");
+});
+
+test("a server's UTC moment is shown in the reader's own zone", () => {
+  // Node reads `TZ` when a date is formatted, so the zone can be chosen per assertion. Kolkata is
+  // +5:30, which a formatter that merely stripped the `T` and `Z` cannot produce.
+  const was = process.env.TZ;
+  try {
+    process.env.TZ = "Asia/Kolkata";
+    assert.equal(localStamp("2026-09-24T10:12:00Z"), "2026-09-24 15:42");
+    assert.equal(localStamp("2026-09-24T20:00:00Z"), "2026-09-25 01:30", "the date moves with the zone too");
+    assert.equal(localStamp("2026-09-24T10:12:00Z", true), "15:42");
+    process.env.TZ = "UTC";
+    assert.equal(localStamp("2026-09-24T10:12:00Z"), "2026-09-24 10:12");
+  } finally {
+    if (was === undefined) delete process.env.TZ; else process.env.TZ = was;
+  }
+  assert.equal(localStamp(""), "");
+  assert.equal(localStamp(undefined), "");
+  assert.equal(localStamp("not a time"), "not a time", "never Invalid Date");
 });

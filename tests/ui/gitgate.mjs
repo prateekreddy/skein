@@ -21,7 +21,7 @@
 //      goes with the clone (SKEIN-1231), and `addtoken.mjs` drives that against a real server.
 //
 //   node tests/ui/gitgate.mjs
-import { grab, harness, page } from "./lift.mjs";
+import { grab, harness, page, pure } from "./lift.mjs";
 
 const source = [
   // `gitqShown` is lifted with the function that owns it. It is module state — what each pending
@@ -62,6 +62,7 @@ const scope = new Function(`
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
   let failing = null;
   ${grab("esc")}
+  ${pure("ago")}
   const toast = m => notes.push("toast:" + m);
   const notice = m => notes.push("notice:" + m);
   const CSS = { escape: s => s };
@@ -321,6 +322,16 @@ check("a granted request has no Grant button left", decided.includes("Grant writ
 // --- grants list --------------------------------------------------------------------------------
 const live = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", live: true });
 check("a live grant can be revoked from the list", live.includes("Revoke"), true);
+// The expiry is the server's UTC moment shown in the reader's own zone (SKEIN-1264). **What would
+// make this fail:** the old `replace("T", " ").replace("Z", "")`, which prints "2026-08-14 00:00"
+// in every zone. Kolkata is +5:30, so only a real conversion produces this.
+{
+  const was = process.env.TZ;
+  process.env.TZ = "Asia/Kolkata";
+  check("a grant's expiry is shown in local time, not UTC with the Z cut off",
+    T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", live: true }).includes("2026-08-14 05:30"), true);
+  if (was === undefined) delete process.env.TZ; else process.env.TZ = was;
+}
 const dead = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-12T00:00:00Z", live: false });
 check("an expired one is shown", dead.includes("expired"), true);
 check("but cannot be revoked twice", dead.includes("Revoke"), false);

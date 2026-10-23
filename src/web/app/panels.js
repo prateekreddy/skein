@@ -365,7 +365,7 @@ function loadMailbox() {
         <div class="mh"><span class="who">${esc(m.from||"?")}</span><span class="arrow">→</span>
           <span class="to">${m.to==="broadcast"?"📢 all":esc(m.to)}</span>
           <span class="kind">${esc(m.kind||"note")}</span>
-          <span class="mt">${esc((m.ts||"").replace("T"," ").replace("Z",""))}</span></div>
+          <span class="mt">${esc(localStamp(m.ts))}</span></div>
         <div class="mb">${esc(m.body||"")}</div>
         ${(m.seenBy&&m.seenBy.length)?`<div class="seen">seen by ${m.seenBy.map(esc).join(", ")}</div>`:""}
       </div>`).join("");
@@ -475,7 +475,7 @@ function subqCard(r) {
   return `
     <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
-      <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc((r.asked || "").replace("T", " ").replace("Z", ""))}</div>
+      <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${why ? `<div class="sq-log">why: ${esc(why)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
@@ -590,13 +590,13 @@ function askqCard(a) {
       : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}"${busy} /><button class="kbtn primary" onclick="answerAskq(${k}, -1)"${busy}>Send answer</button>`)
       + `<button class="kbtn ghost" onclick="dismissAskq(${k})"${busy}>Dismiss</button>` + sendingNote("askq", key);
   } else if (a.state === "answered") {
-    row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc((a.decided || "").slice(11, 16))}</span>`;
+    row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc(localStamp(a.decided, true))}</span>`;
   } else {
-    row = `<span class="sq-meta">dismissed without an answer · ${esc((a.decided || "").slice(11, 16))}</span>`;
+    row = `<span class="sq-meta">dismissed without an answer · ${esc(localStamp(a.decided, true))}</span>`;
   }
   return `
     <div class="msg" data-card="${esc(key)}">
-      <div class="sq-meta">question · asked by <b>${esc(a.box || "?")}</b> — its own words, unverified · ${esc((a.asked || "").replace("T", " ").replace("Z", "").slice(0, 16))}</div>
+      <div class="sq-meta">question · asked by <b>${esc(a.box || "?")}</b> — its own words, unverified · ${esc(localStamp(a.asked))}</div>
       <div class="aq-body">${esc(a.question || "")}</div>
       <div class="sq-row">${row}</div>
     </div>`;
@@ -702,7 +702,7 @@ function gitqCard(r) {
   return `
     <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc(r.repo || "?")}</div>
-      <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc((r.asked || "").replace("T", " ").replace("Z", ""))}</div>
+      <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${reason ? `<div class="sq-log">${esc(reason)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
@@ -719,7 +719,7 @@ function gitqCard(r) {
 function gitqGrantRow(g) {
   // An expired grant is shown rather than hidden: "this box had access until Tuesday" is the answer
   // to a question this list exists to answer, and a row that silently vanishes answers nothing.
-  const when = g.expires ? esc(g.expires.replace("T", " ").replace("Z", "").slice(0, 16)) : "no expiry";
+  const when = g.expires ? esc(localStamp(g.expires)) : "no expiry";
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc(g.box)} → ${esc(g.repo)}</div>
@@ -880,12 +880,12 @@ function saveReadPat() {
 }
 function clearReadPat() {
   if (gitReadPatSet && !confirm("Forget the read-only token? Private repos this fleet does not have an App on stop being readable.")) return Promise.resolve();
-  return putReadPat("").then(() => { document.getElementById("set-readpat").value = ""; toast("forgot the read token"); });
+  return putReadPat("").then(spoke => { document.getElementById("set-readpat").value = ""; if (!spoke) toast("forgot the read token"); });
 }
 function putReadPat(token) {
   return fetch("/api/fleet/git-read-token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
-  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
+  }).then(async r => { if (!r.ok) throw await refused(r); return r.json().catch(() => ({})).then(d => { const spoke = saidByBoxes(d); return loadGitCreds().then(() => spoke); }); })
     .catch(e => notice(failText(e) || "could not store that token"));
 }
 
@@ -1033,8 +1033,18 @@ function removeGitCred(id) {
   const which = reposPhrase(c && (c.repos && c.repos.length ? c.repos : [c.repo])) || "this repository";
   if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
-    .then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json().catch(() => ({})); })
+    .then(d => { saidByBoxes(d); return loadGitCreds(); })
     .catch(e => notice(`could not forget that token: ${failText(e)}`));
+}
+
+// The host answers a forgotten token once every box's copy is taken back, with what each box said
+// that was not plain success (SKEIN-1278). Shown, because "forgotten" alone would hide a box that
+// could still hold it.
+function saidByBoxes(d) {
+  const said = (d && d.problems) || [];
+  if (said.length) toast(`Forgotten. The boxes said: ${said.join("; ")}`);
+  return said.length > 0;
 }
 
 function decideGitq(key, approve) {

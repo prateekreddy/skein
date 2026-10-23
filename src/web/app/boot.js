@@ -564,7 +564,7 @@ setInterval(() => {
 // the settings dialog, whose tracking connection and git identity are not on the row at all. One
 // re-read answers both and is what the `behind` handler already does for the same reason.
 function refresh() {
-  return fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+  return fetch("/api/boxes").then(r => r.json()).then(fleetArrived).catch(() => {});
 }
 let es = null;
 function connect() {
@@ -581,7 +581,7 @@ function connect() {
     if (tick.event === "snapshot") {
       const now = Date.now();
       for (const b of (tick.boxes || [])) receivedAt.set(b.name, now);
-      render(tick.boxes || []);
+      fleetArrived(tick.boxes || []);
       for (const b of (tick.boxes || [])) retryWaiting("wait-box", b.name);
       awayOnFirstBoard();
       return;
@@ -591,7 +591,7 @@ function connect() {
     // Only the rows that ARRIVED get a new moment. A row the update did not mention keeps the one
     // it had, which is what makes its age keep advancing rather than resetting on every tick.
     for (const b of (tick.boxes || [])) { by.set(b.name, b); receivedAt.set(b.name, Date.now()); }
-    render([...by.values()]);
+    fleetArrived([...by.values()]);
     // **The board is the recovery channel for a pane refused because its box was not there**
     // (SKEIN-702). That pane's own socket is gone — that is what the refusal did — and the box
     // arriving or changing state is a transition this stream already carries, so no second mechanism
@@ -765,8 +765,8 @@ function renderLoginBanner(expired) {
   // claiming a death date nothing here can know. Rendered identically, a person cannot tell a
   // credential that is dead from one that was dead a moment ago.
   ban.querySelector(".banbody").innerHTML = expired.map(l => `<span>${l.witness === "refusal"
-      ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(l.expired_at)}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
-      : `the fleet's ${esc(l.runtime)} login expired ${esc(l.expired_at)} — summaries, critiques and workflows are declining model calls`}</span>`
+      ? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : ""} — summaries, critiques and workflows are declining model calls`
+      : `the fleet's ${esc(l.runtime)} login expired ${esc(localStamp(l.expired_at))} — summaries, critiques and workflows are declining model calls`}</span>`
     + `<button type="button" class="loginfix" onclick="openLoginTerminal(${esc(JSON.stringify(l.runtime))})">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
   banDismissable(ban, "loginban", loginProblems(expired));
 }
@@ -1543,12 +1543,12 @@ if (DEMO) {
   loadRuntimes();
   repos = DEMO_REPOS;
   restored = true;                                  // don't reopen real tabs from a prior session
-  render(DEMO_BOXES);
+  fleetArrived(DEMO_BOXES);
   const live = document.getElementById("live"); live.classList.add("on");
   document.getElementById("livetext").textContent = "demo";
 } else {
   loadRuntimes();
-  fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+  fetch("/api/boxes").then(r => r.json()).then(fleetArrived).catch(() => {});
   connect();
   loadSettings();
   loadRepos();

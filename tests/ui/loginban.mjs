@@ -12,7 +12,10 @@
 //     the banner repaints from that answer, and the server's last sentence becomes the toast.
 //
 //   node tests/ui/loginban.mjs
-import { dismissing, grab, harness, stubDom } from "./lift.mjs";
+import { dismissing, grab, harness, pure, stubDom } from "./lift.mjs";
+// The banner prints a moment in the reader's own zone (SKEIN-1264/1298), so the zone is pinned here
+// for the sentences below to be the same on every machine.
+process.env.TZ = "UTC";
 
 const t = harness();
 
@@ -61,6 +64,7 @@ function world() {
     const renderModelChoices = () => {};
     const toast = said => state.toasts.push(said);
     ${grab("esc")}
+    ${pure("ago")}
     ${grab("lastHealth")}
     ${grab("loadHealth")}
     ${grab("renderLoginBanner")}
@@ -113,8 +117,10 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   await settle();
   const ban = w.reg.get("loginban");
   t.check("an expired login raises the banner row", !!ban, true);
+  // **What would make the date half fail:** printing `expired_at` as the server wrote it — the raw
+  // `2026-08-22T10:00:00Z` the sweep found on the banner (SKEIN-1298).
   t.check("the credential's own expiry names the runtime, the date and the consequence",
-    !!ban && said(ban).includes("the fleet's claude login expired 2026-08-22T10:00:00Z — summaries, critiques and workflows are declining model calls"),
+    !!ban && said(ban).includes("the fleet's claude login expired 2026-08-22 10:00 — summaries, critiques and workflows are declining model calls"),
     true);
   t.check("the banner offers the one click", !!ban && said(ban).includes(">log in<"), true);
 }
@@ -127,7 +133,7 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   await settle();
   const ban = w.reg.get("loginban");
   t.check("a refusal says it was refused, and when",
-    !!ban && said(ban).includes("was refused at 2026-08-22T10:00:00Z"), true);
+    !!ban && said(ban).includes("was refused at 2026-08-22 10:00"), true);
   t.check("and carries the words the runtime used, escaped",
     !!ban && said(ban).includes("invalid API key · run `claude login`"), true);
   t.check("the two witnesses do not read the same",

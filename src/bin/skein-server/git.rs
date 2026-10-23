@@ -159,22 +159,59 @@ pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response
     if let Err(e) = saved {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
-    refresh_every_box();
+    refresh_every_box_behind();
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Boxes whose repo a stored token now covers, or no longer covers, are given it or have it taken
-/// without waiting for the next tick.
-fn refresh_every_box() {
+/// **Every box is given the tokens it may hold and loses the ones it may not, now** — and what went
+/// wrong is the answer, each line naming its box (SKEIN-1278).
+///
+/// The one loop: the server's twenty-minute tick, a token stored, and a token forgotten all come
+/// here. Four copies of it each threw the answer away, so "Forget" said done while a box's copy of
+/// the token could still be on disk and nobody would be told. Skein's boxes only — a sandbox skein
+/// did not place has none of this mounted.
+///
+/// A board that cannot be read is a problem, not an empty fleet: nothing was taken from any box,
+/// and for a withdrawal that is the one thing the person must not be left believing happened.
+pub(super) fn refresh_every_box() -> Vec<String> {
+    let views = match load_views() {
+        Ok(views) => views,
+        Err(e) => {
+            return vec![format!(
+                "the boxes could not be listed, so none of them was updated: {e}"
+            )]
+        }
+    };
+    views
+        .iter()
+        .filter(|v| !v.foreign)
+        .flat_map(|view| {
+            skein::gitgate::refresh_tokens(&view.name)
+                .into_iter()
+                .map(move |problem| format!("{}: {problem}", view.name))
+        })
+        .collect()
+}
+
+/// [`refresh_every_box`] after a token is stored: boxes whose repo it now covers are given it
+/// without waiting for the next tick. Not waited for — minting is round trips to GitHub, and the
+/// save has already been checked — so what went wrong is logged, as the tick logs it.
+fn refresh_every_box_behind() {
     tokio::task::spawn_blocking(|| {
-        for view in load_views()
-            .unwrap_or_default()
-            .iter()
-            .filter(|v| !v.foreign)
-        {
-            let _ = skein::gitgate::refresh_tokens(&view.name);
+        for problem in refresh_every_box() {
+            eprintln!("skein: git token for {problem}");
         }
     });
+}
+
+/// [`refresh_every_box`] after a token is forgotten: **waited for**, so the reply comes once every
+/// box's copy has been taken back, and what could not be is the reply (SKEIN-1278). `problems` is
+/// empty when there was nothing to say.
+async fn withdrawn_from_every_box() -> Response {
+    let problems = tokio::task::spawn_blocking(refresh_every_box)
+        .await
+        .unwrap_or_else(|e| vec![format!("taking the token back from the boxes stopped: {e}")]);
+    Json(serde_json::json!({ "problems": problems })).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -197,7 +234,7 @@ pub(super) async fn api_git_credential_alone(Json(r): Json<AloneReq>) -> Respons
     if let Err(e) = saved {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
-    refresh_every_box();
+    refresh_every_box_behind();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -221,7 +258,7 @@ pub(super) async fn api_git_join_share(Json(r): Json<JoinShareReq>) -> Response 
     if let Err(e) = joined {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
-    refresh_every_box();
+    refresh_every_box_behind();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -244,35 +281,23 @@ pub(super) async fn api_git_read_token(Json(r): Json<ReadTokenReq>) -> Response 
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
     // Reads are placed by the same sweep that places writes, so a token stored now reaches the
-    // boxes without waiting for the next tick.
-    tokio::task::spawn_blocking(|| {
-        for view in load_views()
-            .unwrap_or_default()
-            .iter()
-            .filter(|v| !v.foreign)
-        {
-            let _ = skein::gitgate::refresh_tokens(&view.name);
-        }
-    });
+    // boxes without waiting for the next tick — and one forgotten is taken back before the reply,
+    // as a forgotten write token is.
+    if r.token.trim().is_empty() {
+        return withdrawn_from_every_box().await;
+    }
+    refresh_every_box_behind();
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Forget a stored write token, and take it back from every box that held it **before answering**
+/// (SKEIN-1278) — rather than left live for up to a tick, and rather than answering "done" while
+/// that is still happening. `{"problems": [...]}`: what could not be taken back, or was not fine,
+/// box by box.
 pub(super) async fn api_git_credential_remove(Path(id): Path<String>) -> Response {
     match skein::gitgate::remove_write_credential(&id) {
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-        Ok(()) => {
-            // Withdrawn from every box that held it, rather than left live for up to a tick.
-            tokio::task::spawn_blocking(|| {
-                for view in load_views()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|v| !v.foreign)
-                {
-                    let _ = skein::gitgate::refresh_tokens(&view.name);
-                }
-            });
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(()) => withdrawn_from_every_box().await,
     }
 }
 
