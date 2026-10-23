@@ -204,7 +204,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/boxes.rs:619"]
+["src/bin/skein-server/boxes.rs:641"]
 line = "\"ok\": false,"
 window = "serde_json::json!({\u000b\"ok\": false,\u000b\"resumed\": resumed,"
 cited_by = ["docs/recovery-survey.md"]
@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:578"]
+["src/bin/skein-server/main.rs:579"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:588"]
+["src/bin/skein-server/main.rs:589"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:679"]
+["src/bin/skein-server/main.rs:680"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:685"]
+["src/bin/skein-server/main.rs:686"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1600,10 +1600,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "# brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace"
 cited_by = ["docs/delivery.md"]
 
-["src/kit/skein-startup.sh:"]
-line = "merged=\"$(jq -s \"$retire\"'"
-cited_by = ["docs/decisions/harness-as-a-plugin.md"]
-
 ["src/knock.rs:82"]
 line = "/// Arrival order. Monotonic, so \"oldest\" is a `first_key_value` and never a scan."
 cited_by = ["docs/prose-symbols.toml"]
@@ -2036,7 +2032,7 @@ line = "else { foreignRows = []; foreignError = (body && body.error) || `sbx cou
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/board.js:281"]
-line = "else toast(\"continue failed: \" + (d.error || \"\").split(\"\\n\")[0]);"
+line = "else notice(`could not continue ${name}: ${d.error || \"no reason given\"}`);"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/board.js:332"]
@@ -2044,42 +2040,42 @@ line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/web/app/board.js:335"]
-line = "}).catch(error => toast(`restart failed: ${error.message}`)).finally(done);"
+line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:758"]
+["src/web/app/board.js:761"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:809"]
+["src/web/app/board.js:812"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:813"]
+["src/web/app/board.js:816"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:822"]
+["src/web/app/board.js:825"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:860"]
+["src/web/app/board.js:863"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:861"]
+["src/web/app/board.js:864"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:951"]
+["src/web/app/board.js:954"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1176"]
+["src/web/app/board.js:1179"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1208"]
+["src/web/app/board.js:1211"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2129,55 +2125,55 @@ line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1575"]
+["src/web/app/boot.js:1577"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1583"]
+["src/web/app/boot.js:1585"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:23"]
+["src/web/app/box.js:26"]
 line = "}).catch(e => notice(`could not stop ${name}: ${failText(e)}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:36"]
+["src/web/app/box.js:62"]
 line = "}).catch(e => notice(`could not destroy ${name}: ${failText(e)}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:50"]
+["src/web/app/box.js:76"]
 line = "if (!d.ok) { notice(d.error || \"could not continue those boxes\"); if (h && d.held[0]) select(d.held[0]); return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:54"]
+["src/web/app/box.js:80"]
 line = "}).catch(e => notice(`could not continue those boxes: ${failText(e)}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:76"]
+["src/web/app/box.js:102"]
 line = "toast(`something went wrong in the page: ${line}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:247"]
+["src/web/app/box.js:273"]
 line = "sesspane.innerHTML = `<div class=\"sess\"><div class=\"note\">loading…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:496"]
+["src/web/app/box.js:522"]
 line = ".catch(e => { fv.innerHTML = `<div class=\"note\">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:502"]
+["src/web/app/box.js:528"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">asking the box…</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/box.js:513"]
+["src/web/app/box.js:539"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load the diff — ${esc(failText(e))}</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:510"]
+["src/web/app/panels.js:511"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:975"]
+["src/web/app/panels.js:976"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
