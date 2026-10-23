@@ -704,18 +704,39 @@ await check("launching a box creates no fleet — not by skein, not through the 
 // waits, found that same box provisioned.
 await check("and the box ends up on the board", async () => {
   const starts = path.join(fx.root, "home", "starts", "my-project-main.err");
-  for (const deadline = Date.now() + 60_000; Date.now() < deadline && !fs.existsSync(starts); ) {
+  const t0 = Date.now();
+  let polls = 0;
+  for (const deadline = t0 + 60_000; Date.now() < deadline && !fs.existsSync(starts); ) {
     const boxes = await (await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).json();
+    polls++;
     if (boxes.some(b => b.name === "my-project-main")) return;
     await settle(250);
   }
+  const waited = `${polls} polls over ${Date.now() - t0}ms`;
   const why = fs.existsSync(starts) ? fs.readFileSync(starts, "utf8") : "(nothing recorded)";
   // What the create terminal itself said. The whole reason this suite exists is that the CLI is not
   // where onboarding happens, so the terminal's own text is the evidence, not a re-run by hand.
+  // **From xterm's buffer, not from the DOM** (SKEIN-1310): the cockpit keeps xterm's canvas
+  // renderer, so `.xterm-rows` holds no text at all — on a passing run as on a failing one — and this
+  // used to print an empty terminal as though the launch had said nothing.
   const pane = await page.evaluate(() => {
-    const rows = document.querySelector(".xterm-rows");
-    return rows ? rows.innerText.split("\n").filter(l => l.trim()).slice(-14).join("\n") : "(no terminal on screen)";
+    const s = sessions.get("my-project-main");
+    if (!s) return "(no terminal session for my-project-main)";
+    const buf = s.term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < buf.length; i++) {
+      const l = buf.getLine(i)?.translateToString(true) || "";
+      if (l.trim()) lines.push(l);
+    }
+    return `${lines.slice(-30).join("\n")}\n(socket readyState ${s.ws.readyState})`;
   });
+  // Whether the start placed the box, and whether the server lists it now. A record here with the
+  // box absent from the board is a different failure from a start that never got that far.
+  const places = path.join(fx.root, "home", "places");
+  const placed = fs.existsSync(places)
+    ? fs.readdirSync(places).map(f => `${f}: ${fs.readFileSync(path.join(places, f), "utf8").replace(/\s+/g, " ").slice(0, 160)}`).join("\n") || "(empty)"
+    : "(no places directory)";
+  const now = await (await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).json();
   // Defensively: `sbx` is not invoked at all on a normal in-fleet run, so this file often does not
   // exist — and a failure message that throws ENOENT reading its own evidence reports nothing about
   // the failure it was called for. That is exactly what happened while this suite was being
@@ -724,7 +745,7 @@ await check("and the box ends up on the board", async () => {
   const calls = fs.existsSync(log)
     ? fs.readFileSync(log, "utf8").split("\n").slice(-10).join("\n")
     : "(sbx was never invoked, which is normal in-fleet)";
-  throw new Error(`the first box never appeared.\n--- terminal ---\n${pane}\n--- recorded ---\n${why}\n--- last sbx calls ---\n${calls}`);
+  throw new Error(`the first box never appeared (${waited}).\n--- terminal ---\n${pane}\n--- recorded ---\n${why}\n--- placed ---\n${placed}\n--- listed now ---\n${JSON.stringify(now.map(b => b.name))}\n--- last sbx calls ---\n${calls}`);
 });
 
 // **The box's home is the one under the fleet root, not `guest-home`** (SKEIN-627).
