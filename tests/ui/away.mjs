@@ -16,8 +16,10 @@ import { groupOf } from "../../cockpit/src/groups.mjs";
 
 const t = harness();
 
-async function run(answer, boxes) {
-  const asked = [], drawn = [];
+// `popup` says whether a popup is open when the answer lands; `waiting` collects what the page
+// hands to `whenNoDialog`, so a check can close the popup by running it.
+async function run(answer, boxes, popup = false) {
+  const asked = [], drawn = [], waiting = [];
   const fetch = async (url, init = {}) => {
     asked.push([init.method || "GET", url]);
     return { json: async () => answer };
@@ -28,11 +30,15 @@ async function run(answer, boxes) {
     return showAwayDigest;
   `;
   const renderAwayOverlay = (items, since) => drawn.push({ items, since });
-  const show = new Function("fetch", "boxes", "awayItems", "groupOf", "renderAwayOverlay", src)(
-    fetch, boxes, awayItems, groupOf, renderAwayOverlay);
+  const state = { popup };
+  const popupOpen = () => state.popup;
+  const whenNoDialog = fn => { if (state.popup) waiting.push(fn); else fn(); };
+  const show = new Function("fetch", "boxes", "awayItems", "groupOf", "renderAwayOverlay", "popupOpen", "whenNoDialog", src)(
+    fetch, boxes, awayItems, groupOf, renderAwayOverlay, popupOpen, whenNoDialog);
   await show();
   await new Promise(r => setTimeout(r, 0));
-  return { asked, drawn };
+  const closePopup = async () => { state.popup = false; for (const fn of waiting.splice(0)) await fn(); await new Promise(r => setTimeout(r, 0)); };
+  return { asked, drawn, waiting, closePopup };
 }
 
 // A night away: one box finished while nobody looked.
@@ -58,6 +64,21 @@ async function run(answer, boxes) {
   t.check("nothing to say draws nothing", drawn.length, 0);
   // Fails if an empty digest leaves the mark where it was, so the next one repeats old news.
   t.check("an empty digest marks the board seen", asked.slice(1), [["POST", "/api/away/seen"]]);
+}
+
+// A popup is open when the answer lands (SKEIN-1292): the digest waits for it rather than drawing
+// over it, and asks again once it has closed.
+{
+  const { asked, drawn, waiting, closePopup } = await run(
+    { since: "", moments: [{ at: "2026-09-27T07:00:00Z", name: "alpha", from: "working", to: "done" }] },
+    [{ name: "alpha", state: "done" }], true);
+  // Fails if `showAwayDigest` stops checking `popupOpen`: the digest is drawn over the popup.
+  t.check("with a popup open nothing is drawn", drawn.length, 0);
+  t.check("with a popup open nothing is marked seen", asked.some(([m]) => m === "POST"), false);
+  // Fails if it gives up instead of waiting: nothing is queued, and the digest is never shown.
+  t.check("it waits for the popup to close", waiting.length, 1);
+  await closePopup();
+  t.check("once the popup closes it asks again and draws", [asked.filter(([m, u]) => m === "GET" && u === "/api/away").length, drawn.length], [2, 1]);
 }
 
 t.done();

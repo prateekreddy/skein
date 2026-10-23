@@ -506,7 +506,8 @@ await check("a connection in use is not removed out from under its repos", async
   await page.click('.ccard[data-conn="smoke-example"] [data-dropconn]');
   await settle(500);
   await mustSee('.ccard[data-conn="smoke-example"]', "the connection survives a refused removal");
-  const toasted = await text("#toast");
+  // A refusal is a notice, kept until closed (SKEIN-1265).
+  const toasted = await text("#notice .nt-text");
   if (!/smoke/.test(toasted)) throw new Error(`the refusal should name the repo, got "${toasted}"`);
   await page.click('.set-navi[data-pane="repos"]');
   await settle(300);

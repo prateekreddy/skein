@@ -472,6 +472,18 @@
     opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
   #toast.show { opacity:1; transform:none; pointer-events:auto; }
   #toast a { color:var(--accent); text-decoration:none; }
+  /* An error or a report that stays until closed, every line kept (SKEIN-1265, 1245). Above every
+     popup, and at the top in the middle: the bottom right is where a dialog keeps its Save, and a
+     notice that stays would sit on it — smoke.mjs could not click Settings' Save past one. A popup
+     starts a tenth of the way down, so a short notice sits above its card rather than on it. */
+  #notice { position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:130; display:none; gap:10px; align-items:flex-start;
+    width:max-content; max-width:min(560px,calc(100vw - 32px)); max-height:40vh; overflow:auto; background:var(--overlay); color:var(--text);
+    border:1px solid var(--border-3); border-left:3px solid var(--accent); border-radius:9px; padding:10px 12px 10px 14px;
+    font-size:13px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  #notice.show { display:flex; }
+  #notice.error { border-left-color:var(--attn); }
+  #notice .nt-text { flex:1; white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
+  #notice .x { color:var(--dim); cursor:pointer; }
   /* What it heard, shown while it hears it. A voice command that misfires is invisible otherwise —
      you would only see the effect and have to guess at the cause — so the words are always on
      screen before they are acted on. Centred and low, out of the way of the board and the tabs. */
@@ -1373,6 +1385,8 @@
   .nb-head { padding:0 0 4px; border:0; }
   .mbx-head .sub { color:var(--faint); font-size:12px; } .mbx-head .x, .nb-head .x { margin-left:auto; color:var(--dim); cursor:pointer; }
   .mbx-head .x:hover, .nb-head .x:hover { color:var(--text); }
+  /* A close is a <button> so the keyboard reaches it (SKEIN-1268), drawn as the bare ✕ it was. */
+  button.x { background:none; border:0; padding:0 2px; font:inherit; line-height:1; }
   .mbx-list { flex:1; overflow-y:auto; padding:8px; min-height:120px; }
   .msg { padding:10px 12px; border-radius:9px; background:var(--panel); border:1px solid var(--border); margin-bottom:6px; }
   .msg .mh { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--dim); margin-bottom:4px; }
@@ -1411,7 +1425,7 @@
   .switch:focus-visible, .rx:focus-visible, .x:focus-visible {
     outline:2px solid color-mix(in srgb,var(--accent) 75%,transparent); outline-offset:2px; }
   .mbx-compose textarea { resize:vertical; min-height:54px; }
-  .mbx-compose select { flex:1; }
+  .mbx-compose select { flex:1; min-width:0; }   /* a long box name must not push it off a phone (SKEIN-1300) */
   .nb-lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
   .nb-foot { display:flex; align-items:center; gap:10px; } .nb-foot .hint { flex:1; color:var(--faint); font-size:11px; }
   .nb-foot code { font-family:var(--mono); color:var(--text-2); }
@@ -1743,7 +1757,7 @@
   </div>
 
   <div id="pal" aria-hidden="true">
-    <div class="pal-card">
+    <div class="pal-card" aria-label="Command palette">
       <input id="pal-input" placeholder="Search boxes and actions…" autocomplete="off" spellcheck="false" />
       <div class="pal-list" id="pal-list"></div>
       <div class="pal-foot"><span><kbd>↵</kbd> run</span><span><kbd>↑↓</kbd> move</span><span><kbd>esc</kbd> close</span></div>
@@ -1752,7 +1766,7 @@
 
   <div id="mbx" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Mailbox</b><span class="sub">cross-box hand-offs · the shared brain</span><span class="x" onclick="closeMailbox()">✕</span></div>
+      <div class="mbx-head"><b>Mailbox</b><span class="sub">cross-box hand-offs · the shared brain</span><button type="button" class="x" aria-label="Close" onclick="closeMailbox()">✕</button></div>
       <div class="mbx-list" id="mbx-list"></div>
       <div class="mbx-compose">
         <div class="row1">
@@ -1771,14 +1785,14 @@
 
   <div id="askq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Questions</b><span class="x" onclick="closeAskq()">✕</span></div>
+      <div class="mbx-head"><b>Questions</b><button type="button" class="x" aria-label="Close" onclick="closeAskq()">✕</button></div>
       <div class="mbx-list" id="askq-list"></div>
     </div>
   </div>
 
   <div id="subq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><span class="x" onclick="closeSubq()">✕</span></div>
+      <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><button type="button" class="x" aria-label="Close" onclick="closeSubq()">✕</button></div>
       <div class="mbx-list" id="subq-list"></div>
     </div>
   </div>
@@ -1787,21 +1801,21 @@
        The coaching line is here as well as on the socket, because the socket's copy scrolls. -->
   <div id="loginterm" aria-hidden="true">
     <div class="mbx-card lt-card">
-      <div class="mbx-head"><b>Log in</b><span class="sub" id="lt-coach">type /login inside, then /exit when done</span><span class="x" onclick="closeLoginTerminal()">✕</span></div>
+      <div class="mbx-head"><b>Log in</b><span class="sub" id="lt-coach">type /login inside, then /exit when done</span><button type="button" class="x" aria-label="Close" onclick="closeLoginTerminal()">✕</button></div>
       <div id="lt-host"></div>
     </div>
   </div>
 
   <div id="gitq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Repo write access</b><span class="sub">boxes asking to write a repo that is not their own</span><span class="x" onclick="closeGitq()">✕</span></div>
+      <div class="mbx-head"><b>Repo write access</b><span class="sub">boxes asking to write a repo that is not their own</span><button type="button" class="x" aria-label="Close" onclick="closeGitq()">✕</button></div>
       <div class="mbx-list" id="gitq-list"></div>
     </div>
   </div>
 
   <div id="newbox" aria-hidden="true">
     <div class="nb-card">
-      <div class="nb-head"><b>Launch a box</b><span class="x" onclick="closeNewBox()">✕</span></div>
+      <div class="nb-head"><b>Launch a box</b><button type="button" class="x" aria-label="Close" onclick="closeNewBox()">✕</button></div>
       <label class="nb-lbl" id="nb-repo-lbl" style="display:none">repo</label>
       <select id="nb-repo" style="display:none"></select>
       <label class="nb-lbl">branch name</label>
@@ -1817,6 +1831,7 @@
       </div>
       <label class="nb-lbl">github access</label>
       <select id="nb-gitscope"></select>
+      <div class="ar-msg" id="nb-msg" style="display:none;white-space:pre-line"></div>
       <div class="nb-foot"><span class="hint">creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
     </div>
   </div>
@@ -1824,8 +1839,8 @@
   <!-- One box's own settings. Everything here is an EXCEPTION to a default; each field says what it
        would be if left blank, so the panel reads as "what does this box do" rather than a form. -->
   <div id="boxset" aria-hidden="true">
-    <div class="nb-card" style="max-width:560px">
-      <div class="nb-head"><b id="bs-title">Box settings</b><span class="x" onclick="closeBoxSettings()">✕</span></div>
+    <div class="nb-card" style="max-width:560px" aria-label="Box settings">
+      <div class="nb-head"><b id="bs-title">Box settings</b><button type="button" class="x" aria-label="Close" onclick="closeBoxSettings()">✕</button></div>
       <label class="nb-lbl">work tracking</label>
       <select id="bs-sync"></select>
       <label class="nb-lbl">commit as — from next start</label>
@@ -1853,13 +1868,14 @@
         <button type="button" class="kbtn ghost" id="bs-wire"></button>
         <button type="button" class="kbtn ghost" id="bs-take"></button>
       </div>
+      <div class="ar-msg" id="bs-msg" style="display:none;white-space:pre-line"></div>
       <div class="nb-foot"><span class="hint">settings apply immediately — the box keeps running</span><button class="primary" id="bs-go">Save</button></div>
     </div>
   </div>
 
   <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
-      <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
+      <div class="nb-head"><b>Add a repository</b><button type="button" class="x" aria-label="Close" onclick="closeAddRepo()">✕</button></div>
       <label class="nb-lbl">git URL</label>
       <div class="path-row">
         <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   git@github.com:org/repo.git" autocomplete="off" spellcheck="false" />
@@ -1901,7 +1917,7 @@
       <label class="nb-lbl">write token <span class="ar-opt">optional</span></label>
       <select id="ar-tokwhich" style="display:none" onchange="arUpdateDerived()"></select>
       <input id="ar-token" type="password" placeholder="github_pat_… — leave blank if a GitHub App covers it" autocomplete="off" />
-      <div class="ar-derived" id="ar-tokhint">a fine-grained PAT covering only this repo, which its boxes push with. On the App path you need none.</div>
+      <div class="ar-derived" id="ar-tokhint">a fine-grained GitHub token covering only this repo, which its boxes push with. On the App path you need none. Later, it is changed on the repo's card under Settings → Repositories.</div>
       <label class="nb-lbl">work tracking</label>
       <select id="ar-conn"></select>
       <label class="nb-lbl">Plane project <span class="ar-opt">optional</span></label>
@@ -1943,7 +1959,7 @@
       <div class="set-main">
         <header class="set-top">
           <span class="set-h"><b id="set-htitle">Repositories</b><span id="set-hsub"></span></span>
-          <button type="button" class="set-x" onclick="leaveSettings()" title="Close (esc)">✕</button>
+          <button type="button" class="set-x" onclick="leaveSettings()" title="Close (esc)" aria-label="Close">✕</button>
         </header>
         <!-- Shown in place of closing while the form has unsaved changes (SKEIN-1260). Above the
              panes rather than in the footer, which the self-saving panes hide. -->
@@ -1959,7 +1975,7 @@
           </section>
           <!-- Every credential a box could hold is configured here, as THREE ANSWERS TO ONE QUESTION —
                how do boxes get GitHub credentials — and the pane's shape is that claim. An App, a
-               per-repo PAT, or this account's `gh` token: peers, each picked on purpose.
+               per-repo write token, or this account's `gh` token: peers, each picked on purpose.
                They were not peers. The first two had to be configured; the third was simply *on*, so
                the broadest credential of the three was the one nobody chose, and on a keyring-backed
                `gh` it announced itself by unlocking the user's keyring at every start before they had
@@ -1979,10 +1995,10 @@
             <div class="set-head">Your GitHub identity<span class="sub">what skein reads and acts with, as you, in each repository</span></div>
             <div class="set-desc">Your review queue, your reviews, merges and workflows run as you. For each repository skein uses the first of: the token stored for that repository, <code>$GH_TOKEN</code>, your read token (for reading only), then the host's <code>gh</code> login. A token you store, replace or forget here is used from the next call — no restart.</div>
             <div id="set-identity" class="set-identity"></div>
-            <label class="set-field"><span class="set-title">Read-only token <span class="set-opt">optional</span></span><span class="desc">A fine-grained PAT with <b>contents: read</b> and <b>pull requests: read</b>, for reading private repos you have no repository token for — your review queue there, and boxes' reads without an App. <b>Never used to post, merge or label</b>: those need a repository token, <code>$GH_TOKEN</code> or <code>gh auth login</code>. Write-only here: skein stores it 0600 and never serves it back. <details><summary>why this is separate from the write tokens</summary>a read credential may safely be broad, because the worst a box can do with it is read a repo you own. That is exactly the property a write token must not have, so the two are stored and placed separately rather than one credential doing both jobs at different strengths.</details></span><div class="path-row"><input id="set-readpat" type="password" placeholder="github_pat_… (read)" autocomplete="off" /><button type="button" class="kbtn" onclick="saveReadPat()">Store</button><button type="button" class="kbtn ghost" onclick="clearReadPat()">Forget</button></div></label>
+            <label class="set-field"><span class="set-title">Read-only token <span class="set-opt">optional</span></span><span class="desc">A fine-grained GitHub token with <b>contents: read</b> and <b>pull requests: read</b>, for reading private repos you have no write token for — your review queue there, and boxes' reads without an App. <b>Never used to post, merge or label</b>: those need a write token, <code>$GH_TOKEN</code> or <code>gh auth login</code>. Write-only here: skein stores it 0600 and never serves it back. <details><summary>why this is separate from the write tokens</summary>a read credential may safely be broad, because the worst a box can do with it is read a repo you own. That is exactly the property a write token must not have, so the two are stored and placed separately rather than one credential doing both jobs at different strengths.</details></span><div class="path-row"><input id="set-readpat" type="password" placeholder="github_pat_… (read)" autocomplete="off" /><button type="button" class="kbtn" onclick="saveReadPat()">Store</button><button type="button" class="kbtn ghost" onclick="clearReadPat()">Forget</button></div></label>
 
             <div class="set-state" id="set-gitstate">checking…</div>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">On, a box can push only to <b>its own repo</b> and asks in the cockpit for any other. Needs an App or a repository token below; until one exists this changes nothing. <details><summary>what every box holds without it</summary>every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a token scoped to <b>its own repository</b> for writing and a read-only one for the rest, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Until an App or a repository token exists this changes nothing at all, because scoping with no way to issue a token would take pushing away from every box at once rather than narrowing anything. Takes effect at a box's next start; one box can opt out in its own settings.</details></span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">On, a box can push only to <b>its own repo</b> and asks in the cockpit for any other. Needs an App or a write token; until one exists this changes nothing. <details><summary>what every box holds without it</summary>every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a token scoped to <b>its own repository</b> for writing and a read-only one for the rest, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Until an App or a write token exists this changes nothing at all, because scoping with no way to issue a token would take pushing away from every box at once rather than narrowing anything. Takes effect at a box's next start; one box can opt out in its own settings.</details></span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
 
             <div class="set-head">Set it up once<span class="sub">a GitHub App is the whole of it — every token a box gets is minted from this one key</span></div>
             <div class="set-desc">One credential, and skein derives the rest: a write token scoped to a box's own repository, and a read-only one covering everything you installed the App on — both minted per box, valid an hour, renewed while the box runs. Nothing below is needed on this path.</div>
@@ -2000,8 +2016,8 @@
               <summary>Without a GitHub App<span class="sub">store tokens yourself — this is the path that asks for more than one</span></summary>
               <div class="set-altbody">
                 <div class="set-desc">For a fleet where installing an App is not an option. It costs what the App path avoids: <b>one token per repository</b> you want boxes to push to, kept in step by hand as they expire. Reads then come from public access, or from the read token under <b>Your GitHub identity</b> above.</div>
-                <div class="set-head">Repository tokens<span class="sub">one fine-grained PAT per repo, and one repo per PAT</span></div>
-                <div class="set-desc">Each covers <b>exactly one</b> repository, and that is the whole security argument: a token covering three would hand all three to whichever box receives it, because the helper that chooses between them runs inside the box as the agent's own uid. A helper routes; it cannot contain. A repo's token can also be set on its own card under <b>Repositories</b>.</div>
+                <div class="set-head">Write tokens<span class="sub">one per repository, each covering that repository alone</span></div>
+                <div class="set-desc">Each covers <b>exactly one</b> repository, and that is the whole security argument: a token covering three would hand all three to whichever box receives it, because the helper that chooses between them runs inside the box as the agent's own uid. A helper routes; it cannot contain. <b>A repo's write token lives on its own card</b> under <a href="#" onclick="setPane('repos');return false">Repositories</a>, which is the place to add or replace one; this list shows every stored token in one place, and the form under it is for a repository that has no card.</div>
                 <div id="set-gitcreds" class="set-creds"></div>
                 <div class="set-credadd">
                   <input id="set-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
@@ -2012,7 +2028,7 @@
             </details>
 
             <details class="set-alt" id="set-ghalt">
-              <summary>Use this account's <code>gh</code> token<span class="sub">the third path — no App, no per-repo tokens, and no narrowing either</span></summary>
+              <summary>Use this account's <code>gh</code> token<span class="sub">the third path — no App, no write tokens, and no narrowing either</span></summary>
               <div class="set-altbody">
                 <div class="set-desc">The one credential that is <b>not</b> scoped to anything: whatever <code>gh auth token</code> returned, which is <b>your whole GitHub account</b>, sitting in the sandbox-wide secret and reachable by every box. Prefer it only for a fleet whose repos you would hand any box wholesale.<br><br><b>skein can no longer put one there.</b> Seeding was two host-side halves — <code>gh auth token</code> read the host's login, <code>sbx secret set -g</code> wrote the host's keyring — and the machine-global store is deleted, because two fleets on one host shared one token through it. This switch now only says whether boxes are <i>meant</i> to push as the account; whether one actually can depends on a secret seeded before that deletion.</div>
                 <label class="set-row"><span class="set-txt"><span class="set-title">Boxes push as this account</span><span class="desc">says the credential behind an unscoped box is the account-wide <code>github</code> secret, so it can fetch, push and open PRs anywhere it reaches. A scoped box drops it at startup and uses its own token instead. skein does not write that secret any more, so this claims nothing on a fleet that was never seeded — the checklist reports it as unseeded rather than as a credential you have</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
@@ -2430,21 +2446,22 @@ function askRestart(name, label) {
     document.getElementById("rsask")?.remove();
     const el = document.createElement("div");
     el.id = "rsask"; el.className = "open";
-    el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true");
     el.innerHTML = `<div class="nb-card" style="max-width:440px">`
       + `<div class="nb-head"><b>Restart ${esc(label)} in ${esc(name)}?</b></div>`
       + `<div class="rs-body">${esc(RESTART_COST)}</div>`
       + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
       + `<button type="button" class="primary" data-a="yes">Restart</button></div></div>`;
-    const done = yes => { el.remove(); document.removeEventListener("keydown", key, true); answer(yes); };
-    const key = e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); } };
+    // The dialog layer (`registerDialog`, panels.js) gives it Escape, a click outside, the focus
+    // trap and the focus back, as every other popup; closing is dropping `open`, which is what the
+    // layer watches, before the element goes.
+    const done = yes => { el.classList.remove("open"); setTimeout(() => el.remove(), 0); answer(yes); };
     el.addEventListener("click", e => {
       const a = e.target.closest("[data-a]")?.dataset.a;
-      if (a) done(a === "yes"); else if (e.target === el) done(false);
+      if (a) done(a === "yes");
     });
-    document.addEventListener("keydown", key, true);
     document.body.append(el);
     el.querySelector('[data-a="no"]').focus();
+    registerDialog(el, () => done(false));
   });
 }
 async function restartAgent(name) {
@@ -7880,23 +7897,33 @@ function boxRunHtml() {
   return `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`
        + `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
 }
+// A box with a stop or destroy in flight, so a second press while the first is still running is
+// not a second request (SKEIN-1265). Each is a slow host-side act, and the toast saying it started
+// is the only sign it is under way.
+const boxActing = new Set();
 function stopBox(name) {
+  if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (!confirm(`Stop ${name}? This halts the box to free its compute. Nothing is lost — resume it later via attach.\n\nOther boxes keep running.`)) return;
   toast(`stopping ${name}…`);
+  boxActing.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/stop`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); refreshRow(name); }
-    else toast("stop failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("stop failed"));
+    else notice(`could not stop ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not stop ${name}: ${failText(e)}`))
+    .finally(() => boxActing.delete(name));
 }
 function destroyBox(name) {
+  if (boxActing.has(name)) { toast(`${name} is still being stopped or destroyed`); return; }
   if (settings.confirm_destroy !== false
       && !confirm(`Destroy ${name}?\n\nThis removes THIS BOX and reclaims its disk. Other boxes are untouched. In clone mode any commits in it that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
   toast(`destroying ${name}…`);
+  boxActing.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name);
       if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
-    else toast("destroy failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("destroy failed"));
+    else notice(`could not destroy ${name}: ${d.error || "no reason given"}`);
+  }).catch(e => notice(`could not destroy ${name}: ${failText(e)}`))
+    .finally(() => boxActing.delete(name));
 }
 function batchResume() {
   const ps = boxes.filter(b => b.pause === "proceed");
@@ -7909,11 +7936,11 @@ function batchResume() {
     body: JSON.stringify({ names: ps.map(b => b.name) })
   }).then(r => r.json()).then(d => {
     const n = (d.resumed || []).length, h = (d.held || []).length;
-    if (!d.ok) { toast(d.error || "continue failed"); if (h && d.held[0]) select(d.held[0]); return; }
+    if (!d.ok) { notice(d.error || "could not continue those boxes"); if (h && d.held[0]) select(d.held[0]); return; }
     // held = boxes the AI safety gate flagged as a real decision (only when SKEIN_AI=on) — route to one
     toast(`continuing ${n}${h ? ` · held ${h} for your eyes` : ""}`);
     if (h && d.held[0]) select(d.held[0]);
-  }).catch(() => toast("continue failed"));
+  }).catch(e => notice(`could not continue those boxes: ${failText(e)}`));
 }
 
 // An error nobody can see is an error nobody can report.
@@ -8256,6 +8283,9 @@ function loadFiles(name, path, file) {
   if (path !== undefined) st.path = path;
   if (file !== undefined) st.file = file;
   filesState.set(name, st);
+  // Entering the pane says it is waiting, as the diff does (SKEIN-1299); a step inside it keeps the
+  // listing on screen until the next one lands.
+  if (path === undefined) filespane.innerHTML = `<div class="fview"><div class="note">asking the box…</div></div>`;
   fetch(`/api/boxes/${encodeURIComponent(name)}/files?path=${encodeURIComponent(st.path)}`)
     .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
     .then(d => {
@@ -8359,7 +8389,7 @@ function loadFileContent(name, path) {
 // (a git fork in a sandbox), which is why this says "asking the box" rather than "loading".
 function loadDiff(name) {
   diffpane.innerHTML = `<div class="diff"><div class="note">asking the box…</div></div>`;
-  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(r => r.json()).then(d => {
+  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(async r => { if (!r.ok) throw await refused(r); return r.json(); }).then(d => {
     if (view.box !== name || view.mode !== "diff") return;
     // An empty patch is an answer, and the server's note says which one — "nothing changed" and
     // "the box isn't running" look identical otherwise.
@@ -8367,7 +8397,10 @@ function loadDiff(name) {
       ? diffBanner(d) + renderDiff(d.patch)
       : `<div class="diff"><div class="note">${esc(d.note || "no changes on this branch yet")}</div></div>`;
     renderComments(name);
-  }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
+  }).catch(e => {
+    if (view.box !== name || view.mode !== "diff") return;
+    diffpane.innerHTML = `<div class="diff"><div class="note">could not load the diff — ${esc(failText(e))}</div></div>`;
+  });
 }
 // One renderer for provenance, used by every pane that shows a value skein read from somewhere.
 // The server sends TWO provenance fields beside the value, and they answer different questions.
@@ -9235,10 +9268,10 @@ function loadOverlay() {
   if (!ov) {
     ov = document.createElement("div"); ov.id = "load"; document.body.append(ov);
     ov.addEventListener("click", e => { if (e.target.classList.contains("x")) ov.classList.remove("open"); });
-    closeOnBackdrop(ov, () => ov.classList.remove("open"));
+    registerDialog(ov, () => ov.classList.remove("open"));
   }
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Load by box</b>`
-    + `<span class="sub">right now</span><span class="x">✕</span></div><div class="away-list"></div></div>`;
+    + `<span class="sub">right now</span><button type="button" class="x" aria-label="Close">✕</button></div><div class="away-list"></div></div>`;
   return ov;
 }
 function renderLoad(ov, rows) {
@@ -9284,6 +9317,11 @@ function markSeen() {
 async function showAwayDigest() {
   let away;
   try { away = await (await fetch("/api/away")).json(); } catch { return; }
+  // **Not over a popup** (SKEIN-1292). It used to open over New box mid-typing, take the clicks
+  // meant for Launch, and leave Escape to close the dialog under it with the branch typed in it. It
+  // waits for the last popup to close instead, and asks again then — so it says what happened up to
+  // the moment it is read, and nothing is marked seen until it has been.
+  if (popupOpen()) { whenNoDialog(showAwayDigest); return; }
   const items = awayItems(away.moments || [], boxes, groupOf);
   if (!items.length) { markSeen(); return; }
   renderAwayOverlay(items, away.since);
@@ -9306,12 +9344,12 @@ function awayOnFirstBoard() {
 function renderAwayOverlay(items, since) {
   let ov = document.getElementById("away");
   const close = () => { ov.classList.remove("open"); markSeen(); };
-  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); closeOnBackdrop(ov, close); }
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov); registerDialog(ov, close); }
   // `since` is the server's mark; empty means nobody has looked since skein started keeping one.
   const t = Date.parse(since);
   const when = Number.isNaN(t) ? "since skein started" : `since ${new Date(t).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}`;
   ov.innerHTML = `<div class="away-card"><div class="away-head"><b>While you were away</b>`
-    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><span class="x">✕</span></div>`
+    + `<span class="sub">${when} · ${items.length} update${items.length>1?"s":""}</span><button type="button" class="x" aria-label="Close">✕</button></div>`
     + `<div class="away-list"></div></div>`;
   const list = ov.querySelector(".away-list");
   for (const it of items) {
@@ -9329,7 +9367,7 @@ function renderAwayOverlay(items, since) {
 // Every overlay that sits over the page as a dialog. Two things read this list: the terminal's
 // clipboard keys, which leave every chord to the browser while one is open (SKEIN-1246 — a paste
 // into a Settings field landed in the box terminal behind it), and the wiring below.
-const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load"];
+const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load", "rsask"];
 function popupOpen() { return POPUP_IDS.some(id => document.getElementById(id)?.classList.contains("open")); }
 // A click on the backdrop closes the popup through the close function its ✕ and Escape use, so a
 // click outside loses exactly what those lose and nothing more. **Both the press and the release
@@ -9346,14 +9384,147 @@ function closeOnBackdrop(ov, close) {
     if (outside) close();
   });
 }
-// `#away` and `#load` are made when first shown, and are wired where they are made. **The login
-// terminal (`#loginterm`) is left out on purpose**: that popup is a login in progress, closing it
-// ends the login, and a stray click beside it is no reason to — it closes by its ✕ only.
+// ---------- the dialog layer: one helper every popup goes through ----------
+// What a popup does as a dialog, said once rather than per popup (SKEIN-1247, 1268, 1292). Each was
+// patched on its own before, and each patch covered what its author was looking at: Escape reached
+// six of the twelve, `role="dialog"` one, focus moved into three and came back from none, and a
+// fleet key pressed with Questions open moved the board behind it. So the popups only say how they
+// close; this does the rest, from the one fact every popup already has — the `open` class.
+//
+// * **Watched, not called.** Every way a popup opens or closes ends in that class changing — its
+//   opener, its ✕, a click outside, a row that closes it and goes somewhere, a test's bare
+//   `classList.remove` — so the bookkeeping follows the class rather than trusting each path to
+//   remember a call.
+// * **A stack, so only the top one reacts.** Escape closes the popup opened last and nothing under
+//   it, Tab stays inside it, and it is drawn above the ones under it: Add a repository opened from
+//   Settings used to sit behind Settings, because the two share one z-index and Settings comes later
+//   in the page.
+// * **Focus goes in and comes back.** In to the popup's first field (or its close button when it
+//   has none) unless its opener already put it somewhere inside; back, on close, to wherever it was
+//   before the popup opened — unless something else has taken it since, which is not ours to undo.
+// * **Escape belongs to the popup** — except the login terminal's, where Escape is a key the agent
+//   in it needs; that popup closes by its ✕ alone, as it does on a click outside.
+const dialogClose = new Map();      // overlay -> what Escape and a click outside do, or null
+const dialogStack = [];             // open overlays, the one on top last
+const dialogReturn = new WeakMap(); // overlay -> where the focus was before it opened
+const afterDialogs = new Set();     // what waits for the last popup to close
+// Every focus the page has seen lately, newest last, with `document.body` for "nothing" — so the
+// place to return to can be found after an opener has already moved the focus into its popup.
+const focusTrail = [];
+const noteFocus = el => { focusTrail.push(el); if (focusTrail.length > 30) focusTrail.shift(); };
+document.addEventListener("focusin", e => noteFocus(e.target), true);
+document.addEventListener("focusout", e => { if (!e.relatedTarget) noteFocus(document.body); }, true);
+const FOCUSABLE = "input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), "
+  + "button:not([disabled]), a[href], summary, [tabindex]:not([tabindex='-1'])";
+const FIELD = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([disabled]), select:not([disabled]), textarea:not([disabled])";
+const shownEl = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+function topDialog() {
+  for (let i = dialogStack.length - 1; i >= 0; i--) if (dialogStack[i].classList.contains("open")) return dialogStack[i];
+  return null;
+}
+// The card is the dialog; the overlay around it is only the backdrop. Re-applied at every open,
+// because `#away` and `#load` rebuild their card each time they are drawn.
+function dialogCard(ov) {
+  const card = ov.querySelector("[role=dialog]") || ov.firstElementChild || ov;
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  if (!card.hasAttribute("aria-label")) {
+    const head = card.querySelector(".mbx-head b, .nb-head b, .away-head b");
+    card.setAttribute("aria-label", (head && head.textContent.trim()) || ov.id);
+  }
+  if (!card.hasAttribute("tabindex")) card.setAttribute("tabindex", "-1");
+  return card;
+}
+function focusIntoDialog(ov) {
+  const card = dialogCard(ov);
+  const first = [...ov.querySelectorAll(FIELD)].find(shownEl)
+    || [...ov.querySelectorAll(".x")].find(shownEl) || card;
+  try { first.focus({ preventScroll: true }); } catch { /* detached */ }
+}
+function dialogChanged(ov) {
+  const open = ov.classList.contains("open");
+  const at = dialogStack.indexOf(ov);
+  if (open && at < 0) {
+    const under = dialogStack.filter(o => o.classList.contains("open"));
+    dialogStack.push(ov);
+    ov.setAttribute("aria-hidden", "false");
+    dialogCard(ov);
+    ov.style.zIndex = "";
+    const z = o => parseInt(getComputedStyle(o).zIndex, 10) || 0;
+    const top = Math.max(0, ...under.map(z));
+    if (under.length && top >= z(ov)) ov.style.zIndex = String(top + 1);
+    const back = [...focusTrail].reverse().find(el => !ov.contains(el));
+    dialogReturn.set(ov, back || null);
+    if (!ov.contains(document.activeElement)) focusIntoDialog(ov);
+  } else if (!open && at >= 0) {
+    dialogStack.splice(at, 1);
+    ov.setAttribute("aria-hidden", "true");
+    ov.style.zIndex = "";
+    let back = dialogReturn.get(ov);
+    dialogReturn.delete(ov);
+    // A toolbar redrawn while the popup was open has replaced the button that opened it; the one
+    // standing in its place, by id, is where the focus goes back to.
+    if (back && !back.isConnected && back.id) back = document.getElementById(back.id);
+    const now = document.activeElement;
+    if (!now || now === document.body || ov.contains(now)) {
+      if (back && back !== document.body && back.isConnected && shownEl(back)) {
+        try { back.focus({ preventScroll: true }); } catch { /* gone */ }
+      } else if (ov.contains(now)) now.blur();
+    }
+    if (!topDialog() && afterDialogs.size) {
+      const waiting = [...afterDialogs];
+      afterDialogs.clear();
+      setTimeout(() => waiting.forEach(fn => fn()), 0);
+    }
+  }
+}
+// `close` is what Escape and a click outside do; null leaves both to the popup (the login terminal).
+function registerDialog(ov, close) {
+  if (!ov || dialogClose.has(ov)) return;
+  dialogClose.set(ov, close);
+  if (close) closeOnBackdrop(ov, close);
+  new MutationObserver(() => dialogChanged(ov)).observe(ov, { attributes: true, attributeFilter: ["class"] });
+  dialogChanged(ov);
+}
+// **Enter submits a popup's form only from a field in it** (SKEIN-1267, 1268). On a button — a
+// close, a Forget, a Cancel — Enter is that button's own press, and on a summary it unfolds it; a
+// form-wide Enter that took those too saved, or submitted, instead. Not mid-composition either: an
+// IME's Enter picks a candidate, it does not send.
+function enterSubmits(e) {
+  if (e.key !== "Enter" || e.isComposing) return false;
+  const t = e.target;
+  if (t.tagName === "SELECT") return true;
+  return t.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|color|range)$/i.test(t.type);
+}
+// Run `fn` now if no popup is open, else once the last one has closed.
+function whenNoDialog(fn) { if (popupOpen()) afterDialogs.add(fn); else fn.call(null); }
+// First in the capture phase at the window, so a popup's Escape is the popup's whatever has the
+// focus — a field inside it, the page behind it, or nothing — and no listener after it sees the key.
+window.addEventListener("keydown", e => {
+  const top = topDialog();
+  if (!top) return;
+  if (e.key === "Escape" && !e.isComposing) {
+    const close = dialogClose.get(top);
+    if (!close) return;
+    e.preventDefault(); e.stopPropagation();
+    close();
+  } else if (e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.target.closest?.(".xterm")) {
+    const items = [...top.querySelectorAll(FOCUSABLE)].filter(shownEl);
+    const i = items.indexOf(document.activeElement);
+    if (!items.length) { e.preventDefault(); return; }
+    if (i < 0) { e.preventDefault(); items[e.shiftKey ? items.length - 1 : 0].focus(); }
+    else if (!e.shiftKey && i === items.length - 1) { e.preventDefault(); items[0].focus(); }
+    else if (e.shiftKey && i === 0) { e.preventDefault(); items[items.length - 1].focus(); }
+  }
+}, true);
+// `#away` and `#load` are made when first shown, and are registered where they are made. **The
+// login terminal closes by its ✕ alone**: that popup is a login in progress, closing it ends the
+// login, and neither a stray click beside it nor an Escape meant for the agent inside is a reason.
 for (const [id, close] of [
   ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
-  ["askq", closeAskq],
-]) closeOnBackdrop(document.getElementById(id), close);
+  ["askq", closeAskq], ["loginterm", null],
+]) registerDialog(document.getElementById(id), close);
 
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
@@ -9416,7 +9587,6 @@ palInput.addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { e.preventDefault(); setPalSel(Math.min(palSel+1, palItems.length-1)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "ArrowUp") { e.preventDefault(); setPalSel(Math.max(palSel-1,0)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "Enter") { e.preventDefault(); runPal(); }
-  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
 });
 
 // ---------- mailbox (cross-box hand-offs + broadcast) ----------
@@ -9432,8 +9602,10 @@ function closeMailbox() {
 }
 function fillRecipients() {
   const sel = document.getElementById("mbx-to"), cur = sel.value;
+  // **Boxes that can read it** (SKEIN-1300): an ended box has no session to hand a message to, and
+  // listing every box that ever ran made a list of fourteen to find the three live ones in.
   sel.innerHTML = `<option value="broadcast">📢 broadcast — all boxes</option>`
-    + boxes.map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
+    + boxes.filter(b => groupOf(b.state) !== "ended").map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
   if (cur) sel.value = cur;
 }
 function loadMailbox() {
@@ -9458,8 +9630,8 @@ function sendMail() {
   if (!body) { ta.focus(); return; }
   hint.textContent = "sending…";
   fetch("/api/mailbox", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ to, body, kind }) })
-    .then(r => { if (!r.ok) throw 0; ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
-    .catch(() => hint.textContent = "send failed");
+    .then(async r => { if (!r.ok) throw await refused(r); ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
+    .catch(e => hint.textContent = `not sent: ${failText(e)}`);
 }
 document.getElementById("mbx-send").addEventListener("click", sendMail);
 document.getElementById("mbx-body").addEventListener("keydown", e => {
@@ -9493,6 +9665,25 @@ function redrawKeeping(list, html) {
     if (caret) try { back.setSelectionRange(caret[0], caret[1]); } catch { /* not a text field */ }
   }
 }
+
+// **One decision, one request** (SKEIN-1296). "Send answer" and "Approve & install" stayed live while
+// their request was in flight, so a double click posted it twice — and an approval installs for the
+// whole fleet. A card with a decision in flight has every control disabled and says "sending…"
+// until the answer lands; the set is what the card is drawn from, so a refresh of the list while the
+// request is out draws it still sending rather than live again.
+const inFlight = new Set();
+const sendingNow = (panel, key) => inFlight.has(panel + "\n" + key);
+function markSending(panel, key, on) {
+  if (on) inFlight.add(panel + "\n" + key); else inFlight.delete(panel + "\n" + key);
+  const card = document.querySelector(`#${panel}-list [data-card="${CSS.escape(key)}"]`);
+  if (!card) return;
+  for (const c of card.querySelectorAll("button, input")) c.disabled = on;
+  const said = card.querySelector(".sq-sending");
+  if (said) said.hidden = !on;
+}
+// What a card adds to its controls and its row while it is sending.
+const busyAttr = (panel, key) => sendingNow(panel, key) ? " disabled" : "";
+const sendingNote = (panel, key) => `<span class="sq-meta sq-sending"${sendingNow(panel, key) ? "" : " hidden"}>sending…</span>`;
 
 // ---------- package requests (a box asks, the fleet's owner decides) ----------
 //
@@ -9532,17 +9723,19 @@ function subqCard(r) {
   const why = (r.why || "").trim();
   const key = (r.box || "") + "/" + r.id;
   if (pending) subqShown.set(key, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
+  const busy = busyAttr("subq", key);
   return `
-    <div class="msg">
+    <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
       <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${why ? `<div class="sq-log">why: ${esc(why)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
-          <label><input type="checkbox" checked id="sq-rem-${esc(key)}" /> remember for rebuilt sandboxes</label>
-          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(key))}, true)">Approve &amp; install</button>
-          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(key))}, false)">Deny</button>
+          <label><input type="checkbox" checked id="sq-rem-${esc(key)}"${busy} /> remember for rebuilt sandboxes</label>
+          <button class="kbtn primary" onclick="decideSubq(${esc(JSON.stringify(key))}, true)"${busy}>Approve &amp; install</button>
+          <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(key))}, false)"${busy}>Deny</button>
+          ${sendingNote("subq", key)}
           <span class="sq-meta">runs as root for the whole fleet</span>` : ""}
         ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
         ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
@@ -9572,11 +9765,14 @@ function decideSubq(key, approve) {
   const remember = approve ? !!(rem && rem.checked) : false;
   const shown = subqShown.get(key);
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
+  if (sendingNow("subq", key)) return;
+  markSending("subq", key, true);
   fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
-  }).then(r => { if (!r.ok) throw 0; loadSubq(); })
-    .catch(() => toast("could not record that decision"));
+  }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })
+    .catch(e => notice(`could not record that decision: ${failText(e)}`))
+    .finally(() => markSending("subq", key, false));
 }
 
 // The badge, so a request does not wait unseen for someone to open the panel.
@@ -9636,21 +9832,22 @@ function askqCard(a) {
   const k = esc(JSON.stringify(key));
   const options = a.options || [];
   let row;
+  const busy = busyAttr("askq", key);
   if (a.state === "waiting") {
     askqShown.set(key, { box: a.box || "", question: a.question || "", options });
     // The buttons carry the option's INDEX, never its text: a label is the box's words, and the
     // only place they go is inside the escaped button face.
     row = (options.length
-      ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})">${esc(o)}</button>`).join("")
-      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}" /><button class="kbtn primary" onclick="answerAskq(${k}, -1)">Send answer</button>`)
-      + `<button class="kbtn ghost" onclick="dismissAskq(${k})">Dismiss</button>`;
+      ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})"${busy}>${esc(o)}</button>`).join("")
+      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}"${busy} /><button class="kbtn primary" onclick="answerAskq(${k}, -1)"${busy}>Send answer</button>`)
+      + `<button class="kbtn ghost" onclick="dismissAskq(${k})"${busy}>Dismiss</button>` + sendingNote("askq", key);
   } else if (a.state === "answered") {
     row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc(localStamp(a.decided, true))}</span>`;
   } else {
     row = `<span class="sq-meta">dismissed without an answer · ${esc(localStamp(a.decided, true))}</span>`;
   }
   return `
-    <div class="msg">
+    <div class="msg" data-card="${esc(key)}">
       <div class="sq-meta">question · asked by <b>${esc(a.box || "?")}</b> — its own words, unverified · ${esc(localStamp(a.asked))}</div>
       <div class="aq-body">${esc(a.question || "")}</div>
       <div class="sq-row">${row}</div>
@@ -9671,12 +9868,15 @@ function loadAskq() {
 function sendAskq(key, body) {
   const shown = askqShown.get(key);
   if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }
+  if (sendingNow("askq", key)) return;
+  markSending("askq", key, true);
   const id = key.slice(key.indexOf("/") + 1);
   return fetch("/api/fleet/asks/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...shown, ...body }),
-  }).then(r => { if (!r.ok) throw 0; askqShown.delete(key); loadAskq(); pollAskq(); })
-    .catch(() => toast("could not record that decision"));
+  }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); })
+    .catch(e => notice(`could not record that decision: ${failText(e)}`))
+    .finally(() => markSending("askq", key, false));
 }
 
 // `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
@@ -9750,18 +9950,20 @@ function gitqCard(r) {
   const reason = (r.reason || "").trim();
   const key = (r.box || "") + "/" + r.id;
   if (pending) gitqShown.set(key, { box: r.box || "", repo: r.repo || "" });
+  const busy = busyAttr("gitq", key);
   return `
-    <div class="msg">
+    <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc(r.repo || "?")}</div>
       <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${reason ? `<div class="sq-log">${esc(reason)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
-          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}" /> hours
-            <input type="checkbox" id="gq-keep-${esc(key)}" /> keep indefinitely</label>
-          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)">Grant write</button>
-          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(key))}, false)">Deny</button>` : ""}
+          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}"${busy} /> hours
+            <input type="checkbox" id="gq-keep-${esc(key)}"${busy} /> keep indefinitely</label>
+          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)"${busy}>Grant write</button>
+          <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(key))}, false)"${busy}>Deny</button>
+          ${sendingNote("gitq", key)}` : ""}
       </div>
     </div>`;
 }
@@ -9803,7 +10005,9 @@ function gitCredRow(c) {
       <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
       <span class="cslug">${esc((c.repos && c.repos.length ? c.repos.join(", ") : c.repo) || "?")}</span>
       <span class="cwhy">${why}</span>
-      ${c.shared ? "" : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
+      ${c.shared ? "" : cardFor(c.repo)
+        ? `<button type="button" class="kbtn ghost" onclick="showRepoToken(${esc(JSON.stringify(c.repo))})">${c.has_token ? "Replace" : "Add"} on its card</button>`
+        : `<button type="button" class="kbtn ghost" onclick="editGitCred(${esc(JSON.stringify(c.id))})">${c.has_token ? "Replace token" : "Add token"}</button>`}
       <button type="button" class="kbtn ghost" onclick="removeGitCred(${esc(JSON.stringify(c.id))})">Forget</button>
     </div>`;
 }
@@ -9828,7 +10032,7 @@ function renderGitState(d) {
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
-  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} repository token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} write token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   if (!d.ready) {
     el.className = "set-state warn";
     // The App's problem is worth naming only when there *is* an App — "no App configured" would be
@@ -9842,7 +10046,7 @@ function renderGitState(d) {
     // saying nothing: they would go looking for the wrong problem when a push fails.
     el.innerHTML = d.account_token
       ? `<b>Not scoped.</b> Every box holds this account's <code>gh</code> token — whatever it reaches, read and write. `
-        + `Add a GitHub App or a repository token below to narrow that.${half}`
+        + `Add a GitHub App, or a write token on a repo's card, to narrow that.${half}`
       : `<b>No credential chosen.</b> Boxes read public repos anonymously and <b>cannot push anywhere</b>. `
         + `Pick one of the three below — an App is the one that needs no per-repo upkeep.${half}`;
     return;
@@ -9873,7 +10077,7 @@ function loadGitCreds() {
     const el = document.getElementById("set-gitcreds");
     if (el) {
       el.innerHTML = gitqCreds.length ? gitqCreds.map(gitCredRow).join("")
-        : `<div class="set-desc">None stored. On the App path you need none — it mints a per-repo token on its own. Add one here for a repo the App cannot reach, or if you would rather not run an App at all.</div>`;
+        : `<div class="set-desc">None stored. On the App path you need none — it mints one per push on its own. For a repo the App cannot reach, or if you would rather not run an App, a repo's write token goes on its card under Repositories.</div>`;
     }
     const rp = document.getElementById("set-readpat");
     if (rp) rp.placeholder = gitReadPatSet ? "a token is stored — paste to replace it" : "github_pat_… (read)";
@@ -9896,9 +10100,9 @@ function loadGitCreds() {
 // a call would actually send. A repository nothing can act on is said as a warning with the fix,
 // because that is the row a verdict or a merge will fail on.
 const IDENTITY_WORDS = {
-  source: { repo: "this repo's token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
+  source: { repo: "this repo's write token", env: "$GH_TOKEN", read: "your read token", gh: "the host's gh login", none: "nothing" },
   row: (reads, writes) => `reads with ${reads} · posts and merges with ${writes}`,
-  cannotAct: "cannot post, merge or label here — store a token for it on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
+  cannotAct: "cannot post, merge or label here — store a write token on its card under Repositories, export GH_TOKEN, or run gh auth login on the host",
   noRepos: "No GitHub repositories yet. Each one you add is listed here with the credential skein uses for it.",
 };
 function renderIdentity(identity) {
@@ -9933,10 +10137,24 @@ function clearReadPat() {
 function putReadPat(token) {
   return fetch("/api/fleet/git-read-token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return r.json().catch(() => ({})).then(d => { const spoke = saidByBoxes(d); return loadGitCreds().then(() => spoke); }); })
-    .catch(e => toast(String(e.message || "could not store that token")));
+  }).then(async r => { if (!r.ok) throw await refused(r); return r.json().catch(() => ({})).then(d => { const spoke = saidByBoxes(d); return loadGitCreds().then(() => spoke); }); })
+    .catch(e => notice(failText(e) || "could not store that token"));
 }
 
+// **A repo's write token has one home: its card** (SKEIN-1269). The token had four names and three
+// places to enter it; it is "write token" everywhere now, and this pane — a list of every stored
+// one — sends a repository that has a card to that card rather than being a second editor for it.
+// The form here stays for a repository with no card, which has nowhere else to go.
+const cardFor = slug => (repos || []).find(r => (r.slug || "").toLowerCase() === (slug || "").toLowerCase());
+function showRepoToken(slug) {
+  const r = cardFor(slug);
+  if (!r) return;
+  openRepos.add(r.id);
+  setPane("repos");
+  renderRepoList();
+  const field = document.querySelector(`#set-repos [data-repotoken="${CSS.escape(r.slug)}"]`);
+  if (field) { field.scrollIntoView({ block: "nearest" }); field.focus(); }
+}
 // Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
 // hurry. Retyping the repository to do it invites a typo that stores a *second* credential rather
 // than replacing the first, which then quietly keeps working.
@@ -9962,7 +10180,7 @@ function loadGitq() {
     // Keyed on `ready` rather than the App alone — someone using only their own tokens is set up.
     if (!d.ready) {
       html += `<div class="note">nothing is scoped yet — every box keeps the credential it already had. `
-        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App or a repository token goes.`
+        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App goes, and each repo's write token is on its card under Settings → Repositories.`
         + `${d.app_id && d.app_problem ? ` <b>${esc(d.app_problem)}</b>` : ""}</div>`;
     }
     html += reqs.length
@@ -9978,7 +10196,7 @@ function loadGitq() {
     if (d.ready) {
       html += `<div class="note" style="margin-top:10px">Tokens, the GitHub App and the scope switch live in
         <a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a>${
-          creds.length ? ` — ${creds.length} repository token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
+          creds.length ? ` — ${creds.length} write token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
     }
     redrawKeeping(list, html);
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
@@ -10026,7 +10244,7 @@ function storeGitCred(repo, token) {
   return fetch("/api/fleet/repo-token", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Replace a stored token and nothing else — how a shared token is rotated from any card that shares
@@ -10035,7 +10253,7 @@ function rotateGitCred(id, token) {
   return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Point an existing repo at the token another repo has (SKEIN-1241). The host asks GitHub whether
@@ -10045,7 +10263,7 @@ function joinGitShare(repo, share) {
   return fetch("/api/fleet/repo-share", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ repo, share }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return loadGitCreds(); });
 }
 
 // Returns its promise, so a caller — the test, or anything wanting to store then act — can wait
@@ -10057,7 +10275,7 @@ function addGitCred() {
   return storeGitCred(repo, token).then(() => {
     document.getElementById("set-c-token").value = "";
     document.getElementById("set-c-repo").value = "";
-  }).catch(e => toast(String(e.message || "could not store that token")));
+  }).catch(e => notice(failText(e) || "could not store that token"));
 }
 
 // Asks first, as `clearReadPat` does: Forget sits beside Store and Replace, and one stray press
@@ -10067,9 +10285,9 @@ function removeGitCred(id) {
   const which = reposPhrase(c && (c.repos && c.repos.length ? c.repos : [c.repo])) || "this repository";
   if (!confirm(`Forget the write token for ${which}? Its boxes cannot push there with it any more; store another to put it back.`)) return Promise.resolve();
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; return r.json().catch(() => ({})); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json().catch(() => ({})); })
     .then(d => { saidByBoxes(d); return loadGitCreds(); })
-    .catch(() => toast("could not forget that token"));
+    .catch(e => notice(`could not forget that token: ${failText(e)}`));
 }
 
 // The host answers a forgotten token once every box's copy is taken back, with what each box said
@@ -10090,6 +10308,8 @@ function decideGitq(key, approve) {
   const hours = approve ? (keep && keep.checked ? 0 : Math.max(1, parseInt(hrs && hrs.value, 10) || 24)) : 24;
   const shown = gitqShown.get(key);
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
+  if (sendingNow("gitq", key)) return;
+  markSending("gitq", key, true);
   fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, hours, ...shown }),
@@ -10099,15 +10319,16 @@ function decideGitq(key, approve) {
   // pressing learns the row they pressed on was stale. The reload is what makes the row show the
   // real state, so the button that was just refused goes.
   }).then(r => r.ok ? loadGitq() : r.text().then(why => {
-    toast(why.trim() || "could not record that decision");
+    notice(why.trim() || "could not record that decision");
     return loadGitq();
-  })).catch(() => toast("could not record that decision"));
+  })).catch(e => notice(`could not record that decision: ${failText(e)}`))
+    .finally(() => markSending("gitq", key, false));
 }
 
 function revokeGitq(box, repo) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; loadGitq(); })
-    .catch(() => toast("could not revoke that grant"));
+    .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); })
+    .catch(e => notice(`could not revoke that grant: ${failText(e)}`));
 }
 
 function paintGitqBadge(n) {
@@ -10353,6 +10574,11 @@ function setPane(pane) {
   for (const el of settingsModal().querySelectorAll(".set-navi")) el.classList.toggle("on", el.dataset.pane === pane);
   for (const el of settingsModal().querySelectorAll(".set-pane")) el.classList.toggle("on", el.dataset.pane === pane);
   const nav = settingsModal().querySelector(`.set-navi[data-pane="${pane}"]`);
+  // On a phone the section rail is a row that scrolls sideways, and the section opened could be
+  // off its edge — open, with nothing on screen saying which (SKEIN-1300). Brought into view, and
+  // only along the rail: `nearest` leaves a rail that already shows it alone.
+  // Called again once the dialog is shown, since a hidden rail has nothing to scroll.
+  nav?.scrollIntoView({ block: "nearest", inline: "nearest" });
   document.getElementById("set-htitle").textContent = nav ? nav.textContent.replace(/\d+$/, "").trim() : pane;
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
   // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
@@ -10382,7 +10608,13 @@ function markDirty(on) {
 // you leave a field. Nothing in them is something Save would send, so the footer drops its buttons
 // there and an edit in one raises no unsaved-changes flag.
 const SET_SELF_SAVING = ["keys", "repos", "tracking", "diag", "update", "usage"];
+// **Which open is the live one** (SKEIN-1306). The dialog opens when its loads answer, and a close
+// before then used to be undone by the answer: Settings came back over whatever the person had moved
+// on to and took the focus. Every open takes a ticket and every close spends one, so an answer
+// whose open has been closed, or overtaken by a newer open, does nothing.
+let settingsTicket = 0;
 function openSettings(pane = "repos") {
+  const ticket = ++settingsTicket;
   loadFleetPlan().then(renderFleetPlanNotes);
   // What this sandbox HAS, measured inside it, above the three fields that are only what the next
   // create asks for (`sandboxSize`). The same reading the gauge strip draws from.
@@ -10395,6 +10627,7 @@ function openSettings(pane = "repos") {
   // it lands after the dialog is open — and "after the dialog is open" is precisely the window in
   // which a rebuild button that had not yet been hidden would be clickable.
   Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
+    if (ticket !== settingsTicket) return;
     // `!== false` would read an absent field as chosen, which is exactly the default this stopped
     // being. Unset means nobody picked the account token, so the switch is off.
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret === true;
@@ -10445,6 +10678,7 @@ function openSettings(pane = "repos") {
     loadGitCreds();
     renderSync(); renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
+    settingsModal().querySelector(".set-navi.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
@@ -10474,9 +10708,9 @@ function trackWork(name) {
   if (!name || tracking.has(name)) return;
   tracking.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(d.note || `${name} is tracking work`))
-    .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't wire ${name}: ${failText(e)}`))
     .finally(() => { tracking.delete(name); });
 }
 // Re-apply the work-tracking documents to a box that already has them. `replace` (shift-click) is
@@ -10488,9 +10722,9 @@ function refreshDocs(name, replace) {
   if (!name || refreshingDocs.has(name)) return;
   refreshingDocs.add(name); renderDockbar();
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync/refresh${replace ? "?replace=1" : ""}`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${name}: ${d.note || "done"}`))
-    .catch(e => toast(`couldn't update ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't update ${name}: ${failText(e)}`))
     .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
 }
 // One card per connection. A gateway URL and the token that mints at it are one thing — a token is
@@ -10546,7 +10780,7 @@ function saveConnection(card) {
   return fetch("/api/sync/connections", {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
   })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => {
       syncStatus = s;
       // Confirm at the card, not only in a toast: the toast is gone before you've read the next
@@ -10555,23 +10789,23 @@ function saveConnection(card) {
       const flag = document.querySelector(`[data-saved="${CSS.escape("conn-" + (id || (s.connections.at(-1) || {}).id || ""))}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
     })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function forgetConnectionToken(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
   if (!confirm(`Forget the Plane token for ${(c && c.label) || id}? Boxes already running keep theirs; a new box on this connection gets none until you paste another.`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function removeConnection(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
   if (c && c.repos.length && !confirm(`${id} is used by ${c.repos.join(", ")}. Remove it anyway?`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 // A new card is a card, not a prompt() — it starts blank in the list and saves like any other once
 // it has a URL, so adding one and editing one are the same two fields in the same place.
@@ -10774,7 +11008,7 @@ function repoTokenRow(r) {
   // A <div>, not a <label>: a label hands a click on its text to its first control, and here that
   // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
   return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
-    + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
+    + `<span class="desc">a fine-grained GitHub token covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
     + `<div class="set-cred">${state}</div>${checked}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
@@ -10864,7 +11098,7 @@ function renderRepoList() {
     joinGitShare(slug, pick.value).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => { b.disabled = false; toast(String(e.message || "could not use that token")); });
+    }).catch(e => { b.disabled = false; notice(failText(e) || "could not use that token"); });
   }));
   // Two buttons can spend the card's one token field: "Store" / "Use for … alone" (this repo's own
   // token) and, on a shared card, "Replace for all" (the shared file) — SKEIN-1231.
@@ -10878,7 +11112,7 @@ function renderRepoList() {
     send(token).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => toast(String(e.message || "could not store that token")));
+    }).catch(e => notice(failText(e) || "could not store that token"));
   };
   el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () =>
     spend(b, b.dataset.storetoken, token => storeGitCred(b.dataset.storetoken, token))));
@@ -10919,7 +11153,7 @@ function saveRepoField(input) {
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => {
       // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
       const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
@@ -10928,7 +11162,7 @@ function saveRepoField(input) {
       // here changes what the other pane is entitled to say about a Remove.
       Promise.all([loadRepos(), loadSync()]).then(() => { renderRepoList(); renderSync(); });
     })
-    .catch(e => { toast(`${id}: ${e.message}`); input.focus(); });
+    .catch(e => { notice(`${id}: ${failText(e)}`); input.focus(); });
 }
 // Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
 // carries the repo id in data-id and shows a brief busy state. Used by each repo's sidebar header.
@@ -10937,20 +11171,20 @@ function pullRepo(x) {
   if (x.classList.contains("busy")) return;
   x.classList.add("busy"); x.textContent = "…";
   fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${id}: ${(d.summary || "pulled").split("\n")[0]}`))
-    .catch(e => toast(`pull failed: ${e.message}`))
+    .catch(e => notice(`pull failed: ${failText(e)}`))
     .finally(() => { x.classList.remove("busy"); x.textContent = "⟳"; });
 }
 function removeRepo(id) {
   if (!confirm(`Unregister repo "${id}"? Its clone and store stay on disk; only skein's registration is removed.`)) return;
   fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
-    .catch(e => toast(`remove failed: ${e.message}`));
+    .catch(e => notice(`remove failed: ${failText(e)}`));
 }
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
-function closeSettings() { settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
+function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
 // **Escape, ✕ and a click outside ask first when there is something to lose** (SKEIN-1260, the
 // owner's decision of 2026-10-22). They used to close straight away, and reopening reset the form
 // from what was stored — so since SKEIN-1246 made a click outside close it, one stray click threw
@@ -11000,7 +11234,7 @@ function settingsPayload() {
 function saveSettingsQuiet() {
   return fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"},
                                   body: JSON.stringify(settingsPayload()) })
-    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { settings = s; return s; });
 }
 // The box plugin's own after-Save line, approved with its switch (SKEIN-1057): said only when the
@@ -11014,7 +11248,7 @@ function saveSettings() {
       renderDockbar(); closeSettings();
       toast((settings.box_plugin !== false) !== pluginWas ? BOX_PLUGIN_SAVED : "settings saved");
     })
-    .catch(e => toast(`couldn't save: ${e.message}`));
+    .catch(e => notice(`couldn't save: ${failText(e)}`));
 }
 // A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole
 // difference between this and the fleet's own memory and CPUs, which are fixed at sandbox creation
@@ -11032,7 +11266,7 @@ function applyBoxLimits() {
         ? `ceilings applied; ${failed.join(", ")} has no cgroup and was left as it is`
         : "ceilings applied to every running box");
     })
-    .catch(e => toast(`couldn't apply: ${e.message}`))
+    .catch(e => notice(`couldn't apply: ${failText(e)}`))
     .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
 }
 
@@ -11153,7 +11387,7 @@ function currentRepoId() {
 // `launchBox` had an `exists` on the plan to branch on before offering to create the fleet — and
 // that branch is gone (SKEIN-627). Nothing else in this dialog reads the plan, and fetching it on
 // every open bought a round trip nobody looked at.
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; nbSetMsg(""); clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
 
 // A box belongs to a repo. With none registered there is nothing to clone, nothing to name it
 // after, and nothing for the agent to open — `currentRepoId` falls back to the literal string
@@ -11195,7 +11429,7 @@ function firstRunHtml(foreignN = 0) {
     // that discovers that from a failed push an hour later is the outcome this step exists to prevent.
     { done: !!h.git_credential,
       label: h.git_credential ? `boxes can push (${h.git_credential})` : "choose how boxes push",
-      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a per-repo token, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
+      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a write token on each repo's card, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
   ];
   // **The warden is information, not a step** (SKEIN-1184, `docs/decisions/warden-or-prompt.md`).
   // It used to gate "ready" on the reasoning that a first Launch created the fleet through it; a
@@ -11313,6 +11547,10 @@ function armResourcePop(name, row) {
 function resourceRows(name) {
   const b = boxes.find(x => x.name === name) || {};
   const r = loadCache.rows.find(x => x.name === name);
+  // **A figure not there yet says which "not there" it is** (SKEIN-1300). It said "…" both while
+  // the sandbox was being asked and after it had answered without this box, which read as a
+  // measurement forever on its way.
+  const none = loadCache.inflight ? "measuring…" : "not measured";
   const used = b.disk_mb, cap = b.disk_limit_mb;
   // Disk first: it is the reason to look, and the number people are hunting when a build dies with
   // no room left.
@@ -11320,41 +11558,68 @@ function resourceRows(name) {
   const disk = used == null ? "—" : cap ? `${fmtGb(used)} / ${fmtGb(cap)}` : fmtGb(used);
   return `<div class="rp-n">${esc(name)}</div>`
     + `<div class="rp-r ${diskCls}"><span>disk</span><span>${disk}</span></div>`
-    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : "…"}</span></div>`
+    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : none}</span></div>`
     // The question the headline provokes, answered in the same panel: a box whose memory looks
     // small and whose charge is large has been reading files, and saying so is cheaper than
     // leaving somebody to wonder why the two disagree. Hidden when there is nothing to explain.
     + (r && r.mem_cache > (r.mem_anon || 0)
         ? `<div class="rp-r sub" title="page cache — files this box has read or written. The kernel hands it back the moment anything else needs it, so it is not memory the box is holding."><span>· cache</span><span>${fmtGB(r.mem_cache)}</span></div>`
         : "")
-    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : "…"}</span></div>`
-    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : "…"}</span></div>`
+    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : none}</span></div>`
+    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : none}</span></div>`
     + `<div class="rp-w">disk is measured, not enforced — one filesystem serves every box</div>`;
 }
 function showResourcePop(name, row) {
   const el = rpopEl();
+  // Asked first, so the card drawn below knows whether the sandbox is being asked right now.
+  const asked = loadRows();
   el.innerHTML = resourceRows(name);
   const box = row.getBoundingClientRect();
   el.classList.add("on");
-  // Placed after it has been measured, and flipped above the row when there is no room below —
-  // otherwise the last row's card is drawn off the bottom of the window, which is exactly where the
-  // longest-running boxes sit.
-  const h = el.getBoundingClientRect().height;
-  const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
-  el.style.top = `${top}px`;
-  el.style.left = `${Math.min(box.left + 22, window.innerWidth - el.getBoundingClientRect().width - 12)}px`;
+  // Placed after it has been measured. **Beside the row, not under it** (SKEIN-1300): drawn below,
+  // it covered the next several rows — the ones the pointer was on its way to. To the right of the
+  // row when the window has room, its top level with the row's and kept on screen; below the row,
+  // or above it near the bottom, only when there is no room beside it (a phone).
+  const { width: w, height: h } = el.getBoundingClientRect();
+  if (box.right + 8 + w <= window.innerWidth - 8) {
+    el.style.left = `${box.right + 8}px`;
+    el.style.top = `${Math.max(8, Math.min(box.top, window.innerHeight - h - 8))}px`;
+  } else {
+    const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
+    el.style.top = `${top}px`;
+    el.style.left = `${Math.max(8, Math.min(box.left + 22, window.innerWidth - w - 12))}px`;
+  }
   // The live half arrives when the sandbox answers; the card is already up with the disk figure, so
   // nothing waits on a round trip that may be several seconds behind an `sbx exec` fallback.
-  loadRows().then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
+  asked.then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
 }
 
 // One box's own settings. Every field is blank-means-inherit, and the placeholder is what it would
 // inherit — so leaving the panel untouched is always the same as never opening it.
 let boxSettingsFor = "";
+// **Open at once, and say it is loading** (SKEIN-1266). The dialog used to appear only once two
+// requests had answered, so a press on the box's settings did nothing visible for as long as they
+// took — and showed nothing at all when one failed. It opens now with every control disabled and a
+// line saying it is asking; the answer fills it, a failure says why, and a ticket keeps a late
+// answer for a box whose dialog has since closed or moved on from filling it.
+let boxSetTicket = 0;
+const boxSetControls = () => document.querySelectorAll("#boxset select, #boxset input, #boxset .bs-actions button, #bs-go");
+function bsSetMsg(text, kind) {
+  const el = document.getElementById("bs-msg");
+  el.textContent = text; el.className = "ar-msg" + (kind ? " " + kind : ""); el.style.display = text ? "" : "none";
+}
 function openBoxSettings(name) {
   boxSettingsFor = name;
-  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(r => r.json())])
+  const ticket = ++boxSetTicket;
+  document.getElementById("bs-title").textContent = name;
+  for (const c of boxSetControls()) c.disabled = true;
+  bsSetMsg("asking for this box's settings…");
+  document.getElementById("boxset").classList.add("open");
+  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(async r => { if (!r.ok) throw await refused(r); return r.json(); })])
     .then(([, cur]) => {
+      if (ticket !== boxSetTicket || !document.getElementById("boxset").classList.contains("open")) return;
+      for (const c of boxSetControls()) c.disabled = false;
+      bsSetMsg("");
       document.getElementById("bs-title").textContent = name;
       const conns = syncStatus.connections || [];
       document.getElementById("bs-sync").innerHTML = [
@@ -11425,11 +11690,13 @@ function openBoxSettings(name) {
       }
       document.getElementById("bs-note").textContent =
         "Blank inherits the fleet default; `none` means unlimited. Disk is measured, not enforced — one filesystem serves every box.";
-      document.getElementById("boxset").classList.add("open");
     })
-    .catch(e => toast(`settings: ${e.message}`));
+    .catch(e => {
+      if (ticket !== boxSetTicket) return;
+      bsSetMsg(`could not read ${name}'s settings: ${failText(e)}. Close this and open it again.`, "err");
+    });
 }
-function closeBoxSettings() { document.getElementById("boxset").classList.remove("open"); }
+function closeBoxSettings() { boxSetTicket++; document.getElementById("boxset").classList.remove("open"); }
 function saveBoxSettings() {
   const name = boxSettingsFor;
   const sync = document.getElementById("bs-sync").value;
@@ -11440,17 +11707,29 @@ function saveBoxSettings() {
   const privileged = document.getElementById("bs-priv").value === "1";
   const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); });
+  }).then(async r => { if (!r.ok) throw await refused(r); });
   // Absent vs empty is the whole grammar here: cleared field ⇒ inherit again, not "set to nothing".
-  Promise.all([
-    post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) }),
-    post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {}),
-    post("disk", { limit: disk || null }),
-    post("git-scope", { scope: gitScope || null }),
-    post("privileged", { on: privileged }),
-  ])
-    .then(() => { toast(`${name}: settings saved`); closeBoxSettings(); refresh(); })
-    .catch(e => toast(`settings: ${e.message}`));
+  //
+  // **Five writes, and each one's answer is said** (SKEIN-1266). One failure used to reject the
+  // lot with a toast naming nothing, while the other four had saved. Now the dialog stays open
+  // and says which saved and which did not, with the server's reason for each refusal.
+  const writes = [
+    ["work tracking", () => post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) })],
+    ["commit as", () => post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {})],
+    ["disk allowance", () => post("disk", { limit: disk || null })],
+    ["github access", () => post("git-scope", { scope: gitScope || null })],
+    ["workshop box", () => post("privileged", { on: privileged })],
+  ];
+  const go = document.getElementById("bs-go");
+  go.disabled = true;
+  bsSetMsg("saving…");
+  return Promise.allSettled(writes.map(([, w]) => w())).then(results => {
+    const saved = [], refusedHere = [];
+    results.forEach((x, i) => x.status === "fulfilled" ? saved.push(writes[i][0]) : refusedHere.push(`${writes[i][0]} — ${failText(x.reason)}`));
+    if (!refusedHere.length) { bsSetMsg(""); toast(`${name}: settings saved`); closeBoxSettings(); refresh(); return; }
+    bsSetMsg((saved.length ? `Saved: ${saved.join(", ")}.\n` : "") + `Not saved:\n${refusedHere.join("\n")}`, "err");
+    refresh();
+  }).finally(() => { go.disabled = false; });
 }
 function askDiskLimit(name) { openBoxSettings(name); }
 // The launch dialog's copy of the box-settings control. Empty is inheritance, and the label says
@@ -11501,7 +11780,7 @@ function fillSyncSelect() {
 // are all decisions the launcher reads *as the box comes up*, and a second launch path would be a
 // second place for those to be forgotten.
 function openNewBoxFor(repoId, branch) {
-  newbox.classList.add("open"); nbBranch.value = branch || ""; clearIdentityFields();
+  newbox.classList.add("open"); nbBranch.value = branch || ""; nbSetMsg(""); clearIdentityFields();
   Promise.all([loadRepos(), loadSync()]).then(() => {
     if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
     fillSyncSelect(); fillGitScopeSelect();
@@ -11595,8 +11874,8 @@ function arUpdateDerived() {
     return;
   }
   hint.innerHTML = noSlug
-    ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
-    : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none.`;
+    ? "a fine-grained GitHub token for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
+    : `a fine-grained GitHub token covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none. Later, it is changed on the repo's card under Settings → Repositories.`;
 }
 // The source the non-GitHub warning was last shown for: pressing Add again on the same source is
 // the "anyway" (SKEIN-812). Cleared when the dialog opens, so a new visit asks again.
@@ -11641,7 +11920,7 @@ function submitAddRepo() {
   if (share) body.share = share;
   else if (token) body.token = token;
   fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(res => {
       settle();
       // The host resolved which GitHub repository this is, from the URL it cloned — carried on the
@@ -11704,7 +11983,7 @@ function arApplySettings(repo) {
   if (Object.keys(body).length) {
     jobs.push(fetch(`/api/repos/${encodeURIComponent(repo.id)}/settings`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await r.text()) || r.statusText}`); })
+    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await refused(r)).message}`); })
       .catch(e => problems.push(`settings not saved: ${e.message}`)));
   }
   // No token here any more: it went with the clone (SKEIN-1231), and the host said if it was not
@@ -11770,16 +12049,23 @@ function launchBox(branch) {
   const gitName = document.getElementById("nb-gitname").value.trim();
   const gitEmail = document.getElementById("nb-gitemail").value.trim();
   const gitScope = document.getElementById("nb-gitscope").value;
-  closeNewBox();
-  select(name);
-  view = { box: name, mode: "term", kind: "agent" };
+  const go = document.getElementById("nb-go");
+  if (go.dataset.busy) return;
   // Before the launch, not after: provisioning reads the choice, so a token minted against the
   // repo's default and corrected afterwards would already be the wrong one.
+  //
+  // **A refused choice stops the launch** (SKEIN-1266). Only a network failure used to count, so a
+  // tracking, committer or GitHub-access choice the server refused launched the box with the
+  // default instead, and nothing said so. Each refusal is named with the server's reason, the
+  // dialog stays open with what was chosen in it, and nothing is launched.
   const post = (path, body, what) =>
     fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).catch(e => toast(`could not set ${what}: ${e.message}`));
-  const chosen = Promise.all([
+    }).then(async r => { if (!r.ok) throw await refused(r); })
+      .catch(e => { throw new Error(`${what} — ${failText(e)}`); });
+  nbSetMsg("");
+  go.dataset.busy = "1"; go.disabled = true; go.textContent = "launching…";
+  const chosen = Promise.allSettled([
     sync === "" ? null : post("tracking", { connection: sync === "none" ? "" : sync }, "work tracking"),
     (gitName || gitEmail) ? post("identity", { name: gitName, email: gitEmail }, "the committer") : null,
     // Same reason as the two above, and more sharply: the launcher reads this as the box comes up to
@@ -11787,8 +12073,23 @@ function launchBox(branch) {
     // box's first turn — the one most likely to push — would run under the choice not made.
     gitScope === "" ? null : post("git-scope", { scope: gitScope }, "github access"),
   ].filter(Boolean));
-  chosen.then(() => { if (!sessions.has(name)) createSession(name, "agent", branch, agent); });
-  applyView();
+  return chosen.then(results => {
+    const bad = results.filter(x => x.status === "rejected").map(x => x.reason.message);
+    if (bad.length) {
+      nbSetMsg(`Not launched — skein refused ${bad.length === 1 ? "a choice" : "choices"} made here:\n${bad.join("\n")}\n`
+        + `Change ${bad.length === 1 ? "it" : "them"}, or set ${bad.length === 1 ? "it" : "them"} back to the default, and launch again.`);
+      return;
+    }
+    closeNewBox();
+    select(name);
+    view = { box: name, mode: "term", kind: "agent" };
+    if (!sessions.has(name)) createSession(name, "agent", branch, agent);
+    applyView();
+  }).finally(() => { delete go.dataset.busy; go.textContent = "Launch →"; gateLaunch(); });
+}
+function nbSetMsg(text) {
+  const el = document.getElementById("nb-msg");
+  el.textContent = text; el.className = "ar-msg" + (text ? " err" : ""); el.style.display = text ? "" : "none";
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
 document.getElementById("set-leave-save").addEventListener("click", saveSettings);
@@ -11810,12 +12111,14 @@ function ownSaveAction(el) {
   return null;
 }
 settingsModal().addEventListener("keydown", e => {
-  // Not on the unsaved-changes notice: Enter on its Discard must discard, not save.
-  if (e.key === "Enter" && !e.target.closest(".set-navi, .set-leave")) {
+  // Enter saves from a field and from nowhere else (SKEIN-1267): on Forget, Apply, Update, Cancel
+  // or a summary it is that control's own press, which a form-wide Enter used to turn into a save.
+  // `enterSubmits` (panels.js) is the one rule every popup's form uses.
+  if (enterSubmits(e) && !e.target.closest(".set-leave")) {
     e.preventDefault();
     const own = e.target.matches?.(OWN_SAVE) ? ownSaveAction(e.target) : null;
     (own || saveSettings)();
-  } else if (e.key === "Escape") { e.preventDefault(); leaveSettings(); }
+  }
   e.stopPropagation();
 });
 // Section nav, and any edit flips the footer's unsaved-changes flag.
@@ -11837,7 +12140,6 @@ document.getElementById("bs-go").addEventListener("click", saveBoxSettings);
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
-  else if (e.key === "Escape") { e.preventDefault(); closeNewBox(); }
   e.stopPropagation();
 });
 document.getElementById("ar-go").addEventListener("click", submitAddRepo);
@@ -11850,8 +12152,7 @@ nbRepo.addEventListener("change", fillRepoSelect);
 // probed (SKEIN-806): a repo is a remote, and "found: folder" affirmed what add_repo refuses.
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
-  if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
-  else if (e.key === "Escape") { e.preventDefault(); closeAddRepo(); }
+  if (enterSubmits(e)) { e.preventDefault(); submitAddRepo(); }
   e.stopPropagation();
 });
 
@@ -11915,14 +12216,11 @@ document.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") { e.preventDefault(); openNewBox(); return; }
-  const away = document.getElementById("away");
-  if (away?.classList.contains("open")) { if (e.key === "Escape") away.classList.remove("open"); return; }
-  if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
-  if (newbox.classList.contains("open")) return;
-  if (pal.classList.contains("open")) return;
-  // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks
-  // to the fleet keymap from an open dialog moves the selection behind it.
-  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") leaveSettings(); return; }
+  // **No fleet key acts behind a popup** (SKEIN-1247). A popup's own keys — Escape, Tab — are the
+  // dialog layer's (`registerDialog` in panels.js), and every other key is the popup's or nobody's:
+  // with Questions open, j and k used to walk the board behind it. One test against the one list
+  // of popups, rather than a line per popup that a new popup has to remember to add.
+  if (popupOpen()) return;
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. **The decision is `shortcutFor`, tested in node**: what
   // is DOM-shaped is knowing where the focus is, and that is what is passed in.
@@ -12919,7 +13217,7 @@ const UPDATE_WORDS = {
   // exported $GH_TOKEN and for the host's `gh` login, which are renewed where they were set.
   tokenRefused: source => ({
     env: "GitHub refused the token in $GH_TOKEN, so the check asked without it. Set a new one where skein-server gets its environment (for a fleet: sbx secret set github --sandbox <fleet> on your host), then restart skein.",
-    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories, or under Settings → GitHub & keys → Repository tokens.",
+    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories.",
     read: "GitHub refused your read token, so the check asked without it. Paste a new one under Settings → GitHub & keys → Your GitHub identity.",
     gh: "GitHub refused the host's gh login, so the check asked without it. Run gh auth login again on the host, then restart skein.",
   })[source] || "your stored GitHub token was refused — replace it under Settings → GitHub & keys",
@@ -13161,9 +13459,9 @@ async function pressUpdateSkein() {
   if (ended) ended.remove();
   try {
     const r = await fetch("/api/update/start", { method: "POST" }).then(r => r.json());
-    if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
+    if (!r.ok) { notice(`could not start the update: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
   } catch (e) {
-    toast(`could not start: ${e}`);
+    notice(`could not start the update: ${failText(e)}`);
     if (btn) { btn.disabled = false; btn.textContent = "Update skein"; }
     return;
   }
@@ -13225,13 +13523,14 @@ async function pressUpdateAgents(btn) {
     const r = await fetch("/api/update-agents", { method: "POST" }).then(r => r.json());
     // What MOVED, not that it ran: the server answers `claude: 1.2.3 -> 1.2.9`, which is a fact
     // somebody can check, and "done" is not.
-    toast(r.ok ? r.text : `could not update: ${r.error}`);
+    // A report of several lines, one per CLI — kept on screen, line by line, until closed.
+    if (r.ok) notice(r.text, "report"); else notice(`could not update the agent CLIs: ${r.error}`);
     // Only on success, and by re-reading rather than by hiding the offer: the pane draws what the
     // server says is installed, so an install that moved one CLI and not the other still shows the
     // one that is left. Removing the row on the press would have claimed both.
     if (r.ok) loadUpdate();
   } catch (e) {
-    toast(`could not update: ${e}`);
+    notice(`could not update the agent CLIs: ${failText(e)}`);
   } finally {
     btn.disabled = false;
     btn.textContent = "update agents";
@@ -13287,6 +13586,44 @@ function openLoginTerminal(runtime) {
 // The ✕. Closing the socket is how a login flow ends — cleanup lives on `onclose`, so a flow the
 // server ends and a flow you abandon leave through the same door.
 function closeLoginTerminal() { try { loginTermState?.ws.close(); } catch {} }
+
+// ---------- feedback: what a refusal says ----------
+// **The server's reason, not its status line** (SKEIN-1299). A refused write answers with a sentence
+// — "Read-only file system", "request r1 is already granted — …" — and half the page threw that away
+// for `r.statusText` or a fixed "could not record that decision", while the other half read it. One
+// helper now, so every refusal reads the same way: the body as the server wrote it (a JSON
+// `{"error": …}` unwrapped), else the status line, else the code.
+async function refused(r) {
+  let body = "";
+  try { body = (await r.text()).trim(); } catch { /* no body */ }
+  try { const j = JSON.parse(body); if (j && typeof j.error === "string") body = j.error.trim(); } catch { /* not JSON */ }
+  return new Error(body || r.statusText || `HTTP ${r.status}`);
+}
+// What to say for a failure that may never have reached the server at all: fetch's own "Failed to
+// fetch" names the browser's problem, not the person's.
+function failText(e) {
+  const m = String((e && e.message) || e || "").trim();
+  return !m || m === "Failed to fetch" || m === "Load failed" ? "the host is not answering" : m;
+}
+
+// **Where a failure is said** (SKEIN-1265, SKEIN-1245). A failure used to go into the toast, which
+// hides after 3.5 seconds and several callers had cut to its first line — so the part that said why
+// was gone before it could be read, and the agent-CLI update's several-line report read as one
+// run-on line. A notice keeps every line and stays until its ✕ is pressed. `kind` is "error" (said
+// as an alert) or "report" (a result worth reading, said politely). The toast stays for what is
+// fine to miss: "saved", "stopping…".
+function notice(text, kind = "error") {
+  let n = document.getElementById("notice");
+  if (!n) {
+    n = document.createElement("div"); n.id = "notice"; document.body.append(n);
+    n.innerHTML = `<div class="nt-text"></div><button type="button" class="x" aria-label="Close">✕</button>`;
+    n.querySelector(".x").addEventListener("click", () => n.classList.remove("show"));
+  }
+  n.className = kind === "report" ? "report" : "error";
+  n.setAttribute("role", kind === "report" ? "status" : "alert");
+  n.querySelector(".nt-text").textContent = String(text == null ? "" : text).trim();
+  n.classList.add("show");
+}
 
 // ---------- fleet gauges ----------
 // Every box in the fleet shares one VM's memory, disk and cores, and until this strip existed the

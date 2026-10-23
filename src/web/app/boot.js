@@ -2,14 +2,11 @@
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") { e.preventDefault(); openNewBox(); return; }
-  const away = document.getElementById("away");
-  if (away?.classList.contains("open")) { if (e.key === "Escape") away.classList.remove("open"); return; }
-  if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
-  if (newbox.classList.contains("open")) return;
-  if (pal.classList.contains("open")) return;
-  // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks
-  // to the fleet keymap from an open dialog moves the selection behind it.
-  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") leaveSettings(); return; }
+  // **No fleet key acts behind a popup** (SKEIN-1247). A popup's own keys — Escape, Tab — are the
+  // dialog layer's (`registerDialog` in panels.js), and every other key is the popup's or nobody's:
+  // with Questions open, j and k used to walk the board behind it. One test against the one list
+  // of popups, rather than a line per popup that a new popup has to remember to add.
+  if (popupOpen()) return;
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. **The decision is `shortcutFor`, tested in node**: what
   // is DOM-shaped is knowing where the focus is, and that is what is passed in.
@@ -1006,7 +1003,7 @@ const UPDATE_WORDS = {
   // exported $GH_TOKEN and for the host's `gh` login, which are renewed where they were set.
   tokenRefused: source => ({
     env: "GitHub refused the token in $GH_TOKEN, so the check asked without it. Set a new one where skein-server gets its environment (for a fleet: sbx secret set github --sandbox <fleet> on your host), then restart skein.",
-    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories, or under Settings → GitHub & keys → Repository tokens.",
+    repo: "GitHub refused the token you stored for this repository, so the check asked without it. Paste a new one over it on the repository's card under Settings → Repositories.",
     read: "GitHub refused your read token, so the check asked without it. Paste a new one under Settings → GitHub & keys → Your GitHub identity.",
     gh: "GitHub refused the host's gh login, so the check asked without it. Run gh auth login again on the host, then restart skein.",
   })[source] || "your stored GitHub token was refused — replace it under Settings → GitHub & keys",
@@ -1248,9 +1245,9 @@ async function pressUpdateSkein() {
   if (ended) ended.remove();
   try {
     const r = await fetch("/api/update/start", { method: "POST" }).then(r => r.json());
-    if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
+    if (!r.ok) { notice(`could not start the update: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
   } catch (e) {
-    toast(`could not start: ${e}`);
+    notice(`could not start the update: ${failText(e)}`);
     if (btn) { btn.disabled = false; btn.textContent = "Update skein"; }
     return;
   }
@@ -1312,13 +1309,14 @@ async function pressUpdateAgents(btn) {
     const r = await fetch("/api/update-agents", { method: "POST" }).then(r => r.json());
     // What MOVED, not that it ran: the server answers `claude: 1.2.3 -> 1.2.9`, which is a fact
     // somebody can check, and "done" is not.
-    toast(r.ok ? r.text : `could not update: ${r.error}`);
+    // A report of several lines, one per CLI — kept on screen, line by line, until closed.
+    if (r.ok) notice(r.text, "report"); else notice(`could not update the agent CLIs: ${r.error}`);
     // Only on success, and by re-reading rather than by hiding the offer: the pane draws what the
     // server says is installed, so an install that moved one CLI and not the other still shows the
     // one that is left. Removing the row on the press would have claimed both.
     if (r.ok) loadUpdate();
   } catch (e) {
-    toast(`could not update: ${e}`);
+    notice(`could not update the agent CLIs: ${failText(e)}`);
   } finally {
     btn.disabled = false;
     btn.textContent = "update agents";
@@ -1374,6 +1372,44 @@ function openLoginTerminal(runtime) {
 // The ✕. Closing the socket is how a login flow ends — cleanup lives on `onclose`, so a flow the
 // server ends and a flow you abandon leave through the same door.
 function closeLoginTerminal() { try { loginTermState?.ws.close(); } catch {} }
+
+// ---------- feedback: what a refusal says ----------
+// **The server's reason, not its status line** (SKEIN-1299). A refused write answers with a sentence
+// — "Read-only file system", "request r1 is already granted — …" — and half the page threw that away
+// for `r.statusText` or a fixed "could not record that decision", while the other half read it. One
+// helper now, so every refusal reads the same way: the body as the server wrote it (a JSON
+// `{"error": …}` unwrapped), else the status line, else the code.
+async function refused(r) {
+  let body = "";
+  try { body = (await r.text()).trim(); } catch { /* no body */ }
+  try { const j = JSON.parse(body); if (j && typeof j.error === "string") body = j.error.trim(); } catch { /* not JSON */ }
+  return new Error(body || r.statusText || `HTTP ${r.status}`);
+}
+// What to say for a failure that may never have reached the server at all: fetch's own "Failed to
+// fetch" names the browser's problem, not the person's.
+function failText(e) {
+  const m = String((e && e.message) || e || "").trim();
+  return !m || m === "Failed to fetch" || m === "Load failed" ? "the host is not answering" : m;
+}
+
+// **Where a failure is said** (SKEIN-1265, SKEIN-1245). A failure used to go into the toast, which
+// hides after 3.5 seconds and several callers had cut to its first line — so the part that said why
+// was gone before it could be read, and the agent-CLI update's several-line report read as one
+// run-on line. A notice keeps every line and stays until its ✕ is pressed. `kind` is "error" (said
+// as an alert) or "report" (a result worth reading, said politely). The toast stays for what is
+// fine to miss: "saved", "stopping…".
+function notice(text, kind = "error") {
+  let n = document.getElementById("notice");
+  if (!n) {
+    n = document.createElement("div"); n.id = "notice"; document.body.append(n);
+    n.innerHTML = `<div class="nt-text"></div><button type="button" class="x" aria-label="Close">✕</button>`;
+    n.querySelector(".x").addEventListener("click", () => n.classList.remove("show"));
+  }
+  n.className = kind === "report" ? "report" : "error";
+  n.setAttribute("role", kind === "report" ? "status" : "alert");
+  n.querySelector(".nt-text").textContent = String(text == null ? "" : text).trim();
+  n.classList.add("show");
+}
 
 // ---------- fleet gauges ----------
 // Every box in the fleet shares one VM's memory, disk and cores, and until this strip existed the

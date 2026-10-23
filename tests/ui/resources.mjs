@@ -46,7 +46,7 @@ T.reset();
 T.setBoxes([{ name: "web-main", disk_mb: 2048, disk_limit_mb: 10240 }]);
 let card = T.resourceRows("web-main");
 check("disk is there with no round trip at all", /2\.0G \/ 10\.0G/.test(card), true);
-check("and the live figures show as pending, not as zero", (card.match(/…/g) || []).length, 3);
+check("and the live figures show as pending, not as zero", (card.match(/measuring…|not measured/g) || []).length, 3);
 check("the fetch has not even been made yet", T.fetches(), 0);
 
 // --- and fills in once it has --------------------------------------------------------------------

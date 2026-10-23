@@ -105,6 +105,11 @@ function setPane(pane) {
   for (const el of settingsModal().querySelectorAll(".set-navi")) el.classList.toggle("on", el.dataset.pane === pane);
   for (const el of settingsModal().querySelectorAll(".set-pane")) el.classList.toggle("on", el.dataset.pane === pane);
   const nav = settingsModal().querySelector(`.set-navi[data-pane="${pane}"]`);
+  // On a phone the section rail is a row that scrolls sideways, and the section opened could be
+  // off its edge — open, with nothing on screen saying which (SKEIN-1300). Brought into view, and
+  // only along the rail: `nearest` leaves a rail that already shows it alone.
+  // Called again once the dialog is shown, since a hidden rail has nothing to scroll.
+  nav?.scrollIntoView({ block: "nearest", inline: "nearest" });
   document.getElementById("set-htitle").textContent = nav ? nav.textContent.replace(/\d+$/, "").trim() : pane;
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
   // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
@@ -134,7 +139,13 @@ function markDirty(on) {
 // you leave a field. Nothing in them is something Save would send, so the footer drops its buttons
 // there and an edit in one raises no unsaved-changes flag.
 const SET_SELF_SAVING = ["keys", "repos", "tracking", "diag", "update", "usage"];
+// **Which open is the live one** (SKEIN-1306). The dialog opens when its loads answer, and a close
+// before then used to be undone by the answer: Settings came back over whatever the person had moved
+// on to and took the focus. Every open takes a ticket and every close spends one, so an answer
+// whose open has been closed, or overtaken by a newer open, does nothing.
+let settingsTicket = 0;
 function openSettings(pane = "repos") {
+  const ticket = ++settingsTicket;
   loadFleetPlan().then(renderFleetPlanNotes);
   // What this sandbox HAS, measured inside it, above the three fields that are only what the next
   // create asks for (`sandboxSize`). The same reading the gauge strip draws from.
@@ -147,6 +158,7 @@ function openSettings(pane = "repos") {
   // it lands after the dialog is open — and "after the dialog is open" is precisely the window in
   // which a rebuild button that had not yet been hidden would be clickable.
   Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
+    if (ticket !== settingsTicket) return;
     // `!== false` would read an absent field as chosen, which is exactly the default this stopped
     // being. Unset means nobody picked the account token, so the switch is off.
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret === true;
@@ -197,6 +209,7 @@ function openSettings(pane = "repos") {
     loadGitCreds();
     renderSync(); renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
+    settingsModal().querySelector(".set-navi.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
@@ -226,9 +239,9 @@ function trackWork(name) {
   if (!name || tracking.has(name)) return;
   tracking.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(d.note || `${name} is tracking work`))
-    .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't wire ${name}: ${failText(e)}`))
     .finally(() => { tracking.delete(name); });
 }
 // Re-apply the work-tracking documents to a box that already has them. `replace` (shift-click) is
@@ -240,9 +253,9 @@ function refreshDocs(name, replace) {
   if (!name || refreshingDocs.has(name)) return;
   refreshingDocs.add(name); renderDockbar();
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync/refresh${replace ? "?replace=1" : ""}`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${name}: ${d.note || "done"}`))
-    .catch(e => toast(`couldn't update ${name}: ${e.message}`))
+    .catch(e => notice(`couldn't update ${name}: ${failText(e)}`))
     .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
 }
 // One card per connection. A gateway URL and the token that mints at it are one thing — a token is
@@ -298,7 +311,7 @@ function saveConnection(card) {
   return fetch("/api/sync/connections", {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
   })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => {
       syncStatus = s;
       // Confirm at the card, not only in a toast: the toast is gone before you've read the next
@@ -307,23 +320,23 @@ function saveConnection(card) {
       const flag = document.querySelector(`[data-saved="${CSS.escape("conn-" + (id || (s.connections.at(-1) || {}).id || ""))}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
     })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function forgetConnectionToken(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
   if (!confirm(`Forget the Plane token for ${(c && c.label) || id}? Boxes already running keep theirs; a new box on this connection gets none until you paste another.`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 function removeConnection(id) {
   const c = (syncStatus.connections || []).find(c => c.id === id);
   if (c && c.repos.length && !confirm(`${id} is used by ${c.repos.join(", ")}. Remove it anyway?`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
-    .catch(e => toast(e.message));
+    .catch(e => notice(failText(e)));
 }
 // A new card is a card, not a prompt() — it starts blank in the list and saves like any other once
 // it has a URL, so adding one and editing one are the same two fields in the same place.
@@ -526,7 +539,7 @@ function repoTokenRow(r) {
   // A <div>, not a <label>: a label hands a click on its text to its first control, and here that
   // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
   return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
-    + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
+    + `<span class="desc">a fine-grained GitHub token covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
     + `<div class="set-cred">${state}</div>${checked}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
@@ -616,7 +629,7 @@ function renderRepoList() {
     joinGitShare(slug, pick.value).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => { b.disabled = false; toast(String(e.message || "could not use that token")); });
+    }).catch(e => { b.disabled = false; notice(failText(e) || "could not use that token"); });
   }));
   // Two buttons can spend the card's one token field: "Store" / "Use for … alone" (this repo's own
   // token) and, on a shared card, "Replace for all" (the shared file) — SKEIN-1231.
@@ -630,7 +643,7 @@ function renderRepoList() {
     send(token).then(() => {
       const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-    }).catch(e => toast(String(e.message || "could not store that token")));
+    }).catch(e => notice(failText(e) || "could not store that token"));
   };
   el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () =>
     spend(b, b.dataset.storetoken, token => storeGitCred(b.dataset.storetoken, token))));
@@ -671,7 +684,7 @@ function saveRepoField(input) {
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => {
       // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
       const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
@@ -680,7 +693,7 @@ function saveRepoField(input) {
       // here changes what the other pane is entitled to say about a Remove.
       Promise.all([loadRepos(), loadSync()]).then(() => { renderRepoList(); renderSync(); });
     })
-    .catch(e => { toast(`${id}: ${e.message}`); input.focus(); });
+    .catch(e => { notice(`${id}: ${failText(e)}`); input.focus(); });
 }
 // Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
 // carries the repo id in data-id and shows a brief busy state. Used by each repo's sidebar header.
@@ -689,20 +702,20 @@ function pullRepo(x) {
   if (x.classList.contains("busy")) return;
   x.classList.add("busy"); x.textContent = "…";
   fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => toast(`${id}: ${(d.summary || "pulled").split("\n")[0]}`))
-    .catch(e => toast(`pull failed: ${e.message}`))
+    .catch(e => notice(`pull failed: ${failText(e)}`))
     .finally(() => { x.classList.remove("busy"); x.textContent = "⟳"; });
 }
 function removeRepo(id) {
   if (!confirm(`Unregister repo "${id}"? Its clone and store stay on disk; only skein's registration is removed.`)) return;
   fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
-    .catch(e => toast(`remove failed: ${e.message}`));
+    .catch(e => notice(`remove failed: ${failText(e)}`));
 }
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
-function closeSettings() { settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
+function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
 // **Escape, ✕ and a click outside ask first when there is something to lose** (SKEIN-1260, the
 // owner's decision of 2026-10-22). They used to close straight away, and reopening reset the form
 // from what was stored — so since SKEIN-1246 made a click outside close it, one stray click threw
@@ -752,7 +765,7 @@ function settingsPayload() {
 function saveSettingsQuiet() {
   return fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"},
                                   body: JSON.stringify(settingsPayload()) })
-    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(s => { settings = s; return s; });
 }
 // The box plugin's own after-Save line, approved with its switch (SKEIN-1057): said only when the
@@ -766,7 +779,7 @@ function saveSettings() {
       renderDockbar(); closeSettings();
       toast((settings.box_plugin !== false) !== pluginWas ? BOX_PLUGIN_SAVED : "settings saved");
     })
-    .catch(e => toast(`couldn't save: ${e.message}`));
+    .catch(e => notice(`couldn't save: ${failText(e)}`));
 }
 // A cgroup limit is live: no snapshot, no restart, no box interrupted mid-turn. That is the whole
 // difference between this and the fleet's own memory and CPUs, which are fixed at sandbox creation
@@ -784,7 +797,7 @@ function applyBoxLimits() {
         ? `ceilings applied; ${failed.join(", ")} has no cgroup and was left as it is`
         : "ceilings applied to every running box");
     })
-    .catch(e => toast(`couldn't apply: ${e.message}`))
+    .catch(e => notice(`couldn't apply: ${failText(e)}`))
     .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
 }
 
@@ -905,7 +918,7 @@ function currentRepoId() {
 // `launchBox` had an `exists` on the plan to branch on before offering to create the fleet — and
 // that branch is gone (SKEIN-627). Nothing else in this dialog reads the plan, and fetching it on
 // every open bought a round trip nobody looked at.
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; nbSetMsg(""); clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
 
 // A box belongs to a repo. With none registered there is nothing to clone, nothing to name it
 // after, and nothing for the agent to open — `currentRepoId` falls back to the literal string
@@ -947,7 +960,7 @@ function firstRunHtml(foreignN = 0) {
     // that discovers that from a failed push an hour later is the outcome this step exists to prevent.
     { done: !!h.git_credential,
       label: h.git_credential ? `boxes can push (${h.git_credential})` : "choose how boxes push",
-      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a per-repo token, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
+      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a write token on each repo's card, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
   ];
   // **The warden is information, not a step** (SKEIN-1184, `docs/decisions/warden-or-prompt.md`).
   // It used to gate "ready" on the reasoning that a first Launch created the fleet through it; a
@@ -1065,6 +1078,10 @@ function armResourcePop(name, row) {
 function resourceRows(name) {
   const b = boxes.find(x => x.name === name) || {};
   const r = loadCache.rows.find(x => x.name === name);
+  // **A figure not there yet says which "not there" it is** (SKEIN-1300). It said "…" both while
+  // the sandbox was being asked and after it had answered without this box, which read as a
+  // measurement forever on its way.
+  const none = loadCache.inflight ? "measuring…" : "not measured";
   const used = b.disk_mb, cap = b.disk_limit_mb;
   // Disk first: it is the reason to look, and the number people are hunting when a build dies with
   // no room left.
@@ -1072,41 +1089,68 @@ function resourceRows(name) {
   const disk = used == null ? "—" : cap ? `${fmtGb(used)} / ${fmtGb(cap)}` : fmtGb(used);
   return `<div class="rp-n">${esc(name)}</div>`
     + `<div class="rp-r ${diskCls}"><span>disk</span><span>${disk}</span></div>`
-    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : "…"}</span></div>`
+    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : none}</span></div>`
     // The question the headline provokes, answered in the same panel: a box whose memory looks
     // small and whose charge is large has been reading files, and saying so is cheaper than
     // leaving somebody to wonder why the two disagree. Hidden when there is nothing to explain.
     + (r && r.mem_cache > (r.mem_anon || 0)
         ? `<div class="rp-r sub" title="page cache — files this box has read or written. The kernel hands it back the moment anything else needs it, so it is not memory the box is holding."><span>· cache</span><span>${fmtGB(r.mem_cache)}</span></div>`
         : "")
-    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : "…"}</span></div>`
-    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : "…"}</span></div>`
+    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : none}</span></div>`
+    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : none}</span></div>`
     + `<div class="rp-w">disk is measured, not enforced — one filesystem serves every box</div>`;
 }
 function showResourcePop(name, row) {
   const el = rpopEl();
+  // Asked first, so the card drawn below knows whether the sandbox is being asked right now.
+  const asked = loadRows();
   el.innerHTML = resourceRows(name);
   const box = row.getBoundingClientRect();
   el.classList.add("on");
-  // Placed after it has been measured, and flipped above the row when there is no room below —
-  // otherwise the last row's card is drawn off the bottom of the window, which is exactly where the
-  // longest-running boxes sit.
-  const h = el.getBoundingClientRect().height;
-  const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
-  el.style.top = `${top}px`;
-  el.style.left = `${Math.min(box.left + 22, window.innerWidth - el.getBoundingClientRect().width - 12)}px`;
+  // Placed after it has been measured. **Beside the row, not under it** (SKEIN-1300): drawn below,
+  // it covered the next several rows — the ones the pointer was on its way to. To the right of the
+  // row when the window has room, its top level with the row's and kept on screen; below the row,
+  // or above it near the bottom, only when there is no room beside it (a phone).
+  const { width: w, height: h } = el.getBoundingClientRect();
+  if (box.right + 8 + w <= window.innerWidth - 8) {
+    el.style.left = `${box.right + 8}px`;
+    el.style.top = `${Math.max(8, Math.min(box.top, window.innerHeight - h - 8))}px`;
+  } else {
+    const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
+    el.style.top = `${top}px`;
+    el.style.left = `${Math.max(8, Math.min(box.left + 22, window.innerWidth - w - 12))}px`;
+  }
   // The live half arrives when the sandbox answers; the card is already up with the disk figure, so
   // nothing waits on a round trip that may be several seconds behind an `sbx exec` fallback.
-  loadRows().then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
+  asked.then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
 }
 
 // One box's own settings. Every field is blank-means-inherit, and the placeholder is what it would
 // inherit — so leaving the panel untouched is always the same as never opening it.
 let boxSettingsFor = "";
+// **Open at once, and say it is loading** (SKEIN-1266). The dialog used to appear only once two
+// requests had answered, so a press on the box's settings did nothing visible for as long as they
+// took — and showed nothing at all when one failed. It opens now with every control disabled and a
+// line saying it is asking; the answer fills it, a failure says why, and a ticket keeps a late
+// answer for a box whose dialog has since closed or moved on from filling it.
+let boxSetTicket = 0;
+const boxSetControls = () => document.querySelectorAll("#boxset select, #boxset input, #boxset .bs-actions button, #bs-go");
+function bsSetMsg(text, kind) {
+  const el = document.getElementById("bs-msg");
+  el.textContent = text; el.className = "ar-msg" + (kind ? " " + kind : ""); el.style.display = text ? "" : "none";
+}
 function openBoxSettings(name) {
   boxSettingsFor = name;
-  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(r => r.json())])
+  const ticket = ++boxSetTicket;
+  document.getElementById("bs-title").textContent = name;
+  for (const c of boxSetControls()) c.disabled = true;
+  bsSetMsg("asking for this box's settings…");
+  document.getElementById("boxset").classList.add("open");
+  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(async r => { if (!r.ok) throw await refused(r); return r.json(); })])
     .then(([, cur]) => {
+      if (ticket !== boxSetTicket || !document.getElementById("boxset").classList.contains("open")) return;
+      for (const c of boxSetControls()) c.disabled = false;
+      bsSetMsg("");
       document.getElementById("bs-title").textContent = name;
       const conns = syncStatus.connections || [];
       document.getElementById("bs-sync").innerHTML = [
@@ -1177,11 +1221,13 @@ function openBoxSettings(name) {
       }
       document.getElementById("bs-note").textContent =
         "Blank inherits the fleet default; `none` means unlimited. Disk is measured, not enforced — one filesystem serves every box.";
-      document.getElementById("boxset").classList.add("open");
     })
-    .catch(e => toast(`settings: ${e.message}`));
+    .catch(e => {
+      if (ticket !== boxSetTicket) return;
+      bsSetMsg(`could not read ${name}'s settings: ${failText(e)}. Close this and open it again.`, "err");
+    });
 }
-function closeBoxSettings() { document.getElementById("boxset").classList.remove("open"); }
+function closeBoxSettings() { boxSetTicket++; document.getElementById("boxset").classList.remove("open"); }
 function saveBoxSettings() {
   const name = boxSettingsFor;
   const sync = document.getElementById("bs-sync").value;
@@ -1192,17 +1238,29 @@ function saveBoxSettings() {
   const privileged = document.getElementById("bs-priv").value === "1";
   const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); });
+  }).then(async r => { if (!r.ok) throw await refused(r); });
   // Absent vs empty is the whole grammar here: cleared field ⇒ inherit again, not "set to nothing".
-  Promise.all([
-    post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) }),
-    post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {}),
-    post("disk", { limit: disk || null }),
-    post("git-scope", { scope: gitScope || null }),
-    post("privileged", { on: privileged }),
-  ])
-    .then(() => { toast(`${name}: settings saved`); closeBoxSettings(); refresh(); })
-    .catch(e => toast(`settings: ${e.message}`));
+  //
+  // **Five writes, and each one's answer is said** (SKEIN-1266). One failure used to reject the
+  // lot with a toast naming nothing, while the other four had saved. Now the dialog stays open
+  // and says which saved and which did not, with the server's reason for each refusal.
+  const writes = [
+    ["work tracking", () => post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) })],
+    ["commit as", () => post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {})],
+    ["disk allowance", () => post("disk", { limit: disk || null })],
+    ["github access", () => post("git-scope", { scope: gitScope || null })],
+    ["workshop box", () => post("privileged", { on: privileged })],
+  ];
+  const go = document.getElementById("bs-go");
+  go.disabled = true;
+  bsSetMsg("saving…");
+  return Promise.allSettled(writes.map(([, w]) => w())).then(results => {
+    const saved = [], refusedHere = [];
+    results.forEach((x, i) => x.status === "fulfilled" ? saved.push(writes[i][0]) : refusedHere.push(`${writes[i][0]} — ${failText(x.reason)}`));
+    if (!refusedHere.length) { bsSetMsg(""); toast(`${name}: settings saved`); closeBoxSettings(); refresh(); return; }
+    bsSetMsg((saved.length ? `Saved: ${saved.join(", ")}.\n` : "") + `Not saved:\n${refusedHere.join("\n")}`, "err");
+    refresh();
+  }).finally(() => { go.disabled = false; });
 }
 function askDiskLimit(name) { openBoxSettings(name); }
 // The launch dialog's copy of the box-settings control. Empty is inheritance, and the label says
@@ -1253,7 +1311,7 @@ function fillSyncSelect() {
 // are all decisions the launcher reads *as the box comes up*, and a second launch path would be a
 // second place for those to be forgotten.
 function openNewBoxFor(repoId, branch) {
-  newbox.classList.add("open"); nbBranch.value = branch || ""; clearIdentityFields();
+  newbox.classList.add("open"); nbBranch.value = branch || ""; nbSetMsg(""); clearIdentityFields();
   Promise.all([loadRepos(), loadSync()]).then(() => {
     if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
     fillSyncSelect(); fillGitScopeSelect();
@@ -1347,8 +1405,8 @@ function arUpdateDerived() {
     return;
   }
   hint.innerHTML = noSlug
-    ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
-    : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none.`;
+    ? "a fine-grained GitHub token for this repo, which its boxes push with. Which repository that is comes from the remote skein clones — if that is no GitHub remote, the token is not stored and skein says so."
+    : `a fine-grained GitHub token covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with and which a private repo is cloned with. On the App path you need none. Later, it is changed on the repo's card under Settings → Repositories.`;
 }
 // The source the non-GitHub warning was last shown for: pressing Add again on the same source is
 // the "anyway" (SKEIN-812). Cleared when the dialog opens, so a new visit asks again.
@@ -1393,7 +1451,7 @@ function submitAddRepo() {
   if (share) body.share = share;
   else if (token) body.token = token;
   fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(res => {
       settle();
       // The host resolved which GitHub repository this is, from the URL it cloned — carried on the
@@ -1456,7 +1514,7 @@ function arApplySettings(repo) {
   if (Object.keys(body).length) {
     jobs.push(fetch(`/api/repos/${encodeURIComponent(repo.id)}/settings`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await r.text()) || r.statusText}`); })
+    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await refused(r)).message}`); })
       .catch(e => problems.push(`settings not saved: ${e.message}`)));
   }
   // No token here any more: it went with the clone (SKEIN-1231), and the host said if it was not
@@ -1522,16 +1580,23 @@ function launchBox(branch) {
   const gitName = document.getElementById("nb-gitname").value.trim();
   const gitEmail = document.getElementById("nb-gitemail").value.trim();
   const gitScope = document.getElementById("nb-gitscope").value;
-  closeNewBox();
-  select(name);
-  view = { box: name, mode: "term", kind: "agent" };
+  const go = document.getElementById("nb-go");
+  if (go.dataset.busy) return;
   // Before the launch, not after: provisioning reads the choice, so a token minted against the
   // repo's default and corrected afterwards would already be the wrong one.
+  //
+  // **A refused choice stops the launch** (SKEIN-1266). Only a network failure used to count, so a
+  // tracking, committer or GitHub-access choice the server refused launched the box with the
+  // default instead, and nothing said so. Each refusal is named with the server's reason, the
+  // dialog stays open with what was chosen in it, and nothing is launched.
   const post = (path, body, what) =>
     fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).catch(e => toast(`could not set ${what}: ${e.message}`));
-  const chosen = Promise.all([
+    }).then(async r => { if (!r.ok) throw await refused(r); })
+      .catch(e => { throw new Error(`${what} — ${failText(e)}`); });
+  nbSetMsg("");
+  go.dataset.busy = "1"; go.disabled = true; go.textContent = "launching…";
+  const chosen = Promise.allSettled([
     sync === "" ? null : post("tracking", { connection: sync === "none" ? "" : sync }, "work tracking"),
     (gitName || gitEmail) ? post("identity", { name: gitName, email: gitEmail }, "the committer") : null,
     // Same reason as the two above, and more sharply: the launcher reads this as the box comes up to
@@ -1539,8 +1604,23 @@ function launchBox(branch) {
     // box's first turn — the one most likely to push — would run under the choice not made.
     gitScope === "" ? null : post("git-scope", { scope: gitScope }, "github access"),
   ].filter(Boolean));
-  chosen.then(() => { if (!sessions.has(name)) createSession(name, "agent", branch, agent); });
-  applyView();
+  return chosen.then(results => {
+    const bad = results.filter(x => x.status === "rejected").map(x => x.reason.message);
+    if (bad.length) {
+      nbSetMsg(`Not launched — skein refused ${bad.length === 1 ? "a choice" : "choices"} made here:\n${bad.join("\n")}\n`
+        + `Change ${bad.length === 1 ? "it" : "them"}, or set ${bad.length === 1 ? "it" : "them"} back to the default, and launch again.`);
+      return;
+    }
+    closeNewBox();
+    select(name);
+    view = { box: name, mode: "term", kind: "agent" };
+    if (!sessions.has(name)) createSession(name, "agent", branch, agent);
+    applyView();
+  }).finally(() => { delete go.dataset.busy; go.textContent = "Launch →"; gateLaunch(); });
+}
+function nbSetMsg(text) {
+  const el = document.getElementById("nb-msg");
+  el.textContent = text; el.className = "ar-msg" + (text ? " err" : ""); el.style.display = text ? "" : "none";
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
 document.getElementById("set-leave-save").addEventListener("click", saveSettings);
@@ -1562,12 +1642,14 @@ function ownSaveAction(el) {
   return null;
 }
 settingsModal().addEventListener("keydown", e => {
-  // Not on the unsaved-changes notice: Enter on its Discard must discard, not save.
-  if (e.key === "Enter" && !e.target.closest(".set-navi, .set-leave")) {
+  // Enter saves from a field and from nowhere else (SKEIN-1267): on Forget, Apply, Update, Cancel
+  // or a summary it is that control's own press, which a form-wide Enter used to turn into a save.
+  // `enterSubmits` (panels.js) is the one rule every popup's form uses.
+  if (enterSubmits(e) && !e.target.closest(".set-leave")) {
     e.preventDefault();
     const own = e.target.matches?.(OWN_SAVE) ? ownSaveAction(e.target) : null;
     (own || saveSettings)();
-  } else if (e.key === "Escape") { e.preventDefault(); leaveSettings(); }
+  }
   e.stopPropagation();
 });
 // Section nav, and any edit flips the footer's unsaved-changes flag.
@@ -1589,7 +1671,6 @@ document.getElementById("bs-go").addEventListener("click", saveBoxSettings);
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
-  else if (e.key === "Escape") { e.preventDefault(); closeNewBox(); }
   e.stopPropagation();
 });
 document.getElementById("ar-go").addEventListener("click", submitAddRepo);
@@ -1602,8 +1683,7 @@ nbRepo.addEventListener("change", fillRepoSelect);
 // probed (SKEIN-806): a repo is a remote, and "found: folder" affirmed what add_repo refuses.
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
-  if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
-  else if (e.key === "Escape") { e.preventDefault(); closeAddRepo(); }
+  if (enterSubmits(e)) { e.preventDefault(); submitAddRepo(); }
   e.stopPropagation();
 });
 
