@@ -1753,3 +1753,64 @@ fn noskip_check_fails_a_handed_over_run_on_a_broken_test_and_only_then() {
         assert_eq!(got, want, "{name}: {why}; it exited {got} and said:\n{said}");
     }
 }
+
+/// **Every `actions/*` step in the workflows is on a major that runs on Node 24** (SKEIN-1275,
+/// SKEIN-1288). GitHub puts a deprecation notice on every job that runs a Node 20 action and will
+/// stop running them; `release.yml` kept `upload-artifact@v4` and `download-artifact@v4` after
+/// `ci.yml` had moved, because no branch push runs it and nothing read it.
+///
+/// The table is the first Node 24 major of each action, read from that action's own `action.yml`
+/// (`runs.using`) at the tag. An `actions/*` action not in it fails here, so adding one means
+/// reading its `action.yml` first.
+///
+/// **What makes it fail:** any `actions/*@vN` in `.github/workflows/` put back below its row —
+/// `upload-artifact@v4` in `release.yml` is the case that was there.
+#[test]
+fn every_github_action_the_workflows_use_runs_on_node_24() {
+    const FIRST_NODE24_MAJOR: &[(&str, u32)] = &[
+        ("actions/cache", 5),
+        ("actions/checkout", 5),
+        ("actions/download-artifact", 7),
+        ("actions/setup-node", 5),
+        ("actions/upload-artifact", 6),
+    ];
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+    let mut seen = 0;
+    let mut wrong = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the workflows directory") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().to_string();
+        for (n, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
+            let Some(at) = line.find("uses: actions/") else {
+                continue;
+            };
+            let spec = line[at + "uses: ".len()..].trim();
+            let (action, version) = spec.split_once('@').unwrap_or((spec, ""));
+            seen += 1;
+            let major = version
+                .strip_prefix('v')
+                .and_then(|v| v.split('.').next())
+                .and_then(|v| v.parse::<u32>().ok());
+            match (FIRST_NODE24_MAJOR.iter().find(|(a, _)| *a == action), major) {
+                (Some((_, floor)), Some(m)) if m >= *floor => {}
+                (Some((_, floor)), _) => wrong.push(format!(
+                    "{file}:{}: {spec} — the first Node 24 major is v{floor}",
+                    n + 1
+                )),
+                (None, _) => wrong.push(format!(
+                    "{file}:{}: {spec} — not in this test's table; read its action.yml's \
+                     `runs.using` and add the first major that says node24",
+                    n + 1
+                )),
+            }
+        }
+    }
+    assert!(
+        seen >= 5,
+        "found only {seen} `uses: actions/…` lines in .github/workflows, so this reads the wrong files"
+    );
+    assert!(wrong.is_empty(), "actions still on Node 20:\n{}", wrong.join("\n"));
+}

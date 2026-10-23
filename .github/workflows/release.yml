@@ -74,7 +74,13 @@ jobs:
           done
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-      - uses: actions/upload-artifact@v4
+      # `upload-artifact@v7` and `download-artifact@v8` run on Node 24 (the first such majors are v6
+      # and v7; v4 ran on Node 20). Their notes were read against how the two are used here: v7 adds
+      # an opt-in `archive: false` and v8 skips unzipping only what was uploaded that way, so an
+      # artifact uploaded zipped, as this one is, downloads as before; v8 now fails on a digest
+      # mismatch rather than warning, which a release wants; v5's path change is for a download by
+      # ID, and `publish` downloads every artifact into one `merge-multiple` directory (SKEIN-1288).
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -88,7 +94,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
