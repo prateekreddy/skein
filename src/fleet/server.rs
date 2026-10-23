@@ -114,24 +114,35 @@ pub fn server_log_path() -> String {
         .into_owned()
 }
 
-/// `command`, with everything it prints still printed and also appended to `log`, which is moved
-/// to `<log>.1` (replacing the one before) once it passes `max` bytes — two files, never more.
+/// `command` (a list ending in `;`), with everything it prints still printed and also appended to
+/// `log`, which is moved to `<log>.1` (replacing the one before) once it passes `max` bytes — two
+/// files, never more.
 ///
 /// **A separate reader, not a redirection in the server.** Lines the server prints as it exits are
 /// the ones most worth keeping, and a reader in another process drains them after it has gone,
 /// where a thread inside it would die with it. The pane still gets every line, so
-/// [`doorway_pane_command`] answers as it always has. `PYTHONUNBUFFERED`, because the doorway is
-/// python and a pipe would otherwise hold its lines back until a buffer filled.
+/// [`doorway_pane_command`] answers as it always has.
+///
+/// **Through a FIFO, not a pipe, so the doorway stays the supervisor's own child.** door.sh's
+/// `skein_supervised_door` finds the doorway as the CHILD of the pane's shell; a pipeline forks
+/// each side into a subshell and makes it a grandchild, and an unstamped doorway could then no
+/// longer be re-stamped (`a_door_that_lost_its_stamp_is_re_stamped_without_closing`). A
+/// redirected `{ …; }` runs in the shell itself. The reader is not waited for: something the
+/// server started can hold its output open, and the supervisor must not hang on that. If the FIFO
+/// cannot be made, `command` runs as it did before, unlogged. `PYTHONUNBUFFERED`, because the
+/// doorway is python and would otherwise hold its lines back until a buffer filled.
 fn logged(command: &str, log: &str, max: u64) -> String {
     let log = sh_quote(log);
     format!(
-        "{{ PYTHONUNBUFFERED=1 {command} }} 2>&1 | {{ \
-           n=$(( $(cat {log} 2>/dev/null | wc -c) + 0 )); \
-           while IFS= read -r line || [ -n \"$line\" ]; do \
-             printf '%s\\n' \"$line\"; printf '%s\\n' \"$line\" >> {log}; \
-             n=$((n + ${{#line}} + 1)); \
-             if [ \"$n\" -gt {max} ]; then mv -f {log} {log}.1; n=0; fi; \
-           done; }}; "
+        "if logd=$(mktemp -d 2>/dev/null) && mkfifo \"$logd/out\" 2>/dev/null; then \
+           {{ n=$(( $(cat {log} 2>/dev/null | wc -c) + 0 )); \
+             while IFS= read -r line || [ -n \"$line\" ]; do \
+               printf '%s\\n' \"$line\"; printf '%s\\n' \"$line\" >> {log}; \
+               n=$((n + ${{#line}} + 1)); \
+               if [ \"$n\" -gt {max} ]; then mv -f {log} {log}.1; n=0; fi; \
+             done; }} < \"$logd/out\" & \
+           {{ PYTHONUNBUFFERED=1 {command} }} > \"$logd/out\" 2>&1; rm -rf \"$logd\"; \
+         else {command} fi; "
     )
 }
 
