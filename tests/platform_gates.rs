@@ -1702,7 +1702,7 @@ fn noskip_check_fails_a_handed_over_run_on_a_broken_test_and_only_then() {
                   test it_breaks ... FAILED\n\n\
                   failures:\n\n\
                   ---- it_breaks stdout ----\n\n\
-                  thread 'it_breaks' (4242) panicked at tests/broken.rs:3:5:\n\
+                  thread 'it_breaks' (4242) panicked at the fixture test, line 3:\n\
                   assertion failed: false\n\n\n\
                   failures:\n    it_breaks\n\n\
                   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; \
