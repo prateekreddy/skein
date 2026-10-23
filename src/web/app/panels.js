@@ -250,7 +250,7 @@ function enterSubmits(e) {
   return t.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|color|range)$/i.test(t.type);
 }
 // Run `fn` now if no popup is open, else once the last one has closed.
-function whenNoDialog(fn) { if (popupOpen()) afterDialogs.add(fn); else fn(); }
+function whenNoDialog(fn) { if (popupOpen()) afterDialogs.add(fn); else fn.call(null); }
 // First in the capture phase at the window, so a popup's Escape is the popup's whatever has the
 // focus — a field inside it, the page behind it, or nothing — and no listener after it sees the key.
 window.addEventListener("keydown", e => {

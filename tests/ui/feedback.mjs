@@ -360,6 +360,19 @@ await check("the agent-CLI update's report stays on screen, one line per CLI, un
   }
 });
 
+// Fails if `pressUpdateSkein` toasts a refused start again: no notice, or gone after 3.5s.
+await check("a refused Update skein says why in a notice that stays", async () => {
+  await closeEverything();
+  await page.route("**/api/update/start", r => r.fulfill({ json: { ok: false, error: "an update is already running\nwait for it to finish" } }));
+  try {
+    await page.evaluate(() => pressUpdateSkein());
+    await page.waitForTimeout(4000);
+    const n = await noticeNow();
+    if (!n || n.kind !== "error" || !n.text.includes("wait for it to finish")) throw new Error(`notice ${JSON.stringify(n)}`);
+    await page.locator("#notice .x").click();
+  } finally { await page.unroute("**/api/update/start"); }
+});
+
 // Stop, pressed twice while the first is in flight, and refused (SKEIN-1265). Fails if `stopBox`
 // loses its in-flight guard (two POSTs), or cuts the refusal to its first line again.
 await check("Stop pressed twice sends one request, and its refusal is said whole", async () => {

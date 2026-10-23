@@ -1245,9 +1245,9 @@ async function pressUpdateSkein() {
   if (ended) ended.remove();
   try {
     const r = await fetch("/api/update/start", { method: "POST" }).then(r => r.json());
-    if (!r.ok) { toast(`could not start: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
+    if (!r.ok) { notice(`could not start the update: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = "Update skein"; } return; }
   } catch (e) {
-    toast(`could not start: ${e}`);
+    notice(`could not start the update: ${failText(e)}`);
     if (btn) { btn.disabled = false; btn.textContent = "Update skein"; }
     return;
   }
