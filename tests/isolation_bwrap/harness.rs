@@ -22,6 +22,29 @@ pub(super) fn isolation_block() -> String {
     lines[from..=to].join("\n")
 }
 
+/// The launcher's write helpers, lifted the same way: `pin_dir`, which holds a directory of the
+/// box's own open, and `open_new`/`land_new`/`drop_new`, which write a file into one (SKEIN-1287).
+/// Followed by the `root_real` they measure against, so `$root` must be set before it runs.
+pub(super) fn launcher_helpers() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let lift = |name: &str| -> String {
+        let from = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{name}() {{")))
+            .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+        let to = from + lines[from..].iter().position(|l| *l == "}").unwrap();
+        lines[from..=to].join("\n")
+    };
+    format!(
+        "{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"",
+        lift("pin_dir"),
+        lift("open_new"),
+        lift("land_new"),
+        lift("drop_new"),
+    )
+}
+
 /// The launcher's record of which store is this box's (SKEIN-1174), lifted the same way: the `if`
 /// that writes `<tree>/.git/skein-store` from `$SKEIN_BOX_STORE`, which runs straight after the
 /// isolation block and before the variable is unset. [`Fleet::in_box_mounting`] runs it in that
@@ -40,7 +63,7 @@ pub(super) fn store_record_block() -> String {
         .position(|l| *l == "fi")
         .map(|i| from + i)
         .expect("the store record has no end");
-    lines[from..=to].join("\n")
+    format!("{}\n{}", launcher_helpers(), lines[from..=to].join("\n"))
 }
 
 /// The launcher's start-up announcements, lifted the same way.

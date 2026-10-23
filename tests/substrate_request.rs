@@ -499,11 +499,28 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
         .expect("the sudo block moved");
     let to = lines
         .iter()
-        .position(|l| l.contains(r#"binds+=(--ro-bind "$root/bin/sudo""#))
+        .position(|l| l.contains(r#"binds+=(--ro-bind-fd "$new_fd" "$sudo_real")"#))
         .expect("the bind line moved");
     let block = format!(
-        "{}\n  binds+=(--ro-bind \"$root/bin/sudo\" \"$sudo_real\")\nfi",
+        "{}\n  binds+=(--ro-bind-fd \"$new_fd\" \"$sudo_real\")\nfi",
         lines[from..to].join("\n")
+    );
+    // What the launcher has in hand before this block: its write helpers, and the box's `bin` held
+    // open as `bin_at` (SKEIN-1287).
+    let lift = |name: &str| -> String {
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{name}() {{")))
+            .unwrap_or_else(|| panic!("the launcher has no `{name}` any more"));
+        let end = at + lines[at..].iter().position(|l| *l == "}").unwrap();
+        lines[at..=end].join("\n")
+    };
+    let held = format!(
+        "{}\n{}\n{}\n{}\nroot_real=\"$(cd -P -- \"$root\" && pwd -P)\"; pin_dir bin_at \"$root/bin\"",
+        lift("pin_dir"),
+        lift("open_new"),
+        lift("land_new"),
+        lift("drop_new"),
     );
 
     // The launcher has to be where the shim will look for it, which is the whole point.
@@ -512,11 +529,11 @@ fn the_shim_a_box_gets_can_actually_reach_the_queue() {
     fs::copy(&launcher, &installed).unwrap();
 
     let box_root = f.root.join("boxroot");
-    fs::create_dir_all(&box_root).unwrap();
+    fs::create_dir_all(box_root.join("bin")).unwrap();
     let made = Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail; binds=(); root={}; box=web-main; {block}",
+            "set -uo pipefail; binds=(); root={}; box=web-main; {held}\n{block}",
             box_root.display()
         ))
         .env("SKEIN_FLEET_ROOT", &f.root)

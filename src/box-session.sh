@@ -844,9 +844,13 @@ mkdir -p "$root" "$tree" "$(dirname "$pidfile")" || exit 1
 # the real directory was moved aside or never existed, and guessing wrong either loses the box's
 # login or mounts the wrong thing.
 #
-# Not closed by this: the window between the check and the use, which needs a process from the
-# box still running while it is restarted. Moving `home` and `tmp` out of the box-writable root
-# closes that too; it changes every existing box's layout, so it is SKEIN-1287 rather than done here.
+# A check on a name is only as good as the moment it was made, and a box's processes need not stop
+# when the box does: nothing here unshares the pid namespace, so a `setsid` or `nohup` from inside
+# the box outlives its restart and can swap a checked directory for a link between the check and
+# the use. So each one is then HELD OPEN (`pin_dir`) and checked again through the descriptor, and
+# everything after that reaches it through the descriptor rather than by name: a write through
+# `/proc/$$/fd/<n>/<file>`, a bind through `bwrap --bind-fd`. Whatever is at the name afterwards
+# is no longer asked (SKEIN-1287).
 root_real="$(cd -P -- "$root" 2>/dev/null && pwd -P)" || {
   echo "skein: $box cannot start: its root $root cannot be entered" >&2
   exit 1
@@ -883,14 +887,76 @@ aside, move it back to $1; otherwise move this one aside from outside the box an
 again, and an empty one is made." >&2
   exit 1
 }
+# `pin_dir <var> <path>`: open the directory at the path, refuse the start unless the directory
+# that opened is the box's own and is the one the path names, and set `<var>` to a path that reaches
+# it through the open descriptor. The path is either under `$root`, or under a directory already
+# held (`$home_at/.claude`), in which case it is measured against where that one really is. `/.` so that only a directory opens: a FIFO planted
+# at the name would otherwise park the launcher in `open`. The descriptor's number is the last
+# component of that path, which is what `bwrap --bind-fd` takes. With `soft`, a directory that fails
+# is not held and the call fails, rather than refusing the start.
+pin_dir() {
+  local fd want="$root_real${2#"$root"}" got='' held shown="$2"
+  case "$2" in
+    "/proc/$$/fd/"*)
+      held="${2#"/proc/$$/fd/"}"
+      want="$(readlink -- "/proc/$$/fd/${held%%/*}" 2>/dev/null)/${held#*/}"
+      shown="$want"
+      ;;
+  esac
+  if exec {fd}<"$2/."; then
+    got="$(readlink -- "/proc/$$/fd/$fd" 2>/dev/null)"
+    if [ "$got" = "$want" ] && [ -O "/proc/$$/fd/$fd" ]; then
+      printf -v "$1" '/proc/%s/fd/%s' "$$" "$fd"
+      return 0
+    fi
+    exec {fd}<&-
+  fi 2>/dev/null
+  [ "${3-}" = soft ] && return 1
+  echo "skein: $box cannot start: $shown changed while it was being started (it now leads to \
+${got:-nothing that opens}). The launcher binds or writes this path at fleet scope, so it must be a \
+real directory belonging to the box; stop whatever in the box is still running and start it again." >&2
+  exit 1
+}
 own_dir "$home" make
 own_dir "$tmp" make
 own_dir "$home/.local" make
 own_dir "$home/.local/state" make
 own_dir "$root/bin" make
+# `open_new <held dir> <name>`: make a new file beside `<name>` in a directory `pin_dir` holds, and
+# hold it open for writing in `new_fd`. Made and opened in one call, `set -C` being `O_CREAT|O_EXCL`,
+# so there is no moment at which the new name is in the directory and not yet open. `mktemp` and a
+# `>` after it reopened, by name, a file `mktemp` had just announced, and a box process watching
+# the directory could put a link there in between (SKEIN-1287). Write it with `>&"$new_fd"`, then
+# `land_new`; or `drop_new` to give up.
+open_new() {
+  new_at="$1/.$2.$$.$RANDOM$RANDOM"; new_name="$1/$2"; new_fd=''
+  set -C
+  { exec {new_fd}>"$new_at"; } 2>/dev/null
+  set +C
+  [ -n "$new_fd" ] && [ -f "/proc/$$/fd/$new_fd" ] && return 0
+  drop_new
+  return 1
+}
+# `land_new <mode> [keep]`: give the file `open_new` made its mode, through the descriptor, and
+# rename it over its target, which replaces a link there rather than writing through it. With
+# `keep`, `new_fd` stays open for `bwrap --ro-bind-fd`, which binds the file this launcher wrote
+# whatever is at its name by then.
+land_new() {
+  chmod "$1" "/proc/$$/fd/$new_fd" && mv -fT -- "$new_at" "$new_name" || { drop_new; return 1; }
+  [ "${2-}" = keep ] || exec {new_fd}>&-
+}
+drop_new() {
+  [ -n "${new_fd-}" ] && exec {new_fd}>&-
+  rm -f -- "${new_at-}"
+  new_fd=''
+}
+pin_dir home_at "$home"
+pin_dir tmp_at "$tmp"
+pin_dir state_at "$home_at/.local/state"
+pin_dir bin_at "$root/bin"
 # 0700: this holds the box's tracker token and its agent credentials. Other boxes here are not a
 # security boundary, but they are not entitled to read them by accident either.
-chmod 700 "$home" "$tmp" 2>/dev/null || true
+chmod 700 "$home_at" "$tmp_at" 2>/dev/null || true
 
 # Which START this is, for the provisioning handshake. The box's /tmp is $tmp on disk, and a
 # restart keeps it — so the `skein-startup.ready` / `skein-startup.failed` markers the kit writes
@@ -907,11 +973,12 @@ chmod 700 "$home" "$tmp" 2>/dev/null || true
 # (SKEIN-1255), here and at each write below. The directory is the box's own (checked above), but
 # the NAME in it is the box's to choose: a link left at the target would make a plain `>` write, and
 # a `chmod` change, whatever the link points at, at fleet scope. A rename replaces the link itself,
-# and the temporary is made by `mktemp`, which refuses a name that already exists. `chmod =rw` gives
-# the temporary the mode `>` would have: read and write for all, less the umask. `mv -T`, because a
-# link to a directory at the target would otherwise take the file INTO that directory.
+# and the temporary is made by `open_new`, which refuses a name that already exists and holds what
+# it made open (SKEIN-1287). `chmod =rw` gives the temporary the mode `>` would have: read and write
+# for all, less the umask. `mv -T`, because a link to a directory at the target would otherwise take
+# the file INTO that directory.
 start_id="$(date -u +%Y%m%d%H%M%S)-$$"
-fresh="$(mktemp "$tmp/.skein-start-id.XXXXXX")" && printf '%s\n' "$start_id" >"$fresh" && chmod =rw "$fresh" && mv -fT "$fresh" "$tmp/skein-start-id" || { rm -f "${fresh-}"; exit 1; }
+open_new "$tmp_at" skein-start-id && printf '%s\n' "$start_id" >&"$new_fd" && land_new =rw || { drop_new; exit 1; }
 
 # Private by DEFAULT, with a short list of deliberate escapes.
 #
@@ -1053,31 +1120,36 @@ overlay_paths=(".local")
 # box is live, peers address it on that word, and nothing on either end reports the loss.
 
 for rel in "${seed_paths[@]}"; do
-  mine="$home/$rel"
+  mine="$home_at/$rel"
   # A link counts as there, even one that leads nowhere: a copy made onto it would be written
-  # wherever it points (SKEIN-1255).
+  # wherever it points (SKEIN-1255). And `-T --remove-destination` for one planted after this test
+  # (SKEIN-1287): `cp` then refuses a link at the top rather than copying into what it leads to, and
+  # unlinks rather than writes through one at a file.
   { [ -e "$mine" ] || [ -L "$mine" ]; } && continue
   [ -e "$HOME/$rel" ] || continue
-  mkdir -p "$(dirname "$mine")" || exit 1
-  cp -a "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
+  cp -aT --remove-destination "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
 done
 
 # A new box's Claude Code home starts empty and private, rather than as the sandbox's (SKEIN-1235,
 # beside `seed_paths`). The credential loop below fills in the login.
-[ -e "$home/.claude" ] || [ -L "$home/.claude" ] || mkdir -m 700 -- "$home/.claude" || exit 1
+[ -e "$home_at/.claude" ] || [ -L "$home_at/.claude" ] || mkdir -m 700 -- "$home_at/.claude" || exit 1
 # The two agent homes are where the login is merged and the agent's settings are written, each
 # through a temporary file made in the directory itself, so the directory has to be the box's
-# (SKEIN-1255). `.codex` passes when absent; the merge below creates it.
+# (SKEIN-1255), and is held open from here on like the others (SKEIN-1287). `.codex` passes when
+# absent; the credential loop below makes and holds it only if it has a login to put there.
 own_dir "$home/.claude"
 own_dir "$home/.codex"
+pin_dir claude_at "$home_at/.claude"
+codex_at=''
+[ -e "$home_at/.codex" ] || [ -L "$home_at/.codex" ] && pin_dir codex_at "$home_at/.codex"
 
 # ...and a new box's `~/.claude.json` starts with the one key of the sandbox's that belongs to the
 # login: `oauthAccount`, the account the credential was issued to. First start only, like the seed
 # loop: a box that has the file owns it. Everything else in the sandbox's file is the privileged
 # box's: its projects, its device and user ids, its tips and caches. Nothing to copy, or no python3
 # to copy it with, and the box starts with no file, which Claude Code creates for itself.
-if [ ! -e "$home/.claude.json" ] && [ -s "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
-  python3 - "$HOME/.claude.json" "$home/.claude.json" 2>/dev/null <<'PY' || true
+if [ ! -e "$home_at/.claude.json" ] && [ -s "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$HOME/.claude.json" "$home_at/.claude.json" 2>/dev/null <<'PY' || true
 import json, os, sys, tempfile
 src, dst = sys.argv[1], sys.argv[2]
 try:
@@ -1148,12 +1220,20 @@ fi
 # expiry. Prints nothing, and fails, when the file carries no login that could seed anything — a
 # husk, or a credential whose refresh token is spent. Both mean the same thing to every caller:
 # there is nothing here to give away, so the vacuum clause below is free to fire.
+#
+# One side of every comparison is a file the box writes, so it is read only if it is a regular file
+# at that name: a link there is not followed, and counts as no login (SKEIN-1303). Followed, a link
+# to another login lets a box choose the credential that heals the fleet's copy.
 login_life() {
   [ -s "$1" ] || return 1
   python3 - "$1" 2>/dev/null <<'PY'
-import json, sys, time
+import json, os, stat, sys, time
 try:
-    data = json.load(open(sys.argv[1]))
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            sys.exit(1)
+        data = json.load(f)
 except Exception:
     sys.exit(1)
 if not isinstance(data, dict):
@@ -1215,20 +1295,35 @@ better_login() { # $1 $2 = expiries, $3 $4 = the files they came from
 # the same reason a logout is: an absent credential must never overwrite a present one. The
 # destination keeps the source's mtime, as `cp -p` gave it, or the two would take turns being
 # "newer" and copy back and forth on every start.
+#
+# Both files are read only if they are regular files at their names, as `login_life` reads them
+# (SKEIN-1303): a link at the box's copy is replaced by the merged file rather than read through,
+# so the far end's other keys are not copied into the box.
 merge_login() {
   python3 - "$1" "$2" 2>/dev/null <<'PY'
-import json, os, sys, tempfile
+import json, os, stat, sys, tempfile
 src, dst = sys.argv[1], sys.argv[2]
 # The whole of a codex auth.json, and only the agent's block of a claude credentials file.
 LOGIN = ("claudeAiOauth", "tokens", "OPENAI_API_KEY", "last_refresh")
+
+
+def own(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(path + " is not a regular file")
+        return json.load(f), st
+
+
 try:
-    incoming = json.load(open(src))
+    incoming, src_stat = own(src)
 except Exception:
     sys.exit(1)
 if not isinstance(incoming, dict):
     sys.exit(1)
 try:
-    merged = json.load(open(dst))
+    merged = own(dst)[0]
     if not isinstance(merged, dict):
         merged = {}
 except Exception:
@@ -1246,7 +1341,8 @@ handle, temp = tempfile.mkstemp(dir=where)
 try:
     with os.fdopen(handle, "w") as out:
         json.dump(merged, out)
-    os.chmod(temp, 0o600)
+        # Through the descriptor: the name is in a directory the box writes (SKEIN-1287).
+        os.fchmod(out.fileno(), 0o600)
     os.replace(temp, dst)
 except Exception:
     try:
@@ -1254,8 +1350,7 @@ except Exception:
     except OSError:
         pass
     sys.exit(1)
-stat = os.stat(src)
-os.utime(dst, (stat.st_atime, stat.st_mtime))
+os.utime(dst, (src_stat.st_atime, src_stat.st_mtime), follow_symlinks=False)
 PY
 }
 
@@ -1289,7 +1384,20 @@ command -v python3 >/dev/null 2>&1 \
 # the fleet's copy, so the canonical login ages until somebody runs `skein login`. That is a
 # recoverable inconvenience, announced below. A poisoned fleet-wide credential is neither.
 for rel in ".claude/.credentials.json" ".codex/auth.json"; do
-  mine="$home/$rel"; canon="$HOME/$rel"
+  canon="$HOME/$rel"
+  # The box's copy is reached through its held directory (SKEIN-1287). A box with no `.codex` gets
+  # one only when the fleet has a codex login to give it, and it is held like the rest before the
+  # merge writes into it.
+  case "$rel" in
+    .claude/*) mine="$claude_at/${rel#*/}" ;;
+    *)
+      if [ -z "$codex_at" ] && login_life "$canon" >/dev/null 2>&1; then
+        mkdir -- "$home_at/.codex" 2>/dev/null
+        pin_dir codex_at "$home_at/.codex"
+      fi
+      mine="${codex_at:-/nonexistent}/${rel#*/}"
+      ;;
+  esac
   mine_life="$(login_life "$mine")" || mine_life=""
   canon_life="$(login_life "$canon")" || canon_life=""
   if [ -n "$canon_life" ] && [ -n "$mine_life" ]; then
@@ -1349,14 +1457,19 @@ done
 # and unparseable is LEFT ALONE and said out loud: the person is then exactly where they are today,
 # one onboarding prompt, rather than one conversation record worse off. An absent or empty file has
 # no record to lose and is written.
-if command -v python3 >/dev/null 2>&1 && login_life "$home/.claude/.credentials.json" >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && login_life "$claude_at/.credentials.json" >/dev/null 2>&1; then
   onboarding_flag=0
-  python3 - "$home/.claude.json" <<'PY' || onboarding_flag=$?
-import json, os, sys, tempfile
+  python3 - "$home_at/.claude.json" <<'PY' || onboarding_flag=$?
+import json, os, stat, sys, tempfile
 
 p = sys.argv[1]
+# Not through a link or a FIFO at the name: the box writes this file, and what is read here is
+# written back into it (SKEIN-1303).
 try:
-    with open(p) as f:
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            sys.exit(1)
         raw = f.read()
 except FileNotFoundError:
     raw = ""
@@ -1375,7 +1488,7 @@ if data.get("hasCompletedOnboarding") is True:
     sys.exit(0)
 data["hasCompletedOnboarding"] = True
 try:
-    mode = os.stat(p).st_mode & 0o777
+    mode = os.stat(p, follow_symlinks=False).st_mode & 0o777
 except OSError:
     mode = 0o600
 where = os.path.dirname(p) or "."
@@ -1384,7 +1497,8 @@ handle, temp = tempfile.mkstemp(dir=where)
 try:
     with os.fdopen(handle, "w") as out:
         json.dump(data, out)
-    os.chmod(temp, mode)
+        # Through the descriptor: the name is in a directory the box writes (SKEIN-1287).
+        os.fchmod(out.fileno(), mode)
     os.replace(temp, p)
 except Exception:
     try:
@@ -1427,12 +1541,17 @@ fi
 # losing the record.
 if command -v python3 >/dev/null 2>&1 && [ -d "$tree" ]; then
   workspace_trust=0
-  python3 - "$home/.claude.json" "$tree" <<'PY' || workspace_trust=$?
-import json, os, sys, tempfile
+  python3 - "$home_at/.claude.json" "$tree" <<'PY' || workspace_trust=$?
+import json, os, stat, sys, tempfile
 
 p, tree = sys.argv[1], sys.argv[2]
+# Not through a link or a FIFO at the name: the box writes this file, and what is read here is
+# written back into it (SKEIN-1303).
 try:
-    with open(p) as f:
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            sys.exit(1)
         raw = f.read()
 except FileNotFoundError:
     raw = ""
@@ -1463,7 +1582,7 @@ entry["hasTrustDialogAccepted"] = True
 projects[tree] = entry
 data["projects"] = projects
 try:
-    mode = os.stat(p).st_mode & 0o777
+    mode = os.stat(p, follow_symlinks=False).st_mode & 0o777
 except OSError:
     mode = 0o600
 where = os.path.dirname(p) or "."
@@ -1472,7 +1591,8 @@ handle, temp = tempfile.mkstemp(dir=where)
 try:
     with os.fdopen(handle, "w") as out:
         json.dump(data, out)
-    os.chmod(temp, mode)
+        # Through the descriptor: the name is in a directory the box writes (SKEIN-1287).
+        os.fchmod(out.fileno(), mode)
     os.replace(temp, p)
 except Exception:
     try:
@@ -1500,11 +1620,15 @@ fi
 # Only when absent, and never over an unparseable file: a box whose user has taken a position on this
 # keeps it, including a deliberate `hold`.
 if command -v python3 >/dev/null 2>&1; then
-  python3 - "$home/.claude/settings.json" 2>/dev/null <<'PY' || true
-import json, os, sys, tempfile
+  python3 - "$claude_at/settings.json" 2>/dev/null <<'PY' || true
+import json, os, stat, sys, tempfile
 p = sys.argv[1]
 try:
-    with open(p) as f:
+    # Not through a link or a FIFO at the name (SKEIN-1303, as `.claude.json` above).
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            sys.exit(0)
         data = json.load(f)
     if not isinstance(data, dict):
         sys.exit(0)
@@ -1554,12 +1678,15 @@ fi
 skein_telemetry="${SKEIN_BOX_TELEMETRY-0}"
 if command -v python3 >/dev/null 2>&1; then
   telemetry_rc=0
-  python3 - "$home/.claude/settings.json" "$skein_telemetry" 2>/dev/null <<'PY' || telemetry_rc=$?
-import json, os, sys, tempfile
+  python3 - "$claude_at/settings.json" "$skein_telemetry" 2>/dev/null <<'PY' || telemetry_rc=$?
+import json, os, stat, sys, tempfile
 key = "telemetry@builtin"
 p, allowed = sys.argv[1], sys.argv[2] in ("1", "on", "yes", "true")
 try:
-    with open(p) as f:
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            sys.exit(3)
         data = json.load(f)
 except FileNotFoundError:
     data = {}
@@ -1615,7 +1742,9 @@ unset skein_telemetry SKEIN_BOX_TELEMETRY
 # ORIGINAL filesystem, so these still name the sandbox's real directories even though each
 # destination now sits inside the box's private HOME — a symlink could not do this, because the
 # path it would point at is the one being shadowed.
-binds=(--bind "$home" "$HOME")
+# The held descriptors, not the names (SKEIN-1287, beside `pin_dir`). bwrap closes each one once it
+# has bound it, so none of them reaches the box.
+binds=(--bind-fd "${home_at##*/}" "$HOME")
 for rel in "${share_paths[@]}"; do
   [ -e "$HOME/$rel" ] && binds+=(--bind "$HOME/$rel" "$HOME/$rel")
 done
@@ -1673,8 +1802,8 @@ done
 # subtree under it that a restart must find again. Created here, because nothing else makes it: it
 # is not seeded from the sandbox (SKEIN-1234, beside `seed_paths`), so a new box has none until this
 # line runs, and `--bind` of a missing source is a hard bwrap failure — no new box could start. On
-# a box's first start this is what gives it an empty `~/.local/state` of its own.
-mkdir -p "$home/.local/state" || exit 1
+# a box's first start this is what gives it an empty `~/.local/state` of its own. (Made, checked
+# and held with the box's other directories, at `pin_dir state_at`.)
 # The DESTINATION has to exist as well as the source, and under the read-only fallback bwrap cannot
 # make it: it creates a missing mount point with mkdir, and inside a read-only bind that is
 # `Can't mkdir …/.local/state: Read-only file system` — every box failing to start right after the
@@ -1691,7 +1820,7 @@ in the sandbox, then start the box again." >&2
       exit 1
     } ;;
 esac
-binds+=(--bind "$home/.local/state" "$HOME/.local/state")
+binds+=(--bind-fd "${state_at##*/}" "$HOME/.local/state")
 
 # The npm prefix the agent CLIs actually live in — READ-ONLY, and this is the other half of
 # SKEIN-963 (filed separately as SKEIN-968 because a private `~/.local` does not touch it).
@@ -1746,7 +1875,7 @@ done
 # (Caught exactly that while testing from /var/tmp; the real layout is /boxes.)
 case "$root" in
   /var/tmp/*) ;;
-  *) own_dir "$root/vartmp" make; binds+=(--bind "$root/vartmp" /var/tmp) ;;
+  *) own_dir "$root/vartmp" make; pin_dir vartmp_at "$root/vartmp"; binds+=(--bind-fd "${vartmp_at##*/}" /var/tmp) ;;
 esac
 
 # `sudo` cannot work in here, and the way it fails is worse than it not existing: the real one says
@@ -1778,7 +1907,6 @@ esac
 sudo_real=$(command -v sudo 2>/dev/null || true)
 [ -n "$sudo_real" ] && sudo_real=$(readlink -e "$sudo_real" 2>/dev/null || true)
 if [ -n "$sudo_real" ] && [ -f "$sudo_real" ]; then
-  mkdir -p "$root/bin" || exit 1
   # The box name and the launcher's own path are baked in rather than read from the environment,
   # because this shim runs in whatever shell an agent happens to have: an attach shell enters the
   # namespace fresh, without $SKEIN_BOX, and a request filed under an empty box name is a request
@@ -1791,7 +1919,7 @@ if [ -n "$sudo_real" ] && [ -f "$sudo_real" ]; then
   # launcher is actually installed, which is the same path `fleet::box_session_path` builds.
   [ -f "$skein_launcher" ] || skein_launcher="${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh"
   # Written beside the target and renamed over it, as every write under `$root` is (SKEIN-1255).
-  fresh="$(mktemp "$root/bin/.sudo.XXXXXX")" || exit 1
+  open_new "$bin_at" sudo || exit 1
   {
     printf '#!/bin/sh\n'
     printf 'skein_box=%q\n' "$box"
@@ -1851,8 +1979,8 @@ WHYASK
 fi
 exit 1
 SHIM
-  } >"$fresh" && chmod 755 "$fresh" && mv -fT "$fresh" "$root/bin/sudo" || { rm -f "$fresh"; exit 1; }
-  binds+=(--ro-bind "$root/bin/sudo" "$sudo_real")
+  } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
+  binds+=(--ro-bind-fd "$new_fd" "$sudo_real")
 fi
 
 # Starting a box is not the same as adding a session to one. This creates the namespace, so running
@@ -1952,7 +2080,7 @@ fi
 # as it existed. The report goes out the way the anchor and the launcher revision do: over the
 # channel skein already opened, into the placement record, where the board reads it for free.
 # Renamed over its target like every write under `$root` (SKEIN-1255).
-fresh="$(mktemp "$root/.limits.state.XXXXXX")" && printf '%s\n' "$limits_state" >"$fresh" && chmod =rw "$fresh" && mv -fT "$fresh" "$root/limits.state" || rm -f "${fresh-}"
+open_new "$root" limits.state && printf '%s\n' "$limits_state" >&"$new_fd" && land_new =rw || drop_new
 printf "SKEIN_LIMITS %s\n" "$limits_state"
 
 # A login the user made must beat the placeholder key the sandbox ships with.
@@ -1966,8 +2094,8 @@ printf "SKEIN_LIMITS %s\n" "$limits_state"
 #
 # Conditional on the credential existing, so a fleet that genuinely runs on API keys is untouched:
 # no login, no unset, and the proxy path works exactly as before.
-[ -s "$home/.claude/.credentials.json" ] && unset ANTHROPIC_API_KEY
-[ -s "$home/.codex/auth.json" ] && unset OPENAI_API_KEY
+[ -s "$claude_at/.credentials.json" ] && unset ANTHROPIC_API_KEY
+[ -n "$codex_at" ] && [ -s "$codex_at/auth.json" ] && unset OPENAI_API_KEY
 
 # --- One box cannot see another's files ----------------------------------------------------------
 #
@@ -2236,8 +2364,12 @@ fi
 # the path it is named by, and the record is renamed over its target rather than written through
 # it, like every write under `$root` (SKEIN-1255).
 if [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] && [ -d "$tree/.git" ]; then
-  if [ "$(cd -P -- "$tree/.git" 2>/dev/null && pwd -P)" = "$(cd -P -- "$root" 2>/dev/null && pwd -P)${tree#"$root"}/.git" ] && [ -O "$tree/.git" ]; then
-    fresh="$(mktemp "$tree/.git/.skein-store.XXXXXX" 2>/dev/null)" && printf '%s\n' "$SKEIN_BOX_STORE" >"$fresh" && chmod =rw "$fresh" && mv -fT "$fresh" "$tree/.git/skein-store" 2>/dev/null || rm -f "${fresh-}"
+  # Held open for the write, like the box's own directories (SKEIN-1287).
+  if [ ! -L "$tree/.git" ] && pin_dir tree_git_at "$tree/.git" soft 2>/dev/null; then
+    { open_new "$tree_git_at" skein-store && printf '%s\n' "$SKEIN_BOX_STORE" >&"$new_fd" && land_new =rw; } 2>/dev/null || drop_new
+    tree_git_fd="${tree_git_at##*/}"
+    exec {tree_git_fd}<&-
+    unset tree_git_at tree_git_fd
   else
     echo "skein: $box's checkout has a .git that is not a directory of its own, so the record of its store was not written there" >&2
   fi
@@ -2574,7 +2706,6 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
     gh_real=$(command -v gh 2>/dev/null || true)
     [ -n "$gh_real" ] && gh_real=$(readlink -e "$gh_real" 2>/dev/null || true)
     if [ -n "$gh_real" ] && [ -f "$gh_real" ]; then
-      mkdir -p "$root/bin" || exit 1
       gh_mark=''
       if [ -n "${GH_TOKEN-}" ] && command -v sha256sum >/dev/null 2>&1; then
         gh_mark=$(printf '%s' "$GH_TOKEN" | sha256sum)
@@ -2583,8 +2714,8 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
       # Same overlap trick as git's: the real binary is bound to a second path FIRST, because
       # binding the shim over it shadows the very thing the shim has to exec.
       # Both written beside their targets and renamed over them (SKEIN-1255).
-      fresh="$(mktemp "$root/bin/.gh.real.XXXXXX" 2>/dev/null)" && chmod =rw "$fresh" && mv -fT "$fresh" "$root/bin/gh.real" 2>/dev/null || rm -f "${fresh-}"
-      fresh="$(mktemp "$root/bin/.gh.XXXXXX")" || exit 1
+      open_new "$bin_at" gh.real && land_new =rw 2>/dev/null
+      open_new "$bin_at" gh || exit 1
       {
         printf '#!/bin/sh\n'
         printf 'skein_gh=%q\n' "$root/bin/gh.real"
@@ -2607,9 +2738,9 @@ else
 fi
 exec "$skein_gh" "$@"
 GHSHIM
-      } >"$fresh" && chmod 755 "$fresh" && mv -fT "$fresh" "$root/bin/gh" || { rm -f "$fresh"; exit 1; }
+      } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
       binds+=(--ro-bind "$gh_real" "$root/bin/gh.real")
-      binds+=(--ro-bind "$root/bin/gh" "$gh_real")
+      binds+=(--ro-bind-fd "$new_fd" "$gh_real")
       unset gh_mark
     fi
     unset own_token gh_real
@@ -2619,9 +2750,14 @@ GHSHIM
   # box could sign for any repository the host's key reaches. Unsetting the variable is not enough —
   # the socket path is well known, and anything can export it again — so a regular file goes over it
   # and `connect()` fails on a thing that is not a socket.
-  fresh="$(mktemp "$root/.no-ssh-agent.XXXXXX" 2>/dev/null)" && chmod =rw "$fresh" && mv -fT "$fresh" "$root/no-ssh-agent" 2>/dev/null || rm -f "${fresh-}"
-  if [ -n "${SSH_AUTH_SOCK-}" ] && [ -S "$SSH_AUTH_SOCK" ] && [ -f "$root/no-ssh-agent" ]; then
-    binds+=(--ro-bind "$root/no-ssh-agent" "$SSH_AUTH_SOCK")
+  # Bound by the descriptor it was written through, not by name: the name is in the box's root,
+  # and a link put there before the bind would mount whatever it leads to (SKEIN-1287).
+  if open_new "$root" no-ssh-agent && land_new =rw keep 2>/dev/null; then
+    if [ -n "${SSH_AUTH_SOCK-}" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+      binds+=(--ro-bind-fd "$new_fd" "$SSH_AUTH_SOCK")
+    else
+      exec {new_fd}>&-
+    fi
   fi
   unset SSH_AUTH_SOCK
 
@@ -2637,41 +2773,66 @@ GHSHIM
     # stays inside the box's own home is a dotfiles setup and is honoured: the file it leads to is
     # the one edited. A link that leads anywhere else is replaced by a file of the box's own,
     # started from the sandbox's `~/.gitconfig`, which is what a box's copy is seeded from.
-    gitconfig="$home/.gitconfig"
-    if [ -L "$gitconfig" ]; then
-      linked="$(readlink -f -- "$gitconfig" 2>/dev/null || true)"
-      home_real="$(cd -P -- "$home" 2>/dev/null && pwd -P)"
-      if [ -n "$home_real" ] && [ -n "$linked" ] && [ -f "$linked" ] && [ -O "$linked" ]; then
-        case "$linked" in "$home_real"/*) gitconfig="$linked" ;; esac
-      fi
-    fi
-    gitconfig_from="$gitconfig"
-    if [ -L "$gitconfig" ]; then
-      echo "skein: $box's ~/.gitconfig is a link to something outside its own home; it is replaced by a file of its own, started from the sandbox's ~/.gitconfig" >&2
+    #
+    # And edited in a directory of the launcher's own, then written into the box through `open_new`
+    # (SKEIN-1287): `git config --file` reopens the path on every call, so a copy edited in place in
+    # the box's home is a name the box can swap for a link between two of them. The box's own file is
+    # read through one descriptor, checked to be the regular file at that name, for the same reason.
+    gitconfig_dir="$home_at"
+    gitconfig_from="$home_at/.gitconfig"
+    if [ -L "$home_at/.gitconfig" ]; then
       gitconfig_from="$HOME/.gitconfig"
-    fi
-    if fresh="$(mktemp "$(dirname -- "$gitconfig")/.gitconfig.XXXXXX")"; then
-      if [ -f "$gitconfig_from" ]; then cat -- "$gitconfig_from" >"$fresh" 2>/dev/null || true; fi
-      if [ -f "$gitconfig" ] && [ ! -L "$gitconfig" ]; then
-        chmod "$(stat -c %a -- "$gitconfig")" "$fresh" 2>/dev/null || chmod =rw "$fresh"
-      else
-        chmod =rw "$fresh"
+      linked="$(readlink -f -- "$home_at/.gitconfig" 2>/dev/null || true)"
+      home_real="$(readlink -- "$home_at" 2>/dev/null)"
+      if [ -n "$home_real" ] && [ -n "$linked" ] && [ -f "$linked" ] && [ -O "$linked" ]; then
+        case "$linked" in
+          "$home_real"/*)
+            # The directory the dotfile is in is held like the box's own directories; one that
+            # cannot be is not edited, and the link is replaced as if it led outside.
+            linked_dir="${linked%/*}"
+            if pin_dir gitconfig_dir "$root${linked_dir#"$root_real"}" soft 2>/dev/null; then
+              gitconfig_from="$gitconfig_dir/${linked##*/}"
+            fi ;;
+        esac
       fi
-      git config --file "$fresh" credential.useHttpPath true 2>/dev/null || true
-      git config --file "$fresh" credential.helper "$helper" 2>/dev/null || true
+      [ "$gitconfig_from" = "$HOME/.gitconfig" ] && gitconfig_dir="$home_at" \
+        && echo "skein: $box's ~/.gitconfig is a link to something outside its own home; it is replaced by a file of its own, started from the sandbox's ~/.gitconfig" >&2
+    fi
+    if work="$(mktemp -d)"; then
+      edit="$work/gitconfig"
+      gitconfig_mode='=rw'
+      if [ "$gitconfig_from" = "$HOME/.gitconfig" ]; then
+        if [ -f "$gitconfig_from" ]; then cat -- "$gitconfig_from" >"$edit" 2>/dev/null || true; fi
+      elif [ -f "$gitconfig_from" ] && { exec {gitconfig_fd}<"$gitconfig_from"; } 2>/dev/null; then
+        if [ "$(readlink -- "/proc/$$/fd/$gitconfig_fd")" = "$(readlink -- "$gitconfig_dir")/${gitconfig_from##*/}" ] \
+          && [ -f "/proc/$$/fd/$gitconfig_fd" ]; then
+          cat <&"$gitconfig_fd" >"$edit" 2>/dev/null || true
+          gitconfig_mode="$(stat -L -c %a -- "/proc/$$/fd/$gitconfig_fd" 2>/dev/null || echo =rw)"
+        fi
+        exec {gitconfig_fd}<&-
+      fi
+      [ -f "$edit" ] || : >"$edit"
+      git config --file "$edit" credential.useHttpPath true 2>/dev/null || true
+      git config --file "$edit" credential.helper "$helper" 2>/dev/null || true
       # Cleared then re-added, because `insteadOf` is multi-valued: a plain `git config` sets the
       # first value, so the second call would replace the first rather than join it, and `--add` on
       # every box start would instead grow a duplicate a run. Unset-then-add is the only idempotent
       # spelling of "these two, exactly".
-      git config --file "$fresh" \
+      git config --file "$edit" \
         --unset-all url."https://github.com/".insteadOf 2>/dev/null || true
-      git config --file "$fresh" \
+      git config --file "$edit" \
         --add url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
-      git config --file "$fresh" \
+      git config --file "$edit" \
         --add url."https://github.com/".insteadOf "ssh://git@github.com/" 2>/dev/null || true
-      mv -fT "$fresh" "$gitconfig" 2>/dev/null || rm -f "$fresh"
+      if [ "$gitconfig_from" = "$HOME/.gitconfig" ]; then gitconfig_name=.gitconfig; else gitconfig_name="${gitconfig_from##*/}"; fi
+      { open_new "$gitconfig_dir" "$gitconfig_name" && cat -- "$edit" >&"$new_fd" && land_new "$gitconfig_mode"; } 2>/dev/null || drop_new
+      rm -rf -- "$work"
     fi
-    unset gitconfig gitconfig_from linked home_real
+    if [ "$gitconfig_dir" != "$home_at" ]; then
+      gitconfig_fd="${gitconfig_dir##*/}"
+      exec {gitconfig_fd}<&-
+    fi
+    unset gitconfig_dir gitconfig_from gitconfig_name gitconfig_mode gitconfig_fd work edit linked linked_dir home_real
   fi
   unset helper
 
@@ -2699,15 +2860,14 @@ GHSHIM
   git_real=$(command -v git 2>/dev/null || true)
   [ -n "$git_real" ] && git_real=$(readlink -e "$git_real" 2>/dev/null || true)
   if [ -n "$git_real" ] && [ -f "$git_real" ]; then
-    mkdir -p "$root/bin" || exit 1
     # Binding the shim over git shadows the very binary the shim has to exec, so the real one is
     # bound to a second path FIRST. bwrap resolves every source against the ORIGINAL filesystem, so
     # both land correctly however they overlap — the same property `--bind "$home" "$HOME"` relies on
     # above. The destination has to be somewhere this box can write: `/run/git.real` was tried and
     # bwrap refused with "Can't create file", exactly as it does for a new file in /usr/bin.
     # Both written beside their targets and renamed over them (SKEIN-1255).
-    fresh="$(mktemp "$root/bin/.git.real.XXXXXX" 2>/dev/null)" && chmod =rw "$fresh" && mv -fT "$fresh" "$root/bin/git.real" 2>/dev/null || rm -f "${fresh-}"
-    fresh="$(mktemp "$root/bin/.git.XXXXXX")" || exit 1
+    open_new "$bin_at" git.real && land_new =rw 2>/dev/null
+    open_new "$bin_at" git || exit 1
     {
       printf '#!/bin/sh\n'
       printf 'skein_box=%q\n' "$box"
@@ -2866,9 +3026,9 @@ SKEIN_GIT_ASKED="$owner/$name"
 export SKEIN_GIT_ASKED
 skein_git_run "$@"
 GITSHIM
-    } >"$fresh" && chmod 755 "$fresh" && mv -fT "$fresh" "$root/bin/git" || { rm -f "$fresh"; exit 1; }
+    } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
     binds+=(--ro-bind "$git_real" "$root/bin/git.real")
-    binds+=(--ro-bind "$root/bin/git" "$git_real")
+    binds+=(--ro-bind-fd "$new_fd" "$git_real")
   fi
   unset git_real
 fi
@@ -2902,12 +3062,11 @@ fi
 docker_real=$(command -v docker 2>/dev/null || true)
 [ -n "$docker_real" ] && docker_real=$(readlink -e "$docker_real" 2>/dev/null || true)
 if [ -n "$docker_real" ] && [ -f "$docker_real" ]; then
-  mkdir -p "$root/bin" || exit 1
   # Same overlap trick as git's: the real binary is bound to a second path FIRST, because binding
   # the shim over it shadows the very thing the shim has to exec.
   # Both written beside their targets and renamed over them (SKEIN-1255).
-  fresh="$(mktemp "$root/bin/.docker.real.XXXXXX" 2>/dev/null)" && chmod =rw "$fresh" && mv -fT "$fresh" "$root/bin/docker.real" 2>/dev/null || rm -f "${fresh-}"
-  fresh="$(mktemp "$root/bin/.docker.XXXXXX")" || exit 1
+  open_new "$bin_at" docker.real && land_new =rw 2>/dev/null
+  open_new "$bin_at" docker || exit 1
   {
     printf '#!/bin/sh\n'
     printf 'skein_box=%q\n' "$box"
@@ -2960,9 +3119,9 @@ while [ "$seen" -lt "$count" ]; do
 done
 exec "$skein_docker" "$@"
 DOCKERSHIM
-  } >"$fresh" && chmod 755 "$fresh" && mv -fT "$fresh" "$root/bin/docker" || { rm -f "$fresh"; exit 1; }
+  } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
   binds+=(--ro-bind "$docker_real" "$root/bin/docker.real")
-  binds+=(--ro-bind "$root/bin/docker" "$docker_real")
+  binds+=(--ro-bind-fd "$new_fd" "$docker_real")
 fi
 unset docker_real
 
@@ -3074,9 +3233,18 @@ if [ -n "$announce" ]; then
   pane_cmd=(sh -c 'printf "\n%s\n\n" "$0"; exec "$@"' "$announce" "$@")
 fi
 
+# The directories held open only for the launcher's own writes are closed rather than inherited by
+# the box; the ones bound by descriptor bwrap closes itself once it has bound them.
+for held in "$bin_at" "$claude_at" "$codex_at"; do
+  [ -n "$held" ] || continue
+  held="${held##*/}"
+  exec {held}<&-
+done
+unset held
+
 exec bwrap \
   --dev-bind / / \
-  --bind "$tmp" /tmp \
+  --bind-fd "${tmp_at##*/}" /tmp \
   "${binds[@]}" \
   -- \
   bash -lc '
