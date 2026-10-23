@@ -159,7 +159,39 @@ function fixtureHome(base) {
     path.join(home, ".profile"),
     `# ${FIXTURE_HOME_SENTINEL}: written by tests/ui/harness/server.mjs, and seeded into every box\n`,
   );
+  // The agent CLI a box this server launches runs: a stand-in, on every machine (SKEIN-1312).
+  const bin = path.join(home, ".local", "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  for (const executable of BOX_AGENT_EXECUTABLES) {
+    fs.writeFileSync(path.join(bin, executable), fixtureBoxAgent(executable), { mode: 0o755 });
+  }
   return home;
+}
+
+/**
+ * What a box's agent session prints first when it is the fixture's stand-in, and not a real CLI.
+ *
+ * **A box's agent is the first `<executable>` on the box's PATH, and that was whatever the runner
+ * had** (SKEIN-1312). `agent_session_shell` (src/sandbox.rs) runs `command -v claude` inside the
+ * box, and the box's PATH is `box_path` in src/box-session.sh — `$HOME/.local/bin` first, then
+ * `/usr/local/share/npm-global/bin`, with `$HOME` the launcher's, which is this server's. On a dev
+ * box the second of those holds the real CLI, so `onboarding.mjs`'s box started it, under a fixture
+ * home, with its first-run screen on the page; on a CI runner there is none and the session fell to
+ * "not installed" and a shell. One suite, two different paths, decided by the machine.
+ *
+ * So the server's home carries a stand-in in `.local/bin`, which is first on that PATH and which
+ * `box-session.sh` overlays into every box (`overlay_paths`), and the box runs it everywhere. It
+ * says what it is, then stays up the way an agent does, so the session and its attach behave as a
+ * box's do. The fixture's path is in its argv (`$0`), so the leak check can name it.
+ */
+export const FIXTURE_BOX_AGENT = "skein-fixture-box-agent";
+/** The executables `src/runtime.rs` names (`RuntimeInfo::executable`), one stand-in each. */
+const BOX_AGENT_EXECUTABLES = ["claude", "codex"];
+function fixtureBoxAgent(executable) {
+  return "#!/bin/sh\n# Written by tests/ui/harness/server.mjs: the agent CLI a box started by a UI suite's\n" +
+    "# server finds first on its PATH. It runs nothing and says so (SKEIN-1312).\n" +
+    `echo "${FIXTURE_BOX_AGENT}: ${executable} in this box is the UI fixture's stand-in, not the real CLI"\n` +
+    'while :; do read -r _ || sleep 1; done\n';
 }
 
 /**

@@ -27,7 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
-import { FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
+import { FIXTURE_BOX_AGENT, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
 
 const API_TOKEN = "t".repeat(64);
@@ -793,6 +793,30 @@ await check("the create terminal attaches to the box's session, whatever TERM th
     await settle(500);
   }
   throw new Error(`no client attached to ${rec.sock} within 60s.\n--- terminal ---\n${await said()}`);
+});
+
+// **The box's agent is the fixture's stand-in, on every machine** (SKEIN-1312). A box runs the
+// first `claude` on its own PATH, which puts the launcher's `~/.local/bin` ahead of
+// `/usr/local/share/npm-global/bin`; on a dev box the second holds the real CLI, and this suite's box
+// started it — its first-run screen on the page — while on a runner with none the session fell back
+// to a shell. `harness/server.mjs` now puts a stand-in in the server's `~/.local/bin`, and this asks
+// the box's own tmux what its agent pane printed. **What makes it fail:** the stand-in not written
+// (`fixtureHome`), on any machine — on one with a real CLI the pane shows that CLI instead, and on
+// one without, the "not installed" line.
+await check("the box's agent session runs the fixture's stand-in, not whatever agent CLI this machine has", async () => {
+  const rec = JSON.parse(fs.readFileSync(path.join(fx.root, "home", "places", "my-project-main.json"), "utf8"));
+  const panes = () => {
+    const ids = spawnSync("tmux", ["-S", rec.sock, "list-panes", "-a", "-F", "#{pane_id}"], { encoding: "utf8" });
+    return (ids.stdout || "").split("\n").filter(Boolean).map(id =>
+      spawnSync("tmux", ["-S", rec.sock, "capture-pane", "-p", "-t", id], { encoding: "utf8" }).stdout || "").join("\n");
+  };
+  let seen = "";
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline; ) {
+    seen = panes();
+    if (seen.includes(`${FIXTURE_BOX_AGENT}: claude in this box`)) return;
+    await settle(500);
+  }
+  throw new Error(`the box's agent pane never showed the stand-in. It shows:\n${seen.trim().split("\n").slice(-15).join("\n")}`);
 });
 
 // **The box's home is the one under the fleet root, not `guest-home`** (SKEIN-627).
