@@ -90,6 +90,10 @@ const GATED: &[(&str, &str)] = &[
         "runs mailbox.sh's list and prune, and ages messages with GNU `touch -d`",
     ),
     (
+        "a_planted_message_is_never_followed_or_waited_on_and_the_control_still_travels",
+        "plants a FIFO with `mkfifo` and relies on Linux's O_NOFOLLOW and O_NONBLOCK semantics",
+    ),
+    (
         "a_planted_mailbox_lock_is_never_followed_emptied_or_waited_on",
         "runs mailbox.sh against a planted link and a FIFO made with `mkfifo`",
     ),
