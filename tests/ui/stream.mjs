@@ -41,6 +41,8 @@ function board() {
     let boxes = [];
     const receivedAt = new Map();
     const render = () => { bump(); };
+    // Every real snapshot reaches the board through fleetArrived (SKEIN-1293), which renders.
+    const fleetArrived = list => render(list);
     ${grab("connect")}
     connect();
     return {
