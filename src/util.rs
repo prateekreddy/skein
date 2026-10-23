@@ -2083,18 +2083,6 @@ mod tests {
         assert_eq!(pct_decode("a%zz"), "a%zz");
     }
 
-    /// **The bytes reach the disk before the rename, and a failed write leaves nothing behind.**
-    ///
-    /// The durability half cannot be asserted by running code: proving a crash between the write
-    /// and the rename leaves a whole file needs a crash. So it is asserted where it can be — on the
-    /// source of [`write_atomic`] itself, which is the same thing `grep -rn 'sync_all' src/` was
-    /// asked and answered *nothing* to when SKEIN-347 was found. That absence is the mechanism: an
-    /// ext4 crash after a rename with the data still in the page cache classically leaves the file
-    /// present and zero-length, and zero-length is unparseable JSON for every caller here.
-    ///
-    /// The rest is behaviour, and it is the reason `fs::write` could not simply be kept: the flush
-    /// adds two more ways to fail after the temp file exists, and a temp nothing will ever rename
-    /// into place is litter that nothing will ever clean up either.
     /// **A link a box planted at a temporary name is never written through** (SKEIN-1320).
     ///
     /// The temporary used to be `.skein.tmp.<pid>.<n>`, opened with `File::create`: a box that
@@ -2124,6 +2112,18 @@ mod tests {
             .is_file());
     }
 
+    /// **The bytes reach the disk before the rename, and a failed write leaves nothing behind.**
+    ///
+    /// The durability half cannot be asserted by running code: proving a crash between the write
+    /// and the rename leaves a whole file needs a crash. So it is asserted where it can be — on the
+    /// source of [`write_atomic`] itself, which is the same thing `grep -rn 'sync_all' src/` was
+    /// asked and answered *nothing* to when SKEIN-347 was found. That absence is the mechanism: an
+    /// ext4 crash after a rename with the data still in the page cache classically leaves the file
+    /// present and zero-length, and zero-length is unparseable JSON for every caller here.
+    ///
+    /// The rest is behaviour, and it is the reason `fs::write` could not simply be kept: the flush
+    /// adds two more ways to fail after the temp file exists, and a temp nothing will ever rename
+    /// into place is litter that nothing will ever clean up either.
     #[test]
     fn an_atomic_write_is_flushed_before_the_rename_and_leaves_no_temp_behind() {
         let src = include_str!("util.rs");

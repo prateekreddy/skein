@@ -170,7 +170,7 @@ here because getting the first one wrong *was* the original defect:
   same `fleet_sandbox()` call.
 - **`None` also means nothing has arrived since the process started**, which the `disk_total == 0`
   row below cannot say. `Gate::invalidate` expires the clock and never the last good answer
-  (`src/util.rs:1179`), so a fleet that has answered once never comes back here.
+  (`src/util.rs:1232`), so a fleet that has answered once never comes back here.
 
 The new sentence carries a next step and a watchable condition, which no `HealthCheck::unknown` in
 [§2](#2-healthcheckunknown--the-fix-field-is-empty-by-construction) had: it names
