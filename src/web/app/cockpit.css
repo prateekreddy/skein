@@ -1415,7 +1415,7 @@
   .switch:focus-visible, .rx:focus-visible, .x:focus-visible {
     outline:2px solid color-mix(in srgb,var(--accent) 75%,transparent); outline-offset:2px; }
   .mbx-compose textarea { resize:vertical; min-height:54px; }
-  .mbx-compose select { flex:1; }
+  .mbx-compose select { flex:1; min-width:0; }   /* a long box name must not push it off a phone (SKEIN-1300) */
   .nb-lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
   .nb-foot { display:flex; align-items:center; gap:10px; } .nb-foot .hint { flex:1; color:var(--faint); font-size:11px; }
   .nb-foot code { font-family:var(--mono); color:var(--text-2); }

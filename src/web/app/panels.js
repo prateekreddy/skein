@@ -120,7 +120,7 @@ function renderAwayOverlay(items, since) {
 // Every overlay that sits over the page as a dialog. Two things read this list: the terminal's
 // clipboard keys, which leave every chord to the browser while one is open (SKEIN-1246 — a paste
 // into a Settings field landed in the box terminal behind it), and the wiring below.
-const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load"];
+const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load", "rsask"];
 function popupOpen() { return POPUP_IDS.some(id => document.getElementById(id)?.classList.contains("open")); }
 // A click on the backdrop closes the popup through the close function its ✕ and Escape use, so a
 // click outside loses exactly what those lose and nothing more. **Both the press and the release
@@ -213,8 +213,11 @@ function dialogChanged(ov) {
     dialogStack.splice(at, 1);
     ov.setAttribute("aria-hidden", "true");
     ov.style.zIndex = "";
-    const back = dialogReturn.get(ov);
+    let back = dialogReturn.get(ov);
     dialogReturn.delete(ov);
+    // A toolbar redrawn while the popup was open has replaced the button that opened it; the one
+    // standing in its place, by id, is where the focus goes back to.
+    if (back && !back.isConnected && back.id) back = document.getElementById(back.id);
     const now = document.activeElement;
     if (!now || now === document.body || ov.contains(now)) {
       if (back && back !== document.body && back.isConnected && shownEl(back)) {
@@ -352,8 +355,10 @@ function closeMailbox() {
 }
 function fillRecipients() {
   const sel = document.getElementById("mbx-to"), cur = sel.value;
+  // **Boxes that can read it** (SKEIN-1300): an ended box has no session to hand a message to, and
+  // listing every box that ever ran made a list of fourteen to find the three live ones in.
   sel.innerHTML = `<option value="broadcast">📢 broadcast — all boxes</option>`
-    + boxes.map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
+    + boxes.filter(b => groupOf(b.state) !== "ended").map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
   if (cur) sel.value = cur;
 }
 function loadMailbox() {

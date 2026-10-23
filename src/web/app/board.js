@@ -297,21 +297,22 @@ function askRestart(name, label) {
     document.getElementById("rsask")?.remove();
     const el = document.createElement("div");
     el.id = "rsask"; el.className = "open";
-    el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true");
     el.innerHTML = `<div class="nb-card" style="max-width:440px">`
       + `<div class="nb-head"><b>Restart ${esc(label)} in ${esc(name)}?</b></div>`
       + `<div class="rs-body">${esc(RESTART_COST)}</div>`
       + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
       + `<button type="button" class="primary" data-a="yes">Restart</button></div></div>`;
-    const done = yes => { el.remove(); document.removeEventListener("keydown", key, true); answer(yes); };
-    const key = e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(false); } };
+    // The dialog layer (`registerDialog`, panels.js) gives it Escape, a click outside, the focus
+    // trap and the focus back, as every other popup; closing is dropping `open`, which is what the
+    // layer watches, before the element goes.
+    const done = yes => { el.classList.remove("open"); setTimeout(() => el.remove(), 0); answer(yes); };
     el.addEventListener("click", e => {
       const a = e.target.closest("[data-a]")?.dataset.a;
-      if (a) done(a === "yes"); else if (e.target === el) done(false);
+      if (a) done(a === "yes");
     });
-    document.addEventListener("keydown", key, true);
     document.body.append(el);
     el.querySelector('[data-a="no"]').focus();
+    registerDialog(el, () => done(false));
   });
 }
 async function restartAgent(name) {

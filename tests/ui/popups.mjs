@@ -945,6 +945,90 @@ await page.unroute("**/api/fleet/git-grants");
 await page.unroute("**/api/fleet/substrate");
 await closeEverything();
 
+// ---------- the hover card, the mailbox list, and Settings on a phone (SKEIN-1300) ----------
+console.log("\nthe hover card, the mailbox list, Settings on a phone");
+
+// Fails if the card goes back to being drawn under the row (it covers the next rows), or a figure
+// the sandbox did not report goes back to "…".
+await check("the resource card sits beside its row, and a figure nobody measured says so", async () => {
+  await closeEverything();
+  let release;
+  const held = new Promise(res => { release = res; });
+  await page.route("**/api/fleet/load", async r => { await held; return r.fulfill({ json: [] }); });
+  try {
+    await page.evaluate(() => {
+      loadCache = { at: 0, rows: [], inflight: null };
+      for (const [id, top] of [["skein-test-row1", 200], ["skein-test-row2", 232]]) {
+        const r = document.createElement("div"); r.id = id;
+        r.style.cssText = `position:fixed;left:0;top:${top}px;width:300px;height:30px`;
+        document.body.append(r);
+      }
+      rpopFor = "skein-test-box";
+      showResourcePop("skein-test-box", document.getElementById("skein-test-row1"));
+    });
+    const during = await page.evaluate(() => document.getElementById("rpop").textContent);
+    release();
+    await page.waitForFunction(() => document.getElementById("rpop").textContent.includes("not measured"));
+    const got = await page.evaluate(() => {
+      const c = document.getElementById("rpop").getBoundingClientRect();
+      const next = document.getElementById("skein-test-row2").getBoundingClientRect();
+      const covers = c.left < next.right && c.right > next.left && c.top < next.bottom && c.bottom > next.top;
+      return { covers, text: document.getElementById("rpop").textContent };
+    });
+    if (!during.includes("measuring…")) throw new Error(`while asking it said ${JSON.stringify(during)}`);
+    if (got.covers || got.text.includes("…")) throw new Error(JSON.stringify(got));
+  } finally {
+    release();
+    await page.unroute("**/api/fleet/load");
+    await page.evaluate(() => { hideResourcePop(); document.getElementById("skein-test-row1")?.remove(); document.getElementById("skein-test-row2")?.remove(); });
+  }
+});
+
+// A phone, for the two checks that are about one.
+const phone = await context.newPage();
+phone.setDefaultTimeout(5000);
+phone.on("pageerror", e => noise.push(`[pageerror phone] ${e.message}`));
+await phone.setViewportSize({ width: 390, height: 844 });
+await phone.routeWebSocket(/\/api\/boxes\/[^/]+\/terminal/, () => {});
+await phone.goto(`${origin}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
+await phone.waitForFunction(() => typeof openSettings === "function");
+
+// Fails if `fillRecipients` lists ended boxes again, or the select keeps its content's width
+// (`min-width:0` dropped) and runs off a phone.
+await check("the mailbox lists only boxes that can read it, and fits a phone", async () => {
+  const got = await phone.evaluate(() => {
+    boxes = [{ name: "skein-test-live", state: "working" },
+             { name: "skein-test-ended", state: "ended" },
+             { name: "skein-test-" + "a-very-long-branch-name-".repeat(3), state: "waiting" }];
+    openMailbox();
+    const sel = document.getElementById("mbx-to");
+    const out = { names: [...sel.options].map(o => o.value), right: sel.getBoundingClientRect().right };
+    closeMailbox();
+    return out;
+  });
+  if (got.names.includes("skein-test-ended") || !got.names.includes("skein-test-live") || got.right > 390) {
+    throw new Error(JSON.stringify(got));
+  }
+});
+
+// Fails if `setPane` stops bringing the active section's button into view: on a phone the rail
+// scrolls sideways and the last sections are off its edge.
+await check("on a phone, the Settings section opened is in view on its rail", async () => {
+  for (const pane of ["keys", "repos"]) {
+    await phone.evaluate(p => { closeSettings(); openSettings(p); }, pane);
+    await phone.waitForFunction(() => settingsModal().classList.contains("open"));
+    await phone.waitForTimeout(400);
+    const at = await phone.evaluate(p => {
+      const b = document.querySelector(`.set-navi[data-pane="${p}"]`).getBoundingClientRect();
+      const rail = document.querySelector(".set-nav").getBoundingClientRect();
+      return { b: [b.left, b.right], rail: [rail.left, rail.right] };
+    }, pane);
+    if (at.b[0] < at.rail[0] - 1 || at.b[1] > at.rail[1] + 1) throw new Error(`${pane}: ${JSON.stringify(at)}`);
+  }
+  await phone.evaluate(() => closeSettings());
+});
+await phone.close();
+
 await check("no page errors while the popups were driven", () => {
   if (noise.length) throw new Error(noise.slice(0, 5).join(" | "));
 });

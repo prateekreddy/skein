@@ -105,6 +105,11 @@ function setPane(pane) {
   for (const el of settingsModal().querySelectorAll(".set-navi")) el.classList.toggle("on", el.dataset.pane === pane);
   for (const el of settingsModal().querySelectorAll(".set-pane")) el.classList.toggle("on", el.dataset.pane === pane);
   const nav = settingsModal().querySelector(`.set-navi[data-pane="${pane}"]`);
+  // On a phone the section rail is a row that scrolls sideways, and the section opened could be
+  // off its edge — open, with nothing on screen saying which (SKEIN-1300). Brought into view, and
+  // only along the rail: `nearest` leaves a rail that already shows it alone.
+  // Called again once the dialog is shown, since a hidden rail has nothing to scroll.
+  nav?.scrollIntoView({ block: "nearest", inline: "nearest" });
   document.getElementById("set-htitle").textContent = nav ? nav.textContent.replace(/\d+$/, "").trim() : pane;
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
   // The blanket "`$SKEIN_*` env vars override these" used to run here on every other pane, true or
@@ -204,6 +209,7 @@ function openSettings(pane = "repos") {
     loadGitCreds();
     renderSync(); renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
+    settingsModal().querySelector(".set-navi.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
     // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
@@ -1072,6 +1078,10 @@ function armResourcePop(name, row) {
 function resourceRows(name) {
   const b = boxes.find(x => x.name === name) || {};
   const r = loadCache.rows.find(x => x.name === name);
+  // **A figure not there yet says which "not there" it is** (SKEIN-1300). It said "…" both while
+  // the sandbox was being asked and after it had answered without this box, which read as a
+  // measurement forever on its way.
+  const none = loadCache.inflight ? "measuring…" : "not measured";
   const used = b.disk_mb, cap = b.disk_limit_mb;
   // Disk first: it is the reason to look, and the number people are hunting when a build dies with
   // no room left.
@@ -1079,32 +1089,40 @@ function resourceRows(name) {
   const disk = used == null ? "—" : cap ? `${fmtGb(used)} / ${fmtGb(cap)}` : fmtGb(used);
   return `<div class="rp-n">${esc(name)}</div>`
     + `<div class="rp-r ${diskCls}"><span>disk</span><span>${disk}</span></div>`
-    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : "…"}</span></div>`
+    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : none}</span></div>`
     // The question the headline provokes, answered in the same panel: a box whose memory looks
     // small and whose charge is large has been reading files, and saying so is cheaper than
     // leaving somebody to wonder why the two disagree. Hidden when there is nothing to explain.
     + (r && r.mem_cache > (r.mem_anon || 0)
         ? `<div class="rp-r sub" title="page cache — files this box has read or written. The kernel hands it back the moment anything else needs it, so it is not memory the box is holding."><span>· cache</span><span>${fmtGB(r.mem_cache)}</span></div>`
         : "")
-    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : "…"}</span></div>`
-    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : "…"}</span></div>`
+    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : none}</span></div>`
+    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : none}</span></div>`
     + `<div class="rp-w">disk is measured, not enforced — one filesystem serves every box</div>`;
 }
 function showResourcePop(name, row) {
   const el = rpopEl();
+  // Asked first, so the card drawn below knows whether the sandbox is being asked right now.
+  const asked = loadRows();
   el.innerHTML = resourceRows(name);
   const box = row.getBoundingClientRect();
   el.classList.add("on");
-  // Placed after it has been measured, and flipped above the row when there is no room below —
-  // otherwise the last row's card is drawn off the bottom of the window, which is exactly where the
-  // longest-running boxes sit.
-  const h = el.getBoundingClientRect().height;
-  const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
-  el.style.top = `${top}px`;
-  el.style.left = `${Math.min(box.left + 22, window.innerWidth - el.getBoundingClientRect().width - 12)}px`;
+  // Placed after it has been measured. **Beside the row, not under it** (SKEIN-1300): drawn below,
+  // it covered the next several rows — the ones the pointer was on its way to. To the right of the
+  // row when the window has room, its top level with the row's and kept on screen; below the row,
+  // or above it near the bottom, only when there is no room beside it (a phone).
+  const { width: w, height: h } = el.getBoundingClientRect();
+  if (box.right + 8 + w <= window.innerWidth - 8) {
+    el.style.left = `${box.right + 8}px`;
+    el.style.top = `${Math.max(8, Math.min(box.top, window.innerHeight - h - 8))}px`;
+  } else {
+    const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
+    el.style.top = `${top}px`;
+    el.style.left = `${Math.max(8, Math.min(box.left + 22, window.innerWidth - w - 12))}px`;
+  }
   // The live half arrives when the sandbox answers; the card is already up with the disk figure, so
   // nothing waits on a round trip that may be several seconds behind an `sbx exec` fallback.
-  loadRows().then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
+  asked.then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
 }
 
 // One box's own settings. Every field is blank-means-inherit, and the placeholder is what it would
