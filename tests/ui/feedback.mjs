@@ -324,6 +324,13 @@ await check("a refused save is said in a notice that keeps every line and outliv
     await page.locator("#set-ghappid").fill("77");
     await page.locator("#set-go").click();
     await until(() => document.getElementById("notice")?.classList.contains("show"));
+    // And it does not sit on the dialog's own Save, which is how to act on what it says. Fails if
+    // the notice goes back to the bottom right corner.
+    const onSave = await page.evaluate(() => {
+      const r = document.getElementById("set-go").getBoundingClientRect();
+      return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.id;
+    });
+    if (onSave !== "set-go") throw new Error(`Save is covered by ${onSave}`);
     await page.evaluate(() => toast("something else, later"));
     await page.waitForTimeout(4500);
     const n = await noticeNow();

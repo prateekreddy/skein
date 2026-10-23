@@ -520,7 +520,7 @@ function decideSubq(key, approve) {
   if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
   if (sendingNow("subq", key)) return;
   markSending("subq", key, true);
-  return fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
+  fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
   }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })

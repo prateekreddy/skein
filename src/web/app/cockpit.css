@@ -464,10 +464,12 @@
     opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
   #toast.show { opacity:1; transform:none; pointer-events:auto; }
   #toast a { color:var(--accent); text-decoration:none; }
-  /* An error or a report that stays until closed, every line kept (SKEIN-1265, 1245). Above the
-     toast's corner, so a later "saved" does not cover it, and above every popup. */
-  #notice { position:fixed; right:18px; bottom:64px; z-index:130; display:none; gap:10px; align-items:flex-start;
-    max-width:min(560px,calc(100vw - 36px)); max-height:50vh; overflow:auto; background:var(--overlay); color:var(--text);
+  /* An error or a report that stays until closed, every line kept (SKEIN-1265, 1245). Above every
+     popup, and at the top in the middle: the bottom right is where a dialog keeps its Save, and a
+     notice that stays would sit on it — smoke.mjs could not click Settings' Save past one. A popup
+     starts a tenth of the way down, so a short notice sits above its card rather than on it. */
+  #notice { position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:130; display:none; gap:10px; align-items:flex-start;
+    width:max-content; max-width:min(560px,calc(100vw - 32px)); max-height:40vh; overflow:auto; background:var(--overlay); color:var(--text);
     border:1px solid var(--border-3); border-left:3px solid var(--accent); border-radius:9px; padding:10px 12px 10px 14px;
     font-size:13px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   #notice.show { display:flex; }
