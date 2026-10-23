@@ -82,14 +82,42 @@ fn parse_model_aliases(help: &str) -> Vec<String> {
 /// the setting has always been, so nothing is lost when this cannot answer.
 pub fn model_choices() -> Vec<String> {
     let known = MODELS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if known.is_none() && !ASKING_MODELS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    let ask = match &known {
+        None => true,
+        Some((at, found)) => needs_asking(found, at.elapsed()),
+    };
+    if ask && !ASKING_MODELS.swap(true, std::sync::atomic::Ordering::SeqCst) {
         std::thread::spawn(|| {
             let found = ask_model_choices();
-            *MODELS.lock().unwrap_or_else(|e| e.into_inner()) = Some(found);
+            *MODELS.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((std::time::Instant::now(), found));
             ASKING_MODELS.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
-    known.unwrap_or_default()
+    known.map(|(_, found)| found).unwrap_or_default()
+}
+
+/// How long a list `claude` gave is offered before it is asked again — long enough that the
+/// settings page never waits on it, short enough that a CLI updated under a running server offers
+/// its new models the same day rather than at the next restart (SKEIN-1281).
+const MODELS_FRESH: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// How long "could not ask" stands before it is asked again. An empty list is not an answer — a
+/// `claude` that was not on `$PATH` yet, or that hung — and it used to be remembered for the life
+/// of the server, so the dropdown was a text box until a restart (SKEIN-1281).
+const MODELS_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long `claude --help` may take. It answers in well under a second; one that has not answered
+/// in this long is wedged, and the ask is abandoned rather than held open for ever.
+const MODELS_ASK: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Whether a list remembered for `age` should be asked for again. Pure, so the rule is tested
+/// without a CLI.
+fn needs_asking(found: &[String], age: std::time::Duration) -> bool {
+    match found.is_empty() {
+        true => age >= MODELS_RETRY,
+        false => age >= MODELS_FRESH,
+    }
 }
 
 /// `claude --help`, and nothing else. No network, no sandbox hop: the flag's own help text is the
@@ -98,13 +126,16 @@ fn ask_model_choices() -> Vec<String> {
     let bin = claude_bin();
     // Through [`agent_command`], like the call itself: `--help` spends nothing, but it is still the
     // real CLI on `$PATH` being spawned by a test process that never said to (SKEIN-764).
-    let Ok(out) = agent_command(&bin).arg("--help").output() else {
+    let Some(out) = crate::util::output_with_timeout(agent_command(&bin).arg("--help"), MODELS_ASK)
+    else {
         return Vec::new();
     };
     parse_model_aliases(&String::from_utf8_lossy(&out.stdout))
 }
 
-static MODELS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+type Asked = (std::time::Instant, Vec<String>);
+
+static MODELS: std::sync::Mutex<Option<Asked>> = std::sync::Mutex::new(None);
 static ASKING_MODELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
@@ -124,6 +155,35 @@ mod tests {
             super::parse_model_aliases(help),
             vec!["fable", "opus", "sonnet"],
             "the aliases the CLI names are not what would be offered"
+        );
+    }
+
+    /// **A list is asked for again, and "could not ask" soon** (SKEIN-1281).
+    ///
+    /// The list was remembered for the life of the server, and so was an empty one — `claude`
+    /// not on `$PATH` yet, or hung with no timeout — leaving a text box where the dropdown should
+    /// be until a restart. What makes this fail: treating an empty list like an answer (the
+    /// two-minute-old empty list is not asked again), or never letting an answer age (the
+    /// day-old list is not asked again).
+    #[test]
+    fn an_empty_model_list_is_asked_again_soon_and_an_answer_eventually() {
+        use std::time::Duration;
+        let found = vec!["opus".to_string()];
+        assert!(
+            !super::needs_asking(&found, Duration::from_secs(120)),
+            "an answer is offered for a while"
+        );
+        assert!(
+            super::needs_asking(&found, Duration::from_secs(24 * 60 * 60)),
+            "a day-old list is asked for again, so a CLI updated under the server is seen"
+        );
+        assert!(
+            super::needs_asking(&[], Duration::from_secs(120)),
+            "an empty list is not an answer: asked again after a minute, not at the next restart"
+        );
+        assert!(
+            !super::needs_asking(&[], Duration::from_secs(5)),
+            "but not on every draw of the page"
         );
     }
 

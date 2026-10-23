@@ -1006,7 +1006,8 @@ static GH_CLI: std::sync::Mutex<Option<Option<Secret>>> = std::sync::Mutex::new(
 /// the badge poll — would turn a host with no credential from slow to unusable. So `gh` is asked
 /// once per process, and a host given a `gh` login after startup needs a restart. The routes the
 /// cockpit sends a person to — Settings, which writes the files [`credential_for`] and [`read_pat`]
-/// read — do not.
+/// read — do not. A login GitHub refuses with a 401 is asked for again, once, by `prq::viewer`
+/// (SKEIN-1281), so a `gh` token rotated on the host is picked up without one.
 pub fn gh_login() -> Option<Secret> {
     let mut asked = match GH_CLI.lock() {
         Ok(asked) => asked,
