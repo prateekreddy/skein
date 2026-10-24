@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 106  (NOT '.route("' — that gives 93, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 107  (NOT '.route("' — that gives 93, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 175 unique, 180 occurrences
-grep -c 'function ' src/web/index.html                          # 501
+grep -c 'function ' src/web/index.html                          # 510
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -108,7 +108,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   box on the other runtime with a generated handoff brief, and keeps the original as rollback.
 - **Update rules / refresh docs** — re-apply work-tracking documents that are older than the store's,
   rewriting only documents the box has not edited; shift-click widens it.
-- Transcript reader; statusline; runtime selection; `skein attach --handoff` / `--agent`.
+- Transcript reader, with search — your words, Claude's or both, in the session or all of a box's sessions, and a result opens the record at that message (SKEIN-1323, `search_transcript`); statusline; runtime selection; `skein attach --handoff` / `--agent`.
 
 ## 3. Review
 

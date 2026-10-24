@@ -182,6 +182,7 @@ test("the sheet shows exactly the keys the fleet table binds", () => {
   }
   // And the Anywhere rows, which are written out rather than grouped from a table: each is bound.
   const anywhere = { "⌘K": [key("k", { metaKey: true }), {}], "⌘N": [key("n", { metaKey: true }), {}],
+                     "⌘F": [key("f", { metaKey: true }), { boxOpen: true }],
                      "?": [key("?"), {}], esc: [key("Escape"), { dialogOpen: true }] };
   for (const [keys, says] of sheet().get("Anywhere")) {
     for (const k of keys) {
@@ -272,4 +273,20 @@ test("off a Mac the terminal rows name the chords that terminal actually uses", 
   assert.equal(linux.find(([, w]) => w === "copy the selection")[0], "Ctrl+Shift+C");
   assert.equal(linux.find(([, w]) => w === "paste")[0], "Ctrl+Shift+V");
   assert.equal(printed(true).find(([, w]) => w === "copy the selection")[0], "⌘C");
+});
+
+// ⌘F / Ctrl+F opens the open box's transcript search (SKEIN-1323), from anywhere a box is open —
+// a field and its terminal included — and is the browser's own find otherwise. Fails on: the
+// chord placed after the typing guard (null from a terminal), the box test dropped (it takes the
+// browser's find with nothing open), or the popup test dropped (it acts behind a popup).
+test("⌘F and Ctrl+F search the open box's transcript, and only with a box open and no popup", () => {
+  for (const mod of [{ metaKey: true }, { ctrlKey: true }]) {
+    assert.equal(shortcutFor(key("f", mod), { boxOpen: true }), "tx-search");
+    assert.equal(shortcutFor(key("F", { ...mod }), { boxOpen: true, inTerm: true }), "tx-search");
+    assert.equal(shortcutFor(key("f", mod), { boxOpen: true, inField: true }), "tx-search");
+    assert.equal(shortcutFor(key("f", mod), {}), null, "no box open: the browser's find");
+    assert.equal(shortcutFor(key("f", mod), { boxOpen: true, dialogOpen: true }), null);
+    assert.equal(shortcutFor(key("f", { ...mod, shiftKey: true }), { boxOpen: true }), null);
+  }
+  assert.equal(shortcutFor(key("f"), { boxOpen: true }), null, "a bare f is a letter");
 });

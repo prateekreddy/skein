@@ -287,10 +287,50 @@ pub(super) async fn api_transcript(
         .get("bytes")
         .and_then(|b| b.parse::<u64>().ok())
         .unwrap_or(256 * 1024);
-    match tokio::task::spawn_blocking(move || skein::transcript::read_transcript(&name, bytes))
-        .await
+    // `?session=&at=` — what a search result names — opens that record around that message.
+    let session = q.get("session").filter(|s| !s.is_empty()).cloned();
+    let at = match q.get("at").filter(|a| !a.is_empty()) {
+        None => None,
+        Some(at) => match at.parse::<u64>() {
+            Ok(at) => Some(at),
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid message offset").into_response(),
+        },
+    };
+    match tokio::task::spawn_blocking(move || {
+        skein::transcript::read_transcript_at(&name, bytes, session.as_deref(), at)
+    })
+    .await
     {
         Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// Search the box's conversation: `?q=` as plain text, case-insensitive; `who=user|assistant|both`
+/// (both by default); `scope=session` (the newest record, whole — the default) or `scope=all`.
+pub(super) async fn api_transcript_search(
+    Path(name): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let query = q.get("q").cloned().unwrap_or_default();
+    let Some(who) = skein::transcript::Who::parse(q.get("who").map_or("", |w| w.as_str())) else {
+        return (StatusCode::BAD_REQUEST, "who is user, assistant or both").into_response();
+    };
+    let all = match q.get("scope").map_or("session", |s| s.as_str()) {
+        "" | "session" => false,
+        "all" => true,
+        _ => return (StatusCode::BAD_REQUEST, "scope is session or all").into_response(),
+    };
+    match tokio::task::spawn_blocking(move || {
+        skein::transcript::search_transcript(&name, &query, who, all)
+    })
+    .await
+    {
+        Ok(Ok(found)) => Json(found).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }

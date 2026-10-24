@@ -24,7 +24,7 @@ document.addEventListener("keydown", e => {
   revChord = "";
   const action = view.mode === "review"
     ? shortcutFor(e, { inTerm, inField, pane: "review", pending })
-    : shortcutFor(e, { inTerm, inField });
+    : shortcutFor(e, { inTerm, inField, boxOpen: !!view.box });
   if (!action) return;
   if (action === "rev-chord") { e.preventDefault(); revChord = "g"; return; }
   if (action.startsWith("rev-")) { e.preventDefault(); revKey(action); return; }
@@ -32,6 +32,8 @@ document.addEventListener("keydown", e => {
     // Esc returns focus to the fleet for keyboard nav — it never closes/kills a session (that was a
     // footgun: one keypress destroyed the agent session). Close explicitly via the tab ✕.
     case "deselect": e.preventDefault(); document.activeElement?.blur?.(); break;
+    // Neither the terminal (which hands the chord back, `termOwnsKey`) nor the browser's find.
+    case "tx-search": e.preventDefault(); openTxSearch(view.box); break;
     case "next": e.preventDefault(); move(1); break;
     case "previous": e.preventDefault(); move(-1); break;
     case "open": if (sel) { e.preventDefault(); openTerminal(sel); } break;
