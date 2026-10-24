@@ -307,6 +307,7 @@ function commands() {
     { sec:"Actions", label:"Listen for a command", run:listen, meta:glyph("hold ⌥ right") },
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
+  if (view.box) { const name = view.box; acts.unshift({ sec:"Actions", label:`Search the transcript of ${name}`, run:() => openTxSearch(name), meta:glyph("⌘F") }); }
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
   const bx = [];
   for (const b of boxes) {

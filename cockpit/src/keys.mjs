@@ -131,6 +131,12 @@ export function shortcutFor(event, where) {
   // no field is expected to swallow them.
   if (mod && key.toLowerCase() === "k") return "palette";
   if (mod && key.toLowerCase() === "n") return "new-box";
+  // ⌘F and Ctrl+F search the open box's transcript (SKEIN-1323) — from a field or from inside its
+  // terminal too, which is why it is before the guard, and why the terminals hand it back rather
+  // than send ^F. With no box open it is the browser's find, and a popup owns its own keyboard.
+  if (mod && key.toLowerCase() === "f" && !event.altKey && !event.shiftKey) {
+    return where?.boxOpen && !dialogOpen ? "tx-search" : null;
+  }
   // Any other modifier chord belongs to the browser or the terminal, not to the fleet keymap.
   if (mod) return null;
 
@@ -157,7 +163,7 @@ export function shortcutFor(event, where) {
 // Every action this can return, so a caller that switches on it can be checked for completeness.
 export const ACTIONS = [
   ...new Set([
-    "palette", "new-box", "close-dialog",
+    "palette", "new-box", "tx-search", "close-dialog",
     ...Object.values(FLEET),
     ...Object.values(REVIEW),
     ...Object.values(REVIEW_CHORD),
@@ -180,6 +186,7 @@ export const ACTIONS = [
 const SAYS = {
   palette: "command palette",
   "new-box": "new box",
+  "tx-search": "search the transcript of the open box",
   "close-dialog": "close a dialog",
   keys: "this list",
   deselect: "leave the terminal, back to the board",
@@ -245,6 +252,7 @@ export function keySheet(mac = true) {
     { sec: "Anywhere", items: [
       [["⌘K"], SAYS.palette],
       [["⌘N"], SAYS["new-box"]],
+      [["⌘F"], SAYS["tx-search"]],
       [["?"], SAYS.keys],
       [["esc"], SAYS["close-dialog"]],
     ] },

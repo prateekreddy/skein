@@ -968,7 +968,12 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   //
   // `false` for every event type, not only keydown: xterm asks this handler again on keypress, and
   // a `true` there sends the "\r" after all. A key still composing in an IME is left to xterm.
-  if (kind === "agent") term.attachCustomKeyEventHandler(e => {
+  //
+  // ⌘F / Ctrl+F is handed back on both kinds (SKEIN-1323): `false` so xterm neither sends ^F nor
+  // claims the key, and the page's keymap — which the event still reaches — opens the search.
+  term.attachCustomKeyEventHandler(e => {
+    if (shortcutFor(e, { inTerm: true, boxOpen: true }) === "tx-search") return false;
+    if (kind !== "agent") return true;
     if (e.key !== "Enter" || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return true;
     if (e.type === "keydown") {
       e.preventDefault();

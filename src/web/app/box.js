@@ -311,18 +311,22 @@ function renderSession(d) {
 // writes, so a box reboot costs you the colours and nothing else. Tail-first, because the record is
 // megabytes: "older" doubles the window rather than fetching the whole file.
 const TX_START = 256 * 1024, TX_CAP = 8 * 1024 * 1024;
-const txState = new Map();   // box -> bytes currently requested
-function loadTranscript(name, bytes) {
-  const want = bytes || txState.get(name) || TX_START;
-  txState.set(name, want);
+// box -> the window currently asked for: `bytes` of the tail, or — opened from a search result —
+// `bytes` around the message at `at` in record `session`.
+const txState = new Map();
+function loadTranscript(name, want) {
+  const w = want || txState.get(name) || { bytes: TX_START };
+  txState.set(name, w);
   if (!txpane.querySelector(".txmsg")) txpane.innerHTML = `<div class="txwrap"><div class="note">reading the record…</div></div>`;
-  fetch(`/api/boxes/${encodeURIComponent(name)}/transcript?bytes=${want}`)
+  const where = w.session ? `&session=${encodeURIComponent(w.session)}&at=${w.at}` : "";
+  fetch(`/api/boxes/${encodeURIComponent(name)}/transcript?bytes=${w.bytes}${where}`)
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-    .then(d => { if (view.box === name && view.mode === "tx") renderTranscript(name, d); })
+    .then(d => { if (view.box === name && view.mode === "tx") renderTranscript(name, d, w); })
     .catch(e => { txpane.innerHTML = `<div class="txwrap"><div class="note">could not read the record — ${esc(reason(e))}</div></div>`; });
 }
 const txTime = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) ? d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : ""; };
-function renderTranscript(name, d) {
+const txWhen = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) ? d.toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : ""; };
+function renderTranscript(name, d, w = {}) {
   if (d.note) { txpane.innerHTML = `<div class="txwrap"><div class="note">${esc(d.note)}</div></div>`; return; }
   const kb = n => n < 1024*1024 ? `${Math.round(n/1024)}K` : `${(n/1048576).toFixed(1)}M`;
   const older = d.complete
@@ -331,20 +335,173 @@ function renderTranscript(name, d) {
   const body = d.messages.map(m => {
     const tools = (m.tools || []).map(t => `<div class="txtool">${esc(t)}</div>`).join("");
     const text = m.text ? `<div class="txtext">${m.role === "assistant" ? marked.parse(m.text) : esc(m.text)}</div>` : "";
-    return `<div class="txmsg ${m.role}${m.sidechain ? " side" : ""}">`
+    return `<div class="txmsg ${m.role}${m.sidechain ? " side" : ""}" data-at="${Number(m.at) || 0}">`
       + `<div class="txwho">${m.role === "user" ? "you" : "claude"}${m.sidechain ? " · subagent" : ""}<span class="txts">${esc(txTime(m.ts))}</span></div>`
       + text + tools + `</div>`;
   }).join("");
-  txpane.innerHTML = `<div class="txwrap"><div class="txhead">${esc(d.path.split("/").pop() || "record")}`
-    + `<span class="txmeta">${d.messages.length} messages · ${kb(d.size)} on disk</span>`
-    + `<button class="kbtn ghost txref" title="re-read the record">↻</button></div>`
-    + `<div class="txolder">${older}</div>${body}</div>`;
+  // A window opened at an older message is not the end of the conversation, and says how to get back.
+  const back = !d.current ? "back to the current session" : !d.latest ? "back to the latest" : "";
+  const latest = back ? `<div class="txlatest"><button class="kbtn ghost txback">${back}</button></div>` : "";
+  // Keep what was being typed: a re-read redraws the pane, and must not take the field from under a person.
+  const typing = document.activeElement?.classList?.contains("txq") ? document.activeElement.selectionStart : null;
+  txpane.innerHTML = `<div class="txwrap"><div class="txtop"><div class="txhead"><span class="txname">${esc(d.path.split("/").pop() || "record")}</span>`
+    + `<span class="txmeta">${d.messages.length} messages · ${kb(d.size)} on disk${d.current ? "" : " · an earlier session"}</span>`
+    + `<button class="kbtn ghost txref" title="re-read the record">↻</button></div>${txFindRow(name)}</div>`
+    + `<div class="txresults" hidden></div>`
+    + `<div class="txconv"><div class="txolder">${older}</div>${body}${latest}</div></div>`;
   const wrap = txpane.querySelector(".txwrap");
-  wrap.scrollTop = wrap.scrollHeight;   // newest last, like the terminal it replaces
   // a link in a recorded message must not navigate the cockpit away from itself
   txpane.querySelectorAll(".txtext a").forEach(a => { a.target = "_blank"; a.rel = "noopener"; });
-  txpane.querySelector(".txmore")?.addEventListener("click", () => loadTranscript(name, Math.min(d.scanned * 4, TX_CAP)));
+  txpane.querySelector(".txmore")?.addEventListener("click", () => loadTranscript(name, { ...w, bytes: Math.min(d.scanned * 4, TX_CAP) }));
   txpane.querySelector(".txref")?.addEventListener("click", () => loadTranscript(name));
+  txpane.querySelector(".txback")?.addEventListener("click", () => loadTranscript(name, { bytes: TX_START }));
+  txWireFind(name);
+  if (txFocusWanted.delete(name)) { const q = txpane.querySelector(".txq"); q.focus(); q.select(); }
+  else if (typing !== null) { const q = txpane.querySelector(".txq"); q.focus(); try { q.setSelectionRange(typing, typing); } catch {} }
+  const found = w.session != null && txpane.querySelector(`.txmsg[data-at="${Number(w.at)}"]`);
+  if (found) {
+    found.classList.add("txfound");
+    txMark(found, txFind.get(name)?.q || "");
+    found.scrollIntoView({ block: "center" });
+  } else {
+    wrap.scrollTop = wrap.scrollHeight;   // newest last, like the terminal it replaces
+  }
+  if (txFind.get(name)?.open) txShowResults(name);
+}
+
+// ---------- transcript search: the whole record on the server, a list here ----------
+// The search reads every line of the session (or of every session) on the server — the pane only
+// ever holds a window of it. A result names its record and its message's offset, and clicking one
+// opens the record THERE, so a match older than the loaded window, or in another session, is one
+// click away like any other.
+const txFind = new Map();   // box -> { q, who, all, open, seq, data, error, timer }
+const txFocusWanted = new Set();   // boxes whose search field takes the focus when the pane draws
+// ⌘F / Ctrl+F (SKEIN-1323): the box's Transcript view, with the search field focused and whatever
+// was searched last selected, so typing replaces it and Enter runs it again.
+function openTxSearch(name) {
+  if (!name) return;
+  const q = view.box === name && view.mode === "tx" && txpane.querySelector(".txq");
+  if (q) { q.focus(); q.select(); return; }
+  txFocusWanted.add(name);
+  showBox(name, "tx", view.box === name ? view.kind : "agent");
+}
+function txFindState(name) {
+  if (!txFind.has(name)) txFind.set(name, { q: "", who: "both", all: false, open: false, seq: 0, data: null, error: "" });
+  return txFind.get(name);
+}
+function txFindRow(name) {
+  const f = txFindState(name);
+  const who = [["user", "you"], ["assistant", "Claude"], ["both", "both"]]
+    .map(([v, l]) => `<button type="button" data-who="${v}" class="${f.who === v ? "on" : ""}" aria-pressed="${f.who === v}">${l}</button>`).join("");
+  return `<div class="txfind"><input class="txq" type="text" enterkeyhint="search" autocomplete="off" placeholder="Search this conversation" aria-label="Search this conversation" value="${esc(f.q)}">`
+    + `<span class="txopts"><span class="txwhosel" role="group" aria-label="whose messages">${who}</span>`
+    + `<label class="txall"><input type="checkbox" class="txallbox"${f.all ? " checked" : ""}> all sessions</label></span></div>`;
+}
+function txWireFind(name) {
+  const f = txFindState(name), q = txpane.querySelector(".txq");
+  q.addEventListener("input", () => {
+    f.q = q.value;
+    clearTimeout(f.timer);
+    if (!f.q.trim()) { txCloseResults(name); return; }
+    f.timer = setTimeout(() => txSearch(name), 250);
+  });
+  q.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); clearTimeout(f.timer); if (f.q.trim()) txSearch(name); }
+    // Escape here clears the search. Only when there is one: an empty field leaves Escape to the
+    // page's keymap, which takes the focus back to the fleet.
+    else if (e.key === "Escape" && !e.isComposing && (f.q || f.open)) { e.preventDefault(); e.stopPropagation(); txClear(name); }
+  });
+  // The query stays after a result is opened, and coming back to the field brings the list back.
+  q.addEventListener("focus", () => { if (f.q.trim() && !f.open) { f.open = true; f.data ? txShowResults(name) : txSearch(name); } });
+  txpane.querySelectorAll(".txwhosel button").forEach(b => b.addEventListener("click", () => {
+    f.who = b.dataset.who;
+    txpane.querySelectorAll(".txwhosel button").forEach(o => { o.classList.toggle("on", o === b); o.setAttribute("aria-pressed", o === b); });
+    if (f.q.trim()) txSearch(name);
+  }));
+  txpane.querySelector(".txallbox").addEventListener("change", e => { f.all = e.target.checked; if (f.q.trim()) txSearch(name); });
+}
+function txSearch(name) {
+  const f = txFindState(name), seq = ++f.seq;
+  f.open = true; f.data = null; f.error = "";
+  txShowResults(name);
+  const qs = new URLSearchParams({ q: f.q.trim(), who: f.who, scope: f.all ? "all" : "session" });
+  fetch(`/api/boxes/${encodeURIComponent(name)}/transcript/search?${qs}`)
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(d => { if (seq === f.seq) { f.data = d; txShowResults(name); } })
+    .catch(e => { if (seq === f.seq) { f.error = reason(e); txShowResults(name); } });
+}
+function txShowResults(name) {
+  const f = txFindState(name), box = txpane.querySelector(".txresults"), conv = txpane.querySelector(".txconv");
+  if (!box || view.box !== name) return;
+  const d = f.data;
+  let head, note = "", list = "";
+  if (f.error) head = `could not search — ${esc(f.error)}`;
+  else if (!d) head = "searching…";
+  else {
+    const n = d.hits.length;
+    head = d.capped ? `showing the newest ${n} matches` : n ? `${n} match${n === 1 ? "" : "es"}` : "no matches";
+    if (f.all && d.sessions > 1) head += ` in ${d.sessions} sessions`;
+    if (d.note) note = `<div class="txrnote">${esc(d.note)}</div>`;
+    list = d.hits.map((h, i) => {
+      const where = f.all ? `<span>${h.session === d.current ? "this session" : `session ${esc(h.session.slice(0, 8))}`}</span>` : "";
+      return `<button type="button" class="txhit" data-i="${i}"><div class="txhitwho"><span>${h.role === "user" ? "you" : "Claude"}${h.sidechain ? " · subagent" : ""}</span>`
+        + `<span>${esc(txWhen(h.ts))}</span>${where}</div>`
+        + `<div class="txsnip">${esc(h.before)}<mark>${esc(h.matched)}</mark>${esc(h.after)}</div></button>`;
+    }).join("");
+  }
+  box.innerHTML = `<div class="txrhead"><span class="txrcount">${head}</span><button type="button" class="kbtn ghost txrx" title="clear the search" aria-label="clear the search">✕</button></div>${note}${list}`;
+  box.hidden = false; if (conv) conv.hidden = true;
+  box.querySelector(".txrx").addEventListener("click", () => txClear(name));
+  box.querySelectorAll(".txhit").forEach(b => b.addEventListener("click", () => {
+    const h = d.hits[Number(b.dataset.i)];
+    f.open = false;
+    loadTranscript(name, { bytes: TX_START, session: h.session, at: h.at });
+  }));
+}
+function txCloseResults(name) {
+  const f = txFindState(name);
+  f.open = false; f.seq++; f.data = null; f.error = "";
+  const box = txpane.querySelector(".txresults"), conv = txpane.querySelector(".txconv");
+  if (box) { box.hidden = true; box.innerHTML = ""; }
+  if (conv) conv.hidden = false;
+}
+function txClear(name) {
+  const f = txFindState(name);
+  clearTimeout(f.timer);
+  f.q = "";
+  const q = txpane.querySelector(".txq");
+  if (q) q.value = "";
+  txCloseResults(name);
+  txpane.querySelectorAll("mark.txmark").forEach(m => m.replaceWith(...m.childNodes));
+  txpane.querySelectorAll(".txmsg.txfound").forEach(m => m.classList.remove("txfound"));
+}
+// Mark every case-insensitive occurrence of `q` in a message's text. Text nodes only, so markdown
+// that split the words across elements leaves the message marked as a whole and nothing broken.
+function txMark(msg, q) {
+  q = q.trim();
+  const text = msg.querySelector(".txtext");
+  if (!q || !text) return;
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  const walk = document.createTreeWalker(text, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walk.nextNode()) nodes.push(walk.currentNode);
+  for (const node of nodes) {
+    const s = node.nodeValue;
+    re.lastIndex = 0;
+    if (!re.test(s)) continue;
+    re.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = re.exec(s))) {
+      frag.append(s.slice(last, m.index));
+      const mark = document.createElement("mark");
+      mark.className = "txmark"; mark.textContent = m[0];
+      frag.append(mark);
+      last = m.index + m[0].length;
+    }
+    frag.append(s.slice(last));
+    node.replaceWith(frag);
+  }
 }
 
 // ---------- files: browse + read the box's workspace without leaving skein ----------
