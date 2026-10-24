@@ -1270,8 +1270,10 @@ mod tests {
     }
 
     // Planted where the box can: a slug linked to a directory outside holding a matching record,
-    // and a FIFO named like a record. Fails if the walk follows the link (the outside line comes
-    // back), or if the FIFO is opened plainly (the open waits for a writer and `within` fails).
+    // a record-named link to it, and a FIFO named like a record. Fails if the walk follows a link
+    // (the outside line comes back). The FIFO is refused twice — the walk keeps regular files only,
+    // and the open is `boxfile`'s — so it takes both undone to fail: then the open waits for a
+    // writer and `within` fails.
     #[test]
     fn search_follows_no_link_and_waits_on_no_fifo_in_a_boxs_record() {
         let _g = env_lock();
