@@ -578,7 +578,7 @@ pub fn search_transcript(
         ));
     }
     let mut records = walk_jsonl(&box_records(name));
-    records.sort_by(|a, b| b.1.cmp(&a.1));
+    records.sort_by_key(|r| std::cmp::Reverse(r.1));
     let current = records
         .first()
         .map(|(p, _)| session_of(p))
@@ -1151,8 +1151,8 @@ mod tests {
             "assistant".to_string(),
             "parser".to_string(),
         );
-        assert_eq!(s(Who::User), [me.clone()]);
-        assert_eq!(s(Who::Assistant), [it.clone()]);
+        assert_eq!(s(Who::User), std::slice::from_ref(&me));
+        assert_eq!(s(Who::Assistant), std::slice::from_ref(&it));
         assert_eq!(s(Who::Both), [it, me], "both sides, the newest first");
     }
 
