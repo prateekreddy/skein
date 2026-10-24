@@ -1118,7 +1118,7 @@ mod tests {
         // dispatches: each one fires with focus nowhere and returns nothing with focus in a field or
         // a terminal. What is left here is the join — the page must still ask.
         assert!(
-            page.contains("shortcutFor(e, { inTerm, inField })"),
+            page.contains("shortcutFor(e, { inTerm, inField, boxOpen: !!view.box })"),
             "the fleet keymap decides for itself again, so nothing tests that it yields to a \
              focused terminal — and the ear works only because that guard is there"
         );
