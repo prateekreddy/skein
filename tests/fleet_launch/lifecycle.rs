@@ -501,8 +501,13 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             .exec("readlink ~/shared", Duration::from_secs(30))
             .unwrap()
             .trim(),
-        store.join("shared-home").to_string_lossy(),
-        "a box's shared workspace must resolve to its own repo's store"
+        store
+            .parent()
+            .unwrap()
+            .join("shared-home")
+            .to_string_lossy(),
+        "a box's shared workspace must resolve to its own repo's store, beside its .claude and \
+         not under it, where Claude Code asks before every write (SKEIN-1324)"
     );
     // The boot report is per BOX, not per sandbox. Every box here reports the same SANDBOX_VM_ID,
     // so without an explicit identity they would overwrite each other — one box's diagnosis

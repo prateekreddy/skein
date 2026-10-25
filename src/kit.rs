@@ -149,9 +149,6 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
         // a genuinely writable host directory, unlike the RO clone-mode source mirror. See
         // sandbox-bootstrap.sh's surfacing loop.
         "shared-rw",
-        // Project-scoped durable user workspace, surfaced as $HOME/shared in every box. Real $HOME
-        // remains private so credentials, caches, and concurrent runtime state cannot collide.
-        "shared-home",
     ] {
         let p = store.join(d);
         fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
@@ -159,7 +156,135 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
     // Document the layout so the user knows what they can optionally add — written only if absent.
     write_if_absent(&store.join("README.md"), STORE_README);
     ensure_probe_in(store)?;
+    // Last, so that a refusal here costs the repo its `$HOME/shared` and nothing else: every other
+    // part of the store above is already in place, and the launch that called this goes on.
+    ensure_shared_home(store)?;
     Ok(fresh)
+}
+
+/// Where a store's shared working files live — the directory every box of the repo links
+/// `$HOME/shared` to.
+///
+/// For a store skein manages, `$SKEIN_HOME/repos/<id>/store/.claude`, that is
+/// `$SKEIN_HOME/repos/<id>/store/shared-home`: **beside the `.claude` directory, not inside it**.
+/// Claude Code guards every path under a `.claude` directory as its own configuration and judges
+/// the resolved path, so while the files lived at `store/.claude/shared-home` every write to
+/// `~/shared` asked for permission (SKEIN-1324, `docs/decisions/shared-home-outside-claude.md`).
+///
+/// Any other store keeps `<store>/shared-home`. A store put elsewhere with `skein add --store` is
+/// mounted into the fleet on its own (`fleet::fleet_mounts`), so nothing beside it reaches a box,
+/// and its parent is a directory of the person's. The box's half of this rule is
+/// `skein_shared_home` in `src/probe/box-self.sh`, which knows the shape but not `$SKEIN_HOME`.
+pub(crate) fn shared_home_dir(store: &Path) -> PathBuf {
+    shared_home_beside(store).unwrap_or_else(|| store.join("shared-home"))
+}
+
+/// [`shared_home_dir`] when it is the sibling: `Some` only for `<fleet workspace>/<id>/store/.claude`.
+fn shared_home_beside(store: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let workspace = PathBuf::from(crate::fleet::fleet_workspace());
+    let rest = store.strip_prefix(&workspace).ok()?;
+    match rest.components().collect::<Vec<_>>().as_slice() {
+        [Component::Normal(_), Component::Normal(s), Component::Normal(c)]
+            if *s == "store" && *c == ".claude" =>
+        {
+            Some(store.parent()?.join("shared-home"))
+        }
+        _ => None,
+    }
+}
+
+/// Make the store's shared home, moving it out of the store's `.claude` the first time.
+///
+/// Until SKEIN-1324 it was `<store>/shared-home` for every store. For a store skein manages it is
+/// now the sibling ([`shared_home_dir`]), and an existing one is moved there **once**, by a rename:
+///
+/// * only the old one is there: it is renamed to the new place, contents and all;
+/// * only the new one is there: nothing to do, which is every run after the first;
+/// * both are there and the old one is empty: the empty one is removed;
+/// * both are there and the old one holds anything: **refused**, naming both paths, and nothing
+///   moves. Merging two sets of somebody's files is a decision about their files, and a silent one
+///   is how the copy they meant to keep loses;
+/// * either path is a link, or something other than a directory: refused, and never followed. The
+///   store is writable from every box of the repo, so a link there is something a box could have
+///   put there, and following it would move or create files wherever it points.
+///
+/// A box refuses to link `$HOME/shared` while the old directory still holds anything
+/// (`src/store/shared-home.sh`), so a refusal here is seen in the box as well as here.
+fn ensure_shared_home(store: &Path) -> Result<(), String> {
+    let new = shared_home_dir(store);
+    let old = store.join("shared-home");
+    if new == old {
+        // A store kept elsewhere: unchanged from before SKEIN-1324.
+        return fs::create_dir_all(&new).map_err(|e| format!("mkdir {}: {e}", new.display()));
+    }
+    let old_is_dir = real_dir(&old)?;
+    let new_is_dir = real_dir(&new)?;
+    match (old_is_dir, new_is_dir) {
+        (false, false) => make_dir_no_follow(&new),
+        (false, true) => Ok(()),
+        (true, false) => fs::rename(&old, &new).map_err(|e| {
+            format!(
+                "could not move this repo's shared files from {} to {}: {e}. Nothing was moved; \
+                 move the folder there yourself and start the box again.",
+                old.display(),
+                new.display()
+            )
+        }),
+        (true, true) => {
+            let empty = fs::read_dir(&old)
+                .map_err(|e| format!("read {}: {e}", old.display()))?
+                .next()
+                .is_none();
+            if empty {
+                return fs::remove_dir(&old).map_err(|e| format!("rmdir {}: {e}", old.display()));
+            }
+            Err(format!(
+                "this repo's shared files are in two places, {} and {}, and skein will not merge \
+                 them. Nothing was moved, and $HOME/shared stays unlinked in this repo's boxes \
+                 until one is left: move what you want to keep into {}, remove {}, and start the \
+                 box again.",
+                old.display(),
+                new.display(),
+                new.display(),
+                old.display()
+            ))
+        }
+    }
+}
+
+/// Whether `path` is a directory, asked without following a link: `false` when nothing is there,
+/// and refused when a link or anything other than a directory is.
+fn real_dir(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(format!(
+            "{} is a link, and skein does not follow a link for this repo's shared files. Nothing \
+             was moved; remove the link and start the box again.",
+            path.display()
+        )),
+        Ok(m) if m.is_dir() => Ok(true),
+        Ok(_) => Err(format!(
+            "{} is not a folder, so this repo's shared files cannot go there. Nothing was moved; \
+             move it aside and start the box again.",
+            path.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("stat {}: {e}", path.display())),
+    }
+}
+
+/// `mkdir` of one directory whose parent exists, refusing a link at the name rather than making
+/// the directory wherever it points (which `create_dir_all` would accept as "already there").
+fn make_dir_no_follow(path: &Path) -> Result<(), String> {
+    if real_dir(path)? {
+        return Ok(());
+    }
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        // Made by somebody else between the two calls: asked again, without following.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => real_dir(path).map(|_| ()),
+        Err(e) => Err(format!("mkdir {}: {e}", path.display())),
+    }
 }
 
 /// Write `body` to `path` only when nothing is there yet — so scaffolding never overwrites the user's
@@ -326,10 +451,12 @@ mod tests {
             "skills",
             "hooks",
             "shared-rw",
-            "shared-home",
         ] {
             assert!(store.join(d).is_dir(), "missing {d}");
         }
+        // The shared working files sit beside `.claude`, never in it (SKEIN-1324).
+        assert!(store.parent().unwrap().join("shared-home").is_dir());
+        assert!(!store.join("shared-home").exists());
         // skein installs all the machinery so an empty store works end-to-end
         for f in [
             "skein/bin/box-status.sh",
@@ -416,6 +543,189 @@ mod tests {
             "MY OWN README",
             "an existing README is left alone"
         );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// A store skein manages, under a pinned `$SKEIN_HOME`, with nothing in it yet.
+    fn managed_store(home: &Path) -> PathBuf {
+        home.join("repos").join("x").join("store").join(".claude")
+    }
+
+    /// **An existing `store/.claude/shared-home` is moved beside `.claude`, once** (SKEIN-1324).
+    ///
+    /// What would make this fail: `ensure_shared_home` making the new directory without moving the
+    /// old one (the file stays behind and the new one is empty), copying instead of renaming (the
+    /// old one is still there), or `shared_home_dir` answering the old path for a managed store.
+    #[test]
+    fn an_old_shared_home_is_moved_beside_the_store_once() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = managed_store(&home);
+        let old = store.join("shared-home");
+        let new = store.parent().unwrap().join("shared-home");
+        fs::create_dir_all(old.join("notes")).unwrap();
+        fs::write(old.join("notes/case.md"), "kept").unwrap();
+
+        ensure_store(&store).unwrap();
+        assert_eq!(shared_home_dir(&store), new);
+        assert_eq!(
+            fs::read_to_string(new.join("notes/case.md")).unwrap(),
+            "kept"
+        );
+        assert!(!old.exists(), "the old directory is still inside .claude");
+
+        // Every launch runs this again; the second run changes nothing.
+        fs::write(new.join("later.md"), "written after the move").unwrap();
+        ensure_store(&store).unwrap();
+        assert_eq!(
+            fs::read_to_string(new.join("notes/case.md")).unwrap(),
+            "kept"
+        );
+        assert!(new.join("later.md").is_file());
+        assert!(!old.exists(), "a second run made the old directory again");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// **Two non-empty shared homes are refused, and nothing moves** — but an empty old one beside
+    /// a real new one is only a leftover, and goes.
+    ///
+    /// What would make this fail: merging the two, renaming one over the other, or answering `Ok`.
+    #[test]
+    fn two_shared_homes_with_files_are_refused_and_nothing_moves() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = managed_store(&home);
+        let old = store.join("shared-home");
+        let new = store.parent().unwrap().join("shared-home");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        fs::write(old.join("a.md"), "old").unwrap();
+        fs::write(new.join("b.md"), "new").unwrap();
+
+        let err = ensure_store(&store).unwrap_err();
+        assert!(
+            err.contains(&old.display().to_string()) && err.contains(&new.display().to_string()),
+            "the refusal must name both places: {err}"
+        );
+        assert_eq!(fs::read_to_string(old.join("a.md")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(new.join("b.md")).unwrap(), "new");
+        assert!(
+            !new.join("a.md").exists() && !old.join("b.md").exists(),
+            "merged"
+        );
+        // The rest of the store was still made: the refusal costs `~/shared`, nothing else.
+        assert!(store.join("skein/bin/shared-home.sh").is_file());
+
+        // An empty leftover beside a real one is removed, and that is all.
+        fs::remove_file(old.join("a.md")).unwrap();
+        ensure_store(&store).unwrap();
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(new.join("b.md")).unwrap(), "new");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A link at either place is refused and never followed.** The store is writable from every
+    /// box of the repo, so a link there is something a box could have planted.
+    ///
+    /// What would make this fail: `fs::metadata` (which follows) in place of `symlink_metadata` —
+    /// the old link then reads as a directory and is renamed to the new place, or the new link
+    /// reads as "already there" — or `create_dir_all`, which accepts a link to a directory.
+    #[test]
+    fn a_link_at_either_shared_home_is_refused_and_not_followed() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let elsewhere = tempdir();
+        fs::write(elsewhere.join("private.txt"), "not the store's").unwrap();
+
+        // A link at the old place, with nothing at the new one.
+        let store = managed_store(&home);
+        fs::create_dir_all(&store).unwrap();
+        symlink(&elsewhere, store.join("shared-home")).unwrap();
+        let new = store.parent().unwrap().join("shared-home");
+        let err = ensure_store(&store).unwrap_err();
+        assert!(err.contains("is a link"), "{err}");
+        assert!(
+            !new.exists() && !new.is_symlink(),
+            "the link was moved or followed"
+        );
+        assert!(store.join("shared-home").is_symlink());
+
+        // A link at the new place, with nothing at the old one.
+        fs::remove_file(store.join("shared-home")).unwrap();
+        symlink(&elsewhere, &new).unwrap();
+        let err = ensure_store(&store).unwrap_err();
+        assert!(err.contains("is a link"), "{err}");
+        assert!(!store.join("shared-home").exists());
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            1,
+            "something was made through the link"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// **`$HOME/shared` points beside `.claude` for a managed store, and an old link is repaired**
+    /// — the box's half of SKEIN-1324. Nothing under a `.claude` directory is its target.
+    ///
+    /// Also what it refuses: files still at the old place (linking past them would hide them), and
+    /// a missing sibling, which it must NOT make — in a covered box that would be a tmpfs, and the
+    /// files written there would vanish with the box.
+    ///
+    /// What would make this fail: `shared-home.sh` going back to `$store/shared-home`, its
+    /// `mkdir -p` of the canonical directory coming back, or `skein_shared_home` in box-self.sh
+    /// losing the managed shape.
+    #[test]
+    fn shared_home_links_beside_the_store_and_repairs_an_old_link() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = managed_store(&home);
+        ensure_store(&store).unwrap();
+        let new = store.parent().unwrap().join("shared-home");
+        let helper = store.join("skein/bin/shared-home.sh");
+        let box_home = home.join("box-home");
+        fs::create_dir_all(&box_home).unwrap();
+        // What a box from before the move has: a link into the store's `.claude`.
+        symlink(store.join("shared-home"), box_home.join("shared")).unwrap();
+        let run = || {
+            box_shell(&home)
+                .arg(&helper)
+                .arg(&store)
+                .env("HOME", &box_home)
+                .output()
+                .unwrap()
+        };
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let target = fs::read_link(box_home.join("shared")).unwrap();
+        assert_eq!(target, new);
+        assert!(
+            !target.components().any(|c| c.as_os_str() == ".claude"),
+            "$HOME/shared resolves under a .claude directory: {}",
+            target.display()
+        );
+
+        // Files back at the old place: refused, and the link is left alone.
+        fs::create_dir_all(store.join("shared-home")).unwrap();
+        fs::write(store.join("shared-home/stray.md"), "x").unwrap();
+        let out = run();
+        assert!(!out.status.success(), "linked past files at the old place");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("still holds shared files"));
+        fs::remove_dir_all(store.join("shared-home")).unwrap();
+
+        // The sibling gone: refused, and not made.
+        fs::remove_dir(&new).unwrap();
+        let out = run();
+        assert!(
+            !out.status.success(),
+            "linked to a directory that is not there"
+        );
+        assert!(!new.exists(), "the box made the shared home itself");
         env::remove_var("SKEIN_HOME");
     }
 

@@ -439,9 +439,17 @@ the box's **next start**, because a credential is placed as the box comes up.
 ## Shared working files
 
 Every managed Claude and Codex box exposes the repo's durable working-data directory at
-`/home/agent/shared` (`$HOME/shared`). Its canonical host location is `<repo-store>/shared-home/`,
-inside the same project-scoped mount used for memory and mailbox. Writes are visible live in every
-box for that repo; concurrent edits use ordinary filesystem/last-writer-wins semantics.
+`/home/agent/shared` (`$HOME/shared`). Its canonical host location is
+`~/.skein/repos/<id>/store/shared-home/`, beside the store's `.claude` directory rather than inside
+it, so Claude Code does not ask before every write there. A store kept elsewhere with `--store`
+keeps it at `<store>/shared-home/`. Writes are visible live in every box for that repo; concurrent
+edits use ordinary filesystem/last-writer-wins semantics.
+
+A store from before the move has it at `store/.claude/shared-home/`. skein moves it beside `.claude`
+the next time it starts a box of that repo. If both places hold files, skein moves nothing and says
+so, and boxes leave `$HOME/shared` unlinked until one is left: move what you want to keep into
+`store/shared-home/`, remove `store/.claude/shared-home/`, and start the box again. A box that was
+already running when the files moved gets `$HOME/shared` back when it restarts.
 
 Real `$HOME` remains private to each box. Skein never shares agent/auth state (`.claude`, `.codex`),
 credentials (`.ssh`, `.aws`, gh config), caches, toolchains, sockets, or locks. Startup creates or

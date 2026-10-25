@@ -424,6 +424,7 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `boxes/<name>/transitions` — retained signal values and watermarks | recorded |
 | `repos/<id>/mirror` — a bare git mirror | recorded |
 | `repos/<id>/store` — the shared `.claude` every box for that repo reads | recorded, many writers |
+| `repos/<id>/store/shared-home` — the repo's shared working files, `$HOME/shared` in every box; beside `.claude`, not in it (`docs/decisions/shared-home-outside-claude.md`) | recorded, many writers |
 | `<queue>/requests/<box>/` — git-write and package requests | **requested** — writable by that box alone, and the only box-writable thing under `.skein`; the `<queue>/requests/` root is readable, not writable, in every box, so a box reads other boxes' asks but cannot file, rewrite or delete one (`src/box-session.sh`, the drop-box loop) |
 | `<queue>/approved` — the artifacts, and the replayed manifest | declared — written by the approving side, owned by it, under the cover |
 | *(no `audit/` — see below)* | |
