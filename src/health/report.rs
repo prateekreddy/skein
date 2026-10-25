@@ -671,7 +671,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         if !store.join("mailbox").is_dir() {
             mailbox_errors.push(format!("{} mailbox directory missing", repo.id));
         }
-        if !store.join("shared-home").is_dir() {
+        if !crate::kit::shared_home_dir(store).is_dir() {
             probe_errors.push(format!("{} shared-home directory missing", repo.id));
         }
         let boot_dir = store.join("skein/boot");

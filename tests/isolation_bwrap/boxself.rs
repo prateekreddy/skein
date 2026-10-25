@@ -159,7 +159,7 @@ const PER_BOX: [&str; 12] = [
     "handoffs/web-main.codex.consumed.md",
     "status/web-main.pane.json",
     "sandboxes.json",
-    "shared-home/imported-thing.md",
+    "../shared-home/imported-thing.md",
     "hook-log/web-main.jsonl",
 ];
 
@@ -275,8 +275,8 @@ fn a_box_whose_repo_tracks_claude_never_reports_into_its_checkout() {
             );
             assert_eq!(
                 fs::read_link(fleet.dir.join("home/shared")).ok(),
-                Some(store.join("shared-home")),
-                "$HOME/shared is not the store's shared home:\n{said}"
+                Some(store.parent().unwrap().join("shared-home")),
+                "$HOME/shared is not the store's shared home, beside its .claude:\n{said}"
             );
             assert!(
                 fleet.dir.join("home/.codex/AGENTS.md").is_file(),

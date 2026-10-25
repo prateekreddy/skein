@@ -15,7 +15,7 @@ plugin claims below are as the documentation stood on the date, not re-verified 
 guidance — guidance as a skill, because a plugin's own `CLAUDE.md` is not loaded as context. Loaded
 with `--plugin-dir` from a path skein controls: no marketplace, no network, versioned with the
 binary. That would also retire the network-dependent plugin install the bootstrap runs in the
-background at every box start (`src/store/sandbox-bootstrap.sh:354-372`).
+background at every box start (`src/store/sandbox-bootstrap.sh:355-373`).
 
 **What provably cannot.** `statusLine` (a plugin's settings honour only `agent` and
 `subagentStatusLine`), `tui`, `permissions` and `env`; and the whole provisioning layer, because an

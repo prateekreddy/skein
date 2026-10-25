@@ -4,7 +4,8 @@ Use `$HOME/shared` (`/home/agent/shared`) for durable project working material t
 box restart or be available live in another Claude/Codex box for this repo. Examples: reference
 documents, sample corpora, research captures, and working notes.
 
-The canonical directory is `shared-home/` in this repo's mounted Skein store. It is read-write and
+The canonical directory is `shared-home/` beside this repo's mounted Skein store, outside any
+`.claude` directory, so writing there does not ask for permission. It is read-write and
 project-scoped. Changes appear in every box immediately; concurrent writes have normal filesystem
 last-writer-wins behavior, so coordinate edits to the same file.
 

@@ -30,7 +30,8 @@ here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 store="$(skein_box_store "$root")" \
   || { echo "[skein-bootstrap] this box's store could not be found from $root — skipping" >&2; exit 0; }
 
-# --- durable project workspace: private $HOME/shared -> mounted store/shared-home ----------------
+# --- durable project workspace: private $HOME/shared -> the store's shared home -----------------
+# (beside the store's `.claude` for a store skein manages; box-self.sh's `skein_shared_home`)
 # The same provider-neutral helper runs during durable kit startup. Running it again here self-heals
 # boxes created with an older kit as soon as their live shared probe refreshes.
 shared_home="$here/shared-home.sh"

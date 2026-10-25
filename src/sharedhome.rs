@@ -59,8 +59,8 @@ root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"
 # `import_shared_home`: the same answer every script skein ships into a box gets (SKEIN-1174).
 store="$(skein_box_store "$root")" || { echo "this box's store could not be found from $root" >&2; exit 1; }
 self="$(skein_box_name)" || self=""
-canonical="$store/shared-home"
-[ -d "$canonical" ] && [ -w "$canonical" ] \
+canonical="$(skein_shared_home "$store")"
+[ -d "$canonical" ] && [ ! -L "$canonical" ] && [ -w "$canonical" ] \
   || { echo "shared-home unavailable or not writable: $canonical" >&2; exit 1; }
 [ "$#" -gt 0 ] || { echo 'no import entries selected' >&2; exit 1; }
 
@@ -76,7 +76,9 @@ for name in "$@"; do
   [ -z "$unsafe" ] || { echo "unsafe nested entry blocks import: $unsafe" >&2; exit 1; }
 done
 
-stage="$store/.shared-home-import.${self:-box}.$$"
+# Staged inside the shared home itself, so the move into place below is a rename on one mount: in a
+# covered box the store and its shared home are two binds, and `mv` between them is a copy.
+stage="$canonical/.skein-import.${self:-box}.$$"
 mkdir -p "$stage"
 trap 'rm -rf "$stage"' EXIT
 warnings="$stage/.tar-warnings"
@@ -135,7 +137,7 @@ pub fn import_shared_home(name: &str, selected: &[String]) -> Result<String, Str
     }
     let inventory = shared_home_inventory(name)?;
     let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
-    let canonical = Path::new(&repo.store).join("shared-home");
+    let canonical = crate::kit::shared_home_dir(Path::new(&repo.store));
     let mut unique = BTreeSet::new();
     for entry in selected {
         if entry.contains(['\n', '\r', '\0']) {

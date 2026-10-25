@@ -111,6 +111,11 @@ commit = "6256aba73ed43430de13867b9e6fd4d3a33fd543"
 subject = "feat(warden): a port mapping can be withdrawn by the warden, and never opened by it"
 date = "2026-08-29T09:21:00Z"
 
+[citations."641d3b3"]
+commit = "641d3b38cd2ad3b54b793a46a611688d5fc3515b"
+subject = "feat: add project-scoped shared home"
+date = "2026-07-14T12:07:16+05:30"
+
 [citations."6a4371b"]
 commit = "6a4371bf91fedfbed3f93647f680723b17d1ddf9"
 subject = "fix(anchor): the address of a box comes from skein, not from the box"
@@ -119,6 +124,11 @@ date = "2026-08-20T14:47:34Z"
 [citations."6e3f703"]
 external = "the sync plugin's own repository, cited by src/store/sync/UPSTREAM.md:14 — correct as written; not a commit skein's history will ever carry."
 sites = ["docs/line-cites.toml", "src/store/sync/UPSTREAM.md"]
+
+[citations."708518c"]
+commit = "708518c72cc2464a9fefc2556c9dd71e8ad282d0"
+subject = "feat(skein): generalize to any repo — skein-owned repos, own kit, settings"
+date = "2026-06-29T11:54:06Z"
 
 [citations."7b39014"]
 commit = "7b3901498f59bf140368af3ab9f90880ede9a149"

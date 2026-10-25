@@ -1,5 +1,5 @@
 # box-self.sh — which box this is, and where its store is: the one answer to each question for
-# every script skein ships into a box (SKEIN-1174). Sourced, never run: it defines two functions
+# every script skein ships into a box (SKEIN-1174). Sourced, never run: it defines three functions
 # and does nothing else, so sourcing it cannot fail a caller or print into a hook's stdout.
 #
 # Installed beside every script that sources it — in both variants of skein's read-only plugin
@@ -7,6 +7,7 @@
 #
 #   skein_box_store <root>   prints this box's store, or prints nothing and returns 1
 #   skein_box_name           prints this box's name, or prints nothing and returns 1
+#   skein_shared_home <store> prints where that store's shared working files are (`$HOME/shared`)
 #
 # What a caller does on a refusal is its own business — a hook exits quietly, the mailbox says why
 # — but the DECISION is made here and nowhere else.
@@ -72,6 +73,36 @@ _skein_is_store() {
     case "$real/" in "$2"/*) return 1 ;; esac
   fi
   return 0
+}
+
+# Where this repo's shared working files are, given its store: what `$HOME/shared` links to.
+#
+# For a store skein manages, `<…>/repos/<id>/store/.claude`, it is `<…>/repos/<id>/store/shared-home`:
+# BESIDE the `.claude` directory, not inside it. Claude Code guards every path under a `.claude`
+# directory as its own configuration and judges the resolved path, so while the files lived in
+# `store/.claude/shared-home` every write to `~/shared` asked for permission (SKEIN-1324,
+# docs/decisions/shared-home-outside-claude.md). The host moves an old one across
+# (`kit::ensure_store`), and the launcher binds the sibling back into a covered box beside the store.
+#
+# Any other store keeps `<store>/shared-home`. A store put elsewhere with `skein add --store` is
+# mounted into the fleet on its own, so nothing beside it is reachable from a box, and its parent is
+# a directory of the person's. The host's half of this rule is `kit::shared_home_dir`.
+skein_shared_home() {
+  local store="${1:-}" rest id
+  while [ "${store%/}" != "$store" ]; do store="${store%/}"; done
+  case "$store" in
+    */./* | */../* | *//*) ;;
+    /*/repos/*/store/.claude)
+      rest="${store%/store/.claude}"
+      id="${rest##*/}"
+      if [ "${rest%/*}" != "$rest" ] && [ "$(basename "${rest%/*}")" = repos ] \
+        && [ -n "$id" ] && [ "$id" != . ] && [ "$id" != .. ]; then
+        printf '%s/store/shared-home\n' "$rest"
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s/shared-home\n' "$store"
 }
 
 # The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a signal

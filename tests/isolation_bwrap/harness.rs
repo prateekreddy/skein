@@ -239,6 +239,10 @@ impl Fleet {
             f.dir.join("boxhome/.claude/projects"),
             f.repos.join("web/store/.claude/memory"),
             f.repos.join("other/store/.claude/memory"),
+            // Each repo's shared working files, beside its store's `.claude` (SKEIN-1324): the
+            // host makes them (`kit::ensure_store`) and a box never does.
+            f.repos.join("web/store/shared-home"),
+            f.repos.join("other/store/shared-home"),
             f.elsewhere.join("store/.claude"),
         ] {
             fs::create_dir_all(&p).unwrap();

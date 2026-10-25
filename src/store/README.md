@@ -71,9 +71,11 @@ What you *optionally* add is your own project content:
                    empty and accumulates as boxes work; drop in notes to seed it.
     skills/        project skills (one dir per skill).
     hooks/         your own hook scripts, if you reference them from settings.json.
-    shared-home/   durable project working files, exposed as $HOME/shared in every Claude/Codex
-                   box. Real $HOME remains box-private. Writes are live across the repo's boxes;
-                   coordinate concurrent edits (ordinary last-writer-wins filesystem semantics).
+    ../shared-home/  durable project working files, exposed as $HOME/shared in every Claude/Codex
+                   box. BESIDE this folder, not in it: under a .claude folder, Claude Code asks
+                   before every write. (A store kept elsewhere with --store keeps it here, as
+                   shared-home/.) Real $HOME remains box-private. Writes are live across the
+                   repo's boxes; coordinate concurrent edits (last-writer-wins).
     shared-paths.txt   one repo-relative path per line of GITIGNORED files the box
                    needs (CLAUDE.md, .env, local config, …). A --clone carries only
                    tracked files, so the bootstrap symlinks each of these from the
