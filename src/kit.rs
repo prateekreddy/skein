@@ -167,6 +167,7 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
 ///
 /// For a store skein manages, `$SKEIN_HOME/repos/<id>/store/.claude`, that is
 /// `$SKEIN_HOME/repos/<id>/store/shared-home`: **beside the `.claude` directory, not inside it**.
+/// Decided by the path's shape, `/<…>/repos/<id>/store/.claude` ([`shared_home_beside`]).
 /// Claude Code guards every path under a `.claude` directory as its own configuration and judges
 /// the resolved path, so while the files lived at `store/.claude/shared-home` every write to
 /// `~/shared` asked for permission (SKEIN-1324, `docs/decisions/shared-home-outside-claude.md`).
@@ -179,14 +180,28 @@ pub(crate) fn shared_home_dir(store: &Path) -> PathBuf {
     shared_home_beside(store).unwrap_or_else(|| store.join("shared-home"))
 }
 
-/// [`shared_home_dir`] when it is the sibling: `Some` only for `<fleet workspace>/<id>/store/.claude`.
+/// [`shared_home_dir`] when it is the sibling: `Some` only for a store of the shape skein gives
+/// the stores it manages, `/<…>/repos/<id>/store/.claude`, with no `.` or `..` and no doubled `/`.
+///
+/// **The shape, and not "under `$SKEIN_HOME`"**, because the box decides from the path alone
+/// (`skein_shared_home` in `src/probe/box-self.sh` cannot know `$SKEIN_HOME`), and a host that
+/// answered differently for the same path would leave the box asking for a directory the host
+/// never made.
 fn shared_home_beside(store: &Path) -> Option<PathBuf> {
     use std::path::Component;
-    let workspace = PathBuf::from(crate::fleet::fleet_workspace());
-    let rest = store.strip_prefix(&workspace).ok()?;
-    match rest.components().collect::<Vec<_>>().as_slice() {
-        [Component::Normal(_), Component::Normal(s), Component::Normal(c)]
-            if *s == "store" && *c == ".claude" =>
+    if store.to_string_lossy().contains("//") {
+        return None;
+    }
+    let parts = store.components().collect::<Vec<_>>();
+    let (Component::RootDir, rest) = parts.split_first()? else {
+        return None;
+    };
+    if !rest.iter().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    match rest {
+        [_, .., Component::Normal(r), Component::Normal(_), Component::Normal(s), Component::Normal(c)]
+            if *r == "repos" && *s == "store" && *c == ".claude" =>
         {
             Some(store.parent()?.join("shared-home"))
         }

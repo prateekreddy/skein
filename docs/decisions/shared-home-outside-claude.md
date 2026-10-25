@@ -4,8 +4,8 @@
 box links `$HOME/shared` to is `$SKEIN_HOME/repos/<id>/store/shared-home`: a sibling of `.claude`,
 not `store/.claude/shared-home`. skein moves an existing one across once, when it next prepares the
 store. It refuses rather than merges when both places hold files, and it never follows a link at
-either place. A store somebody keeps elsewhere with `skein add --store` keeps its shared files
-inside itself, as before.
+either place. A store of any other shape, which only `skein add --store` makes, keeps its shared
+files inside itself, as before.
 
 **Date.** 2026-10-25.
 
@@ -47,6 +47,12 @@ directory made under the tmpfs would lose its files when the box stops.
 and nothing beside it, so a sibling of that store is unreachable from any box. The store's parent
 is also a directory of the person's, not skein's. Moving those stores would need a mount per repo
 and a sandbox recreate. That question is open, and nothing here settles it.
+
+The rule is decided from the path's shape, `/<…>/repos/<id>/store/.claude`, on both sides. The
+box cannot know `$SKEIN_HOME`, and a host that answered differently for the same path would leave
+the box waiting for a directory the host never made. The cost is one edge case: a `--store` path of
+exactly that shape outside `~/.skein` is treated as managed. Its sibling is not mounted into the
+fleet, so its boxes refuse to link `$HOME/shared` and say why.
 
 **Rules out.**
 
