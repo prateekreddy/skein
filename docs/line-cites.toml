@@ -44,15 +44,15 @@ cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:616"]
+["docs/architecture.md:617"]
 line = "## 8. The host warden"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:667"]
+["docs/architecture.md:668"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1759"]
+["docs/architecture.md:1760"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:504"]
+["docs/modules.toml:509"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -856,41 +856,45 @@ cited_by = ["docs/architecture.md"]
 
 ["src/box-session.sh:2363"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
-cited_by = ["docs/architecture.md", "docs/threat-model.md"]
+cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md", "docs/threat-model.md"]
 
 ["src/box-session.sh:2371"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
-cited_by = ["docs/architecture.md"]
+cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2454"]
+["src/box-session.sh:2379"]
+line = "box_shared_home=\"${SKEIN_BOX_STORE%/.claude}/shared-home\""
+cited_by = ["docs/decisions/shared-home-outside-claude.md"]
+
+["src/box-session.sh:2468"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2455"]
+["src/box-session.sh:2469"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2518"]
+["src/box-session.sh:2532"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2643"]
+["src/box-session.sh:2657"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2782"]
+["src/box-session.sh:2796"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3225"]
+["src/box-session.sh:3239"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3284"]
+["src/box-session.sh:3298"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3325"]
+["src/box-session.sh:3339"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1845,7 +1849,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
 cited_by = ["docs/architecture.md"]
 
-["src/store/sandbox-bootstrap.sh:354"]
+["src/store/sandbox-bootstrap.sh:355"]
 line = "if [ -n \"$wanted\" ] && [ \"$wanted\" != \"$(cat \"$marker\" 2>/dev/null || true)\" ] \\"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 

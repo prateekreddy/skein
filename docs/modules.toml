@@ -497,7 +497,12 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # than a constant somebody edits and rebuilds. The read is in `disk_health` and not in
 # `disk_verdict`, which keeps the verdict itself drivable on a machine with no settings file; what
 # crosses the boundary is a `u32`, and nothing reachable from `config` depends on `health`.
-depends_on = ["ai", "board", "config", "fleet", "gitgate", "github", "place", "prq", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+# `kit` for one path: `kit::shared_home_dir`, where a repo's shared working files are (SKEIN-1324).
+# It is beside the store's `.claude` for a managed store and inside it for any other, and the
+# report's "shared-home directory missing" line has to ask the same rule the store is built by, or
+# it reports every managed store as broken the day the files move. Nothing in `kit` depends on
+# `health`.
+depends_on = ["ai", "board", "config", "fleet", "gitgate", "github", "kit", "place", "prq", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 # `repos` and `util` went with local-path repos. `kit` reached for `Repo` to read a checkout
