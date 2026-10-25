@@ -560,7 +560,8 @@ mod tests {
     fn an_old_shared_home_is_moved_beside_the_store_once() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
         let store = managed_store(&home);
         let old = store.join("shared-home");
         let new = store.parent().unwrap().join("shared-home");
@@ -584,7 +585,6 @@ mod tests {
         );
         assert!(new.join("later.md").is_file());
         assert!(!old.exists(), "a second run made the old directory again");
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **Two non-empty shared homes are refused, and nothing moves** — but an empty old one beside
@@ -595,7 +595,8 @@ mod tests {
     fn two_shared_homes_with_files_are_refused_and_nothing_moves() {
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
         let store = managed_store(&home);
         let old = store.join("shared-home");
         let new = store.parent().unwrap().join("shared-home");
@@ -623,7 +624,6 @@ mod tests {
         ensure_store(&store).unwrap();
         assert!(!old.exists());
         assert_eq!(fs::read_to_string(new.join("b.md")).unwrap(), "new");
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **A link at either place is refused and never followed.** The store is writable from every
@@ -637,7 +637,8 @@ mod tests {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
         let elsewhere = tempdir();
         fs::write(elsewhere.join("private.txt"), "not the store's").unwrap();
 
@@ -665,7 +666,6 @@ mod tests {
             1,
             "something was made through the link"
         );
-        env::remove_var("SKEIN_HOME");
     }
 
     /// **`$HOME/shared` points beside `.claude` for a managed store, and an old link is repaired**
@@ -683,7 +683,8 @@ mod tests {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
         let store = managed_store(&home);
         ensure_store(&store).unwrap();
         let new = store.parent().unwrap().join("shared-home");
@@ -726,7 +727,6 @@ mod tests {
             "linked to a directory that is not there"
         );
         assert!(!new.exists(), "the box made the shared home itself");
-        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
