@@ -1900,7 +1900,7 @@
         <button type="button" class="kbtn ghost" id="bs-take"></button>
       </div>
       <div class="ar-msg" id="bs-msg" style="display:none;white-space:pre-line"></div>
-      <div class="nb-foot"><span class="hint">settings apply immediately — the box keeps running</span><button class="primary" id="bs-go">Save</button></div>
+      <div class="nb-foot"><span class="hint">disk allowance and work tracking apply now; commit as, github access and workshop box apply when the box restarts</span><button class="primary" id="bs-go">Save</button></div>
     </div>
   </div>
 
@@ -2508,7 +2508,16 @@ function pressRestart(name) { return needsWholeRestart(name) ? restartBox(name) 
 // What each reason the row gives (`stale`, `fleet::why_cover_is_stale`'s keys) means to the person
 // it happened to. A key this page has no words for reads as the last update, which is what every
 // one of them is in the end: a start-time decision skein would now make differently.
-const RESTART_REASONS = { launcher: "the last update", peers: "peer messaging was changed" };
+const RESTART_REASONS = {
+  launcher: "the last update",
+  peers: "peer messaging was changed",
+  // SKEIN-1331: the rest of what the launcher decides at start, each a switch in Box settings or a
+  // repository's settings that a running box does not see until it restarts.
+  scope: "its GitHub access was changed",
+  workshop: "its workshop setting was changed",
+  exposure: "its repository was added or removed",
+  telemetry: "the telemetry setting was changed",
+};
 function staleReasons(name) {
   const said = (boxes.find(b => b.name === name)?.stale || []).map(k => RESTART_REASONS[k]).filter(Boolean);
   return said.length ? [...new Set(said)] : [RESTART_REASONS.launcher];
@@ -2659,13 +2668,16 @@ function updateRow(el, b, showRepo) {
   // start, and the box keeps them until the whole box restarts — so the row says so, in the words
   // of what to do (SKEIN-1326). The box's Restart button is what does it: it restarts the whole box
   // for exactly the rows that show this. No click handler on the hint itself: the button asks first.
+  // A setting changed since it started says "restart to apply" instead, with the reason in the
+  // hint (SKEIN-1331): the setting saved, and this box goes on running with the old one.
   const cw = el.querySelector(".covwarn");
   const older = b.cover === "older";
-  cw.textContent = older ? "restart to update" : "";
+  const updateOnly = (b.stale || []).every(k => k === "launcher");
+  cw.textContent = older ? (updateOnly ? "restart to update" : "restart to apply") : "";
   cw.style.display = older ? "" : "none";
   cw.title = older
-    ? "this box started before the last update, and keeps the setup it started with — its mounts "
-      + "and isolation — until the whole box restarts. Open it and press Restart: it restarts the "
+    ? `this box started before ${staleReasons(b.name).join(" and before ")}, and keeps what it `
+      + "started with until the whole box restarts. Open it and press Restart: it restarts the "
       + "whole box, after asking. Its files and conversation stay."
     : "";
   // What bounds this box's memory, which was invisible until the launcher started reporting it:

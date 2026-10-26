@@ -1185,6 +1185,58 @@ mod tests {
         );
     }
 
+    /// **A box still running scoped keeps its tokens until it restarts** (SKEIN-1331). It started
+    /// with `SKEIN_GIT_TOKENS` set and the fleet-wide token removed, so taking its tokens would
+    /// leave it able to push nowhere, its own repo included, until somebody restarted it.
+    ///
+    /// The box is "running" the way the liveness sweep decides it: its anchor is this test
+    /// process, stamped with the real boot id and start time. What would make it fail: deleting
+    /// `held_scoped` from `refresh_tokens` (the token goes at once); holding for a record that
+    /// started at fleet scope, or for a box that is not running (the second half keeps it).
+    #[test]
+    fn un_scoping_a_running_box_holds_its_tokens_until_it_restarts() {
+        let (_lock, home, mut env) = fresh_home();
+        let _warden = crate::testutil::no_warden();
+        env.set("SKEIN_FLEET_ROOT", home.as_ref() as &std::path::Path);
+        set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        set_credential_token("mine", "skein-test-pat-XYZ").unwrap();
+        let path = box_holding("worker", "a/one");
+        let started_scoped = |ns_start: u64| crate::place::PlaceRecord {
+            sandbox: crate::place::fleet_sandbox(),
+            ns_pid: std::process::id(),
+            generation: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .unwrap()
+                .trim()
+                .to_string(),
+            ns_start,
+            scoped: Some(true),
+            ..Default::default()
+        };
+        let own_start = crate::place::parse_proc_starttime(
+            &std::fs::read_to_string("/proc/self/stat").unwrap(),
+        )
+        .unwrap();
+        crate::place::record_place("worker", &started_scoped(own_start)).unwrap();
+        crate::fleet::forget_fleet_liveness();
+
+        set_box_scope("worker", Some("fleet")).unwrap();
+        let problems = refresh_tokens("worker");
+        assert!(
+            path.exists(),
+            "a box still running scoped lost its tokens the moment it was un-scoped: {problems:?}"
+        );
+
+        // Stopped — the anchor names a process that started at another time — and the next
+        // refresh withdraws them, as an un-scope always did.
+        crate::place::record_place("worker", &started_scoped(own_start + 1)).unwrap();
+        crate::fleet::forget_fleet_liveness();
+        let problems = refresh_tokens("worker");
+        assert!(
+            !path.exists(),
+            "a stopped box kept the tokens of a scope it no longer has: {problems:?}"
+        );
+    }
+
     /// A token is never world-readable, not even for the instant between write and chmod.
     ///
     /// `write_atomic` creates its temp with the umask and would be chmodded afterwards, which is the

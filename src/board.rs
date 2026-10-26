@@ -289,7 +289,13 @@ pub fn load_views() -> Vec<BoxView> {
                     false => "older".to_string(),
                 },
                 stale,
-                scoped: scopable.then(|| crate::gitgate::box_is_scoped(&name)),
+                scoped: scopable.then(|| {
+                    record
+                        .as_ref()
+                        .filter(|_| live == Some(Liveness::Running))
+                        .and_then(|rec| rec.scoped)
+                        .unwrap_or_else(|| crate::gitgate::box_is_scoped(&name))
+                }),
                 disk_mb: usage.get(&name).copied(),
                 disk_limit_mb: usage.get(&name).and(box_disk_limit(&name)),
             }
@@ -424,7 +430,8 @@ pub struct BoxView {
     pub cover: String,
     /// Why [`Self::cover`] reads `"older"`: the start-time decisions this box was born with that are
     /// not the ones skein would make now — `fleet::why_cover_is_stale`'s keys (`"launcher"`,
-    /// `"peers"`), and `["launcher"]` for a running box with no placement record. Empty exactly when
+    /// `"peers"`, `"scope"`, `"workshop"`, `"exposure"`, `"telemetry"`), and `["launcher"]` for a running box
+    /// with no placement record. Empty exactly when
     /// `cover` is. The cockpit's Restart restarts the whole box for a non-empty one and says which
     /// reason it is (SKEIN-1326).
     #[serde(default)]
@@ -452,6 +459,11 @@ pub struct BoxView {
     /// a push inside the box and reading the 403. Three-valued for the same reason `legacy` is
     /// suppressed on an unadopted host — badging every row before the distinction exists would
     /// label the normal case as the odd one.
+    ///
+    /// **What a running box STARTED with**, when its launcher said (SKEIN-1331): the scope is built
+    /// at start and a running box keeps it, so a tag that followed the switch would tell somebody a
+    /// box is scoped while it still holds the fleet-wide credential. The switch's new position is
+    /// on the row as a `"scope"` reason in [`Self::stale`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scoped: Option<bool>,
     /// MiB this box occupies on the fleet's shared disk, and what it is allowed. Absent for a box

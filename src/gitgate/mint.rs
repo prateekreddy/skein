@@ -281,7 +281,15 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     // App token that self-heals within the hour; a stored PAT is returned verbatim by [`mint_token`]
     // and expires when its owner said it would, which may be next year. "Stop scoping this box" has
     // to mean the credentials go, not that they stop being refreshed.
-    if !box_is_scoped(box_name) {
+    //
+    // **Except from a box still running scoped** (SKEIN-1331). Scope is decided at start: a running
+    // box that started scoped has `SKEIN_GIT_TOKENS` set and the sandbox-wide token removed, so
+    // taking its tokens now leaves it able to push nowhere at all, its own repo included, until it
+    // restarts. It keeps them, refreshed, until then; its row says "restart to apply", and the
+    // restart is what withdraws them.
+    let held_scoped =
+        || crate::fleet::running_record(box_name).is_some_and(|rec| rec.scoped == Some(true));
+    if !box_is_scoped(box_name) && !held_scoped() {
         // Everything goes, which is the largest withdrawal there is — so it is reported, and only
         // when there was something to take: an unscoped box is refreshed on every pass and has no
         // tokens on all but the first.

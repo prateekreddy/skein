@@ -488,6 +488,19 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
         let launched = own_sandbox(FLEET)
             .exec(&script, Duration::from_secs(60))
             .unwrap_or_else(|e| panic!("start the {case} box: {e}"));
+        // What the launcher says it decided, which the placement record keeps and the board
+        // compares with the configuration (SKEIN-1331): the scope each case was given, the cover
+        // an unmatched name gets, and no telemetry plugin. What would make these fail: the
+        // launcher not printing them, or printing the switch's input rather than its decision.
+        assert_eq!(
+            (
+                skein::fleet::scope_from_launch(&launched),
+                skein::fleet::exposure_from_launch(&launched).as_deref(),
+                skein::fleet::telemetry_from_launch(&launched),
+            ),
+            (Some(case != "fleet"), Some("uncovered"), Some(false)),
+            "the {case} box's launcher did not report what it decided: {launched:?}"
+        );
         let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
         let ns_start = sh(&format!(
             "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"

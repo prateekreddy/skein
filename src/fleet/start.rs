@@ -767,6 +767,10 @@ fn start_box_inner(
             launcher,
             ceiling,
             peers,
+            // `None` on the adoption branch, for `peers`'s reason (SKEIN-1331).
+            scoped: launched.as_deref().and_then(scope_from_launch),
+            exposure: launched.as_deref().and_then(exposure_from_launch),
+            telemetry: launched.as_deref().and_then(telemetry_from_launch),
             // Threaded from the caller rather than defaulted, because this is the one place in
             // the tree where the answer is *decided* rather than copied: everything else that
             // builds a record is a fixture. The guard at the top of this function is what stops it
@@ -986,6 +990,9 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             launcher: launcher_from_launch(&out),
             ceiling: limits_from_launch(&out),
             peers: peers_from_launch(&out),
+            scoped: scope_from_launch(&out),
+            exposure: exposure_from_launch(&out),
+            telemetry: telemetry_from_launch(&out),
             ..record.clone()
         },
     )?;

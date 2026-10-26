@@ -1763,6 +1763,9 @@ PY
   fi
   unset telemetry_rc
 fi
+# What this box was BORN with, reported the way `SKEIN_PEERS` is and for its reason: the setting is
+# written into the box only here, so a running box keeps it until it restarts (SKEIN-1331).
+case "$skein_telemetry" in 1|on|yes|true) printf 'SKEIN_TELEMETRY 1\n' ;; *) printf 'SKEIN_TELEMETRY 0\n' ;; esac
 unset skein_telemetry SKEIN_BOX_TELEMETRY
 
 # $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
@@ -2611,7 +2614,15 @@ if [ -n "$announce" ]; then
   # non-zero has its stderr turned into the error text, which is the one case that always worked.
   echo "skein: $announce" >&2
 fi
-unset uncovered
+# And the two other decisions built only here, reported for the same reason (SKEIN-1331): which
+# cover the box got — the words are `fleet::Exposure::spelled` — and whether it is scoped to its own
+# repository on GitHub (the block below; anything but `fleet` is scoped, as it decides).
+exposure=covered
+[ "${uncovered-}" = "1" ] && exposure=uncovered
+[ "${SKEIN_BOX_PRIVILEGED-}" = "1" ] && exposure=workshop
+printf 'SKEIN_EXPOSURE %s\n' "$exposure"
+case "${SKEIN_GIT_SCOPE-repo}" in fleet) printf 'SKEIN_SCOPE fleet\n' ;; *) printf 'SKEIN_SCOPE repo\n' ;; esac
+unset uncovered exposure
 
 # --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------
 #
