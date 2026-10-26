@@ -20,6 +20,7 @@
 //!     removes only those that are still on a list worked out again at that moment.
 
 use super::*;
+use std::path::Path;
 
 /// One thing in a box that can be removed and made again, with its size.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -73,12 +74,12 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
 
     for rel in DOWNLOAD_CACHES {
         let path = home.join(rel);
-        if is_real_dir(&path, dev) {
+        if real_all_the_way(&box_dir, &path, dev) {
             found.push((path, "download cache"));
         }
     }
     found.extend(
-        ended_scratchpads(&home, dev)
+        ended_scratchpads(&box_dir, &home, dev)
             .into_iter()
             .map(|p| (p, "scratchpad")),
     );
@@ -101,7 +102,7 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
             path: path.display().to_string(),
             kind,
         })
-        .filter(|c| c.bytes > 0)
+        .filter(|c| c.bytes > 0 && real_all_the_way(&box_dir, Path::new(&c.path), dev))
         .collect();
     out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
     Ok(out)
@@ -162,8 +163,24 @@ pub(crate) fn clean_box_given(
                 .join(", ")
         ));
     }
+    let box_dir = Path::new(&fleet_root()).join(name);
+    let dev = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(&box_dir)
+            .map(|m| m.dev())
+            .map_err(|e| format!("{name} has no directory in this fleet ({e})"))?
+    };
     let mut done = Cleaned::default();
     for c in now.iter().filter(|c| paths.contains(&c.path)) {
+        // Again, at the moment of removal: a link put into the chain since the list was made
+        // must not lead the removal out of this box.
+        if !real_all_the_way(&box_dir, Path::new(&c.path), dev) {
+            done.failed.push((
+                c.path.clone(),
+                "part of this path is now a link, so skein left it alone".to_string(),
+            ));
+            continue;
+        }
         match std::fs::remove_dir_all(&c.path) {
             Ok(()) => {
                 done.removed.push(c.path.clone());
@@ -175,7 +192,33 @@ pub(crate) fn clean_box_given(
     Ok(done)
 }
 
-/// A directory, not a link to one, on the box directory's own device.
+/// Whether every component from `box_dir` down to `path` is a real directory on `dev`, never a
+/// link. Checking only the last component is not enough: `symlink_metadata` follows every
+/// component before the last, so a box that made its own `~/.cache` a link to another box's home
+/// or into the store would have had that directory offered, and removed, as its own.
+fn real_all_the_way(box_dir: &Path, path: &Path, dev: u64) -> bool {
+    let Ok(rel) = path.strip_prefix(box_dir) else {
+        return false;
+    };
+    if !is_real_dir(box_dir, dev) {
+        return false;
+    }
+    let mut at = box_dir.to_path_buf();
+    for part in rel.components() {
+        match part {
+            std::path::Component::Normal(p) => at.push(p),
+            _ => return false,
+        }
+        if !is_real_dir(&at, dev) {
+            return false;
+        }
+    }
+    true
+}
+
+/// A directory, not a link to one, on the box directory's own device. About the last component
+/// only: callers either walk down from the box directory one component at a time, or use
+/// [`real_all_the_way`].
 fn is_real_dir(path: &std::path::Path, dev: u64) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && m.dev() == dev)
@@ -188,9 +231,12 @@ fn is_real_dir(path: &std::path::Path, dev: u64) -> bool {
 /// under `~/.claude/projects/` is what `--continue` resumes, and its file name is the session id
 /// the scratchpad directory is named for. Where no transcript can be read, the newest scratchpad
 /// directory is kept instead, so an unreadable conversation never costs the live one its files.
-fn ended_scratchpads(home: &std::path::Path, dev: u64) -> Vec<std::path::PathBuf> {
+fn ended_scratchpads(box_dir: &Path, home: &Path, dev: u64) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let scratch = home.join(MODEL_SCRATCH);
+    if !real_all_the_way(box_dir, &scratch, dev) {
+        return out;
+    }
     for uid_dir in real_subdirs(&scratch, dev) {
         for project in real_subdirs(&uid_dir, dev) {
             let sessions = real_subdirs(&project, dev);
@@ -447,6 +493,79 @@ mod tests {
             home.join("shared/target/.rustc_info.json"),
         ] {
             assert!(kept.exists(), "the clean removed {}", kept.display());
+        }
+    }
+
+    /// **Nothing reached through a link anywhere in its path is offered or removed.**
+    ///
+    /// A box owns its home, so it can make `~/.cache` a link to another box's home, or
+    /// `~/.cache/skein` a link to somewhere else. Both targets are on the same device.
+    ///
+    /// What would make it fail: checking only the last component of a candidate, which is what
+    /// `symlink_metadata` alone does — it follows every component before the last. Watched: with
+    /// `real_all_the_way` reduced to `is_real_dir(path, dev)`, the other box's `pip` and its
+    /// scratchpad were offered, and the clean removed them.
+    #[test]
+    fn nothing_behind_a_link_in_the_path_is_offered_or_removed() {
+        let _lock = env_lock();
+        let dir = tempdir();
+        let base: &Path = dir.as_ref();
+        let root = base.join("fleet");
+        let mut pins = env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &root);
+        pins.set("SKEIN_HOME", base.join("skein"));
+        let victim = root.join("other-main/home/.cache");
+        put(&victim.join("pip/wheel"));
+        put(&victim.join("ms-playwright/chromium-1/chrome"));
+        put(&victim.join("skein/claude/claude-1000/-proj/older/scratchpad/notes"));
+        put(&victim.join("skein/claude/claude-1000/-proj/newer/scratchpad/notes"));
+        let older = victim.join("skein/claude/claude-1000/-proj/older");
+        std::fs::File::open(&older)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+            .unwrap();
+
+        // `~/.cache` itself is a link to the other box's.
+        let whole = root.join("whole-main/home");
+        std::fs::create_dir_all(&whole).unwrap();
+        std::os::unix::fs::symlink(&victim, whole.join(".cache")).unwrap();
+        // `~/.cache` is real, and `~/.cache/skein` is a link to the other box's.
+        let part = root.join("part-main/home/.cache");
+        std::fs::create_dir_all(&part).unwrap();
+        std::os::unix::fs::symlink(victim.join("skein"), part.join("skein")).unwrap();
+
+        for name in ["whole-main", "part-main"] {
+            let offered = box_cleanables(name).expect("a box with a directory is answerable");
+            assert!(
+                offered.is_empty(),
+                "{name} offered what a link in its path leads to: {offered:?}"
+            );
+        }
+        for (name, path) in [
+            ("whole-main", whole.join(".cache/pip")),
+            ("whole-main", whole.join(".cache/ms-playwright")),
+            (
+                "part-main",
+                part.join("skein/claude/claude-1000/-proj/older"),
+            ),
+        ] {
+            let asked = vec![path.display().to_string()];
+            let refused = clean_box_given(name, &asked, Some(false));
+            assert!(
+                refused.is_err(),
+                "{name}: a clean of {path:?} went ahead: {refused:?}"
+            );
+        }
+        for kept in [
+            victim.join("pip/wheel"),
+            victim.join("ms-playwright/chromium-1/chrome"),
+            victim.join("skein/claude/claude-1000/-proj/older/scratchpad/notes"),
+        ] {
+            assert!(
+                kept.exists(),
+                "a clean through a link removed {}",
+                kept.display()
+            );
         }
     }
 
