@@ -2505,17 +2505,18 @@ function askRestart(name, label) {
 // everything in the box, and says why it is the one on offer.
 function needsWholeRestart(name) { return boxes.find(b => b.name === name)?.cover === "older"; }
 function pressRestart(name) { return needsWholeRestart(name) ? restartBox(name) : restartAgent(name); }
-const RESTART_BOX_COST = "This box started before the last update, so restarting Claude alone won't "
-  + "pick it up. Restarting the box stops everything running in it — Claude, its shell and anything "
+// The coordinator's words, with the box's own agent named in them: "Claude" on a Claude box.
+const restartBoxCost = label => `This box started before the last update, so restarting ${label} alone won't `
+  + `pick it up. Restarting the box stops everything running in it — ${label}, its shell and anything `
   + "left running in the background — and starts it again. Its files and conversation stay.";
-function askRestartBox(name) {
+function askRestartBox(name, label) {
   return new Promise(answer => {
     document.getElementById("rsask")?.remove();
     const el = document.createElement("div");
     el.id = "rsask"; el.className = "open";
     el.innerHTML = `<div class="nb-card" style="max-width:440px">`
       + `<div class="nb-head"><b>Restart ${esc(name)}?</b></div>`
-      + `<div class="rs-body">${esc(RESTART_BOX_COST)}</div>`
+      + `<div class="rs-body">${esc(restartBoxCost(label))}</div>`
       + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
       + `<button type="button" class="primary" data-a="yes">Restart box</button></div></div>`;
     const done = yes => { el.classList.remove("open"); setTimeout(() => el.remove(), 0); answer(yes); };
@@ -2535,7 +2536,7 @@ function askRestartBox(name) {
 async function restartBox(name) {
   if (restartingAgents.has(name)) return;
   const runtime = activeSession()?.box === name ? activeSession().runtime : agentOf(name);
-  if (!(await askRestartBox(name))) return;
+  if (!(await askRestartBox(name, runtimeLabel(runtime)))) return;
   if (restartingAgents.has(name)) return;
   restartingAgents.add(name);
   startActing(name, "restarting");
