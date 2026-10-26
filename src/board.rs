@@ -875,7 +875,34 @@ mod tests {
              with it, which asks for a restart that would tell nobody anything new"
         );
 
+        // **A running box with no placement record at all** — every box started before records
+        // existed. Nothing said which launcher made it, so it reads older, for the launcher, and
+        // the cockpit's Restart restarts it whole (SKEIN-1326). It reaches the board as the box
+        // this server runs in (`$SKEIN_SELF`), and with no record its liveness is `sbx ls`'s
+        // answer (`sbx::box_liveness`), which says running.
+        // What would make this fail: the `(true, None)` arm in `load_views` answering no reasons —
+        // the row then reads current and Restart restarts only the agent.
         forget_place("demo-task");
+        env::set_var("SKEIN_SELF", "demo-task");
+        env::set_var(
+            "SKEIN_LS_CMD",
+            "echo '[{\"name\":\"skein-fleet\"},{\"name\":\"demo-task\",\"status\":\"running\"}]'",
+        );
+        crate::sbx::forget_fleet_boxes();
+        let unrecorded = {
+            crate::fleet::disturbing_liveness(|| ());
+            load_views()
+                .into_iter()
+                .find(|v| v.name == "demo-task")
+                .expect("the box this server runs in is on the board")
+        };
+        env::remove_var("SKEIN_SELF");
+        assert_eq!(
+            (unrecorded.cover.as_str(), unrecorded.stale.clone()),
+            ("older", vec!["launcher".to_string()]),
+            "a running box with no placement record was read as started under the current launcher"
+        );
+
         env::remove_var("SKEIN_FLEET_ROOT");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
