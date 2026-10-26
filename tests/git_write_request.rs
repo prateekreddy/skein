@@ -79,6 +79,11 @@ impl Box_ {
 
     /// Ask the helper for a credential exactly as git does.
     fn credential(&self, host: &str, path: &str) -> String {
+        self.credential_said(host, path).0
+    }
+
+    /// [`Box_::credential`], with what the helper said on stderr.
+    fn credential_said(&self, host: &str, path: &str) -> (String, String) {
         use std::io::Write;
         let mut child = Command::new("sh")
             .arg(script("git-credential-skein.sh"))
@@ -86,6 +91,7 @@ impl Box_ {
             .env("SKEIN_GIT_TOKENS", &self.tokens)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("the helper to run");
         write!(
@@ -94,7 +100,11 @@ impl Box_ {
         )
         .unwrap();
         let out = child.wait_with_output().unwrap();
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        assert!(out.status.success(), "the helper failed: {out:?}");
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
     }
 
     /// Run `box-session.sh --request-write` the way the git shim runs it: the box's own name baked
@@ -211,6 +221,39 @@ fn a_repo_with_no_token_gets_nothing_rather_than_a_token_that_cannot_work() {
         "",
         "a repo with no token must get no credential at all"
     );
+}
+
+/// **A GitHub repository with no token here is named on stderr, with the fix, and nothing else is
+/// said** (SKEIN-1339). git asks only after GitHub refused a request with no credential, and its own
+/// "could not read Username" named neither cause nor fix — 33 of them in a month, 14 fetching a
+/// submodule from another repository.
+///
+/// What would make each assertion fail: the line dropped (stderr empty); the helper answering with
+/// some other token (stdout not empty); the line naming a repository or token other than the one
+/// git asked about (`acme`, either token); the line said for a repository it does have a token
+/// for, or for a host that is not GitHub.
+#[test]
+fn a_github_repo_with_no_token_is_named_on_stderr_and_nothing_else_is() {
+    let b = Box_::new("named");
+    b.place_token("acme/thing", "APP-TOKEN-FOR-THING");
+    b.place_read("acme", "READ-ACME");
+
+    let (out, err) = b.credential_said("github.com", "other-org/sub.git");
+    assert_eq!(out, "", "a repo with no token must still get no credential");
+    assert_eq!(
+        err,
+        "skein: this box has no GitHub token for other-org/sub, so git cannot sign in to it. To \
+         reach it, ask the person to add other-org/sub as a repo in the cockpit, share a write \
+         token with it from its card, or store a read-only token under Settings → GitHub & keys.\n"
+    );
+    assert!(
+        !err.contains("acme") && !err.contains("APP-TOKEN") && !err.contains("READ-ACME"),
+        "{err}"
+    );
+
+    assert_eq!(b.credential_said("github.com", "acme/thing.git").1, "");
+    assert_eq!(b.credential_said("github.com", "acme/other.git").1, "");
+    assert_eq!(b.credential_said("gitlab.com", "a/b.git").1, "");
 }
 
 #[test]
