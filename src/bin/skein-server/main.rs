@@ -527,6 +527,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/resume-batch", post(api_resume_batch))
         .route("/api/boxes/:name/stop", post(api_stop))
         .route("/api/boxes/:name/destroy", post(api_destroy))
+        .route("/api/boxes/:name/clean", get(api_cleanable).post(api_clean))
         .route(
             "/api/boxes/:name/upload",
             // Attachments (screenshots, PDFs, videos, whole folders) dwarf axum's 2 MB default body

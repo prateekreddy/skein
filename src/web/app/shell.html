@@ -165,6 +165,9 @@
       <label class="nb-lbl">disk allowance</label>
       <input id="bs-disk" autocomplete="off" spellcheck="false" />
       <div class="ar-derived" id="bs-note"></div>
+      <!-- How much of this box is caches and scratch, and the clean (SKEIN-1341). Filled from
+           GET /api/boxes/:name/clean, which walks the box, so it arrives after the rest. -->
+      <div class="ar-derived" id="bs-diskuse"></div>
       <label class="nb-lbl">github access</label>
       <select id="bs-gitscope"></select>
       <div class="ar-derived" id="bs-gitscope-note"></div>
@@ -181,6 +184,7 @@
       <div class="bs-actions">
         <button type="button" class="kbtn ghost" id="bs-wire"></button>
         <button type="button" class="kbtn ghost" id="bs-take"></button>
+        <button type="button" class="kbtn ghost" id="bs-clean" hidden></button>
       </div>
       <div class="ar-msg" id="bs-msg" style="display:none;white-space:pre-line"></div>
       <div class="nb-foot"><span class="hint">disk allowance and work tracking apply now; commit as, github access and workshop box apply when the box restarts</span><button class="primary" id="bs-go">Save</button></div>

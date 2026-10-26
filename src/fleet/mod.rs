@@ -58,6 +58,7 @@ use chrono::Utc;
 use std::time::Duration;
 
 mod checkout;
+mod clean;
 mod containers;
 mod create;
 mod credentials;
@@ -86,6 +87,7 @@ mod transcript;
 mod unowned;
 
 pub use checkout::*;
+pub use clean::*;
 pub use containers::*;
 pub use create::*;
 use credentials::*;

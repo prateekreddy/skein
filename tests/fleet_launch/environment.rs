@@ -959,6 +959,138 @@ fn every_box_finds_the_shared_toolchain_and_none_can_change_it() {
     }
 }
 
+/// **`cargo install` works in a box, and what it installs is on the box's PATH** (SKEIN-1349).
+///
+/// SKEIN-1337 bound the fleet's toolchain `bin` read-only over every box's `~/.cargo/bin`, which is
+/// where `cargo install` puts a program by default, so every install failed. The session block now
+/// points `CARGO_INSTALL_ROOT` at `~/.local`. This runs the real `cargo` that is running this test,
+/// reached through a fixture toolchain laid out as `bootstrap.sh` lays out the fleet's, and installs
+/// a one-file crate offline in an ordinary box.
+///
+/// What would make it fail: dropping `CARGO_INSTALL_ROOT` from the session block's export (cargo
+/// then writes into the read-only `~/.cargo/bin` and the install fails), or pointing it anywhere
+/// that is not on `box_path`. And the last assertion: an install that reached the SANDBOX's own
+/// `~/.local/bin`, which every box runs, rather than the box's copy-on-write view of it.
+#[test]
+fn cargo_install_in_a_box_lands_on_its_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    let real_cargo = PathBuf::from(env!("CARGO"));
+    let real_rustc = real_cargo.with_file_name("rustc");
+    if !bwrap_works() || !have("tmux") || !real_rustc.is_file() {
+        return skip(
+            "this machine cannot make a bwrap namespace, lacks tmux, or has no rustc beside the \
+             cargo running this test, so it cannot install a crate in a box",
+        );
+    }
+    let root = scratch_named("cargoinst");
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"));
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    let toolchain = root.join("boxes/.skein/toolchain");
+    let bin = toolchain.join("cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(toolchain.join("rustup")).unwrap();
+    fs::write(
+        bin.join("cargo"),
+        format!(
+            "#!/bin/sh\nRUSTC='{}' exec '{}' \"$@\"\n",
+            real_rustc.display(),
+            real_cargo.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let krate = root.join("hello");
+    fs::create_dir_all(krate.join("src")).unwrap();
+    fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"skein-test-hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [workspace]\n",
+    )
+    .unwrap();
+    fs::write(
+        krate.join("src/main.rs"),
+        "fn main() { println!(\"skein-test-installed\"); }\n",
+    )
+    .unwrap();
+
+    let name = "cargoinst-main";
+    let agent = format!(
+        "{{ cargo install --path '{}' --offline --target-dir /tmp/hello-target > /tmp/ci.log 2>&1; \
+           printf 'rc %s\\n' \"$?\"; \
+           printf 'found %s\\n' \"$(command -v skein-test-hello)\"; \
+           printf 'runs %s\\n' \"$(skein-test-hello 2>&1)\"; \
+           printf 'log %s\\n' \"$(tail -3 /tmp/ci.log | tr '\\n' ' ')\"; \
+         }} > /tmp/ci.tmp && mv /tmp/ci.tmp /tmp/ci.report; exec sleep 300",
+        krate.display()
+    );
+    let script = session_script(name, "skein-agent", &agent);
+    let launched = own_sandbox(FLEET)
+        .exec(&script, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("start the box: {e}"));
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+    let report_path = PathBuf::from(format!("{}/tmp/ci.report", box_root(name)));
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while !report_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let report = fs::read_to_string(&report_path).unwrap_or_default();
+    let limits = fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+    let _ = Command::new("tmux")
+        .args(["-S", &box_sock(name), "kill-server"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    anchor_gone(anchor);
+    if limits.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .status();
+    }
+
+    let field = |key: &str| {
+        report
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{key} ")))
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(
+        field("rc"),
+        "0",
+        "`cargo install` failed in a box: {report:?}"
+    );
+    assert_eq!(
+        field("found"),
+        sandbox_home
+            .join(".local/bin/skein-test-hello")
+            .display()
+            .to_string(),
+        "what `cargo install` put in a box is not on its PATH from ~/.local/bin: {report:?}"
+    );
+    assert_eq!(
+        field("runs"),
+        "skein-test-installed",
+        "the installed program does not run in the box: {report:?}"
+    );
+    assert!(
+        !sandbox_home.join(".local/bin/skein-test-hello").exists(),
+        "a box's `cargo install` landed in the sandbox's own ~/.local/bin, which every box runs"
+    );
+}
+
 /// A report of `<key> <value>` lines fit to print in a failure message: a value that is one of
 /// this file's own `skein-test-` sentinels, or `none`, is shown; anything else is a credential the
 /// machine supplied, and only its length is (SKEIN-1342).

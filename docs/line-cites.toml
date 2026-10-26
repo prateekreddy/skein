@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:615"]
+["src/bin/skein-server/main.rs:616"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:625"]
+["src/bin/skein-server/main.rs:626"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:716"]
+["src/bin/skein-server/main.rs:717"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:722"]
+["src/bin/skein-server/main.rs:723"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -874,23 +874,23 @@ cited_by = ["docs/threat-model.md"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2789"]
+["src/box-session.sh:2790"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2917"]
+["src/box-session.sh:2918"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3360"]
+["src/box-session.sh:3361"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3419"]
+["src/box-session.sh:3420"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3460"]
+["src/box-session.sh:3461"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1912,19 +1912,9 @@ line = "return Err(format!("
 window = "if !users.is_empty() {\u000breturn Err(format!(\u000b\"{} still {} it — point {} at another connection first\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1055"]
-line = "return Err(format!(\"{name} is not running\"));"
-window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/tracking.rs:954"]
 line = "return Err(format!("
 window = "if base.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
-cited_by = ["docs/recovery-survey.md"]
-
-["src/tracking.rs:1177"]
-line = "return Err(format!(\"{name} is not running\"));"
-window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/tracking.rs:1043"]
@@ -1937,9 +1927,19 @@ line = "return Err(format!("
 window = "if connection_token(&conn.id).is_none() {\u000breturn Err(format!(\u000b\"no Plane token stored for {} — add it in Settings → Work tracking\","
 cited_by = ["docs/recovery-survey.md"]
 
+["src/tracking.rs:1055"]
+line = "return Err(format!(\"{name} is not running\"));"
+window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/tracking.rs:1104"]
 line = "Err(format!("
 window = "let last = report.trim().lines().last().unwrap_or(\"\").trim();\u000bErr(format!(\u000b\"token written, but registration did not confirm{} — the box can still be registered by hand against {}\","
+cited_by = ["docs/recovery-survey.md"]
+
+["src/tracking.rs:1177"]
+line = "return Err(format!(\"{name} is not running\"));"
+window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/tracking.rs:1287"]
@@ -2296,7 +2296,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:1434"]
+["src/web/app/settings.js:1501"]
 line = "arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, \"warn\");"
 cited_by = ["docs/recovery-survey.md"]
 

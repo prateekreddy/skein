@@ -788,6 +788,45 @@ pub(super) async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Va
     })
 }
 
+/// What in a stopped box can be removed and made again, and whether the box is running
+/// (SKEIN-1341). Walks the box's download caches, build directories and scratchpads, so it is
+/// asked for when a box's settings open and never on the board's tick.
+pub(super) async fn api_cleanable(Path(name): Path<String>) -> Response {
+    let r = tokio::task::spawn_blocking(move || {
+        let items = skein::fleet::box_cleanables(&name)?;
+        let running = skein::fleet::fleet_liveness().get(&name).copied();
+        let total_mb = skein::fleet::fleet_disk_usage().get(&name).copied();
+        Ok::<_, String>(serde_json::json!({
+            "items": items,
+            "running": running,
+            "total_mb": total_mb,
+        }))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct CleanReq {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+/// Remove what the person confirmed from a stopped box: only paths still on the list, and never
+/// from a running box (`fleet::clean_box`).
+pub(super) async fn api_clean(Path(name): Path<String>, Json(r): Json<CleanReq>) -> Response {
+    let done = tokio::task::spawn_blocking(move || skein::fleet::clean_box(&name, &r.paths)).await;
+    match done {
+        Ok(Ok(d)) => Json(d).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
