@@ -862,6 +862,10 @@ cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.m
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
+["src/box-session.sh:2380"]
+line = "box_shared_home=\"${SKEIN_BOX_STORE%/*}/shared-home\""
+cited_by = ["docs/decisions/shared-home-outside-claude.md"]
+
 ["src/box-session.sh:2541"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
