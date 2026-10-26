@@ -120,7 +120,9 @@ set -uo pipefail
 # Boxes remain one trust domain for their STATE — §9.2 says so and it is still true — but the
 # domain's membership is no longer writable from inside it (SKEIN-963, SKEIN-968).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH"
+# The third entry is `~/.cargo/bin`, where the fleet's shared Rust toolchain is bound read-only
+# (SKEIN-1337, "the fleet's Rust toolchain" below). Ahead of the fixed six, which still end it.
+box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.cargo/bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
 #
 # Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
@@ -705,7 +707,7 @@ fi
 # would name the two that were noticed and pass the next one; this names what a box needs.
 #
 # Unaffected by this, on purpose (the owner's decision on SKEIN-972): what the launcher EXPORTS
-# after this point (SKEIN_BOX, SKEIN_STATE, PATH, SKEIN_GIT_TOKENS, GH_TOKEN, NO_PROXY and the rest),
+# after this point (SKEIN_BOX, SKEIN_STATE, PATH, SKEIN_GIT_TOKENS, NO_PROXY and the rest),
 # and whatever the box's own login profile sets inside the namespace.
 #
 # Measured, not guessed. The sandbox half is the names in the fleet's own environment on
@@ -756,7 +758,7 @@ inherited_env=(
   XAI_API_KEY SBX_CRED_ANTHROPIC_MODE SBX_CRED_OPENAI_MODE SBX_CRED_GOOGLE_MODE SBX_CRED_MISTRAL_MODE
   SBX_CRED_NEBIUS_MODE SBX_CRED_OPENROUTER_MODE SBX_CRED_XAI_MODE
   # The sandbox's `github` secret. A `fleet`-scoped box keeps it on purpose; a scoped box has it
-  # replaced by its own-repo token or removed, further down.
+  # removed further down, and reads its own-repo token from a file on every call instead.
   GH_TOKEN
   # The sandbox's MCP gateway, which the runtimes' MCP servers are reached through.
   MCP_GATEWAY_URL MCP_SENTINEL_TOKEN_NAME
@@ -1761,6 +1763,9 @@ PY
   fi
   unset telemetry_rc
 fi
+# What this box was BORN with, reported the way `SKEIN_PEERS` is and for its reason: the setting is
+# written into the box only here, so a running box keeps it until it restarts (SKEIN-1331).
+case "$skein_telemetry" in 1|on|yes|true) printf 'SKEIN_TELEMETRY 1\n' ;; *) printf 'SKEIN_TELEMETRY 0\n' ;; esac
 unset skein_telemetry SKEIN_BOX_TELEMETRY
 
 # $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
@@ -2614,6 +2619,16 @@ esac
 printf 'SKEIN_PEERS %s\n' "$peers"
 unset runtime_dir peer_socks peers
 
+# And the two other decisions built only here, reported for the same reason (SKEIN-1331): which
+# cover the box got — the words are `fleet::Exposure::spelled` — and whether it is scoped to its own
+# repository on GitHub (the GitHub block below; anything but `fleet` is scoped, as it decides).
+exposure=covered
+[ "${uncovered-}" = "1" ] && exposure=uncovered
+[ "${SKEIN_BOX_PRIVILEGED-}" = "1" ] && exposure=workshop
+printf 'SKEIN_EXPOSURE %s\n' "$exposure"
+case "${SKEIN_GIT_SCOPE-repo}" in fleet) printf 'SKEIN_SCOPE fleet\n' ;; *) printf 'SKEIN_SCOPE repo\n' ;; esac
+unset exposure
+
 # A privileged box says so at every start.
 #
 # The whole risk of this switch is forgetting which box carries it: a box that can read every other
@@ -2683,6 +2698,50 @@ if [ -n "$announce" ]; then
   echo "skein: $announce" >&2
 fi
 unset uncovered
+
+# --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------
+#
+# `bootstrap.sh` installs one toolchain under the fleet root's `.skein`, and every box used to say
+# "cargo: command not found" and grow a private `~/.rustup` of its own. Its `bin` is bound over the
+# box's own `~/.cargo/bin`, which `box_path` carries, so a crossing's PATH is still a function of
+# the box's home alone (`place::box_path`); the session block below points `RUSTUP_HOME` at it; and
+# `CARGO_HOME` stays the box's own `~/.cargo`, so the registry and build caches are the box's own.
+# What a box cannot do is `cargo install` into `~/.cargo/bin`, which is the shared one.
+#
+# Read-only in EVERY box: a covered box already sees `.skein` read-only, but the workshop box and an
+# uncovered one see the fleet root as the sandbox does, and one box changing the toolchain would
+# change it under all of them. Owner's decision on SKEIN-1337.
+#
+# `rustup` would then fail on a read-only file system with a message about a settings file. The
+# shim bound over the box's `~/.cargo/bin/rustup` says why instead, for the subcommands that change
+# a toolchain, and runs the real one for everything else (`rustup show`, a bare `rustup default`).
+toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
+if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/null; then
+  binds+=(--ro-bind "$toolchain" "$toolchain")
+  binds+=(--ro-bind "$toolchain/cargo/bin" "$HOME/.cargo/bin")
+  if [ -f "$toolchain/cargo/bin/rustup" ]; then
+    open_new "$bin_at" rustup || exit 1
+    {
+      printf '#!/bin/sh\n'
+      printf 'skein_rustup=%q\n' "$toolchain/cargo/bin/rustup"
+      cat <<'RUSTUPSHIM'
+sub=''; arg=''
+for a in "$@"; do
+  case "$a" in -*|+*) continue ;; esac
+  if [ -z "$sub" ]; then sub=$a; else arg=$a; break; fi
+done
+case "$sub:$arg" in
+  default:?*|install:*|uninstall:*|update:*|upgrade:*|self:*|set:*|toolchain:install|toolchain:uninstall|toolchain:remove|toolchain:link|component:add|component:remove|target:add|target:remove|override:set|override:unset|override:add|override:remove)
+    echo "skein: this box's Rust toolchain is shared by the whole fleet and is read-only, so rustup cannot change it. To use a different toolchain, ask the person who runs the fleet." >&2
+    exit 1 ;;
+esac
+exec "$skein_rustup" "$@"
+RUSTUPSHIM
+    } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
+    binds+=(--ro-bind-fd "$new_fd" "$HOME/.cargo/bin/rustup")
+  fi
+fi
+unset toolchain
 
 # --- GitHub: one repo to write, everything else to read ------------------------------------------
 #
@@ -2775,54 +2834,49 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
   # It holds whatever the sbx `github` secret was set to — for this fleet, a user token reaching 460
   # repositories read and write. Leaving it in place while scoping everything else would mean the
   # isolation held only if its owner had also remembered to swap that secret by hand, and a boundary
-  # that depends on a manual step nobody is reminded of is not a boundary. Replaced below by this
-  # box's own-repo token when the host has placed one; otherwise `gh` simply has no credential,
-  # which is the honest state rather than a borrowed one.
+  # that depends on a manual step nobody is reminded of is not a boundary.
+  #
+  # **And nothing is exported in its place** (SKEIN-1332, the owner's decision). This used to export
+  # the box's own-repo token as `GH_TOKEN`, and an export is a snapshot: every shell, terminal and
+  # agent session in the box descends from the tmux server started at the bottom of this file, and
+  # a crossing copies `GH_TOKEN` out of that server's environment (`place::as_the_session_holds`).
+  # So a key forgotten or replaced in Settings, or a share that ended, went on working from
+  # `$GH_TOKEN` in every running box until it restarted, while git and `gh` had already moved on.
+  # git reads the placed file through the credential helper on every call, and `gh` through the
+  # shim below; anything else that wants the GitHub API uses `gh api`, which the box's guide says.
   unset GH_TOKEN
   if [ -n "${SKEIN_BOX_REPO-}" ]; then
     own_token="$SKEIN_GIT_TOKENS/$(printf '%s' "$SKEIN_BOX_REPO" | sed 's#/#%2F#')"
-    if [ -r "$own_token" ]; then
-      # `gh pr create` and `gh pr comment` against this box's own repo work with this; against any
-      # other repo `gh` is unauthenticated, while git keeps reading through the helper.
-      GH_TOKEN="$(cat "$own_token" 2>/dev/null)"
-      export GH_TOKEN
-    fi
 
-    # **`gh` reads the placed token on every call, not the value exported above** (SKEIN-1240).
+    # **`gh` reads the placed token on every call** (SKEIN-1240).
     #
     # The host rewrites `$own_token` the moment a key is replaced in Settings
-    # (`gitgate::refresh_tokens`), and git sees the new one on its next call because the helper
-    # reads the file each time. The export above is a snapshot: every shell, terminal, Codex or
-    # Claude session in this box descends from the tmux server started at the bottom of this file,
-    # and a crossing copies `GH_TOKEN` out of that server's environment
-    # (`place::as_the_session_holds`), so all of them hold the token as it was when the box started,
-    # for as long as the box runs. The owner's decision on SKEIN-1240: `gh` uses a replaced key
-    # straight away, without reopening anything. So this shim, bound over the real `gh` exactly as
-    # the git shim below is bound over git, sets `GH_TOKEN` from the placed file for each invocation
-    # and execs the real one. With no file placed it unsets `GH_TOKEN`, so `gh` has no credential:
-    # the sandbox-wide token dropped above is gone from this namespace and nothing here brings it
-    # back.
+    # (`gitgate::refresh_tokens`) and removes it when one is forgotten. The owner's decision on
+    # SKEIN-1240: `gh` uses a replaced key straight away, without reopening anything. So this shim,
+    # bound over the real `gh` exactly as the git shim below is bound over git, sets `GH_TOKEN` from
+    # the placed file for each invocation and execs the real one. With no file placed it unsets
+    # `GH_TOKEN`, so `gh` has no credential: the sandbox-wide token dropped above is gone from this
+    # namespace and nothing here brings it back. `gh pr create` and `gh pr comment` against this
+    # box's own repo work with it; against any other repo `gh` is unauthenticated, while git keeps
+    # reading through the helper.
     #
     # **A `GH_TOKEN` somebody set on purpose still wins.** A review crossing exports the owner's own
     # token for one call (`fleet::credentials`) so that `gh` acts as the reviewer, and a person may
     # export one by hand; overriding either would be skein quietly replacing a credential somebody
-    # chose. The stale value is told apart from those by what it is: the shim carries the sha256 of
-    # the value exported above (empty when none was), and only a `GH_TOKEN` matching it, or none at
-    # all, is replaced. That fingerprint is of a token this box can already read in full, so it
-    # tells the box nothing new. A box with no `sha256sum` cannot compare, and keeps the exported
-    # value as before rather than guessing.
-    #
-    # The export above stays, because other things in a box read `$GH_TOKEN` directly (a `curl`
-    # with it, an MCP server), and for them the value from the box's start is still better than
-    # none. They keep the old key until the session is reopened; only `gh` is fixed here.
+    # chose. Nothing in this box is given a `GH_TOKEN` by skein any more, so any value present was
+    # set on purpose.
     gh_real=$(command -v gh 2>/dev/null || true)
     [ -n "$gh_real" ] && gh_real=$(readlink -e "$gh_real" 2>/dev/null || true)
+    # A box started from inside another box (a test run on a fleet box) finds that box's own shim
+    # here, and execing it would hand this box the outer box's token whenever this one has none.
+    # So the shim still goes over that path, and the binary behind it is what it execs (SKEIN-1342).
+    gh_exec="$gh_real"
     if [ -n "$gh_real" ] && [ -f "$gh_real" ]; then
-      gh_mark=''
-      if [ -n "${GH_TOKEN-}" ] && command -v sha256sum >/dev/null 2>&1; then
-        gh_mark=$(printf '%s' "$GH_TOKEN" | sha256sum)
-        gh_mark="${gh_mark%% *}"
-      fi
+      gh_inner=$(head -n 2 "$gh_real" 2>/dev/null | tr -d '\0' | sed -n 's/^skein_gh=//p')
+      [ -n "$gh_inner" ] && [ -f "$gh_inner" ] && gh_exec="$gh_inner"
+      unset gh_inner
+    fi
+    if [ -n "$gh_real" ] && [ -f "$gh_real" ]; then
       # Same overlap trick as git's: the real binary is bound to a second path FIRST, because
       # binding the shim over it shadows the very thing the shim has to exec.
       # Both written beside their targets and renamed over them (SKEIN-1255).
@@ -2832,14 +2886,9 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
         printf '#!/bin/sh\n'
         printf 'skein_gh=%q\n' "$root/bin/gh.real"
         printf 'skein_gh_token=%q\n' "$own_token"
-        printf 'skein_gh_mark=%q\n' "$gh_mark"
         cat <<'GHSHIM'
-# A GH_TOKEN other than the one this box started with was set on purpose: use it unchanged.
-if [ -n "${GH_TOKEN-}" ]; then
-  [ -n "$skein_gh_mark" ] || exec "$skein_gh" "$@"
-  skein_gh_seen=$(printf '%s' "$GH_TOKEN" | sha256sum 2>/dev/null)
-  [ "${skein_gh_seen%% *}" = "$skein_gh_mark" ] || exec "$skein_gh" "$@"
-fi
+# A GH_TOKEN set on purpose (skein exports none in a scoped box): use it unchanged.
+[ -n "${GH_TOKEN-}" ] && exec "$skein_gh" "$@"
 # Otherwise the token the host has placed for this box's repository now, or none at all.
 GH_TOKEN=''
 [ -r "$skein_gh_token" ] && GH_TOKEN=$(cat "$skein_gh_token" 2>/dev/null)
@@ -2851,11 +2900,10 @@ fi
 exec "$skein_gh" "$@"
 GHSHIM
       } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
-      binds+=(--ro-bind "$gh_real" "$root/bin/gh.real")
+      binds+=(--ro-bind "$gh_exec" "$root/bin/gh.real")
       binds+=(--ro-bind-fd "$new_fd" "$gh_real")
-      unset gh_mark
     fi
-    unset own_token gh_real
+    unset own_token gh_real gh_exec
   fi
 
   # The forwarded agent is account-wide, so leaving it reachable would undo all of the above: any
@@ -3410,6 +3458,11 @@ exec bwrap \
     # the profile before it runs this command string, so an export in this block is the one
     # spelling a profile cannot undo -- and it reaches the agent down the same tmux chain.
     export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
+    # The fleet shared Rust toolchain, whose bin is already on box_path (SKEIN-1337). Exported here
+    # for the same reason as the two above. CARGO_HOME is the box own, so its caches are too.
+    if [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
+      export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo"
+    fi
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
     # path names the OUTER /tmp, which does not exist in this box private one, so the server fails

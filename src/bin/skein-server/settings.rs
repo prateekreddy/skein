@@ -205,9 +205,10 @@ pub(super) async fn api_remove_connection(Path(id): Path<String>) -> Response {
     }
 }
 
-/// Forget one connection's stored token, keeping the connection itself.
+/// Forget one connection's stored token, keeping the connection itself. Refused while a box holds a
+/// token only it can revoke — see `forget_connection_token`.
 pub(super) async fn api_forget_connection_token(Path(id): Path<String>) -> Response {
-    match skein::tracking::set_connection_token(&id, "") {
+    match skein::tracking::forget_connection_token(&id) {
         Ok(()) => Json(skein::tracking::sync_status()).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }

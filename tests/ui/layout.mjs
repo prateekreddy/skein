@@ -269,6 +269,8 @@ try {
         pause: "none", headline: "", task: "", cover: "older", stale: ["launcher"] },
       { name: "web-peers", repo: "web", branch: "feat/peers", state: "idle", tier: 4, age_secs: 60, agent: "claude",
         pause: "none", headline: "", task: "", cover: "older", stale: ["peers"] },
+      { name: "web-scope", repo: "web", branch: "feat/scope", state: "idle", tier: 4, age_secs: 60, agent: "claude",
+        pause: "none", headline: "", task: "", cover: "older", stale: ["scope", "telemetry"] },
       { name: "web-new", repo: "web", branch: "feat/new", state: "idle", tier: 4, age_secs: 60, agent: "claude",
         pause: "none", headline: "", task: "", cover: "" },
     ];
@@ -280,6 +282,15 @@ try {
         const c = document.querySelector(`#fleet .row[data-name="${n}"] .covwarn`);
         return c && getComputedStyle(c).display !== "none" ? c.textContent : ""; })),
       ["restart to update", ""]);
+    // SKEIN-1331: a setting changed under a running box says "restart to apply", and its hint names
+    // the setting. **What would make this fail:** the hint keyed on `cover` alone (every older row
+    // reads "restart to update"), or a reason this page has no words for.
+    value("a box whose settings changed since it started says 'restart to apply', and names them",
+      await page.evaluate(() => ["web-peers", "web-scope"].map(n => {
+        const c = document.querySelector(`#fleet .row[data-name="${n}"] .covwarn`);
+        return c && getComputedStyle(c).display !== "none" ? [c.textContent, c.title.split(", and keeps")[0]] : null; })),
+      [["restart to apply", "this box started before peer messaging was changed"],
+       ["restart to apply", "this box started before its GitHub access was changed and before the telemetry setting was changed"]]);
     const sent = [];
     let answer = { ok: true };
     await page.route("**/api/boxes/*/restart", async r => {
@@ -335,6 +346,14 @@ try {
     await page.waitForTimeout(300);
     value("a box born before peer messaging was changed is told that, not that it missed an update",
       (await ask())?.body?.split(". ")[0], "This box started before peer messaging was changed, so restarting Claude alone won't pick it up");
+    await page.click('#rsask [data-a="no"]');
+    await page.waitForTimeout(200);
+    await page.evaluate(() => openDiff("web-scope"));
+    await page.waitForTimeout(300);
+    await page.click("#drestart");
+    await page.waitForTimeout(300);
+    value("a box born before two settings changed is told both (SKEIN-1331)",
+      (await ask())?.body?.split(". ")[0], "This box started before its GitHub access was changed and before the telemetry setting was changed, so restarting Claude alone won't pick them up");
     await page.click('#rsask [data-a="no"]');
     await page.waitForTimeout(200);
     await page.evaluate(() => openDiff("web-new"));

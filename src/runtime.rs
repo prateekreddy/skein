@@ -191,11 +191,24 @@ pub(crate) fn pane_observer_start(tmux_name: &str, sock: &str) -> String {
 /// already scrolled away — the shape the cross-runtime replacement path kept hitting.
 /// Contains no `$`: this string is embedded double-quoted in the outer shell, which would expand a
 /// variable itself instead of leaving it for tmux's shell.
+///
+/// **It also drops the sandbox's placeholder API key when the box has a login** (SKEIN-1334). The
+/// launcher makes that choice once, at box start (`src/box-session.sh`, "A login the user made must
+/// beat the placeholder key"), and the box's tmux server keeps the answer for its whole life — so a
+/// box that started with no login kept `ANTHROPIC_API_KEY=proxy-managed` after a login was placed,
+/// every agent session made in it afterwards inherited it, and the runtime, which prefers an API
+/// key to a stored login, failed with "Invalid API key". So the same rule is asked again here, every
+/// time an agent session is made: a restart picks up a login placed since the box started. `~` and
+/// not `$HOME`, for the `$` rule above; tmux's shell expands it to the box's own home.
 pub(crate) fn guarded_agent_command(agent: &str, command: &str) -> String {
     format!(
-        "{command} || {{ echo; echo 'skein: {agent} could not start — see the error above; keeping this session as a shell'; exec bash -li; }}"
+        "{LOGIN_BEATS_PLACEHOLDER}{command} || {{ echo; echo 'skein: {agent} could not start — see the error above; keeping this session as a shell'; exec bash -li; }}"
     )
 }
+
+/// The launcher's "login beats the placeholder key" rule, asked when an agent session is made
+/// rather than only when the box started — see [`guarded_agent_command`]. Same files, same names.
+const LOGIN_BEATS_PLACEHOLDER: &str = "{ [ -s ~/.claude/.credentials.json ] && unset ANTHROPIC_API_KEY; [ -s ~/.codex/auth.json ] && unset OPENAI_API_KEY; }; ";
 
 /// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
 /// creating its agent process. Reattaching to a live tmux session skips this entire branch.
@@ -322,6 +335,63 @@ pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An agent session made after a login was placed runs on the login, not the placeholder
+    /// key** (SKEIN-1334), and one made with no login keeps the key, which is how a fleet that
+    /// runs on API keys works.
+    ///
+    /// Run through both shells the guard really passes through: the outer one that embeds it
+    /// double-quoted (the attach shell's `tmux new-session … {command:?}`), and the one tmux runs it
+    /// with. The probe is `env`, so no `$` is in it for the outer shell to expand early.
+    ///
+    /// What would make it fail: dropping `LOGIN_BEATS_PLACEHOLDER` from `guarded_agent_command`
+    /// (the `claude login` and `both` rows keep the key), spelling it with `$HOME` (the outer shell
+    /// expands it to the test's own home), or unsetting without asking (the `no login` row loses
+    /// both keys).
+    #[test]
+    fn an_agent_session_runs_on_a_login_placed_after_the_box_started() {
+        let probe = guarded_agent_command("claude", "env | grep _API_KEY= | sort");
+        let run = |claude: bool, codex: bool| {
+            let home = crate::testutil::tempdir();
+            let home: &std::path::Path = home.as_ref();
+            if claude {
+                std::fs::create_dir_all(home.join(".claude")).unwrap();
+                std::fs::write(home.join(".claude/.credentials.json"), "{}").unwrap();
+            }
+            if codex {
+                std::fs::create_dir_all(home.join(".codex")).unwrap();
+                std::fs::write(home.join(".codex/auth.json"), "{}").unwrap();
+            }
+            // Only this test's own values in the environment: the machine running it may hold
+            // real keys under these names and their neighbours.
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sh -c {probe:?}"))
+                .env_clear()
+                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .env("HOME", home)
+                .env("ANTHROPIC_API_KEY", "skein-test-placeholder")
+                .env("OPENAI_API_KEY", "skein-test-placeholder")
+                .output()
+                .expect("run sh");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let anthropic = "ANTHROPIC_API_KEY=skein-test-placeholder";
+        let openai = "OPENAI_API_KEY=skein-test-placeholder";
+        for (what, claude, codex, keeps_anthropic, keeps_openai) in [
+            ("no login", false, false, true, true),
+            ("claude login", true, false, false, true),
+            ("codex login", false, true, true, false),
+            ("both", true, true, false, false),
+        ] {
+            let seen = run(claude, codex);
+            assert_eq!(
+                (seen.contains(anthropic), seen.contains(openai)),
+                (keeps_anthropic, keeps_openai),
+                "with {what}, the agent session's keys were: {seen:?}"
+            );
+        }
+    }
 
     /// **Every `claude` the adapter can start carries skein's plugin**, both halves of every `||`,
     /// and the placeholder resolves to the read-only build's copy under the fleet root.

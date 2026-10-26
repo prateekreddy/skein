@@ -166,7 +166,10 @@ pub fn close_finished(
             continue;
         }
         match crate::sandbox::destroy_box(&name) {
-            Ok(()) => {
+            Ok(unrevoked) => {
+                if let Some(warning) = unrevoked {
+                    eprintln!("skein: destroyed {name}, but {warning}");
+                }
                 forget_the_conversation(&name);
                 gone.push(name);
             }

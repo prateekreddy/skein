@@ -686,7 +686,11 @@ fn delist_from_registry(store: &Path, name: &str) -> Result<(), String> {
 /// Destroy a box: end it, then delist it. The teardown must succeed before we delist, so a failed
 /// teardown leaves the box on the board to retry rather than orphaning a box you can no longer see.
 /// Destructive — the box's tree goes with it.
-pub fn destroy_box(name: &str) -> Result<(), String> {
+///
+/// `Ok(Some(warning))` is a box that is gone whose work-tracking token could not be revoked: said
+/// to the person who destroyed it, because a bearer token outlives the box and only they can
+/// retire it now (SKEIN-1333). It used to go to the server's stderr, which nobody reads.
+pub fn destroy_box(name: &str) -> Result<Option<String>, String> {
     // Its disk as well as its liveness: the tree is gone, so the `du` figures now attribute space to
     // a box that is not there and hide the room that just came back.
     let gone = crate::fleet::disturbing(
@@ -705,23 +709,27 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
         &format!("destroy-box-{name}"),
         "destroyed a box",
         &match &gone {
-            Ok(()) => format!("{name} and its checkout are gone"),
+            Ok(_) => format!("{name} and its checkout are gone"),
             Err(why) => format!("{name} was not destroyed: {why}"),
         },
     );
     gone
 }
 
-fn destroy_box_inner(name: &str) -> Result<(), String> {
+fn destroy_box_inner(name: &str) -> Result<Option<String>, String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
     // Before the box goes: a bearer token outlives the filesystem it was written to, so a destroy
     // that leaves it live hands the fleet a credential nobody is holding any more. Best-effort by
-    // design — an unreachable gateway must not strand a box on the board.
-    if let Err(e) = sync_revoke_token(name) {
-        eprintln!("skein: destroying {name}, but revoking its tracker token failed — revoke it by hand at the gateway: {e}");
-    }
+    // design — an unreachable gateway must not strand a box on the board — and reported to the
+    // person when it fails, which is the part that was missing.
+    let unrevoked = sync_revoke_token(name).err().map(|why| {
+        format!(
+            "its work-tracking token could not be revoked ({why}). Revoke the agent {name} at \
+             that gateway by hand"
+        )
+    });
     if let Some(rec) = shared_record(name) {
         // Same reasoning as stop_box, and this one REMOVES — `sbx rm -f <box>` aimed at a sandbox
         // that shares the box's name would destroy someone else's work, which is why there is no
@@ -738,7 +746,7 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
         if let Err(e) = delist_box(name) {
             eprintln!("skein: destroyed {name}, but delisting it failed (harmless): {e}");
         }
-        return Ok(());
+        return Ok(unrevoked);
     }
     // Same as `stop_box`: no placement record means there is no box here to tear down, and the
     // refusal says which of the two reasons it is rather than reporting a teardown that failed.
@@ -2270,7 +2278,7 @@ mod tests {
         assert!(first
             .last()
             .unwrap()
-            .contains(r#""claude --name 'thing-x' --plugin-dir "#));
+            .contains(r#"; }; claude --name 'thing-x' --plugin-dir "#));
         assert!(!first.last().unwrap().contains("{box}"));
         assert!(!first.last().unwrap().contains("--continue"));
         // a start that fails outright holds the session open as a shell instead of vanishing and
@@ -2281,7 +2289,7 @@ mod tests {
         // the guard is embedded double-quoted in the outer shell, so it must hold no variable for
         // that shell to expand before tmux ever sees it.
         let guard = guarded_agent_command("claude", "claude --continue");
-        assert!(guard.starts_with("claude --continue || {"));
+        assert!(guard.contains("claude --continue || {"));
         assert!(!guard.contains('$'), "{guard}");
         assert!(first.last().unwrap().contains("waiting for box setup"));
         assert!(!a.last().unwrap().contains("waiting for box setup"));

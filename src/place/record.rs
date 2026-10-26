@@ -81,6 +81,22 @@ pub struct PlaceRecord {
     /// the box, or it is a switch that silently does nothing until somebody happens to restart.
     #[serde(default)]
     pub peers: Option<bool>,
+    /// Whether this box was BORN scoped to its own repository on GitHub — `SKEIN_SCOPE repo` from
+    /// the launcher — or holding the fleet-wide credential (`fleet`). The rest of the start-time
+    /// decisions travel the way [`Self::peers`] does and for its reason: each is a switch in skein's
+    /// configuration whose effect the launcher builds once, so a running box keeps what it started
+    /// with until it restarts, and the host can only say so if the box said what it got
+    /// (SKEIN-1331). `None` for each is a launcher too old to say, read as neither answer.
+    #[serde(default)]
+    pub scoped: Option<bool>,
+    /// The mount cover the box was born under: `covered`, `workshop` or `uncovered` —
+    /// `fleet::Exposure::spelled` of what the launcher actually did.
+    #[serde(default)]
+    pub exposure: Option<String>,
+    /// Whether Claude Code's built-in telemetry plugin was allowed in this box at start, which the
+    /// launcher writes into the box's own settings then and only then.
+    #[serde(default)]
+    pub telemetry: Option<bool>,
     /// Why this box exists — see [`Purpose`].
     ///
     /// Recorded here rather than derived, because nothing else on the host can answer it: a box

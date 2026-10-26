@@ -50,7 +50,45 @@ pub fn why_cover_is_stale(name: &str, record: &crate::place::PlaceRecord) -> Vec
     {
         stale.push("peers");
     }
+    // The rest of the start-time decisions a running box still holds (SKEIN-1331), each the same
+    // shape as the peer switch and with its third answer spent the same way.
+    if !record
+        .scoped
+        .is_none_or(|born| born == crate::gitgate::box_is_scoped(name))
+    {
+        stale.push("scope");
+    }
+    // Two keys for one decision, because two different switches move it and the person is told
+    // which: the workshop setting, or a repository registered or removed under the box's name
+    // (covered and uncovered).
+    if let Some(born) = record.exposure.as_deref() {
+        let now = box_exposure(name).spelled();
+        if (born == "workshop") != (now == "workshop") {
+            stale.push("workshop");
+        } else if born != now {
+            stale.push("exposure");
+        }
+    }
+    if !record
+        .telemetry
+        .is_none_or(|born| born == crate::repos::box_allows_the_telemetry_plugin(name))
+    {
+        stale.push("telemetry");
+    }
     stale
+}
+
+/// A running box's placement record, which says what it was started with — `None` for a box that
+/// is not running, whose next start decides everything again.
+///
+/// For a decision that must hold until the box restarts rather than follow the configuration at
+/// once: un-scoping a running box used to delete its tokens within a tick while it still had
+/// `SKEIN_GIT_TOKENS` set, so it could not push at all until somebody restarted it (SKEIN-1331).
+///
+/// The record is read first, so a box skein never placed costs no liveness sweep.
+pub fn running_record(name: &str) -> Option<crate::place::PlaceRecord> {
+    let record = crate::place::shared_record(name)?;
+    (fleet_liveness().get(name) == Some(&true)).then_some(record)
 }
 
 /// The line in `box-session.sh` that [`install_launcher`] replaces with [`launcher_revision`].
@@ -162,6 +200,34 @@ pub fn peers_from_launch(out: &str) -> Option<bool> {
         .filter_map(|l| l.trim().strip_prefix("SKEIN_PEERS "))
         .next()
         .map(|said| said.trim() == "1")
+}
+
+/// One start-time decision the launcher reported as `<key> <value>` — **the first line, not the
+/// last**, for the reason [`launcher_from_launch`] gives: a line after the launcher's own is one
+/// the box's `~/.bash_profile` can print. Empty is the same as unsaid.
+fn first_said(out: &str, key: &str) -> Option<String> {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix(key)?.strip_prefix(' '))
+        .next()
+        .map(|said| said.trim().to_string())
+        .filter(|said| !said.is_empty())
+}
+
+/// Whether the launcher scoped this box to its own repository on GitHub (`SKEIN_SCOPE repo`), held
+/// it at fleet scope (`fleet`), or did not say (`None`) — see
+/// [`crate::place::PlaceRecord::scoped`].
+pub fn scope_from_launch(out: &str) -> Option<bool> {
+    first_said(out, "SKEIN_SCOPE").map(|said| said == "repo")
+}
+
+/// Which mount cover the launcher gave this box (`SKEIN_EXPOSURE`), or `None` when it did not say.
+pub fn exposure_from_launch(out: &str) -> Option<String> {
+    first_said(out, "SKEIN_EXPOSURE")
+}
+
+/// Whether the launcher allowed the telemetry plugin in this box (`SKEIN_TELEMETRY`), or `None`.
+pub fn telemetry_from_launch(out: &str) -> Option<bool> {
+    first_said(out, "SKEIN_TELEMETRY").map(|said| said == "1")
 }
 
 /// Everything the launcher asked skein to tell the person who started this box.
@@ -552,6 +618,61 @@ mod tests {
             named("0000000000000000", Some(false)),
             vec!["launcher", "peers"]
         );
+
+        // SKEIN-1331: scope, exposure and telemetry, each against what this fixture's
+        // configuration says now — not scoped (nothing can issue a write token), uncovered (no
+        // repository matches the name), and no telemetry plugin. What would make these fail:
+        // dropping a comparison (its row reads empty), comparing with the wrong decision (its row
+        // reads another key), or reading `None` as an answer (the first row is not empty).
+        env.set("SKEIN_FLEET_ROOT", home.as_ref() as &std::path::Path);
+        let decided = |scoped, exposure: Option<&str>, telemetry| {
+            why_cover_is_stale(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: current.clone(),
+                    scoped,
+                    exposure: exposure.map(str::to_string),
+                    telemetry,
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            decided(None, None, None),
+            Vec::<&str>::new(),
+            "a launcher too old to say what it decided took a side"
+        );
+        assert_eq!(
+            decided(Some(false), Some("uncovered"), Some(false)),
+            Vec::<&str>::new(),
+            "a box started with what skein would decide now has a reason to restart"
+        );
+        assert_eq!(decided(Some(true), None, None), vec!["scope"]);
+        assert_eq!(decided(None, Some("covered"), None), vec!["exposure"]);
+        assert_eq!(decided(None, Some("workshop"), None), vec!["workshop"]);
+        assert_eq!(decided(None, None, Some(true)), vec!["telemetry"]);
+        assert_eq!(
+            decided(Some(true), Some("workshop"), Some(true)),
+            vec!["scope", "workshop", "telemetry"]
+        );
+    }
+
+    /// **What the launcher says it decided is read off its first line** (SKEIN-1331), for the
+    /// reason `peers_from_launch` is: a later line is one the box's own login profile can print.
+    /// What would make this fail: reading the last line, or reading silence as an answer.
+    #[test]
+    fn a_launchers_start_time_decisions_are_its_first_word_on_each() {
+        let said = "SKEIN_ANCHOR 42\nSKEIN_TELEMETRY 0\nSKEIN_EXPOSURE covered\nSKEIN_SCOPE repo\n\
+                    SKEIN_SCOPE fleet\nSKEIN_EXPOSURE workshop\nSKEIN_TELEMETRY 1\n";
+        assert_eq!(scope_from_launch(said), Some(true));
+        assert_eq!(exposure_from_launch(said).as_deref(), Some("covered"));
+        assert_eq!(telemetry_from_launch(said), Some(false));
+        assert_eq!(scope_from_launch("SKEIN_SCOPE fleet\n"), Some(false));
+        assert_eq!(telemetry_from_launch("SKEIN_TELEMETRY 1\n"), Some(true));
+        let silent = "SKEIN_ANCHOR 42\nSKEIN_SCOPES repo\n";
+        assert_eq!(scope_from_launch(silent), None);
+        assert_eq!(exposure_from_launch(silent), None);
+        assert_eq!(telemetry_from_launch(silent), None);
     }
 
     /// The host's reading of it, and the direction that must never be guessed.

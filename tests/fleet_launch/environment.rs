@@ -397,11 +397,12 @@ fn with_launch_env(script: &str, key: &str, value: &str) -> String {
     format!("{}{key}={value}{}", &script[..at], &script[end..])
 }
 
-/// **A crossing into a scoped box carries that box's own `GH_TOKEN` or none, never the fleet's; a
-/// `fleet`-scoped box's crossing still carries the fleet's** (SKEIN-1095).
+/// **A crossing into a scoped box carries no `GH_TOKEN`, never the fleet's; a `fleet`-scoped box's
+/// crossing still carries the fleet's** (SKEIN-1095, SKEIN-1332).
 ///
-/// The launcher replaces `GH_TOKEN` for a scoped box with its own-repo token, or removes it, and
-/// drops `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` for a box with a login of its own. A crossing is
+/// The launcher removes `GH_TOKEN` for a scoped box, whether or not an own-repo token is placed
+/// (git and `gh` read that file on every call instead), and drops
+/// `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` for a box with a login of its own. A crossing is
 /// spawned by skein-server, whose environment has the fleet's token; this is that crossing, for
 /// real, into three real boxes started from this process's environment:
 ///
@@ -411,8 +412,9 @@ fn with_launch_env(script: &str, key: &str, value: &str) -> String {
 ///   * `fleet`: what the fixture's config gives, which is `fleet` (it can issue no write tokens).
 ///
 /// What would make each assertion fail:
-///   * the session's `gh`: the launcher no longer swapping the token. It is the baseline the
-///     crossing's `gh` is held to, so without it that assertion proves nothing.
+///   * the session's `gh`: the launcher no longer dropping the fleet's token, or exporting the
+///     placed own-repo token again (SKEIN-1332: a forgotten key would then go on working from
+///     `$GH_TOKEN`). It is the baseline the crossing's `gh` is held to.
 ///   * the crossing's `gh` for `scoped` and `bare`: deleting `as_the_session_holds` from
 ///     `Place::enter`, which carries skein-server's `skein-test-fleet-token` in.
 ///   * the API keys against the session, and `scoped`'s `anthropic` being `none`: `GH_TOKEN`
@@ -486,6 +488,19 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
         let launched = own_sandbox(FLEET)
             .exec(&script, Duration::from_secs(60))
             .unwrap_or_else(|e| panic!("start the {case} box: {e}"));
+        // What the launcher says it decided, which the placement record keeps and the board
+        // compares with the configuration (SKEIN-1331): the scope each case was given, the cover
+        // an unmatched name gets, and no telemetry plugin. What would make these fail: the
+        // launcher not printing them, or printing the switch's input rather than its decision.
+        assert_eq!(
+            (
+                skein::fleet::scope_from_launch(&launched),
+                skein::fleet::exposure_from_launch(&launched).as_deref(),
+                skein::fleet::telemetry_from_launch(&launched),
+            ),
+            (Some(case != "fleet"), Some("uncovered"), Some(false)),
+            "the {case} box's launcher did not report what it decided: {launched:?}"
+        );
         let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
         let ns_start = sh(&format!(
             "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
@@ -547,8 +562,7 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
             .unwrap_or_else(|e| panic!("the crossing into the {case} box did not run: {e}"));
         // The GitHub token each kind of box is given, pinned: this is the property itself.
         let gh = match *case {
-            "scoped" => "skein-test-box-token",
-            "bare" => "none",
+            "scoped" | "bare" => "none",
             _ => "skein-test-fleet-token",
         };
         assert_eq!(
@@ -598,27 +612,36 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
 }
 
 /// **`gh` in a running scoped box uses the token placed for it now, not the one the box started
-/// with** (SKEIN-1240).
+/// with, and a forgotten token is nowhere in the box's environment** (SKEIN-1240, SKEIN-1332).
 ///
-/// Replacing a key in Settings rewrites the box's placed token file at once, but `GH_TOKEN` is a
-/// snapshot taken when the launcher ran, and every process in the box (and every crossing, which
-/// copies it from the box's tmux server) holds that snapshot until the box is restarted. The `gh`
-/// shim the launcher binds over the real `gh` reads the file on every call instead. Driven for
+/// Replacing a key in Settings rewrites the box's placed token file at once, and forgetting one
+/// removes it. An exported `GH_TOKEN` would be a snapshot taken when the launcher ran, held by
+/// every process in the box (and every crossing, which copies it from the box's tmux server) until
+/// the box is restarted, so the launcher exports none. The `gh` shim the launcher binds over the
+/// real `gh` reads the file on every call instead. Driven for
 /// real: a real box, the real `gh` behind the shim, and `gh auth token`, which prints the
-/// credential `gh` resolved without reaching GitHub. Only `skein-test-` values exist here.
+/// credential `gh` resolved without reaching GitHub. Only `skein-test-` values are placed here.
 ///
 /// The box's own session shell is the long-lived process the owner reported: it asks once, waits
 /// while the test replaces the file, then asks again, all with one environment.
 ///
 /// What would make each assertion fail:
-///   * `before`: the launcher no longer placing the own-repo token at all. It is the baseline.
-///   * `after` in the session, and the crossing's `gh`: the shim gone, so `gh` reads the exported
-///     snapshot again — the SKEIN-1240 bug. The session's own `$GH_TOKEN` is asserted to still be
-///     the old key, so the new one can only have come from the shim.
+///   * `before`'s `gh`: the shim not reading the placed own-repo token. It is the baseline.
+///   * every `env`: the launcher exporting the placed token as `GH_TOKEN` again (SKEIN-1332), which
+///     leaves `removed`'s environment holding a key that was forgotten.
+///   * `after` in the session, and the crossing's `gh`: the shim gone, so `gh` has nothing, or a
+///     shim that reads the file once — the SKEIN-1240 bug.
 ///   * the chosen token: a shim that replaces every `GH_TOKEN` unconditionally, which would take
 ///     the owner's own token away from a review crossing.
 ///   * `removed`: a shim that leaves the old exported value in place when no file is placed, so a
 ///     revoked key would go on being presented.
+///
+/// **Hermetic against the machine's own GitHub login** (SKEIN-1342). On a fleet box the `gh` the
+/// launcher finds is that box's own shim, which supplies that box's real token whenever it is
+/// handed none; the launcher wraps the binary behind it instead, and `removed` fails if it does
+/// not. Every failure message goes through `redacted`, so a credential that is not one of this
+/// test's own `skein-test-` values is never printed, and the comparisons are `assert!` rather than
+/// `assert_eq!`, whose `left`/`right` would print the raw value.
 #[test]
 fn gh_in_a_running_box_uses_the_token_placed_now() {
     let _env = env_lock();
@@ -633,10 +656,24 @@ fn gh_in_a_running_box_uses_the_token_placed_now() {
     let root = scratch_named("ghlive");
     let sandbox_home = sandbox_home_with_agent(&root);
     let mut pins = env_pins();
+    // Everything `gh` reads a credential from, pinned to nothing of the machine's (SKEIN-1342):
+    // its config directory and the XDG one it falls back to, the session bus its keyring is
+    // reached through, and every token variable it honours. `GH_TOKEN` is set rather than unset,
+    // to the fleet's stand-in, because a scoped box dropping it is part of what is tested. The box
+    // itself inherits only the launcher's allow-list, which carries none of the rest; pinning them
+    // here keeps the host side of this test from depending on that.
+    let gh_config = root.join("gh-config");
+    fs::create_dir_all(&gh_config).unwrap();
     pins.set("HOME", &sandbox_home)
         .set("SKEIN_HOME", root.join("skein"))
         .set("SKEIN_FLEET_ROOT", root.join("boxes"))
-        .set("GH_TOKEN", "skein-test-fleet-token");
+        .set("GH_TOKEN", "skein-test-fleet-token")
+        .set("GH_CONFIG_DIR", &gh_config)
+        .set("XDG_CONFIG_HOME", root.join("xdg-config"))
+        .unset("GITHUB_TOKEN")
+        .unset("GH_ENTERPRISE_TOKEN")
+        .unset("GITHUB_ENTERPRISE_TOKEN")
+        .unset("DBUS_SESSION_BUS_ADDRESS");
     save_config(&Config {
         fleet_sandbox: FLEET.into(),
         ..Config::default()
@@ -739,41 +776,203 @@ fn gh_in_a_running_box_uses_the_token_placed_now() {
     let chosen = chosen.unwrap_or_else(|e| panic!("the crossing did not run: {e}"));
     let removed = removed.unwrap_or_else(|e| panic!("the crossing did not run: {e}"));
 
-    assert_eq!(
-        (
-            field(&before, "gh").as_str(),
-            field(&before, "env").as_str()
-        ),
-        ("skein-test-box-token-old", "skein-test-box-token-old"),
-        "the box did not start with its own placed token, so nothing below has a baseline: \
-         {before:?}"
+    assert!(
+        field(&before, "gh") == "skein-test-box-token-old",
+        "gh in the box did not use its own placed token, so nothing below has a baseline: {}",
+        redacted(&before)
     );
-    assert_eq!(
-        field(&after, "env"),
-        "skein-test-box-token-old",
-        "the session's own GH_TOKEN changed under it, so the assertion below could pass without the \
-         shim: {after:?}"
-    );
-    assert_eq!(
-        field(&after, "gh"),
-        "skein-test-box-token-new",
+    for (when, report) in [
+        ("at start", &before),
+        ("after the key was replaced", &after),
+        ("in a crossing", &crossed),
+        ("after the key was forgotten", &removed),
+    ] {
+        assert!(
+            field(report, "env") == "none",
+            "the box's environment holds a GH_TOKEN {when}, which keeps working after the key is \
+             forgotten or replaced (SKEIN-1332): {}",
+            redacted(report)
+        );
+    }
+    assert!(
+        field(&after, "gh") == "skein-test-box-token-new",
         "gh in a session started before the key was replaced still uses the old one (SKEIN-1240): \
-         {after:?}"
+         {}",
+        redacted(&after)
     );
-    assert_eq!(
-        field(&crossed, "gh"),
-        "skein-test-box-token-new",
-        "gh in a crossing, which copies the session's GH_TOKEN, still uses the old key: {crossed:?}"
+    assert!(
+        field(&crossed, "gh") == "skein-test-box-token-new",
+        "gh in a crossing still uses the old key: {}",
+        redacted(&crossed)
     );
-    assert_eq!(
-        field(&chosen, "gh"),
-        "skein-test-chosen",
+    assert!(
+        field(&chosen, "gh") == "skein-test-chosen",
         "a GH_TOKEN set on purpose for one call was replaced by the placed token, which would take \
-         a review crossing's own credential away: {chosen:?}"
+         a review crossing's own credential away: {}",
+        redacted(&chosen)
     );
-    assert_eq!(
-        field(&removed, "gh"),
-        "none",
-        "with no token placed for this box any more, gh still presented one: {removed:?}"
+    assert!(
+        field(&removed, "gh") == "none",
+        "with no token placed for this box any more, gh still presented one: {}",
+        redacted(&removed)
     );
+}
+
+/// **Every box finds the fleet's shared Rust toolchain on its PATH, and no box can change it**
+/// (SKEIN-1337).
+///
+/// A real box over a fixture toolchain under the fleet root, laid out as `bootstrap.sh` lays out
+/// the real one: `cargo/bin` with a `cargo` and a `rustup` in it, and a `rustup` home. Two boxes:
+/// an ordinary one, and the workshop box, which is the one that matters for the marks — every
+/// other box sees `.skein` read-only already, and the workshop box saw the fleet root as the
+/// sandbox does. The marks are looked for on the HOST afterwards, so a write that a box was told
+/// failed and that landed anyway still fails the test.
+///
+/// What would make each assertion fail:
+///   * `cargo`: dropping `$HOME/.cargo/bin` from `box_path`, or the bind over it.
+///   * `rustup_home`: dropping the session block's `RUSTUP_HOME` export.
+///   * `cargo_home`: pointing `CARGO_HOME` at the shared toolchain, whose registry would then be
+///     one every box writes, or leaving it unset.
+///   * the marks: dropping the `--ro-bind` of the toolchain (the workshop box writes them).
+///   * `show`: a shim that refuses everything.
+///   * `default`: dropping the shim, which hands a mutation to the real `rustup`.
+#[test]
+fn every_box_finds_the_shared_toolchain_and_none_can_change_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so it cannot host a box",
+        );
+    }
+    let root = scratch_named("rusttool");
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"));
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    let toolchain = root.join("boxes/.skein/toolchain");
+    let bin = toolchain.join("cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(toolchain.join("rustup")).unwrap();
+    fs::write(toolchain.join("rustup/settings.toml"), "version = \"12\"\n").unwrap();
+    for (tool, says) in [
+        ("cargo", "echo skein-test-cargo"),
+        ("rustup", "echo skein-test-rustup \"$@\""),
+    ] {
+        fs::write(bin.join(tool), format!("#!/bin/sh\n{says}\n")).unwrap();
+        fs::set_permissions(bin.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let shared_bin = bin.display().to_string();
+    let agent = format!(
+        "{{ printf 'cargo %s\\n' \"$(cargo 2>&1)\"; \
+           printf 'rustup_home %s\\n' \"${{RUSTUP_HOME-none}}\"; \
+           printf 'cargo_home %s\\n' \"${{CARGO_HOME-none}}\"; \
+           touch \"${{RUSTUP_HOME:-/nowhere}}/skein-test-mark\" 2>/dev/null; \
+           touch \"$HOME/.cargo/bin/skein-test-mark\" 2>/dev/null; \
+           touch '{shared_bin}/skein-test-mark2' 2>/dev/null; \
+           printf 'show %s\\n' \"$(rustup show 2>&1)\"; \
+           printf 'default %s\\n' \"$(rustup default nightly 2>&1)\"; \
+         }} > /tmp/tc.tmp && mv /tmp/tc.tmp /tmp/tc.report; exec sleep 300"
+    );
+    for (case, name) in [("ordinary", "rusttool-main"), ("workshop", "rustshop-main")] {
+        let mut script = session_script(name, "skein-agent", &agent);
+        if case == "workshop" {
+            script = with_launch_env(&script, "SKEIN_BOX_PRIVILEGED", "1");
+        }
+        let launched = own_sandbox(FLEET)
+            .exec(&script, Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("start the {case} box: {e}"));
+        let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+        let report_path = PathBuf::from(format!("{}/tmp/tc.report", box_root(name)));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !report_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let report = fs::read_to_string(&report_path).unwrap_or_default();
+        let limits =
+            fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+        let _ = Command::new("tmux")
+            .args(["-S", &box_sock(name), "kill-server"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        anchor_gone(anchor);
+        if limits.starts_with("capped ") {
+            let _ = Command::new("sudo")
+                .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+                .status();
+        }
+
+        let field = |key: &str| {
+            report
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{key} ")))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(
+            field("cargo"),
+            "skein-test-cargo",
+            "a box does not find the fleet's cargo on its PATH: {case} box: {report:?}"
+        );
+        assert_eq!(
+            field("rustup_home"),
+            toolchain.join("rustup").display().to_string(),
+            "a box's RUSTUP_HOME is not the fleet's shared one: {case} box: {report:?}"
+        );
+        assert_eq!(
+            field("cargo_home"),
+            sandbox_home.join(".cargo").display().to_string(),
+            "a box's CARGO_HOME is not its own: {case} box: {report:?}"
+        );
+        let marks: Vec<PathBuf> = [
+            toolchain.join("rustup/skein-test-mark"),
+            bin.join("skein-test-mark"),
+            bin.join("skein-test-mark2"),
+        ]
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+        assert!(
+        marks.is_empty(),
+        "the {case} box wrote into the fleet's shared toolchain, which every box runs: {marks:?}"
+    );
+        assert_eq!(
+            field("show"),
+            "skein-test-rustup show",
+            "`rustup show` in a box does not reach the real rustup: {case} box: {report:?}"
+        );
+        assert!(
+        field("default").contains("read-only") && !field("default").contains("skein-test-rustup"),
+        "`rustup default nightly` in a box was not refused in skein's words: {case} box: {report:?}"
+    );
+    }
+}
+
+/// A report of `<key> <value>` lines fit to print in a failure message: a value that is one of
+/// this file's own `skein-test-` sentinels, or `none`, is shown; anything else is a credential the
+/// machine supplied, and only its length is (SKEIN-1342).
+fn redacted(report: &str) -> String {
+    report
+        .lines()
+        .map(|line| {
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            if value.is_empty() || value == "none" || value.starts_with("skein-test-") {
+                line.to_string()
+            } else {
+                format!("{key} <some other credential, {} chars>", value.len())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }

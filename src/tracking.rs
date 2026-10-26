@@ -421,6 +421,7 @@ pub fn upsert_connection(
 /// Refused while any repo still selects it, naming them: silently untracking three repos to honour
 /// one click is a bigger edit than the click asked for.
 pub fn remove_connection(id: &str) -> Result<(), String> {
+    refuse_while_held(id, "removing the connection")?;
     let users: Vec<String> = load_repos()
         .into_iter()
         .filter(|r| r.sync_connection == id)
@@ -486,6 +487,12 @@ pub fn connection_for_box(name: &str) -> Option<SyncConnection> {
             .then(|| load_connections().into_iter().find(|c| c.id == chosen))
             .flatten();
     }
+    inherited_connection(name)
+}
+
+/// The connection a box with no choice of its own claims through: its repo's, or the only one there
+/// is when it has no repo.
+fn inherited_connection(name: &str) -> Option<SyncConnection> {
     match repo_for_box(name) {
         Some(repo) => connection_for_repo(&repo),
         None => {
@@ -493,6 +500,80 @@ pub fn connection_for_box(name: &str) -> Option<SyncConnection> {
             (list.len() == 1).then(|| list.remove(0))
         }
     }
+}
+
+/// Where skein records which connection minted the work-tracking token a box holds (SKEIN-1333).
+///
+/// Written when the token lands in the box and removed when it is revoked. Without it, the only
+/// answer to "where was this token minted" was the box's CURRENT connection, so a token minted at
+/// a connection the box no longer uses could never be revoked: destroy sent its DELETE to the new
+/// gateway, and a box set to "not tracked" kept a token that still claimed work.
+fn box_minted_path(name: &str) -> Option<PathBuf> {
+    valid_name(name).then(|| {
+        skein_home()
+            .join("boxes")
+            .join(name)
+            .join("tracking-minted")
+    })
+}
+
+/// The id of the connection that minted the token this box holds, when skein minted one.
+pub fn box_minted_at(name: &str) -> Option<String> {
+    fs::read_to_string(box_minted_path(name)?)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn record_minted(name: &str, connection: &str) -> Result<(), String> {
+    let path = box_minted_path(name).ok_or_else(|| format!("unusable box name {name:?}"))?;
+    let dir = path.parent().ok_or("no parent directory")?;
+    fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    write_atomic(&path, dir, connection.as_bytes())
+}
+
+fn forget_minted(name: &str) {
+    if let Some(path) = box_minted_path(name) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Every box holding a token minted at `connection`, by name and sorted — what a connection must
+/// not be forgotten under, because its Plane token is the only thing that can revoke theirs.
+pub fn boxes_holding_tokens_from(connection: &str) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(skein_home().join("boxes")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|name| box_minted_at(name).as_deref() == Some(connection))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The refusal for forgetting a connection, or its Plane token, while boxes hold tokens from it.
+fn refuse_while_held(id: &str, what: &str) -> Result<(), String> {
+    let holders = boxes_holding_tokens_from(id);
+    if holders.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} still {} a work-tracking token from {id}, and {what} would leave no way to revoke it. \
+         Set {} work tracking to another connection or to not tracked first — that revokes the \
+         token — then try again",
+        holders.join(", "),
+        if holders.len() == 1 { "holds" } else { "hold" },
+        if holders.len() == 1 { "its" } else { "their" },
+    ))
+}
+
+/// Forget one connection's stored Plane token, keeping the connection — refused while a box holds a
+/// token that only this Plane token can revoke (SKEIN-1333).
+pub fn forget_connection_token(id: &str) -> Result<(), String> {
+    refuse_while_held(id, "forgetting its Plane token")?;
+    set_connection_token(id, "")
 }
 
 /// Where a box's own tracking choice is recorded — beside its other durable host-side state, so it
@@ -568,10 +649,31 @@ pub fn check_box_tracking_choice(choice: &str) -> Result<(), String> {
 }
 
 /// Record (or clear) that choice. `None` returns the box to its repo's default.
+///
+/// **A change away from the connection that minted the box's token revokes that token first**
+/// (SKEIN-1333). The choice used to be only a file, so a box set to "not tracked", or moved to
+/// another connection, kept a token that could still claim work where it was minted. When the
+/// revocation fails, nothing is changed and the error says so: the alternative is a recorded choice
+/// the box is not actually following.
 pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<(), String> {
     let path = box_tracking_path(name).ok_or_else(|| format!("unusable box name {name:?}"))?;
     if let Some(choice) = choice {
         check_box_tracking_choice(choice)?;
+    }
+    if let Some(minted) = box_minted_at(name) {
+        let after = match choice {
+            Some(chosen) => Some(chosen.trim().to_string()).filter(|c| !c.is_empty()),
+            None => inherited_connection(name).map(|c| c.id),
+        };
+        if after.as_deref() != Some(minted.as_str()) {
+            sync_revoke_token(name).map_err(|why| {
+                format!(
+                    "{name} holds a work-tracking token from {minted}, and it could not be \
+                     revoked ({why}), so its work tracking was not changed. Try again once that \
+                     gateway answers"
+                )
+            })?;
+        }
     }
     let Some(choice) = choice else {
         return match fs::remove_file(&path) {
@@ -827,6 +929,9 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     let script = "umask 077; mkdir -p \"$HOME/.config/sync\"; cat > \"$HOME/.config/sync/env\"; \
                   chmod 600 \"$HOME/.config/sync/env\"";
     located(name)?.write(script, env_file.as_bytes(), Duration::from_secs(30))?;
+    // The token is in the box from here on, so where it came from is recorded now — before the
+    // registration below, which can fail with the token already in place (SKEIN-1333).
+    record_minted(name, &conn.id)?;
 
     // Registration itself is the store installer's job, not a second copy of that logic here: it is
     // the thing that knows both runtimes, and it is the same script the kit runs at startup, so a
@@ -973,19 +1078,34 @@ pub(crate) fn describe_refresh(report: &str, force: bool) -> String {
 /// Never fatal: `sbx rm` has already succeeded by the time this runs, and refusing to finish a
 /// teardown over a failed revocation would leave a box on the board that no longer exists.
 pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
-    // The box's own connection: a token is only revocable at the gateway that minted it, and the
-    // PAT that can revoke it is that connection's. Reading a host-wide default here would send the
-    // DELETE to a gateway that never issued the token, and report success for a live credential.
-    let Some(conn) = connection_for_box(agent) else {
-        return Ok(());
+    // The connection that MINTED the token (SKEIN-1333): a token is only revocable at the gateway
+    // that issued it, with that connection's PAT. The box's current connection is the answer only
+    // for a token minted before skein recorded where, and then silence is still the answer for a
+    // box that was never tracked.
+    let minted = box_minted_at(agent);
+    let conn = match &minted {
+        Some(id) => load_connections()
+            .into_iter()
+            .find(|c| &c.id == id)
+            .ok_or_else(|| {
+                format!("its token was minted at the {id} connection, which skein no longer has")
+            })?,
+        None => match connection_for_box(agent) {
+            Some(conn) => conn,
+            None => return Ok(()),
+        },
     };
     let base = conn.gateway_url.trim().trim_end_matches('/').to_string();
-    let Some(token) = connection_token(&conn.id) else {
-        return Ok(());
+    let token = connection_token(&conn.id);
+    let (Some(token), false) = (token, base.is_empty()) else {
+        return match minted {
+            None => Ok(()),
+            Some(_) => Err(format!(
+                "its token was minted at {}, which has no Plane token or gateway stored now",
+                conn.label
+            )),
+        };
     };
-    if base.is_empty() {
-        return Ok(());
-    }
     let script = format!(
         "curl -sS -m 20 -X DELETE {}/v1/agent-tokens/{} \
          -H \"Authorization: Bearer $SKEIN_PLANE_TOKEN\"",
@@ -1002,7 +1122,9 @@ pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
     if !out.status.success() {
         return Err(format!("the gateway could not be reached ({})", out.status));
     }
-    revocation_outcome(&body)
+    revocation_outcome(&body)?;
+    forget_minted(agent);
+    Ok(())
 }
 
 /// Did the gateway actually retire the token?
@@ -2570,6 +2692,185 @@ mod tests {
         assert!(
             request.contains("Authorization: Bearer skein-test-plane-secret"),
             "the PAT is what authorises a revocation — the box's own token cannot: {request}"
+        );
+    }
+
+    /// A gateway that answers one request, as `revoked`, and hands back what it was asked — or an
+    /// empty string when nothing asked within the deadline.
+    fn one_revocation() -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let seen = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut buf = [0u8; 2048];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\n\r\n{\"revoked\":\"pro/worker\"}",
+                        );
+                        return String::from_utf8_lossy(&buf[..n]).into_owned();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return String::new();
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => return format!("accept failed: {e}"),
+                }
+            }
+        });
+        (port, seen)
+    }
+
+    /// A port nothing listens on: bound, then let go.
+    fn nobody_listening() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// **Moving a box off the connection that minted its token revokes that token there**
+    /// (SKEIN-1333), for both ways off it: another connection, and "not tracked".
+    ///
+    /// What would make it fail: `set_box_tracking` writing the choice and nothing else (no request
+    /// reaches the old gateway, and the box goes on claiming work with a live token);
+    /// `sync_revoke_token` asking the box's CURRENT connection rather than the one that minted the
+    /// token (the DELETE carries the new connection's Plane token, or goes nowhere for "not
+    /// tracked"); or the record kept after a revocation.
+    #[test]
+    fn changing_a_boxs_tracking_revokes_the_token_minted_at_the_old_connection() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        for choice in ["other", ""] {
+            let (port, seen) = one_revocation();
+            upsert_connection(
+                Some("old"),
+                "old",
+                &format!("http://127.0.0.1:{port}"),
+                Some("skein-test-old-plane"),
+            )
+            .unwrap();
+            upsert_connection(
+                Some("other"),
+                "other",
+                &format!("http://127.0.0.1:{}", nobody_listening()),
+                Some("skein-test-other-plane"),
+            )
+            .unwrap();
+            set_box_tracking("worker", Some("old")).unwrap();
+            record_minted("worker", "old").unwrap();
+
+            set_box_tracking("worker", Some(choice)).unwrap();
+            let request = seen.join().unwrap();
+            assert!(
+                request.starts_with("DELETE /v1/agent-tokens/worker ")
+                    && request.contains("Authorization: Bearer skein-test-old-plane"),
+                "moving the box to {choice:?} did not revoke its token at the connection that \
+                 minted it: {request:?}"
+            );
+            assert_eq!(
+                box_minted_at("worker"),
+                None,
+                "a revoked token is still recorded"
+            );
+            assert_eq!(box_tracking("worker").as_deref(), Some(choice));
+        }
+    }
+
+    /// **When the old token cannot be revoked, the choice is not changed** (SKEIN-1333), and the
+    /// error says so. What would make it fail: writing the choice before revoking, or after a
+    /// failure — the box would then read as moved while its old token still claims work.
+    #[test]
+    fn a_tracking_change_whose_revocation_fails_changes_nothing() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        upsert_connection(
+            Some("old"),
+            "old",
+            &format!("http://127.0.0.1:{}", nobody_listening()),
+            Some("skein-test-old-plane"),
+        )
+        .unwrap();
+        set_box_tracking("worker", Some("old")).unwrap();
+        record_minted("worker", "old").unwrap();
+
+        let why = set_box_tracking("worker", Some("")).unwrap_err();
+        assert!(
+            why.contains("could not be revoked") && why.contains("was not changed"),
+            "{why}"
+        );
+        assert_eq!(box_tracking("worker").as_deref(), Some("old"));
+        assert_eq!(box_minted_at("worker").as_deref(), Some("old"));
+    }
+
+    /// **A connection, or its Plane token, cannot be forgotten while a box holds a token only it
+    /// can revoke** (SKEIN-1333) — and the refusal names the box. What would make it fail: either
+    /// refusal dropped (the connection or its token goes, and the box's token can never be revoked).
+    #[test]
+    fn a_connection_whose_tokens_are_held_is_not_forgotten() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        upsert_connection(
+            Some("old"),
+            "old",
+            "http://127.0.0.1:9",
+            Some("skein-test-old-plane"),
+        )
+        .unwrap();
+        record_minted("worker", "old").unwrap();
+        for refused in [remove_connection("old"), forget_connection_token("old")] {
+            let why = refused.unwrap_err();
+            assert!(
+                why.contains("worker") && why.contains("still holds"),
+                "{why}"
+            );
+        }
+        assert!(load_connections().iter().any(|c| c.id == "old"));
+        assert!(connection_token("old").is_some());
+        // And with nothing held, both go as before.
+        forget_minted("worker");
+        forget_connection_token("old").unwrap();
+        remove_connection("old").unwrap();
+    }
+
+    /// **Destroying a box whose token cannot be revoked says so, to whoever destroyed it**
+    /// (SKEIN-1333). It used to find no Plane token, return `Ok`, and say nothing. What would make
+    /// it fail: `destroy_box` dropping the revocation's error, or `sync_revoke_token` reading a
+    /// token minted at a connection skein no longer has as nothing to revoke.
+    #[test]
+    fn destroying_a_box_whose_token_cannot_be_revoked_says_so() {
+        let _g = env_lock();
+        let _warden = crate::testutil::no_warden();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        let fleet = tempdir();
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        crate::testutil::placed("gone");
+        record_minted("gone", "vanished").unwrap();
+        let _crossing = crate::place::seam::doing_nothing();
+        env.set("SKEIN_REGISTRY", dir.join("sandboxes.json"));
+        fs::write(dir.join("sandboxes.json"), "{}").unwrap();
+
+        let warning = destroy_box("gone").unwrap();
+        let warning = warning.expect("a token nothing could revoke was not reported");
+        assert!(
+            warning.contains("could not be revoked") && warning.contains("vanished"),
+            "{warning}"
         );
     }
 
