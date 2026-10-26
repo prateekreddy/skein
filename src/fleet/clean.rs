@@ -132,6 +132,18 @@ pub(crate) fn clean_box_given(
     paths: &[String],
     running: Option<bool>,
 ) -> Result<Cleaned, String> {
+    clean_box_between(name, paths, running, &|| {})
+}
+
+/// [`clean_box_given`] with `between` run after the last check and before each removal: the
+/// window a running box could use to swap a directory in the path for a link. Tests put a swap
+/// there; production passes nothing.
+fn clean_box_between(
+    name: &str,
+    paths: &[String],
+    running: Option<bool>,
+    between: &dyn Fn(),
+) -> Result<Cleaned, String> {
     if paths.is_empty() {
         return Err("nothing was chosen to remove".to_string());
     }
@@ -194,7 +206,8 @@ pub(crate) fn clean_box_given(
             ));
             continue;
         }
-        match std::fs::remove_dir_all(&c.path) {
+        between();
+        match remove_without_following(&box_dir, Path::new(&c.path), dev) {
             Ok(()) => {
                 done.removed.push(c.path.clone());
                 done.freed += c.bytes;
@@ -203,6 +216,175 @@ pub(crate) fn clean_box_given(
         }
     }
     Ok(done)
+}
+
+/// Remove the directory `path` under `box_dir` in a way that cannot follow a link anywhere in it.
+///
+/// Checking the path and then removing it by name is not enough once a running box may be cleaned:
+/// the box can swap `~/.cache` for a link between the check and the removal, and a removal by path
+/// resolves every component again and follows the link into another box. So each component is
+/// opened from the one before it with `O_NOFOLLOW`, checked to be on the box's device, and the
+/// leaf is removed through the held parent descriptor by [`remove_tree_at`], which never follows a
+/// link either.
+fn remove_without_following(box_dir: &Path, path: &Path, dev: u64) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let refused = |why: &str| std::io::Error::other(why.to_string());
+    let rel = path
+        .strip_prefix(box_dir)
+        .map_err(|_| refused("not inside this box"))?;
+    let parts: Vec<std::ffi::CString> = rel
+        .components()
+        .map(|c| match c {
+            std::path::Component::Normal(p) => std::ffi::CString::new(p.as_bytes())
+                .map_err(|_| refused("a path component holds a NUL")),
+            _ => Err(refused("not a plain path")),
+        })
+        .collect::<Result<_, _>>()?;
+    let Some((leaf, chain)) = parts.split_last() else {
+        return Err(refused("refusing to remove the box directory itself"));
+    };
+    let top = std::ffi::CString::new(box_dir.as_os_str().as_bytes())
+        .map_err(|_| refused("the box path holds a NUL"))?;
+    // SAFETY: a NUL-terminated path and flags; the result is checked before it is owned.
+    let mut at = owned(unsafe {
+        libc::open(
+            top.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })?;
+    on_device(&at, dev)?;
+    for part in chain {
+        at = open_dir_at(&at, part)
+            .map_err(|_| refused("part of this path is now a link, so skein left it alone"))?;
+        on_device(&at, dev)?;
+    }
+    let st = stat_at(&at, leaf)?;
+    if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(refused("this is now a link, so skein left it alone"));
+    }
+    remove_tree_at(&at, leaf, dev)
+}
+
+fn owned(fd: libc::c_int) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a descriptor this process just opened and nothing else owns.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+fn open_dir_at(
+    parent: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: a live descriptor, a NUL-terminated name, and flags.
+    owned(unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
+}
+
+fn stat_at(parent: &std::os::fd::OwnedFd, name: &std::ffi::CStr) -> std::io::Result<libc::stat> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an all-zero `stat` is a valid value to be overwritten.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a live descriptor, a NUL-terminated name, and a buffer of the right type.
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
+fn on_device(fd: &std::os::fd::OwnedFd, dev: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: as in `stat_at`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a live descriptor and a buffer of the right type.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if st.st_dev as u64 != dev {
+        return Err(std::io::Error::other(
+            "part of this path is on another filesystem, so skein left it alone",
+        ));
+    }
+    Ok(())
+}
+
+/// Remove `name` under the directory `parent`, recursively, never following a link: a link is
+/// unlinked as itself, a directory is opened with `O_NOFOLLOW` from its parent's descriptor, and
+/// a directory on another device (a mount point) is left alone.
+fn remove_tree_at(
+    parent: &std::os::fd::OwnedFd,
+    name: &std::ffi::CStr,
+    dev: u64,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let st = stat_at(parent, name)?;
+    if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        let dir = open_dir_at(parent, name)?;
+        on_device(&dir, dev)?;
+        for kid in entries(&dir)? {
+            remove_tree_at(&dir, &kid, dev)?;
+        }
+        // SAFETY: a live descriptor and a NUL-terminated name.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    } else {
+        // SAFETY: as above; without AT_REMOVEDIR a link is removed as itself.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// The names in the directory `dir`, without `.` and `..`.
+fn entries(dir: &std::os::fd::OwnedFd) -> std::io::Result<Vec<std::ffi::CString>> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `dup` of a live descriptor; `fdopendir` takes ownership of the copy.
+    let copy = unsafe { libc::dup(dir.as_raw_fd()) };
+    if copy < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `copy` is a directory descriptor this process owns.
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        let e = std::io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `copy` is still ours to close.
+        unsafe { libc::close(copy) };
+        return Err(e);
+    }
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: `stream` is open until the `closedir` below.
+        let ent = unsafe { libc::readdir(stream) };
+        if ent.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is NUL-terminated within the entry `readdir` returned.
+        let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            out.push(name.to_owned());
+        }
+    }
+    // SAFETY: closes the stream and the copy it owns.
+    unsafe { libc::closedir(stream) };
+    Ok(out)
 }
 
 /// Whether every component from `box_dir` down to `path` is a real directory on `dev`, never a
@@ -580,6 +762,48 @@ mod tests {
                 kept.display()
             );
         }
+    }
+
+    /// **A link swapped into the path after the last check does not lead the removal out of
+    /// the box.**
+    ///
+    /// A running box may have its download caches cleaned, and it can swap `~/.cache` for a link
+    /// to another box's between the check and the removal. The hook does that swap in exactly
+    /// that window.
+    ///
+    /// What would make it fail: removing by path (`std::fs::remove_dir_all(&c.path)`), which
+    /// resolves `~/.cache` again and follows the new link. Watched: with that in place of
+    /// `remove_without_following`, the other box's `pip/wheel` was removed and this failed.
+    #[test]
+    fn a_link_swapped_in_before_the_removal_is_not_followed() {
+        let _lock = env_lock();
+        let dir = tempdir();
+        let (root, b, _pins) = planted(&dir);
+        let home = b.join("home");
+        put(&home.join(".cache/pip/mine"));
+        let other = root.join("other-main").join("home").join(".cache");
+        put(&other.join("pip/wheel"));
+        let target = home.join(".cache/pip");
+        let asked = vec![target.display().to_string()];
+        let swap = || {
+            std::fs::rename(home.join(".cache"), home.join(".cache-moved")).unwrap();
+            std::os::unix::fs::symlink(&other, home.join(".cache")).unwrap();
+        };
+        let done = clean_box_between("web-main", &asked, Some(true), &swap)
+            .expect("a download cache may be cleaned from a running box");
+        assert!(
+            other.join("pip/wheel").exists(),
+            "the removal followed the link into another box: {done:?}"
+        );
+        assert!(done.removed.is_empty(), "{done:?}");
+        assert_eq!(
+            done.failed
+                .iter()
+                .map(|(p, _)| p.clone())
+                .collect::<Vec<_>>(),
+            asked,
+            "the path is not reported under Could not remove: {done:?}"
+        );
     }
 
     /// **Build output and scratchpads are refused from a running box, or one skein cannot see;
