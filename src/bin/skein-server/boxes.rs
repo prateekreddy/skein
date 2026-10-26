@@ -835,14 +835,15 @@ mod tests {
             "a box skein did not place was not refused as one: {unplaced}"
         );
 
-        let held = Restarting::take("thing-busy").expect("nothing holds it yet");
-        let second = run("thing-busy");
-        assert_eq!(
-            second,
-            serde_json::json!({ "ok": false,
-                "error": "thing-busy is already being restarted — wait for that to finish" })
-        );
-        drop(held);
+        {
+            let _held = Restarting::take("thing-busy").expect("nothing holds it yet");
+            let second = run("thing-busy");
+            assert_eq!(
+                second,
+                serde_json::json!({ "ok": false,
+                    "error": "thing-busy is already being restarted — wait for that to finish" })
+            );
+        }
         assert!(
             Restarting::take("thing-busy").is_some(),
             "the hold outlived the restart that took it, so this box can never be restarted again"
