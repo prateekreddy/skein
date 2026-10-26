@@ -780,7 +780,9 @@ pub(super) async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Va
     }
     let r = tokio::task::spawn_blocking(move || skein::sandbox::destroy_box(&name)).await;
     Json(match r {
-        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Ok(None)) => serde_json::json!({ "ok": true }),
+        // Gone, with something the person has to do about it (SKEIN-1333).
+        Ok(Ok(Some(warning))) => serde_json::json!({ "ok": true, "warning": warning }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })

@@ -57,7 +57,9 @@ function destroyNow(name) {
   startActing(name, "destroying");
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name);
-      if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
+      if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); }
+      // Gone, with a token left live behind it: said where failures are said, not in a toast.
+      if (d.warning) notice(`destroyed ${name}, but ${d.warning}`); else toast(`destroyed ${name}`); }
     else notice(`could not destroy ${name}: ${d.error || "no reason given"}`);
   }).catch(e => notice(`could not destroy ${name}: ${failText(e)}`))
     .finally(() => doneActing(name));
