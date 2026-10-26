@@ -105,6 +105,17 @@ pub(crate) fn gib(mib: u64) -> String {
     format!("{:.1}G", mib as f64 / 1024.0)
 }
 
+/// An amount somebody is asked to clear, rounded **up** to the tenth: never `0.0G`.
+///
+/// [`gib`] rounds to the nearest tenth, so anything under 52 MiB prints as `0.0G`, and an agent
+/// told to "clear 0.0G" was told to do nothing and held for it (SKEIN-1335: 73 such asks in a
+/// month). Rounding up keeps the figure honest, since clearing what it says is always enough, and a
+/// figure that is not zero is never printed as zero.
+pub(crate) fn gib_up(mib: u64) -> String {
+    let tenths = (mib * 10).div_ceil(1024).max(1);
+    format!("{}.{}G", tenths / 10, tenths % 10)
+}
+
 /// The fleet's disk as [`crate::announce`] needs it: how much has to go, and who is holding it.
 ///
 /// One value rather than two calls, because the two halves have to be read of the same fleet. The

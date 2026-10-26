@@ -307,13 +307,13 @@ pub fn compose(check: &HealthCheck, ask: &Ask) -> String {
 /// clear 0.0G would be worse than the silence it replaces, and the rest of the note — the verdict
 /// and the recipe — is the part that still applies.
 ///
-/// Figures through [`crate::health::gib`], which is the health row's own formatter, so the amount a
-/// box is asked for and the amount the row says it is holding cannot be printed two ways.
+/// Figures through [`crate::health::gib_up`], the health row's formatter rounded up, so an amount
+/// asked for is never printed as `0.0G` and clearing it is always enough (SKEIN-1335).
 fn asked_of_you(ask: &Ask) -> String {
     if ask.over_by == 0 {
         return String::new();
     }
-    let gib = crate::health::gib;
+    let gib = crate::health::gib_up;
     match ask.short_by {
         // The boxes told cover it between them, so the figure is this box's share of the overage
         // and the others are named with theirs — a reader that knows it is not being asked alone
@@ -1220,7 +1220,7 @@ mod tests {
         let (a, b) = (inbox(&home, "half-a"), inbox(&home, "half-b"));
         assert_eq!((a.len(), b.len()), (1, 1), "{a:?} {b:?}");
         assert!(
-            a[0].contains("Clear 14.9G of storage you are not using")
+            a[0].contains("Clear 15.0G of storage you are not using")
                 && a[0].contains("half-b has been asked for 14.4G"),
             "the note does not ask this box for its own share of the overage, or does not say who \
              else was asked: {}",
@@ -1228,7 +1228,7 @@ mod tests {
         );
         assert!(
             b[0].contains("Clear 14.4G of storage you are not using")
-                && b[0].contains("half-a has been asked for 14.9G"),
+                && b[0].contains("half-a has been asked for 15.0G"),
             "the note does not ask this box for its own share of the overage, or does not say who \
              else was asked: {}",
             b[0]
@@ -1328,8 +1328,8 @@ mod tests {
         assert_eq!(told.len(), 1, "{told:?}");
         assert!(
             told[0].contains(
-                "Clear what you can of the 5.9G you are holding. The fleet is 19.5G over what it \
-                 can spare, and emptying every box in it would still leave 6.8G of that"
+                "Clear what you can of the 5.9G you are holding. The fleet is 19.6G over what it \
+                 can spare, and emptying every box in it would still leave 6.9G of that"
             ),
             "the note does not say that emptying the fleet's boxes still leaves it over the line: \
              {}",

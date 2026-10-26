@@ -2209,6 +2209,66 @@ mod tests {
         );
     }
 
+    /// **A box already set up still points its tracker at the gateway its repo publishes, and
+    /// follows it when it moves** (SKEIN-1340). The URL used to be written only past the stamp
+    /// gate, so a stamped box — set up before the setting existed, or seeded with another box's
+    /// stamps (SKEIN-1233) — never got it, and its plugin reached a built-in gateway instead: "the
+    /// sync server isn't connected here (SYNC_MCP_URL isn't set)".
+    ///
+    /// What would make it fail: the URL written behind the stamp gate again (no `SYNC_MCP_URL`
+    /// after the first start, the old one after the second); the gate letting anything else
+    /// through (the box's CLAUDE.md changes).
+    #[test]
+    fn a_stamped_box_still_follows_the_gateway_its_repo_publishes() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let (store, project, bin, _log, boxhome) = plugin_box(&home);
+        fs::write(project.join("CLAUDE.md"), "# proj\n\nours\n").unwrap();
+        let state = boxhome.join(".local/state/skein");
+        fs::create_dir_all(&state).unwrap();
+        let slug = project.display().to_string().replace('/', "-");
+        fs::write(state.join(format!("sync-{slug}.done")), "").unwrap();
+
+        let start = || {
+            let out = box_shell(&home)
+                .arg(store.join("skein").join("bin").join("sync-install.sh"))
+                .env("HOME", &boxhome)
+                .env("WORKSPACE_DIR", &project)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env_remove("SYNC_MCP_URL")
+                .env_remove("SYNC_GATEWAY_URL")
+                .env_remove("SYNC_AGENT_TOKEN")
+                .env_remove("SKEIN_SYNC_FORCE")
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            let settings: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(boxhome.join(".claude/settings.json")).unwrap_or_default(),
+            )
+            .unwrap_or_default();
+            settings["env"]["SYNC_MCP_URL"].clone()
+        };
+        fs::write(store.join("skein/sync/gateway"), "https://gw.test/mcp\n").unwrap();
+        assert_eq!(
+            start(),
+            "https://gw.test/mcp",
+            "a stamped box got no gateway"
+        );
+        fs::write(store.join("skein/sync/gateway"), "https://gw2.test/mcp\n").unwrap();
+        assert_eq!(
+            start(),
+            "https://gw2.test/mcp",
+            "a stamped box kept the gateway its repo moved away from"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("CLAUDE.md")).unwrap(),
+            "# proj\n\nours\n",
+            "the gate let more than the gateway through"
+        );
+    }
+
     /// A box laid out for the plugin tests: a store, a project, and a `claude` on PATH that keeps
     /// Claude Code's own record of installed plugins the way the real one does, so the script's
     /// file test and its `plugin list` both see what the fake installed. Returns the store, the

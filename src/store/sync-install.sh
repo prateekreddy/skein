@@ -246,11 +246,6 @@ elif command -v claude >/dev/null 2>&1; then
   [ "$plugin" = "yes" ] && mark_plugin
 fi
 
-if [ -e "$stamp" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
-  echo "[sync] already set up — this box owns its tracker config now (SKEIN_SYNC_FORCE=1 to re-apply)" >&2
-  exit 0
-fi
-
 # The gateway URL is a base; the MCP endpoint is /mcp under it. Accept either spelling so a pasted
 # endpoint URL does not silently become /mcp/mcp.
 url="$(printf '%s' "$url" | sed 's#/*$##')"
@@ -258,8 +253,6 @@ case "$url" in
   */mcp) ;;
   *) url="$url/mcp" ;;
 esac
-
-registered="no"
 
 # Point the plugin's server at THIS fleet's gateway.
 #
@@ -302,6 +295,24 @@ os.replace(tmp, path)
 PY
 }
 
+# **Ahead of the stamp gate, as the plugin is, and for the same reason** (SKEIN-1340). The stamp
+# guards what the box owns once it is set up — its CLAUDE.md block, memory and skill — and the
+# gateway is none of those: it is the repo's connection, published in the store so that every box of
+# the repo "picks the URL up by starting" (`publish_sync_gateway`). Behind the gate it never did for
+# a stamped box: a box set up before this setting existed, one whose repo moved to another gateway,
+# and every box whose `~/.local/state` was seeded with another box's stamps (SKEIN-1233) went on
+# without it, and the plugin then reached its own built-in gateway, not this fleet's. It writes
+# only when the value differs, so a box already pointed here is not touched.
+url_set="no"
+command -v claude >/dev/null 2>&1 && set_sync_url "$url" && url_set="yes"
+
+if [ -e "$stamp" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
+  echo "[sync] already set up — this box owns its tracker config now (SKEIN_SYNC_FORCE=1 to re-apply)" >&2
+  exit 0
+fi
+
+registered="no"
+
 # Claude Code gets the `sync` server from the PLUGIN now, not from a registration of skein's.
 #
 # The two cannot coexist by design: a hand-added `sync` entry WINS and the plugin's is skipped with
@@ -319,7 +330,7 @@ if command -v claude >/dev/null 2>&1; then
   # fallback registration here on purpose. The plugin is the only source of this server now.
   claude_bounded mcp remove sync -s user >/dev/null 2>&1 \
     || claude_bounded mcp remove sync >/dev/null 2>&1 || true
-  if set_sync_url "$url"; then
+  if [ "$url_set" = "yes" ]; then
     [ "$plugin" = "yes" ] && registered="yes"
   else
     echo "[sync] could not write SYNC_MCP_URL into ~/.claude/settings.json — the plugin would reach its built-in default gateway, not yours" >&2

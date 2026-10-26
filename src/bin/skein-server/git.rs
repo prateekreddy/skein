@@ -88,6 +88,8 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
             // (SKEIN-1239).
             "unchecked": c.unchecked,
             "turned_down": c.turned_down,
+            // What it can push to and cannot read: check runs, Actions (SKEIN-1338).
+            "cannot_read": c.cannot_read,
             // Carried so an unusable entry can explain itself. One hand-edited to cover three
             // repositories is listed and refused, and a list that silently omitted it would leave
             // someone staring at a repo whose token "is configured" and does not work.
@@ -141,14 +143,14 @@ pub(super) async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response
             }
             return skein::gitgate::replace_token_checked(&r.id, &token).map(|_| ());
         }
-        let unchecked = match token.is_empty() {
-            true => String::new(),
+        let checked = match token.is_empty() {
+            true => skein::gitgate::Checked::default(),
             false => skein::gitgate::check_new_token(&token, &r.repos, "")?,
         };
         skein::gitgate::set_write_credential(&r.id, &r.label, &r.repos)?;
         if let Some(token) = r.token {
             if !token.trim().is_empty() {
-                skein::gitgate::mark_checked(&r.id, &unchecked)?;
+                skein::gitgate::mark_checked(&r.id, &checked)?;
             }
             skein::gitgate::set_credential_token(&r.id, &token)?;
         }

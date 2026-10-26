@@ -29,7 +29,8 @@
 #
 # **Never fails loudly.** A helper that errors takes down every git operation in the box, including
 # the reads that were always allowed. Every unexpected shape here exits 0 with no output, which git
-# reads as "this helper has nothing" and moves on to the next one.
+# reads as "this helper has nothing" and moves on to the next one. The one thing it says is a line
+# on stderr when a GitHub repository has no token here at all (below), and it still exits 0.
 
 case "${1-}" in
   get) ;;
@@ -106,7 +107,18 @@ done
 # deliberately routes back through the proxy; the substrate's egress policy (SKEIN-926), not this
 # script, is what answers that. A `fleet`-scoped box keeps the proxy on purpose and this note does
 # not apply to it.
-[ -n "$token" ] || exit 0
+#
+# **Silence on stdout, and one line on stderr saying why** (SKEIN-1339). git asks a helper only
+# after GitHub has refused a request carrying no credential, so a public repository never reaches
+# here, and git's own words for what follows — "could not read Username for
+# 'https://github.com/…'" — name neither the cause nor the fix. A submodule from another repository
+# is the usual way in. The line names only the repository git asked about, which git already
+# printed; nothing about any other repository's token is said, nor whether one exists.
+if [ -z "$token" ]; then
+  printf 'skein: this box has no GitHub token for %s/%s, so git cannot sign in to it. To reach it, ask the person to add %s/%s as a repo in the cockpit, share a write token with it from its card, or store a read-only token under Settings → GitHub & keys.\n' \
+    "$owner" "$name" "$owner" "$name" >&2
+  exit 0
+fi
 
 printf 'username=x-access-token\n'
 printf 'password=%s\n' "$token"

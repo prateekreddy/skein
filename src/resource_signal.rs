@@ -39,7 +39,7 @@
 //! Nothing here stops, kills or throttles anything. The kernel's limits are the ceiling whether or
 //! not an agent reads this; the file is how the agent is told first (owner's answers 1 and 3).
 
-use crate::health::gib;
+use crate::health::{gib, gib_up};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -60,6 +60,12 @@ pub const ANON_OF_HIGH_PCT: u64 = 90;
 
 /// Processes, as a percentage of `pids.max`, at which a box is asked.
 pub const PIDS_OF_MAX_PCT: u64 = 75;
+
+/// How far over, as a percentage of the box's share, before a disk ask holds a command (owner,
+/// SKEIN-1335): 1G on a 10G share. Below it the box is still asked and told, but nothing is held.
+/// A month of holds for overages of 0.2G and less (226 of 486) is what this number is chosen
+/// against: a hold for a rounding error teaches an agent the hold is noise.
+pub const DISK_HOLD_OVER_PCT: u64 = 10;
 
 /// The kinds an ask can be. **There is no `cpu`**, and the plugin's hook holds only for these.
 pub const ASK_KINDS: [&str; 3] = ["disk", "memory", "pids"];
@@ -277,7 +283,8 @@ pub struct Ask {
     pub since: String,
     /// New at each crossing, the same while the band holds. The plugin holds one command per id.
     pub crossing_id: String,
-    /// The words of the held command.
+    /// The words of the held command. Empty for a disk ask not far enough over to hold one
+    /// ([`DISK_HOLD_OVER_PCT`]): the box is told, and its commands run.
     pub hold: String,
     /// The SessionStart line. Every live ask has one.
     #[serde(default)]
@@ -358,6 +365,22 @@ fn disk_band(r: &Reading) -> Band<DiskAsk> {
         (FleetDisk::Unknown, _) | (_, Band::Unknown) => Band::Unknown,
         _ => Band::NotAsked,
     }
+}
+
+/// Whether a disk ask is far enough over to hold a command: what it asks this box to clear is more
+/// than [`DISK_HOLD_OVER_PCT`] of the box's share.
+///
+/// The share is the box's allowance when it has one, for every kind of disk ask, so the fleet's
+/// ask and the allowance's are held by the same rule (owner: "same rules for the fleet-share ask").
+/// A box allowed the whole disk has no allowance to measure against, so its share is what it holds.
+fn disk_holds(d: &DiskAsk, limit: Option<u64>) -> bool {
+    let (asked, holds) = match d {
+        DiskAsk::Share(s) => (s.free, s.holds),
+        DiskAsk::EveryBox(s) => (s.holds, s.holds),
+        DiskAsk::Allowance { excess, holds, .. } => (*excess, *holds),
+    };
+    let share = limit.unwrap_or(holds);
+    asked.saturating_mul(100) > share.saturating_mul(DISK_HOLD_OVER_PCT)
 }
 
 /// Memory: hot on this reading and the one before it, and near its line.
@@ -464,9 +487,11 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
     };
 
     let prev_ask = |kind: &str| prev.and_then(|p| p.asks.iter().find(|a| a.kind == kind));
-    // A crossing keeps its id and start while the band holds; a new one is minted on entering.
+    // A crossing keeps its id and start while the band holds; a new one is minted on entering, and
+    // on a disk ask starting or stopping holding commands, so going from far enough over to tell
+    // the agent to far enough over to hold it is a crossing the plugin has not yet shown.
     let stamp = |kind: &str, fresh: Ask| -> Ask {
-        match prev_ask(kind) {
+        match prev_ask(kind).filter(|b| b.hold.is_empty() == fresh.hold.is_empty()) {
             Some(before) => Ask {
                 since: before.since.clone(),
                 crossing_id: before.crossing_id.clone(),
@@ -481,7 +506,14 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
     };
 
     match disk_band(r) {
-        Band::Asked(d) => out.asks.push(stamp("disk", words::disk(&d))),
+        Band::Asked(d) => {
+            let mut ask = words::disk(&d);
+            if !disk_holds(&d, r.disk_limit_mb) {
+                // Told, not held: the plugin holds only an ask with words to hold it with.
+                ask.hold = String::new();
+            }
+            out.asks.push(stamp("disk", ask));
+        }
         Band::Unknown => out.asks.extend(prev_ask("disk").cloned()),
         Band::NotAsked => {
             out.cleared
@@ -578,8 +610,8 @@ mod words {
                      outputs, caches, and any containers or volumes you started. The fleet's disk \
                      is {over} over what it can spare, and this box holds {holds} of it{others}. \
                      {HELD}",
-                    free = gib(s.free),
-                    over = gib(s.over_by),
+                    free = gib_up(s.free),
+                    over = gib_up(s.over_by),
                     holds = gib(s.holds),
                     others = others_asked(s.others),
                 ),
@@ -590,19 +622,19 @@ mod words {
                     "skein: before you start, this box is asked to clear {free} of storage it is \
                      not using. The fleet's disk is {over} over what it can spare and this box \
                      holds {holds}. {WHERE}",
-                    free = gib(s.free),
-                    over = gib(s.over_by),
+                    free = gib_up(s.free),
+                    over = gib_up(s.over_by),
                     holds = gib(s.holds),
                 )),
                 remind: Some(format!(
                     "skein: still asked of this box: clear {} of storage (it holds {}).",
-                    gib(s.free),
+                    gib_up(s.free),
                     gib(s.holds)
                 )),
                 enter: Some(format!(
                     "skein: the fleet's disk is over its line; this box is asked to clear {} it \
                      is not using.",
-                    gib(s.free)
+                    gib_up(s.free)
                 )),
                 ..Default::default()
             },
@@ -616,14 +648,14 @@ mod words {
                      build outputs, caches, and any containers or volumes you started. The fleet's \
                      disk is {over} over what it can spare, and every box has been asked. {HELD}",
                     holds = gib(s.holds),
-                    over = gib(s.over_by),
+                    over = gib_up(s.over_by),
                 ),
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear what it can of the \
                      {holds} it holds. The fleet's disk is {over} over what it can spare, and \
                      every box has been asked. {WHERE}",
                     holds = gib(s.holds),
-                    over = gib(s.over_by),
+                    over = gib_up(s.over_by),
                 )),
                 remind: Some(format!(
                     "skein: still asked of this box: clear what you can of the {} it holds.",
@@ -637,6 +669,8 @@ mod words {
                 ..Default::default()
             },
             // (1c), (4), (5), (6). Its own (6): the fleet's line is not why this box is asked.
+            // What it holds is rounded up too, so a box a little over never reads as holding no more
+            // than its share ("holds 10.0G against its 10.0G share").
             DiskAsk::Allowance {
                 excess,
                 holds,
@@ -648,28 +682,28 @@ mod words {
                 hold: format!(
                     "skein: clear {} of storage you are not using before you continue. This box \
                      holds {} against its {} share of the fleet's disk. {HELD}",
-                    gib(*excess),
-                    gib(*holds),
+                    gib_up(*excess),
+                    gib_up(*holds),
                     gib(*limit),
                 ),
                 start: Some(format!(
                     "skein: before you start, this box is asked to clear {} of storage it is not \
                      using. It holds {} against its {} share of the fleet's disk. {WHERE}",
-                    gib(*excess),
-                    gib(*holds),
+                    gib_up(*excess),
+                    gib_up(*holds),
                     gib(*limit),
                 )),
                 remind: Some(format!(
                     "skein: still asked of this box: clear {} of storage (it holds {}).",
-                    gib(*excess),
-                    gib(*holds)
+                    gib_up(*excess),
+                    gib_up(*holds)
                 )),
                 enter: Some(format!(
                     "skein: this box holds {} against its {} share of the fleet's disk; clear {} \
                      it is not using.",
-                    gib(*holds),
+                    gib_up(*holds),
                     gib(*limit),
-                    gib(*excess),
+                    gib_up(*excess),
                 )),
                 ..Default::default()
             },
@@ -1501,6 +1535,125 @@ mod tests {
         );
     }
 
+    /// A box `excess` MiB over a 10G allowance, with nothing asked of it by the fleet.
+    fn over_allowance(minute: i64, excess: u64) -> Reading {
+        Reading {
+            disk_mb: Some(10240 + excess),
+            disk_limit_mb: Some(10240),
+            ..reading(minute, Some(calm()))
+        }
+    }
+
+    /// **A disk ask holds a command only when it is over by more than a tenth of the box's share**
+    /// (owner, SKEIN-1335): 1G on a 10G share. Under that the box is still asked — the ask is in
+    /// the file with its start line, reminder and entering line — and its `hold` is empty, which is
+    /// what the plugin reads as "tell, do not hold". The same rule for the fleet's ask, measured
+    /// against the box's allowance, or against what it holds when it has none.
+    ///
+    /// Fails if the threshold is dropped (every ask holds again, so the 1,024 MiB case has words),
+    /// if the comparison becomes `>=` (exactly 10% holds), or if the fleet's ask is left out of it.
+    #[test]
+    fn a_disk_ask_holds_only_when_over_by_more_than_a_tenth_of_the_share() {
+        let disk = |r: &Reading| next(None, r).asks.into_iter().find(|a| a.kind == "disk");
+        for (excess, holds) in [(1, false), (1024, false), (1025, true), (4096, true)] {
+            let ask = disk(&over_allowance(0, excess)).expect("over its allowance and not asked");
+            assert_eq!(ask.why, "allowance");
+            assert!(ask.start.is_some() && ask.remind.is_some() && ask.enter.is_some());
+            assert_eq!(
+                !ask.hold.is_empty(),
+                holds,
+                "{excess} MiB over a 10G share: held {:?}",
+                ask.hold
+            );
+        }
+        let fleet = |free: u64, limit: Option<u64>| Reading {
+            fleet: FleetDisk::Asked(Share {
+                free,
+                ..share(0, false)
+            }),
+            disk_mb: Some(9626),
+            disk_limit_mb: limit,
+            ..reading(0, Some(calm()))
+        };
+        for (free, limit, holds) in [
+            (1024, Some(10240), false),
+            (1025, Some(10240), true),
+            // No allowance: a tenth of the 9,626 MiB it holds.
+            (962, None, false),
+            (963, None, true),
+        ] {
+            let ask = disk(&fleet(free, limit)).expect("the fleet's ask went missing");
+            assert_eq!(ask.why, "fleet");
+            assert_eq!(
+                !ask.hold.is_empty(),
+                holds,
+                "asked for {free} MiB with allowance {limit:?}: held {:?}",
+                ask.hold
+            );
+        }
+    }
+
+    /// **Going from told to held is a new crossing, and a band that stays held keeps its id.**
+    ///
+    /// The plugin holds one command per crossing id, so a box that grows from a little over to far
+    /// over must get a new id, or it would never be held: its id was already "shown" by the start
+    /// line. Fails if the crossing id carries over regardless of whether the ask holds.
+    #[test]
+    fn going_from_told_to_held_is_a_new_crossing() {
+        let files = run(&[
+            over_allowance(0, 200),
+            over_allowance(1, 300),
+            over_allowance(2, 2048),
+            over_allowance(3, 2100),
+        ]);
+        let id = |n: usize| files[n].asks[0].crossing_id.clone();
+        assert_eq!(id(0), id(1), "a told band that held minted a new crossing");
+        assert_ne!(id(1), id(2), "starting to hold did not mint a new crossing");
+        assert_eq!(id(2), id(3), "a held band that held minted a new crossing");
+        assert!(files[1].asks[0].hold.is_empty() && !files[2].asks[0].hold.is_empty());
+    }
+
+    /// **No disk ask says `0.0G`** (SKEIN-1335: 73 asks to "clear 0.0G" in a month). An amount to
+    /// clear is rounded up to the tenth, so it is never zero and clearing it is always enough.
+    ///
+    /// Fails if the disk words go back to `gib`, which prints 1 MiB as `0.0G`.
+    #[test]
+    fn no_disk_ask_says_nothing_needs_clearing() {
+        assert_eq!(
+            [1, 51, 1024, 1025, 2355].map(gib_up),
+            ["0.1G", "0.1G", "1.0G", "1.1G", "2.3G"]
+        );
+        let tiny = Share {
+            over_by: 1,
+            free: 1,
+            ..share(0, false)
+        };
+        for d in [
+            DiskAsk::Share(tiny.clone()),
+            DiskAsk::Allowance {
+                excess: 1,
+                holds: 10241,
+                limit: 10240,
+            },
+        ] {
+            let a = words::disk(&d);
+            if let DiskAsk::Allowance { .. } = d {
+                assert!(
+                    a.hold.contains("holds 10.1G against its 10.0G share"),
+                    "{}",
+                    a.hold
+                );
+            }
+            for t in [Some(a.hold), a.start, a.remind, a.enter]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!t.contains(" 0.0G"), "{t}");
+                assert!(t.contains(" 0.1G"), "{t}");
+            }
+        }
+    }
+
     // --------------------------------------------------------------------------------------------
     // The plugin's hooks, run as a box runs them: the shipped script, fed a file `write_box` wrote.
     // --------------------------------------------------------------------------------------------
@@ -1742,8 +1895,10 @@ mod tests {
             None,
             "a session told at start was held for the same crossing"
         );
+        // Told at start is the hour's disk warning (SKEIN-1335), so the first prompt adds nothing.
+        assert_eq!(h.context("prompt", "s1"), None);
         assert_eq!(
-            h.context("prompt", "s1").as_deref(),
+            h.context("prompt", "s2").as_deref(),
             Some("skein: still asked of this box: clear 2.3G of storage (it holds 9.4G).")
         );
 
@@ -1856,5 +2011,160 @@ mod tests {
             "skein: this box is back to 1,204 processes. Nothing more is asked.\n"
         );
         assert_eq!(pass(), "");
+    }
+
+    impl Hooked {
+        /// Write a file for a box `excess` MiB over a 10G allowance.
+        fn over(&self, secs: i64, excess: u64) -> Signals {
+            write_box(
+                &self.state,
+                &Reading {
+                    at: Utc::now() + chrono::Duration::seconds(secs),
+                    disk_mb: Some(10240 + excess),
+                    disk_limit_mb: Some(10240),
+                    fleet: FleetDisk::NotAsked { over_by: 0 },
+                    cgroup: Some(calm()),
+                },
+            )
+            .unwrap()
+        }
+
+        /// Make this session's last disk warning and hold an hour and a second old.
+        fn an_hour_passes(&self, session: &str) {
+            let path = self
+                .home
+                .join(".local/state/skein/shown")
+                .join(format!("{session}.disk"));
+            let raw = std::fs::read_to_string(&path).expect("no disk record was written");
+            let mut said: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let past = Utc::now().timestamp() as f64 - 3601.0;
+            for key in ["warned", "held"] {
+                if said.get(key).is_some() {
+                    said[key] = serde_json::json!(past);
+                }
+            }
+            std::fs::write(&path, said.to_string()).unwrap();
+        }
+    }
+
+    /// **A box a little over its share is told, at most once an hour, and never held** (owner,
+    /// SKEIN-1335).
+    ///
+    /// What would make each assertion fail:
+    /// * *no call is held* — the plugin holds for an ask with no hold words, or skein writes hold
+    ///   words for an overage under a tenth of the share.
+    /// * *the second prompt says nothing* — the reminder is not limited to once an hour, which is
+    ///   the every-prompt reminder this replaced.
+    /// * *it is said again after the hour* — the limit never expires, so a box over all day is told
+    ///   once and never again.
+    #[test]
+    fn a_little_over_is_told_hourly_and_never_held() {
+        let h = hooked();
+        let file = h.over(0, 200);
+        assert!(file.asks[0].hold.is_empty());
+        assert_eq!(h.tool("s1"), None, "a box 0.2G over its share was held");
+
+        let told = h
+            .context("prompt", "s1")
+            .expect("a box over its share was not told");
+        assert_eq!(told, file.asks[0].remind.clone().unwrap());
+        assert_eq!(
+            h.context("prompt", "s1"),
+            None,
+            "it was told again within the hour"
+        );
+        h.an_hour_passes("s1");
+        assert_eq!(
+            h.context("prompt", "s1"),
+            Some(told),
+            "an hour later and still over, it was not told again"
+        );
+        assert_eq!(h.tool("s1"), None);
+    }
+
+    /// **A box far over its share is held, at most once an hour, however often its figure crosses
+    /// back and forth** (owner, SKEIN-1335). One transcript in the sweep was held 229 times: every
+    /// build pushed the box over and every clean brought it back, and each crossing held a call.
+    ///
+    /// What would make each assertion fail:
+    /// * *the first call is held* — the threshold suppresses holds that should be made.
+    /// * *a new crossing within the hour runs* — fails if the hourly limit on disk holds is dropped
+    ///   from the PreToolUse hook: the new crossing id is unshown, so it would hold.
+    /// * *after the hour it is held* — the limit never expires, or the waiting crossing was recorded
+    ///   as shown when it was not shown.
+    /// * *the reminder waits too* — a hold counts as the hour's warning.
+    #[test]
+    fn far_over_is_held_at_most_hourly_however_often_it_crosses() {
+        let h = hooked();
+        let first = h.over(0, 2048);
+        assert_eq!(h.tool("s1").as_deref(), Some(first.asks[0].hold.as_str()));
+        assert_eq!(h.tool("s1"), None);
+        assert_eq!(
+            h.context("prompt", "s1"),
+            None,
+            "the reminder came straight after the hold"
+        );
+
+        h.over(1, 0);
+        let again = h.over(2, 2100);
+        assert_ne!(again.asks[0].crossing_id, first.asks[0].crossing_id);
+        assert_eq!(
+            h.tool("s1"),
+            None,
+            "a second crossing within the hour was held"
+        );
+
+        h.an_hour_passes("s1");
+        assert!(
+            h.tool("s1").is_some(),
+            "still far over an hour later, and the crossing never held"
+        );
+        assert_eq!(h.tool("s1"), None);
+    }
+
+    /// **The monitor announces the disk band at most once an hour**, and says it cleared only to a
+    /// session it last told it was asked.
+    ///
+    /// Fails if the monitor's hourly limit on disk is dropped (the second entering line prints), or
+    /// if a cleared line is printed after an entering line that was not (a "nothing more is asked"
+    /// about an ask the session was never told of).
+    #[test]
+    fn the_monitor_says_the_disk_band_at_most_hourly() {
+        let h = hooked();
+        let keep = h.home.join("monitor.json");
+        let keep_s = keep.to_str().unwrap();
+        let pass = || h.run(&["monitor", "--passes", "1", "--state", keep_s], "", None);
+
+        h.over(0, 0);
+        assert_eq!(pass(), "");
+        let entered = h.over(1, 2048);
+        assert_eq!(
+            pass(),
+            format!("{}\n", entered.asks[0].enter.clone().unwrap())
+        );
+        h.over(2, 0);
+        assert_eq!(pass(), format!("{}\n", words::DISK_CLEARED));
+        h.over(3, 2048);
+        assert_eq!(
+            pass(),
+            "",
+            "the disk band was announced twice within the hour"
+        );
+        h.over(4, 0);
+        assert_eq!(
+            pass(),
+            "",
+            "cleared was said of an ask the session was not told"
+        );
+
+        let mut state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&keep).unwrap()).unwrap();
+        state["_disk"]["at"] = serde_json::json!(Utc::now().timestamp() as f64 - 3601.0);
+        std::fs::write(&keep, state.to_string()).unwrap();
+        let later = h.over(5, 2048);
+        assert_eq!(
+            pass(),
+            format!("{}\n", later.asks[0].enter.clone().unwrap())
+        );
     }
 }

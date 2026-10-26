@@ -608,6 +608,13 @@ if [ -n "$git_dir" ]; then
     grep -qxF '/.claude' "$exclude" 2>/dev/null || printf '/.claude\n' >> "$exclude"
   fi
 fi
+# Agents make their worktrees under `.worktrees/` in the checkout, as the agent guide tells them
+# (SKEIN-1336): inside the directory the runtime trusts, so their working directory is not reset.
+# None of them is a change to the checkout.
+if [ -n "$git_dir" ]; then
+  grep -qxF '/.worktrees/' "$git_dir/info/exclude" 2>/dev/null \
+    || printf '/.worktrees/\n' >> "$git_dir/info/exclude"
+fi
 
 # Expose the project-scoped durable workspace without sharing literal HOME. The helper is
 # provider-neutral and refuses to overwrite a real HOME/shared path. Keep startup gated on its

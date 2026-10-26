@@ -35,6 +35,8 @@ const LET_IN = "skein-test-private-token";
 const WRONG = "skein-test-token-for-another-repo";
 // A token saved while the stub GitHub answers nothing but 503.
 const UNASKED = "skein-test-saved-while-github-was-down";
+// A token that pushes and cannot read check runs or Actions (SKEIN-1338).
+const NO_CHECKS = "skein-test-token-that-cannot-read-checks";
 
 function git(cwd, ...args) {
   return execFileSync("git", args, {
@@ -102,14 +104,17 @@ function startPrivateHost(fx) {
 
 // GitHub's `GET /repos/{slug}`, for the push check a share and a card's save make. `push` is what
 // the test says it is; a token in `refuse` gets GitHub's 401, and `down` answers every request 503.
+// With `noChecks`, the check-runs and Actions reads a saved token is asked about answer 403.
 function startGitHubApi() {
-  const state = { push: false, asked: [], refuse: new Set(), down: false };
+  const state = { push: false, asked: [], refuse: new Set(), down: false, noChecks: false };
   const server = http.createServer((req, res) => {
     state.asked.push(req.url);
     const auth = req.headers.authorization || "";
     const [code, answer] = state.down ? [503, { message: "Service Unavailable" }]
       : [...state.refuse].some(t => auth.includes(t)) ? [401, { message: "Bad credentials" }]
-      : [200, { permissions: { push: state.push } }];
+      : state.noChecks && /\/(check-runs|actions\/runs)(\?|$)/.test(req.url)
+        ? [403, { message: "Resource not accessible by personal access token" }]
+      : [200, { permissions: { push: state.push }, default_branch: "main" }];
     const body = JSON.stringify(answer);
     res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
     res.end(body);
@@ -297,6 +302,21 @@ try {
   check("and it was saved", tokenFile("acme-second"), UNASKED);
   api.state.down = false;
 
+  // A token that pushes and cannot read CI results is saved, and its card says what to add
+  // (SKEIN-1338). **What would make this fail:** the save not asking about check runs and Actions,
+  // `cannot_read` not served by `/api/fleet/git-grants`, or not drawn by `repoTokenRow`.
+  api.state.push = true;
+  api.state.noChecks = true;
+  await cardBody().locator(`[data-repotoken="acme/second"]`).fill(NO_CHECKS);
+  await cardBody().locator("button", { hasText: "Store" }).click();
+  await until(async () => ((await cardBody().locator(".rbody").textContent()) || "").includes("can't read checks"));
+  check("a token that cannot read check results says on its card which permissions to add",
+    ((await cardBody().locator(".rbody").textContent()) || "").replace(/\s+/g, " ")
+      .split("can't read checks")[1]?.includes("It can push, but GitHub won't let it read CI results: acme/second needs Checks: read and Actions: read. Add those permissions to the token on GitHub; skein looks again within 20 minutes"),
+    true);
+  check("and it was saved", tokenFile("acme-second"), NO_CHECKS);
+  api.state.noChecks = false;
+
   // --- an existing repo uses the token another repo has, from its card (SKEIN-1241) -------------
   const priv = () => page.locator(`[data-card="private"]`);
   await priv().locator(".rhead").click();
@@ -330,7 +350,7 @@ try {
   // --- no token bytes anywhere a person or a log can read them -------------------------------------
   // **What would make this fail:** a route echoing its request, an error carrying git's command line
   // with a token in a URL, or a page drawing a stored token back.
-  const leaks = where => [LET_IN, WRONG, UNASKED].filter(t => where.includes(t));
+  const leaks = where => [LET_IN, WRONG, UNASKED, NO_CHECKS].filter(t => where.includes(t));
   check("no /api/ response carried a token", { answers: answers.length > 10, leaked: leaks(answers.join("\n")) },
     { answers: true, leaked: [] });
   check("nor does the page", leaks(await page.content()), []);

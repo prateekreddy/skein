@@ -399,6 +399,12 @@ repos is write access to three repos for whichever box receives it, because the 
 runs inside the box as the agent's own uid and can route but never contain. Cross-repo reads of
 private repos then need an optional read-only PAT, which nothing prompts for.
 
+**What a write token needs**, chosen per repository when it is made on GitHub: **Contents: read and
+write** to push, **Pull requests: read and write** and **Issues: read and write** to open a PR and
+comment on it, and **Checks: read** and **Actions: read** so agents can see whether CI passed.
+skein asks GitHub before saving: a token that cannot push is not saved, and one that pushes but
+cannot read check runs or Actions is saved with its card naming the permissions to add (SKEIN-1338).
+
 #### Asking to write another repo
 
 A push elsewhere has no credential of this box's to make it with, and the push itself files the ask:
