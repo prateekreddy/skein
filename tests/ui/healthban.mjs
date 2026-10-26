@@ -366,6 +366,29 @@ for (const name of STEPS) {
     w.said(), "3 boxes run old probes and 1 sends no signals — restart them to update their probes.");
 }
 
+{
+  // SKEIN-1326: a box that started before the last update is fixed by its own Restart button,
+  // which restarts the whole box for exactly these boxes — so the row points there, by name, and
+  // not at the CLI line the report's fix carries for `skein doctor`. Fails if the `cover` branch
+  // goes: the row is then "Box isolation is failing: … To fix: `skein restart example-one` …".
+  const w = world();
+  w.state.health = unhealthy({
+    cover: { level: "unsatisfied",
+             detail: "started before the current isolation and still running under the old one: example-one",
+             fix: "`skein restart example-one` — restarting it rebuilds the box's namespace with the covers this skein installs" },
+    uncovered_boxes: ["example-one"],
+  });
+  w.loadHealth();
+  await settle();
+  t.check("a box that started before the last update is sent to its Restart button",
+    w.said(), "1 box started before the last update (example-one) — open it and press Restart to update it.");
+  w.state.health.uncovered_boxes = ["example-one", "example-two"];
+  w.loadHealth();
+  await settle();
+  t.check("and two are spoken of as two",
+    w.said(), "2 boxes started before the last update (example-one, example-two) — open each and press Restart to update them.");
+}
+
 // --- the row is the way to the diagnostics pane ---------------------------------------------------
 //
 // It is a button, and the only thing pressing it can usefully do is open the pane that lists every

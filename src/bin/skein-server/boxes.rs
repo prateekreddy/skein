@@ -580,6 +580,78 @@ pub(super) async fn api_restart_agent(
     })
 }
 
+/// Boxes with a whole-box restart under way in this server, so a second press — from another tab,
+/// or a page reloaded mid-restart — is told so rather than stopping the box a second time while
+/// the first start is still bringing it up.
+static RESTARTING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// This server's hold on one box's restart, released when it is dropped — on every way out of the
+/// route, a panic in the blocking task included.
+struct Restarting(String);
+
+impl Restarting {
+    fn take(name: &str) -> Option<Self> {
+        let mut held = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
+        if held.iter().any(|n| n == name) {
+            return None;
+        }
+        held.push(name.to_string());
+        Some(Restarting(name.to_string()))
+    }
+}
+
+impl Drop for Restarting {
+    fn drop(&mut self) {
+        RESTARTING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|n| n != &self.0);
+    }
+}
+
+/// Restart the WHOLE box: stop it and start it again through the launcher this skein installs
+/// (SKEIN-1326). The cockpit's one Restart button sends this for a box whose board row reads
+/// `cover: "older"` — started under a launcher that is not the current one — and `restart-agent`
+/// for every other box.
+///
+/// Waits for the start, which can be minutes, and answers `{ok}` or `{ok:false, error}`: the person
+/// pressed one button and is looking at the row, and a "restarting…" that ends in silence is what a
+/// slow start was once reported as. [`skein::sandbox::restart_box`] is `skein restart`'s own path,
+/// so the two cannot drift.
+///
+/// Refused before anything is stopped for a box skein did not place: there is no launcher record
+/// to bring up to date, and nothing of skein's to start again.
+pub(super) async fn api_restart_box(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::util::valid_name(&name) {
+        return Json(restart_answer(Err("invalid box name".into())));
+    }
+    let Some(held) = Restarting::take(&name) else {
+        return Json(restart_answer(Err(format!(
+            "{name} is already being restarted — wait for that to finish"
+        ))));
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let _held = held;
+        if skein::place::shared_record(&name).is_none() {
+            return Err(skein::place::unplaced(&name));
+        }
+        skein::sandbox::restart_box(&name, None)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    Json(restart_answer(result))
+}
+
+/// What the restart route answers. Its own function so both halves can be asserted without a
+/// fleet: a failure carries its reason whole, because the page shows it as the notice, and a cut
+/// reason is how a person gets the complaint without the cure.
+fn restart_answer(result: Result<(), String>) -> serde_json::Value {
+    match result {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error.trim() }),
+    }
+}
+
 /// Lazy AI narration of a box's last turn — the rationed Haiku fallback for the digest when the box
 /// keeps no journal (step 7). Returns {summary} (null when AI is off / unavailable). Called on demand
 /// only (Session-tab open), cached per turn-end; never per fleet tick.
@@ -717,6 +789,66 @@ pub(super) async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole-box restart's answer, both halves (SKEIN-1326). What would make this fail: the
+    /// error clipped or wrapped in a phrase of the route's own, so the notice no longer carries
+    /// the reason `restart_box` gave — its last clause is usually what to do.
+    #[test]
+    fn the_restart_route_answers_ok_or_the_reason_whole() {
+        assert_eq!(restart_answer(Ok(())), serde_json::json!({ "ok": true }));
+        let why = "thing-x was stopped, and starting it again failed: the launcher did not \
+                   report an anchor pid. Run `skein restart thing-x` to try again";
+        assert_eq!(
+            restart_answer(Err(format!("{why}\n"))),
+            serde_json::json!({ "ok": false, "error": why })
+        );
+    }
+
+    /// The route over the real path, for the two refusals it makes itself before anything is
+    /// stopped: a box skein never placed, and a second press while the first restart is running.
+    ///
+    /// What would make this fail: dropping the placement check (the refusal is then `start_target`'s
+    /// "no registered repo", which says nothing about the box not being skein's), or dropping the
+    /// in-flight hold (the second press then runs the restart again).
+    #[test]
+    fn the_restart_route_refuses_a_box_it_did_not_place_and_a_second_press() {
+        let _env = super::super::env_lock();
+        let home = super::super::scratch_dir("1326");
+        let mut env = super::super::review::review_routes::env_pins();
+        env.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", &home)
+            .set("SKEIN_LS_CMD", "printf '[]'");
+        skein::sbx::forget_fleet_boxes();
+        let run = |name: &str| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a tokio runtime for this test's body")
+                .block_on(api_restart_box(Path(name.to_string())))
+                .0
+        };
+
+        let unplaced = run("thing-nowhere");
+        assert_eq!(unplaced["ok"], false, "{unplaced}");
+        assert_eq!(
+            unplaced["error"],
+            skein::place::unplaced("thing-nowhere"),
+            "a box skein did not place was not refused as one: {unplaced}"
+        );
+
+        let held = Restarting::take("thing-busy").expect("nothing holds it yet");
+        let second = run("thing-busy");
+        assert_eq!(
+            second,
+            serde_json::json!({ "ok": false,
+                "error": "thing-busy is already being restarted — wait for that to finish" })
+        );
+        drop(held);
+        assert!(
+            Restarting::take("thing-busy").is_some(),
+            "the hold outlived the restart that took it, so this box can never be restarted again"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

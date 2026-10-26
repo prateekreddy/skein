@@ -243,7 +243,7 @@ function makeRow(name) {
     // the "sign in" chip opens the same login terminal the expired-login banner does — the one fix
     // that works from the cockpit, and every box inherits what it signs in (SKEIN-1183)
     if (e.target.classList.contains("pchip") && e.target.classList.contains("k-auth")) { openLoginTerminal(agentOf(name)); return; }
-    if (e.target.classList.contains("hookwarn") && e.target.dataset.restart === "1") { restartAgent(name); return; }
+    if (e.target.classList.contains("hookwarn") && e.target.dataset.restart === "1") { pressRestart(name); return; }
     if (e.target.classList.contains("dchip")) { askDiskLimit(name); return; }
     // the check chip is a link to what the check actually said — a red tick you can't read is noise
     openTerminal(name);
@@ -314,6 +314,61 @@ function askRestart(name, label) {
     el.querySelector('[data-a="no"]').focus();
     registerDialog(el, () => done(false));
   });
+}
+// **One Restart, and it chooses** (SKEIN-1326, the owner's call). Restarting the agent alone
+// leaves the box in the namespace it was born with — its mounts, its isolation, where `~/shared`
+// points — and those are built only when the whole box starts. So a box that started under an
+// older launcher than the one installed now (`cover: "older"` on its row, the same verdict the
+// health line and the row's hint read) is restarted whole: stopped and started again through
+// `skein restart`'s own path. Every other box keeps the agent-only restart, which leaves a dev
+// server somebody left running alone. The whole-box one always asks first, because it stops
+// everything in the box, and says why it is the one on offer.
+function needsWholeRestart(name) { return boxes.find(b => b.name === name)?.cover === "older"; }
+function pressRestart(name) { return needsWholeRestart(name) ? restartBox(name) : restartAgent(name); }
+const RESTART_BOX_COST = "This box started before the last update, so restarting Claude alone won't "
+  + "pick it up. Restarting the box stops everything running in it — Claude, its shell and anything "
+  + "left running in the background — and starts it again. Its files and conversation stay.";
+function askRestartBox(name) {
+  return new Promise(answer => {
+    document.getElementById("rsask")?.remove();
+    const el = document.createElement("div");
+    el.id = "rsask"; el.className = "open";
+    el.innerHTML = `<div class="nb-card" style="max-width:440px">`
+      + `<div class="nb-head"><b>Restart ${esc(name)}?</b></div>`
+      + `<div class="rs-body">${esc(RESTART_BOX_COST)}</div>`
+      + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
+      + `<button type="button" class="primary" data-a="yes">Restart box</button></div></div>`;
+    const done = yes => { el.classList.remove("open"); setTimeout(() => el.remove(), 0); answer(yes); };
+    el.addEventListener("click", e => {
+      const a = e.target.closest("[data-a]")?.dataset.a;
+      if (a) done(a === "yes");
+    });
+    document.body.append(el);
+    el.querySelector('[data-a="no"]').focus();
+    registerDialog(el, () => done(false));
+  });
+}
+// The box's terminals are closed BEFORE the request rather than after it: the stop ends their tmux
+// server, and a terminal left open would reconnect into the middle of the start — the reconnect
+// starts a box that has no session, which is this restart's own job. The agent's terminal is
+// opened again once the box is back, as the agent-only restart does.
+async function restartBox(name) {
+  if (restartingAgents.has(name)) return;
+  const runtime = activeSession()?.box === name ? activeSession().runtime : agentOf(name);
+  if (!(await askRestartBox(name))) return;
+  if (restartingAgents.has(name)) return;
+  restartingAgents.add(name);
+  startActing(name, "restarting");
+  renderDockbar();
+  const done = () => { restartingAgents.delete(name); doneActing(name); renderDockbar(); };
+  closeBoxSessions(name);
+  toast(`restarting ${name}…`);
+  fetch(`/api/boxes/${encodeURIComponent(name)}/restart`, { method:"POST" })
+    .then(r => r.json()).then(result => {
+      if (!result.ok) throw new Error(result.error || "restart failed");
+      openTerminal(name, runtime);
+      toast(`restarted ${name}`);
+    }).catch(error => notice(`could not restart ${name}: ${failText(error)}`)).finally(done);
 }
 async function restartAgent(name) {
   if (restartingAgents.has(name)) return;
@@ -408,18 +463,19 @@ function updateRow(el, b, showRepo) {
   hw.style.display = hh ? "" : "none";
   hw.dataset.restart = hh && hh[2] ? "1" : "0";
   hw.title = hh ? hh[1] : "";
-  // Which isolation this box actually has. It is invisible from every other angle — an uncovered
-  // box looks exactly like a covered one on this row and from inside itself — and it can only
-  // change by restarting, because the cover is built at box start and the box keeps the namespace
-  // it was born with. No click handler on purpose: a restart costs the agent's unfinished work.
+  // Whether this box started under an older launcher than the one installed now. It is invisible
+  // from every other angle — its mounts, its isolation and where `~/shared` points are built at box
+  // start, and the box keeps them until the whole box restarts — so the row says so, in the words
+  // of what to do (SKEIN-1326). The box's Restart button is what does it: it restarts the whole box
+  // for exactly the rows that show this. No click handler on the hint itself: the button asks first.
   const cw = el.querySelector(".covwarn");
   const older = b.cover === "older";
-  cw.textContent = older ? "⚠ older isolation" : "";
+  cw.textContent = older ? "restart to update" : "";
   cw.style.display = older ? "" : "none";
   cw.title = older
-    ? "this box started before the isolation skein installs now, and keeps the namespace it was "
-      + "born with until it is restarted — `skein restart " + b.name + "` rebuilds it with the "
-      + "current covers, leaving the checkout and branch alone"
+    ? "this box started before the last update, and keeps the setup it started with — its mounts "
+      + "and isolation — until the whole box restarts. Open it and press Restart: it restarts the "
+      + "whole box, after asking. Its files and conversation stay."
     : "";
   // What bounds this box's memory, which was invisible until the launcher started reporting it:
   // the ceiling lives in a cgroup inside the sandbox and the record of it in a file the host cannot
@@ -1349,7 +1405,8 @@ function renderDockbar() {
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
   const restart = dockbar.querySelector("#drestart");
   if (restart) {
-    restart.onclick = () => restartAgent(view.box);
+    restart.onclick = () => pressRestart(view.box);
+    if (needsWholeRestart(view.box)) restart.title = "restart the whole box — it started before the last update, so restarting the agent alone would not pick the update up";
     // Held down while one is in flight: a second press would restart the session the first just
     // brought back (SKEIN-1262).
     if (restartingAgents.has(view.box)) { restart.disabled = true; restart.textContent = "Restarting…"; }

@@ -1000,6 +1000,83 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
     }
 }
 
+/// What a box is started from: its registered repository, and the branch it is on — `branch`
+/// when the caller names one, else the box's own launch spec.
+///
+/// Shared by `skein start`, `skein restart` and the cockpit's whole-box restart, so a box that
+/// cannot be started is refused in the same words wherever it was asked from — and, for a restart,
+/// refused *before* anything is stopped.
+pub fn start_target(name: &str, branch: Option<&str>) -> Result<(Repo, String), String> {
+    // **Not answerable with `--uncovered`, and saying so is the point.** A box whose name matches
+    // no repository is uncovered (`fleet::refuse_if_uncovered`), but that is the smaller half of
+    // what is missing here: there is no remote to clone from and no store to link, so there is no
+    // box to start however exposed anyone is willing to have it. The step that works is the name or
+    // the registration, and this says both rather than leaving `skein repos` to be interpreted.
+    let repo = repo_for_box(name).ok_or_else(|| {
+        format!(
+            "no registered repo for box {name}, so skein has nothing to clone it from, no store \
+             to link into it, and no mounts it could name as the box's own.\n\
+             `skein repos` lists the ids skein knows — a box whose name starts with one of them \
+             is matched with no further ceremony.\n\
+             `skein add <git-url> --id <id>` registers a repository skein does not have yet."
+        )
+    })?;
+    let branch = branch
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::repos::branch_of(name).unwrap_or_default());
+    if branch.trim().is_empty() {
+        return Err(format!("no branch for box {name}; pass --branch <branch>"));
+    }
+    Ok((repo, branch))
+}
+
+/// Stop a box and start it again through the launcher this skein installs — `skein restart <box>`,
+/// and the cockpit's Restart for a box that started under an older launcher (SKEIN-1326). One path
+/// for both, so the button does exactly what the command the health line names does.
+///
+/// **The whole box, not the agent**, which is [`restart_agent_session`]'s job and the reason this
+/// exists beside it: a box keeps the mount namespace it was born with, and everything
+/// `box-session.sh` builds — its binds, its isolation, the `~/shared` link's target — is built only
+/// here, at start. So this ends every process in the box, the box's own shell and anything left
+/// running in the background included. Its tree, its private home and its conversation are on disk
+/// and are kept.
+///
+/// What is checked first, before anything is stopped: that the box has a repository and a branch
+/// to start from. A restart that stopped a box it then could not start would leave somebody with
+/// less than they pressed the button on.
+///
+/// The stop itself is best-effort, deliberately: a box whose session is already gone must still be
+/// startable, and refusing would leave the case people most want this for — a half-dead box — with
+/// nothing to press. The start is not: when it fails, the error says the box was stopped, because
+/// that is what the person now has.
+///
+/// The purpose is the placement record's own, because a restart is not a repurpose: started again
+/// as a manual box, a review box would be refused by `start_box` — after it had been stopped. A
+/// box with no record yet (its first start failed before it was placed) is a manual one, which is
+/// what `skein start` would make of it.
+pub fn restart_box(name: &str, branch: Option<&str>) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let purpose = shared_record(name)
+        .map(|record| record.purpose)
+        .unwrap_or_default();
+    let (repo, branch) = start_target(name, branch)?;
+    let stopped = match stop_box(name) {
+        Ok(()) => true,
+        Err(why) => {
+            eprintln!("skein: {name} did not stop cleanly ({why}); starting it anyway");
+            false
+        }
+    };
+    crate::fleet::start_box(name, &repo, &branch, "exec bash -l", purpose).map_err(|why| {
+        match stopped {
+            true => format!("{name} was stopped, and starting it again failed: {why}"),
+            false => why,
+        }
+    })
+}
+
 /// Restart a box's agent onto whatever CLI the sandbox now has, and **reopen its conversation
 /// without sending it anything** — the Update pane's per-box press (SKEIN-1071).
 ///
@@ -1621,6 +1698,77 @@ mod tests {
             Some(vec!["sh".into(), "-c".into(), answer.clone()])
         }));
         (guard, seen)
+    }
+
+    /// **A whole-box restart that cannot start the box again does not stop it** (SKEIN-1326).
+    ///
+    /// A placed box whose name no registered repository claims: there is nothing to start it from,
+    /// so the restart is refused in `start_target`'s words, and nothing crossed into the sandbox —
+    /// the stop script included. What would make this fail: `restart_box` stopping first and
+    /// asking for the repository afterwards, the order `skein restart` had before it (the stop
+    /// script is then the argv `seen` holds, and the person is left with a stopped box).
+    #[test]
+    fn a_restart_that_could_not_start_the_box_again_does_not_stop_it() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir).set("SKEIN_FLEET_ROOT", &fleet);
+        placed("thing-x");
+        let (_crossing, seen) = crossing_answering(":");
+        let why = restart_box("thing-x", None).expect_err("no repository, so no restart");
+        assert!(
+            why.starts_with("no registered repo for box thing-x"),
+            "the refusal is not the one every start gives: {why}"
+        );
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Vec::<String>::new(),
+            "the restart crossed into the sandbox before finding it could not start the box again"
+        );
+    }
+
+    /// **A restart whose start failed says the box was stopped** (SKEIN-1326), because that is
+    /// what the person who pressed Restart now has — the reason alone reads as though nothing
+    /// happened. The crossing answers every command and does nothing, so the stop "succeeds" and
+    /// the start fails at the first thing it needed the launcher to say.
+    ///
+    /// What would make this fail: returning `start_box`'s error bare.
+    #[test]
+    fn a_restart_whose_start_failed_says_the_box_was_stopped() {
+        let _g = env_lock();
+        let _warden = crate::testutil::no_warden();
+        let dir = tempdir();
+        let fleet = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir).set("SKEIN_FLEET_ROOT", &fleet);
+        crate::config::save_config(&crate::config::Config {
+            fleet_sandbox: "skein-fleet".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        save_repos(&[Repo {
+            id: "thing".into(),
+            source: "git@github.com:o/thing.git".into(),
+            store: dir.join("store/.claude").to_string_lossy().into(),
+            ..Default::default()
+        }])
+        .unwrap();
+        placed("thing-x");
+        let (_crossing, seen) = crossing_answering(":");
+        let why = restart_box("thing-x", Some("feat/x")).expect_err("the launcher said nothing");
+        assert!(
+            why.starts_with("thing-x was stopped, and starting it again failed: "),
+            "a failed start after a stop does not say the box is now stopped: {why}"
+        );
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|argv| argv.contains("/boxes/thing-x/session.sock")),
+            "the restart never stopped the box, so this is not the case it claims: {:?}",
+            seen.lock().unwrap()
+        );
     }
 
     #[test]
