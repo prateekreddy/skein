@@ -2270,7 +2270,7 @@ mod tests {
         assert!(first
             .last()
             .unwrap()
-            .contains(r#""claude --name 'thing-x' --plugin-dir "#));
+            .contains(r#"; }; claude --name 'thing-x' --plugin-dir "#));
         assert!(!first.last().unwrap().contains("{box}"));
         assert!(!first.last().unwrap().contains("--continue"));
         // a start that fails outright holds the session open as a shell instead of vanishing and
@@ -2281,7 +2281,7 @@ mod tests {
         // the guard is embedded double-quoted in the outer shell, so it must hold no variable for
         // that shell to expand before tmux ever sees it.
         let guard = guarded_agent_command("claude", "claude --continue");
-        assert!(guard.starts_with("claude --continue || {"));
+        assert!(guard.contains("claude --continue || {"));
         assert!(!guard.contains('$'), "{guard}");
         assert!(first.last().unwrap().contains("waiting for box setup"));
         assert!(!a.last().unwrap().contains("waiting for box setup"));
