@@ -308,8 +308,8 @@ const cleanable = running => ({
   total_mb: 10240,
   items: [
     { path: "/fleet/b/tree/target", shown: "b/tree/target", kind: "build output", bytes: 3 * 1024 ** 3 },
-    { path: "/fleet/b/home/.cache/ms-playwright", shown: "~/.cache/ms-playwright", kind: "download cache", bytes: 1024 ** 3 },
-    { path: "/fleet/b/home/.cache/skein/claude/claude-1000/-p/s1", shown: "~/.cache/skein/claude/claude-1000/-p/s1", kind: "scratchpad", bytes: 512 * 1024 ** 2 },
+    { path: "/fleet/b/h/.cache/ms-playwright", shown: "~/.cache/ms-playwright", kind: "download cache", bytes: 1024 ** 3 },
+    { path: "/fleet/b/h/.cache/skein/claude/claude-1000/-p/s1", shown: "~/.cache/skein/claude/claude-1000/-p/s1", kind: "scratchpad", bytes: 512 * 1024 ** 2 },
   ],
 });
 
