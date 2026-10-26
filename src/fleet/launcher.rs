@@ -517,6 +517,11 @@ mod tests {
     /// read "launcher", or nothing), or dropping either comparison.
     #[test]
     fn every_stale_decision_is_named_by_its_own_reason() {
+        // Pinned: the peer half reads `repos.json`, and an unpinned `$SKEIN_HOME` is refused.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
         let record = |launcher: &str, peers: Option<bool>| crate::place::PlaceRecord {
             launcher: launcher.to_string(),
             peers,
