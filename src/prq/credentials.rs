@@ -1669,6 +1669,13 @@ mod tests {
         // Hermetic against the machine's own login (SKEIN-1342): with a `gh` that could answer, the
         // "nothing at all" half below sent its owner's real token to the fake GitHub instead.
         let mut env = with_no_host_credential(home.as_ref(), &base);
+        // And every other place a `gh` could find the machine's login, should one be reached: the
+        // `gh` first on PATH is already one with no login, so these are belt and braces.
+        env.set("GH_CONFIG_DIR", home.as_ref() as &std::path::Path)
+            .set("XDG_CONFIG_HOME", home.as_ref() as &std::path::Path)
+            .unset("GH_ENTERPRISE_TOKEN")
+            .unset("GITHUB_ENTERPRISE_TOKEN")
+            .unset("DBUS_SESSION_BUS_ADDRESS");
 
         // A read token: the credential someone stores when they want cross-repo reads without an App.
         crate::gitgate::set_read_pat("skein-test-pat-read").unwrap();

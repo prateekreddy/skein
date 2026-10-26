@@ -656,10 +656,24 @@ fn gh_in_a_running_box_uses_the_token_placed_now() {
     let root = scratch_named("ghlive");
     let sandbox_home = sandbox_home_with_agent(&root);
     let mut pins = env_pins();
+    // Everything `gh` reads a credential from, pinned to nothing of the machine's (SKEIN-1342):
+    // its config directory and the XDG one it falls back to, the session bus its keyring is
+    // reached through, and every token variable it honours. `GH_TOKEN` is set rather than unset,
+    // to the fleet's stand-in, because a scoped box dropping it is part of what is tested. The box
+    // itself inherits only the launcher's allow-list, which carries none of the rest; pinning them
+    // here keeps the host side of this test from depending on that.
+    let gh_config = root.join("gh-config");
+    fs::create_dir_all(&gh_config).unwrap();
     pins.set("HOME", &sandbox_home)
         .set("SKEIN_HOME", root.join("skein"))
         .set("SKEIN_FLEET_ROOT", root.join("boxes"))
-        .set("GH_TOKEN", "skein-test-fleet-token");
+        .set("GH_TOKEN", "skein-test-fleet-token")
+        .set("GH_CONFIG_DIR", &gh_config)
+        .set("XDG_CONFIG_HOME", root.join("xdg-config"))
+        .unset("GITHUB_TOKEN")
+        .unset("GH_ENTERPRISE_TOKEN")
+        .unset("GITHUB_ENTERPRISE_TOKEN")
+        .unset("DBUS_SESSION_BUS_ADDRESS");
     save_config(&Config {
         fleet_sandbox: FLEET.into(),
         ..Config::default()
