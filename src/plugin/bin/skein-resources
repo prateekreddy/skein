@@ -11,6 +11,13 @@
 #   prompt          UserPromptSubmit: each standing ask's reminder, as context.
 #   monitor         The `resources` monitor: one line when a band changes, either way.
 #
+# Disk is said at most once an hour (owner, SKEIN-1335). A box a little over its share is over it
+# for hours, and its figure moves across the line and back with every build, so a once-per-crossing
+# rule said it hundreds of times a day. While a disk ask stands, its reminder is given to a session
+# at most hourly, a disk hold is made at most hourly, and the monitor announces the disk band at
+# most hourly. Whether a disk ask holds at all is skein's call, not this script's: an ask with no
+# `hold` words is one skein wants told and not held.
+#
 # It never stops, kills or slows anything, and a hold never repeats: a deny that repeated would trap
 # an agent that cannot comply, and the kernel's limits hold whether or not the agent acts.
 #
@@ -37,6 +44,9 @@ STALE_AFTER = 300
 
 # The monitor's period.
 EVERY = 30
+
+# The least time between two things said to one session about disk.
+DISK_EVERY = 3600
 
 
 def signals():
@@ -107,6 +117,33 @@ def record(path, ids):
         return False
 
 
+def disk_said(path):
+    """{"warned": epoch, "held": epoch}: when this session was last told about disk, and last held
+    for it. Empty when never, or when the record cannot be read."""
+    try:
+        with open(path + ".disk", encoding="utf-8") as f:
+            said = json.load(f)
+        return said if isinstance(said, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def disk_record(path, said):
+    """False when the record could not be written, and then nothing about disk may be said."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".disk", "w", encoding="utf-8") as f:
+            json.dump(said, f)
+        return True
+    except OSError:
+        return False
+
+
+def recent(said, key, now):
+    at = said.get(key)
+    return isinstance(at, (int, float)) and now - at < DISK_EVERY
+
+
 def context(event, lines):
     if lines:
         print(
@@ -127,6 +164,8 @@ def session_start():
     # Shown here counts as shown (owner, SKEIN-1055): a session is not held for an ask it was
     # just told about. Only what was actually printed is recorded.
     if told and record(path, [a["crossing_id"] for a in told]):
+        if any(a["kind"] == "disk" for a in told):
+            disk_record(path, dict(disk_said(path), warned=time.time()))
         context("SessionStart", [a["start"] for a in told])
 
 
@@ -136,6 +175,14 @@ def pre_tool_use():
         return
     seen = shown(path)
     unshown = [a for a in asks(signals()) if a["crossing_id"] not in seen and a.get("hold")]
+    now, said = time.time(), disk_said(path)
+    # A disk hold within the hour: this crossing waits, unrecorded, and holds a call once the hour
+    # is up if it still stands.
+    if recent(said, "held", now):
+        unshown = [a for a in unshown if a["kind"] != "disk"]
+    if any(a["kind"] == "disk" for a in unshown):
+        if not disk_record(path, dict(said, warned=now, held=now)):
+            unshown = [a for a in unshown if a["kind"] != "disk"]
     if not unshown or not record(path, [a["crossing_id"] for a in unshown]):
         return
     # Every unshown ask in one held call, because each text ends "the next will run" and must be
@@ -154,32 +201,63 @@ def pre_tool_use():
 
 
 def prompt():
-    hook_input()
-    context("UserPromptSubmit", [a["remind"] for a in asks(signals()) if a.get("remind")])
+    path = shown_file(hook_input().get("session_id", ""))
+    now = time.time()
+    said = disk_said(path) if path else {}
+    lines = []
+    for a in asks(signals()):
+        if not a.get("remind"):
+            continue
+        if a["kind"] == "disk":
+            # Hourly, and only once the hour is recorded: a reminder that could not be recorded
+            # would be given on every prompt.
+            if not path or recent(said, "warned", now):
+                continue
+            if not disk_record(path, dict(said, warned=now)):
+                continue
+        lines.append(a["remind"])
+    context("UserPromptSubmit", lines)
 
 
-def monitor_pass(before, s):
-    """One look. `before` is {kind: crossing_id} from the last look, or None on the first.
-    Returns the new state and the lines to print."""
+def monitor_pass(before, s, clock=None):
+    """One look. `before` is {kind: crossing_id} from the last look, or None on the first, with
+    "_disk" = {"at": when the disk band was last announced, "told": whether that was an entering
+    line}. Returns the new state and the lines to print."""
     if s is None:
         # Nothing to believe: no band has moved.
         return before, []
+    t = time.time() if clock is None else clock
     now = {a["kind"]: a["crossing_id"] for a in asks(s)}
     if before is None:
         # The first look says nothing; SessionStart has already told the session what stands.
+        now["_disk"] = {"at": t if "disk" in now else 0, "told": "disk" in now}
         return now, []
+    disk = before.get("_disk")
+    disk = dict(disk) if isinstance(disk, dict) else {"at": 0, "told": False}
     lines = []
     by_kind = {a["kind"]: a for a in asks(s)}
     cleared = s.get("cleared") or {}
     for kind in KINDS:
         if kind in now and now[kind] != before.get(kind):
             line = by_kind[kind].get("enter")
+            if kind == "disk":
+                # Hourly: a box hovering at its line re-enters the band with every build.
+                if recent(disk, "at", t):
+                    line = None
+                elif isinstance(line, str) and line:
+                    disk = {"at": t, "told": True}
         elif kind in before and kind not in now:
             line = cleared.get(kind)
+            if kind == "disk":
+                # Cleared is said only to a session that was last told the disk was asked.
+                if not disk.get("told"):
+                    line = None
+                disk["told"] = False
         else:
             line = None
         if isinstance(line, str) and line:
             lines.append(line)
+    now["_disk"] = disk
     return now, lines
 
 
