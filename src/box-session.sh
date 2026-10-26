@@ -2546,6 +2546,16 @@ esac
 printf 'SKEIN_PEERS %s\n' "$peers"
 unset runtime_dir peer_socks peers
 
+# And the two other decisions built only here, reported for the same reason (SKEIN-1331): which
+# cover the box got — the words are `fleet::Exposure::spelled` — and whether it is scoped to its own
+# repository on GitHub (the GitHub block below; anything but `fleet` is scoped, as it decides).
+exposure=covered
+[ "${uncovered-}" = "1" ] && exposure=uncovered
+[ "${SKEIN_BOX_PRIVILEGED-}" = "1" ] && exposure=workshop
+printf 'SKEIN_EXPOSURE %s\n' "$exposure"
+case "${SKEIN_GIT_SCOPE-repo}" in fleet) printf 'SKEIN_SCOPE fleet\n' ;; *) printf 'SKEIN_SCOPE repo\n' ;; esac
+unset exposure
+
 # A privileged box says so at every start.
 #
 # The whole risk of this switch is forgetting which box carries it: a box that can read every other
@@ -2614,15 +2624,7 @@ if [ -n "$announce" ]; then
   # non-zero has its stderr turned into the error text, which is the one case that always worked.
   echo "skein: $announce" >&2
 fi
-# And the two other decisions built only here, reported for the same reason (SKEIN-1331): which
-# cover the box got — the words are `fleet::Exposure::spelled` — and whether it is scoped to its own
-# repository on GitHub (the block below; anything but `fleet` is scoped, as it decides).
-exposure=covered
-[ "${uncovered-}" = "1" ] && exposure=uncovered
-[ "${SKEIN_BOX_PRIVILEGED-}" = "1" ] && exposure=workshop
-printf 'SKEIN_EXPOSURE %s\n' "$exposure"
-case "${SKEIN_GIT_SCOPE-repo}" in fleet) printf 'SKEIN_SCOPE fleet\n' ;; *) printf 'SKEIN_SCOPE repo\n' ;; esac
-unset uncovered exposure
+unset uncovered
 
 # --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------
 #
