@@ -5,9 +5,11 @@
 //! other half the owner asked for on 2026-10-26: a per-box clean behind a confirmation that names
 //! every path and its size. So the rules here are about what may never be on that list:
 //!
-//!   * **Only a stopped box.** A running box may be using any of it — a build in its target
-//!     directory, a browser it is about to launch. [`clean_box`] refuses unless the board's own
-//!     liveness sweep says the box is stopped, and "cannot tell" is a refusal too.
+//!   * **Build output and scratchpads only from a stopped box.** A running box may be using them —
+//!     a build in its target directory, the scratchpad of a session that is still going.
+//!     [`clean_box`] refuses them unless the board's own liveness sweep says the box is stopped,
+//!     and "cannot tell" is a refusal too. Download caches may be cleaned from a running box (the
+//!     owner's answer, 2026-10-26): the tool downloads again what it needs.
 //!   * **Nothing a symlink leads to.** The walks read `symlink_metadata` and never descend through
 //!     a link, so `~/shared` (a link into the repo's store) and anything else a box linked in is
 //!     neither measured nor offered. Every candidate is also checked to be on the box directory's
@@ -130,20 +132,6 @@ pub(crate) fn clean_box_given(
     paths: &[String],
     running: Option<bool>,
 ) -> Result<Cleaned, String> {
-    match running {
-        Some(false) => {}
-        Some(true) => {
-            return Err(format!(
-                "{name} is running, and it may be using these files. Stop it, then clean again."
-            ))
-        }
-        None => {
-            return Err(format!(
-                "skein cannot tell whether {name} is running, so it removed nothing. Try again in \
-                 a moment."
-            ))
-        }
-    }
     if paths.is_empty() {
         return Err("nothing was chosen to remove".to_string());
     }
@@ -162,6 +150,31 @@ pub(crate) fn clean_box_given(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    // The owner's answer (2026-10-26): a download cache may be cleaned while the box runs, since
+    // the tool downloads it again; build output and scratchpads need the box stopped, since a
+    // build or a session may be using them right now.
+    let needs_stop = now
+        .iter()
+        .any(|c| paths.contains(&c.path) && c.kind != "download cache");
+    if needs_stop {
+        match running {
+            Some(false) => {}
+            Some(true) => {
+                return Err(format!(
+                    "{name} is running, so skein removed nothing. Its download caches can be \
+                     cleaned now; build output and scratchpads need it stopped. Stop it, then \
+                     clean again."
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "skein cannot tell whether {name} is running, so it removed nothing. Its \
+                     download caches can be cleaned anyway; for build output and scratchpads, try \
+                     again in a moment."
+                ))
+            }
+        }
     }
     let box_dir = Path::new(&fleet_root()).join(name);
     let dev = {
@@ -514,7 +527,7 @@ mod tests {
         let mut pins = env_pins();
         pins.set("SKEIN_FLEET_ROOT", &root);
         pins.set("SKEIN_HOME", base.join("skein"));
-        let victim = root.join("other-main/home/.cache");
+        let victim = root.join("other-main").join("home").join(".cache");
         put(&victim.join("pip/wheel"));
         put(&victim.join("ms-playwright/chromium-1/chrome"));
         put(&victim.join("skein/claude/claude-1000/-proj/older/scratchpad/notes"));
@@ -530,7 +543,7 @@ mod tests {
         std::fs::create_dir_all(&whole).unwrap();
         std::os::unix::fs::symlink(&victim, whole.join(".cache")).unwrap();
         // `~/.cache` is real, and `~/.cache/skein` is a link to the other box's.
-        let part = root.join("part-main/home/.cache");
+        let part = root.join("part-main").join("home").join(".cache");
         std::fs::create_dir_all(&part).unwrap();
         std::os::unix::fs::symlink(victim.join("skein"), part.join("skein")).unwrap();
 
@@ -569,12 +582,13 @@ mod tests {
         }
     }
 
-    /// **A running box, a box skein cannot see, and a list that moved are all refusals that
-    /// remove nothing.**
+    /// **Build output and scratchpads are refused from a running box, or one skein cannot see;
+    /// download caches are not; and a list that moved removes nothing.**
     ///
-    /// What would make it fail: a clean that goes ahead when the box is running or its state is
-    /// unknown, or that removes the paths still on the list when one asked for is not. Watched:
-    /// with the `Some(true)` arm falling through, the running box was cleaned.
+    /// What would make it fail: a clean that removes build output or a scratchpad when the box is
+    /// running or its state is unknown, one that refuses a download cache from a running box, or
+    /// one that removes the paths still on the list when one asked for is not. Watched: with
+    /// `needs_stop` forced false, the running box's build output was removed and this failed.
     #[test]
     fn a_clean_refuses_rather_than_removing_what_might_be_in_use() {
         let _lock = env_lock();
@@ -589,6 +603,19 @@ mod tests {
         assert!(running.contains("Stop it, then clean again"), "{running}");
         let unknown = clean_box_given("web-main", &paths, None).unwrap_err();
         assert!(unknown.contains("removed nothing"), "{unknown}");
+        for alone in [
+            b.join("tree/target"),
+            b.join("home/.cache/skein/claude/claude-1000/-proj/old-session"),
+        ] {
+            let one = vec![alone.display().to_string()];
+            for state in [Some(true), None] {
+                assert!(
+                    clean_box_given("web-main", &one, state).is_err(),
+                    "{} was removed from a box that is running or unknown ({state:?})",
+                    alone.display()
+                );
+            }
+        }
         let mut moved = paths.clone();
         moved.push(b.join("tree/vendor-build").display().to_string());
         let changed = clean_box_given("web-main", &moved, Some(false)).unwrap_err();
@@ -596,5 +623,11 @@ mod tests {
         for p in &paths {
             assert!(Path::new(p).exists(), "a refused clean removed {p}");
         }
+        let cache = b.join("home/.cache/ms-playwright").display().to_string();
+        let done = clean_box_given("web-main", std::slice::from_ref(&cache), Some(true))
+            .expect("a download cache is cleaned from a running box");
+        assert_eq!(done.removed, vec![cache.clone()], "{done:?}");
+        assert!(!Path::new(&cache).exists());
+        assert!(b.join("tree/target/debug/big").exists());
     }
 }

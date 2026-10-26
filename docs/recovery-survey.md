@@ -781,7 +781,7 @@ three requirements presuppose a next step that this case does not have. The toke
 box push to GitHub; a repo on another host is not there, and nothing its owner could do to the repo
 changes that — the missing thing is non-GitHub push credentials in skein, which is a statement about
 skein's support rather than a step. So the sentence says whose limit it is and that the repo is
-fine, and stops. The add dialog says the same before the clone (`src/web/app/settings.js:1480`), so
+fine, and stops. The add dialog says the same before the clone (`src/web/app/settings.js:1492`), so
 nobody meets it for the first time on the card. **This is an exception, written down so it stays
 one**: the row used to carry advice to give a host clone an `origin` (removed by SKEIN-588), which
 was false advice added to fill the gap, and a rule with an undocumented exception is how the next

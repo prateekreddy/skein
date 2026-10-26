@@ -2296,7 +2296,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:1480"]
+["src/web/app/settings.js:1492"]
 line = "arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, \"warn\");"
 cited_by = ["docs/recovery-survey.md"]
 

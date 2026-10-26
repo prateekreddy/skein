@@ -1269,9 +1269,9 @@ function askDiskLimit(name) { openBoxSettings(name); }
 // ---------- caches and scratch in one box, and the clean (SKEIN-1341) ----------
 //
 // The list comes from the server and is the whole of what a clean may remove: download caches,
-// build output git ignores, and the scratchpads of ended sessions. A clean runs only on a stopped
-// box, after a confirmation that names every path and its size, and the server removes only paths
-// that are still on its own list at that moment.
+// build output git ignores, and the scratchpads of ended sessions. Build output and scratchpads are
+// cleaned only from a stopped box; download caches from any. A confirmation names every path and its
+// size, and the server removes only paths that are still on its own list at that moment.
 const mbOf = bytes => Math.ceil(bytes / 1048576);
 function cleanableLine(c) {
   const sum = kind => c.items.filter(i => i.kind === kind).reduce((n, i) => n + i.bytes, 0);
@@ -1293,24 +1293,36 @@ function loadCleanable(name, ticket) {
       use.textContent = cleanableLine(c);
       if (!c.items.length) return;
       btn.hidden = false;
-      btn.textContent = `Clean ${fmtGb(mbOf(c.items.reduce((n, i) => n + i.bytes, 0)))}…`;
+      const shown = cleanPick(c).length ? cleanPick(c) : c.items;
+      btn.textContent = `Clean ${fmtGb(mbOf(shown.reduce((n, i) => n + i.bytes, 0)))}…`;
       btn.onclick = () => cleanBox(name, c);
     })
     .catch(e => { if (ticket === boxSetTicket) use.textContent = `could not measure caches: ${failText(e)}`; });
 }
+// Download caches may go while a box runs, since the tool downloads again what it needs; build
+// output and scratchpads need the box stopped (the owner's answer, 2026-10-26). So a running box,
+// or one skein cannot see, is offered its download caches alone.
+function cleanPick(c) {
+  return c.running === false ? c.items : c.items.filter(i => i.kind === "download cache");
+}
 function cleanBox(name, c) {
-  if (c.running !== false) {
+  const pick = cleanPick(c);
+  if (!pick.length) {
     bsSetMsg(c.running
-      ? `${name} is running, and it may be using these files. Stop it, then clean again.`
-      : `skein cannot tell whether ${name} is running. Close this and try again in a moment.`, "err");
+      ? `${name} is running. Its build output and scratchpads can be cleaned only once it is stopped. Stop it, then clean again.`
+      : `skein cannot tell whether ${name} is running, and its build output and scratchpads need it stopped. Close this and try again in a moment.`, "err");
     return;
   }
-  const all = c.items.reduce((n, i) => n + i.bytes, 0);
-  const lines = c.items.map(i => `  ${fmtGb(mbOf(i.bytes))}  ${i.shown}  (${i.kind})`).join("\n");
-  if (!confirm(`Remove these from ${name}? Builds rebuild and caches download again when needed.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}. Work in its checkout, ~/shared, the store and its conversations are not touched.`)) return;
+  const rest = c.items.length - pick.length;
+  const note = !rest ? "" : c.running
+    ? `\n\n${name} is running, so only its download caches are listed. Its build output and scratchpads need it stopped: stop it, then clean again to remove them too.`
+    : `\n\nskein cannot tell whether ${name} is running, so only its download caches are listed. Its build output and scratchpads need it stopped.`;
+  const all = pick.reduce((n, i) => n + i.bytes, 0);
+  const lines = pick.map(i => `  ${fmtGb(mbOf(i.bytes))}  ${i.shown}  (${i.kind})`).join("\n");
+  if (!confirm(`Remove these from ${name}? Builds rebuild and caches download again when needed.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}. Work in its checkout, ~/shared, the store and its conversations are not touched.${note}`)) return;
   bsSetMsg("cleaning…");
   fetch(`/api/boxes/${encodeURIComponent(name)}/clean`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: c.items.map(i => i.path) }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: pick.map(i => i.path) }),
   })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
     .then(d => {

@@ -342,12 +342,40 @@ await check("Box settings shows caches and scratch, and Clean confirms every pat
   } finally { page.off("dialog", onDialog); await page.unroute(`**/api/boxes/${BOX}/clean`); await closeEverything(); }
 });
 
-// Fails if Clean on a running box asks to confirm or posts at all: it must say to stop the box.
-await check("Clean on a running box says to stop it first, and neither confirms nor removes", async () => {
+// Fails if a running box is offered its build output or scratchpads (the confirmation lists them,
+// or the POST carries them), or if its download caches cannot be cleaned while it runs.
+await check("Clean on a running box lists and removes only its download caches, and says the rest need a stop", async () => {
   await closeEverything();
-  let posts = 0, dialogs = 0;
+  let posted = null, asked = "";
   await page.route(`**/api/boxes/${BOX}/clean`, r => {
     if (r.request().method() === "GET") return r.fulfill({ json: cleanable(true) });
+    posted = r.request().postDataJSON();
+    return r.fulfill({ json: { removed: posted.paths, freed: 1024 ** 3, failed: [] } });
+  });
+  const onDialog = d => { asked = d.message(); d.accept(); };
+  page.on("dialog", onDialog);
+  try {
+    await page.evaluate(box => openBoxSettings(box), BOX);
+    await until(() => !document.getElementById("bs-clean").hidden && !document.getElementById("bs-go").disabled);
+    const label = await page.evaluate(() => document.getElementById("bs-clean").textContent);
+    if (label !== "Clean 1.0G…") throw new Error(`button ${JSON.stringify(label)}`);
+    await page.locator("#bs-clean").click();
+    await until(() => document.getElementById("bs-msg").textContent.startsWith("Removed"));
+    if (!asked.includes("~/.cache/ms-playwright") || asked.includes("b/tree/target") || asked.includes("(scratchpad)")
+      || !asked.includes(`${BOX} is running, so only its download caches are listed`)) throw new Error(`asked ${JSON.stringify(asked)}`);
+    const sent = JSON.stringify(posted && posted.paths);
+    if (sent !== JSON.stringify(["/fleet/b/h/.cache/ms-playwright"])) throw new Error(`posted ${sent}`);
+  } finally { page.off("dialog", onDialog); await page.unroute(`**/api/boxes/${BOX}/clean`); await closeEverything(); }
+});
+
+// Fails if a running box with nothing but build output and scratchpads confirms or posts at all:
+// it must say they need it stopped.
+await check("Clean on a running box with no download caches says to stop it first, and neither confirms nor removes", async () => {
+  await closeEverything();
+  let posts = 0, dialogs = 0;
+  const noCaches = { ...cleanable(true), items: cleanable(true).items.filter(i => i.kind !== "download cache") };
+  await page.route(`**/api/boxes/${BOX}/clean`, r => {
+    if (r.request().method() === "GET") return r.fulfill({ json: noCaches });
     posts++;
     return r.fulfill({ status: 409, body: "running" });
   });
@@ -358,7 +386,7 @@ await check("Clean on a running box says to stop it first, and neither confirms 
     await until(() => !document.getElementById("bs-clean").hidden && !document.getElementById("bs-go").disabled);
     await page.locator("#bs-clean").click();
     const msg = await page.evaluate(() => document.getElementById("bs-msg").textContent);
-    if (msg !== `${BOX} is running, and it may be using these files. Stop it, then clean again.` || posts || dialogs) {
+    if (msg !== `${BOX} is running. Its build output and scratchpads can be cleaned only once it is stopped. Stop it, then clean again.` || posts || dialogs) {
       throw new Error(JSON.stringify({ msg, posts, dialogs }));
     }
   } finally { page.off("dialog", onDialog); await page.unroute(`**/api/boxes/${BOX}/clean`); await closeEverything(); }
