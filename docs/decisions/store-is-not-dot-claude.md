@@ -80,7 +80,8 @@ start made for any other entry, to the old or the new store, is removed (the lin
 
 **Settings the kit writes**, into `.claude/settings.local.json`, the box's own file:
 `autoMemoryDirectory` (unless the person set their own), and `$HOME/shared` in
-`permissions.additionalDirectories`, so default and acceptEdits mode can write `~/shared`.
+`permissions.additionalDirectories`, so acceptEdits mode can write `~/shared` — with the store's
+`skills/` beside it where the checkout links them, which the re-run below showed was needed.
 
 **Codex.** Its workspace sandbox cannot write outside the checkout, so the kit adds the resolved
 shared home and the store's `mailbox/` to `sandbox_workspace_write.writable_roots` in
@@ -95,3 +96,74 @@ the start) the link stays as the fallback, readable, and the bootstrap says to r
 
 **The guide.** The pointer to `.claude/skein/SHARED-HOME.md` was a read outside the box's working
 directories, which prompts. The two facts it added go into the agent guide itself.
+
+## The record
+
+**Decision.** A repo's store is `$SKEIN_HOME/repos/<id>/store/data`, and skein moves a store at
+`store/.claude` there once, at server start, record and directory together. Nothing a box writes is
+reached through a path with a `.claude` component: memory is the store's `memory/` through
+`autoMemoryDirectory`, `~/shared` is beside the store, the checkout's `.claude` links only `skein/`
+and what Claude Code reads there, and a surfaced file is bound into the checkout rather than linked.
+
+**Date.** 2026-10-26.
+
+**Decided by.** The project owner (SKEIN-1330, under SKEIN-1329's sweep of 2026-10-26).
+
+**Why.** Claude Code asks before a write to anything under a `.claude` directory, judging the path
+as written and as resolved, in auto mode, with `--add-dir` and with allow rules alike, and it will
+not write through a link to a file at all. Each row below is one `claude -p` write (claude 2.1.310,
+haiku), the "before" column from sweep A's fixtures of the old layout and the "after" column from
+the same calls against the new one, as the kit and launcher now set a box up:
+
+| what the box writes | before (store at `store/.claude`) | after (store at `store/data`) |
+|---|---|---|
+| a memory note, acceptEdits | refused: "a sensitive file" (`.claude/memory` link, and the `~/.claude/projects/<slug>/memory` bridge) | written, into `store/data/memory` |
+| a memory note, auto | refused through `.claude/memory`; written through the bridge | written |
+| `~/shared/<file>`, acceptEdits | refused: "a sensitive file" (`store/.claude/shared-home`) | written |
+| `~/shared/<file>`, auto | refused | written |
+| the mailbox, by redirect, auto | refused: `.claude/mailbox` "a sensitive file" | written, into `store/data/mailbox` |
+| a skill, auto | refused through `.claude/skills` | written, with the store's `skills/` an added directory |
+| a skill through `.claude/skills/…`, acceptEdits | refused | **still asks**: Claude Code guards its own `.claude/skills` path as written; at the store's own path it is written |
+| a surfaced `rw` file, an edit | refused: "it is a symbolic link" | edited in place, into `shared-rw/` (bound) |
+| `.codex/memory` through `shared-paths.txt` | surfaced, as "Codex's memory", and refused as sensitive | not surfaced: not Codex's memory |
+
+**Rules out.**
+
+- Naming any directory skein creates for a box to write `.claude`, or linking one under a `.claude`
+  path, whatever it is linked to.
+- Linking a store entry into a checkout's `.claude` that Claude Code does not itself read there.
+- Surfacing a file into a checkout as a link to a file.
+- Copying a store to move it, merging two, or following a link at either name.
+- A named exception to the shared-paths shape rule that nothing reads.
+
+**Enforced at.**
+
+- `kit::move_store_off_dot_claude` and `repos::move_stores_off_dot_claude` (`src/kit.rs`,
+  `src/repos/list.rs`), run from `src/bin/skein-server/main.rs`: tests
+  `an_old_store_is_moved_to_data_once`, `two_stores_with_files_are_refused_and_nothing_moves`,
+  `a_link_at_either_store_is_refused_and_other_stores_are_not_renamed` and
+  `managed_stores_move_off_dot_claude_and_their_records_follow`. New repos get the name from
+  `kit::STORE_NAME` (`src/repos/add.rs`).
+- `skein_box_store` and `skein_shared_home` (`src/probe/box-self.sh`): test
+  `a_box_follows_its_store_to_its_new_name`.
+- The kit (`src/kit/skein-startup.sh`): tests
+  `the_checkout_links_only_what_claude_code_reads_from_the_store`,
+  `the_box_settings_point_memory_at_the_store_and_allow_the_shared_home` and
+  `codex_may_write_the_shared_home_and_the_mailbox` (`src/kit.rs`).
+- The launcher's surfaced-file binds and the shared-home bind by either name
+  (`src/box-session.sh`): bwrap test
+  `a_covered_box_writes_its_store_at_data_and_edits_a_surfaced_file_in_place`
+  (`tests/isolation_bwrap/boxself.rs`); the bootstrap's half, test
+  `nothing_under_a_hidden_directory_is_surfaced_and_a_bound_entry_is_left_alone`.
+- The empirical table above is not a gate: Claude Code's guards are its own and change with it.
+  The scripts that produced it are the lane's, and re-running them is the check.
+
+**Open.**
+
+- A store kept elsewhere with `skein add --store` at a path ending in `.claude` (a
+  `skein-shared/.claude`) is the person's directory and is not renamed, so its boxes still ask. It
+  could be moved by asking the person, or mounted under a second name; that is the owner's call.
+- A skill written through `.claude/skills/…` in acceptEdits still asks, by Claude Code's own rule.
+- A box already running keeps its settings, links and binds until it restarts; nothing tells the
+  person which boxes have not, beyond each box's own start messages.
+

@@ -271,35 +271,35 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:168"]
+["src/bin/skein-server/main.rs:181"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:176"]
+["src/bin/skein-server/main.rs:189"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:189"]
+["src/bin/skein-server/main.rs:202"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:274"]
+["src/bin/skein-server/main.rs:287"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:583"]
+["src/bin/skein-server/main.rs:596"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:593"]
+["src/bin/skein-server/main.rs:606"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:684"]
+["src/bin/skein-server/main.rs:697"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:690"]
+["src/bin/skein-server/main.rs:703"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -862,39 +862,35 @@ cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.m
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2379"]
-line = "box_shared_home=\"${SKEIN_BOX_STORE%/.claude}/shared-home\""
-cited_by = ["docs/decisions/shared-home-outside-claude.md"]
-
-["src/box-session.sh:2468"]
+["src/box-session.sh:2541"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2469"]
+["src/box-session.sh:2542"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2532"]
+["src/box-session.sh:2605"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2657"]
+["src/box-session.sh:2730"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2796"]
+["src/box-session.sh:2869"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3239"]
+["src/box-session.sh:3312"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3298"]
+["src/box-session.sh:3371"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3339"]
+["src/box-session.sh:3412"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
@@ -1684,19 +1680,19 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "Gone with `Repo::agent` (SKEIN-1207, the owner 2026-09-27: one fleet default plus a per-box pick). A repository has no runtime of its own any more, so `add_repo` takes none and this refusal of a bad one has nothing to refuse; `skein add --agent` is now refused outright by `src/bin/skein.rs`, naming where a runtime is chosen. Declared rather than re-pointed because the row is the record of the refusal as it was measured, and moving it onto a different message would make the survey claim it found words that were never in this file."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/add.rs:82"]
+["src/repos/add.rs:83"]
 line = "let store = match store.map(str::trim).filter(|s| !s.is_empty()) {"
 cited_by = ["docs/architecture.md"]
 
-["src/repos/add.rs:96"]
+["src/repos/add.rs:101"]
 line = "if !registrable_source(source) {"
 cited_by = ["docs/architecture.md", "docs/parity.md"]
 
-["src/repos/add.rs:98"]
+["src/repos/add.rs:103"]
 line = "\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/add.rs:253"]
+["src/repos/add.rs:258"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
@@ -1849,7 +1845,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "env[\"SKEIN_LISTEN_INHERITED_ONLY\"] = \"1\""
 cited_by = ["docs/architecture.md"]
 
-["src/store/sandbox-bootstrap.sh:355"]
+["src/store/sandbox-bootstrap.sh:365"]
 line = "if [ -n \"$wanted\" ] && [ \"$wanted\" != \"$(cat \"$marker\" 2>/dev/null || true)\" ] \\"
 cited_by = ["docs/decisions/harness-as-a-plugin.md"]
 

@@ -1931,7 +1931,7 @@
            capability that is withdrawn in silence reads as a capability that is gone. The 400 says
            the same sentence, but only to somebody who has already found a way to send `store`;
            this says it to the person who was about to look for the field. -->
-      <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds one under <code>~/.skein/repos</code>. To adopt a store you already have, from the host:</div>
+      <div class="ar-derived">the repo's store — memory + mailbox shared live across this repo's boxes. skein scaffolds one under <code>~/.skein/repos</code>. To adopt a store you already have, from the host:</div>
       <pre class="ar-cmd">skein add &lt;git-url&gt; --store &lt;path&gt;</pre>
 
       <!-- Everything else a repo carries, set here rather than found later on its card. All but the
@@ -13951,8 +13951,8 @@ function loadResources() {
 
 // ---------- demo seed (only used under ?demo) ----------
 const DEMO_REPOS = [
-  { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/.claude", agent:"claude" },
-  { id:"skein",  source:"https://github.com/acme/skein-demo.git", work:"~/.skein/repos/skein/work", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
+  { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/data", agent:"claude" },
+  { id:"skein",  source:"https://github.com/acme/skein-demo.git", work:"~/.skein/repos/skein/work", store:"~/.skein/repos/skein/store/data", agent:"claude" },
 ];
 const DEMO_BOXES = [
   { name:"thing-feat-auth", repo:"thing", branch:"feat/auth", state:"needs-input", tier:0, age:"2m",

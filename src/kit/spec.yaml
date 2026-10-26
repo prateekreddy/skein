@@ -4,7 +4,7 @@ name: skein
 displayName: skein workspace
 description: >-
   skein's own repo-agnostic kit. Wires each --clone sandbox to the skein-managed
-  shared .claude store (mailbox + skein's turn-state probe) that lives outside the
+  shared store (mailbox + skein's turn-state probe) that lives outside the
   repo, checks out the box's branch before the agent starts, and installs jq + tmux
   as the minimal probe/session substrate. Installed by skein (ensure_kit); used by
   `sbx create --clone --kit <skein-home>/kit --name <repo>-<branch> <agent> <work> <store>`.
@@ -29,10 +29,10 @@ commands:
       description: Link skein store into the clone, then check out the box branch
 
 memory: |
-  ## skein workspace (clone + shared .claude)
+  ## skein workspace (clone + shared store)
 
   This sandbox is a private `--clone` of the repo (isolated code, full git); the
-  `.claude` store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
+  store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
   shared mount linked in at startup and is LIVE across every parallel sandbox.
   Re-opening a box attaches to its persistent `skein-agent` tmux session; `skein-shell`
   is the separate persistent shell. UI reloads reattach to the live process; only a

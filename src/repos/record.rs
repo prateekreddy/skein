@@ -17,7 +17,7 @@ pub struct Repo {
     /// so the field and its machinery are gone rather than left as a thing that only ever
     /// apologised.
     pub source: String,
-    pub store: String, // host shared `.claude` store
+    pub store: String, // host shared store, `repos/<id>/store/data` unless `--store` chose one
     /// May skein read this repo's pull requests without being asked, with nobody watching?
     ///
     /// **Off unless it is switched on, per repo**, as it was asked for: "only ones where I mark
