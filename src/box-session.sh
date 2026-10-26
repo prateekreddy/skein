@@ -2414,6 +2414,78 @@ if [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] && [ -d "$tree/.git
     echo "skein: $box's checkout has a .git that is not a directory of its own, so the record of its store was not written there" >&2
   fi
 fi
+# --- The files `shared-paths.txt` surfaces are BOUND into the checkout, not linked (SKEIN-1330) ---
+#
+# An entry of the store's `shared-paths.txt` is a gitignored file every box of the repo shares, kept
+# in the store's `shared-rw/`. The bootstrap used to link it into the checkout, and Claude Code
+# refuses to edit through a link to a file at all ("Refusing to write …: it is a symbolic link"), so
+# the one thing the `rw` in the manifest promised was the thing the agent could not do. A bind is a
+# regular file to everything in the box: Claude's edit renames over it, the rename fails on the
+# mount point with EBUSY, and it writes in place — into the store's copy, measured with bwrap 0.11.1
+# and claude 2.1.310.
+#
+# The manifest and `shared-rw/` are in the store, which every box of the repo can write, so an entry
+# is another box's say over where a file lands in THIS box's checkout. The rules are the bootstrap's
+# (`sandbox-bootstrap.sh`, SKEIN-1256), checked here before a bind rather than trusted from there:
+# the entry is a relative path with no `..`, no `.git` and no hidden directory; the copy is a regular
+# file, not a link, whose real directory is inside the real `shared-rw/`; and the place it lands is
+# in this checkout once every link on the way is resolved, and passes the same shape rule there, so
+# a link the repo tracks cannot carry it into `.git/`. What is at that place now must be nothing, the
+# empty file a bind leaves behind as its mount point, or the link an earlier start made to this copy
+# (under the store's new name or its old one), which is removed; anything else is the person's, and
+# is left alone and said. A directory that is not there yet is not made here: the bootstrap's
+# fallback link makes it, and the next start binds.
+surfaced_shape_ok() {                    # $1 = repo-relative path; 0 when its SHAPE may be surfaced
+  local rest="$1" comp
+  case "$rest" in "" | /* | */) return 1 ;; esac
+  while :; do
+    comp="${rest%%/*}"
+    case "$comp" in "" | . | .. | .git) return 1 ;; esac
+    [ "$comp" = "$rest" ] && return 0
+    case "$comp" in .*) return 1 ;; esac
+    rest="${rest#*/}"
+  done
+}
+if [ -n "${SKEIN_BOX_STORE-}" ] && [ -f "$SKEIN_BOX_STORE/shared-paths.txt" ] \
+  && [ ! -L "$SKEIN_BOX_STORE/shared-paths.txt" ] && [ -d "$SKEIN_BOX_STORE/shared-rw" ] \
+  && [ ! -L "$SKEIN_BOX_STORE/shared-rw" ] && [ -d "$tree" ] && [ ! -L "$tree" ]; then
+  surfaced_rw="$(cd -P "$SKEIN_BOX_STORE/shared-rw" 2>/dev/null && pwd)"
+  surfaced_tree="$(cd -P "$tree" 2>/dev/null && pwd)"
+  surfaced_old=""
+  case "$SKEIN_BOX_STORE" in /*/repos/*/store/data) surfaced_old="$(dirname "$SKEIN_BOX_STORE")/.claude" ;; esac
+  while IFS= read -r surfaced_line || [ -n "$surfaced_line" ]; do
+    surfaced_line="${surfaced_line%%#*}"
+    read -r surfaced_p _ <<<"$surfaced_line" || true
+    [ -n "${surfaced_p-}" ] && surfaced_shape_ok "$surfaced_p" || continue
+    surfaced_src="$SKEIN_BOX_STORE/shared-rw/$surfaced_p"
+    [ -f "$surfaced_src" ] && [ ! -L "$surfaced_src" ] || continue
+    case "$(cd -P "$(dirname "$surfaced_src")" 2>/dev/null && pwd)/" in
+      "$surfaced_rw"/*) ;;
+      *) continue ;;
+    esac
+    surfaced_dst="$tree/$surfaced_p"
+    surfaced_dir="$(cd -P "$(dirname "$surfaced_dst")" 2>/dev/null && pwd)" || continue
+    case "$surfaced_dir" in
+      "$surfaced_tree") surfaced_real="$(basename "$surfaced_p")" ;;
+      "$surfaced_tree"/*) surfaced_real="${surfaced_dir#"$surfaced_tree"/}/$(basename "$surfaced_p")" ;;
+      *) continue ;;
+    esac
+    surfaced_shape_ok "$surfaced_real" || continue
+    if [ -L "$surfaced_dst" ]; then
+      case "$(readlink "$surfaced_dst")" in
+        "$surfaced_src" | "${surfaced_old:-/nonexistent}/shared-rw/$surfaced_p") rm -f "$surfaced_dst" || continue ;;
+        *) continue ;;
+      esac
+    elif [ -e "$surfaced_dst" ] && { [ ! -f "$surfaced_dst" ] || [ -s "$surfaced_dst" ]; }; then
+      echo "skein: $surfaced_p in $box's checkout is a file of its own, so the shared copy is not put over it; move it aside and restart the box to share it" >&2
+      continue
+    fi
+    binds+=(--bind "$surfaced_src" "$surfaced_dst")
+  done <"$SKEIN_BOX_STORE/shared-paths.txt"
+  unset surfaced_rw surfaced_tree surfaced_old surfaced_line surfaced_p surfaced_src surfaced_dst \
+    surfaced_dir surfaced_real
+fi
+
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
 # fleet, and the box has no use for it after this point.
 unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE

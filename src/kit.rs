@@ -1450,25 +1450,28 @@ mod tests {
         assert_eq!(fs::read_link(tree.join("CLAUDE.md")).unwrap(), linked);
     }
 
-    /// `.codex/memory` is the one directory skein shares through `shared-paths.txt`, so it is a
-    /// named exception to the shape rule, fixed in the bootstrap rather than read from the store
-    /// (SKEIN-1256). It must be a real directory in `shared-rw/` holding only files and
-    /// directories; every other entry under a hidden directory is still refused.
+    /// **There is no exception to the shared-paths shape rule: `.codex/memory` is refused like
+    /// any entry under a hidden directory, and the link an earlier start made for it goes**
+    /// (SKEIN-1330, which took back SKEIN-1256's one named exception). codex-cli keeps its
+    /// memories in its own home; nothing reads `.codex/memory` in a checkout.
     ///
-    /// Fails if `.codex/memory` leaves the exception list (the directory is not surfaced), if the
-    /// list stops being exact (`.codex/config.toml` or `.git/hooks/x` is surfaced), if
-    /// `is_excepted_dir` matches a prefix rather than the whole entry (`.codex/memory/../../.git/
-    /// hooks` is linked into `.git/hooks`, and `.codex/memoryX` is surfaced), or if the
-    /// `find` in `dir_is_inside` goes (a directory holding a link out of `shared-rw/` stays
-    /// surfaced).
+    /// **And an entry the launcher has bound is left alone**, while the empty file a bind leaves as
+    /// its mount point, in a start that has none, is replaced by the fallback link. A hard link
+    /// stands in for the bind here: to the bootstrap the question is the same, whether the
+    /// checkout's name and the store's copy are one file (`-ef`).
+    ///
+    /// Fails if the exception comes back (`.codex/memory` is surfaced, or its old link stays), if
+    /// any other hidden entry is surfaced (`.codex/config.toml`, `.git/hooks/x`), if the bootstrap
+    /// replaces a bound entry with a link (Claude could no longer edit it), or if it leaves an
+    /// empty mount point where the shared file should be.
     #[test]
-    fn codex_memory_is_the_named_exception_and_nothing_else_under_a_hidden_directory_is() {
+    fn nothing_under_a_hidden_directory_is_surfaced_and_a_bound_entry_is_left_alone() {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let dir = tempdir();
         let mut env = env_pins();
         env.set("SKEIN_HOME", &dir);
-        let store = dir.join("store").join(".claude");
+        let store = dir.join("store").join("data");
         let tree = dir.join("tree");
         let empty_source = dir.join("no-source");
         ensure_store(&store).unwrap();
@@ -1479,7 +1482,8 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        symlink(&store, tree.join(".claude")).unwrap();
+        fs::create_dir_all(tree.join(".claude")).unwrap();
+        symlink(store.join("skein"), tree.join(".claude/skein")).unwrap();
         let home = dir.join("home");
         fs::create_dir_all(&home).unwrap();
         let rw = store.join("shared-rw");
@@ -1487,8 +1491,7 @@ mod tests {
             (".codex/memory/note.md", "remembered\n"),
             (".codex/config.toml", "[x]\n"),
             (".git/hooks/x", "#!/bin/sh\n"),
-            (".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n"),
-            (".codex/memoryX/note.md", "not the exception\n"),
+            ("notes.env", "shared\n"),
         ] {
             let p = rw.join(rel);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1496,12 +1499,14 @@ mod tests {
         }
         fs::write(
             store.join("shared-paths.txt"),
-            // The climbing entry comes first: the exception is matched exactly, so it is shaped
-            // like any other entry and refused before `.codex/memory` is ever linked.
-            ".codex/memory/../../.git/hooks\n.codex/memoryX\n.codex/memory\n.codex/config.toml\n\
-             .git/hooks/x\n",
+            ".codex/memory\n.codex/config.toml\n.git/hooks/x\nnotes.env rw\n",
         )
         .unwrap();
+        // What a start under the exception made.
+        fs::create_dir_all(tree.join(".codex")).unwrap();
+        symlink(rw.join(".codex/memory"), tree.join(".codex/memory")).unwrap();
+        // What the launcher's bind makes of `notes.env`: the store's copy, at the checkout's name.
+        fs::hard_link(rw.join("notes.env"), tree.join("notes.env")).unwrap();
         let run = || {
             box_shell(&dir)
                 .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
@@ -1513,65 +1518,56 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            rw.join(".git/hooks/pre-commit"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        let out = run();
-        assert!(out.status.success(), "{out:?}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // An entry that only STARTS with the exception's name is no exception: matched as a
-        // prefix, the climbing one would skip the shape rule and link shared-rw/'s hooks into
-        // this checkout's .git.
-        let hooks = tree.join(".git/hooks");
-        assert!(
-            !fs::symlink_metadata(&hooks)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-                && fs::read_dir(&hooks).unwrap().all(|e| !e
-                    .unwrap()
-                    .file_type()
-                    .unwrap()
-                    .is_symlink()),
-            "nothing in .git/hooks may be a link into shared-rw/: {stderr}"
-        );
-        assert!(
-            fs::symlink_metadata(tree.join(".codex/memoryX")).is_err(),
-            ".codex/memoryX is not the exception: {stderr}"
-        );
-        for refused in [".codex/memory/../../.git/hooks", ".codex/memoryX"] {
-            assert!(
-                stderr.contains(&format!("not surfacing '{refused}'")),
-                "{refused} must be refused out loud: {stderr}"
-            );
-        }
-        assert_eq!(
-            fs::read_to_string(tree.join(".codex/memory/note.md")).unwrap_or_default(),
-            "remembered\n",
-            "the named exception must be surfaced: {stderr}"
-        );
-        for refused in [".codex/config.toml", ".git/hooks/x"] {
-            assert!(
-                fs::symlink_metadata(tree.join(refused)).is_err(),
-                "{refused} is under a hidden directory and is no exception: {stderr}"
-            );
-        }
-
-        // A link beneath the excepted directory that leads out of shared-rw/: the whole directory
-        // is refused at the next start, and the link the last start made is taken away.
-        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
-        symlink(dir.join("outside.txt"), rw.join(".codex/memory/out.md")).unwrap();
         let out = run();
         assert!(out.status.success(), "{out:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             fs::symlink_metadata(tree.join(".codex/memory")).is_err(),
-            "a directory holding a link out of shared-rw/ must not stay surfaced: {stderr}"
+            ".codex/memory is surfaced, or the old link stayed: {stderr}"
         );
-        assert!(stderr.contains("not surfacing '.codex/memory'"), "{stderr}");
+        for refused in [".codex/memory", ".codex/config.toml", ".git/hooks/x"] {
+            assert!(
+                stderr.contains(&format!("not surfacing '{refused}'")),
+                "{refused} must be refused out loud: {stderr}"
+            );
+        }
+        assert!(fs::symlink_metadata(tree.join(".codex/config.toml")).is_err());
+        assert!(fs::symlink_metadata(tree.join(".git/hooks/x")).is_err());
+        assert!(
+            !tree.join("notes.env").is_symlink(),
+            "a bound entry was replaced by a link: {stderr}"
+        );
+        fs::write(tree.join("notes.env"), "edited in the box\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(rw.join("notes.env")).unwrap(),
+            "edited in the box\n"
+        );
+        assert!(fs::read_to_string(tree.join(".git/info/exclude"))
+            .unwrap()
+            .lines()
+            .any(|l| l == "/notes.env"));
+
+        // Bound, and the shared copy emptied: still the bind, not mistaken for an empty mount point.
+        fs::write(rw.join("notes.env"), "").unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            !tree.join("notes.env").is_symlink() && rw.join("notes.env").is_file(),
+            "an empty bound entry was taken for a leftover mount point: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // A start with no bind for it: the empty mount point an earlier bind left is not the file.
+        fs::remove_file(tree.join("notes.env")).unwrap();
+        fs::write(tree.join("notes.env"), "").unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_link(tree.join("notes.env")).ok(),
+            Some(rw.join("notes.env")),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather

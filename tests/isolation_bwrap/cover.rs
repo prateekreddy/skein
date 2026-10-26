@@ -185,10 +185,7 @@ fn a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses() {
 
     // And everything that is somebody else's.
     for (path, what) in [
-        (
-            fleet.repos.join("other/store/.claude"),
-            "another repo's store",
-        ),
+        (fleet.repos.join("other/store/data"), "another repo's store"),
         (
             fleet.elsewhere.join("store/.claude"),
             "a store outside the workspace",
@@ -224,7 +221,7 @@ fn the_workshop_box_sees_what_an_ordinary_box_cannot() {
     let fleet = Fleet::make("workshop");
     let report = fleet.seen_by_box(Born::Workshop);
     for path in [
-        fleet.repos.join("other/store/.claude"),
+        fleet.repos.join("other/store/data"),
         fleet.elsewhere.join("store/.claude"),
         fleet.fleet_root.join("other-main"),
         fleet.state_parent.join("other-main"),
@@ -301,10 +298,7 @@ fn a_box_with_no_mount_manifest_is_uncovered_and_a_matched_box_is_not() {
     // Every other repo's store and work tree, same shape and the commoner case: most fleets are not
     // on a volume, and this half is the one they still have.
     for (path, what) in [
-        (
-            fleet.repos.join("other/store/.claude"),
-            "another repo's store",
-        ),
+        (fleet.repos.join("other/store/data"), "another repo's store"),
         (
             fleet.elsewhere.join("store/.claude"),
             "a store outside the workspace",

@@ -137,10 +137,19 @@ fi
 # Default (no `rw` suffix) — RO: symlinked straight from the source tree. `/run/sandbox/source` is a
 # read-only bind mount (sbx's own doing — no per-file trick makes it writable), so edits fail.
 # `rw` suffix — RW + host-visible + shared: the file is seeded ONCE into the store's shared-rw/
-# (a genuinely writable host directory, same as memory/), then symlinked from THERE instead of the
-# source tree. Edits inside the box persist to that store path and are live across every box on the
-# repo (last-write-wins, same semantics as the memory bridge below) — just not back to the file's
+# (a genuinely writable host directory, same as memory/), and that copy is what the checkout gets.
+# Edits inside the box persist to that store path and are live across every box on the repo
+# (last-write-wins, same semantics as the memory bridge below) — just not back to the file's
 # original repo-relative host path, since that path is unreachable read-write from inside a clone.
+#
+# **The copy is BOUND over its place in the checkout by the launcher, not linked (SKEIN-1330).**
+# Claude Code refuses to edit through a link to a file at all ("Refusing to write …: it is a
+# symbolic link"), so a linked entry could be read and never edited. A bind is a regular file to
+# everything in the box: Claude's edit renames over it, the rename fails on the mount point, and it
+# writes in place, into the store's copy. The launcher applies the same shape and containment rules
+# as this loop (src/box-session.sh), at the start, so an entry this loop finds already bound is left
+# alone. Where it is not — a box started before this, or a copy that appeared after the start — the
+# link below stays as the fallback, readable, and this says to restart.
 manifest="$store/shared-paths.txt"
 if [ -f "$manifest" ]; then
   git_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
@@ -184,32 +193,13 @@ if [ -f "$manifest" ]; then
     case "$real/" in "$base"/*) return 0 ;; esac
     return 1
   }
-  # **The named exceptions: directories skein itself shares through this list, and nothing else.**
-  # Fixed here, in skein's read-only copy of this script, and never read from the store, which any
-  # box can write. `.codex/memory` is Codex's memory directory. Claude's needs no entry: it reaches
-  # the store through the memory bridge below, not through the checkout. An excepted entry must be
-  # a real directory inside shared-rw/ (not a link), its link must land inside the checkout, and
-  # nothing beneath it may be anything but a regular file or a directory — so no link in it leads
-  # out of shared-rw/. That is checked at each start: a link a sibling plants in the directory
-  # after this box has started is not caught until the next one, the same exposure the store's own
-  # memory/ has (SKEIN-1308).
-  readonly shared_dir_exceptions=".codex/memory"
-  is_excepted_dir() {                      # $1 = entry; 0 when it is one of the named exceptions
-    case " $shared_dir_exceptions " in *" $1 "*) return 0 ;; esac
-    return 1
-  }
-  # A real directory, not a link, whose real path is $2 or under it, holding only regular files and
-  # directories. `find` does not follow links, so a link anywhere beneath it is found, not entered.
-  dir_is_inside() {                        # $1 = directory, $2 = the directory it must sit inside
-    local real base
-    [ -d "$1" ] && [ ! -L "$1" ] || return 1
-    real="$(cd -P "$1" 2>/dev/null && pwd)" || return 1
-    base="$(cd -P "$2" 2>/dev/null && pwd)" || return 1
-    case "$real/" in "$base"/*) ;; *) return 1 ;; esac
-    [ -z "$(find "$1" ! -type f ! -type d -print -quit 2>/dev/null)" ]
-  }
+  # There are no exceptions to the shape rule. There was one, `.codex/memory`, surfaced as "Codex's
+  # memory directory"; it is not. codex-cli keeps its memories in its own home (`~/.codex`), its
+  # binary names no `.codex/memory` anywhere, and nothing reads that directory in a checkout
+  # (SKEIN-1330, docs/decisions/store-is-not-dot-claude.md). So it is refused like any other entry
+  # under a hidden directory, and the link an earlier start made for it goes.
   entry_is_inside() {                      # $1 = entry, $2 = its copy, $3 = where it must sit
-    if is_excepted_dir "$1"; then dir_is_inside "$2" "$3"; else file_is_inside "$2" "$3"; fi
+    file_is_inside "$2" "$3"
   }
   # Only a link pointing exactly where this loop would have pointed it is removed, so nothing a
   # person made by hand is touched.
@@ -230,12 +220,13 @@ if [ -f "$manifest" ]; then
     p="$(printf '%s' "$line" | awk '{print $1}')"
     flag="$(printf '%s' "$line" | awk '{print $2}')"
     [ -z "$p" ] && continue
-    if ! is_excepted_dir "$p" && ! shared_path_shape_ok "$p"; then
+    if ! shared_path_shape_ok "$p"; then
       refuse "$p" "only a relative path with no '..' and no hidden or .git directory in it can be surfaced"
       continue
     fi
     dst="$root/$p"
     src=""
+    rwcopy=""
     # Outside --clone mode the source tree is the repo's real work tree, and a box that can see it
     # at all sees it READ-WRITE. An RO entry
     # symlinked straight at it would let a box silently edit the host's own checkout, which the
@@ -254,7 +245,7 @@ if [ -f "$manifest" ]; then
       fi
       [ -e "$rwcopy" ] || [ -L "$rwcopy" ] || continue
       if ! entry_is_inside "$p" "$rwcopy" "$rw_root"; then
-        refuse "$p" "its copy in shared-rw/ is not a regular file (or, for a named exception, a directory of only files and directories) inside shared-rw/"
+        refuse "$p" "its copy in shared-rw/ is not a regular file inside shared-rw/"
         continue
       fi
       target="$rwcopy"
@@ -267,8 +258,19 @@ if [ -f "$manifest" ]; then
       fi
       target="$src"
     fi
+    # Bound by the launcher: the checkout's file IS the copy, and there is nothing to do but keep it
+    # out of `git status`. `-ef` asks whether the two names are one file, which is what a bind is.
+    if [ ! -L "$dst" ] && [ -f "$dst" ] && [ "$dst" -ef "$target" ]; then
+      exclude_path "$p"
+      continue
+    fi
+    # The empty file a bind left as its mount point, in a start that has no bind for it (the copy
+    # appeared after the start, or the launcher refused it): not the person's, so the link replaces it.
+    if [ ! -L "$dst" ] && [ -f "$dst" ] && [ ! -s "$dst" ] && [ "$target" = "${rwcopy:-}" ]; then
+      rm -f "$dst"
+    fi
     # self-heal: an existing symlink made before this entry changed shape (RO ↔ `rw`) points at
-    # the other copy.
+    # the other copy, or at the store under its name before SKEIN-1330.
     if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$target" ]; then
       rm -f "$dst"
     fi
@@ -279,7 +281,15 @@ if [ -f "$manifest" ]; then
         "$(cd -P "$root" 2>/dev/null && pwd)"/*) ;;
         *) refuse "$p" "a link on the way to it leaves this checkout"; continue ;;
       esac
-      if ln -s "$target" "$dst" 2>/dev/null && [ "$target" = "${src:-}" ] && [ "$p" = "CLAUDE.md" ]; then
+      linked_now=""
+      ln -s "$target" "$dst" 2>/dev/null && linked_now=1
+      # In the fleet the launcher binds this copy at the next start, and until then it is a link,
+      # which Claude can read and will not edit.
+      if [ -n "$linked_now" ] && [ "$target" = "${rwcopy:-}" ] \
+        && [ -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
+        echo "[skein-bootstrap] '$p' is linked for now, so it can be read but not edited; restart this box and it is the shared copy itself" >&2
+      fi
+      if [ -n "$linked_now" ] && [ "$target" = "${src:-}" ] && [ "$p" = "CLAUDE.md" ]; then
         # CLAUDE.md is read into context at session START — before this hook runs — so on the run
         # that first links it, print it so this fresh clone still gets the project direction.
         echo "[skein-bootstrap] project direction (CLAUDE.md, freshly linked):"
