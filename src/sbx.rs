@@ -39,7 +39,7 @@ pub struct SbxBox {
     pub agent: String,
     /// Run state; `None` if sbx reports an unrecognised status (caller falls back to lastSeen).
     pub live: Option<Liveness>,
-    /// The repo workspace (the shared `.claude` store mount is excluded). May be empty.
+    /// The repo workspace (the shared store's mount is excluded). May be empty.
     pub dir: String,
 }
 
@@ -298,8 +298,9 @@ pub(crate) fn parse_boxes_checked(json: &str) -> Option<Vec<SbxBox>> {
     Some(out)
 }
 
-/// Pick the repo workspace from a box's `workspaces` value: the path that isn't the shared `.claude`
-/// store. Accepts an array or a single string; empty if none.
+/// Pick the repo workspace from a box's `workspaces` value: the path that isn't the shared store,
+/// `…/store/data`, or a `.claude` store from before SKEIN-1330 or kept elsewhere with `--store`.
+/// Accepts an array or a single string; empty if none.
 fn repo_workspace(ws: &serde_json::Value) -> String {
     use serde_json::Value;
     let paths: Vec<&str> = match ws {
@@ -309,7 +310,10 @@ fn repo_workspace(ws: &serde_json::Value) -> String {
     };
     paths
         .iter()
-        .find(|p| !p.trim_end_matches('/').ends_with("/.claude"))
+        .find(|p| {
+            let p = p.trim_end_matches('/');
+            !p.ends_with("/.claude") && !p.ends_with("/store/data")
+        })
         .or_else(|| paths.first())
         .map(|s| s.to_string())
         .unwrap_or_default()
@@ -748,6 +752,19 @@ mod tests {
             Some(Liveness::Stopped)
         );
         assert_eq!(by_name(&v, "thing-master").dir, "/x/thing");
+    }
+
+    /// **A store renamed to `store/data` is still not taken for the box's workspace** (SKEIN-1330).
+    /// Listed first on purpose: `repo_workspace` takes the first path it does not recognise as a
+    /// store, so a store it no longer recognised would be the answer.
+    ///
+    /// What would make this fail: `repo_workspace` knowing a store only by a `/.claude` suffix.
+    #[test]
+    fn a_store_named_data_is_not_the_workspace() {
+        let ws = serde_json::json!(["/h/.skein/repos/web/store/data/", "/x/web"]);
+        assert_eq!(repo_workspace(&ws), "/x/web");
+        let ws = serde_json::json!(["/h/.skein/repos/web/store/.claude", "/x/web"]);
+        assert_eq!(repo_workspace(&ws), "/x/web");
     }
 
     #[test]

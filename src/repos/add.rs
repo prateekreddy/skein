@@ -74,14 +74,19 @@ pub fn add_repo_with_token(
         return Err(repo_id_refusal(&id));
     }
     let home = skein_home();
-    // The repo's shared-data folder (its `.claude` store), shared live across all the repo's boxes —
+    // The repo's shared-data folder (its store), shared live across all the repo's boxes —
     // cross-box memory/mailbox/skills/statusline. The caller may point it at an existing rich store
-    // (e.g. thing's `skein-shared/.claude`); otherwise skein manages one under its home. Either way
+    // (e.g. thing's `skein-shared/.claude`); otherwise skein manages one under its home, named
+    // `data` and never `.claude` (SKEIN-1330, `docs/decisions/store-is-not-dot-claude.md`). Either way
     // `ensure_store` is idempotent (adds the probe, seeds only what's absent), so an existing store is
     // adopted, not clobbered.
     let store = match store.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => PathBuf::from(expand_tilde(s)),
-        None => home.join("repos").join(&id).join("store").join(".claude"),
+        None => home
+            .join("repos")
+            .join(&id)
+            .join("store")
+            .join(crate::kit::STORE_NAME),
     };
 
     // **A repo is a remote, and a path is not one.** Adopting a local checkout is no longer
@@ -238,7 +243,7 @@ fn store_refusal(store: &Path, id: &str) -> Option<String> {
          box given it would read the API token, the GitHub credentials and every other box's \
          state. So this repo's boxes would come up with no store.\n  Give --store a folder \
          outside {home}, or leave --store out and skein keeps the store at \
-         {home}/repos/{id}/store/.claude."
+         {home}/repos/{id}/store/data."
     ))
 }
 
@@ -379,7 +384,7 @@ mod tests {
                  box — a box given it would read the API token, the GitHub credentials and every \
                  other box's state. So this repo's boxes would come up with no store.\n  Give \
                  --store a folder outside {shown}, or leave --store out and skein keeps the store \
-                 at {shown}/repos/thing/store/.claude."
+                 at {shown}/repos/thing/store/data."
             )
         };
 
@@ -442,7 +447,7 @@ mod tests {
         let why = add_repo(source, Some("thing"), None)
             .expect_err("nothing answers at that address, so the clone fails");
         assert!(
-            !why.contains("skein's own volume") && home.join("repos/thing/store/.claude").is_dir(),
+            !why.contains("skein's own volume") && home.join("repos/thing/store/data").is_dir(),
             "skein's default store was refused, or not scaffolded: {why}"
         );
 

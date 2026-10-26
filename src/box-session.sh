@@ -2369,15 +2369,16 @@ SKEIN_MOUNTS
     # directory is enough to hit that, and the symptom is one box of the pair starting fine.
     [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] &&
       binds+=(--bind "$SKEIN_BOX_STORE" "$SKEIN_BOX_STORE")
-    # And the repo's shared working files, which for a store skein manages sit BESIDE its `.claude`
+    # And the repo's shared working files, which for a store skein manages sit BESIDE the store
     # (`store/shared-home`), under the same cover, so they are bound back the same way (SKEIN-1324,
-    # docs/decisions/shared-home-outside-claude.md). The shape is box-self.sh's `skein_shared_home`;
-    # a store of any other shape keeps them inside itself and needs nothing more. Never a link.
+    # docs/decisions/shared-home-outside-claude.md). The shape is box-self.sh's `skein_shared_home`:
+    # `store/data`, or `store/.claude` from before SKEIN-1330. A store of any other shape keeps them
+    # inside itself and needs nothing more. Never a link.
     case "${SKEIN_BOX_STORE-}" in
       */./* | */../* | *//*) ;;
-      /*/repos/*/store/.claude)
-        box_shared_home="${SKEIN_BOX_STORE%/.claude}/shared-home"
-        [ "$(basename "$(dirname "${SKEIN_BOX_STORE%/store/.claude}")")" = repos ] &&
+      /*/repos/*/store/data | /*/repos/*/store/.claude)
+        box_shared_home="${SKEIN_BOX_STORE%/*}/shared-home"
+        [ "$(basename "$(dirname "${SKEIN_BOX_STORE%/store/*}")")" = repos ] &&
           [ -d "$box_shared_home" ] && [ ! -L "$box_shared_home" ] &&
           binds+=(--bind "$box_shared_home" "$box_shared_home")
         unset box_shared_home

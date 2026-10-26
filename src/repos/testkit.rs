@@ -8,7 +8,7 @@ use super::*;
 /// which needs an upstream that exists without reaching the network. So they write the record
 /// and make the mirror directly, which is all `add_repo` did for them anyway.
 pub(super) fn registered(id: &str, from: &Path) -> Repo {
-    let store = skein_home().join("repos").join(id).join("store/.claude");
+    let store = skein_home().join("repos").join(id).join("store/data");
     let repo: Repo = serde_json::from_value(serde_json::json!({
         "id": id,
         "source": from.to_string_lossy(),

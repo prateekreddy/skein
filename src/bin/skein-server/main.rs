@@ -160,6 +160,19 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     if let Err(e) = skein::repos::adopt_fleet_base_branch() {
         eprintln!("skein: could not move the base branch from Settings onto each repo ({e}); new boxes start from each remote's default until it is set on the repo card");
     }
+    // Each managed store moves off its old `.claude` name, where every write a box made to it asked
+    // for permission (SKEIN-1330). Before anything reads a store path, and before any box starts.
+    match skein::repos::move_stores_off_dot_claude() {
+        Ok((moved, refused)) => {
+            if moved > 0 {
+                eprintln!("skein: moved {moved} repo store(s) from store/.claude to store/data; a box already running keeps working, and picks up the rest at its next restart");
+            }
+            for why in refused {
+                eprintln!("skein: {why}");
+            }
+        }
+        Err(e) => eprintln!("skein: could not move the repo stores off store/.claude ({e}); they stay where they are and keep working"),
+    }
     // Bring an existing fleet sandbox into line with this binary: it keeps the launcher and the
     // ceilings it was last given, and an upgrade that changes what skein passes the launcher stops
     // every box in that fleet starting until the copy out there is replaced. A restart is the only

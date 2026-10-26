@@ -111,9 +111,10 @@ fi
 #     the checkout's own `.claude`. The answer every probe and the bootstrap get, so the kit cannot
 #     link one store while they report into another;
 #   * a mount holding this box's launch spec;
-#   * a store under any mount, at `<mount>/*/store/.claude` or `<mount>/repos/*/store/.claude`,
-#     holding this box's launch spec. This is what finds it on the first start after git replaced
-#     the old `.claude` link with the directory the repo tracks.
+#   * a store under any mount, at `<mount>/*/store/data` or `<mount>/repos/*/store/data` (or
+#     `store/.claude`, the name before SKEIN-1330), holding this box's launch spec. This is what
+#     finds it on the first start after git replaced the old `.claude` link with the directory the
+#     repo tracks.
 # A box never adopts another repository's store. When the clone names a repo's mirror as a remote
 # (`fleet::clone_script` clones from `<repo>/mirror`), only that repo's store is taken; when it names
 # none, one store with this box's launch spec is taken and several are refused.
@@ -140,7 +141,8 @@ if [ -z "$store" ] && [ -r /proc/self/mountinfo ]; then
   specs=""
   while read -r mp; do
     [ "$mp" = / ] && mp=""
-    for cand in "$mp"/*/store/.claude "$mp"/repos/*/store/.claude; do
+    for cand in "$mp"/*/store/data "$mp"/repos/*/store/data \
+      "$mp"/*/store/.claude "$mp"/repos/*/store/.claude; do
       [ -f "$cand/skein/launch/$vmid.json" ] && specs="$specs$cand
 "
     done
@@ -151,7 +153,8 @@ if [ -z "$store" ] && [ -r /proc/self/mountinfo ]; then
   mine=""
   while read -r mp; do
     [ "$mp" = / ] && mp=""
-    for cand in "$mp"/*/store/.claude "$mp"/repos/*/store/.claude; do
+    for cand in "$mp"/*/store/data "$mp"/repos/*/store/data \
+      "$mp"/*/store/.claude "$mp"/repos/*/store/.claude; do
       [ -d "$cand" ] || continue
       printf '%s\n' "$remotes" | grep -qxF "$(dirname "$(dirname "$cand")")/mirror" \
         && mine="$cand"

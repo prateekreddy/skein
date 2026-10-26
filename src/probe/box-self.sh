@@ -38,6 +38,8 @@ skein_box_store() {
   if [ -n "$gitdir" ] && [ -r "$gitdir/skein-store" ]; then
     cand="$(sed -n '1p' "$gitdir/skein-store" 2>/dev/null)"
     if _skein_is_store "$cand" "$real_root"; then printf '%s\n' "$cand"; return 0; fi
+    cand="$(_skein_moved_store "$cand")" \
+      && _skein_is_store "$cand" "$real_root" && { printf '%s\n' "$cand"; return 0; }
   fi
   # 2. The store's own copy of this file. Physical, so a copy reached through the checkout's
   # `.claude/skein` link still names the store and not the checkout.
@@ -60,7 +62,27 @@ skein_box_store() {
     return 1
   fi
   if _skein_is_store "$cand" "$real_root"; then printf '%s\n' "$cand"; return 0; fi
+  cand="$(_skein_moved_store "$cand")" \
+    && _skein_is_store "$cand" "$real_root" && { printf '%s\n' "$cand"; return 0; }
   return 1
+}
+
+# Where a store recorded at its old name is now (SKEIN-1330, docs/decisions/store-is-not-dot-claude.md).
+# The host moves a managed store from `<…>/repos/<id>/store/.claude` to `<…>/store/data` while boxes
+# are running. A covered box does not notice: its store is a bind, which follows the directory and
+# not its name. A box that sees the volume itself (the workshop, a privileged box) finds the old
+# name gone, and the record and the `.claude/skein` link still naming it until its next start. So a
+# store named `.claude` of the managed shape that is not there answers its new name, which the
+# caller still checks is a store. Prints nothing and returns 1 for anything else.
+_skein_moved_store() {
+  case "${1:-}" in
+    */./* | */../* | *//*) return 1 ;;
+    /*/repos/*/store/.claude)
+      [ -e "$1" ] || [ -L "$1" ] && return 1
+      printf '%s/data\n' "${1%/.claude}"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # A store is a directory holding skein's own `skein/` directory, and not the checkout or anything
@@ -77,10 +99,11 @@ _skein_is_store() {
 
 # Where this repo's shared working files are, given its store: what `$HOME/shared` links to.
 #
-# For a store skein manages, `<…>/repos/<id>/store/.claude`, it is `<…>/repos/<id>/store/shared-home`:
-# BESIDE the `.claude` directory, not inside it. Claude Code guards every path under a `.claude`
-# directory as its own configuration and judges the resolved path, so while the files lived in
-# `store/.claude/shared-home` every write to `~/shared` asked for permission (SKEIN-1324,
+# For a store skein manages, `<…>/repos/<id>/store/data`, it is `<…>/repos/<id>/store/shared-home`:
+# BESIDE the store, not inside it. The same for `store/.claude`, the store's name until SKEIN-1330,
+# which a box started before the move still has bound. Claude Code guards every path under a
+# `.claude` directory as its own configuration and judges the resolved path, so while the files lived
+# in `store/.claude/shared-home` every write to `~/shared` asked for permission (SKEIN-1324,
 # docs/decisions/shared-home-outside-claude.md). The host moves an old one across
 # (`kit::ensure_store`), and the launcher binds the sibling back into a covered box beside the store.
 #
@@ -92,8 +115,8 @@ skein_shared_home() {
   while [ "${store%/}" != "$store" ]; do store="${store%/}"; done
   case "$store" in
     */./* | */../* | *//*) ;;
-    /*/repos/*/store/.claude)
-      rest="${store%/store/.claude}"
+    /*/repos/*/store/data | /*/repos/*/store/.claude)
+      rest="${store%/store/*}"
       id="${rest##*/}"
       if [ "${rest%/*}" != "$rest" ] && [ "$(basename "${rest%/*}")" = repos ] \
         && [ -n "$id" ] && [ "$id" != . ] && [ "$id" != .. ]; then
