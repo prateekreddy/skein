@@ -142,7 +142,7 @@ the same calls against the new one, as the kit and launcher now set a box up:
   `src/repos/list.rs`), run from `src/bin/skein-server/main.rs`: tests
   `an_old_store_is_moved_to_data_once`, `two_stores_with_files_are_refused_and_nothing_moves`,
   `a_link_at_either_store_is_refused_and_other_stores_are_not_renamed` and
-  `managed_stores_move_off_dot_claude_and_their_records_follow`. New repos get the name from
+  `stores_move_off_dot_claude_and_their_records_follow`. New repos get the name from
   `kit::STORE_NAME` (`src/repos/add.rs`).
 - `skein_box_store` and `skein_shared_home` (`src/probe/box-self.sh`): test
   `a_box_follows_its_store_to_its_new_name`.
@@ -161,9 +161,39 @@ the same calls against the new one, as the kit and launcher now set a box up:
 **Open.**
 
 - A store kept elsewhere with `skein add --store` at a path ending in `.claude` (a
-  `skein-shared/.claude`) is the person's directory and is not renamed, so its boxes still ask. It
-  could be moved by asking the person, or mounted under a second name; that is the owner's call.
+  `skein-shared/.claude`): **decided 2026-10-26, rename it automatically** (SKEIN-1345), below.
+  Where it is its own mount in the fleet sandbox, which is every such store outside skein's volume,
+  the rename cannot happen from inside, and how the host-side half is done is still the owner's
+  call: today the refusal tells the person how to do it by hand.
 - A skill written through `.claude/skills/…` in acceptEdits still asks, by Claude Code's own rule.
 - A box already running keeps its settings, links and binds until it restarts; nothing tells the
   person which boxes have not, beyond each box's own start messages.
 
+## A store put at `<dir>/.claude` with `--store` (SKEIN-1345)
+
+**Decision.** The owner, 2026-10-26: rename it automatically. At server start, beside the managed
+move and under the same repo-list lock, a store whose last component is `.claude` and which is not
+of the managed shape moves to `<dir>/data`, record and directory together.
+
+**The rules**, the managed move's with one difference: `<dir>/data` is in a directory of the
+person's, so it may be a folder of theirs rather than a store. skein takes it for the store only
+when it holds skein's own `skein/` directory. So an old store that is gone moves the record only
+onto a `data` that is a store, an empty old store is removed only beside one, and `ensure_store`
+makes the old store again when `data` is not one. Both holding anything: refused, naming both. A
+link at either name: refused and never followed. A rename, never a copy.
+
+**The shared home and the box's shape rules need nothing more.** Such a store keeps its shared
+home inside itself (`<store>/shared-home`, `kit::shared_home_dir`, `skein_shared_home`), so it moves
+with the store, and the launcher's bind of `store/shared-home` beside the store is for the managed
+shape only. A covered box's store is a bind, which follows the directory. An uncovered box follows
+the move through `_skein_moved_store`, which answers `<dir>/data` for any `<dir>/.claude` that is
+gone, and its caller takes that only when it is a store.
+
+**What it cannot do from inside the fleet.** `fleet::fleet_mounts` mounts a `--store` store by its
+own path, so in the fleet sandbox, where the server runs, the store is a mount point, and a mount
+point cannot be renamed (`EBUSY`, measured with bwrap and with `unshare -rm`). There the move is
+refused with what to do on the host instead: stop the fleet, rename the directory, change the repo's
+`store` in `repos.json`, and create the fleet again, since sbx fixes mounts at create. A store under
+a directory the sandbox already mounts (skein's own volume) is renamed in place. Tests:
+`a_store_put_at_a_dot_claude_path_moves_to_data_beside_it` and
+`a_store_mounted_under_its_dot_claude_name_says_what_to_do_instead` (`src/kit.rs`).

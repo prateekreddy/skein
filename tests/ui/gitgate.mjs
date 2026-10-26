@@ -36,6 +36,8 @@ const source = [
   // last payload from `gitLast`. Without these two the suite died at its first `renderGitState`
   // with `ReferenceError: renderReviewIdentityNote is not defined`.
   "gitLast", "renderReviewIdentityNote",
+  // The App misconfigured flag (SKEIN-1344), on the status line and the repo card.
+  "appReadsNote", "appReadsFor",
   // The per-repository "Your GitHub identity" rows (SKEIN-1179) and the words they are drawn in.
   "IDENTITY_WORDS", "renderIdentity",
   // A card with a decision in flight is drawn disabled (SKEIN-1296), a refusal is read by one
@@ -465,6 +467,16 @@ T.renderGitState({ ready: true, app_ready: false, credentials: [
 check("a shared token is the exception the scoped line has to say (SKEIN-1231)",
   T.state().innerHTML.includes("A box writes only its own repo — or every repo its token is shared with — and asks for any other"), true);
 
+// An App that mints without Checks: read or Actions: read is flagged, naming the permission and
+// where to grant it (SKEIN-1344). Fails if `appReadsNote` is dropped from the scoped line, or the
+// line still draws as good.
+T.renderGitState({ ready: true, app_ready: true, app_id: "12345", credentials: [],
+  app_cannot_read: [{ slug: "acme/other", needs: ["Actions: read"] }] });
+check("an App missing a read is flagged on the status line",
+  T.state().innerHTML.includes("The GitHub App is missing a permission.")
+  && T.state().innerHTML.includes("grant it Actions: read under the App's Permissions &amp; events"), true);
+check("and the line is drawn as a problem", T.state().className.includes("warn"), true);
+
 // Configured but switched off is its own state — "ready" would overclaim and "not scoped" would
 // hide that the hard part is already done.
 T.setScoped(false);
@@ -552,6 +564,15 @@ check("and says the token also runs this repo's queue, reviews and merges",
 
 const fromApp = T.repoTokenRow({ id: "other", source: "git@github.com:acme/other.git", slug: "acme/other" });
 check("one without falls back to the App rather than reading as broken", fromApp.includes("from the App"), true);
+check("and is not flagged while the App reads CI", fromApp.includes("App misconfigured"), false);
+// SKEIN-1344: the card of a repo the App pushes to but cannot read CI on says which to grant.
+T.setGitLast({ app_ready: true, app_cannot_read: [{ slug: "acme/other", needs: ["Checks: read", "Actions: read"] }] });
+const flagged = T.repoTokenRow({ id: "other", source: "git@github.com:acme/other.git", slug: "acme/other" });
+check("an App that cannot read CI here is flagged on the card",
+  flagged.includes("App misconfigured") && flagged.includes("grant it Checks: read and Actions: read"), true);
+check("and a repo with its own token is not",
+  T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" }).includes("App misconfigured"), false);
+T.setGitLast({ credentials: [], ready: false });
 
 // The regression this row was getting wrong: a repo adopted from a local path whose clone has a
 // GitHub `origin`. The host resolves that and sends the slug; parsing `source` here called it "not

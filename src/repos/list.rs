@@ -462,9 +462,10 @@ pub fn adopt_fleet_base_branch() -> Result<usize, String> {
     Ok(adopted)
 }
 
-/// Move every managed store off its old `.claude` name and record where it went (SKEIN-1330,
-/// `docs/decisions/store-is-not-dot-claude.md`). Run once at server start, beside
-/// [`adopt_fleet_base_branch`].
+/// Move every store off a `.claude` name and record where it went (SKEIN-1330,
+/// `docs/decisions/store-is-not-dot-claude.md`): a managed one from `store/.claude` to
+/// `store/data`, and one the person put at `<dir>/.claude` with `skein add --store` to `<dir>/data`
+/// (SKEIN-1345). Run once at server start, beside [`adopt_fleet_base_branch`].
 ///
 /// The directory and its `store` value move together, inside the repo-list lock: a store renamed
 /// on disk with the record still naming the old path would leave every box of the repo with no
@@ -572,15 +573,15 @@ mod tests {
     use super::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
 
-    /// **Each managed store moves off `.claude` and its record follows; a refused one keeps both,
-    /// and a store kept elsewhere is untouched** (SKEIN-1330).
+    /// **Each store moves off `.claude` and its record follows, a managed one (SKEIN-1330) and one
+    /// put elsewhere with `--store` (SKEIN-1345); a refused one keeps both.**
     ///
     /// What would make it fail: the record not rewritten (`moved`'s store still names `.claude`, so
     /// every box gets a store that is no longer there), a refused move rewriting the record anyway
-    /// (`clash` would name a store with only half its files), renaming a `--store` directory, or a
-    /// second run doing anything.
+    /// (`clash` would name a store with only half its files), a `--store` store at `.claude` left
+    /// where it was (`theirs`, SKEIN-1345), or a second run doing anything.
     #[test]
-    fn managed_stores_move_off_dot_claude_and_their_records_follow() {
+    fn stores_move_off_dot_claude_and_their_records_follow() {
         let _g = env_lock();
         let home = tempdir();
         let mut env = env_pins();
@@ -593,7 +594,8 @@ mod tests {
             fs::write(at("clash", name).join("f"), name).unwrap();
         }
         let theirs = tempdir().join("thing-shared/.claude");
-        fs::create_dir_all(&theirs).unwrap();
+        fs::create_dir_all(theirs.join("skein")).unwrap();
+        let theirs_now = theirs.with_file_name("data");
         let s = |p: PathBuf| p.to_string_lossy().into_owned();
         fs::write(
             home.join("repos.json"),
@@ -613,7 +615,7 @@ mod tests {
         };
 
         let (moved, refused) = move_stores_off_dot_claude().unwrap();
-        assert_eq!(moved, 1, "{refused:?}");
+        assert_eq!(moved, 2, "{refused:?}");
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].starts_with("clash: "), "{refused:?}");
         let after = stores();
@@ -622,14 +624,14 @@ mod tests {
             vec![
                 ("moved".to_string(), s(at("moved", "data"))),
                 ("clash".to_string(), s(at("clash", ".claude"))),
-                ("theirs".to_string(), s(theirs.clone())),
+                ("theirs".to_string(), s(theirs_now.clone())),
             ]
         );
         assert_eq!(
             fs::read_to_string(at("moved", "data").join("memory/m.md")).unwrap(),
             "kept"
         );
-        assert!(theirs.is_dir());
+        assert!(theirs_now.join("skein").is_dir() && !theirs.exists());
 
         // Once the clash is resolved, the next start finishes it, and the one after does nothing.
         fs::remove_file(at("clash", ".claude").join("f")).unwrap();

@@ -327,7 +327,7 @@ function forgetConnectionToken(id) {
   if (!confirm(`Forget the Plane token for ${(c && c.label) || id}? Boxes already running keep theirs; a new box on this connection gets none until you paste another.`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
-    .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
+    .then(s => { syncStatus = s; renderSync(); if (s.warning) notice(s.warning); else toast(`forgot the token for ${id}`); })
     .catch(e => notice(failText(e)));
 }
 function removeConnection(id) {
@@ -335,7 +335,7 @@ function removeConnection(id) {
   if (c && c.repos.length && !confirm(`${id} is used by ${c.repos.join(", ")}. Remove it anyway?`)) return;
   fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
-    .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
+    .then(s => { syncStatus = s; renderSync(); renderRepoList(); if (s.warning) notice(s.warning); })
     .catch(e => notice(failText(e)));
 }
 // A new card is a card, not a prompt() — it starts blank in the list and saves like any other once
@@ -538,11 +538,16 @@ function repoTokenRow(r) {
     : `<span class="sq-state">${c && c.problem ? "refused" : "from the App"}</span><span class="cwhy">${
         c && c.problem ? esc(c.problem)
         : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
+  // The App mints this repo's token but could not be given CI reads with it (SKEIN-1344).
+  const appReads = !(c && !c.problem && c.has_token) && appReadsFor(slug);
+  const appFlag = appReads
+    ? `<div class="set-cred"><span class="sq-state">App misconfigured</span><span class="cwhy">The GitHub App can push here, but cannot read CI results. On GitHub, grant it ${esc(reposPhrase(appReads.needs || []))} under the App's Permissions &amp; events → Repository permissions, then accept the change where it is installed</span></div>`
+    : "";
   // A <div>, not a <label>: a label hands a click on its text to its first control, and here that
   // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
   return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
     + `<span class="desc">a fine-grained GitHub token covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
-    + `<div class="set-cred">${state}</div>${checked}`
+    + `<div class="set-cred">${state}</div>${checked}${appFlag}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
 }
@@ -1238,9 +1243,11 @@ function saveBoxSettings() {
   const disk = document.getElementById("bs-disk").value.trim();
   const gitScope = document.getElementById("bs-gitscope").value;
   const privileged = document.getElementById("bs-priv").value === "1";
+  // A write that went through with something to say answers 200 with a `warning` (SKEIN-1333: a
+  // tracking change whose old token could not be revoked yet); the rest answer 204.
   const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }).then(async r => { if (!r.ok) throw await refused(r); });
+  }).then(async r => { if (!r.ok) throw await refused(r); return r.status === 200 ? (await r.json()).warning : undefined; });
   // Absent vs empty is the whole grammar here: cleared field ⇒ inherit again, not "set to nothing".
   //
   // **Five writes, and each one's answer is said** (SKEIN-1266). One failure used to reject the
@@ -1259,7 +1266,9 @@ function saveBoxSettings() {
   return Promise.allSettled(writes.map(([, w]) => w())).then(results => {
     const saved = [], refusedHere = [];
     results.forEach((x, i) => x.status === "fulfilled" ? saved.push(writes[i][0]) : refusedHere.push(`${writes[i][0]} — ${failText(x.reason)}`));
-    if (!refusedHere.length) { bsSetMsg(""); toast(`${name}: settings saved`); closeBoxSettings(); refresh(); return; }
+    const warned = results.filter(x => x.status === "fulfilled" && x.value).map(x => x.value);
+    if (warned.length) notice(warned.join("\n"));
+    if (!refusedHere.length) { bsSetMsg(""); if (!warned.length) toast(`${name}: settings saved`); closeBoxSettings(); refresh(); return; }
     bsSetMsg((saved.length ? `Saved: ${saved.join(", ")}.\n` : "") + `Not saved:\n${refusedHere.join("\n")}`, "err");
     refresh();
   }).finally(() => { go.disabled = false; });
@@ -1594,7 +1603,7 @@ function launchBox(branch) {
   const post = (path, body, what) =>
     fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    }).then(async r => { if (!r.ok) throw await refused(r); })
+    }).then(async r => { if (!r.ok) throw await refused(r); return r.status === 200 ? (await r.json()).warning : undefined; })
       .catch(e => { throw new Error(`${what} — ${failText(e)}`); });
   nbSetMsg("");
   go.dataset.busy = "1"; go.disabled = true; go.textContent = "launching…";
@@ -1613,6 +1622,8 @@ function launchBox(branch) {
         + `Change ${bad.length === 1 ? "it" : "them"}, or set ${bad.length === 1 ? "it" : "them"} back to the default, and launch again.`);
       return;
     }
+    const warned = results.filter(x => x.status === "fulfilled" && x.value).map(x => x.value);
+    if (warned.length) notice(warned.join("\n"));
     closeNewBox();
     select(name);
     view = { box: name, mode: "term", kind: "agent" };

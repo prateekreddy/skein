@@ -73,11 +73,14 @@ skein_box_store() {
 # not its name. A box that sees the volume itself (the workshop, a privileged box) finds the old
 # name gone, and the record and the `.claude/skein` link still naming it until its next start. So a
 # store named `.claude` of the managed shape that is not there answers its new name, which the
-# caller still checks is a store. Prints nothing and returns 1 for anything else.
+# caller still checks is a store. A store the person put at any other `<dir>/.claude` with
+# `skein add --store` moves the same way, to `<dir>/data` (SKEIN-1345), and the host takes that one
+# for the store only when it is one, which is the caller's check here too. Prints nothing and
+# returns 1 for anything else.
 _skein_moved_store() {
   case "${1:-}" in
     */./* | */../* | *//*) return 1 ;;
-    /*/repos/*/store/.claude)
+    /*/.claude)
       [ -e "$1" ] || [ -L "$1" ] && return 1
       printf '%s/data\n' "${1%/.claude}"
       ;;

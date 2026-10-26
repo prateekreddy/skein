@@ -59,6 +59,13 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
         // *what by*. The key it pairs with is a path that never leaves the host.
         "app_id": skein::config::load_config().github_app_id,
         "app_problem": skein::gitgate::app_credentials().err().unwrap_or_default(),
+        // Each repository the App's last token could not read CI results on, and which of Checks:
+        // read and Actions: read to grant it (SKEIN-1344). Pushing works either way; this is the
+        // flag on the repo card and the status line.
+        "app_cannot_read": skein::gitgate::app_cannot_read()
+            .into_iter()
+            .map(|(slug, needs)| serde_json::json!({ "slug": slug, "needs": needs }))
+            .collect::<Vec<_>>(),
         // Whether a write token can be issued *at all* — by App or by a stored PAT. This is what
         // scoping is gated on, so it is the honest "is this switched on" answer; `app_ready` alone
         // would read as off for someone using nothing but their own tokens.
