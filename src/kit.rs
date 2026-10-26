@@ -1380,11 +1380,13 @@ mod tests {
             .unwrap()
         }
 
+        /// The clone's exclusions, less `/.worktrees/`, which every start adds and
+        /// `agents_worktrees_inside_the_checkout_stay_out_of_git_status` asserts on its own.
         fn exclude(&self) -> Vec<String> {
             fs::read_to_string(self.tree.join(".git/info/exclude"))
                 .unwrap_or_default()
                 .lines()
-                .filter(|l| !l.starts_with('#'))
+                .filter(|l| !l.starts_with('#') && *l != "/.worktrees/")
                 .map(str::to_string)
                 .collect()
         }
@@ -2011,6 +2013,42 @@ mod tests {
         ));
         out.sort();
         out
+    }
+
+    /// **An agent's worktree under `.worktrees/` in the checkout stays out of `git status`, and the
+    /// agent guide tells it to put one there** (SKEIN-1336). A worktree beside the checkout is
+    /// outside the directory Claude trusts, so every `cd` into it was reset.
+    ///
+    /// What would make it fail: the kit not excluding `/.worktrees/` (`git status` lists the
+    /// worktree), or the guide's bullet dropped (the person's CLAUDE.md does not name the place).
+    #[test]
+    fn agents_worktrees_inside_the_checkout_stay_out_of_git_status() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("claude", None);
+        kit.start();
+        kit.start();
+        let exclude = fs::read_to_string(kit.tree.join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            exclude.lines().filter(|l| *l == "/.worktrees/").count(),
+            1,
+            "{exclude}"
+        );
+        fs::create_dir_all(kit.tree.join(".worktrees/lane")).unwrap();
+        fs::write(kit.tree.join(".worktrees/lane/work.txt"), "work\n").unwrap();
+        assert_eq!(
+            kit.git(&["status", "--porcelain"]),
+            "",
+            "an agent's worktree is listed as a change to the checkout"
+        );
+        let guide = fs::read_to_string(kit.home.join(".claude/CLAUDE.md")).unwrap();
+        assert!(guide.contains("under `.worktrees/<name>`"), "{guide}");
     }
 
     /// The layout every box skein made before SKEIN-1053: `.claude` is the store's own link, the
