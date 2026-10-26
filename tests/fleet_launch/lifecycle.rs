@@ -462,7 +462,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // A box that never got this comes up looking entirely healthy and simply never reports — no
     // hooks, no probe, no tracker. It is the one gap that cannot be seen from the outside, so it is
     // asserted from the inside, on the artefacts the script actually leaves.
-    let store = root.join("skein/repos/web/store/.claude");
+    let store = root.join("skein/repos/web/store/data");
     ensure_store(&store).expect("a store to provision against");
     // Written by the ordinary launch path (`write_launch_spec_for_agent`), which the fleet shares —
     // keyed on the box name, which is exactly the identity `SKEIN_BOX` supplies inside the box.
@@ -477,13 +477,14 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             Duration::from_secs(120),
         )
         .expect("provision the box");
-    // `.claude` is a directory of the box's own, with the store's entries linked into it and its
-    // settings files left out (SKEIN-1053); `skein` is the link the probes find the store through.
+    // `.claude` is a directory of the box's own, with the store's `skein/` and what Claude Code
+    // reads linked into it and its settings files and memory left out (SKEIN-1053, SKEIN-1330);
+    // `skein` is the link the probes find the store through.
     assert_eq!(
         boxed
             .exec(
                 "[ -d .claude ] && [ ! -L .claude ] && [ ! -e .claude/settings.json ] \
-                 && readlink .claude/skein",
+                 && [ ! -e .claude/memory ] && readlink .claude/skein",
                 Duration::from_secs(30)
             )
             .unwrap()
@@ -506,8 +507,8 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             .unwrap()
             .join("shared-home")
             .to_string_lossy(),
-        "a box's shared workspace must resolve to its own repo's store, beside its .claude and \
-         not under it, where Claude Code asks before every write (SKEIN-1324)"
+        "a box's shared workspace must resolve to its own repo's store, beside it and not under \
+         it (SKEIN-1324)"
     );
     // The boot report is per BOX, not per sandbox. Every box here reports the same SANDBOX_VM_ID,
     // so without an explicit identity they would overwrite each other — one box's diagnosis
