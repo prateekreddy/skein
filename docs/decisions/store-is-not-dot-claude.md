@@ -122,7 +122,7 @@ the same calls against the new one, as the kit and launcher now set a box up:
 | `~/shared/<file>`, acceptEdits | refused: "a sensitive file" (`store/.claude/shared-home`) | written |
 | `~/shared/<file>`, auto | refused | written |
 | the mailbox, by redirect, auto | refused: `.claude/mailbox` "a sensitive file" | written, into `store/data/mailbox` |
-| a skill, auto | refused through `.claude/skills` | written, with the store's `skills/` an added directory |
+| a skill, auto | refused through `.claude/skills` | written when the store's `skills/` was an added directory; **since the owner's answer of 2026-10-26 it is not one**, so writing a shared skill asks, because a skill reaches every box of the repo |
 | a skill through `.claude/skills/…`, acceptEdits | refused | **still asks**: Claude Code guards its own `.claude/skills` path as written; at the store's own path it is written |
 | a surfaced `rw` file, an edit | refused: "it is a symbolic link" | edited in place, into `shared-rw/` (bound) |
 | `.codex/memory` through `shared-paths.txt` | surfaced, as "Codex's memory", and refused as sensitive | not surfaced: not Codex's memory |

@@ -2790,11 +2790,10 @@ mod tests {
                 mem.as_str(),
                 "{ships:?}: {local}"
             );
-            // The store's skills only where the checkout links them (SKEIN-1330).
-            let want = match ships {
-                None => serde_json::json!(["/theirs", shared, kit.store.join("skills")]),
-                Some(_) => serde_json::json!(["/theirs", shared]),
-            };
+            // Never the store's skills, which reach every box of the repo: writing one asks (the
+            // owner, 2026-10-26). What would make this fail: the skills directory added back to
+            // the list, for the layout whose checkout links them (`ships == None`).
+            let want = serde_json::json!(["/theirs", shared]);
             assert_eq!(
                 local["permissions"]["additionalDirectories"], want,
                 "{ships:?}: {local}"

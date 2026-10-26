@@ -465,8 +465,8 @@ fi
 # (SKEIN-1330): `autoMemoryDirectory` is the store's `memory/` (unless the person set their own), so
 # memory is read and written there directly rather than through a link under `~/.claude`, which
 # Claude Code guards; and `$HOME/shared` is in `permissions.additionalDirectories`, so default and
-# acceptEdits mode write it as they write the checkout, and with it the store's `skills/` where the
-# checkout links them. Claude honours a local `autoMemoryDirectory`
+# acceptEdits mode write it as they write the checkout. The store's `skills/` is deliberately not
+# there: a shared skill reaches every box of the repo, so writing one asks. Claude honours a local `autoMemoryDirectory`
 # only in a trusted folder, and the launcher trusts this one. What else goes in is skein's `tui`,
 # `subagentPromptCacheTtl` and `statusLine` defaults, read from the plugin's read-only
 # `settings-defaults.json` and never from the store. Each default
@@ -581,10 +581,9 @@ else
       shared="/dev/null"
       [ -f "$rc/settings.json" ] && shared="$rc/settings.json"
       [ -f "$rc/settings.local.json" ] || echo '{}' > "$rc/settings.local.json"
-      # The store's skills too, where they are this checkout's: through `.claude/skills` they lead out
-      # of the checkout, and a write to one asked even in auto mode (SKEIN-1330).
-      skills_dir=""
-      [ -L "$rc/skills" ] && [ "$(readlink "$rc/skills")" = "$store/skills" ] && skills_dir="$store/skills"
+      # NOT the store's skills: a skill written there reaches every box of the repo, so a write to one
+      # still asks (the owner, 2026-10-26). An entry an earlier start added for them is taken out.
+      skills_dir="$store/skills"
       merged="$(jq -s --arg mem "$store/memory" --arg shared "$HOME/shared" --arg skills "$skills_dir" "$retire"'
         (.[0] | if type == "object" then . else {} end | retire) as $l
         | .[1] as $d | (.[2] // {}) as $s
@@ -602,8 +601,8 @@ else
            then .autoMemoryDirectory = $mem else . end)
         | (if (.permissions | type) == "object" or .permissions == null
            then .permissions = ((.permissions // {})
-             | ([$shared] + (if $skills == "" then [] else [$skills] end)) as $ours
-             | .additionalDirectories = (((.additionalDirectories // []) | map(select(. as $dir | $ours | index($dir) | not))) + $ours))
+             | [$shared] as $ours
+             | .additionalDirectories = (((.additionalDirectories // []) | map(select(. as $dir | ($ours + [$skills]) | index($dir) | not))) + $ours))
            else . end)
       ' "$rc/settings.local.json" "$defaults" "$shared" 2>/dev/null)"
       if [ -n "$merged" ]; then
