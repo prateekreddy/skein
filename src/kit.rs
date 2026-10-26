@@ -278,7 +278,8 @@ pub(crate) fn move_store_off_dot_claude(store: &Path) -> Result<PathBuf, String>
         (false, _) => Ok(new),
         (true, false) => fs::rename(store, &new).map(|()| new.clone()).map_err(|e| {
             format!(
-                "could not move this repo's store from {} to {}: {e}. Nothing was moved, and the                  repo keeps its store where it was.",
+                "could not move this repo's store from {} to {}: {e}. Nothing was moved, and the \
+                 repo keeps its store where it was.",
                 store.display(),
                 new.display()
             )
@@ -2751,9 +2752,13 @@ mod tests {
                 mem.as_str(),
                 "{ships:?}: {local}"
             );
+            // The store's skills only where the checkout links them (SKEIN-1330).
+            let want = match ships {
+                None => serde_json::json!(["/theirs", shared, kit.store.join("skills")]),
+                Some(_) => serde_json::json!(["/theirs", shared]),
+            };
             assert_eq!(
-                local["permissions"]["additionalDirectories"],
-                serde_json::json!(["/theirs", shared]),
+                local["permissions"]["additionalDirectories"], want,
                 "{ships:?}: {local}"
             );
             assert_eq!(
