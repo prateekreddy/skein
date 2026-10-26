@@ -1,6 +1,8 @@
 # skein shared store
 
-This folder (kept at `.claude` for backward-compatible mounting) is **one project's shared data**.
+This folder (`~/.skein/repos/<id>/store/data`; it was `store/.claude` until SKEIN-1330, when skein
+renamed it because Claude Code asks before every write to a path under a `.claude` folder) is **one
+project's shared data**.
 It serves Claude, Codex, and future runtime adapters; it is not a Claude-only transcript store. Every sandbox skein launches
 for this repo mounts it live, so memory and the mailbox are shared across the
 project's parallel boxes — and stay scoped to *this* project (see "Talking across
@@ -66,14 +68,16 @@ local delivery picks it up unchanged. This only runs while something host-side
 
 What you *optionally* add is your own project content:
 
-    memory/        project memory. The bootstrap bridges ~/.claude/projects/<cwd>/memory
-                   → here, so it's live and shared across this project's boxes. Starts
-                   empty and accumulates as boxes work; drop in notes to seed it.
-    skills/        project skills (one dir per skill).
+    memory/        project memory. Each box's own .claude/settings.local.json sets Claude's
+                   autoMemoryDirectory to this folder, so it's live and shared across this
+                   project's boxes and written without a prompt. Starts empty and
+                   accumulates as boxes work; drop in notes to seed it.
+    skills/        project skills (one dir per skill). Linked into each box's .claude, with
+                   commands/, agents/, output-styles/ and rules/ if you add them; nothing else
+                   here is.
     hooks/         your own hook scripts, if you reference them from settings.json.
     ../shared-home/  durable project working files, exposed as $HOME/shared in every Claude/Codex
-                   box. BESIDE this folder, not in it: under a .claude folder, Claude Code asks
-                   before every write. (A store kept elsewhere with --store keeps it here, as
+                   box. BESIDE this folder, not in it. (A store kept elsewhere with --store keeps it here, as
                    shared-home/.) Real $HOME remains box-private. Writes are live across the
                    repo's boxes; coordinate concurrent edits (last-writer-wins).
     shared-paths.txt   one repo-relative path per line of GITIGNORED files the box
@@ -85,12 +89,13 @@ What you *optionally* add is your own project content:
                    at a relative path with no `..` and no hidden or .git directory on
                    the way is surfaced; a directory, a link, or anything under a
                    dot-directory is refused, and the box's start says so (SKEIN-1256).
-                   The one exception is `.codex/memory`, named in the bootstrap itself:
-                   a directory, surfaced while it holds only files and directories.
-                   Add ` rw` after a path (e.g. `LOCAL_DEV.md rw`) to make it editable:
-                   the file is seeded once into shared-rw/ (a writable store dir) and
-                   symlinked from there instead — edits persist there and are shared
-                   live across the project's boxes. Default (no suffix) is read-only.
+                   There is no exception (`.codex/memory` was one; Codex keeps its
+                   memories in its own home). Add ` rw` after a path (e.g.
+                   `LOCAL_DEV.md rw`) to make it editable: the file is seeded once into
+                   shared-rw/ (a writable store dir), and in the fleet every box binds
+                   that copy into its checkout at start, so the agent edits it in place —
+                   edits persist there and are shared live across the project's boxes.
+                   Default (no suffix) is read-only.
     settings.json  NOT loaded as a box's settings. Every box of the repo can write this
                    folder, so a hook or status line set here could run in every other
                    box; each box's settings are its own `.claude/settings.local.json`

@@ -32,8 +32,8 @@ skein add https://github.com/org/app.git      # mirrors it into ~/.skein/repos/a
 skein repos                                    # list managed repos
 ```
 
-…or in the cockpit: **⌘K → "Add a repo…"**. Adding a repo provisions a shared `.claude` store
-from scratch (mailbox + skein's turn-state probe) and installs skein's own sbx kit; how its boxes
+…or in the cockpit: **⌘K → "Add a repo…"**. Adding a repo provisions a shared store at
+`~/.skein/repos/<id>/store/data` from scratch (memory, mailbox, skills and skein's turn-state probe) and installs skein's own sbx kit; how its boxes
 push is the credential you pick under Settings → GitHub & keys (below). Boxes are then named `<repo>-<branch>`; create
 one from the **New box** dialog (which gains a repo selector once you manage more than one).
 
@@ -446,12 +446,13 @@ the box's **next start**, because a credential is placed as the box comes up.
 
 Every managed Claude and Codex box exposes the repo's durable working-data directory at
 `/home/agent/shared` (`$HOME/shared`). Its canonical host location is
-`~/.skein/repos/<id>/store/shared-home/`, beside the store's `.claude` directory rather than inside
-it, so Claude Code does not ask before every write there. A store kept elsewhere with `--store`
-keeps it at `<store>/shared-home/`. Writes are visible live in every box for that repo; concurrent
-edits use ordinary filesystem/last-writer-wins semantics.
+`~/.skein/repos/<id>/store/shared-home/`, beside the store (`store/data`) rather than inside it. A
+store kept elsewhere with `--store` keeps it at `<store>/shared-home/`. Writes are visible live in
+every box for that repo; concurrent edits use ordinary filesystem/last-writer-wins semantics. A box
+writes it without a prompt: it is in the box's `permissions.additionalDirectories`, and for Codex in
+`sandbox_workspace_write.writable_roots`.
 
-A store from before the move has it at `store/.claude/shared-home/`. skein moves it beside `.claude`
+A store from before the move has it at `store/.claude/shared-home/`. skein moves it beside the store
 the next time it starts a box of that repo. If both places hold files, skein moves nothing and says
 so, and boxes leave `$HOME/shared` unlinked until one is left: move what you want to keep into
 `store/shared-home/`, remove `store/.claude/shared-home/`, and start the box again. A box that was
@@ -475,6 +476,33 @@ Hidden state, workspaces/repos, symlinks, sockets/devices, credentials, dependen
 outputs are excluded. Unreadable source files are skipped and reported without privilege escalation.
 Apply never overwrites or merges an existing destination and records imported names plus warnings in
 a receipt under `<repo-store>/skein/imports/`.
+
+## The store is `store/data`, not `store/.claude`
+
+Claude Code asks before every write to a path under a `.claude` directory, judging the path as
+written and where it leads, in auto mode and with `--add-dir` alike. Each repo's store was
+`~/.skein/repos/<id>/store/.claude`, so every memory note, every mailbox post and every edit of a
+surfaced file asked. It is `store/data` now (SKEIN-1330, `docs/decisions/store-is-not-dot-claude.md`).
+
+- **When it moves.** At the next start of `skein-server`, by a rename, and `repos.json`'s `store`
+  with it. A store kept elsewhere with `--store` is yours and is not renamed.
+- **If it refuses.** Both `store/.claude` and `store/data` holding files, or a link at either name,
+  is refused, the server log names both paths, and the repo keeps `store/.claude` and works as it
+  did. Move what you want to keep into `store/data`, remove `store/.claude`, and restart the server.
+- **A box already running** loses nothing. Its store is bound into it, and a bind follows the
+  directory, not the name, so it goes on writing into the renamed one. What it gets only at its
+  next restart: memory read straight from the store, `~/shared` and the mailbox writable from Codex,
+  and surfaced files editable. The workshop box sees the volume itself; its hooks find the store at
+  the new name on their own.
+- **Memory** is the store's `memory/`, set as `autoMemoryDirectory` in the box's own
+  `.claude/settings.local.json` rather than reached through a link under `~/.claude`. The checkout's
+  `.claude` links only the store's `skein/` and what Claude Code reads there (`skills/`,
+  `commands/`, `agents/`, `output-styles/`, `rules/`); a link a box had to its memory or mailbox
+  is removed at its next start.
+- **Surfaced files** (`shared-paths.txt`) are bound into the checkout at the box's start, so the
+  agent can edit them; the edit lands in the store's `shared-rw/` copy. A file of the box's own at
+  that path is left alone and the launcher says so. An entry under a hidden directory, such as
+  `.codex/memory`, is refused.
 
 ## Configuration
 

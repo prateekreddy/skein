@@ -1,9 +1,10 @@
 //! The two things skein installs on the host so a box can exist: the kit, and the store.
 //!
 //! The **kit** is the sbx launch spec — what a new box is created from. The **store** is the
-//! `.claude` directory mounted into every box of a repo, and it is shared, so scaffolding it is
-//! additive by rule: `write_if_absent` never overwrites a file the user owns, and the probe
-//! installer beside it (see [`crate::probes`]) is the only thing here that rewrites anything.
+//! directory mounted into every box of a repo (`repos/<id>/store/data`), and it is shared, so
+//! scaffolding it is additive by rule: `write_if_absent` never overwrites a file the user owns, and
+//! the probe installer beside it (see [`crate::probes`]) is the only thing here that rewrites
+//! anything.
 //!
 //! The kit's provisioning script is a real file rather than a string inlined in the spec, and that
 //! is not tidiness. It is spliced into a YAML block scalar where indentation *is* the syntax, one
@@ -71,7 +72,7 @@ pub fn ensure_kit() -> Result<PathBuf, String> {
 /// Documents the shared-store layout for the user — written into a fresh store only when absent.
 const STORE_README: &str = include_str!("store/README.md");
 
-/// Provision a repo's shared-data folder at `store` (a `.claude` dir): scaffold the directory
+/// Provision a repo's shared-data folder at `store`: scaffold the directory
 /// structure (only what's missing — never clobbering data the user already put there), install skein's
 /// own machinery (turn-state probe + the SessionStart bootstrap, mailbox, and a default status line,
 /// copies under `skein/bin/`; what a box runs is skein's read-only plugin's), and wire it into
@@ -123,6 +124,17 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
             store.display().to_string()
         ));
     }
+    // A managed store still named `.claude` whose `data` is already there was moved after this
+    // caller read `repos.json`. Making the old one again would leave the repo two stores, and the
+    // next move would refuse them both (SKEIN-1330).
+    if store_has_old_name(store) && !store.exists() && store.with_file_name(STORE_NAME).is_dir() {
+        return Err(format!(
+            "{} moved to {}; this caller read the repo list before the move, so nothing was made \
+             at the old name. Try again.",
+            store.display(),
+            store.with_file_name(STORE_NAME).display()
+        ));
+    }
     let fresh = !store.exists();
     fs::create_dir_all(store).map_err(|e| format!("mkdir {}: {e}", store.display()))?;
     // skein-owned runtime (skein/, mailbox/, status/, tasks/) + the user-filled content homes
@@ -165,12 +177,13 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
 /// Where a store's shared working files live — the directory every box of the repo links
 /// `$HOME/shared` to.
 ///
-/// For a store skein manages, `$SKEIN_HOME/repos/<id>/store/.claude`, that is
-/// `$SKEIN_HOME/repos/<id>/store/shared-home`: **beside the `.claude` directory, not inside it**.
-/// Decided by the path's shape, `/<…>/repos/<id>/store/.claude` ([`shared_home_beside`]).
-/// Claude Code guards every path under a `.claude` directory as its own configuration and judges
-/// the resolved path, so while the files lived at `store/.claude/shared-home` every write to
-/// `~/shared` asked for permission (SKEIN-1324, `docs/decisions/shared-home-outside-claude.md`).
+/// For a store skein manages, `$SKEIN_HOME/repos/<id>/store/data`, that is
+/// `$SKEIN_HOME/repos/<id>/store/shared-home`: **beside the store, not inside it**. Decided by the
+/// path's shape, `/<…>/repos/<id>/store/data` ([`shared_home_beside`]), or `store/.claude`, the
+/// name the store had until SKEIN-1330 and still has in a box started before it moved. Claude Code
+/// guards every path under a `.claude` directory as its own configuration and judges the resolved
+/// path, so while the files lived at `store/.claude/shared-home` every write to `~/shared` asked for
+/// permission (SKEIN-1324, `docs/decisions/shared-home-outside-claude.md`).
 ///
 /// Any other store keeps `<store>/shared-home`. A store put elsewhere with `skein add --store` is
 /// mounted into the fleet on its own (`fleet::fleet_mounts`), so nothing beside it reaches a box,
@@ -181,13 +194,32 @@ pub(crate) fn shared_home_dir(store: &Path) -> PathBuf {
 }
 
 /// [`shared_home_dir`] when it is the sibling: `Some` only for a store of the shape skein gives
-/// the stores it manages, `/<…>/repos/<id>/store/.claude`, with no `.` or `..` and no doubled `/`.
+/// the stores it manages ([`managed_store_name`]).
 ///
 /// **The shape, and not "under `$SKEIN_HOME`"**, because the box decides from the path alone
 /// (`skein_shared_home` in `src/probe/box-self.sh` cannot know `$SKEIN_HOME`), and a host that
 /// answered differently for the same path would leave the box asking for a directory the host
 /// never made.
 fn shared_home_beside(store: &Path) -> Option<PathBuf> {
+    managed_store_name(store)?;
+    Some(store.parent()?.join("shared-home"))
+}
+
+/// The name a managed store sits under in `repos/<id>/store/`, since SKEIN-1330.
+///
+/// `data` and not `.claude`: Claude Code treats any path that is, or resolves to, something under a
+/// `.claude` directory as its own configuration, and asks before every write there however it is
+/// allowed (`docs/decisions/store-is-not-dot-claude.md`).
+pub(crate) const STORE_NAME: &str = "data";
+
+/// The name the store had before [`STORE_NAME`], which [`move_store_off_dot_claude`] moves from.
+const OLD_STORE_NAME: &str = ".claude";
+
+/// Which of the two names a store of the managed shape has: `Some` only for
+/// `/<…>/repos/<id>/store/data` or `/<…>/repos/<id>/store/.claude`, with no `.` or `..` and no
+/// doubled `/`. The box's copy of this rule is `skein_shared_home` in `src/probe/box-self.sh`, and
+/// the launcher's is its bind of `store/shared-home` in `src/box-session.sh`.
+pub(crate) fn managed_store_name(store: &Path) -> Option<&'static str> {
     use std::path::Component;
     if store.to_string_lossy().contains("//") {
         return None;
@@ -201,11 +233,77 @@ fn shared_home_beside(store: &Path) -> Option<PathBuf> {
     }
     match rest {
         [_, .., Component::Normal(r), Component::Normal(_), Component::Normal(s), Component::Normal(c)]
-            if *r == "repos" && *s == "store" && *c == ".claude" =>
+            if *r == "repos" && *s == "store" =>
         {
-            Some(store.parent()?.join("shared-home"))
+            [STORE_NAME, OLD_STORE_NAME].into_iter().find(|n| c == n)
         }
         _ => None,
+    }
+}
+
+/// Whether `store` is a managed store still at its old name, `/<…>/repos/<id>/store/.claude` — the
+/// one shape [`move_store_off_dot_claude`] moves. Asks nothing of the filesystem.
+pub(crate) fn store_has_old_name(store: &Path) -> bool {
+    managed_store_name(store) == Some(OLD_STORE_NAME)
+}
+
+/// Move a managed store from `store/.claude` to `store/data`, once, and say where it is now.
+///
+/// `Ok(store)` unchanged for any store that is not a managed one named `.claude`: a store put
+/// elsewhere with `skein add --store` is a directory of the person's, named by them, and is not
+/// renamed here. For `/<…>/repos/<id>/store/.claude` the answer is `/<…>/repos/<id>/store/data`,
+/// and the directory is moved there by a rename, by the same rules as the shared home's move:
+///
+/// * only the old one is there: renamed, contents and all;
+/// * only the new one is there: already moved, which is every run after the first;
+/// * neither is there: nothing to move, and the store is made at the new name when it is next used;
+/// * both are there and the old one is empty: the empty one is removed;
+/// * both are there and the old one holds anything: **refused**, naming both, and nothing moves;
+/// * either is a link or not a directory: refused, and never followed.
+///
+/// The caller records the answer in `repos.json` ([`crate::repos::move_stores_off_dot_claude`]).
+/// A refusal leaves the store where it was, working as before, and costs only the prompts.
+pub(crate) fn move_store_off_dot_claude(store: &Path) -> Result<PathBuf, String> {
+    if !store_has_old_name(store) {
+        return Ok(store.to_path_buf());
+    }
+    let Some(parent) = store.parent() else {
+        return Ok(store.to_path_buf());
+    };
+    let new = parent.join(STORE_NAME);
+    let what = "this repo's store";
+    let old_is_dir = real_dir_of(store, what)?;
+    let new_is_dir = real_dir_of(&new, what)?;
+    match (old_is_dir, new_is_dir) {
+        (false, _) => Ok(new),
+        (true, false) => fs::rename(store, &new).map(|()| new.clone()).map_err(|e| {
+            format!(
+                "could not move this repo's store from {} to {}: {e}. Nothing was moved, and the \
+                 repo keeps its store where it was.",
+                store.display(),
+                new.display()
+            )
+        }),
+        (true, true) => {
+            let empty = fs::read_dir(store)
+                .map_err(|e| format!("read {}: {e}", store.display()))?
+                .next()
+                .is_none();
+            if empty {
+                fs::remove_dir(store).map_err(|e| format!("rmdir {}: {e}", store.display()))?;
+                return Ok(new);
+            }
+            Err(format!(
+                "this repo's store is in two places, {} and {}, and skein will not merge them. \
+                 Nothing was moved, and the repo keeps using {} until one is left: move what you \
+                 want to keep into {}, remove {}, and restart skein.",
+                store.display(),
+                new.display(),
+                store.display(),
+                new.display(),
+                store.display()
+            ))
+        }
     }
 }
 
@@ -271,16 +369,21 @@ fn ensure_shared_home(store: &Path) -> Result<(), String> {
 /// Whether `path` is a directory, asked without following a link: `false` when nothing is there,
 /// and refused when a link or anything other than a directory is.
 fn real_dir(path: &Path) -> Result<bool, String> {
+    real_dir_of(path, "this repo's shared files")
+}
+
+/// [`real_dir`], with `what` naming what was being moved in the refusal.
+fn real_dir_of(path: &Path, what: &str) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => Err(format!(
-            "{} is a link, and skein does not follow a link for this repo's shared files. Nothing \
-             was moved; remove the link and start the box again.",
+            "{} is a link, and skein does not follow a link for {what}. Nothing was moved; remove \
+             the link and start the box again.",
             path.display()
         )),
         Ok(m) if m.is_dir() => Ok(true),
         Ok(_) => Err(format!(
-            "{} is not a folder, so this repo's shared files cannot go there. Nothing was moved; \
-             move it aside and start the box again.",
+            "{} is not a folder, so {what} cannot go there. Nothing was moved; move it aside and \
+             start the box again.",
             path.display()
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -428,7 +531,7 @@ mod tests {
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
-        let store = home.join("repos/demo/store/.claude");
+        let store = home.join("repos/demo/store/data");
         let first = store_freshly_created(&store);
         let second = store_freshly_created(&store);
         env::remove_var("SKEIN_HOME");
@@ -451,7 +554,7 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
-        let store = home.join("repos").join("x").join("store").join(".claude");
+        let store = home.join("repos").join("x").join("store").join("data");
         ensure_store(&store).unwrap();
         // the full structure: skein runtime + the user-filled content homes.
         for d in [
@@ -563,7 +666,224 @@ mod tests {
 
     /// A store skein manages, under a pinned `$SKEIN_HOME`, with nothing in it yet.
     fn managed_store(home: &Path) -> PathBuf {
+        home.join("repos").join("x").join("store").join("data")
+    }
+
+    /// The same store at the name it had before SKEIN-1330.
+    fn old_managed_store(home: &Path) -> PathBuf {
         home.join("repos").join("x").join("store").join(".claude")
+    }
+
+    /// **A store at `store/.claude` is moved to `store/data` by a rename, once** (SKEIN-1330).
+    ///
+    /// What would make this fail: `move_store_off_dot_claude` copying rather than renaming (the old
+    /// directory is still there), answering the old path, or doing anything on the second run.
+    #[test]
+    fn an_old_store_is_moved_to_data_once() {
+        let home = tempdir();
+        let old = old_managed_store(&home);
+        let new = managed_store(&home);
+        fs::create_dir_all(old.join("memory")).unwrap();
+        fs::write(old.join("memory/MEMORY.md"), "- kept\n").unwrap();
+        fs::create_dir_all(old.join("mailbox")).unwrap();
+        fs::write(old.join("mailbox/1.json"), "{}").unwrap();
+        let inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&old).unwrap());
+
+        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
+        assert!(!old.exists(), "the old store is still there");
+        assert_eq!(
+            fs::read_to_string(new.join("memory/MEMORY.md")).unwrap(),
+            "- kept\n"
+        );
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&fs::metadata(&new).unwrap()),
+            inode,
+            "the store was copied, not renamed: a running box's bind follows the directory"
+        );
+
+        // The second run, and a store already at the new name, change nothing.
+        fs::write(new.join("later.md"), "x").unwrap();
+        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
+        assert_eq!(move_store_off_dot_claude(&new), Ok(new.clone()));
+        assert!(new.join("later.md").is_file() && !old.exists());
+    }
+
+    /// **Two stores with files are refused and nothing moves**; an empty old one beside a real new
+    /// one is a leftover and goes. And `ensure_store` will not make the old one again.
+    ///
+    /// What would make this fail: merging the two, renaming one over the other, answering `Ok`
+    /// with files at both, or `ensure_store` re-creating `store/.claude` from a stale record.
+    #[test]
+    fn two_stores_with_files_are_refused_and_nothing_moves() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
+        let old = old_managed_store(&home);
+        let new = managed_store(&home);
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        fs::write(old.join("a.md"), "old").unwrap();
+        fs::write(new.join("b.md"), "new").unwrap();
+
+        let err = move_store_off_dot_claude(&old).unwrap_err();
+        assert!(
+            err.contains(&old.display().to_string()) && err.contains(&new.display().to_string()),
+            "the refusal must name both places: {err}"
+        );
+        assert_eq!(fs::read_to_string(old.join("a.md")).unwrap(), "old");
+        assert!(
+            !new.join("a.md").exists() && !old.join("b.md").exists(),
+            "merged"
+        );
+
+        fs::remove_file(old.join("a.md")).unwrap();
+        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
+        assert!(!old.exists(), "an empty leftover stayed");
+
+        // A caller holding the record from before the move.
+        let err = ensure_store(&old).unwrap_err();
+        assert!(err.contains("moved to"), "{err}");
+        assert!(!old.exists(), "ensure_store made the old store again");
+    }
+
+    /// **A link at either name is refused and never followed**, and a store that is not of the
+    /// managed shape is left exactly where the person put it.
+    ///
+    /// What would make this fail: `fs::metadata` (which follows) in place of `symlink_metadata`,
+    /// so the link is renamed or read as "already moved", or the shape test accepting a store kept
+    /// elsewhere, a `..` in the path, or a doubled `/`.
+    #[test]
+    fn a_link_at_either_store_is_refused_and_other_stores_are_not_renamed() {
+        use std::os::unix::fs::symlink;
+        let home = tempdir();
+        let elsewhere = tempdir();
+        fs::write(elsewhere.join("private.txt"), "not the store's").unwrap();
+        let old = old_managed_store(&home);
+        let new = managed_store(&home);
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+
+        symlink(&elsewhere, &old).unwrap();
+        let err = move_store_off_dot_claude(&old).unwrap_err();
+        assert!(err.contains("is a link"), "{err}");
+        assert!(old.is_symlink() && !new.exists() && !new.is_symlink());
+        fs::remove_file(&old).unwrap();
+
+        fs::create_dir_all(&old).unwrap();
+        symlink(&elsewhere, &new).unwrap();
+        let err = move_store_off_dot_claude(&old).unwrap_err();
+        assert!(err.contains("is a link"), "{err}");
+        assert!(old.is_dir() && new.is_symlink());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 1);
+
+        let theirs = elsewhere.join("thing-shared/.claude");
+        fs::create_dir_all(&theirs).unwrap();
+        for kept in [
+            theirs.clone(),
+            PathBuf::from("/x/repos/a/store/../store/.claude"),
+            PathBuf::from("/x/repos/a//store/.claude"),
+            PathBuf::from("/x/repos/a/stores/.claude"),
+        ] {
+            assert_eq!(move_store_off_dot_claude(&kept), Ok(kept.clone()));
+        }
+        assert!(theirs.is_dir());
+    }
+
+    /// **A box whose store moved under it follows it to `store/data`, and the shared home is
+    /// beside the store under either name** — `box-self.sh`'s half of SKEIN-1330.
+    ///
+    /// An uncovered box sees the volume itself, so after the host's rename its checkout's record
+    /// and `.claude/skein` link name a store that is gone. What would make this fail:
+    /// `_skein_moved_store` gone or not consulted (the box finds no store at all and its hooks go
+    /// quiet until a restart), following a name that is still there (an old `store/.claude` that is
+    /// not a store would be passed over for `data`), following any shape but the managed one, or
+    /// `skein_shared_home` knowing only one of the two names.
+    #[test]
+    fn a_box_follows_its_store_to_its_new_name() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir();
+        let lib = dir.join("box-self.sh");
+        fs::write(&lib, crate::probes::BOX_SELF_SH).unwrap();
+        let ask = |call: &str, arg: &Path| {
+            let out = box_shell(&dir)
+                .arg("-c")
+                .arg(format!(r#". "$1" && {call} "$2""#))
+                .arg("box-self")
+                .arg(&lib)
+                .arg(arg)
+                .output()
+                .unwrap();
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            )
+        };
+        let old = dir.join("repos/web/store/.claude");
+        let new = dir.join("repos/web/store/data");
+        fs::create_dir_all(new.join("skein/bin")).unwrap();
+
+        // The record the launcher wrote before the move.
+        let clone = dir.join("clone");
+        fs::create_dir_all(&clone).unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(&clone)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        fs::write(
+            clone.join(".git/skein-store"),
+            format!("{}\n", old.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            ask("skein_box_store", &clone),
+            (true, new.display().to_string())
+        );
+
+        // The `.claude/skein` link the kit made before the move, with no record.
+        fs::remove_file(clone.join(".git/skein-store")).unwrap();
+        fs::create_dir_all(clone.join(".claude")).unwrap();
+        symlink(old.join("skein"), clone.join(".claude/skein")).unwrap();
+        assert_eq!(
+            ask("skein_box_store", &clone),
+            (true, new.display().to_string())
+        );
+
+        // The old name still there and not a store: not passed over for the new one.
+        fs::create_dir_all(&old).unwrap();
+        assert_eq!(ask("skein_box_store", &clone), (false, String::new()));
+        fs::remove_dir(&old).unwrap();
+
+        // A store of any other shape that is gone is gone.
+        let theirs = dir.join("thing-shared/.claude");
+        fs::create_dir_all(dir.join("thing-shared/data/skein")).unwrap();
+        fs::remove_file(clone.join(".claude/skein")).unwrap();
+        symlink(theirs.join("skein"), clone.join(".claude/skein")).unwrap();
+        assert_eq!(ask("skein_box_store", &clone), (false, String::new()));
+
+        for (store, home) in [
+            ("/v/repos/web/store/data", "/v/repos/web/store/shared-home"),
+            (
+                "/v/repos/web/store/.claude/",
+                "/v/repos/web/store/shared-home",
+            ),
+            (
+                "/v/thing-shared/.claude",
+                "/v/thing-shared/.claude/shared-home",
+            ),
+            (
+                "/v/repos/web/store/other",
+                "/v/repos/web/store/other/shared-home",
+            ),
+        ] {
+            assert_eq!(
+                ask("skein_shared_home", Path::new(store)),
+                (true, home.to_string()),
+                "{store}"
+            );
+        }
     }
 
     /// **An existing `store/.claude/shared-home` is moved beside `.claude`, once** (SKEIN-1324).
@@ -1131,25 +1451,28 @@ mod tests {
         assert_eq!(fs::read_link(tree.join("CLAUDE.md")).unwrap(), linked);
     }
 
-    /// `.codex/memory` is the one directory skein shares through `shared-paths.txt`, so it is a
-    /// named exception to the shape rule, fixed in the bootstrap rather than read from the store
-    /// (SKEIN-1256). It must be a real directory in `shared-rw/` holding only files and
-    /// directories; every other entry under a hidden directory is still refused.
+    /// **There is no exception to the shared-paths shape rule: `.codex/memory` is refused like
+    /// any entry under a hidden directory, and the link an earlier start made for it goes**
+    /// (SKEIN-1330, which took back SKEIN-1256's one named exception). codex-cli keeps its
+    /// memories in its own home; nothing reads `.codex/memory` in a checkout.
     ///
-    /// Fails if `.codex/memory` leaves the exception list (the directory is not surfaced), if the
-    /// list stops being exact (`.codex/config.toml` or `.git/hooks/x` is surfaced), if
-    /// `is_excepted_dir` matches a prefix rather than the whole entry (`.codex/memory/../../.git/
-    /// hooks` is linked into `.git/hooks`, and `.codex/memoryX` is surfaced), or if the
-    /// `find` in `dir_is_inside` goes (a directory holding a link out of `shared-rw/` stays
-    /// surfaced).
+    /// **And an entry the launcher has bound is left alone**, while the empty file a bind leaves as
+    /// its mount point, in a start that has none, is replaced by the fallback link. A hard link
+    /// stands in for the bind here: to the bootstrap the question is the same, whether the
+    /// checkout's name and the store's copy are one file (`-ef`).
+    ///
+    /// Fails if the exception comes back (`.codex/memory` is surfaced, or its old link stays), if
+    /// any other hidden entry is surfaced (`.codex/config.toml`, `.git/hooks/x`), if the bootstrap
+    /// replaces a bound entry with a link (Claude could no longer edit it), or if it leaves an
+    /// empty mount point where the shared file should be.
     #[test]
-    fn codex_memory_is_the_named_exception_and_nothing_else_under_a_hidden_directory_is() {
+    fn nothing_under_a_hidden_directory_is_surfaced_and_a_bound_entry_is_left_alone() {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let dir = tempdir();
         let mut env = env_pins();
         env.set("SKEIN_HOME", &dir);
-        let store = dir.join("store").join(".claude");
+        let store = dir.join("store").join("data");
         let tree = dir.join("tree");
         let empty_source = dir.join("no-source");
         ensure_store(&store).unwrap();
@@ -1160,7 +1483,8 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        symlink(&store, tree.join(".claude")).unwrap();
+        fs::create_dir_all(tree.join(".claude")).unwrap();
+        symlink(store.join("skein"), tree.join(".claude/skein")).unwrap();
         let home = dir.join("home");
         fs::create_dir_all(&home).unwrap();
         let rw = store.join("shared-rw");
@@ -1168,8 +1492,7 @@ mod tests {
             (".codex/memory/note.md", "remembered\n"),
             (".codex/config.toml", "[x]\n"),
             (".git/hooks/x", "#!/bin/sh\n"),
-            (".git/hooks/pre-commit", "#!/bin/sh\nexit 0\n"),
-            (".codex/memoryX/note.md", "not the exception\n"),
+            ("notes.env", "shared\n"),
         ] {
             let p = rw.join(rel);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1177,12 +1500,14 @@ mod tests {
         }
         fs::write(
             store.join("shared-paths.txt"),
-            // The climbing entry comes first: the exception is matched exactly, so it is shaped
-            // like any other entry and refused before `.codex/memory` is ever linked.
-            ".codex/memory/../../.git/hooks\n.codex/memoryX\n.codex/memory\n.codex/config.toml\n\
-             .git/hooks/x\n",
+            ".codex/memory\n.codex/config.toml\n.git/hooks/x\nnotes.env rw\n",
         )
         .unwrap();
+        // What a start under the exception made.
+        fs::create_dir_all(tree.join(".codex")).unwrap();
+        symlink(rw.join(".codex/memory"), tree.join(".codex/memory")).unwrap();
+        // What the launcher's bind makes of `notes.env`: the store's copy, at the checkout's name.
+        fs::hard_link(rw.join("notes.env"), tree.join("notes.env")).unwrap();
         let run = || {
             box_shell(&dir)
                 .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
@@ -1194,65 +1519,56 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            rw.join(".git/hooks/pre-commit"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        let out = run();
-        assert!(out.status.success(), "{out:?}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // An entry that only STARTS with the exception's name is no exception: matched as a
-        // prefix, the climbing one would skip the shape rule and link shared-rw/'s hooks into
-        // this checkout's .git.
-        let hooks = tree.join(".git/hooks");
-        assert!(
-            !fs::symlink_metadata(&hooks)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-                && fs::read_dir(&hooks).unwrap().all(|e| !e
-                    .unwrap()
-                    .file_type()
-                    .unwrap()
-                    .is_symlink()),
-            "nothing in .git/hooks may be a link into shared-rw/: {stderr}"
-        );
-        assert!(
-            fs::symlink_metadata(tree.join(".codex/memoryX")).is_err(),
-            ".codex/memoryX is not the exception: {stderr}"
-        );
-        for refused in [".codex/memory/../../.git/hooks", ".codex/memoryX"] {
-            assert!(
-                stderr.contains(&format!("not surfacing '{refused}'")),
-                "{refused} must be refused out loud: {stderr}"
-            );
-        }
-        assert_eq!(
-            fs::read_to_string(tree.join(".codex/memory/note.md")).unwrap_or_default(),
-            "remembered\n",
-            "the named exception must be surfaced: {stderr}"
-        );
-        for refused in [".codex/config.toml", ".git/hooks/x"] {
-            assert!(
-                fs::symlink_metadata(tree.join(refused)).is_err(),
-                "{refused} is under a hidden directory and is no exception: {stderr}"
-            );
-        }
-
-        // A link beneath the excepted directory that leads out of shared-rw/: the whole directory
-        // is refused at the next start, and the link the last start made is taken away.
-        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
-        symlink(dir.join("outside.txt"), rw.join(".codex/memory/out.md")).unwrap();
         let out = run();
         assert!(out.status.success(), "{out:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             fs::symlink_metadata(tree.join(".codex/memory")).is_err(),
-            "a directory holding a link out of shared-rw/ must not stay surfaced: {stderr}"
+            ".codex/memory is surfaced, or the old link stayed: {stderr}"
         );
-        assert!(stderr.contains("not surfacing '.codex/memory'"), "{stderr}");
+        for refused in [".codex/memory", ".codex/config.toml", ".git/hooks/x"] {
+            assert!(
+                stderr.contains(&format!("not surfacing '{refused}'")),
+                "{refused} must be refused out loud: {stderr}"
+            );
+        }
+        assert!(fs::symlink_metadata(tree.join(".codex/config.toml")).is_err());
+        assert!(fs::symlink_metadata(tree.join(".git/hooks/x")).is_err());
+        assert!(
+            !tree.join("notes.env").is_symlink(),
+            "a bound entry was replaced by a link: {stderr}"
+        );
+        fs::write(tree.join("notes.env"), "edited in the box\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(rw.join("notes.env")).unwrap(),
+            "edited in the box\n"
+        );
+        assert!(fs::read_to_string(tree.join(".git/info/exclude"))
+            .unwrap()
+            .lines()
+            .any(|l| l == "/notes.env"));
+
+        // Bound, and the shared copy emptied: still the bind, not mistaken for an empty mount point.
+        fs::write(rw.join("notes.env"), "").unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            !tree.join("notes.env").is_symlink() && rw.join("notes.env").is_file(),
+            "an empty bound entry was taken for a leftover mount point: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // A start with no bind for it: the empty mount point an earlier bind left is not the file.
+        fs::remove_file(tree.join("notes.env")).unwrap();
+        fs::write(tree.join("notes.env"), "").unwrap();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            fs::read_link(tree.join("notes.env")).ok(),
+            Some(rw.join("notes.env")),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// One box of a repo, laid out the way the fleet lays one out, for running the kit ITSELF rather
@@ -1276,7 +1592,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let dir = tempdir();
             let root = dir.join("fleet");
-            let store = dir.join("repos/web/store/.claude");
+            let store = dir.join("repos/web/store/data");
             let tree = root.join("web-main/tree");
             let home = dir.join("home");
             let mut install = crate::probes::plugin_install_under(&root.to_string_lossy());
@@ -1808,7 +2124,10 @@ mod tests {
         assert_eq!(
             kit.json("settings.local.json"),
             serde_json::json!({
-                "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"]
+                "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"],
+                // Not defaults: where this box's memory and shared files are (SKEIN-1330).
+                "autoMemoryDirectory": kit.store.join("memory"),
+                "permissions": { "additionalDirectories": [kit.home.join("shared")] },
             }),
             "the box's local settings override what the repo chose"
         );
@@ -1932,8 +2251,11 @@ mod tests {
         );
     }
 
-    /// Every store entry a box whose repo tracks nothing under `.claude` reaches through it, and the
-    /// two it must not: each is a link to the store's own, and the settings files are absent.
+    /// What a box whose repo tracks nothing under `.claude` reaches through it: the store's `skein/`
+    /// and the entries Claude Code reads from a project's `.claude`, each a link to the store's own,
+    /// and nothing else of the store's — not its settings files, which every box can write, and not
+    /// its memory, mailbox or runtime, where a write through `.claude` asks for permission
+    /// (SKEIN-1330).
     fn assert_store_linked_in(kit: &KitBox) {
         assert!(
             !kit.tree.join(".claude").is_symlink() && kit.tree.join(".claude").is_dir(),
@@ -1946,10 +2268,18 @@ mod tests {
                 continue;
             }
             let here = kit.claude(&name);
-            if name == "settings.json" || name == "settings.local.json" {
+            let read_by_claude = [
+                "skein",
+                "skills",
+                "commands",
+                "agents",
+                "output-styles",
+                "rules",
+            ];
+            if !read_by_claude.contains(&name.as_str()) {
                 assert!(
                     !here.is_symlink(),
-                    "the store's {name}, which every box can write, is linked into this box"
+                    "the store's {name} is linked into this box's .claude"
                 );
                 continue;
             }
@@ -1961,8 +2291,8 @@ mod tests {
             linked += 1;
         }
         assert!(
-            linked > 5,
-            "the store had almost nothing to link, so this checked little"
+            linked >= 2,
+            "neither skein/ nor skills/ was linked, so this checked little"
         );
     }
 
@@ -2063,10 +2393,11 @@ mod tests {
         bootstrap(kit);
     }
 
-    /// **A box whose repo tracks nothing under `.claude` gets a directory of its own, with each of
-    /// the store's entries linked into it and the store's settings files left out** (SKEIN-1053,
-    /// the owner's answer to SKEIN-1153). What would make it fail: `.claude` linked to the store
-    /// whole, as before (the first assertion); either settings file linked; an entry not linked;
+    /// **A box whose repo tracks nothing under `.claude` gets a directory of its own, with the
+    /// store's `skein/` and what Claude Code reads linked into it and the store's settings files,
+    /// memory and runtime left out** (SKEIN-1053, the owner's answer to SKEIN-1153, SKEIN-1330).
+    /// What would make it fail: `.claude` linked to the store whole, as before (the first
+    /// assertion); either settings file, or `memory/`, linked; `skein/` or `skills/` not linked;
     /// the directory not excluded (`git status` lists it).
     #[test]
     fn a_repo_with_no_claude_gets_a_directory_of_its_own_with_the_store_linked_in() {
@@ -2099,8 +2430,8 @@ mod tests {
     /// **A box whose `.claude` is the store's link is converted, and keeps everything it reached
     /// through it but the store's two settings files** (SKEIN-1053).
     ///
-    /// What a converted box keeps, each asserted below: every entry of the store, linked one by one
-    /// (memory, skills, the mailbox, skein's machinery and the rest); every byte of the store's
+    /// What a converted box keeps, each asserted below: the store's `skein/` and what Claude Code
+    /// reads from `.claude`, linked one by one (SKEIN-1330); every byte of the store's
     /// memory and skills and its settings file, since the conversion removes a link and never
     /// what it points at; the memory Claude's memory tool writes, whose bridge resolves into the
     /// store both before the next session's bootstrap and after it; a clean tree. What it no
@@ -2151,8 +2482,8 @@ mod tests {
         assert_eq!(
             kit.boot()["claude_note"],
             "converted .claude from the store's link to a directory of this box's own; the \
-             store's entries are linked into it, except settings.json and settings.local.json, \
-             which are now this box's own",
+             store's skein/ and what Claude Code reads from .claude are linked into it, and \
+             settings.json and settings.local.json are now this box's own",
             "{}",
             kit.boot()
         );
@@ -2329,6 +2660,246 @@ mod tests {
             "a second file was moved over the first"
         );
         assert_eq!(kit.boot()["claude_note"], "", "{}", kit.boot());
+    }
+
+    /// **The checkout's `.claude` links the store's `skein/` and what Claude Code reads from a
+    /// project's `.claude`, and nothing else; a link an earlier start made to anything else goes,
+    /// and one to the store's old name is redone** (SKEIN-1330).
+    ///
+    /// Claude Code judges a path as written as well as where it leads, so `.claude/memory` asked
+    /// before every write even once the store was not called `.claude`.
+    ///
+    /// What would make it fail: the kit linking every store entry again (`memory` and `mailbox` are
+    /// back), the prune keyed on the new name only (the old-name `memory` link survives), the
+    /// prune touching a link skein did not make (`notes` goes), or a kept entry's old-name link left
+    /// dangling (`skills` and, in a repo that ships `.claude`, `skein` point at a store that is gone).
+    #[test]
+    fn the_checkout_links_only_what_claude_code_reads_from_the_store() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        use std::os::unix::fs::symlink;
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        for ships in [None, Some("{}\n")] {
+            let kit = KitBox::new("claude", ships);
+            let old = kit.store.with_file_name(".claude");
+            let rc = kit.tree.join(".claude");
+            fs::create_dir_all(&rc).unwrap();
+            fs::create_dir_all(kit.store.join("commands")).unwrap();
+            // What a start before SKEIN-1330 left: every entry linked, to the store's old name.
+            symlink(old.join("memory"), rc.join("memory")).unwrap();
+            symlink(old.join("skills"), rc.join("skills")).unwrap();
+            symlink(old.join("skein"), rc.join("skein")).unwrap();
+            symlink(kit.store.join("mailbox"), rc.join("mailbox")).unwrap();
+            symlink(kit.dir.join("elsewhere"), rc.join("notes")).unwrap();
+
+            kit.start();
+
+            let link = |name: &str| fs::read_link(rc.join(name)).ok();
+            assert_eq!(link("skein"), Some(kit.store.join("skein")), "{ships:?}");
+            assert_eq!(
+                link("memory"),
+                None,
+                "{ships:?}: .claude/memory is still linked"
+            );
+            assert_eq!(
+                link("mailbox"),
+                None,
+                "{ships:?}: .claude/mailbox is still linked"
+            );
+            assert_eq!(link("notes"), Some(kit.dir.join("elsewhere")), "{ships:?}");
+            match ships {
+                None => {
+                    assert_eq!(link("skills"), Some(kit.store.join("skills")));
+                    assert_eq!(link("commands"), Some(kit.store.join("commands")));
+                }
+                Some(_) => assert_eq!(
+                    link("skills"),
+                    None,
+                    "a shipped .claude got the store's skills"
+                ),
+            }
+            // Nothing else of the store's is reachable through the checkout's `.claude`.
+            for entry in fs::read_dir(&rc).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                if let Some(to) = link(&name) {
+                    assert!(
+                        !to.starts_with(&kit.store) && !to.starts_with(&old)
+                            || ["skein", "skills", "commands"].contains(&name.as_str()),
+                        "{ships:?}: .claude/{name} links into the store"
+                    );
+                }
+            }
+            let note = kit.boot()["claude_note"].as_str().unwrap_or("").to_string();
+            assert!(
+                note.contains("memory") && note.contains("mailbox"),
+                "{note}"
+            );
+
+            // The next start changes nothing.
+            kit.start();
+            assert_eq!(link("skein"), Some(kit.store.join("skein")));
+            assert_eq!(link("memory"), None);
+        }
+    }
+
+    /// **The box's own settings send Claude's memory to the store and let it write `~/shared`,
+    /// with no link under `.claude` and no prompt** (SKEIN-1330), in both layouts, once.
+    ///
+    /// Claude Code's own memory directory is `~/.claude/projects/<slug>/memory`, and with that a
+    /// link into the store every memory write in default or acceptEdits mode asked, whatever the
+    /// store was called; `autoMemoryDirectory` set to the store's `memory/` asked nothing.
+    ///
+    /// What would make it fail: the merge not writing `autoMemoryDirectory` (absent), writing it
+    /// over the person's own (`/mine`), not replacing skein's old value (the `.claude` path stays),
+    /// or adding `$HOME/shared` again on every start (it appears twice).
+    #[test]
+    fn the_box_settings_point_memory_at_the_store_and_allow_the_shared_home() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        for ships in [None, Some("{}\n")] {
+            let kit = KitBox::new("claude", ships);
+            let shared = kit.home.join("shared").to_string_lossy().into_owned();
+            let mem = kit.store.join("memory").to_string_lossy().into_owned();
+            fs::create_dir_all(kit.claude("")).unwrap();
+            // Skein's value from before the move, and a directory the person added themselves.
+            fs::write(
+                kit.claude("settings.local.json"),
+                serde_json::json!({
+                    "autoMemoryDirectory": kit.store.with_file_name(".claude").join("memory"),
+                    "permissions": { "additionalDirectories": ["/theirs"], "allow": ["Bash(ls)"] },
+                })
+                .to_string(),
+            )
+            .unwrap();
+            kit.start();
+            kit.start();
+            let local = kit.json("settings.local.json");
+            assert_eq!(
+                local["autoMemoryDirectory"],
+                mem.as_str(),
+                "{ships:?}: {local}"
+            );
+            // The store's skills only where the checkout links them (SKEIN-1330).
+            let want = match ships {
+                None => serde_json::json!(["/theirs", shared, kit.store.join("skills")]),
+                Some(_) => serde_json::json!(["/theirs", shared]),
+            };
+            assert_eq!(
+                local["permissions"]["additionalDirectories"], want,
+                "{ships:?}: {local}"
+            );
+            assert_eq!(
+                local["permissions"]["allow"],
+                serde_json::json!(["Bash(ls)"])
+            );
+
+            // A memory directory the person chose is theirs.
+            let mut mine = local.clone();
+            mine["autoMemoryDirectory"] = "/mine".into();
+            fs::write(kit.claude("settings.local.json"), mine.to_string()).unwrap();
+            kit.start();
+            assert_eq!(
+                kit.json("settings.local.json")["autoMemoryDirectory"],
+                "/mine"
+            );
+        }
+    }
+
+    /// **A Codex box may write the shared home and the mailbox: both are `writable_roots` in its
+    /// `config.toml`, in a line skein owns, and never over the person's own** (SKEIN-1330).
+    ///
+    /// What would make it fail: the kit not writing the line (nothing writable), writing the link
+    /// `$HOME/shared` rather than where it leads (Codex checks the real path), a second line on the
+    /// second start (a key twice is a file Codex will not load — checked by parsing it), dropping a
+    /// key of the person's in the same table, or writing beside a `writable_roots` of theirs.
+    #[test]
+    fn codex_may_write_the_shared_home_and_the_mailbox() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let parse = |p: &Path| -> Option<serde_json::Value> {
+            let out = Command::new("python3")
+                .args(["-I", "-c", "import json,sys,tomllib; print(json.dumps(tomllib.load(open(sys.argv[1],'rb'))))"])
+                .arg(p)
+                .output()
+                .ok()?;
+            assert!(out.status.success(), "not TOML Codex can load: {out:?}");
+            serde_json::from_slice(&out.stdout).ok()
+        };
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("codex", None);
+        let cfg = kit.home.join(".codex/config.toml");
+        let want = serde_json::json!([
+            kit.store.with_file_name("shared-home"),
+            kit.store.join("mailbox"),
+        ]);
+
+        // No config at all, then the same start again. Twice before the comparison: the kit trusts
+        // the checkout in `config.toml` only once the file is there, which the first start makes.
+        kit.start();
+        kit.start();
+        let first = fs::read_to_string(&cfg).unwrap();
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(&cfg).unwrap(),
+            first,
+            "the third start changed it"
+        );
+        if let Some(v) = parse(&cfg) {
+            assert_eq!(
+                v["sandbox_workspace_write"]["writable_roots"], want,
+                "{first}"
+            );
+        }
+        assert_eq!(kit.boot()["codex_roots"], "set");
+
+        // The person's own table: the line goes in it, and their key stays.
+        fs::write(
+            &cfg,
+            "[sandbox_workspace_write]\nnetwork_access = true\n\n[tui]\nx = 1\n",
+        )
+        .unwrap();
+        kit.start();
+        kit.start();
+        let text = fs::read_to_string(&cfg).unwrap();
+        if let Some(v) = parse(&cfg) {
+            assert_eq!(
+                v["sandbox_workspace_write"]["writable_roots"], want,
+                "{text}"
+            );
+            assert_eq!(
+                v["sandbox_workspace_write"]["network_access"], true,
+                "{text}"
+            );
+            assert_eq!(v["tui"]["x"], 1, "{text}");
+        }
+
+        // Their own list: left exactly as it was, and said.
+        // With the checkout's trust already in it, so the only thing that could change is skein's.
+        let theirs = format!(
+            "[sandbox_workspace_write]\nwritable_roots = [\"/theirs\"]\n\n[projects.\"{}\"]\n\
+             trust_level = \"trusted\"\n",
+            kit.tree.display()
+        );
+        fs::write(&cfg, &theirs).unwrap();
+        kit.start();
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), theirs);
+        assert_eq!(kit.boot()["codex_roots"], "theirs");
     }
 
     /// **Every `.claude` or `$HOME` path the guide skein writes into a box names is there, in both

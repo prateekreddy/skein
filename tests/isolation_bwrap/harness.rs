@@ -67,6 +67,33 @@ pub(super) fn store_record_block() -> String {
     format!("{}\n{}", launcher_helpers(), lines[from..=to].join("\n"))
 }
 
+/// The launcher's binds of the files `shared-paths.txt` surfaces (SKEIN-1330), lifted the same way:
+/// from `surfaced_shape_ok` to the `fi` of the block that uses it, which runs straight after the
+/// store record and before `SKEIN_BOX_STORE` is unset.
+pub(super) fn surfaced_block() -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let from = lines
+        .iter()
+        .position(|l| l.starts_with("surfaced_shape_ok() {"))
+        .expect("the launcher's surfaced-file binds moved");
+    let block = from
+        + lines[from..]
+            .iter()
+            .position(|l| {
+                l.starts_with(
+                r#"if [ -n "${SKEIN_BOX_STORE-}" ] && [ -f "$SKEIN_BOX_STORE/shared-paths.txt" ]"#,
+            )
+            })
+            .expect("the surfaced-file block has no `if`");
+    let to = block
+        + lines[block..]
+            .iter()
+            .position(|l| *l == "fi")
+            .expect("the surfaced-file block has no end");
+    lines[from..=to].join("\n")
+}
+
 /// The launcher's start-up announcements, lifted the same way.
 ///
 /// One block holding both: the workshop box's banner and the uncovered box's, which is how they
@@ -237,9 +264,9 @@ impl Fleet {
             f.state_parent.join("web-main/git-tokens"),
             f.state_parent.join("other-main"),
             f.dir.join("boxhome/.claude/projects"),
-            f.repos.join("web/store/.claude/memory"),
-            f.repos.join("other/store/.claude/memory"),
-            // Each repo's shared working files, beside its store's `.claude` (SKEIN-1324): the
+            f.repos.join("web/store/data/memory"),
+            f.repos.join("other/store/data/memory"),
+            // Each repo's shared working files, beside its store (SKEIN-1324): the
             // host makes them (`kit::ensure_store`) and a box never does.
             f.repos.join("web/store/shared-home"),
             f.repos.join("other/store/shared-home"),
@@ -287,9 +314,9 @@ impl Fleet {
                 fs::write(drop.join("20260101-000000-1.json"), "{}\n").unwrap();
             }
         }
-        fs::write(f.repos.join("web/store/.claude/memory/mine.md"), "mine\n").unwrap();
+        fs::write(f.repos.join("web/store/data/memory/mine.md"), "mine\n").unwrap();
         fs::write(
-            f.repos.join("other/store/.claude/memory/theirs.md"),
+            f.repos.join("other/store/data/memory/theirs.md"),
             "theirs\n",
         )
         .unwrap();
@@ -353,7 +380,7 @@ impl Fleet {
     }
 
     pub(super) fn store(&self) -> PathBuf {
-        self.repos.join("web/store/.claude")
+        self.repos.join("web/store/data")
     }
 
     /// Empty for the same box and from the same `None`: `session_script` computes
@@ -417,6 +444,7 @@ impl Fleet {
     ) -> Vec<u8> {
         let block = isolation_block();
         let store_record = store_record_block();
+        let surfaced = surfaced_block();
         let quoted: Vec<String> = args.iter().map(|a| skein::util::sh_quote(a)).collect();
         let record_bind = format!(
             "--bind {} {}",
@@ -448,6 +476,7 @@ impl Fleet {
              {block}\n\
              tree=\"$root/tree\"\n\
              {store_record}\n\
+             {surfaced}\n\
              exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} -- /bin/sh -c {probe} skein-probe {args}\n",
             record = record_bind,
             root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
@@ -500,7 +529,7 @@ done
             self.state_parent.join("web-main/git-tokens/owner%2Frepo"),
             self.dir.join("boxhome/.claude/projects"),
             self.store(),
-            self.repos.join("other/store/.claude"),
+            self.repos.join("other/store/data"),
             self.elsewhere.join("store/.claude"),
             self.fleet_root.join("web-main"),
             self.fleet_root.join("other-main"),

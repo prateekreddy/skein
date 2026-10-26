@@ -6,7 +6,7 @@
 //! carries the one datum the sandbox cannot.
 //!
 //! **There is more than one store, and that is the whole subtlety.** Each managed repo has its own
-//! `.claude` store, mounted into that repo's boxes — so a box's signals must be read from ITS repo's
+//! store, mounted into that repo's boxes — so a box's signals must be read from ITS repo's
 //! store, not from a single global one. Reading only the legacy global registry is what made the
 //! board show a box's launch branch forever after an in-box checkout. Aggregate views span every
 //! store; per-box reads pick the right one and fall back.
@@ -108,7 +108,7 @@ pub(crate) fn store_dir() -> Option<PathBuf> {
 }
 
 /// The store to read a *specific box's* per-box signals from. Each managed repo has its own store
-/// (`~/.skein/repos/<id>/store/.claude`, mounted into its boxes), so turn-state / task / session /
+/// (`~/.skein/repos/<id>/store/data`, mounted into its boxes), so turn-state / task / session /
 /// journal for a box must come from ITS repo's store — not a single global one. Falls back to
 /// `store_dir()` for boxes that match no registered repo (the legacy single-repo path).
 ///

@@ -498,7 +498,7 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # `disk_verdict`, which keeps the verdict itself drivable on a machine with no settings file; what
 # crosses the boundary is a `u32`, and nothing reachable from `config` depends on `health`.
 # `kit` for one path: `kit::shared_home_dir`, where a repo's shared working files are (SKEIN-1324).
-# It is beside the store's `.claude` for a managed store and inside it for any other, and the
+# It is beside the store for a managed store and inside it for any other, and the
 # report's "shared-home directory missing" line has to ask the same rule the store is built by, or
 # it reports every managed store as broken the day the files move. Nothing in `kit` depends on
 # `health`.

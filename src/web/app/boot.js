@@ -1519,8 +1519,8 @@ function loadResources() {
 
 // ---------- demo seed (only used under ?demo) ----------
 const DEMO_REPOS = [
-  { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/.claude", agent:"claude" },
-  { id:"skein",  source:"https://github.com/acme/skein-demo.git", work:"~/.skein/repos/skein/work", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
+  { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/data", agent:"claude" },
+  { id:"skein",  source:"https://github.com/acme/skein-demo.git", work:"~/.skein/repos/skein/work", store:"~/.skein/repos/skein/store/data", agent:"claude" },
 ];
 const DEMO_BOXES = [
   { name:"thing-feat-auth", repo:"thing", branch:"feat/auth", state:"needs-input", tier:0, age:"2m",

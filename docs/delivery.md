@@ -454,7 +454,7 @@ breaks, and none of it was in the first draft.
 - **Per-box overrides**: privileged, tracking, git-scope, disk, identity.
 - **Journals, diffs, mailbox, handoffs** — deliberately not deleted on box destroy, because for a
   clone-mode box they are the only durable record.
-- **The repo's shared `.claude` store** — and stores adopted from outside the state root via
+- **The repo's shared store**, `repos/<id>/store/data` (`store/.claude` before SKEIN-1330) — and stores adopted from outside the state root via
   `--store`, which must **not** be relocated.
 - **`review/<repo-id>/`** — the PR archive, standing module notes and the summary cache. Parity lists
   all three as capabilities.

@@ -469,3 +469,117 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$own" >/dev/null || break; sleep 1; 
         "a kit with no box name wrote a boot report under some name: {reports:?}\n{said}"
     );
 }
+
+/// **A covered box reaches its repo's store at `store/data` and its shared home beside it, writes
+/// its memory, mailbox and `~/shared` there, and edits a surfaced file in place** — SKEIN-1330,
+/// measured in the namespace the launcher's own blocks build rather than read from its arguments.
+///
+/// A surfaced file used to be a link into `shared-rw/`, and Claude Code will not edit through a
+/// link to a file. Bound, it is a regular file: a rename over it fails on the mount point (EBUSY,
+/// which is what sends Claude's edit to its in-place write), and a write in place lands in the
+/// store's copy. A sibling box writes the manifest and `shared-rw/`, so the launcher's rules are
+/// asked too: a copy that is a link out of `shared-rw/` is not bound, nor is an entry under `.git`,
+/// nor one the checkout's own tracked link would carry into `.git/hooks`, nor one over a file of
+/// the box's own; the link a start before the store's move made is replaced by the bind.
+///
+/// What would make this fail: the launcher's shared-home bind not knowing `store/data` (`shared`
+/// fails); no surfaced-file block (`notes.env` stays a dangling link, and the edit fails); the copy
+/// not checked to be a file inside `shared-rw/` (`escape.txt` reads another repo's memory); the
+/// shape not asked of where the entry really lands (`viahooks/pre-commit` becomes a git hook); a
+/// file of the box's own bound over (`mine.txt` reads the shared copy).
+#[test]
+fn a_covered_box_writes_its_store_at_data_and_edits_a_surfaced_file_in_place() {
+    if !bwrap_works() {
+        return skip("bwrap cannot make a namespace here");
+    }
+    use std::os::unix::fs::symlink;
+    let fleet = Fleet::make("surfaced");
+    let store = fleet.store();
+    let shared = store.parent().unwrap().join("shared-home");
+    let tree = fleet.fleet_root.join("web-main/tree");
+    let rw = store.join("shared-rw");
+    fs::create_dir_all(store.join("mailbox")).unwrap();
+    fs::create_dir_all(rw.join(".git/hooks")).unwrap();
+    fs::create_dir_all(rw.join("viahooks")).unwrap();
+    fs::write(rw.join("notes.env"), "v1\n").unwrap();
+    fs::write(rw.join("mine.txt"), "the shared copy\n").unwrap();
+    fs::write(rw.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+    fs::write(rw.join("viahooks/pre-commit"), "#!/bin/sh\n").unwrap();
+    symlink(
+        fleet.repos.join("other/store/data/memory/theirs.md"),
+        rw.join("escape.txt"),
+    )
+    .unwrap();
+    fs::write(
+        store.join("shared-paths.txt"),
+        "notes.env rw\nescape.txt rw\n.git/hooks/pre-commit rw\nviahooks/pre-commit rw\nmine.txt rw\n",
+    )
+    .unwrap();
+    // The checkout: a git directory with hooks, a link the repo tracks into it, a file of the box's
+    // own, and the link an earlier start made to the store's old name.
+    fs::create_dir_all(tree.join(".git/hooks")).unwrap();
+    symlink(".git/hooks", tree.join("viahooks")).unwrap();
+    fs::write(tree.join("mine.txt"), "the box's own\n").unwrap();
+    symlink(
+        store.with_file_name(".claude").join("shared-rw/notes.env"),
+        tree.join("notes.env"),
+    )
+    .unwrap();
+
+    let probe = r#"
+t="$1"; st="$2"; sh="$3"; other="$4"
+cd "$t" || exit 1
+[ -L notes.env ] && echo "notes is a link" || echo "notes is a file"
+printf 'x\n' > notes.tmp
+mv notes.tmp notes.env 2>/dev/null && echo "rename went through" || echo "rename refused"
+rm -f notes.tmp
+printf 'v2\n' > notes.env && echo "edited in place"
+[ -e escape.txt ] && echo "escape present" || echo "escape absent"
+[ -e .git/hooks/pre-commit ] && echo "hook present" || echo "hook absent"
+echo "mine: $(cat mine.txt)"
+printf 'm\n' > "$st/memory/new.md" && echo "memory written"
+printf '{}\n' > "$st/mailbox/1.json" && echo "mail written"
+printf 's\n' > "$sh/new.md" && echo "shared written"
+cat "$other/memory/theirs.md" >/dev/null 2>&1 && echo "other seen" || echo "other hidden"
+"#;
+    let out = fleet.in_box(
+        Born::Covered,
+        probe,
+        &[
+            tree.to_string_lossy().into_owned(),
+            store.to_string_lossy().into_owned(),
+            shared.to_string_lossy().into_owned(),
+            fleet
+                .repos
+                .join("other/store/data")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+    );
+    let said = String::from_utf8_lossy(&out).into_owned();
+    for line in [
+        "notes is a file",
+        "rename refused",
+        "edited in place",
+        "escape absent",
+        "hook absent",
+        "mine: the box's own",
+        "memory written",
+        "mail written",
+        "shared written",
+        "other hidden",
+    ] {
+        assert!(
+            said.lines().any(|l| l == line),
+            "expected {line:?}:\n{said}"
+        );
+    }
+    assert_eq!(fs::read_to_string(rw.join("notes.env")).unwrap(), "v2\n");
+    assert_eq!(
+        fs::read_to_string(rw.join("mine.txt")).unwrap(),
+        "the shared copy\n"
+    );
+    assert!(store.join("memory/new.md").is_file() && store.join("mailbox/1.json").is_file());
+    assert!(shared.join("new.md").is_file());
+    assert!(!tree.join(".git/hooks/pre-commit").exists());
+}

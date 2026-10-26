@@ -645,9 +645,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$own" >/dev/null || break; sleep 1; 
 
 /// A launch spec for box `name` in the store of repo `repo`.
 fn launch_spec(fleet: &Fleet, repo: &str, name: &str) {
-    let dir = fleet
-        .repos
-        .join(format!("{repo}/store/.claude/skein/launch"));
+    let dir = fleet.repos.join(format!("{repo}/store/data/skein/launch"));
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join(format!("{name}.json")),
@@ -661,7 +659,7 @@ fn boot_report(fleet: &Fleet, repo: &str) -> Option<serde_json::Value> {
     fs::read_to_string(
         fleet
             .repos
-            .join(format!("{repo}/store/.claude/skein/boot/web-main.json")),
+            .join(format!("{repo}/store/data/skein/boot/web-main.json")),
     )
     .ok()
     .map(|s| serde_json::from_str(&s).unwrap())
@@ -673,7 +671,7 @@ fn boot_report(fleet: &Fleet, repo: &str) -> Option<serde_json::Value> {
 /// another box's spec, is neither linked nor reported into.
 ///
 /// **What would make this fail**:
-/// - the scan of the workspace for `*/store/.claude/skein/launch/<box>.json` deleted: the box has no
+/// - the scan of the workspace for `*/store/data/skein/launch/<box>.json` deleted: the box has no
 ///   store (`.claude/skein` is not linked, and no boot report is written);
 /// - the match loosened to any launch spec (`launch/*.json`): both repos' stores match, the clone
 ///   names neither mirror, and none is adopted.
@@ -774,7 +772,7 @@ fn a_box_never_adopts_another_repositorys_store() {
         );
         let boot = boot_report(&fleet, "web").expect("the box wrote no boot report");
         let note = boot["claude_note"].as_str().unwrap_or_default();
-        let other = fleet.repos.join("other/store/.claude");
+        let other = fleet.repos.join("other/store/data");
         assert!(
             note.contains(other.to_string_lossy().as_ref()),
             "the boot report does not name the store passed over: {boot}"

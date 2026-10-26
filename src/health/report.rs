@@ -838,7 +838,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         // more urgent of the two, and a check may carry exactly one recipe.
         if probes.fix.is_empty() || dark_boxes.is_empty() {
             probes.fix = format!(
-                "remove the misfiled signal — `ls ~/.skein/repos/*/store/.claude/{{status,sessions,\
+                "remove the misfiled signal — `ls ~/.skein/repos/*/store/data/{{status,sessions,\
                  tasks}}/{}.json` and delete the one whose `box` field names a different box — then \
                  reattach the box, since the attach is what exports SKEIN_BOX to its probes",
                 misfiled_boxes.first().map(String::as_str).unwrap_or("<box>")
