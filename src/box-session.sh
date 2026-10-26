@@ -120,7 +120,9 @@ set -uo pipefail
 # Boxes remain one trust domain for their STATE — §9.2 says so and it is still true — but the
 # domain's membership is no longer writable from inside it (SKEIN-963, SKEIN-968).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$PATH"
+# The third entry is `~/.cargo/bin`, where the fleet's shared Rust toolchain is bound read-only
+# (SKEIN-1337, "the fleet's Rust toolchain" below). Ahead of the fixed six, which still end it.
+box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.cargo/bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
 #
 # Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
@@ -2611,6 +2613,50 @@ if [ -n "$announce" ]; then
 fi
 unset uncovered
 
+# --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------
+#
+# `bootstrap.sh` installs one toolchain under the fleet root's `.skein`, and every box used to say
+# "cargo: command not found" and grow a private `~/.rustup` of its own. Its `bin` is bound over the
+# box's own `~/.cargo/bin`, which `box_path` carries, so a crossing's PATH is still a function of
+# the box's home alone (`place::box_path`); the session block below points `RUSTUP_HOME` at it; and
+# `CARGO_HOME` stays the box's own `~/.cargo`, so the registry and build caches are the box's own.
+# What a box cannot do is `cargo install` into `~/.cargo/bin`, which is the shared one.
+#
+# Read-only in EVERY box: a covered box already sees `.skein` read-only, but the workshop box and an
+# uncovered one see the fleet root as the sandbox does, and one box changing the toolchain would
+# change it under all of them. Owner's decision on SKEIN-1337.
+#
+# `rustup` would then fail on a read-only file system with a message about a settings file. The
+# shim bound over the box's `~/.cargo/bin/rustup` says why instead, for the subcommands that change
+# a toolchain, and runs the real one for everything else (`rustup show`, a bare `rustup default`).
+toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
+if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/null; then
+  binds+=(--ro-bind "$toolchain" "$toolchain")
+  binds+=(--ro-bind "$toolchain/cargo/bin" "$HOME/.cargo/bin")
+  if [ -f "$toolchain/cargo/bin/rustup" ]; then
+    open_new "$bin_at" rustup || exit 1
+    {
+      printf '#!/bin/sh\n'
+      printf 'skein_rustup=%q\n' "$toolchain/cargo/bin/rustup"
+      cat <<'RUSTUPSHIM'
+sub=''; arg=''
+for a in "$@"; do
+  case "$a" in -*|+*) continue ;; esac
+  if [ -z "$sub" ]; then sub=$a; else arg=$a; break; fi
+done
+case "$sub:$arg" in
+  default:?*|install:*|uninstall:*|update:*|upgrade:*|self:*|set:*|toolchain:install|toolchain:uninstall|toolchain:remove|toolchain:link|component:add|component:remove|target:add|target:remove|override:set|override:unset|override:add|override:remove)
+    echo "skein: this box's Rust toolchain is shared by the whole fleet and is read-only, so rustup cannot change it. To use a different toolchain, ask the person who runs the fleet." >&2
+    exit 1 ;;
+esac
+exec "$skein_rustup" "$@"
+RUSTUPSHIM
+    } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
+    binds+=(--ro-bind-fd "$new_fd" "$HOME/.cargo/bin/rustup")
+  fi
+fi
+unset toolchain
+
 # --- GitHub: one repo to write, everything else to read ------------------------------------------
 #
 # What this replaces, measured rather than assumed: every box held the same `GH_TOKEN` — a user token
@@ -3326,6 +3372,11 @@ exec bwrap \
     # the profile before it runs this command string, so an export in this block is the one
     # spelling a profile cannot undo -- and it reaches the agent down the same tmux chain.
     export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
+    # The fleet shared Rust toolchain, whose bin is already on box_path (SKEIN-1337). Exported here
+    # for the same reason as the two above. CARGO_HOME is the box own, so its caches are too.
+    if [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
+      export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo"
+    fi
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
     # path names the OUTER /tmp, which does not exist in this box private one, so the server fails

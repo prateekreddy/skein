@@ -375,7 +375,8 @@ impl Place {
     /// `command -v cargo` empty. A login shell rebuilds nothing; the PATH a box runs on is the one
     /// it was handed.
     ///
-    /// So it is handed the box's own: `$HOME/.local/bin`, [`BOX_PATH_HEAD`], then [`FLEET_PATH`] —
+    /// So it is handed the box's own: `$HOME/.local/bin`, [`BOX_PATH_HEAD`], `$HOME/.cargo/bin`
+    /// (SKEIN-1337), then [`FLEET_PATH`] —
     /// written from the `home` in the placement rather than from `$HOME` in the shell, so it cannot
     /// depend on the order two words of one `export` are expanded in.
     ///
@@ -792,8 +793,9 @@ mod tests {
             argv.last().unwrap(),
             &format!(
                 "export HOME='{box_home}' SKEIN_BOX='web-main' PATH='{box_home}/.local/bin:\
-                 /usr/local/share/npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:\
-                 /usr/bin:/sbin:/bin' && cd '/boxes/web-main/tree' && git status"
+                 /usr/local/share/npm-global/bin:{box_home}/.cargo/bin:/usr/local/sbin:\
+                 /usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' && cd '/boxes/web-main/tree' && \
+                 git status"
             )
         );
         // Stated as a property as well as a value, because the value above passes for a PATH that

@@ -47,8 +47,12 @@ const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 /// that PATH is would be two lists inside one binary — the shape SKEIN-678 caught in the mount
 /// check, where the row and the thing it checked were built from different sets, and the row
 /// reported healthy on the one fleet it existed to catch.
+///
+/// The third entry is the box's `~/.cargo/bin`, where `box-session.sh` binds the fleet's shared
+/// Rust toolchain read-only (SKEIN-1337). Spelled from `home` like the first, so this stays a
+/// function of the placement record alone.
 pub fn box_path(home: &str) -> String {
-    format!("{home}/.local/bin:{BOX_PATH_HEAD}:{FLEET_PATH}")
+    format!("{home}/.local/bin:{BOX_PATH_HEAD}:{home}/.cargo/bin:{FLEET_PATH}")
 }
 
 /// The launcher, embedded for the one thing this module reads out of it: its `inherited_env` list.

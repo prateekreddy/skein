@@ -791,6 +791,147 @@ fn gh_in_a_running_box_uses_the_token_placed_now() {
     );
 }
 
+/// **Every box finds the fleet's shared Rust toolchain on its PATH, and no box can change it**
+/// (SKEIN-1337).
+///
+/// A real box over a fixture toolchain under the fleet root, laid out as `bootstrap.sh` lays out
+/// the real one: `cargo/bin` with a `cargo` and a `rustup` in it, and a `rustup` home. Two boxes:
+/// an ordinary one, and the workshop box, which is the one that matters for the marks — every
+/// other box sees `.skein` read-only already, and the workshop box saw the fleet root as the
+/// sandbox does. The marks are looked for on the HOST afterwards, so a write that a box was told
+/// failed and that landed anyway still fails the test.
+///
+/// What would make each assertion fail:
+///   * `cargo`: dropping `$HOME/.cargo/bin` from `box_path`, or the bind over it.
+///   * `rustup_home`: dropping the session block's `RUSTUP_HOME` export.
+///   * `cargo_home`: pointing `CARGO_HOME` at the shared toolchain, whose registry would then be
+///     one every box writes, or leaving it unset.
+///   * the marks: dropping the `--ro-bind` of the toolchain (the workshop box writes them).
+///   * `show`: a shim that refuses everything.
+///   * `default`: dropping the shim, which hands a mutation to the real `rustup`.
+#[test]
+fn every_box_finds_the_shared_toolchain_and_none_can_change_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so it cannot host a box",
+        );
+    }
+    let root = scratch_named("rusttool");
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"));
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    let toolchain = root.join("boxes/.skein/toolchain");
+    let bin = toolchain.join("cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(toolchain.join("rustup")).unwrap();
+    fs::write(toolchain.join("rustup/settings.toml"), "version = \"12\"\n").unwrap();
+    for (tool, says) in [
+        ("cargo", "echo skein-test-cargo"),
+        ("rustup", "echo skein-test-rustup \"$@\""),
+    ] {
+        fs::write(bin.join(tool), format!("#!/bin/sh\n{says}\n")).unwrap();
+        fs::set_permissions(bin.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let shared_bin = bin.display().to_string();
+    let agent = format!(
+        "{{ printf 'cargo %s\\n' \"$(cargo 2>&1)\"; \
+           printf 'rustup_home %s\\n' \"${{RUSTUP_HOME-none}}\"; \
+           printf 'cargo_home %s\\n' \"${{CARGO_HOME-none}}\"; \
+           touch \"${{RUSTUP_HOME:-/nowhere}}/skein-test-mark\" 2>/dev/null; \
+           touch \"$HOME/.cargo/bin/skein-test-mark\" 2>/dev/null; \
+           touch '{shared_bin}/skein-test-mark2' 2>/dev/null; \
+           printf 'show %s\\n' \"$(rustup show 2>&1)\"; \
+           printf 'default %s\\n' \"$(rustup default nightly 2>&1)\"; \
+         }} > /tmp/tc.tmp && mv /tmp/tc.tmp /tmp/tc.report; exec sleep 300"
+    );
+    for (case, name) in [("ordinary", "rusttool-main"), ("workshop", "rustshop-main")] {
+        let mut script = session_script(name, "skein-agent", &agent);
+        if case == "workshop" {
+            script = with_launch_env(&script, "SKEIN_BOX_PRIVILEGED", "1");
+        }
+        let launched = own_sandbox(FLEET)
+            .exec(&script, Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("start the {case} box: {e}"));
+        let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+        let report_path = PathBuf::from(format!("{}/tmp/tc.report", box_root(name)));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !report_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let report = fs::read_to_string(&report_path).unwrap_or_default();
+        let limits =
+            fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+        let _ = Command::new("tmux")
+            .args(["-S", &box_sock(name), "kill-server"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        anchor_gone(anchor);
+        if limits.starts_with("capped ") {
+            let _ = Command::new("sudo")
+                .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+                .status();
+        }
+
+        let field = |key: &str| {
+            report
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{key} ")))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(
+            field("cargo"),
+            "skein-test-cargo",
+            "a box does not find the fleet's cargo on its PATH: {case} box: {report:?}"
+        );
+        assert_eq!(
+            field("rustup_home"),
+            toolchain.join("rustup").display().to_string(),
+            "a box's RUSTUP_HOME is not the fleet's shared one: {case} box: {report:?}"
+        );
+        assert_eq!(
+            field("cargo_home"),
+            sandbox_home.join(".cargo").display().to_string(),
+            "a box's CARGO_HOME is not its own: {case} box: {report:?}"
+        );
+        let marks: Vec<PathBuf> = [
+            toolchain.join("rustup/skein-test-mark"),
+            bin.join("skein-test-mark"),
+            bin.join("skein-test-mark2"),
+        ]
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+        assert!(
+        marks.is_empty(),
+        "the {case} box wrote into the fleet's shared toolchain, which every box runs: {marks:?}"
+    );
+        assert_eq!(
+            field("show"),
+            "skein-test-rustup show",
+            "`rustup show` in a box does not reach the real rustup: {case} box: {report:?}"
+        );
+        assert!(
+        field("default").contains("read-only") && !field("default").contains("skein-test-rustup"),
+        "`rustup default nightly` in a box was not refused in skein's words: {case} box: {report:?}"
+    );
+    }
+}
+
 /// A report of `<key> <value>` lines fit to print in a failure message: a value that is one of
 /// this file's own `skein-test-` sentinels, or `none`, is shown; anything else is a credential the
 /// machine supplied, and only its length is (SKEIN-1342).
