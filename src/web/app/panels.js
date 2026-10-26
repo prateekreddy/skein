@@ -750,6 +750,7 @@ function gitCredRow(c) {
   const check = c.problem || !c.has_token ? ""
     : c.turned_down ? `GitHub turned this token down when skein asked after saving it: ${esc(c.turned_down)}. `
     : c.unchecked ? `not checked yet — GitHub could not be reached when it was saved (${esc(c.unchecked)}); skein asks again within 20 minutes. `
+    : c.cannot_read ? `can push, but cannot read CI results — ${esc(c.cannot_read)}; add those permissions to the token on GitHub. `
     : "";
   const why = check + (c.problem ? `unusable — ${esc(c.problem)}`
     : !c.has_token ? "no token stored"

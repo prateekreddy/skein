@@ -504,6 +504,8 @@ function repoTokenRow(r) {
   const checked = !c || c.problem ? ""
     : c.turned_down ? `<div class="set-cred"><span class="sq-state">turned down</span><span class="cwhy">GitHub turned this token down when skein asked after saving it: ${esc(c.turned_down)}. Paste a token with Contents read and write to replace it</span></div>`
     : c.unchecked ? `<div class="set-cred"><span class="sq-state">not checked yet</span><span class="cwhy">GitHub could not be reached when it was saved (${esc(c.unchecked)}). Boxes push with it meanwhile, and skein asks GitHub again within 20 minutes</span></div>`
+    // It pushes, but its boxes cannot see whether CI passed (SKEIN-1338).
+    : c.cannot_read ? `<div class="set-cred"><span class="sq-state">can't read checks</span><span class="cwhy">It can push, but GitHub won't let it read CI results: ${esc(c.cannot_read)}. Add those permissions to the token on GitHub; skein looks again within 20 minutes</span></div>`
     : "";
   // **Use the token another repo has, from an existing card** (SKEIN-1241, amending SKEIN-1231's
   // "only when adding"). Every repository that gains access is named before the button is pressed,

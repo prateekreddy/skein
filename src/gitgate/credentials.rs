@@ -69,6 +69,12 @@ pub struct WriteCredential {
     /// [`unchecked`]: WriteCredential::unchecked
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub turned_down: String,
+    /// What a token that can push cannot read, and on which repository — "a/one needs Checks: read
+    /// and Actions: read" — so its boxes cannot see whether CI passed (SKEIN-1338). Not a reason to
+    /// refuse it: pushing works. Empty when it can read both, or when GitHub could not be asked;
+    /// the twenty-minute tick asks again while it is set, so adding them on GitHub clears it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cannot_read: String,
 }
 
 impl WriteCredential {
@@ -283,13 +289,13 @@ pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(
 /// failure between the two leaves an entry the cockpit shows as "no token stored", never a live
 /// token that no entry names.
 pub fn store_repo_token(slug: &str, token: &str) -> Result<String, String> {
-    store_repo_token_marked(slug, token, "")
+    store_repo_token_marked(slug, token, &Checked::default())
 }
 
 /// [`store_repo_token`], with the entry written already marked [`WriteCredential::unchecked`] when
 /// `unchecked` says why GitHub could not be asked — in the same write, so there is no moment in
 /// which a token nobody checked reads as checked.
-fn store_repo_token_marked(slug: &str, token: &str, unchecked: &str) -> Result<String, String> {
+fn store_repo_token_marked(slug: &str, token: &str, checked: &Checked) -> Result<String, String> {
     if !slug_is_nameable(slug) {
         return Err(format!("{slug:?} is not a repository"));
     }
@@ -319,7 +325,8 @@ fn store_repo_token_marked(slug: &str, token: &str, unchecked: &str) -> Result<S
             id: id.clone(),
             label: slug.to_string(),
             repos: vec![slug.to_string()],
-            unchecked: unchecked.to_string(),
+            unchecked: checked.unchecked.clone(),
+            cannot_read: checked.cannot_read.clone(),
             ..Default::default()
         });
         Ok(id)
@@ -498,7 +505,8 @@ pub fn join_share(id: &str, slug: &str) -> Result<(), String> {
 /// What GitHub said about a token for one repository, asked before the token is saved.
 #[derive(Debug, Clone, PartialEq)]
 enum Answer {
-    Pushes,
+    /// It can push, and these are the read permissions it lacks there, by GitHub's names for them.
+    Pushes(Vec<&'static str>),
     /// GitHub answered, and the answer is no — in words that say which no.
     TurnedDown(String),
     /// GitHub could not be asked: the network, a timeout, a 5xx, a rate limit. Why.
@@ -517,7 +525,11 @@ fn ask_before_saving(token: &Secret, slug: &str) -> Answer {
     let path = crate::github::repo_path(slug);
     match crate::github::get_json_within(&path, token, std::time::Duration::from_secs(15)) {
         Ok(v) => match v.pointer("/permissions/push").and_then(|p| p.as_bool()) {
-            Some(true) => Answer::Pushes,
+            Some(true) => Answer::Pushes(missing_reads(
+                token,
+                slug,
+                v.get("default_branch").and_then(|b| b.as_str()),
+            )),
             _ => Answer::TurnedDown(format!("it can read {slug} but not push to it")),
         },
         Err(e) => match rejected(&e) {
@@ -525,6 +537,40 @@ fn ask_before_saving(token: &Secret, slug: &str) -> Answer {
             None => Answer::NotAsked(e),
         },
     }
+}
+
+/// The read permissions a token that can push to `slug` lacks there, of the two an agent needs to
+/// see whether its work passed (SKEIN-1338): **Checks: read** for check runs and the PR's status
+/// rollup, and **Actions: read** for workflow runs. A fine-grained token made with Contents alone
+/// pushes fine, and every `gh pr checks` then fails with 403 "Resource not accessible by personal
+/// access token" — 61 of them in a month of transcripts.
+///
+/// Only a 403 counts as missing. Anything else — a 404 for a repository with no commits yet, the
+/// network, a rate limit — says nothing about the token, so nothing is reported for it. The check
+/// runs are asked about on the default branch, and not at all when GitHub did not name one.
+fn missing_reads(token: &Secret, slug: &str, branch: Option<&str>) -> Vec<&'static str> {
+    let repo = crate::github::repo_path(slug);
+    let mut asks = Vec::new();
+    if let Some(branch) = branch.filter(|b| !b.is_empty()) {
+        let at = crate::github::path_segments(branch);
+        asks.push((
+            "Checks: read",
+            format!("{repo}/commits/{at}/check-runs?per_page=1"),
+        ));
+    }
+    asks.push(("Actions: read", format!("{repo}/actions/runs?per_page=1")));
+    asks.into_iter()
+        .filter(|(_, path)| {
+            crate::github::get_json_within(path, token, std::time::Duration::from_secs(15))
+                .is_err_and(|e| forbidden(&e))
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Whether `why` is [`crate::github`]'s sentence for a 403.
+fn forbidden(why: &str) -> bool {
+    rejected(why).is_some_and(|said| said.starts_with("403"))
 }
 
 /// GitHub's own words, when `why` is [`crate::github`]'s sentence for a 401, 403 or 404 — the
@@ -546,13 +592,18 @@ struct Answers {
     turned_down: Vec<(String, String)>,
     /// Why GitHub could not be asked, for each it could not.
     not_asked: Vec<String>,
+    /// "a/one needs Checks: read and Actions: read", for each it can push to and not read.
+    cannot_read: Vec<String>,
 }
 
 fn ask_all(token: &Secret, slugs: &[String]) -> Answers {
     let mut out = Answers::default();
     for slug in slugs {
         match ask_before_saving(token, slug) {
-            Answer::Pushes => {}
+            Answer::Pushes(missing) if missing.is_empty() => {}
+            Answer::Pushes(missing) => out
+                .cannot_read
+                .push(format!("{slug} needs {}", repos_phrase(&missing))),
             Answer::TurnedDown(why) => out.turned_down.push((slug.clone(), why)),
             Answer::NotAsked(why) => out.not_asked.push(format!("{slug}: {why}")),
         }
@@ -576,20 +627,33 @@ fn repos_phrase<S: AsRef<str>>(list: &[S]) -> String {
     }
 }
 
+/// What the check of a token about to be saved found, for the entry it is saved under.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Checked {
+    /// [`WriteCredential::unchecked`]: why GitHub could not be asked, or empty.
+    pub unchecked: String,
+    /// [`WriteCredential::cannot_read`]: what it can push to and not read, or empty.
+    pub cannot_read: String,
+}
+
 /// Ask GitHub about `token` for every repository in `slugs`, before it is saved (SKEIN-1239).
 ///
 /// `Err` is the refusal, whole: each repository GitHub turned it down for and what it said, then
 /// `kept` — what goes on working, which only the caller knows — then what to paste instead. `Ok`
-/// carries why it could not be asked about some repository, for [`WriteCredential::unchecked`], or
-/// is empty when GitHub says it can push to all of them.
-pub fn check_new_token(token: &str, slugs: &[String], kept: &str) -> Result<String, String> {
+/// carries why it could not be asked about some repository, for [`WriteCredential::unchecked`], and
+/// what it can push to but not read, for [`WriteCredential::cannot_read`] (SKEIN-1338); both are
+/// empty when GitHub says it can push to and read all of them.
+pub fn check_new_token(token: &str, slugs: &[String], kept: &str) -> Result<Checked, String> {
     let token = token.trim();
     if token.is_empty() {
         return Err("no token was given".into());
     }
     let answers = ask_all(&Secret::new(token), slugs);
     if answers.turned_down.is_empty() {
-        return Ok(answers.not_asked.join("; "));
+        return Ok(Checked {
+            unchecked: answers.not_asked.join("; "),
+            cannot_read: answers.cannot_read.join("; "),
+        });
     }
     let whys: Vec<&str> = answers
         .turned_down
@@ -621,9 +685,9 @@ pub fn store_repo_token_checked(slug: &str, token: &str) -> Result<String, Strin
         Some(_) => format!("{slug} keeps the token it had. "),
         None => String::new(),
     };
-    let unchecked = check_new_token(token, &[slug.to_string()], &kept)?;
-    store_repo_token_marked(slug, token, &unchecked)?;
-    Ok(unchecked)
+    let checked = check_new_token(token, &[slug.to_string()], &kept)?;
+    store_repo_token_marked(slug, token, &checked)?;
+    Ok(checked.unchecked)
 }
 
 /// Replace the token of stored credential `id` and nothing else — a shared token rotated from any
@@ -643,18 +707,19 @@ pub fn replace_token_checked(id: &str, token: &str) -> Result<String, String> {
             repos_phrase(all)
         ),
     };
-    let unchecked = check_new_token(token, &c.repos, &kept)?;
-    mark_checked(id, &unchecked)?;
-    set_credential_token(id, token).map(|()| unchecked)
+    let checked = check_new_token(token, &c.repos, &kept)?;
+    mark_checked(id, &checked)?;
+    set_credential_token(id, token).map(|()| checked.unchecked)
 }
 
 /// Record what the check of a token about to be stored under `id` said: why it could not be asked,
 /// or "" — and forget any earlier `turned_down`, which was about the token being replaced. Written
 /// before the token, so a new token never sits behind an older "checked".
-pub fn mark_checked(id: &str, unchecked: &str) -> Result<(), String> {
+pub fn mark_checked(id: &str, checked: &Checked) -> Result<(), String> {
     crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
         if let Some(c) = all.iter_mut().find(|c| c.id == id) {
-            c.unchecked = unchecked.to_string();
+            c.unchecked = checked.unchecked.clone();
+            c.cannot_read = checked.cannot_read.clone();
             c.turned_down.clear();
         }
         Ok(())
@@ -668,6 +733,11 @@ pub fn mark_checked(id: &str, unchecked: &str) -> Result<(), String> {
 /// push with. Still out of reach: left marked for the next tick. Returns a sentence for each token
 /// GitHub turned down.
 ///
+/// A token that pushes but was saved [`WriteCredential::cannot_read`] is asked about too, so adding
+/// the missing permissions on GitHub clears the card's line within the tick (SKEIN-1338). Only its
+/// `cannot_read` is rewritten, and only from an answer for every repository it covers: a GitHub out
+/// of reach does not make a checked token read as unchecked.
+///
 /// The answer is written only if the token on disk is still the one asked about — its file not
 /// written since, and its entry still marked as it was: a token saved while GitHub was being asked
 /// has its own check, and this one's answer is not about it.
@@ -675,8 +745,9 @@ pub fn recheck_unchecked() -> Vec<String> {
     let mut said = Vec::new();
     for c in write_credentials()
         .into_iter()
-        .filter(|c| !c.unchecked.is_empty())
+        .filter(|c| !c.unchecked.is_empty() || !c.cannot_read.is_empty())
     {
+        let was_unchecked = !c.unchecked.is_empty();
         let path = credential_token_path(&c.id);
         let written = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let asked_about = written(&path);
@@ -694,6 +765,8 @@ pub fn recheck_unchecked() -> Vec<String> {
             true => answers.not_asked.join("; "),
             false => String::new(),
         };
+        let cannot_read = answers.cannot_read.join("; ");
+        let all_answered = answers.turned_down.is_empty() && answers.not_asked.is_empty();
         let wrote =
             crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
                 // Told by when the file was written and what the entry still says, rather than by
@@ -701,17 +774,24 @@ pub fn recheck_unchecked() -> Vec<String> {
                 let same = asked_about.is_some() && written(&path) == asked_about;
                 if let Some(entry) = all
                     .iter_mut()
-                    .find(|e| e.id == c.id && e.unchecked == c.unchecked)
+                    .find(|e| {
+                        e.id == c.id && e.unchecked == c.unchecked && e.cannot_read == c.cannot_read
+                    })
                     .filter(|_| same)
                 {
-                    entry.unchecked = unchecked.clone();
-                    entry.turned_down = turned_down.clone();
+                    if was_unchecked {
+                        entry.unchecked = unchecked.clone();
+                        entry.turned_down = turned_down.clone();
+                        entry.cannot_read = cannot_read.clone();
+                    } else if all_answered {
+                        entry.cannot_read = cannot_read.clone();
+                    }
                 }
                 Ok(())
             });
         if let Err(why) = wrote {
             said.push(format!("the token {} uses: {why}", repos_phrase(&c.repos)));
-        } else if !turned_down.is_empty() {
+        } else if was_unchecked && !turned_down.is_empty() {
             said.push(format!(
                 "the token {} uses: {turned_down}",
                 repos_phrase(&c.repos)
@@ -1799,6 +1879,110 @@ mod tests {
                 "{slug}"
             );
         }
+    }
+
+    /// A GitHub that answers by path, the query left off, from `answers`, and 404 for any other.
+    fn stub_github_paths(answers: Vec<(String, u16, &'static str)>) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let url = head.split_whitespace().nth(1).unwrap_or("");
+                let path = url.split('?').next().unwrap_or("").to_string();
+                let (status, body) = answers
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, s, b)| (*s, *b))
+                    .unwrap_or((404, r#"{"message":"Not Found"}"#));
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// GitHub for `a/one`: the token pushes, and check runs and Actions answer as given.
+    fn pushes_and_reads(checks: u16, actions: u16) -> String {
+        const DENIED: &str = r#"{"message":"Resource not accessible by personal access token"}"#;
+        let body = |status| match status {
+            403 => DENIED,
+            _ => r#"{"total_count":0}"#,
+        };
+        stub_github_paths(vec![
+            (
+                "/repos/a/one".into(),
+                200,
+                r#"{"permissions":{"push":true},"default_branch":"main"}"#,
+            ),
+            (
+                "/repos/a/one/commits/main/check-runs".into(),
+                checks,
+                body(checks),
+            ),
+            ("/repos/a/one/actions/runs".into(), actions, body(actions)),
+        ])
+    }
+
+    /// **A token that pushes but cannot read check runs or Actions is saved, and says which
+    /// permissions to add; the tick clears it once they are added** (SKEIN-1338).
+    ///
+    /// What would make each assertion fail:
+    /// * *it names what is missing* — the save not asking about check runs and Actions
+    ///   (`missing_reads` answering nothing), or a 403 on one read reported as both.
+    /// * *a GitHub out of reach leaves it alone* — the tick writing `unchecked` onto a token that
+    ///   was checked, or clearing `cannot_read` without an answer.
+    /// * *the tick clears it* — `recheck_unchecked` asking only about tokens saved unchecked.
+    #[test]
+    fn a_token_that_cannot_read_checks_is_saved_and_says_what_to_add() {
+        let (_lock, _home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+
+        env.set("SKEIN_GITHUB_API", pushes_and_reads(403, 200));
+        assert_eq!(
+            store_repo_token_checked("a/one", "skein-test-no-checks"),
+            Ok(String::new())
+        );
+        let (c, token) = credential_for("a/one").expect("a token that pushes was not saved");
+        assert_eq!(token.expose(), "skein-test-no-checks");
+        assert_eq!(c.cannot_read, "a/one needs Checks: read");
+
+        let id = c.id.clone();
+        env.set("SKEIN_GITHUB_API", pushes_and_reads(403, 403));
+        replace_token_checked(&id, "skein-test-no-reads").unwrap();
+        assert_eq!(
+            credential_for("a/one").unwrap().0.cannot_read,
+            "a/one needs Checks: read and Actions: read"
+        );
+
+        env.set(
+            "SKEIN_GITHUB_API",
+            stub_github(503, r#"{"message":"Service Unavailable"}"#),
+        );
+        assert!(recheck_unchecked().is_empty());
+        let c = credential_for("a/one").unwrap().0;
+        assert_eq!(
+            (c.unchecked.as_str(), c.cannot_read.as_str()),
+            ("", "a/one needs Checks: read and Actions: read"),
+            "a GitHub out of reach changed what a checked token says"
+        );
+
+        env.set("SKEIN_GITHUB_API", pushes_and_reads(200, 200));
+        assert!(recheck_unchecked().is_empty());
+        assert_eq!(
+            credential_for("a/one").unwrap().0.cannot_read,
+            "",
+            "the permissions were added on GitHub and the card still says they are missing"
+        );
     }
 
     /// **A token saved while GitHub is out of reach is saved, marked, and settled by the tick**
