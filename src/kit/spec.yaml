@@ -48,6 +48,11 @@ memory: |
   runtime state, caches, repositories, build outputs, sockets, or locks into `shared`. Concurrent
   writes have normal last-writer-wins filesystem semantics, so coordinate edits to the same file.
 
+  ## Installing tools in this box
+
+  `cargo install` puts programs in `~/.local/bin`, which is on your PATH. They last until this box
+  restarts. If every box needs a tool, ask the person who runs the fleet to install it for all of them.
+
   ## Git authentication in this box
 
   Before retrying a failed fetch, push, or PR, inspect the configured path:

@@ -2706,7 +2706,8 @@ unset uncovered
 # box's own `~/.cargo/bin`, which `box_path` carries, so a crossing's PATH is still a function of
 # the box's home alone (`place::box_path`); the session block below points `RUSTUP_HOME` at it; and
 # `CARGO_HOME` stays the box's own `~/.cargo`, so the registry and build caches are the box's own.
-# What a box cannot do is `cargo install` into `~/.cargo/bin`, which is the shared one.
+# What a box cannot do is `cargo install` into `~/.cargo/bin`, which is the shared one, so the
+# session block points `CARGO_INSTALL_ROOT` at `~/.local` instead (SKEIN-1349).
 #
 # Read-only in EVERY box: a covered box already sees `.skein` read-only, but the workshop box and an
 # uncovered one see the fleet root as the sandbox does, and one box changing the toolchain would
@@ -3460,8 +3461,14 @@ exec bwrap \
     export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
     # The fleet shared Rust toolchain, whose bin is already on box_path (SKEIN-1337). Exported here
     # for the same reason as the two above. CARGO_HOME is the box own, so its caches are too.
+    #
+    # CARGO_INSTALL_ROOT because `cargo install` writes into CARGO_HOME/bin by default, and that is
+    # the shared read-only bin, so every install failed (SKEIN-1349). ~/.local/bin is first on
+    # box_path. ~/.local is the per-box copy-on-write overlay, so an install lasts until the box
+    # restarts; the box guide (src/kit/spec.yaml) says so.
     if [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
-      export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo"
+      export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo" \
+        CARGO_INSTALL_ROOT="$HOME/.local"
     fi
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
