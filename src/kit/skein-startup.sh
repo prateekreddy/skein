@@ -444,18 +444,31 @@ fi
 # `.claude` is a directory of this box's own in both layouts (SKEIN-1053), and every run leaves a
 # boot report, because a silent miss here is the #1 way a box ends up with zero hooks while
 # looking perfectly healthy:
-#   1. the repo tracks nothing under .claude/ → skein makes the directory and links each of the
-#      store's entries into it, one by one — memory/, skills/, mailbox/, skein/ and the rest — and
-#      leaves out the store's `settings.json` and `settings.local.json`. Every box of the repo can
-#      write the store, so a settings file read from there is one where a box plants a hook or a
-#      status line that its siblings run (SKEIN-1153);
+#   1. the repo tracks nothing under .claude/ → skein makes the directory and links into it the
+#      store's `skein/` and the entries Claude Code itself reads from a project's `.claude` —
+#      `skills/`, `commands/`, `agents/`, `output-styles/`, `rules/` — one by one, and nothing else
+#      (SKEIN-1330). Not the store's `settings.json` or `settings.local.json`: every box of the repo
+#      can write the store, so a settings file read from there is one where a box plants a hook or
+#      a status line that its siblings run (SKEIN-1153). And not `memory/`, `mailbox/` or the rest:
+#      Claude Code asks before every write to a path under a `.claude` directory, judging the path
+#      as written as well as where it leads, so a box's memory reached as `.claude/memory` prompted
+#      whatever the store was called. Memory is `autoMemoryDirectory` below, pointing at the store
+#      itself; the mailbox is `mailbox.sh`'s; the rest is skein's runtime. A link an earlier start
+#      made for any other entry, to the store under its new name or its old one, is removed — the
+#      link, never what it points at — and one it made for a kept entry to the old name is redone;
 #   2. the repo tracks files under .claude/ (committed settings, commands, skills) → link only the
 #      store's skein/ into it (the probes resolve the true store through that link). A link an
 #      earlier start made for layout 1 goes, the link and never what it points at.
 # In both, skein's settings go into `.claude/settings.local.json`: untracked, this box's own, and
 # never the repo's `settings.json`, which the repo may track and which is left exactly as it is
-# (SKEIN-1048). What goes in is skein's `tui`, `subagentPromptCacheTtl` and `statusLine` defaults,
-# read from the plugin's read-only `settings-defaults.json` and never from the store. Each default
+# (SKEIN-1048). Two settings point Claude at the store and the shared home without a prompt
+# (SKEIN-1330): `autoMemoryDirectory` is the store's `memory/` (unless the person set their own), so
+# memory is read and written there directly rather than through a link under `~/.claude`, which
+# Claude Code guards; and `$HOME/shared` is in `permissions.additionalDirectories`, so default and
+# acceptEdits mode write it as they write the checkout. Claude honours a local `autoMemoryDirectory`
+# only in a trusted folder, and the launcher trusts this one. What else goes in is skein's `tui`,
+# `subagentPromptCacheTtl` and `statusLine` defaults, read from the plugin's read-only
+# `settings-defaults.json` and never from the store. Each default
 # goes in only where neither file sets one, except the status line a past merge copied into `settings.json`, which ran
 # the store's renderer and which the local file now overrides. The same pass RETIRES every skein
 # hook a past merge copied into either file: skein's turn-state hooks load from its read-only
@@ -465,8 +478,8 @@ fi
 #
 # A clone whose `.claude` is still the store's own link — every box skein made before SKEIN-1053 —
 # is converted: the link is removed, never the store it points at, and the layout above is built in
-# its place. Everything the box reached through the link it still reaches, through the entries
-# linked one by one, except the store's two settings files. In layout 2, an untracked
+# its place. What the box reached through the link that Claude Code reads it still reaches, through
+# the entries linked one by one, and its memory through `autoMemoryDirectory`. In layout 2, an untracked
 # `settings.json` a past merge created is moved aside to `settings.json.skein-old`, once, which
 # Claude does not load; nothing is deleted.
 link_state="failed"
@@ -481,6 +494,12 @@ else
   if [ -L "$rc" ] && [ "$(cd "$rc" 2>/dev/null && pwd -P)" = "$store_real" ]; then
     rm -f "$rc" && converted="true"
   fi
+  # The same link to the store's name before SKEIN-1330, which a volume-wide box finds gone.
+  case "$store" in
+    /*/repos/*/store/data)
+      [ -L "$rc" ] && [ "$(readlink "$rc")" = "$(dirname "$store")/.claude" ] && rm -f "$rc" && converted="true"
+      ;;
+  esac
   if [ -L "$rc" ]; then
     # A link to somewhere other than this repo's store is somebody's own choice, and stays.
     link_state="linked"
@@ -488,17 +507,39 @@ else
     tracked="$(git -C "$clone_root" ls-files -- .claude 2>/dev/null | head -n 1)"
     mkdir -p "$rc" 2>/dev/null || true
     if [ "$converted" = "true" ]; then
-      claude_note="converted .claude from the store's link to a directory of this box's own; the store's entries are linked into it, except settings.json and settings.local.json, which are now this box's own"
+      claude_note="converted .claude from the store's link to a directory of this box's own; the store's skein/ and what Claude Code reads from .claude are linked into it, and settings.json and settings.local.json are now this box's own"
       # The files the repo tracks there, which the link stood in the way of.
       git -C "$clone_root" ls-files -z --deleted -- .claude 2>/dev/null \
         | xargs -0 -r git -C "$clone_root" checkout -- 2>/dev/null || true
     fi
+    # The entries this checkout's `.claude` links from the store: `skein` alone where the repo tracks
+    # its own `.claude`, and with the entries Claude Code reads from a project's `.claude` where it
+    # does not (SKEIN-1330, docs/decisions/store-is-not-dot-claude.md).
+    if [ -n "$tracked" ]; then keep="skein"; else keep="skein skills commands agents output-styles rules"; fi
+    # The store's name before SKEIN-1330, which links an earlier start made still name.
+    old_store=""
+    case "$store" in /*/repos/*/store/data) old_store="$(dirname "$store")/.claude" ;; esac
+    unlinked=""
+    for entry in "$rc"/*; do
+      [ -L "$entry" ] || continue
+      name="$(basename "$entry")"
+      target="$(readlink "$entry")"
+      if [ "$target" = "$store/$name" ]; then
+        case " $keep " in *" $name "*) continue ;; esac
+      elif [ -z "$old_store" ] || [ "$target" != "$old_store/$name" ]; then
+        continue
+      fi
+      rm -f "$entry" || continue
+      case " $keep " in
+        *" $name "*) ;;
+        *) if [ -n "$unlinked" ]; then unlinked="$unlinked, $name"; else unlinked="$name"; fi ;;
+      esac
+    done
+    if [ -n "$unlinked" ]; then
+      moved="removed the .claude links to the store's $unlinked, where every write asked for permission; memory is the store's memory/ through autoMemoryDirectory, and nothing was deleted"
+      if [ -n "$claude_note" ]; then claude_note="$claude_note; $moved"; else claude_note="$moved"; fi
+    fi
     if [ -n "$tracked" ]; then
-      for entry in "$rc"/*; do
-        name="$(basename "$entry")"
-        [ "$name" != "skein" ] && [ -L "$entry" ] && [ "$(readlink "$entry")" = "$store/$name" ] \
-          && rm -f "$entry"
-      done
       if [ -f "$rc/settings.json" ] && [ ! -L "$rc/settings.json" ] \
         && [ ! -e "$rc/settings.json.skein-old" ] \
         && ! git -C "$clone_root" ls-files --error-unmatch -- .claude/settings.json >/dev/null 2>&1; then
@@ -521,10 +562,8 @@ else
       fi
       [ -e "$rc/skein" ] || [ -L "$rc/skein" ] || ln -s "$store/skein" "$rc/skein" 2>/dev/null || true
     else
-      for entry in "$store"/*; do
-        [ -e "$entry" ] || continue
-        name="$(basename "$entry")"
-        case "$name" in settings.json|settings.local.json) continue ;; esac
+      for name in $keep; do
+        [ -e "$store/$name" ] || continue
         [ -e "$rc/$name" ] || [ -L "$rc/$name" ] || ln -s "$store/$name" "$rc/$name" 2>/dev/null || true
       done
     fi
@@ -541,7 +580,7 @@ else
       shared="/dev/null"
       [ -f "$rc/settings.json" ] && shared="$rc/settings.json"
       [ -f "$rc/settings.local.json" ] || echo '{}' > "$rc/settings.local.json"
-      merged="$(jq -s "$retire"'
+      merged="$(jq -s --arg mem "$store/memory" --arg shared "$HOME/shared" "$retire"'
         (.[0] | if type == "object" then . else {} end | retire) as $l
         | .[1] as $d | (.[2] // {}) as $s
         | $d.settings.statusLine as $line
@@ -552,6 +591,13 @@ else
         | (if .statusLine.command == $d.storeEraStatusLine then .statusLine.command = $line.command
            elif .statusLine == null and ($s.statusLine == null or $s.statusLine.command == $d.storeEraStatusLine)
            then .statusLine = (($s.statusLine // $line) + {command: $line.command})
+           else . end)
+        | (if .autoMemoryDirectory == null
+              or ((.autoMemoryDirectory | tostring) | test("/repos/[^/]+/store/(\\.claude|data)/memory/?$"))
+           then .autoMemoryDirectory = $mem else . end)
+        | (if (.permissions | type) == "object" or .permissions == null
+           then .permissions = ((.permissions // {})
+             | .additionalDirectories = (((.additionalDirectories // []) | map(select(. != $shared))) + [$shared]))
            else . end)
       ' "$rc/settings.local.json" "$defaults" "$shared" 2>/dev/null)"
       if [ -n "$merged" ]; then
@@ -659,6 +705,58 @@ if [ -r "$codex_installer" ] && bash "$codex_installer"; then
   codex_hooks_state="installed"
 fi
 
+# Codex's workspace sandbox writes the checkout and nothing else, so a Codex box could not write
+# `$HOME/shared` or post to the mailbox (SKEIN-1330). Both go in `sandbox_workspace_write`'s
+# `writable_roots` in `~/.codex/config.toml`, by their real paths — the shared home as
+# `skein_shared_home` names it, not the `$HOME/shared` link. The line is skein's, marked, and
+# replaced at every start. TOML has no merge, and a key twice in one table is a file Codex will not
+# load, so where the table already holds a `writable_roots` of the person's, or the person set the
+# table some other way, theirs is left exactly as it is and the boot report says `theirs`.
+codex_roots_state="absent"
+codex_cfg="$codex_home/config.toml"
+if [ "$box_self" = "true" ]; then shared_dir="$(skein_shared_home "$store")"; else shared_dir="$store/shared-home"; fi
+roots=""
+for root in "$shared_dir" "$store/mailbox"; do
+  [ -d "$root" ] && [ ! -L "$root" ] || continue
+  case "$root" in *'"'* | *'\'*) continue ;; esac
+  if [ -n "$roots" ]; then roots="$roots, \"$root\""; else roots="\"$root\""; fi
+done
+if [ -n "$roots" ] && mkdir -p "$codex_home" 2>/dev/null; then
+  mark="# skein: this repo's shared files and mailbox"
+  [ -f "$codex_cfg" ] || : >"$codex_cfg"
+  tmp="$(mktemp "$codex_home/.config.XXXXXX" 2>/dev/null)" || tmp=""
+  if [ -n "$tmp" ]; then
+    awk -v line="writable_roots = [$roots] $mark" -v mark="$mark" '
+      function header(s) { return s ~ /^[[:space:]]*\[/ }
+      function ours(s) { return s ~ /^[[:space:]]*\[[[:space:]]*sandbox_workspace_write[[:space:]]*\][[:space:]]*(#.*)?$/ }
+      function key(s) { return s ~ /^[[:space:]]*writable_roots[[:space:]]*=/ }
+      NR == FNR {
+        if (header($0)) { seen = 1; t = ours($0); if (t) table = 1 }
+        else if (t && key($0)) { if (index($0, mark)) mine = 1; else theirs = 1 }
+        else if (!seen && $0 ~ /^[[:space:]]*sandbox_workspace_write[[:space:]]*[.=]/) theirs = 1
+        next
+      }
+      header($0) { t = ours($0) }
+      t && key($0) && index($0, mark) { if (!theirs) print line; next }
+      { print }
+      ours($0) && !theirs && !mine { print line }
+      END {
+        if (!table && !theirs) { print ""; print "[sandbox_workspace_write]"; print line }
+        exit theirs ? 3 : 0
+      }
+    ' "$codex_cfg" "$codex_cfg" >"$tmp"
+    case "$?" in
+      0) codex_roots_state="set" ;;
+      3) codex_roots_state="theirs" ;;
+      *) codex_roots_state="failed" ;;
+    esac
+    if [ "$codex_roots_state" != "failed" ] && ! cmp -s "$tmp" "$codex_cfg"; then
+      mv "$tmp" "$codex_cfg" || codex_roots_state="failed"
+    fi
+    rm -f "$tmp"
+  fi
+fi
+
 # The same project skills should be available to both runtimes. Claude reads them through
 # .claude/skills; Codex discovers user skills under ~/.codex/skills. Link each project skill
 # without replacing Codex's own/system skills.
@@ -694,8 +792,8 @@ if [ -d "$store" ] && [ -n "$vmid" ]; then
   if [ -n "$store_note" ]; then
     if [ -n "$claude_note" ]; then claude_note="$store_note; $claude_note"; else claude_note="$store_note"; fi
   fi
-  printf '{"ts":"%s","claude_link":"%s","claude_note":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$claude_note" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
+  printf '{"ts":"%s","claude_link":"%s","claude_note":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","codex_roots":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$claude_note" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$codex_roots_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
     > "$store/skein/boot/$vmid.json" 2>/dev/null || true
 fi
 [ "$tools_ok" = "true" ] || exit 1

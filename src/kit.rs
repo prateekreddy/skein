@@ -1595,7 +1595,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let dir = tempdir();
             let root = dir.join("fleet");
-            let store = dir.join("repos/web/store/.claude");
+            let store = dir.join("repos/web/store/data");
             let tree = root.join("web-main/tree");
             let home = dir.join("home");
             let mut install = crate::probes::plugin_install_under(&root.to_string_lossy());
@@ -2125,7 +2125,10 @@ mod tests {
         assert_eq!(
             kit.json("settings.local.json"),
             serde_json::json!({
-                "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"]
+                "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"],
+                // Not defaults: where this box's memory and shared files are (SKEIN-1330).
+                "autoMemoryDirectory": kit.store.join("memory"),
+                "permissions": { "additionalDirectories": [kit.home.join("shared")] },
             }),
             "the box's local settings override what the repo chose"
         );
@@ -2249,8 +2252,11 @@ mod tests {
         );
     }
 
-    /// Every store entry a box whose repo tracks nothing under `.claude` reaches through it, and the
-    /// two it must not: each is a link to the store's own, and the settings files are absent.
+    /// What a box whose repo tracks nothing under `.claude` reaches through it: the store's `skein/`
+    /// and the entries Claude Code reads from a project's `.claude`, each a link to the store's own,
+    /// and nothing else of the store's — not its settings files, which every box can write, and not
+    /// its memory, mailbox or runtime, where a write through `.claude` asks for permission
+    /// (SKEIN-1330).
     fn assert_store_linked_in(kit: &KitBox) {
         assert!(
             !kit.tree.join(".claude").is_symlink() && kit.tree.join(".claude").is_dir(),
@@ -2263,10 +2269,18 @@ mod tests {
                 continue;
             }
             let here = kit.claude(&name);
-            if name == "settings.json" || name == "settings.local.json" {
+            let read_by_claude = [
+                "skein",
+                "skills",
+                "commands",
+                "agents",
+                "output-styles",
+                "rules",
+            ];
+            if !read_by_claude.contains(&name.as_str()) {
                 assert!(
                     !here.is_symlink(),
-                    "the store's {name}, which every box can write, is linked into this box"
+                    "the store's {name} is linked into this box's .claude"
                 );
                 continue;
             }
@@ -2278,8 +2292,8 @@ mod tests {
             linked += 1;
         }
         assert!(
-            linked > 5,
-            "the store had almost nothing to link, so this checked little"
+            linked >= 2,
+            "neither skein/ nor skills/ was linked, so this checked little"
         );
     }
 
@@ -2344,10 +2358,11 @@ mod tests {
         bootstrap(kit);
     }
 
-    /// **A box whose repo tracks nothing under `.claude` gets a directory of its own, with each of
-    /// the store's entries linked into it and the store's settings files left out** (SKEIN-1053,
-    /// the owner's answer to SKEIN-1153). What would make it fail: `.claude` linked to the store
-    /// whole, as before (the first assertion); either settings file linked; an entry not linked;
+    /// **A box whose repo tracks nothing under `.claude` gets a directory of its own, with the
+    /// store's `skein/` and what Claude Code reads linked into it and the store's settings files,
+    /// memory and runtime left out** (SKEIN-1053, the owner's answer to SKEIN-1153, SKEIN-1330).
+    /// What would make it fail: `.claude` linked to the store whole, as before (the first
+    /// assertion); either settings file, or `memory/`, linked; `skein/` or `skills/` not linked;
     /// the directory not excluded (`git status` lists it).
     #[test]
     fn a_repo_with_no_claude_gets_a_directory_of_its_own_with_the_store_linked_in() {
@@ -2380,8 +2395,8 @@ mod tests {
     /// **A box whose `.claude` is the store's link is converted, and keeps everything it reached
     /// through it but the store's two settings files** (SKEIN-1053).
     ///
-    /// What a converted box keeps, each asserted below: every entry of the store, linked one by one
-    /// (memory, skills, the mailbox, skein's machinery and the rest); every byte of the store's
+    /// What a converted box keeps, each asserted below: the store's `skein/` and what Claude Code
+    /// reads from `.claude`, linked one by one (SKEIN-1330); every byte of the store's
     /// memory and skills and its settings file, since the conversion removes a link and never
     /// what it points at; the memory Claude's memory tool writes, whose bridge resolves into the
     /// store both before the next session's bootstrap and after it; a clean tree. What it no
@@ -2432,8 +2447,8 @@ mod tests {
         assert_eq!(
             kit.boot()["claude_note"],
             "converted .claude from the store's link to a directory of this box's own; the \
-             store's entries are linked into it, except settings.json and settings.local.json, \
-             which are now this box's own",
+             store's skein/ and what Claude Code reads from .claude are linked into it, and \
+             settings.json and settings.local.json are now this box's own",
             "{}",
             kit.boot()
         );
@@ -2610,6 +2625,242 @@ mod tests {
             "a second file was moved over the first"
         );
         assert_eq!(kit.boot()["claude_note"], "", "{}", kit.boot());
+    }
+
+    /// **The checkout's `.claude` links the store's `skein/` and what Claude Code reads from a
+    /// project's `.claude`, and nothing else; a link an earlier start made to anything else goes,
+    /// and one to the store's old name is redone** (SKEIN-1330).
+    ///
+    /// Claude Code judges a path as written as well as where it leads, so `.claude/memory` asked
+    /// before every write even once the store was not called `.claude`.
+    ///
+    /// What would make it fail: the kit linking every store entry again (`memory` and `mailbox` are
+    /// back), the prune keyed on the new name only (the old-name `memory` link survives), the
+    /// prune touching a link skein did not make (`notes` goes), or a kept entry's old-name link left
+    /// dangling (`skills` and, in a repo that ships `.claude`, `skein` point at a store that is gone).
+    #[test]
+    fn the_checkout_links_only_what_claude_code_reads_from_the_store() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        use std::os::unix::fs::symlink;
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        for ships in [None, Some("{}\n")] {
+            let kit = KitBox::new("claude", ships);
+            let old = kit.store.with_file_name(".claude");
+            let rc = kit.tree.join(".claude");
+            fs::create_dir_all(&rc).unwrap();
+            fs::create_dir_all(kit.store.join("commands")).unwrap();
+            // What a start before SKEIN-1330 left: every entry linked, to the store's old name.
+            symlink(old.join("memory"), rc.join("memory")).unwrap();
+            symlink(old.join("skills"), rc.join("skills")).unwrap();
+            symlink(old.join("skein"), rc.join("skein")).unwrap();
+            symlink(kit.store.join("mailbox"), rc.join("mailbox")).unwrap();
+            symlink(kit.dir.join("elsewhere"), rc.join("notes")).unwrap();
+
+            kit.start();
+
+            let link = |name: &str| fs::read_link(rc.join(name)).ok();
+            assert_eq!(link("skein"), Some(kit.store.join("skein")), "{ships:?}");
+            assert_eq!(
+                link("memory"),
+                None,
+                "{ships:?}: .claude/memory is still linked"
+            );
+            assert_eq!(
+                link("mailbox"),
+                None,
+                "{ships:?}: .claude/mailbox is still linked"
+            );
+            assert_eq!(link("notes"), Some(kit.dir.join("elsewhere")), "{ships:?}");
+            match ships {
+                None => {
+                    assert_eq!(link("skills"), Some(kit.store.join("skills")));
+                    assert_eq!(link("commands"), Some(kit.store.join("commands")));
+                }
+                Some(_) => assert_eq!(
+                    link("skills"),
+                    None,
+                    "a shipped .claude got the store's skills"
+                ),
+            }
+            // Nothing else of the store's is reachable through the checkout's `.claude`.
+            for entry in fs::read_dir(&rc).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                if let Some(to) = link(&name) {
+                    assert!(
+                        !to.starts_with(&kit.store) && !to.starts_with(&old)
+                            || ["skein", "skills", "commands"].contains(&name.as_str()),
+                        "{ships:?}: .claude/{name} links into the store"
+                    );
+                }
+            }
+            let note = kit.boot()["claude_note"].as_str().unwrap_or("").to_string();
+            assert!(
+                note.contains("memory") && note.contains("mailbox"),
+                "{note}"
+            );
+
+            // The next start changes nothing.
+            kit.start();
+            assert_eq!(link("skein"), Some(kit.store.join("skein")));
+            assert_eq!(link("memory"), None);
+        }
+    }
+
+    /// **The box's own settings send Claude's memory to the store and let it write `~/shared`,
+    /// with no link under `.claude` and no prompt** (SKEIN-1330), in both layouts, once.
+    ///
+    /// Claude Code's own memory directory is `~/.claude/projects/<slug>/memory`, and with that a
+    /// link into the store every memory write in default or acceptEdits mode asked, whatever the
+    /// store was called; `autoMemoryDirectory` set to the store's `memory/` asked nothing.
+    ///
+    /// What would make it fail: the merge not writing `autoMemoryDirectory` (absent), writing it
+    /// over the person's own (`/mine`), not replacing skein's old value (the `.claude` path stays),
+    /// or adding `$HOME/shared` again on every start (it appears twice).
+    #[test]
+    fn the_box_settings_point_memory_at_the_store_and_allow_the_shared_home() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        for ships in [None, Some("{}\n")] {
+            let kit = KitBox::new("claude", ships);
+            let shared = kit.home.join("shared").to_string_lossy().into_owned();
+            let mem = kit.store.join("memory").to_string_lossy().into_owned();
+            fs::create_dir_all(kit.claude("")).unwrap();
+            // Skein's value from before the move, and a directory the person added themselves.
+            fs::write(
+                kit.claude("settings.local.json"),
+                serde_json::json!({
+                    "autoMemoryDirectory": kit.store.with_file_name(".claude").join("memory"),
+                    "permissions": { "additionalDirectories": ["/theirs"], "allow": ["Bash(ls)"] },
+                })
+                .to_string(),
+            )
+            .unwrap();
+            kit.start();
+            kit.start();
+            let local = kit.json("settings.local.json");
+            assert_eq!(
+                local["autoMemoryDirectory"],
+                mem.as_str(),
+                "{ships:?}: {local}"
+            );
+            assert_eq!(
+                local["permissions"]["additionalDirectories"],
+                serde_json::json!(["/theirs", shared]),
+                "{ships:?}: {local}"
+            );
+            assert_eq!(
+                local["permissions"]["allow"],
+                serde_json::json!(["Bash(ls)"])
+            );
+
+            // A memory directory the person chose is theirs.
+            let mut mine = local.clone();
+            mine["autoMemoryDirectory"] = "/mine".into();
+            fs::write(kit.claude("settings.local.json"), mine.to_string()).unwrap();
+            kit.start();
+            assert_eq!(
+                kit.json("settings.local.json")["autoMemoryDirectory"],
+                "/mine"
+            );
+        }
+    }
+
+    /// **A Codex box may write the shared home and the mailbox: both are `writable_roots` in its
+    /// `config.toml`, in a line skein owns, and never over the person's own** (SKEIN-1330).
+    ///
+    /// What would make it fail: the kit not writing the line (nothing writable), writing the link
+    /// `$HOME/shared` rather than where it leads (Codex checks the real path), a second line on the
+    /// second start (a key twice is a file Codex will not load — checked by parsing it), dropping a
+    /// key of the person's in the same table, or writing beside a `writable_roots` of theirs.
+    #[test]
+    fn codex_may_write_the_shared_home_and_the_mailbox() {
+        if !have_jq() {
+            return skip("no jq here, and the kit's merge is jq");
+        }
+        let parse = |p: &Path| -> Option<serde_json::Value> {
+            let out = Command::new("python3")
+                .args(["-I", "-c", "import json,sys,tomllib; print(json.dumps(tomllib.load(open(sys.argv[1],'rb'))))"])
+                .arg(p)
+                .output()
+                .ok()?;
+            assert!(out.status.success(), "not TOML Codex can load: {out:?}");
+            serde_json::from_slice(&out.stdout).ok()
+        };
+        let _lock = env_lock();
+        let skein_home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &*skein_home);
+        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
+        let kit = KitBox::new("codex", None);
+        let cfg = kit.home.join(".codex/config.toml");
+        let want = serde_json::json!([
+            kit.store.with_file_name("shared-home"),
+            kit.store.join("mailbox"),
+        ]);
+
+        // No config at all, then the same start again. Twice before the comparison: the kit trusts
+        // the checkout in `config.toml` only once the file is there, which the first start makes.
+        kit.start();
+        kit.start();
+        let first = fs::read_to_string(&cfg).unwrap();
+        kit.start();
+        assert_eq!(
+            fs::read_to_string(&cfg).unwrap(),
+            first,
+            "the third start changed it"
+        );
+        if let Some(v) = parse(&cfg) {
+            assert_eq!(
+                v["sandbox_workspace_write"]["writable_roots"], want,
+                "{first}"
+            );
+        }
+        assert_eq!(kit.boot()["codex_roots"], "set");
+
+        // The person's own table: the line goes in it, and their key stays.
+        fs::write(
+            &cfg,
+            "[sandbox_workspace_write]\nnetwork_access = true\n\n[tui]\nx = 1\n",
+        )
+        .unwrap();
+        kit.start();
+        kit.start();
+        let text = fs::read_to_string(&cfg).unwrap();
+        if let Some(v) = parse(&cfg) {
+            assert_eq!(
+                v["sandbox_workspace_write"]["writable_roots"], want,
+                "{text}"
+            );
+            assert_eq!(
+                v["sandbox_workspace_write"]["network_access"], true,
+                "{text}"
+            );
+            assert_eq!(v["tui"]["x"], 1, "{text}");
+        }
+
+        // Their own list: left exactly as it was, and said.
+        // With the checkout's trust already in it, so the only thing that could change is skein's.
+        let theirs = format!(
+            "[sandbox_workspace_write]\nwritable_roots = [\"/theirs\"]\n\n[projects.\"{}\"]\n\
+             trust_level = \"trusted\"\n",
+            kit.tree.display()
+        );
+        fs::write(&cfg, &theirs).unwrap();
+        kit.start();
+        assert_eq!(fs::read_to_string(&cfg).unwrap(), theirs);
+        assert_eq!(kit.boot()["codex_roots"], "theirs");
     }
 
     /// **Every `.claude` or `$HOME` path the guide skein writes into a box names is there, in both
