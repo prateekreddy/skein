@@ -490,6 +490,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
         .route("/api/boxes/:name/restart-agent", post(api_restart_agent))
+        .route("/api/boxes/:name/restart", post(api_restart_box))
         .route("/api/boxes/:name/takeover", post(api_takeover))
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))

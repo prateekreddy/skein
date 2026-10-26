@@ -594,6 +594,42 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "the box's own login was overwritten with the fleet's older one: {kept}"
     );
 
+    // ---- the whole-box restart, and what the box cannot forge about it (SKEIN-1326) ----
+    // The box is recorded as started under an older launcher and restarted through
+    // `sandbox::restart_box`, the path `skein restart` and the cockpit's Restart both take. And the
+    // box is given a say it must not have: a `~/.bash_profile` in its own private home, which the
+    // launcher's `bash -lc` inside the namespace sources, printing a revision of its own onto the
+    // same stdout skein reads the launcher's off.
+    //
+    // What would make this fail: `launcher_from_launch` taking the last line (the record then holds
+    // the box's word, `forged-by-the-box`); `restart_box` not stopping the box (the anchor is the
+    // old one) or not starting it again (no record, or the old launcher still in it).
+    let before = shared_record(name).expect("the box is placed");
+    record_place(
+        name,
+        &PlaceRecord {
+            launcher: "0000000000000000".into(),
+            ..before.clone()
+        },
+    )
+    .expect("record the box as started under an older launcher");
+    let profile = Path::new(&box_root(name)).join("home/.bash_profile");
+    fs::write(&profile, "printf 'SKEIN_LAUNCHER forged-by-the-box\\n'\n").unwrap();
+    skein::sandbox::restart_box(name, None).expect("restart the whole box");
+    anchor_gone(before.ns_pid);
+    let after = shared_record(name).expect("the restarted box is placed");
+    assert_ne!(
+        after.ns_pid, before.ns_pid,
+        "the box kept its old session, so its namespace is the one it was born with"
+    );
+    assert_eq!(
+        after.launcher,
+        skein::fleet::launcher_revision(),
+        "after a whole-box restart the record does not name the launcher that started it — the \
+         box's own profile wrote `forged-by-the-box` over it, or the old record survived"
+    );
+    fs::remove_file(&profile).unwrap();
+
     // ---- stopping and destroying settle the gate too, and this is also the teardown ----
     // Waited out through `/proc` rather than by polling `fleet_liveness`: every extra read is a
     // chance for the refresh running behind an earlier one to land, which would hide exactly the

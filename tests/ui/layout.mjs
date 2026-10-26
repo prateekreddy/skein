@@ -65,22 +65,22 @@ const browser = await chromium.launch();
 
 /** A page on the board at `w`×`h`, the fleet answered by this suite. `hold` delays the fleet's
  *  answers by that many ms; `touch` makes it a touch screen (`pointer: coarse`). */
-async function board(w, h, { hold = 0, touch = false } = {}) {
+async function board(w, h, { hold = 0, touch = false, boxes: fleet = BOXES } = {}) {
   const context = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: touch, isMobile: touch });
   const page = await context.newPage();
   const seen = erring(page, { say: (kind, text) => `${kind}: ${text}` });
   const later = () => new Promise(r => setTimeout(r, hold));
-  await page.route("**/api/boxes", async r => { await later(); await r.fulfill({ json: BOXES }).catch(() => {}); });
+  await page.route("**/api/boxes", async r => { await later(); await r.fulfill({ json: fleet }).catch(() => {}); });
   await page.route("**/api/events", async r => {
     await later();
     await r.fulfill({ contentType: "text/event-stream",
-      body: `event: snapshot\ndata: ${JSON.stringify({ event: "snapshot", boxes: BOXES })}\n\n` }).catch(() => {});
+      body: `event: snapshot\ndata: ${JSON.stringify({ event: "snapshot", boxes: fleet })}\n\n` }).catch(() => {});
   });
   await page.route("**/api/repos", r => r.fulfill({ json: [{ id: "web", source: "https://github.com/acme/web.git", work: "/w/web" }] }));
   await page.route("**/api/boxes/*/files*", r => r.fulfill({ json: FILES }));
   await page.route("**/api/boxes/*/settings", r => r.fulfill({ json: {} }));
   await page.goto(`${base}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
-  if (!hold) await page.waitForFunction(() => document.querySelectorAll("#fleet .row").length >= 4, null, { timeout: 15000 });
+  if (!hold) await page.waitForFunction(n => document.querySelectorAll("#fleet .row").length >= n, fleet.length, { timeout: 15000 });
   return { page, context, ...seen };
 }
 const rect = (page, sel) => page.evaluate(s => {
@@ -256,6 +256,98 @@ try {
       await page.evaluate(() => document.getElementById("drestart")?.disabled), false);
     sayBlips();
     value("the board raised no page errors at 1280", errors, []);
+    await context.close();
+  }
+
+  // --- SKEIN-1326: one Restart, and it chooses -----------------------------------------------------
+  // A box that started under an older launcher (`cover: "older"`, the verdict the board serves) is
+  // restarted WHOLE, after asking in the coordinator's words; a current box keeps the agent-only
+  // restart. Both routes are answered here, and what is asserted is which one each press reached.
+  {
+    const OLDER = [
+      { name: "web-old", repo: "web", branch: "feat/old", state: "idle", tier: 4, age_secs: 60, agent: "claude",
+        pause: "none", headline: "", task: "", cover: "older", stale: ["launcher"] },
+      { name: "web-peers", repo: "web", branch: "feat/peers", state: "idle", tier: 4, age_secs: 60, agent: "claude",
+        pause: "none", headline: "", task: "", cover: "older", stale: ["peers"] },
+      { name: "web-new", repo: "web", branch: "feat/new", state: "idle", tier: 4, age_secs: 60, agent: "claude",
+        pause: "none", headline: "", task: "", cover: "" },
+    ];
+    const { page, context, errors, sayBlips } = await board(1280, 800, { boxes: OLDER });
+    // **What would make this fail:** the row hint keyed on anything but `cover`, or still reading
+    // "⚠ older isolation" — the older row says what to do, and the current one says nothing.
+    value("a box that started before the last update says 'restart to update' on its row, and a current one does not",
+      await page.evaluate(() => ["web-old", "web-new"].map(n => {
+        const c = document.querySelector(`#fleet .row[data-name="${n}"] .covwarn`);
+        return c && getComputedStyle(c).display !== "none" ? c.textContent : ""; })),
+      ["restart to update", ""]);
+    const sent = [];
+    let answer = { ok: true };
+    await page.route("**/api/boxes/*/restart", async r => {
+      sent.push(`box ${decodeURIComponent(new URL(r.request().url()).pathname.split("/")[3])}`);
+      await r.fulfill({ json: answer }).catch(() => {});
+    });
+    await page.route("**/api/boxes/*/restart-agent", async r => {
+      sent.push(`agent ${decodeURIComponent(new URL(r.request().url()).pathname.split("/")[3])}`);
+      await r.fulfill({ json: { ok: true } }).catch(() => {});
+    });
+    const ask = () => page.evaluate(() => { const d = document.getElementById("rsask");
+      return d ? { title: d.querySelector(".nb-head b").textContent, body: d.querySelector(".rs-body").textContent,
+                   buttons: [...d.querySelectorAll("button")].map(b => b.textContent),
+                   focus: document.activeElement?.textContent || "" } : null; });
+    await page.evaluate(() => openDiff("web-old"));
+    await page.waitForTimeout(300);
+    await page.click("#drestart");
+    await page.waitForTimeout(300);
+    // **What would make this fail:** `pressRestart` sending the older box down the agent path —
+    // an idle box restarts at once there, so there is no question and `restart-agent` is sent.
+    value("Restart on a box that started before the last update asks first, in the coordinator's words",
+      await ask(), { title: "Restart web-old?",
+        body: "This box started before the last update, so restarting Claude alone won't pick it up. Restarting the box stops everything running in it — Claude, its shell and anything left running in the background — and starts it again. Its files and conversation stay.",
+        buttons: ["Cancel", "Restart box"], focus: "Cancel" });
+    await page.click('#rsask [data-a="no"]');
+    await page.waitForTimeout(200);
+    value("Cancel sends nothing", { open: await ask(), sent: sent.slice() }, { open: null, sent: [] });
+    await page.click("#drestart");
+    await page.waitForTimeout(200);
+    await page.click('#rsask [data-a="yes"]');
+    await page.waitForFunction(() => !document.getElementById("drestart")?.disabled, null, { timeout: 8000 }).catch(() => {});
+    // **What would make this fail:** `restartBox` posting to `restart-agent`, or to nothing.
+    value("Restart box restarts the whole box, and only that", sent.slice(), ["box web-old"]);
+    // A failure is said, whole, where failures are said. **What would make this fail:** the
+    // notice dropped (a toast that is gone in seconds) or the server's reason replaced.
+    answer = { ok: false, error: "web-old was stopped, and starting it again failed: the launcher did not report an anchor pid" };
+    await page.evaluate(() => openDiff("web-old"));
+    await page.waitForTimeout(300);
+    await page.click("#drestart");
+    await page.waitForTimeout(200);
+    await page.click('#rsask [data-a="yes"]');
+    await page.waitForFunction(() => document.getElementById("notice")?.classList.contains("show"), null, { timeout: 8000 }).catch(() => {});
+    value("and a whole-box restart that failed says why, plainly",
+      await page.evaluate(() => document.querySelector("#notice .nt-text")?.textContent || ""),
+      "could not restart web-old: web-old was stopped, and starting it again failed: the launcher did not report an anchor pid");
+    await page.evaluate(() => document.querySelector("#notice .x")?.click());
+    // The reason is the row's own (`stale`), and a box whose only stale decision is the peer switch
+    // is not told it missed an update. **What would make this fail:** the question ignoring
+    // `stale`, so every box reads "before the last update".
+    await page.evaluate(() => openDiff("web-peers"));
+    await page.waitForTimeout(300);
+    await page.click("#drestart");
+    await page.waitForTimeout(300);
+    value("a box born before peer messaging was changed is told that, not that it missed an update",
+      (await ask())?.body?.split(". ")[0], "This box started before peer messaging was changed, so restarting Claude alone won't pick it up");
+    await page.click('#rsask [data-a="no"]');
+    await page.waitForTimeout(200);
+    await page.evaluate(() => openDiff("web-new"));
+    await page.waitForTimeout(300);
+    await page.click("#drestart");
+    await page.waitForTimeout(300);
+    // **What would make this fail:** every box restarted whole — a question in front of the
+    // cheap case, and a stopped box where only the agent needed restarting.
+    value("Restart on a current box restarts only its agent, at once",
+      { asked: await ask(), sent: sent.slice() }, { asked: null, sent: ["box web-old", "box web-old", "agent web-new"] });
+    await page.waitForFunction(() => !document.getElementById("drestart")?.disabled, null, { timeout: 8000 }).catch(() => {});
+    sayBlips();
+    value("the board raised no page errors restarting", errors, []);
     await context.close();
   }
 

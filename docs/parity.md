@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 107  (NOT '.route("' — that gives 93, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 108  (NOT '.route("' — that gives 94, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 175 unique, 180 occurrences
-grep -c 'function ' src/web/index.html                          # 510
+grep -c 'function ' src/web/index.html                          # 514
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -100,7 +100,10 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   keep structure; capped at 200 files and `UPLOAD_CAP` 2 GB per file, enforced as the bytes go past; streamed not buffered; one batch directory per drop; the in-box path
   is pasted into the live terminal.
 - **Terminal clipboard** — `⌘C`/`⌘V` inside the keydown gesture; `⌃C` deliberately never intercepted.
-- Session lifecycle: start, stop, restart the agent, resume, **resume in batch**.
+- Session lifecycle: start, stop, restart, resume, **resume in batch**. **Restart is one button
+  that chooses** (SKEIN-1326): a box that started under an older launcher than the one installed
+  (its row's `cover`) is restarted whole, after asking — `skein restart`'s own path, the route
+  `/api/boxes/:name/restart` — and every other box restarts only its agent (`restart-agent`).
 - **Session digest** — "what happened here": blocked-on, last message, journal, commits, diff
   summary, assembled from free signals with no model tokens. Distinct from `narrate`, which is the
   paid version.

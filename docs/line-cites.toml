@@ -73,7 +73,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/parity.md:154"]
+["docs/parity.md:157"]
 line = "stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -204,7 +204,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return (StatusCode::FORBIDDEN, \"cross-origin stream blocked\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/boxes.rs:681"]
+["src/bin/skein-server/boxes.rs:753"]
 line = "\"ok\": false,"
 window = "serde_json::json!({\u000b\"ok\": false,\u000b\"resumed\": resumed,"
 cited_by = ["docs/recovery-survey.md"]
@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:583"]
+["src/bin/skein-server/main.rs:584"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:593"]
+["src/bin/skein-server/main.rs:594"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:684"]
+["src/bin/skein-server/main.rs:685"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:690"]
+["src/bin/skein-server/main.rs:691"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -660,56 +660,52 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"could not refresh {} — a box created now clones from the remote instead\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1534"]
-line = "if branch.trim().is_empty() {"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein.rs:1539"]
+["src/bin/skein.rs:1526"]
 line = "return Err(format!(\"unsupported runtime {agent:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1569"]
+["src/bin/skein.rs:1559"]
 line = "let Some((program, args)) = argv.split_first() else {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1573"]
+["src/bin/skein.rs:1563"]
 line = "Ok(s) if s.success() => Ok(()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1577"]
+["src/bin/skein.rs:1567"]
 line = "Err(e) if e.kind() == ErrorKind::NotFound => Err(match program.as_str() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1580"]
+["src/bin/skein.rs:1570"]
 line = "}),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1688"]
+["src/bin/skein.rs:1678"]
 line = "\"{} of {} box{} could not be copied out ({}) — that work is still only inside {sandbox}, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1724"]
+["src/bin/skein.rs:1714"]
 line = "let asked = [(\"memory\", memory), (\"cpus\", cpus), (\"disk\", disk)]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1726"]
+["src/bin/skein.rs:1716"]
 line = ".filter(|(_, v)| !v.trim().is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1731"]
+["src/bin/skein.rs:1721"]
 line = "\"\\n\\nThe size you asked for ({asked}) is not in that create line — it renders the size \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1755"]
+["src/bin/skein.rs:1745"]
 line = "return Err(format!(\"unsupported runtime {runtime:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1781"]
+["src/bin/skein.rs:1771"]
 line = "return Err(format!("
 window = ".join(\", \");\u000breturn Err(format!(\u000b\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1782"]
+["src/bin/skein.rs:1772"]
 line = "\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
 
@@ -721,59 +717,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// module note. `fleet` is never empty: `load_config` repairs a blank name, which is what makes"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:305"]
+["src/board.rs:311"]
 line = "pub state: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:332"]
+["src/board.rs:338"]
 line = "pub headline: Option<String>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:338"]
+["src/board.rs:344"]
 line = "pub pause: Pause,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:341"]
+["src/board.rs:347"]
 line = "/// each wants a different move from you, so the row names it instead of saying \"decision\"."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:343"]
+["src/board.rs:349"]
 line = "pub blocked_kind: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:348"]
+["src/board.rs:354"]
 line = "/// installed probe contract. See [`crate::signals::hook_health`] for what each one asks of a"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:355"]
+["src/board.rs:361"]
 line = "pub hook_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:360"]
+["src/board.rs:366"]
 line = "pub status_from: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:365"]
+["src/board.rs:371"]
 line = "pub screen_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:383"]
+["src/board.rs:389"]
 line = "pub foreign: bool,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:418"]
+["src/board.rs:424"]
 line = "pub cover: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:428"]
+["src/board.rs:441"]
 line = "/// Three ways to be uncapped and they are not one problem. *no-limit-computed* is skein's own"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:433"]
+["src/board.rs:446"]
 line = "pub ceiling: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:443"]
+["src/board.rs:456"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1841,7 +1837,11 @@ line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1059"]
+["src/sandbox.rs:1027"]
+line = "if branch.trim().is_empty() {"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/sandbox.rs:1136"]
 line = "fn refusal_argv(name: &str) -> Vec<String> {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2039,47 +2039,47 @@ cited_by = ["docs/recovery-survey.md"]
 line = "else notice(`could not continue ${name}: ${d.error || \"no reason given\"}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:332"]
+["src/web/app/board.js:398"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:335"]
+["src/web/app/board.js:401"]
 line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:761"]
+["src/web/app/board.js:828"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:812"]
+["src/web/app/board.js:879"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:816"]
+["src/web/app/board.js:883"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:825"]
+["src/web/app/board.js:892"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:863"]
+["src/web/app/board.js:930"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:864"]
+["src/web/app/board.js:931"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:954"]
+["src/web/app/board.js:1021"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1184"]
+["src/web/app/board.js:1251"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1216"]
+["src/web/app/board.js:1283"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2104,36 +2104,36 @@ cited_by = ["docs/recovery-survey.md"]
 line = "es.onerror = () => { document.getElementById(\"live\").classList.remove(\"on\"); document.getElementById(\"livetext\").textContent = \"reconnecting…\"; };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:737"]
+["src/web/app/boot.js:743"]
 line = "return `${name.charAt(0).toUpperCase()}${name.slice(1)} is failing: ${sentence(health[lead]?.problem || health[lead]?.detail) || \"no reason given\"}.${fix ? ` To fix: ${fix}.` : \"\"}${extra}`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:786"]
+["src/web/app/boot.js:792"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1266"]
+["src/web/app/boot.js:1272"]
 line = "if (!r.ok) { notice(`could not start the update: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1292"]
+["src/web/app/boot.js:1298"]
 line = "updateTail = setTimeout(step, 1500);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1309"]
+["src/web/app/boot.js:1315"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1384"]
+["src/web/app/boot.js:1390"]
 line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1579"]
+["src/web/app/boot.js:1585"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1587"]
+["src/web/app/boot.js:1593"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 

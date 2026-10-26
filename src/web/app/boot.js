@@ -729,8 +729,14 @@ function loadHealth() {
     const sentence = text => (text || "").split(/\.(?:\s|$)/)[0].trim();
     const many = (n, one, more) => n === 1 ? one : more;
     const names = health.dark_boxes || [];
+    // A box that started before the last update is fixed by its own Restart button, which restarts
+    // the whole box for exactly these boxes (SKEIN-1326) — so that is what this points at, rather
+    // than the CLI line the report's fix carries for `skein doctor`.
+    const older = health.uncovered_boxes || [];
     banner.querySelector(".healthgo").textContent = lead === "probes" && dark
       ? `${dark} running ${many(dark, "box sends", "boxes send")} no signals (${names.join(", ")}) — restart ${many(dark, "it", "them")}: \`skein restart ${names[0]}\`.${extra}`
+      : lead === "cover" && older.length
+      ? `${older.length} ${many(older.length, "box", "boxes")} started before the last update (${older.join(", ")}) — open ${many(older.length, "it", "each")} and press Restart to update ${many(older.length, "it", "them")}.${extra}`
       : lead
       ? (() => {
           const name = nameOf(lead), fix = sentence(health[lead]?.fix);

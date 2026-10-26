@@ -18,16 +18,39 @@ use super::*;
 /// launcher, which is `fleet`'s. A method on `PlaceRecord` would put that edge back to save an
 /// import, and `module-check` said so within a minute of it being written.
 pub fn cover_is_current(name: &str, record: &crate::place::PlaceRecord) -> bool {
-    !record.launcher.is_empty()
-        && record.launcher == launcher_revision()
-        // **And the peer switch, which the revision cannot see.** `launcher_revision` hashes
-        // `box-session.sh`, and `peer_messaging` lives in `repos.json` — flipping it changes no byte
-        // of that script, so a box still running the mount it was born with looked exactly like one
-        // running the current cover. `is_none_or` is the third answer: a launcher too old to say
-        // leaves the box alone rather than being read as either position (SKEIN-572).
-        && record
-            .peers
-            .is_none_or(|born| born == crate::repos::box_is_on_the_peer_network(name))
+    why_cover_is_stale(name, record).is_empty()
+}
+
+/// Which start-time decisions this box was born with that are not the ones skein would make now
+/// — empty when it is current, which is all [`cover_is_current`] asks.
+///
+/// A list of reasons rather than a yes or no, because the cockpit says which one it is before it
+/// restarts a whole box (SKEIN-1326): "started before the last update" and "started before peer
+/// messaging was changed" are different things to have done to you. Each entry is a key the page
+/// has words for (`src/web/app/board.js`, `RESTART_REASONS`).
+///
+/// **The pattern each entry follows**: the launcher reports a decision on stdout at start, the
+/// placement record keeps it (`PlaceRecord`), and this compares it with what the configuration
+/// says now. A decision added that way is one more `if` here, one more key in the page's words, and
+/// one more assertion in `every_stale_decision_is_named_by_its_own_reason`.
+pub fn why_cover_is_stale(name: &str, record: &crate::place::PlaceRecord) -> Vec<&'static str> {
+    let mut stale = Vec::new();
+    // [`crate::place::PlaceRecord::launcher`] says why an empty revision is stale, not unknown.
+    if record.launcher.is_empty() || record.launcher != launcher_revision() {
+        stale.push("launcher");
+    }
+    // **And the peer switch, which the revision cannot see.** `launcher_revision` hashes
+    // `box-session.sh`, and `peer_messaging` lives in `repos.json` — flipping it changes no byte of
+    // that script, so a box still running the mount it was born with looked exactly like one
+    // running the current cover. `is_none_or` is the third answer: a launcher too old to say leaves
+    // the box alone rather than being read as either position (SKEIN-572).
+    if !record
+        .peers
+        .is_none_or(|born| born == crate::repos::box_is_on_the_peer_network(name))
+    {
+        stale.push("peers");
+    }
+    stale
 }
 
 /// The line in `box-session.sh` that [`install_launcher`] replaces with [`launcher_revision`].
@@ -131,10 +154,13 @@ pub fn limits_from_launch(out: &str) -> String {
 /// The third answer is the point. `None` is a record from before this, or a launcher too old to
 /// print `SKEIN_PEERS`, and [`cover_is_current`] leaves such a box alone rather than reading the
 /// silence as either position — see [`crate::place::PlaceRecord::peers`].
+///
+/// **The first line, not the last**, for the reason [`launcher_from_launch`] gives: this answer
+/// feeds [`cover_is_current`], and a line after the launcher's own is one the box can print.
 pub fn peers_from_launch(out: &str) -> Option<bool> {
     out.lines()
         .filter_map(|l| l.trim().strip_prefix("SKEIN_PEERS "))
-        .next_back()
+        .next()
         .map(|said| said.trim() == "1")
 }
 
@@ -147,8 +173,8 @@ pub fn peers_from_launch(out: &str) -> Option<bool> {
 /// launcher writes them on STDOUT now, as `SKEIN_NOTICE <one line>`, which is the channel skein
 /// already reads the anchor pid, the launcher revision, the ceiling and the peer flag off.
 ///
-/// All of them, in order, rather than `next_back()` like its neighbours: those parse a fact with
-/// one current value, where a second line means the first is stale. These are sentences, and a
+/// All of them, in order, rather than one line like its neighbours: those parse a fact with one
+/// value, so a second line is either stale or not the launcher's. These are sentences, and a
 /// launcher with two things to say must not have one of them silently dropped.
 pub fn notices_from_launch(out: &str) -> Vec<String> {
     out.lines()
@@ -184,10 +210,18 @@ pub fn is_capped(state: &str) -> bool {
 /// anything, and neither can the adoption path, where no launcher runs at all. Both mean the same
 /// thing — this box's cover is not known to be the current one — and [`crate::place::PlaceRecord`]
 /// stores it as such rather than guessing.
+///
+/// **The first line, not the last** (SKEIN-1326). The launcher prints its own line before any box
+/// namespace exists, and then hands the box's start to a `bash -lc` inside the namespace — a login
+/// shell, which reads `~/.bash_profile` from the box's own home, a file the box writes. Whatever
+/// that profile prints lands on this same stdout, after the launcher's line. Read last-wins, a box
+/// could print the current revision there and be reported as started under the current launcher by
+/// one that was older, which is the one thing this value exists to say — and the cockpit's Restart
+/// reads it to decide whether to restart the whole box or only its agent.
 pub fn launcher_from_launch(out: &str) -> String {
     out.lines()
         .filter_map(|l| l.trim().strip_prefix("SKEIN_LAUNCHER "))
-        .next_back()
+        .next()
         .map(|rev| rev.trim().to_string())
         .filter(|rev| !rev.is_empty() && rev != LAUNCHER_REVISION_MARK)
         .unwrap_or_default()
@@ -406,6 +440,18 @@ mod tests {
             "",
             "a launcher that predates the report was read as having answered"
         );
+        // A box's own `~/.bash_profile` runs inside the namespace after the launcher has printed
+        // its line, and prints to the same stdout. What would make this fail: `next_back()`, which
+        // records the box's claim and calls an older box current (SKEIN-1326).
+        assert_eq!(
+            launcher_from_launch(&format!(
+                "SKEIN_LAUNCHER 0000000000000000\nSKEIN_LAUNCHER {}\nSKEIN_ANCHOR 42\n",
+                launcher_revision()
+            )),
+            "0000000000000000",
+            "a revision printed after the launcher's own, where the box's login profile prints, \
+             was recorded as the launcher that built the box"
+        );
         assert_eq!(
             launcher_from_launch(&format!("SKEIN_LAUNCHER {LAUNCHER_REVISION_MARK}\n")),
             "",
@@ -463,6 +509,51 @@ mod tests {
         );
     }
 
+    /// **Each stale decision is named by its own reason** (SKEIN-1326), because the cockpit says
+    /// which before it restarts a whole box. Same name as the test above uses, so the peer switch
+    /// reads as the ship default (`true`) for it.
+    ///
+    /// What would make this fail: collapsing the reasons back to one (a peers-only box would then
+    /// read "launcher", or nothing), or dropping either comparison.
+    #[test]
+    fn every_stale_decision_is_named_by_its_own_reason() {
+        // Pinned: the peer half reads `repos.json`, and an unpinned `$SKEIN_HOME` is refused.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let record = |launcher: &str, peers: Option<bool>| crate::place::PlaceRecord {
+            launcher: launcher.to_string(),
+            peers,
+            ..Default::default()
+        };
+        let current = launcher_revision();
+        let named = |launcher: &str, peers| {
+            why_cover_is_stale("no-such-repo-box", &record(launcher, peers))
+        };
+        assert_eq!(
+            named(&current, Some(true)),
+            Vec::<&str>::new(),
+            "a current box has a reason to restart"
+        );
+        assert_eq!(
+            named(&current, None),
+            Vec::<&str>::new(),
+            "a launcher too old to say took a side"
+        );
+        assert_eq!(named("0000000000000000", Some(true)), vec!["launcher"]);
+        assert_eq!(
+            named("", Some(true)),
+            vec!["launcher"],
+            "a silent record was read as current"
+        );
+        assert_eq!(named(&current, Some(false)), vec!["peers"]);
+        assert_eq!(
+            named("0000000000000000", Some(false)),
+            vec!["launcher", "peers"]
+        );
+    }
+
     /// The host's reading of it, and the direction that must never be guessed.
     #[test]
     fn a_box_that_did_not_say_what_bounds_it_is_not_taken_to_be_bounded() {
@@ -507,11 +598,14 @@ mod tests {
             peers_from_launch("SKEIN_ANCHOR 42\nSKEIN_PEERS 0\n"),
             Some(false)
         );
-        // The last one wins, the way the ceiling's does: a launcher that reported twice is
-        // reporting a change, and the earlier line is the state it changed from.
+        // The FIRST one wins (SKEIN-1326). The launcher prints this once, before the box's
+        // namespace exists; a second line can only come from the box's own login profile, which
+        // runs after it. What would make this fail: `next_back()`, which takes the box's line.
         assert_eq!(
             peers_from_launch("SKEIN_PEERS 1\nSKEIN_PEERS 0\n"),
-            Some(false)
+            Some(true),
+            "a line printed after the launcher's own, where the box's profile prints, decided \
+             which side of the peer switch the box was born on"
         );
         assert_eq!(
             peers_from_launch("SKEIN_ANCHOR 42\n"),

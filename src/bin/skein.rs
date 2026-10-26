@@ -1447,14 +1447,12 @@ fn cmd_stop(name: &str) -> Result<(), String> {
 /// does not survive. Restarting only the agent's session is a different thing and stays where it
 /// is, on the cockpit's row.
 ///
-/// The stop is best-effort, deliberately: a box whose session is already gone must still be
-/// startable, and refusing here would leave the one case people most want this for — a box that is
-/// half-dead — with nothing to run.
+/// The stop and the start are [`skein::sandbox::restart_box`], which the cockpit's Restart runs
+/// too for a box that started under an older launcher (SKEIN-1326) — one path, so the button and
+/// this command cannot come to mean different things. This adds only what a terminal has: the
+/// flags, and the attach afterwards.
 fn cmd_restart(name: &str, opts: &[String]) -> Result<(), String> {
-    if let Err(why) = skein::sandbox::stop_box(name) {
-        eprintln!("{DIM}skein:{RESET} {name} did not stop cleanly ({why}); starting it anyway");
-    }
-    cmd_start(name, opts)
+    settle_start(name, start_the_box(name, opts, Bring::Restart))
 }
 
 /// Bring a box up inside the shared sandbox — the fleet's stand-in for `sbx create`.
@@ -1464,7 +1462,14 @@ fn cmd_restart(name: &str, opts: &[String]) -> Result<(), String> {
 /// does not exist until the session runs, and provisioning has to go through the placement that pid
 /// produces. `skein attach` then behaves exactly as it always has.
 fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
-    settle_start(name, start_the_box(name, opts))
+    settle_start(name, start_the_box(name, opts, Bring::Start))
+}
+
+/// Whether [`bring_up`] starts a box or stops it first.
+#[derive(Clone, Copy)]
+enum Bring {
+    Start,
+    Restart,
 }
 
 /// Why `skein start` did not finish: the box never came up, or it came up and only the terminal
@@ -1501,8 +1506,8 @@ fn settle_start(name: &str, out: Result<(), StartFailed>) -> Result<(), String> 
     }
 }
 
-fn start_the_box(name: &str, opts: &[String]) -> Result<(), StartFailed> {
-    let agent = bring_up(name, opts).map_err(StartFailed::Start)?;
+fn start_the_box(name: &str, opts: &[String], bring: Bring) -> Result<(), StartFailed> {
+    let agent = bring_up(name, opts, bring).map_err(StartFailed::Start)?;
     // `--attach` exists so the cockpit's create-a-box terminal can hand off into the agent without
     // the caller having to name the box's placement — which does not exist until the box is up.
     // Resolved here, after the box is real.
@@ -1514,26 +1519,8 @@ fn start_the_box(name: &str, opts: &[String]) -> Result<(), StartFailed> {
 }
 
 /// Everything `skein start` does before the attach: the box brought up, and the runtime it runs.
-fn bring_up(name: &str, opts: &[String]) -> Result<String, String> {
-    // **Not answerable with `--uncovered`, and saying so is the point.** A box whose name matches
-    // no repository is uncovered (`fleet::refuse_if_uncovered`), but that is the smaller half of
-    // what is missing here: there is no remote to clone from and no store to link, so there is no
-    // box to start however exposed anyone is willing to have it. The step that works is the name or
-    // the registration, and this says both rather than leaving `skein repos` to be interpreted.
-    let repo = skein::repos::repo_for_box(name).ok_or_else(|| {
-        format!(
-            "no registered repo for box {name}, so skein has nothing to clone it from, no store \
-             to link into it, and no mounts it could name as the box's own.\n\
-             `skein repos` lists the ids skein knows — a box whose name starts with one of them \
-             is matched with no further ceremony.\n\
-             `skein add <git-url> --id <id>` registers a repository skein does not have yet."
-        )
-    })?;
-    let branch =
-        flag(opts, "--branch").unwrap_or_else(|| skein::repos::branch_of(name).unwrap_or_default());
-    if branch.trim().is_empty() {
-        return Err(format!("no branch for box {name}; pass --branch <branch>"));
-    }
+fn bring_up(name: &str, opts: &[String], bring: Bring) -> Result<String, String> {
+    let (repo, branch) = skein::sandbox::start_target(name, flag(opts, "--branch").as_deref())?;
     let agent = flag(opts, "--agent").unwrap_or_else(|| skein::repos::agent_for_box(name));
     if !skein::runtime::valid_runtime(&agent) {
         return Err(format!("unsupported runtime {agent:?}"));
@@ -1549,13 +1536,16 @@ fn bring_up(name: &str, opts: &[String]) -> Result<String, String> {
     if opts.iter().any(|o| o == "--uncovered") {
         skein::fleet::allow_uncovered(name, true)?;
     }
-    skein::fleet::start_box(
-        name,
-        &repo,
-        &branch,
-        "exec bash -l",
-        skein::place::Purpose::Manual,
-    )?;
+    match bring {
+        Bring::Start => skein::fleet::start_box(
+            name,
+            &repo,
+            &branch,
+            "exec bash -l",
+            skein::place::Purpose::Manual,
+        )?,
+        Bring::Restart => skein::sandbox::restart_box(name, Some(&branch))?,
+    }
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
     Ok(agent)
 }
