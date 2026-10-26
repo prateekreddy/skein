@@ -266,7 +266,9 @@ try {
   {
     const OLDER = [
       { name: "web-old", repo: "web", branch: "feat/old", state: "idle", tier: 4, age_secs: 60, agent: "claude",
-        pause: "none", headline: "", task: "", cover: "older" },
+        pause: "none", headline: "", task: "", cover: "older", stale: ["launcher"] },
+      { name: "web-peers", repo: "web", branch: "feat/peers", state: "idle", tier: 4, age_secs: 60, agent: "claude",
+        pause: "none", headline: "", task: "", cover: "older", stale: ["peers"] },
       { name: "web-new", repo: "web", branch: "feat/new", state: "idle", tier: 4, age_secs: 60, agent: "claude",
         pause: "none", headline: "", task: "", cover: "" },
     ];
@@ -324,6 +326,17 @@ try {
       await page.evaluate(() => document.querySelector("#notice .nt-text")?.textContent || ""),
       "could not restart web-old: web-old was stopped, and starting it again failed: the launcher did not report an anchor pid");
     await page.evaluate(() => document.querySelector("#notice .x")?.click());
+    // The reason is the row's own (`stale`), and a box whose only stale decision is the peer switch
+    // is not told it missed an update. **What would make this fail:** the question ignoring
+    // `stale`, so every box reads "before the last update".
+    await page.evaluate(() => openDiff("web-peers"));
+    await page.waitForTimeout(300);
+    await page.click("#drestart");
+    await page.waitForTimeout(300);
+    value("a box born before peer messaging was changed is told that, not that it missed an update",
+      (await ask())?.body?.split(". ")[0], "This box started before peer messaging was changed, so restarting Claude alone won't pick it up");
+    await page.click('#rsask [data-a="no"]');
+    await page.waitForTimeout(200);
     await page.evaluate(() => openDiff("web-new"));
     await page.waitForTimeout(300);
     await page.click("#drestart");

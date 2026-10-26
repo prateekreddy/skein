@@ -18,16 +18,39 @@ use super::*;
 /// launcher, which is `fleet`'s. A method on `PlaceRecord` would put that edge back to save an
 /// import, and `module-check` said so within a minute of it being written.
 pub fn cover_is_current(name: &str, record: &crate::place::PlaceRecord) -> bool {
-    !record.launcher.is_empty()
-        && record.launcher == launcher_revision()
-        // **And the peer switch, which the revision cannot see.** `launcher_revision` hashes
-        // `box-session.sh`, and `peer_messaging` lives in `repos.json` — flipping it changes no byte
-        // of that script, so a box still running the mount it was born with looked exactly like one
-        // running the current cover. `is_none_or` is the third answer: a launcher too old to say
-        // leaves the box alone rather than being read as either position (SKEIN-572).
-        && record
-            .peers
-            .is_none_or(|born| born == crate::repos::box_is_on_the_peer_network(name))
+    why_cover_is_stale(name, record).is_empty()
+}
+
+/// Which start-time decisions this box was born with that are not the ones skein would make now
+/// — empty when it is current, which is all [`cover_is_current`] asks.
+///
+/// A list of reasons rather than a yes or no, because the cockpit says which one it is before it
+/// restarts a whole box (SKEIN-1326): "started before the last update" and "started before peer
+/// messaging was changed" are different things to have done to you. Each entry is a key the page
+/// has words for (`src/web/app/board.js`, `RESTART_REASONS`).
+///
+/// **The pattern each entry follows**: the launcher reports a decision on stdout at start, the
+/// placement record keeps it (`PlaceRecord`), and this compares it with what the configuration
+/// says now. A decision added that way is one more `if` here, one more key in the page's words, and
+/// one more assertion in `every_stale_decision_is_named_by_its_own_reason`.
+pub fn why_cover_is_stale(name: &str, record: &crate::place::PlaceRecord) -> Vec<&'static str> {
+    let mut stale = Vec::new();
+    // [`crate::place::PlaceRecord::launcher`] says why an empty revision is stale, not unknown.
+    if record.launcher.is_empty() || record.launcher != launcher_revision() {
+        stale.push("launcher");
+    }
+    // **And the peer switch, which the revision cannot see.** `launcher_revision` hashes
+    // `box-session.sh`, and `peer_messaging` lives in `repos.json` — flipping it changes no byte of
+    // that script, so a box still running the mount it was born with looked exactly like one
+    // running the current cover. `is_none_or` is the third answer: a launcher too old to say leaves
+    // the box alone rather than being read as either position (SKEIN-572).
+    if !record
+        .peers
+        .is_none_or(|born| born == crate::repos::box_is_on_the_peer_network(name))
+    {
+        stale.push("peers");
+    }
+    stale
 }
 
 /// The line in `box-session.sh` that [`install_launcher`] replaces with [`launcher_revision`].
@@ -483,6 +506,46 @@ mod tests {
         assert!(
             !current.is_empty(),
             "this build has no launcher revision to compare against"
+        );
+    }
+
+    /// **Each stale decision is named by its own reason** (SKEIN-1326), because the cockpit says
+    /// which before it restarts a whole box. Same name as the test above uses, so the peer switch
+    /// reads as the ship default (`true`) for it.
+    ///
+    /// What would make this fail: collapsing the reasons back to one (a peers-only box would then
+    /// read "launcher", or nothing), or dropping either comparison.
+    #[test]
+    fn every_stale_decision_is_named_by_its_own_reason() {
+        let record = |launcher: &str, peers: Option<bool>| crate::place::PlaceRecord {
+            launcher: launcher.to_string(),
+            peers,
+            ..Default::default()
+        };
+        let current = launcher_revision();
+        let named = |launcher: &str, peers| {
+            why_cover_is_stale("no-such-repo-box", &record(launcher, peers))
+        };
+        assert_eq!(
+            named(&current, Some(true)),
+            Vec::<&str>::new(),
+            "a current box has a reason to restart"
+        );
+        assert_eq!(
+            named(&current, None),
+            Vec::<&str>::new(),
+            "a launcher too old to say took a side"
+        );
+        assert_eq!(named("0000000000000000", Some(true)), vec!["launcher"]);
+        assert_eq!(
+            named("", Some(true)),
+            vec!["launcher"],
+            "a silent record was read as current"
+        );
+        assert_eq!(named(&current, Some(false)), vec!["peers"]);
+        assert_eq!(
+            named("0000000000000000", Some(false)),
+            vec!["launcher", "peers"]
         );
     }
 

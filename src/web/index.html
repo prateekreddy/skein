@@ -2505,10 +2505,20 @@ function askRestart(name, label) {
 // everything in the box, and says why it is the one on offer.
 function needsWholeRestart(name) { return boxes.find(b => b.name === name)?.cover === "older"; }
 function pressRestart(name) { return needsWholeRestart(name) ? restartBox(name) : restartAgent(name); }
-// The coordinator's words, with the box's own agent named in them: "Claude" on a Claude box.
-const restartBoxCost = label => `This box started before the last update, so restarting ${label} alone won't `
-  + `pick it up. Restarting the box stops everything running in it — ${label}, its shell and anything `
-  + "left running in the background — and starts it again. Its files and conversation stay.";
+// What each reason the row gives (`stale`, `fleet::why_cover_is_stale`'s keys) means to the person
+// it happened to. A key this page has no words for reads as the last update, which is what every
+// one of them is in the end: a start-time decision skein would now make differently.
+const RESTART_REASONS = { launcher: "the last update", peers: "peer messaging was changed" };
+function staleReasons(name) {
+  const said = (boxes.find(b => b.name === name)?.stale || []).map(k => RESTART_REASONS[k]).filter(Boolean);
+  return said.length ? [...new Set(said)] : [RESTART_REASONS.launcher];
+}
+// The coordinator's words, with the box's own agent named in them ("Claude" on a Claude box) and
+// the reason it is the whole box that has to restart.
+const restartBoxCost = (label, reasons) => `This box started before ${reasons.join(" and before ")}, `
+  + `so restarting ${label} alone won't pick ${reasons.length > 1 ? "them" : "it"} up. Restarting the box `
+  + `stops everything running in it — ${label}, its shell and anything left running in the background — `
+  + "and starts it again. Its files and conversation stay.";
 function askRestartBox(name, label) {
   return new Promise(answer => {
     document.getElementById("rsask")?.remove();
@@ -2516,7 +2526,7 @@ function askRestartBox(name, label) {
     el.id = "rsask"; el.className = "open";
     el.innerHTML = `<div class="nb-card" style="max-width:440px">`
       + `<div class="nb-head"><b>Restart ${esc(name)}?</b></div>`
-      + `<div class="rs-body">${esc(restartBoxCost(label))}</div>`
+      + `<div class="rs-body">${esc(restartBoxCost(label, staleReasons(name)))}</div>`
       + `<div class="nb-foot"><span class="hint"></span><button type="button" class="kbtn" data-a="no">Cancel</button>`
       + `<button type="button" class="primary" data-a="yes">Restart box</button></div></div>`;
     const done = yes => { el.classList.remove("open"); setTimeout(() => el.remove(), 0); answer(yes); };

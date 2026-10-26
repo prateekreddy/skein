@@ -226,6 +226,19 @@ pub fn load_views() -> Vec<BoxView> {
             // Read once and asked twice below: whether skein placed this box at all, and which
             // cover it was placed under.
             let record = shared_record(&name);
+            // Which cover it was placed under, as the reasons it is not the current one. Only while
+            // it is running, and that is not a shortcut: a stopped box has no namespace to be
+            // uncovered in, and starting it runs the current launcher. Saying "older" of one would
+            // be asking somebody to restart a box that is already going to get the current cover
+            // the moment it exists. No record at all is an older launcher — nothing said otherwise.
+            let stale: Vec<String> = match (live == Some(Liveness::Running), record.as_ref()) {
+                (false, _) => Vec::new(),
+                (true, Some(rec)) => crate::fleet::why_cover_is_stale(&name, rec)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                (true, None) => vec!["launcher".to_string()],
+            };
             BoxView {
                 name: name.clone(),
                 state,
@@ -259,13 +272,6 @@ pub fn load_views() -> Vec<BoxView> {
                 // written down. No record ⇒ not managed: a sandbox skein never placed is nobody's
                 // job of skein's, whatever else it is.
                 managed: record.as_ref().is_some_and(|rec| rec.purpose.managed()),
-                // The same record, read once. A box carries the cover the launcher gave it at
-                // start and nothing later changes that, so this is the only place the answer is.
-                //
-                // Only while it is running, and that is not a shortcut: a stopped box has no
-                // namespace to be uncovered in, and starting it runs the current launcher. Saying
-                // "older" of one would be asking somebody to restart a box that is already going to
-                // get the current cover the moment it exists.
                 // Same record, same tick. `uncapped …` is the launcher's own word for it and the
                 // rest of the line is the reason; empty means no launcher answered, which is not
                 // the same as capped and must not read as it.
@@ -276,13 +282,13 @@ pub fn load_views() -> Vec<BoxView> {
                         .map(|rec| rec.ceiling.clone())
                         .unwrap_or_default(),
                 },
-                cover: match live == Some(Liveness::Running) {
-                    false => String::new(),
-                    true => match record.as_ref() {
-                        Some(rec) if crate::fleet::cover_is_current(&name, rec) => String::new(),
-                        Some(_) | None => "older".to_string(),
-                    },
+                // The same record, read once above. A box carries the cover the launcher gave it at
+                // start and nothing later changes that, so this is the only place the answer is.
+                cover: match stale.is_empty() {
+                    true => String::new(),
+                    false => "older".to_string(),
                 },
+                stale,
                 scoped: scopable.then(|| crate::gitgate::box_is_scoped(&name)),
                 disk_mb: usage.get(&name).copied(),
                 disk_limit_mb: usage.get(&name).and(box_disk_limit(&name)),
@@ -416,6 +422,13 @@ pub struct BoxView {
     /// reads `"older"`, since nothing said otherwise and this is not a direction to guess in.
     #[serde(default)]
     pub cover: String,
+    /// Why [`Self::cover`] reads `"older"`: the start-time decisions this box was born with that are
+    /// not the ones skein would make now — `fleet::why_cover_is_stale`'s keys (`"launcher"`,
+    /// `"peers"`), and `["launcher"]` for a running box with no placement record. Empty exactly when
+    /// `cover` is. The cockpit's Restart restarts the whole box for a non-empty one and says which
+    /// reason it is (SKEIN-1326).
+    #[serde(default)]
+    pub stale: Vec<String>,
     /// What bounds this box's memory — `capped <limits>`, `uncapped <reason>`, or empty for a box
     /// that is not running or whose launcher never said.
     ///
@@ -763,6 +776,17 @@ mod tests {
                 .expect("the placed box is on the board")
                 .cover
         };
+        // Which reasons the row gives for it (SKEIN-1326): the cockpit says which before it
+        // restarts a whole box. What would make the two checks below fail: the row's `stale` not
+        // filled from `fleet::why_cover_is_stale`, or one reason standing in for the other.
+        let stale_of = || -> Vec<String> {
+            crate::fleet::disturbing_liveness(|| ());
+            load_views()
+                .into_iter()
+                .find(|v| v.name == "demo-task")
+                .expect("the placed box is on the board")
+                .stale
+        };
 
         record_place("demo-task", &place(&crate::fleet::launcher_revision())).unwrap();
         assert_eq!(
@@ -778,6 +802,7 @@ mod tests {
             "a box born under a different launcher looked exactly like a covered one — which is \
              the whole defect: from the row, from inside the box, and from the sandbox, it does"
         );
+        assert_eq!(stale_of(), vec!["launcher".to_string()]);
 
         // The case that actually exists in the fleet today: every box placed before the record
         // carried this field at all. Silence is not agreement.
@@ -826,6 +851,11 @@ mod tests {
             "the peer switch was flipped and the row said nothing, because `launcher_revision` \
              hashes a script the switch does not touch — so the box keeps the mount it was born \
              with and every surface reports it as current"
+        );
+        assert_eq!(
+            stale_of(),
+            vec!["peers".to_string()],
+            "a box whose only stale decision is the peer switch was given another reason"
         );
 
         // And a launcher too old to say which side it was born on is left alone rather than being
