@@ -1148,6 +1148,7 @@ function openBoxSettings(name) {
   for (const c of boxSetControls()) c.disabled = true;
   bsSetMsg("asking for this box's settings…");
   document.getElementById("boxset").classList.add("open");
+  loadCleanable(name, ticket);
   Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(async r => { if (!r.ok) throw await refused(r); return r.json(); })])
     .then(([, cur]) => {
       if (ticket !== boxSetTicket || !document.getElementById("boxset").classList.contains("open")) return;
@@ -1265,6 +1266,60 @@ function saveBoxSettings() {
   }).finally(() => { go.disabled = false; });
 }
 function askDiskLimit(name) { openBoxSettings(name); }
+// ---------- caches and scratch in one box, and the clean (SKEIN-1341) ----------
+//
+// The list comes from the server and is the whole of what a clean may remove: download caches,
+// build output git ignores, and the scratchpads of ended sessions. A clean runs only on a stopped
+// box, after a confirmation that names every path and its size, and the server removes only paths
+// that are still on its own list at that moment.
+const mbOf = bytes => Math.ceil(bytes / 1048576);
+function cleanableLine(c) {
+  const sum = kind => c.items.filter(i => i.kind === kind).reduce((n, i) => n + i.bytes, 0);
+  const all = c.items.reduce((n, i) => n + i.bytes, 0);
+  const parts = [["build output", sum("build output")], ["download caches", sum("download cache")], ["scratchpads", sum("scratchpad")]]
+    .filter(([, n]) => n > 0).map(([k, n]) => `${fmtGb(mbOf(n))} ${k}`);
+  const rest = c.total_mb != null ? Math.max(0, c.total_mb - mbOf(all)) : null;
+  if (!parts.length) return "no caches or scratch to clean";
+  return `${parts.join(", ")}${rest != null ? `; ${fmtGb(rest)} everything else` : ""}`;
+}
+function loadCleanable(name, ticket) {
+  const use = document.getElementById("bs-diskuse"), btn = document.getElementById("bs-clean");
+  use.textContent = "measuring caches and scratch…";
+  btn.hidden = true;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/clean`)
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(c => {
+      if (ticket !== boxSetTicket) return;
+      use.textContent = cleanableLine(c);
+      if (!c.items.length) return;
+      btn.hidden = false;
+      btn.textContent = `Clean ${fmtGb(mbOf(c.items.reduce((n, i) => n + i.bytes, 0)))}…`;
+      btn.onclick = () => cleanBox(name, c);
+    })
+    .catch(e => { if (ticket === boxSetTicket) use.textContent = `could not measure caches: ${failText(e)}`; });
+}
+function cleanBox(name, c) {
+  if (c.running !== false) {
+    bsSetMsg(c.running
+      ? `${name} is running, and it may be using these files. Stop it, then clean again.`
+      : `skein cannot tell whether ${name} is running. Close this and try again in a moment.`, "err");
+    return;
+  }
+  const all = c.items.reduce((n, i) => n + i.bytes, 0);
+  const lines = c.items.map(i => `  ${fmtGb(mbOf(i.bytes))}  ${i.shown}  (${i.kind})`).join("\n");
+  if (!confirm(`Remove these from ${name}? Builds rebuild and caches download again when needed.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}. Work in its checkout, ~/shared, the store and its conversations are not touched.`)) return;
+  bsSetMsg("cleaning…");
+  fetch(`/api/boxes/${encodeURIComponent(name)}/clean`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: c.items.map(i => i.path) }),
+  })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(d => {
+      const failed = d.failed.map(([p, why]) => `${p} — ${why}`).join("\n");
+      bsSetMsg(`Removed ${fmtGb(mbOf(d.freed))} from ${name}.` + (failed ? `\nCould not remove:\n${failed}` : ""), failed ? "err" : "");
+      loadCleanable(name, boxSetTicket);
+    })
+    .catch(e => bsSetMsg(failText(e), "err"));
+}
 // The launch dialog's copy of the box-settings control. Empty is inheritance, and the label says
 // what inheriting currently means — a bare "fleet default" would not tell you which way this box
 // comes up, which is the only thing the person launching it wants to know.

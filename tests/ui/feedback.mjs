@@ -300,6 +300,70 @@ await check("Box settings opens at once and says it is loading, with Save off un
   } finally { release(); await page.unroute(`**/api/boxes/${BOX}/settings`); await closeEverything(); }
 });
 
+// ---------- caches and scratch, and the clean (SKEIN-1341) ----------
+console.log("\na box's caches and scratch, and the clean");
+
+const cleanable = running => ({
+  running,
+  total_mb: 10240,
+  items: [
+    { path: "/fleet/b/tree/target", shown: "b/tree/target", kind: "build output", bytes: 3 * 1024 ** 3 },
+    { path: "/fleet/b/home/.cache/ms-playwright", shown: "~/.cache/ms-playwright", kind: "download cache", bytes: 1024 ** 3 },
+    { path: "/fleet/b/home/.cache/skein/claude/claude-1000/-p/s1", shown: "~/.cache/skein/claude/claude-1000/-p/s1", kind: "scratchpad", bytes: 512 * 1024 ** 2 },
+  ],
+});
+
+// Fails if the breakdown or the button stop being drawn from GET /clean, if the confirmation stops
+// naming every path with its size, or if the POST sends anything but the paths that were shown.
+await check("Box settings shows caches and scratch, and Clean confirms every path then sends exactly those", async () => {
+  await closeEverything();
+  let posted = null, asked = "";
+  await page.route(`**/api/boxes/${BOX}/clean`, r => {
+    if (r.request().method() === "GET") return r.fulfill({ json: cleanable(false) });
+    posted = r.request().postDataJSON();
+    return r.fulfill({ json: { removed: posted.paths, freed: 4.5 * 1024 ** 3, failed: [] } });
+  });
+  const onDialog = d => { asked = d.message(); d.accept(); };
+  page.on("dialog", onDialog);
+  try {
+    await page.evaluate(box => openBoxSettings(box), BOX);
+    await until(() => !document.getElementById("bs-clean").hidden && !document.getElementById("bs-go").disabled);
+    const line = await page.evaluate(() => document.getElementById("bs-diskuse").textContent);
+    if (line !== "3.0G build output, 1.0G download caches, 512M scratchpads; 5.5G everything else") throw new Error(`line ${JSON.stringify(line)}`);
+    await page.locator("#bs-clean").click();
+    await until(() => document.getElementById("bs-msg").textContent.startsWith("Removed"));
+    for (const want of ["3.0G  b/tree/target  (build output)", "1.0G  ~/.cache/ms-playwright  (download cache)", "512M  ~/.cache/skein/claude/claude-1000/-p/s1  (scratchpad)", "Total 4.5G", "~/shared"]) {
+      if (!asked.includes(want)) throw new Error(`the confirmation lacks ${JSON.stringify(want)}: ${JSON.stringify(asked)}`);
+    }
+    const sent = JSON.stringify(posted && posted.paths);
+    if (sent !== JSON.stringify(cleanable(false).items.map(i => i.path))) throw new Error(`posted ${sent}`);
+    const msg = await page.evaluate(() => document.getElementById("bs-msg").textContent);
+    if (msg !== `Removed 4.5G from ${BOX}.`) throw new Error(`said ${JSON.stringify(msg)}`);
+  } finally { page.off("dialog", onDialog); await page.unroute(`**/api/boxes/${BOX}/clean`); await closeEverything(); }
+});
+
+// Fails if Clean on a running box asks to confirm or posts at all: it must say to stop the box.
+await check("Clean on a running box says to stop it first, and neither confirms nor removes", async () => {
+  await closeEverything();
+  let posts = 0, dialogs = 0;
+  await page.route(`**/api/boxes/${BOX}/clean`, r => {
+    if (r.request().method() === "GET") return r.fulfill({ json: cleanable(true) });
+    posts++;
+    return r.fulfill({ status: 409, body: "running" });
+  });
+  const onDialog = d => { dialogs++; d.dismiss(); };
+  page.on("dialog", onDialog);
+  try {
+    await page.evaluate(box => openBoxSettings(box), BOX);
+    await until(() => !document.getElementById("bs-clean").hidden && !document.getElementById("bs-go").disabled);
+    await page.locator("#bs-clean").click();
+    const msg = await page.evaluate(() => document.getElementById("bs-msg").textContent);
+    if (msg !== `${BOX} is running, and it may be using these files. Stop it, then clean again.` || posts || dialogs) {
+      throw new Error(JSON.stringify({ msg, posts, dialogs }));
+    }
+  } finally { page.off("dialog", onDialog); await page.unroute(`**/api/boxes/${BOX}/clean`); await closeEverything(); }
+});
+
 // ---------- an error stays, every line of it (SKEIN-1265, SKEIN-1245) ----------
 console.log("\nan error or a report stays until it is closed");
 

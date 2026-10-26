@@ -123,7 +123,7 @@ fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
 ///
 /// `on_disk` is the device the walk must stay on (`du -x`); `None` skips that filter, for a caller
 /// that could not stat its own root.
-fn tree_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
+pub(super) fn tree_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
     use std::os::unix::fs::MetadataExt;
     // The directory's own blocks count too — `du -s <dir>` includes the directory it was pointed
     // at, not only what is under it. Verified against `du -sx --block-size=512` on a fixture tree;
@@ -502,7 +502,7 @@ pub fn stray_advice(strays: &[Stray]) -> Option<String> {
 ///
 /// Named once because it is the definition of "this is a build directory" that this file uses in
 /// place of a name match.
-const CARGO_TARGET_MARKER: &str = ".rustc_info.json";
+pub(super) const CARGO_TARGET_MARKER: &str = ".rustc_info.json";
 
 /// A build directory inside a live box, and the source tree its own dependency files name.
 #[derive(Debug, Clone, PartialEq, Eq)]
