@@ -538,11 +538,16 @@ function repoTokenRow(r) {
     : `<span class="sq-state">${c && c.problem ? "refused" : "from the App"}</span><span class="cwhy">${
         c && c.problem ? esc(c.problem)
         : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
+  // The App mints this repo's token but could not be given CI reads with it (SKEIN-1344).
+  const appReads = !(c && !c.problem && c.has_token) && appReadsFor(slug);
+  const appFlag = appReads
+    ? `<div class="set-cred"><span class="sq-state">App misconfigured</span><span class="cwhy">The GitHub App can push here, but cannot read CI results. On GitHub, grant it ${esc(reposPhrase(appReads.needs || []))} under the App's Permissions &amp; events → Repository permissions, then accept the change where it is installed</span></div>`
+    : "";
   // A <div>, not a <label>: a label hands a click on its text to its first control, and here that
   // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
   return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
     + `<span class="desc">a fine-grained GitHub token covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
-    + `<div class="set-cred">${state}</div>${checked}`
+    + `<div class="set-cred">${state}</div>${checked}${appFlag}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
 }

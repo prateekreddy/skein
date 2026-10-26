@@ -783,6 +783,24 @@ function renderReviewIdentityNote() {
   note.hidden = !(chosen.value === "app" && gitLast.app_ready === false);
 }
 
+// **The GitHub App is missing a read it should have** (SKEIN-1344, the owner's decision of
+// 2026-10-26: the App setup requires Checks: read and Actions: read). The server learns it when a
+// token request naming them is refused and one without them is not, so pushing keeps working; this
+// says which permission to grant, and where. "" when nothing is missing.
+function appReadsNote(d) {
+  const missing = d.app_ready ? (d.app_cannot_read || []) : [];
+  if (!missing.length) return "";
+  const needs = [...new Set(missing.flatMap(m => m.needs || []))];
+  return ` <b>The GitHub App is missing ${needs.length === 1 ? "a permission" : "permissions"}.</b> `
+    + `It can push, but cannot read CI results on ${esc(reposPhrase(missing.map(m => m.slug)))}. `
+    + `On GitHub, grant it ${esc(reposPhrase(needs))} under the App's Permissions &amp; events → Repository permissions, `
+    + `then accept the change where the App is installed. skein asks for them again with each new token.`;
+}
+function appReadsFor(slug) {
+  if (!gitLast.app_ready) return null;
+  return (gitLast.app_cannot_read || []).find(m => m.slug.toLowerCase() === String(slug).toLowerCase()) || null;
+}
+
 function renderGitState(d) {
   renderReviewIdentityNote();
   const el = document.getElementById("set-gitstate");
@@ -810,13 +828,13 @@ function renderGitState(d) {
   const on = document.getElementById("set-gitscope");
   if (on && !on.checked) {
     el.className = "set-state warn";
-    el.innerHTML = `<b>Ready, but switched off.</b> ${esc(how)} can issue tokens; until the switch below is on, boxes keep the fleet-wide credential.`;
+    el.innerHTML = `<b>Ready, but switched off.</b> ${esc(how)} can issue tokens; until the switch below is on, boxes keep the fleet-wide credential.${appReadsNote(d)}`;
     return;
   }
-  el.className = "set-state on";
+  el.className = appReadsNote(d) ? "set-state warn" : "set-state on";
   // A shared token is the exception the sentence has to carry, or it is untrue (SKEIN-1231).
   const shared = (d.credentials || []).some(c => c.shared && !c.problem && c.has_token);
-  el.innerHTML = `<b>Scoped.</b> A box writes only its own repo${shared ? " — or every repo its token is shared with —" : ""} and asks for any other. ${esc(how)}. Takes effect at each box's next start.`;
+  el.innerHTML = `<b>Scoped.</b> A box writes only its own repo${shared ? " — or every repo its token is shared with —" : ""} and asks for any other. ${esc(how)}. Takes effect at each box's next start.${appReadsNote(d)}`;
 }
 
 // One fetch answers both sections and the repo cards, so it is done once and shared rather than

@@ -333,9 +333,17 @@ placed, and its card says so rather than offering a field that could not work.
 
 Create a GitHub App — no domain, no webhook, no hosting; it is a credential-minting primitive, and
 the traffic is outbound only. Untick **Webhook → Active**, leave the callback blank, set permissions
-to **Contents: write**, **Pull requests: write** and **Issues: write**, choose *Only on this
-account*, generate a private key to `~/.skein/github-app.pem`, and install it on the repos you want
-reachable. Put the App ID in Settings.
+to **Contents: write**, **Pull requests: write**, **Issues: write**, **Checks: read** and
+**Actions: read**, choose *Only on this account*, generate a private key to
+`~/.skein/github-app.pem`, and install it on the repos you want reachable. Put the App ID in
+Settings.
+
+The two reads are required (SKEIN-1344): they are how an agent sees whether CI passed. An App
+without them still mints tokens that push, because skein asks again without them when GitHub
+refuses, and the repo card and the GitHub & keys status say **App misconfigured**, naming the
+permission to grant under the App's *Permissions & events → Repository permissions*. A
+permission added to an App only applies once the installation accepts it, on GitHub's page for
+the installation.
 
 The installation list is then the only control: a repo the App is installed on is readable, and one
 it is not is not. Adding one takes effect at the next refresh with nothing to re-mint.

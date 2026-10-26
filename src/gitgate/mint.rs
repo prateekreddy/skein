@@ -180,26 +180,102 @@ pub fn mint_token(slug: &str) -> Result<Secret, String> {
     // `issues: write` alongside `pull_requests: write`, because a comment on a PR is posted through
     // the *issues* endpoint — `POST /repos/{o}/{r}/issues/{n}/comments`. Without it `gh pr comment`
     // fails on a token that can already open the PR it cannot talk about, which reads as a bug.
-    // Still nothing else: no `administration`, no `members`, no `workflows`.
-    let body = serde_json::json!({
-        "repositories": [name],
-        "permissions": {
+    // `checks: read` and `actions: read` so an agent can see whether CI passed (`gh pr checks`, a
+    // check run, a workflow run) instead of meeting a 403 (SKEIN-1344). Still nothing else: no
+    // `administration`, no `members`, no `workflows`.
+    //
+    // **The two reads are asked for, and never the price of a push** (the owner's decision of
+    // 2026-10-26). An App not granted them answers 422 to a token request that names them, so each
+    // request that 422s is asked again with fewer, down to none, and the first token GitHub gives
+    // is used. What was left out is recorded ([`note_app_reads`]) for the repo card and the
+    // GitHub & keys status to name, and cleared by the next token minted with both.
+    let mut last = String::new();
+    for reads in [&APP_READS[..], &APP_READS[..1], &APP_READS[1..], &[]] {
+        let mut permissions = serde_json::json!({
             "contents": "write",
             "pull_requests": "write",
             "issues": "write",
+        });
+        for (key, _) in reads {
+            permissions[*key] = "read".into();
+        }
+        let body = serde_json::json!({ "repositories": [name], "permissions": permissions });
+        match crate::github::send_json(
+            "POST",
+            &format!("/app/installations/{id}/access_tokens"),
+            &jwt,
+            &body,
+        ) {
+            Ok(token) => {
+                let missing: Vec<&str> = APP_READS
+                    .iter()
+                    .filter(|r| !reads.contains(r))
+                    .map(|(_, said)| *said)
+                    .collect();
+                if let Err(why) = note_app_reads(slug, &missing) {
+                    eprintln!(
+                        "skein: could not record what the GitHub App cannot read on {slug}: {why}"
+                    );
+                }
+                return token
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .map(Secret::new)
+                    .ok_or_else(|| format!("GitHub returned no token for {slug}"));
+            }
+            Err(why) if unprocessable(&why) && !reads.is_empty() => last = why,
+            Err(why) => return Err(why),
+        }
+    }
+    Err(last)
+}
+
+/// The read permissions an App-minted write token asks for beyond pushing, as GitHub names them in
+/// a token request and as its settings page shows them (SKEIN-1344).
+const APP_READS: [(&str, &str); 2] = [("checks", "Checks: read"), ("actions", "Actions: read")];
+
+/// Whether `why` is [`crate::github`]'s sentence for a 422: the answer GitHub gives a token request
+/// that names a permission the App was not granted.
+fn unprocessable(why: &str) -> bool {
+    why.starts_with("GitHub said 422") || why.starts_with("GitHub answered 422")
+}
+
+/// Where skein records, per repository, which of [`APP_READS`] the GitHub App could not be given a
+/// token with. Host-only, beside the App's key, and describing the App rather than holding any of
+/// its secrets.
+fn app_reads_path() -> std::path::PathBuf {
+    crate::config::skein_home().join("github-app-reads.json")
+}
+
+/// Record what the App could not read on `slug` at its last token, or clear it when nothing.
+fn note_app_reads(slug: &str, missing: &[&str]) -> Result<(), String> {
+    let key = slug.to_ascii_lowercase();
+    let known = app_cannot_read();
+    let now: Vec<String> = missing.iter().map(|m| m.to_string()).collect();
+    if known.get(&key).cloned().unwrap_or_default() == now {
+        return Ok(());
+    }
+    // Lossy: every entry is learned again at the App's next token for that repository, so a file
+    // that will not parse holds nothing anybody would miss.
+    crate::util::update_json_lossy(
+        &app_reads_path(),
+        |all: &mut std::collections::BTreeMap<String, Vec<String>>| {
+            match now.is_empty() {
+                true => all.remove(&key),
+                false => all.insert(key.clone(), now.clone()),
+            };
+            Ok(())
         },
-    });
-    let token = crate::github::send_json(
-        "POST",
-        &format!("/app/installations/{id}/access_tokens"),
-        &jwt,
-        &body,
-    )?;
-    token
-        .get("token")
-        .and_then(|v| v.as_str())
-        .map(Secret::new)
-        .ok_or_else(|| format!("GitHub returned no token for {slug}"))
+    )
+}
+
+/// Each repository the GitHub App's last token for could not read, with the permissions to grant
+/// it, by lowercased slug (SKEIN-1344). Empty when the App was granted both, or has minted nothing.
+pub fn app_cannot_read() -> std::collections::BTreeMap<String, Vec<String>> {
+    std::fs::read_to_string(app_reads_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// Take every token out of a box's token directory.
@@ -515,6 +591,148 @@ pub fn mint_read_token(installation: i64) -> Result<Secret, String> {
 mod tests {
     use super::*;
     use crate::gitgate::testkit::*;
+
+    /// A GitHub App installation for `a/one` that grants every permission but those named in
+    /// `ungranted`: a token request naming one of them is answered 422, as GitHub answers it, and
+    /// any other gets a token spelling which reads it carries. Hands back the base URL and each
+    /// token request's permissions, in order.
+    fn app_installation(
+        ungranted: &'static [&'static str],
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
+        use std::io::{Read as _, Write as _};
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut got = Vec::new();
+                let mut buf = [0u8; 4096];
+                // The whole request: headers, then as much body as they say there is.
+                let (head, body) = loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    got.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&got).into_owned();
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let want = head
+                            .lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= want || n == 0 {
+                            break (head.to_string(), body.to_string());
+                        }
+                    } else if n == 0 {
+                        break (text, String::new());
+                    }
+                };
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (status, reply) = if path == "/repos/a/one/installation" {
+                    (200, r#"{"id":7}"#.to_string())
+                } else if path == "/app/installations/7/access_tokens" {
+                    let asked: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let perms: Vec<String> = asked["permissions"]
+                        .as_object()
+                        .map(|m| m.keys().cloned().collect())
+                        .unwrap_or_default();
+                    seen.lock().unwrap().push(perms.clone());
+                    if perms.iter().any(|p| ungranted.contains(&p.as_str())) {
+                        (
+                            422,
+                            r#"{"message":"The permissions requested are not granted to this installation."}"#
+                                .to_string(),
+                        )
+                    } else {
+                        let reads: Vec<&str> = ["checks", "actions"]
+                            .into_iter()
+                            .filter(|r| perms.iter().any(|p| p == r))
+                            .collect();
+                        (
+                            200,
+                            format!(r#"{{"token":"skein-test-app[{}]"}}"#, reads.join(",")),
+                        )
+                    }
+                } else {
+                    (404, r#"{"message":"Not Found"}"#.to_string())
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), asked)
+    }
+
+    /// **An App-minted write token asks for Checks: read and Actions: read, and an App not granted
+    /// them still mints one that pushes, and says which to grant** (SKEIN-1344, the owner's
+    /// decision of 2026-10-26).
+    ///
+    /// What would make it fail: the reads not requested (the first token carries none, and the
+    /// first request names neither); a 422 returned as the mint's failure, which takes pushing
+    /// away (`expect` panics); a retry that drops both reads when one would do (the token carries
+    /// no `checks`); nothing recorded for the repo card (`app_cannot_read` empty); or a record
+    /// kept after the App is granted both.
+    #[test]
+    fn an_app_without_ci_reads_still_mints_and_says_which_to_grant() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let key = home.join("app.pem");
+        let made = Command::new("openssl")
+            .args(["genrsa", "-out"])
+            .arg(&key)
+            .arg("2048")
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "github_app_id": "123", "github_app_key": key }).to_string(),
+        )
+        .unwrap();
+
+        let (api, asked) = app_installation(&[]);
+        env.set("SKEIN_GITHUB_API", &api);
+        let token = mint_token("a/one").expect("an App granted everything did not mint");
+        assert_eq!(token.expose(), "skein-test-app[checks,actions]");
+        assert_eq!(asked.lock().unwrap().len(), 1, "asked more than once");
+        assert!(app_cannot_read().is_empty());
+
+        let (api, asked) = app_installation(&["actions"]);
+        env.set("SKEIN_GITHUB_API", &api);
+        let token = mint_token("a/one").expect("an App without Actions: read stopped minting");
+        assert_eq!(token.expose(), "skein-test-app[checks]");
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        assert_eq!(
+            app_cannot_read().get("a/one"),
+            Some(&vec!["Actions: read".to_string()])
+        );
+
+        let (api, _) = app_installation(&["checks", "actions"]);
+        env.set("SKEIN_GITHUB_API", &api);
+        let token = mint_token("a/one").expect("an App without either read stopped minting");
+        assert_eq!(token.expose(), "skein-test-app[]");
+        assert_eq!(
+            app_cannot_read().get("a/one"),
+            Some(&vec![
+                "Checks: read".to_string(),
+                "Actions: read".to_string()
+            ])
+        );
+
+        // Granted both on GitHub: the next token clears the flag.
+        let (api, _) = app_installation(&[]);
+        env.set("SKEIN_GITHUB_API", &api);
+        mint_token("a/one").unwrap();
+        assert!(app_cannot_read().is_empty(), "{:?}", app_cannot_read());
+    }
 
     /// A token directory that is a symbolic link stops the placement, rather than redirecting it.
     ///
