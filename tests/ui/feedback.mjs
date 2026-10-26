@@ -312,6 +312,23 @@ const noticeNow = () => page.evaluate(() => {
   return { kind: n.className.replace("show", "").trim(), text: t.textContent, lines: Math.round(t.getBoundingClientRect().height / lh) };
 });
 
+// SKEIN-1333, save and warn: a tracking change whose old token could not be revoked goes through
+// and answers 200 with a `warning`. Fails if `saveBoxSettings`' `post` goes back to ignoring the
+// body (no notice, only "settings saved"), or if the warning keeps the dialog open as a refusal.
+await check("a tracking change that saved with a warning closes Box settings and says the warning", async () => {
+  await closeEverything();
+  const warning = `${BOX}'s work tracking is changed, but the token old gave it could not be revoked (the gateway could not be reached). skein will try again when that tracker answers; to be sure now, revoke the agent ${BOX} there by hand.`;
+  await page.route(`**/api/boxes/${BOX}/tracking`, r => r.fulfill({ status: 200, json: { ok: true, warning } }));
+  try {
+    await page.evaluate(box => openBoxSettings(box), BOX);
+    await until(() => !document.getElementById("bs-go").disabled);
+    await page.locator("#bs-go").click();
+    await until(() => !document.getElementById("boxset").classList.contains("open"));
+    const said = await noticeNow();
+    if (!said || !said.text.includes("revoke the agent") || said.kind !== "error") throw new Error(JSON.stringify(said));
+  } finally { await page.unroute(`**/api/boxes/${BOX}/tracking`); await closeEverything(); }
+});
+
 // Fails if a refusal goes back to the toast (gone after 3.5s), if the notice drops its line breaks
 // (`white-space` back to normal: one line), or if a later toast takes it away.
 await check("a refused save is said in a notice that keeps every line and outlives the toast", async () => {

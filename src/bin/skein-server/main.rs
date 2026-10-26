@@ -281,6 +281,23 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
             }
         }
     });
+    // **A token a tracking change could not revoke, tried again** (SKEIN-1333, the owner's
+    // decision of 2026-10-26: save and warn). The person was told when they made the change; this
+    // is the "skein will try again" half. Five minutes: nothing is waiting on it, and a tracker
+    // that was down is usually back by then. A failure says nothing and blocks nothing.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            tick.tick().await;
+            if let Ok(done) =
+                tokio::task::spawn_blocking(skein::tracking::retry_pending_revocations).await
+            {
+                for what in done {
+                    eprintln!("skein: {what}");
+                }
+            }
+        }
+    });
     // **The warden, said at boot.** Optional (SKEIN-1184, `docs/decisions/warden-or-prompt.md`):
     // without one skein shows the person the command instead, so this is one line saying which
     // route this fleet is on — the health check's own sentence — and never a reason not to start.

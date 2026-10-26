@@ -35,7 +35,12 @@ pub(super) async fn api_set_box_tracking(
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
     match skein::tracking::set_box_tracking(&name, r.connection.as_deref()) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        // Changed, with something the person has to know: the old token could not be revoked yet
+        // (SKEIN-1333, save and warn). Said the way destroy says its own.
+        Ok(Some(warning)) => {
+            Json(serde_json::json!({ "ok": true, "warning": warning })).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
@@ -200,16 +205,26 @@ pub(super) async fn api_save_connection(Json(req): Json<ConnectionReq>) -> Respo
 /// Forget a connection entirely. Refused while a repo still selects it — see `remove_connection`.
 pub(super) async fn api_remove_connection(Path(id): Path<String>) -> Response {
     match skein::tracking::remove_connection(&id) {
-        Ok(()) => Json(skein::tracking::sync_status()).into_response(),
+        Ok(warning) => status_with_warning(warning),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
+}
+
+/// The work-tracking status, carrying a `warning` when a token waiting to be revoked at a
+/// connection being forgotten still could not be (SKEIN-1333).
+fn status_with_warning(warning: Option<String>) -> Response {
+    let mut status = serde_json::to_value(skein::tracking::sync_status()).unwrap_or_default();
+    if let (Some(warning), Some(map)) = (warning, status.as_object_mut()) {
+        map.insert("warning".into(), warning.into());
+    }
+    Json(status).into_response()
 }
 
 /// Forget one connection's stored token, keeping the connection itself. Refused while a box holds a
 /// token only it can revoke — see `forget_connection_token`.
 pub(super) async fn api_forget_connection_token(Path(id): Path<String>) -> Response {
     match skein::tracking::forget_connection_token(&id) {
-        Ok(()) => Json(skein::tracking::sync_status()).into_response(),
+        Ok(warning) => status_with_warning(warning),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }

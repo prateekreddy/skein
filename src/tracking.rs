@@ -4,8 +4,9 @@
 //! with PAT `A` is only valid where `A` authenticates — so [`SyncConnection`] holds the pair and a
 //! repo selects a whole connection rather than describing half of one.
 //!
-//! Nothing here runs on a tick. Provisioning is an explicit act: it spends a network round trip
-//! and mints a real credential.
+//! Provisioning is an explicit act: it spends a network round trip and mints a real credential.
+//! The one thing here that runs on a tick is [`retry_pending_revocations`]: a token a tracking change
+//! could not revoke is tried again until its tracker answers (SKEIN-1333).
 
 use crate::config::*;
 use crate::place::located;
@@ -419,8 +420,9 @@ pub fn upsert_connection(
 /// Forget a connection and its token.
 ///
 /// Refused while any repo still selects it, naming them: silently untracking three repos to honour
-/// one click is a bigger edit than the click asked for.
-pub fn remove_connection(id: &str) -> Result<(), String> {
+/// one click is a bigger edit than the click asked for. `Ok(Some(warning))` when a token waiting
+/// to be revoked at it could not be, and skein stops trying ([`settle_pending_before_forgetting`]).
+pub fn remove_connection(id: &str) -> Result<Option<String>, String> {
     refuse_while_held(id, "removing the connection")?;
     let users: Vec<String> = load_repos()
         .into_iter()
@@ -439,6 +441,10 @@ pub fn remove_connection(id: &str) -> Result<(), String> {
             },
         ));
     }
+    if !load_connections().iter().any(|c| c.id == id) {
+        return Err(format!("no work-tracking connection called {id:?}"));
+    }
+    let warning = settle_pending_before_forgetting(id, "the connection is removed")?;
     update_connections(|all: &mut Vec<SyncConnection>| {
         let before = all.len();
         all.retain(|c| c.id != id);
@@ -448,7 +454,7 @@ pub fn remove_connection(id: &str) -> Result<(), String> {
         }
     })?;
     let _ = set_connection_token(id, "");
-    Ok(())
+    Ok(warning)
 }
 
 /// The connection a repo claims work through, if it has one.
@@ -570,10 +576,131 @@ fn refuse_while_held(id: &str, what: &str) -> Result<(), String> {
 }
 
 /// Forget one connection's stored Plane token, keeping the connection — refused while a box holds a
-/// token that only this Plane token can revoke (SKEIN-1333).
-pub fn forget_connection_token(id: &str) -> Result<(), String> {
+/// token that only this Plane token can revoke (SKEIN-1333). `Ok(Some(warning))` as
+/// [`remove_connection`] gives it.
+pub fn forget_connection_token(id: &str) -> Result<Option<String>, String> {
     refuse_while_held(id, "forgetting its Plane token")?;
-    set_connection_token(id, "")
+    let warning = settle_pending_before_forgetting(id, "its Plane token is forgotten")?;
+    set_connection_token(id, "")?;
+    Ok(warning)
+}
+
+/// Where skein keeps the revocations a tracking change could not make (SKEIN-1333), one
+/// `<box> <connection>` per line. Host-only: in `$SKEIN_HOME` itself, which no box is given, and
+/// not under `boxes/<name>/`, so a box destroyed meanwhile does not take its pending revocation
+/// with it.
+fn pending_revocations_path() -> PathBuf {
+    skein_home().join("tracking-revocations")
+}
+
+/// Every revocation still waiting, as `(box, connection)`, in the order they were queued.
+pub fn pending_revocations() -> Vec<(String, String)> {
+    fs::read_to_string(pending_revocations_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (b, c) = l.trim().split_once(' ')?;
+            (valid_name(b) && valid_connection_id(c)).then(|| (b.to_string(), c.to_string()))
+        })
+        .collect()
+}
+
+/// Change the pending list under its lock, and write it back.
+fn update_pending<T>(f: impl FnOnce(&mut Vec<(String, String)>) -> T) -> Result<T, String> {
+    let path = pending_revocations_path();
+    let dir = path.parent().ok_or("no parent directory")?.to_path_buf();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    crate::util::with_lock(&dir.join(".tracking-revocations.lock"), || {
+        let mut list = pending_revocations();
+        let out = f(&mut list);
+        let body: String = list.iter().map(|(b, c)| format!("{b} {c}\n")).collect();
+        write_atomic(&path, &dir, body.as_bytes())?;
+        Ok(out)
+    })
+}
+
+/// Queue the token `connection` gave `name` for revocation, once.
+fn queue_revocation(name: &str, connection: &str) -> Result<(), String> {
+    update_pending(|list| {
+        let entry = (name.to_string(), connection.to_string());
+        if !list.contains(&entry) {
+            list.push(entry);
+        }
+    })
+}
+
+fn drop_pending(name: &str, connection: &str) -> Result<(), String> {
+    update_pending(|list| list.retain(|(b, c)| !(b == name && c == connection)))
+}
+
+/// Try every pending revocation once, and say which went through. Run on a tick by the server.
+///
+/// A failure is silent and blocks nothing: the person was told when the change was made, and the
+/// entry stays for the next pass. An entry for a box that holds a token from that same connection
+/// again (it was wired up there since) is dropped untried, because the gateway names a token by
+/// its agent, and the revocation would retire the token the box is using now.
+pub fn retry_pending_revocations() -> Vec<String> {
+    let mut said = Vec::new();
+    for (name, connection) in pending_revocations() {
+        if box_minted_at(&name).as_deref() == Some(connection.as_str()) {
+            let _ = drop_pending(&name, &connection);
+            continue;
+        }
+        let Some(conn) = load_connections().into_iter().find(|c| c.id == connection) else {
+            continue;
+        };
+        if revoke_at(&name, &conn, true).is_ok() && drop_pending(&name, &connection).is_ok() {
+            said.push(format!(
+                "revoked the work-tracking token {connection} gave {name}, on a retry"
+            ));
+        }
+    }
+    said
+}
+
+/// Before a connection or its Plane token is forgotten, try the revocations still waiting there
+/// while its token can still make them, and stop waiting on the rest.
+///
+/// **A pending revocation does not block the removal**, unlike a box that holds a token from the
+/// connection now: that box can be moved first, which revokes its token, but a revocation the
+/// tracker keeps refusing would hold the connection for ever. So each is tried once, now; the ones
+/// that fail are dropped from the queue, and the warning names each box, so the person can revoke
+/// it by hand, which is all skein could still have done.
+fn settle_pending_before_forgetting(id: &str, because: &str) -> Result<Option<String>, String> {
+    let waiting: Vec<String> = pending_revocations()
+        .into_iter()
+        .filter(|(_, c)| c == id)
+        .map(|(b, _)| b)
+        .collect();
+    if waiting.is_empty() {
+        return Ok(None);
+    }
+    let conn = load_connections().into_iter().find(|c| c.id == id);
+    let (mut names, mut whys) = (Vec::new(), Vec::new());
+    for name in waiting {
+        let tried = match &conn {
+            Some(conn) => revoke_at(&name, conn, true),
+            None => Err("the connection is gone".to_string()),
+        };
+        if let Err(why) = tried {
+            whys.push(format!("{name}: {why}"));
+            names.push(name);
+        }
+    }
+    update_pending(|list| list.retain(|(_, c)| c != id))?;
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let many = names.len() > 1;
+    Ok(Some(format!(
+        "the old work-tracking {} {id} gave {} could not be revoked ({}), and skein stops trying \
+         now that {because}. To be sure, revoke the {} {} there by hand.",
+        if many { "tokens" } else { "token" },
+        names.join(", "),
+        whys.join("; "),
+        if many { "agents" } else { "agent" },
+        names.join(", "),
+    )))
 }
 
 /// Where a box's own tracking choice is recorded — beside its other durable host-side state, so it
@@ -652,27 +779,39 @@ pub fn check_box_tracking_choice(choice: &str) -> Result<(), String> {
 ///
 /// **A change away from the connection that minted the box's token revokes that token first**
 /// (SKEIN-1333). The choice used to be only a file, so a box set to "not tracked", or moved to
-/// another connection, kept a token that could still claim work where it was minted. When the
-/// revocation fails, nothing is changed and the error says so: the alternative is a recorded choice
-/// the box is not actually following.
-pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<(), String> {
+/// another connection, kept a token that could still claim work where it was minted.
+///
+/// **When the revocation fails, the change still goes through, and `Ok(Some(warning))` says so**
+/// (the owner's decision of 2026-10-26, save and warn). The token is queued
+/// ([`queue_revocation`]) and [`retry_pending_revocations`] tries it again until that tracker
+/// answers. Only a failure to queue it refuses the change, since then nothing would try again.
+pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<Option<String>, String> {
     let path = box_tracking_path(name).ok_or_else(|| format!("unusable box name {name:?}"))?;
     if let Some(choice) = choice {
         check_box_tracking_choice(choice)?;
     }
+    let mut warning = None;
     if let Some(minted) = box_minted_at(name) {
         let after = match choice {
             Some(chosen) => Some(chosen.trim().to_string()).filter(|c| !c.is_empty()),
             None => inherited_connection(name).map(|c| c.id),
         };
         if after.as_deref() != Some(minted.as_str()) {
-            sync_revoke_token(name).map_err(|why| {
-                format!(
-                    "{name} holds a work-tracking token from {minted}, and it could not be \
-                     revoked ({why}), so its work tracking was not changed. Try again once that \
-                     gateway answers"
-                )
-            })?;
+            if let Err(why) = sync_revoke_token(name) {
+                queue_revocation(name, &minted).map_err(|e| {
+                    format!(
+                        "{name} holds a work-tracking token from {minted} that could not be \
+                         revoked ({why}), and skein could not note it to try again ({e}), so its \
+                         work tracking was not changed. Try again once that tracker answers"
+                    )
+                })?;
+                forget_minted(name);
+                warning = Some(format!(
+                    "{name}'s work tracking is changed, but the token {minted} gave it could not \
+                     be revoked ({why}). skein will try again when that tracker answers; to be \
+                     sure now, revoke the agent {name} there by hand."
+                ));
+            }
         }
     }
     let Some(choice) = choice else {
@@ -680,12 +819,13 @@ pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<(), String> 
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 Err(format!("clearing {}: {e}", path.display()))
             }
-            _ => Ok(()),
+            _ => Ok(warning),
         };
     };
     let dir = path.parent().ok_or("no parent directory")?;
     fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    write_atomic(&path, dir, choice.trim().as_bytes())
+    write_atomic(&path, dir, choice.trim().as_bytes())?;
+    Ok(warning)
 }
 
 /// The gateway's MCP endpoint for a configured base URL. Accepts either spelling, so a pasted
@@ -914,6 +1054,20 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     if box_liveness(name) != Some(Liveness::Running) {
         return Err(format!("{name} is not running"));
     }
+    // A token this connection gave the box earlier that is still waiting to be revoked goes first:
+    // the gateway names a token by its agent, so revoking it after the new one is minted would
+    // retire the new one (SKEIN-1333).
+    if pending_revocations().contains(&(name.to_string(), conn.id.clone())) {
+        revoke_at(name, &conn, true).map_err(|why| {
+            format!(
+                "the token {} gave {name} before is still waiting to be revoked ({why}), and a \
+                 new one minted there now would be revoked with it. Try again once that tracker \
+                 answers",
+                conn.id
+            )
+        })?;
+        drop_pending(name, &conn.id)?;
+    }
     let project = repo_for_box(name)
         .map(|r| r.plane_project)
         .and_then(|p| plane_project_id(&p));
@@ -1095,12 +1249,22 @@ pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
             None => return Ok(()),
         },
     };
+    revoke_at(agent, &conn, minted.is_some())?;
+    forget_minted(agent);
+    Ok(())
+}
+
+/// Ask `conn`'s gateway to retire the token named `agent`, with that connection's Plane token.
+///
+/// `recorded` says skein knows a token was minted there: with no Plane token or gateway stored,
+/// that is a failure, and for a box never known to be tracked it is nothing to do.
+fn revoke_at(agent: &str, conn: &SyncConnection, recorded: bool) -> Result<(), String> {
     let base = conn.gateway_url.trim().trim_end_matches('/').to_string();
     let token = connection_token(&conn.id);
     let (Some(token), false) = (token, base.is_empty()) else {
-        return match minted {
-            None => Ok(()),
-            Some(_) => Err(format!(
+        return match recorded {
+            false => Ok(()),
+            true => Err(format!(
                 "its token was minted at {}, which has no Plane token or gateway stored now",
                 conn.label
             )),
@@ -1122,9 +1286,7 @@ pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
     if !out.status.success() {
         return Err(format!("the gateway could not be reached ({})", out.status));
     }
-    revocation_outcome(&body)?;
-    forget_minted(agent);
-    Ok(())
+    revocation_outcome(&body)
 }
 
 /// Did the gateway actually retire the token?
@@ -2787,32 +2949,118 @@ mod tests {
         }
     }
 
-    /// **When the old token cannot be revoked, the choice is not changed** (SKEIN-1333), and the
-    /// error says so. What would make it fail: writing the choice before revoking, or after a
-    /// failure — the box would then read as moved while its old token still claims work.
+    /// **When the old token cannot be revoked, the change goes through, says so, and the
+    /// revocation is tried again until the tracker answers** (SKEIN-1333, the owner's decision of
+    /// 2026-10-26: save and warn).
+    ///
+    /// What would make it fail: the change refused as before (`unwrap` on the `Err`); no warning
+    /// (`Ok(None)`); the revocation not queued (`pending_revocations` empty, and the retry sends
+    /// nothing); the retry asking anywhere but the connection that minted the token; a revoked
+    /// entry kept; or the retry revoking a token the box was given at that connection since.
     #[test]
-    fn a_tracking_change_whose_revocation_fails_changes_nothing() {
+    fn a_tracking_change_whose_revocation_fails_goes_through_warns_and_retries() {
         let _g = env_lock();
         let dir = tempdir();
         let mut env = env_pins();
         env.set("SKEIN_HOME", &dir);
-        upsert_connection(
-            Some("old"),
-            "old",
-            &format!("http://127.0.0.1:{}", nobody_listening()),
-            Some("skein-test-old-plane"),
-        )
-        .unwrap();
+        let old_at = |port: u16| {
+            upsert_connection(
+                Some("old"),
+                "old",
+                &format!("http://127.0.0.1:{port}"),
+                Some("skein-test-old-plane"),
+            )
+            .unwrap()
+        };
+        old_at(nobody_listening());
         set_box_tracking("worker", Some("old")).unwrap();
         record_minted("worker", "old").unwrap();
 
-        let why = set_box_tracking("worker", Some("")).unwrap_err();
+        let warning = set_box_tracking("worker", Some(""))
+            .unwrap()
+            .expect("the change went through without a word about the token");
         assert!(
-            why.contains("could not be revoked") && why.contains("was not changed"),
-            "{why}"
+            warning.starts_with("worker's work tracking is changed, but the token old gave it")
+                && warning.contains("revoke the agent worker there by hand"),
+            "{warning}"
         );
-        assert_eq!(box_tracking("worker").as_deref(), Some("old"));
-        assert_eq!(box_minted_at("worker").as_deref(), Some("old"));
+        assert_eq!(box_tracking("worker").as_deref(), Some(""));
+        assert_eq!(box_minted_at("worker"), None);
+        let queued = vec![("worker".to_string(), "old".to_string())];
+        assert_eq!(pending_revocations(), queued);
+
+        // The tracker still down: the retry says nothing, and the entry stays.
+        assert!(retry_pending_revocations().is_empty());
+        assert_eq!(pending_revocations(), queued);
+
+        // It answers: the next retry revokes there, with that connection's Plane token.
+        let (port, seen) = one_revocation();
+        old_at(port);
+        assert_eq!(retry_pending_revocations().len(), 1);
+        let request = seen.join().unwrap();
+        assert!(
+            request.starts_with("DELETE /v1/agent-tokens/worker ")
+                && request.contains("Authorization: Bearer skein-test-old-plane"),
+            "{request:?}"
+        );
+        assert!(pending_revocations().is_empty());
+
+        // An entry for a box wired up at that connection again is dropped, never sent: the
+        // gateway names a token by its agent, so it would retire the box's new one.
+        let (port, seen) = one_revocation();
+        old_at(port);
+        queue_revocation("worker", "old").unwrap();
+        record_minted("worker", "old").unwrap();
+        assert!(retry_pending_revocations().is_empty());
+        assert!(pending_revocations().is_empty());
+        assert_eq!(
+            seen.join().unwrap(),
+            "",
+            "the box's current token was revoked"
+        );
+    }
+
+    /// **A revocation still waiting does not hold a connection for ever** (SKEIN-1333): forgetting
+    /// the connection, or its Plane token, tries it once more while the token can, and when that
+    /// fails goes ahead and says which agent to revoke by hand.
+    ///
+    /// What would make it fail: `refuse_while_held` counting queued revocations (the removal is
+    /// refused); `settle_pending_before_forgetting` not run (no warning, and the entry is left
+    /// queued against a connection that is gone); or a revocation that succeeds still warned about.
+    #[test]
+    fn a_revocation_still_waiting_does_not_hold_a_connection_for_ever() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &dir);
+        let (port, seen) = one_revocation();
+        for (id, port) in [("up", port), ("down", nobody_listening())] {
+            upsert_connection(
+                Some(id),
+                id,
+                &format!("http://127.0.0.1:{port}"),
+                Some("skein-test-plane"),
+            )
+            .unwrap();
+            queue_revocation("worker", id).unwrap();
+        }
+
+        assert_eq!(forget_connection_token("up"), Ok(None));
+        assert!(seen
+            .join()
+            .unwrap()
+            .starts_with("DELETE /v1/agent-tokens/worker "));
+
+        let warning = remove_connection("down")
+            .unwrap()
+            .expect("a token that could not be revoked was dropped without a word");
+        assert!(
+            warning.contains("down gave worker could not be revoked")
+                && warning.contains("revoke the agent worker there by hand"),
+            "{warning}"
+        );
+        assert!(!load_connections().iter().any(|c| c.id == "down"));
+        assert!(pending_revocations().is_empty());
     }
 
     /// **A connection, or its Plane token, cannot be forgotten while a box holds a token only it
