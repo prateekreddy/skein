@@ -664,10 +664,6 @@ cited_by = ["docs/recovery-survey.md"]
 line = "return Err(format!(\"unsupported runtime {agent:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1534"]
-line = "if branch.trim().is_empty() {"
-cited_by = ["docs/recovery-survey.md"]
-
 ["src/bin/skein.rs:1559"]
 line = "let Some((program, args)) = argv.split_first() else {"
 cited_by = ["docs/recovery-survey.md"]
@@ -1839,6 +1835,10 @@ cited_by = ["docs/recovery-survey.md"]
 ["src/sandbox.rs:966"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/sandbox.rs:1027"]
+line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/sandbox.rs:1136"]
