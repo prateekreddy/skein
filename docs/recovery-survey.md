@@ -121,14 +121,14 @@ Ranked by reachability × severity — how easily an ordinary session lands here
 person is when it does.
 
 **1. The terminal reconnect overlay waits for a click, over a sentence it hides.**
-`src/web/app/board.js:919` paints *"session not connected / click to reconnect"* on any box terminal
+`src/web/app/board.js:930` paints *"session not connected / click to reconnect"* on any box terminal
 whose socket drops with a code that is not `CLOSE_CHILD_ENDED`. There was no retry timer
 when this was written: `reconnectSession` had four call sites, and every one of them was a person
 acting — a restart, a tab click, the overlay itself, a file drop. **That is no longer true**
 (re-read 2026-09-23, `grep -n 'reconnectSession(' src/web/app/*.js` prints its definition and
 six calls):
-`src/web/app/board.js:387`, `src/web/app/board.js:817`, `src/web/app/board.js:920`,
-`src/web/app/board.js:1240` (the recovery card's *Try again*), `src/web/app/board.js:1272` and
+`src/web/app/board.js:398`, `src/web/app/board.js:828`, `src/web/app/board.js:931`,
+`src/web/app/board.js:1251` (the recovery card's *Try again*), `src/web/app/board.js:1283` and
 `src/web/app/boot.js:174` — and the fifth is not a person: `retryWaiting` reconnects every pane
 waiting on a condition the moment the board tick or a `pty-freed` event says it cleared. Worse,
 the six failure sentences in `terminal_session`, `login_session` and `pump_pty`
@@ -594,7 +594,7 @@ same shape and all of them conform.
 **Already owned: SKEIN-702**, which is decided and blocked only on file ownership. Included so the
 table is complete, and because measuring them changed one thing: the defect is not only that some
 say nothing, it is that *none of the six early returns sends a close code*, so
-`src/web/app/board.js:1010` reads 1006, decides the connection went away, and covers the sentence with
+`src/web/app/board.js:1021` reads 1006, decides the connection went away, and covers the sentence with
 the reconnect card. `CLOSE_CHILD_ENDED` (`src/bin/skein-server.rs:4469`) is only sent at `src/bin/skein-server.rs:4405`,
 which is reached solely when `pump_pty` returned a child's exit code.
 
@@ -631,7 +631,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     (`src/stream.rs:243`); the server forwards that as `pty-freed` (`src/bin/skein-server/events.rs:79`);
 >     and the page reconnects every pane waiting on it (`src/web/app/boot.js:612`), offering no
 >     control, because a control beside a promise to come back is an invitation to press something
->     that was not needed (`src/web/app/board.js:868`). Watched, and it recovers unasked.
+>     that was not needed (`src/web/app/board.js:879`). Watched, and it recovers unasked.
 >   * **The absent box — W → C.** The same shape one token along: the refusal adds
 >     `watching_for_box` (`src/bin/skein-server/terminal.rs:292`) and the board's own ticks drive the
 >     reconnect (`src/web/app/boot.js:587`).
@@ -644,7 +644,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     is met: `skeins_own_fault` says whose failure it is, that nothing will reopen the pane by
 >     itself, and which control to use (`src/bin/skein-server/terminal.rs:320`), and `AFTER_NO_WATCH`
 >     (`src/bin/skein-server/terminal.rs:421`) is what puts that button on the page instead of a spinner
->     (`src/web/app/board.js:872`). Requirement 3 is open, and that is what W is for: three of the four
+>     (`src/web/app/board.js:883`). Requirement 3 is open, and that is what W is for: three of the four
 >     rows below already NAME the condition in their `watchable?` cell — a pty slot freeing, the
 >     program appearing on PATH, fd pressure easing — and the fourth is that same fd pressure one
 >     call later. Each is a poll this tree knows how to write, `openpty` being the cheapest of them
@@ -656,7 +656,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     pump failures now close with `retry` (`src/bin/skein-server/terminal.rs:426`), and the pane
 >     tries again at 3s, 10s, 30s, 60s and 120s through `retryWaiting`, saying when the next try is
 >     and offering no button, then hands over to the button after the fifth
->     (`src/web/app/board.js:881`). `openpty` failing spawns nothing, so a try risks nothing. The
+>     (`src/web/app/board.js:892`). `openpty` failing spawns nothing, so a try risks nothing. The
 >     login modal's copy of the same four stays `no-watch` and keeps its button, for the reason the
 >     cap refusal above gives. `tests/ui/recovery.mjs` drives the whole run on Playwright's clock and
 >     counts the tries off the wire. The row letters below are still the 2026-09-09 measurement.
@@ -745,8 +745,8 @@ after `REV_STALE_TRIES`. Everything below either copies those or does not.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/web/app/board.js:919` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
-| `src/web/app/board.js:281`, `src/web/app/board.js:390`, `src/web/app/box.js:26`, `src/web/app/box.js:62` | could not continue {box}: {why} · could not restart {agent} in {box}: {why} · could not stop {box}: {why} · could not destroy {box}: {why} | **R** — any of the four resume/restart/stop/destroy POSTs answering non-ok | the row action buttons on the fleet board. **Not** the other pair, at `src/web/app/box.js:76` and `src/web/app/box.js:80`, which is a different surface (SKEIN-891): the header's Continue N (`#contall`) or saying "continue all", one POST to `/api/resume-batch` for several boxes. Its first arm used to be unreachable — `api_resume_batch` answered `ok: true` on every path, so a batch that failed inside the server toasted "continuing 0" as a success. It now answers `ok: false` whenever a box it was asked for was neither continued nor held, with a sentence naming those boxes, each with its reason (`src/bin/skein-server/boxes.rs:753`, SKEIN-1137), and the page says that sentence in a notice that stays until closed (SKEIN-1132, SKEIN-1265); "could not continue those boxes" is the fallback for an answer without one and for the request itself failing | **y** — all four say the server's whole reason in a notice that stays until closed (SKEIN-1265, SKEIN-1313); a second stop or destroy while one is in flight sends nothing, and the row says "stopping…" or "destroying…" until it answers | yes — the box's own state on `/api/events`: a stop that failed leaves the box running | N |
+| `src/web/app/board.js:930` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
+| `src/web/app/board.js:281`, `src/web/app/board.js:401`, `src/web/app/box.js:26`, `src/web/app/box.js:62` | could not continue {box}: {why} · could not restart {agent} in {box}: {why} · could not stop {box}: {why} · could not destroy {box}: {why} | **R** — any of the four resume/restart/stop/destroy POSTs answering non-ok | the row action buttons on the fleet board. **Not** the other pair, at `src/web/app/box.js:76` and `src/web/app/box.js:80`, which is a different surface (SKEIN-891): the header's Continue N (`#contall`) or saying "continue all", one POST to `/api/resume-batch` for several boxes. Its first arm used to be unreachable — `api_resume_batch` answered `ok: true` on every path, so a batch that failed inside the server toasted "continuing 0" as a success. It now answers `ok: false` whenever a box it was asked for was neither continued nor held, with a sentence naming those boxes, each with its reason (`src/bin/skein-server/boxes.rs:753`, SKEIN-1137), and the page says that sentence in a notice that stays until closed (SKEIN-1132, SKEIN-1265); "could not continue those boxes" is the fallback for an answer without one and for the request itself failing | **y** — all four say the server's whole reason in a notice that stays until closed (SKEIN-1265, SKEIN-1313); a second stop or destroy while one is in flight sends nothing, and the row says "stopping…" or "destroying…" until it answers | yes — the box's own state on `/api/events`: a stop that failed leaves the box running | N |
 | `src/web/app/voice.js:126` | send failed | **R** — `POST /api/mailbox` failing | Mailbox → Send with a failing POST | **n** — two words. The typed text survives, and nothing says so | yes — the HTTP status distinguishes a safely re-sendable 5xx from a 4xx | N |
 | `src/web/app/panels.js:977` | could not run the test | **R** — the git-probe POST failing | Settings → GitHub & keys → test writes | **n** | yes — `health.gitgate` already carries the same fact on the 15s poll | N |
 | `src/web/app/box.js:696` | could not load the diff — {why} | **R** — the diff GET failing with the Diff tab open | box → Diff tab when the endpoint rejects | **n** — but it now says the server's reason after the dash, as the ok path's `d.note` does (SKEIN-1299) | yes — the box's run state | N |
@@ -797,17 +797,17 @@ help sitting in a doc comment beside it.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/board.rs:305` | the word `error`, `ended` or `stale` in the state column | **R** — `skein stop` a box — `state_with` maps `Liveness::Stopped` to "stale" | looking at the board | **n** — one word | yes — `box_liveness` returning running, or a new hook edge | N |
-| `src/board.rs:332` | the reason the turn failed, verbatim from the box's own probe | **R** — the probe reporting an `error`/`ended` turn outcome — the ordinary turn lifecycle | looking at the board | **cannot tell** — the text originates in the probe and `signals`, not here | yes — a fresh non-outcome status | N |
-| `src/board.rs:338` | why the turn stopped | **R** — any paused agent — `classify_message` on an ordinary tick | looking at the board | n | yes — a new turn starting | N |
-| `src/board.rs:343` | `permission`, `question`, `trust` or `auth` | **R** — the agent's screen showing a permission, question, trust or auth dialog | a blocked agent | partly — the doc at `src/board.rs:341` says "each wants a different move from you, so the row names it instead of saying 'decision'". It names the *kind* of move, not the move | yes — the dialog clearing | N |
-| `src/board.rs:355` | `never`, `misfiled` or `stale` for hooks | **R** — a box just started (no hook file yet), a reused name, or a session predating the installed probe | a box whose signals are not arriving | partly — the doc at `src/board.rs:348` sends the reader to `hook_health` for "what each one asks of a person"; the row carries only the token | yes — a correctly-named signal appearing | N |
-| `src/board.rs:365` | `none`, `stale`, `unreadable`, `unsupported`, `newer`, `misfiled` | **R** — all six values are live branches of `screen_health`; the same drift as row 131 | a box blind to its own screen | **n** | yes — a fresh parseable observation, which `pane_usable` already computes | N |
-| `src/board.rs:360` | `screen`, `edge`, `edge-ahead` | **R** — the turn-state fusion's three rules, each with a real bug behind it (docs/architecture.md §2.2) | looking at the board | n | yes — the observer catching up | N |
-| `src/board.rs:383` | a sandbox skein did not place, hidden until the `foreign:` filter reveals it | **R** — type `foreign:` in the board filter with a sandbox `sbx` made directly | typing `foreign:` | n | yes — a placement record appearing | N |
-| `src/board.rs:418` | `older` — the box's isolation cover is out of date | **R** — upgrade the binary while an older-covered box is running | after an upgrade | n at the row; §1's `cover_health` carries the sentence and the cost | yes — `cover_is_current`, computed every tick | N |
-| `src/board.rs:433` | `uncapped no-cgroup-delegation` (or `no-limit-computed`, `could-not-join-cgroup`) | **R** — start a box on a host without cgroup v2 delegation — `box-session.sh` writes the reason | a box started outside the ceiling | partly — the doc at `src/board.rs:428` distinguishes the three, "need a different fleet rather than a different setting"; the row shows the token | yes — the launcher writing `capped` at the next start | N |
-| `src/board.rs:443` | this box's credential is not scoped to its own repo | **R** — a fleet that can scope credentials with a box whose token is not scoped yet | looking at the board | n | yes — `box_is_scoped` flipping | N |
+| `src/board.rs:311` | the word `error`, `ended` or `stale` in the state column | **R** — `skein stop` a box — `state_with` maps `Liveness::Stopped` to "stale" | looking at the board | **n** — one word | yes — `box_liveness` returning running, or a new hook edge | N |
+| `src/board.rs:338` | the reason the turn failed, verbatim from the box's own probe | **R** — the probe reporting an `error`/`ended` turn outcome — the ordinary turn lifecycle | looking at the board | **cannot tell** — the text originates in the probe and `signals`, not here | yes — a fresh non-outcome status | N |
+| `src/board.rs:344` | why the turn stopped | **R** — any paused agent — `classify_message` on an ordinary tick | looking at the board | n | yes — a new turn starting | N |
+| `src/board.rs:349` | `permission`, `question`, `trust` or `auth` | **R** — the agent's screen showing a permission, question, trust or auth dialog | a blocked agent | partly — the doc at `src/board.rs:347` says "each wants a different move from you, so the row names it instead of saying 'decision'". It names the *kind* of move, not the move | yes — the dialog clearing | N |
+| `src/board.rs:361` | `never`, `misfiled` or `stale` for hooks | **R** — a box just started (no hook file yet), a reused name, or a session predating the installed probe | a box whose signals are not arriving | partly — the doc at `src/board.rs:354` sends the reader to `hook_health` for "what each one asks of a person"; the row carries only the token | yes — a correctly-named signal appearing | N |
+| `src/board.rs:371` | `none`, `stale`, `unreadable`, `unsupported`, `newer`, `misfiled` | **R** — all six values are live branches of `screen_health`; the same drift as row 131 | a box blind to its own screen | **n** | yes — a fresh parseable observation, which `pane_usable` already computes | N |
+| `src/board.rs:366` | `screen`, `edge`, `edge-ahead` | **R** — the turn-state fusion's three rules, each with a real bug behind it (docs/architecture.md §2.2) | looking at the board | n | yes — the observer catching up | N |
+| `src/board.rs:389` | a sandbox skein did not place, hidden until the `foreign:` filter reveals it | **R** — type `foreign:` in the board filter with a sandbox `sbx` made directly | typing `foreign:` | n | yes — a placement record appearing | N |
+| `src/board.rs:424` | `older` — the box's isolation cover is out of date | **R** — upgrade the binary while an older-covered box is running | after an upgrade | n at the row; §1's `cover_health` carries the sentence and the cost | yes — `cover_is_current`, computed every tick | N |
+| `src/board.rs:446` | `uncapped no-cgroup-delegation` (or `no-limit-computed`, `could-not-join-cgroup`) | **R** — start a box on a host without cgroup v2 delegation — `box-session.sh` writes the reason | a box started outside the ceiling | partly — the doc at `src/board.rs:441` distinguishes the three, "need a different fleet rather than a different setting"; the row shows the token | yes — the launcher writing `capped` at the next start | N |
+| `src/board.rs:456` | this box's credential is not scoped to its own repo | **R** — a fleet that can scope credentials with a box whose token is not scoped yet | looking at the board | n | yes — `box_is_scoped` flipping | N |
 
 ## 9. `src/fleet/`
 
@@ -988,7 +988,7 @@ person.
 
 ## What could not be classified, and why
 
-- **`src/board.rs:332`** — the board's principal "why" field. Its text originates in the box's own
+- **`src/board.rs:338`** — the board's principal "why" field. Its text originates in the box's own
   probe and in `signals`, not in `board`, so whether it says what to do is a property of a surface
   this survey did not reach. It is the single largest unexamined text source in the product.
 - **`src/bin/skein-server/settings.rs:273`** — a person presses Save, the ssh key does not load, and the

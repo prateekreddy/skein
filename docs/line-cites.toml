@@ -717,59 +717,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// module note. `fleet` is never empty: `load_config` repairs a blank name, which is what makes"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:305"]
+["src/board.rs:311"]
 line = "pub state: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:332"]
+["src/board.rs:338"]
 line = "pub headline: Option<String>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:338"]
+["src/board.rs:344"]
 line = "pub pause: Pause,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:341"]
+["src/board.rs:347"]
 line = "/// each wants a different move from you, so the row names it instead of saying \"decision\"."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:343"]
+["src/board.rs:349"]
 line = "pub blocked_kind: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:348"]
+["src/board.rs:354"]
 line = "/// installed probe contract. See [`crate::signals::hook_health`] for what each one asks of a"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:355"]
+["src/board.rs:361"]
 line = "pub hook_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:360"]
+["src/board.rs:366"]
 line = "pub status_from: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:365"]
+["src/board.rs:371"]
 line = "pub screen_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:383"]
+["src/board.rs:389"]
 line = "pub foreign: bool,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:418"]
+["src/board.rs:424"]
 line = "pub cover: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:428"]
+["src/board.rs:441"]
 line = "/// Three ways to be uncapped and they are not one problem. *no-limit-computed* is skein's own"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:433"]
+["src/board.rs:446"]
 line = "pub ceiling: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:443"]
+["src/board.rs:456"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2039,47 +2039,47 @@ cited_by = ["docs/recovery-survey.md"]
 line = "else notice(`could not continue ${name}: ${d.error || \"no reason given\"}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:387"]
+["src/web/app/board.js:398"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:390"]
+["src/web/app/board.js:401"]
 line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:817"]
+["src/web/app/board.js:828"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:868"]
+["src/web/app/board.js:879"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:872"]
+["src/web/app/board.js:883"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:881"]
+["src/web/app/board.js:892"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:919"]
+["src/web/app/board.js:930"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:920"]
+["src/web/app/board.js:931"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1010"]
+["src/web/app/board.js:1021"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1240"]
+["src/web/app/board.js:1251"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1272"]
+["src/web/app/board.js:1283"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
