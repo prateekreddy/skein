@@ -65,7 +65,7 @@ says, and the rows below are mostly about files for that reason.
 | the rest of the internet | **yes — every host tried, and not bounded by skein** (SKEIN-926). **Open by decision rather than by oversight**: a box installs from npm, PyPI, crates.io, GitHub and the model APIs, so an allowlist that misses one produces a failure that reads as a broken build rather than as a policy. skein therefore sets no egress policy at all, and a box reaches whatever the host's `sbx` policy allows | measured 2026-09-21 from inside a scoped box with the proxy out of the path — the command is under [Checking this page](#checking-this-page), and all six hosts answered `200`. `grep -rn 'sbx policy' src` finds 9 hits, every one of them advice printed for a person to run on their own host; none sets a policy |
 | the fleet's canonical agent login | cannot replace it; a box's login moves up only when the fleet holds none (`src/box-session.sh:1450`) | code |
 | another box's files or the fleet's, through a link it leaves in its own root for the launcher to bind or write at its next start | **no**. The launcher refuses to start a box whose `home`, `tmp`, `bin`, `vartmp`, `.local/state` or agent homes are not real directories of the box's own (SKEIN-1254), and writes each file in the root under a temporary name and renames it over the target, which replaces a link instead of following it (SKEIN-1255). A box process still running across the restart cannot race the check either: each directory is held open once checked, and written and bound through the descriptor from then on (SKEIN-1287) | fleet tests `a_box_whose_own_directory_was_swapped_for_a_link_is_refused`, `a_link_where_the_launcher_writes_is_replaced_and_what_it_led_to_is_untouched`, `a_dotfile_link_inside_the_home_is_followed_and_a_foreign_git_directory_is_not_written`, `a_directory_swapped_after_it_was_checked_is_not_what_the_box_gets`; code: `src/box-session.sh:904`, `src/box-session.sh:927`, `src/box-session.sh:1006` |
-| the environment the cockpit was started with | **only the names on the launcher's allow-list** (SKEIN-972), whether through the box's session or through a later crossing into it (SKEIN-1085); see [What a box inherits](#what-a-box-inherits). The cockpit's own variables, `SKEIN_HOME` and `SKEIN_LISTEN_INHERITED_ONLY` among them, reach neither. A crossing into a scoped box carries that box's own `GH_TOKEN` or none, never the fleet's, as its session does (SKEIN-1095) | tests `a_box_session_inherits_only_its_allow_list`, `a_crossing_into_a_box_carries_only_its_allow_list` and `a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch/environment.rs`), which start a real box with a canary in the environment and read the environment back from inside it; `the_crossing_list_is_the_launchers_list` and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place/crossing.rs`) |
+| the environment the cockpit was started with | **only the names on the launcher's allow-list** (SKEIN-972), whether through the box's session or through a later crossing into it (SKEIN-1085); see [What a box inherits](#what-a-box-inherits). The cockpit's own variables, `SKEIN_HOME` and `SKEIN_LISTEN_INHERITED_ONLY` among them, reach neither. A crossing into a scoped box carries no `GH_TOKEN`, never the fleet's, as its session does (SKEIN-1095, SKEIN-1332) | tests `a_box_session_inherits_only_its_allow_list`, `a_crossing_into_a_box_carries_only_its_allow_list` and `a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch/environment.rs`), which start a real box with a canary in the environment and read the environment back from inside it; `the_crossing_list_is_the_launchers_list` and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place/crossing.rs`) |
 
 **Two kinds of box get less of this, and both say so when they start.**
 
@@ -126,7 +126,7 @@ as it does for a session.
 
 **And a crossing holds what the box's session was given** (SKEIN-1095). The list only says which
 names a box may inherit. For some of them the launcher then decides per box: a scoped box has
-`GH_TOKEN` replaced by its own-repo token or removed, and loses `SSH_AUTH_SOCK`; a box with a login
+`GH_TOKEN` removed, and loses `SSH_AUTH_SOCK`; a box with a login
 of its own loses `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. A crossing used to carry skein-server's
 values for all of these, so every crossing into a scoped box brought the fleet's `GH_TOKEN` in,
 including the pane observer, whose `/proc/<pid>/environ` the box's agent can read.
@@ -138,13 +138,15 @@ the rule is not written twice. A `fleet`-scoped box still gets the fleet's token
 `a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none` (`tests/fleet_launch/environment.rs`)
 and `the_names_the_session_decides_are_the_launchers_unsets` (`src/place/crossing.rs`).
 
-**What a box holds is its token as of its start, and `gh` reads past that** (SKEIN-1240). The
-session and every crossing carry the own-repo token the box started with, while the host rewrites
-the placed file the moment a key is replaced. A scoped box's `gh` is a shim, bound over the real
-binary, that reads the placed file on every call and has no credential when there is none. A
-`GH_TOKEN` that differs from the one the box started with was set on purpose, a review crossing's
-for one, and is used unchanged. Anything else that reads `$GH_TOKEN` keeps the old key until the
-box restarts. Test `gh_in_a_running_box_uses_the_token_placed_now` (`tests/fleet_launch/environment.rs`).
+**A box's own-repo token is read from its file on every call, never held in its environment**
+(SKEIN-1240, SKEIN-1332). The host rewrites the placed file the moment a key is replaced and removes
+it when one is forgotten or a share ends. git reads it through the credential helper, and a scoped
+box's `gh` is a shim, bound over the real binary, that reads it on every call and has no credential
+when there is none. The launcher exports no `GH_TOKEN` in a scoped box: an export would be a
+snapshot every session and crossing kept until the box restarted, so a forgotten key would go on
+working from `$GH_TOKEN`. A `GH_TOKEN` present in such a box was set on purpose, a review
+crossing's for one, and `gh` uses it unchanged. Test `gh_in_a_running_box_uses_the_token_placed_now`
+(`tests/fleet_launch/environment.rs`).
 
 ## Open
 

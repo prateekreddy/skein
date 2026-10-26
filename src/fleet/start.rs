@@ -699,10 +699,11 @@ fn start_box_inner(
             Duration::from_secs(600),
         )?;
     }
-    // Before the session, not after: `box-session.sh` reads the token as it comes up to decide what
-    // `GH_TOKEN` holds, so a token placed afterwards would leave the box's first turn — the one
-    // most likely to push — holding only the read credential. Failures are reported and not fatal:
-    // a box that cannot push its own repo yet is recoverable, a box that will not start is not.
+    // Before the session, not after: git and `gh` in the box read the placed file on every call
+    // (SKEIN-1332), so a token placed afterwards would leave the box's first turn — the one most
+    // likely to push — with only the read credential until it lands. Failures are reported and
+    // not fatal: a box that cannot push its own repo yet is recoverable, a box that will not start
+    // is not.
     for problem in crate::gitgate::refresh_tokens(name) {
         eprintln!("skein: {name} has no write token yet — {problem}");
     }

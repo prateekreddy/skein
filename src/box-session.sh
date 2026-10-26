@@ -705,7 +705,7 @@ fi
 # would name the two that were noticed and pass the next one; this names what a box needs.
 #
 # Unaffected by this, on purpose (the owner's decision on SKEIN-972): what the launcher EXPORTS
-# after this point (SKEIN_BOX, SKEIN_STATE, PATH, SKEIN_GIT_TOKENS, GH_TOKEN, NO_PROXY and the rest),
+# after this point (SKEIN_BOX, SKEIN_STATE, PATH, SKEIN_GIT_TOKENS, NO_PROXY and the rest),
 # and whatever the box's own login profile sets inside the namespace.
 #
 # Measured, not guessed. The sandbox half is the names in the fleet's own environment on
@@ -756,7 +756,7 @@ inherited_env=(
   XAI_API_KEY SBX_CRED_ANTHROPIC_MODE SBX_CRED_OPENAI_MODE SBX_CRED_GOOGLE_MODE SBX_CRED_MISTRAL_MODE
   SBX_CRED_NEBIUS_MODE SBX_CRED_OPENROUTER_MODE SBX_CRED_XAI_MODE
   # The sandbox's `github` secret. A `fleet`-scoped box keeps it on purpose; a scoped box has it
-  # replaced by its own-repo token or removed, further down.
+  # removed further down, and reads its own-repo token from a file on every call instead.
   GH_TOKEN
   # The sandbox's MCP gateway, which the runtimes' MCP servers are reached through.
   MCP_GATEWAY_URL MCP_SENTINEL_TOKEN_NAME
@@ -2702,54 +2702,49 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
   # It holds whatever the sbx `github` secret was set to — for this fleet, a user token reaching 460
   # repositories read and write. Leaving it in place while scoping everything else would mean the
   # isolation held only if its owner had also remembered to swap that secret by hand, and a boundary
-  # that depends on a manual step nobody is reminded of is not a boundary. Replaced below by this
-  # box's own-repo token when the host has placed one; otherwise `gh` simply has no credential,
-  # which is the honest state rather than a borrowed one.
+  # that depends on a manual step nobody is reminded of is not a boundary.
+  #
+  # **And nothing is exported in its place** (SKEIN-1332, the owner's decision). This used to export
+  # the box's own-repo token as `GH_TOKEN`, and an export is a snapshot: every shell, terminal and
+  # agent session in the box descends from the tmux server started at the bottom of this file, and
+  # a crossing copies `GH_TOKEN` out of that server's environment (`place::as_the_session_holds`).
+  # So a key forgotten or replaced in Settings, or a share that ended, went on working from
+  # `$GH_TOKEN` in every running box until it restarted, while git and `gh` had already moved on.
+  # git reads the placed file through the credential helper on every call, and `gh` through the
+  # shim below; anything else that wants the GitHub API uses `gh api`, which the box's guide says.
   unset GH_TOKEN
   if [ -n "${SKEIN_BOX_REPO-}" ]; then
     own_token="$SKEIN_GIT_TOKENS/$(printf '%s' "$SKEIN_BOX_REPO" | sed 's#/#%2F#')"
-    if [ -r "$own_token" ]; then
-      # `gh pr create` and `gh pr comment` against this box's own repo work with this; against any
-      # other repo `gh` is unauthenticated, while git keeps reading through the helper.
-      GH_TOKEN="$(cat "$own_token" 2>/dev/null)"
-      export GH_TOKEN
-    fi
 
-    # **`gh` reads the placed token on every call, not the value exported above** (SKEIN-1240).
+    # **`gh` reads the placed token on every call** (SKEIN-1240).
     #
     # The host rewrites `$own_token` the moment a key is replaced in Settings
-    # (`gitgate::refresh_tokens`), and git sees the new one on its next call because the helper
-    # reads the file each time. The export above is a snapshot: every shell, terminal, Codex or
-    # Claude session in this box descends from the tmux server started at the bottom of this file,
-    # and a crossing copies `GH_TOKEN` out of that server's environment
-    # (`place::as_the_session_holds`), so all of them hold the token as it was when the box started,
-    # for as long as the box runs. The owner's decision on SKEIN-1240: `gh` uses a replaced key
-    # straight away, without reopening anything. So this shim, bound over the real `gh` exactly as
-    # the git shim below is bound over git, sets `GH_TOKEN` from the placed file for each invocation
-    # and execs the real one. With no file placed it unsets `GH_TOKEN`, so `gh` has no credential:
-    # the sandbox-wide token dropped above is gone from this namespace and nothing here brings it
-    # back.
+    # (`gitgate::refresh_tokens`) and removes it when one is forgotten. The owner's decision on
+    # SKEIN-1240: `gh` uses a replaced key straight away, without reopening anything. So this shim,
+    # bound over the real `gh` exactly as the git shim below is bound over git, sets `GH_TOKEN` from
+    # the placed file for each invocation and execs the real one. With no file placed it unsets
+    # `GH_TOKEN`, so `gh` has no credential: the sandbox-wide token dropped above is gone from this
+    # namespace and nothing here brings it back. `gh pr create` and `gh pr comment` against this
+    # box's own repo work with it; against any other repo `gh` is unauthenticated, while git keeps
+    # reading through the helper.
     #
     # **A `GH_TOKEN` somebody set on purpose still wins.** A review crossing exports the owner's own
     # token for one call (`fleet::credentials`) so that `gh` acts as the reviewer, and a person may
     # export one by hand; overriding either would be skein quietly replacing a credential somebody
-    # chose. The stale value is told apart from those by what it is: the shim carries the sha256 of
-    # the value exported above (empty when none was), and only a `GH_TOKEN` matching it, or none at
-    # all, is replaced. That fingerprint is of a token this box can already read in full, so it
-    # tells the box nothing new. A box with no `sha256sum` cannot compare, and keeps the exported
-    # value as before rather than guessing.
-    #
-    # The export above stays, because other things in a box read `$GH_TOKEN` directly (a `curl`
-    # with it, an MCP server), and for them the value from the box's start is still better than
-    # none. They keep the old key until the session is reopened; only `gh` is fixed here.
+    # chose. Nothing in this box is given a `GH_TOKEN` by skein any more, so any value present was
+    # set on purpose.
     gh_real=$(command -v gh 2>/dev/null || true)
     [ -n "$gh_real" ] && gh_real=$(readlink -e "$gh_real" 2>/dev/null || true)
+    # A box started from inside another box (a test run on a fleet box) finds that box's own shim
+    # here, and execing it would hand this box the outer box's token whenever this one has none.
+    # So the shim still goes over that path, and the binary behind it is what it execs (SKEIN-1342).
+    gh_exec="$gh_real"
     if [ -n "$gh_real" ] && [ -f "$gh_real" ]; then
-      gh_mark=''
-      if [ -n "${GH_TOKEN-}" ] && command -v sha256sum >/dev/null 2>&1; then
-        gh_mark=$(printf '%s' "$GH_TOKEN" | sha256sum)
-        gh_mark="${gh_mark%% *}"
-      fi
+      gh_inner=$(head -n 2 "$gh_real" 2>/dev/null | tr -d '\0' | sed -n 's/^skein_gh=//p')
+      [ -n "$gh_inner" ] && [ -f "$gh_inner" ] && gh_exec="$gh_inner"
+      unset gh_inner
+    fi
+    if [ -n "$gh_real" ] && [ -f "$gh_real" ]; then
       # Same overlap trick as git's: the real binary is bound to a second path FIRST, because
       # binding the shim over it shadows the very thing the shim has to exec.
       # Both written beside their targets and renamed over them (SKEIN-1255).
@@ -2759,14 +2754,9 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
         printf '#!/bin/sh\n'
         printf 'skein_gh=%q\n' "$root/bin/gh.real"
         printf 'skein_gh_token=%q\n' "$own_token"
-        printf 'skein_gh_mark=%q\n' "$gh_mark"
         cat <<'GHSHIM'
-# A GH_TOKEN other than the one this box started with was set on purpose: use it unchanged.
-if [ -n "${GH_TOKEN-}" ]; then
-  [ -n "$skein_gh_mark" ] || exec "$skein_gh" "$@"
-  skein_gh_seen=$(printf '%s' "$GH_TOKEN" | sha256sum 2>/dev/null)
-  [ "${skein_gh_seen%% *}" = "$skein_gh_mark" ] || exec "$skein_gh" "$@"
-fi
+# A GH_TOKEN set on purpose (skein exports none in a scoped box): use it unchanged.
+[ -n "${GH_TOKEN-}" ] && exec "$skein_gh" "$@"
 # Otherwise the token the host has placed for this box's repository now, or none at all.
 GH_TOKEN=''
 [ -r "$skein_gh_token" ] && GH_TOKEN=$(cat "$skein_gh_token" 2>/dev/null)
@@ -2778,11 +2768,10 @@ fi
 exec "$skein_gh" "$@"
 GHSHIM
       } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
-      binds+=(--ro-bind "$gh_real" "$root/bin/gh.real")
+      binds+=(--ro-bind "$gh_exec" "$root/bin/gh.real")
       binds+=(--ro-bind-fd "$new_fd" "$gh_real")
-      unset gh_mark
     fi
-    unset own_token gh_real
+    unset own_token gh_real gh_exec
   fi
 
   # The forwarded agent is account-wide, so leaving it reachable would undo all of the above: any

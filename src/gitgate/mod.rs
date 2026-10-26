@@ -14,8 +14,9 @@
 //!   credential helper hands over for a repo with no write token (`git-credential-skein.sh`, and
 //!   `refresh_tokens`/`token_file` here place them). It cannot write anywhere, which is the point.
 //!   It is deliberately NOT delivered as `GH_TOKEN`: a scoped box `unset`s `GH_TOKEN` in
-//!   `box-session.sh` so that nothing in the environment carries a credential, and `GH_TOKEN` holds
-//!   only this box's own-repo WRITE token when one exists, for `gh pr create` against that one repo.
+//!   `box-session.sh` so that nothing in the environment carries a credential. Its `gh` shim sets
+//!   `GH_TOKEN` to this box's own-repo WRITE token for one call, from the placed file, when one
+//!   exists (SKEIN-1240, SKEIN-1332).
 //! * **write** — a GitHub App installation token scoped to **one repository**, valid an hour,
 //!   minted by the host and dropped into the box's own host-mounted state directory. Or, for
 //!   someone who would rather not install an App across their account, a fine-grained PAT they

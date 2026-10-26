@@ -67,6 +67,9 @@ memory: |
      Settings (and run `gh auth login` on the host if needed). If SSH has no identities, ask them
      to run `ssh-add` on the host (skein forwards that agent) or switch `origin` to HTTPS.
 
+  A box scoped to its own repo has no `$GH_TOKEN`. For the GitHub API, use `gh api`: it reads this
+  box's current token on every call, so it keeps working when the owner replaces the token.
+
   State the failing command and its exact stderr when asking. Do not loop on `gh auth login`, create
   keys, rewrite the remote, or copy credentials without the user's explicit direction.
 

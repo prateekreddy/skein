@@ -244,8 +244,8 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
 /// # What it does
 ///
 /// Each decided name is unset, then exported again from the anchor's environment if and only if
-/// the anchor has it. So a scoped box's crossing carries its own-repo token or no `GH_TOKEN` at
-/// all, never the fleet's; a `fleet`-scoped box's carries the fleet's, which is what its session
+/// the anchor has it. So a scoped box's crossing carries no `GH_TOKEN` at all, never the
+/// fleet's; a `fleet`-scoped box's carries the fleet's, which is what its session
 /// holds. An environment that cannot be read leaves every decided name unset. That is the direction
 /// the launcher takes when it is unsure of the scope, and the `nsenter` that follows would fail on
 /// the same permission anyway.
