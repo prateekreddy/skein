@@ -46,6 +46,7 @@ not deleted: a reversed decision says what replaced it and why.
 | [tracker-state-lags-the-code.md](tracker-state-lags-the-code.md) | the git log, not the tracker's state, says whether work is done |
 | [shared-home-outside-claude.md](shared-home-outside-claude.md) | a repo's shared working files live beside its store's `.claude`, not inside it |
 | [store-is-not-dot-claude.md](store-is-not-dot-claude.md) | a repo's store is `store/data`, and nothing a box writes is reached through a `.claude` path |
+| [repos-are-the-trust-boundary.md](repos-are-the-trust-boundary.md) | the three levels of the security model: a hard wall around the person, a light wall between repos, one trust domain inside a repo |
 | [harness-as-a-plugin.md](harness-as-a-plugin.md) | research, parked: which part of the box harness could be a Claude Code plugin |
 
 Two more pieces of settled knowledge already live in the design documents, and are not repeated here:

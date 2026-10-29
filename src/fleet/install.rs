@@ -598,8 +598,8 @@ mod tests {
     /// pointed, what it was asked to build, and where the binary ended up.
     ///
     /// The two variables are the whole security property and they fail **silently**: unset, the
-    /// build succeeds against the sandbox's shared toolchain, which `box-session.sh` binds
-    /// read-write into every box (architecture §9.2).
+    /// build succeeds against the sandbox's own toolchain under its home, which `box-session.sh`
+    /// bound read-write into every box until SKEIN-1350 (architecture §9.2).
     #[test]
     fn the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place() {
         // The root is pinned in THIS process as well as in the two children below, and the lock is
