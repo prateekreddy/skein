@@ -59,7 +59,8 @@ pub struct Request {
     /// The box that asked. `box` is a Rust keyword, so the field is renamed rather than the JSON.
     #[serde(default, rename = "box")]
     pub box_name: String,
-    /// `apt` or `npm`. Anything else is refused at [`Request::problem`].
+    /// `apt`, `npm`, or `playwright` for a browser the fleet fetches into its shared store without
+    /// the owner (SKEIN-1341, `fleet::browsers`). Anything else is refused at [`Request::problem`].
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
@@ -114,6 +115,8 @@ fn package_is_nameable(kind: &str, p: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
     };
     match kind {
+        // `<browser>@<version>`, and only the browsers and version shape `fleet::browsers` names.
+        "playwright" => crate::fleet::browsers::want_is_nameable(p),
         // `@scope/name`, and nothing else with a slash in it. Not "at most one slash": the scope
         // has to be a scope, or `x/../../y` is one slash and a path.
         "npm" => match p.strip_prefix('@') {
@@ -165,11 +168,15 @@ impl Request {
     /// Returned as a reason rather than a bool because every caller has to *show* it: a request the
     /// cockpit silently drops looks to the box that filed it exactly like one nobody got around to.
     pub fn problem(&self) -> Option<String> {
-        if self.kind != "apt" && self.kind != "npm" {
+        if !["apt", "npm", "playwright"].contains(&self.kind.as_str()) {
             return Some(format!("unknown package source {:?}", self.kind));
         }
         if self.packages.is_empty() {
             return Some("no packages named".into());
+        }
+        // One browser per request, so one request is one fill and one answer.
+        if self.kind == "playwright" && self.packages.len() != 1 {
+            return Some("a browser request names one browser, like chromium@1.56.1".into());
         }
         if let Some(bad) = self
             .packages
@@ -477,6 +484,26 @@ pub fn decide(
     if let Some(why) = rendered.problem() {
         return Err(format!("refusing to act on this request: {why}"));
     }
+    decide_once(sandbox, rendered, approve, remember, None)
+}
+
+/// Deny a request **because of what it asks for**, and say why, to the box and on the record.
+///
+/// For skein's own decisions, where nobody pressed a button: a browser request that is not a
+/// browser and a Playwright version is answered `denied: <why>` (SKEIN-1341). The request is
+/// refused precisely because [`Request::problem`] objects to it, so that check is not made here;
+/// the box and the id still have to be names, because they are paths.
+pub fn refuse(sandbox: &str, rendered: &Request, why: &str) -> Result<Request, String> {
+    decide_once(sandbox, rendered, false, false, Some(why))
+}
+
+fn decide_once(
+    sandbox: &str,
+    rendered: &Request,
+    approve: bool,
+    remember: bool,
+    why: Option<&str>,
+) -> Result<Request, String> {
     let path = decision_path(&rendered.box_name, &rendered.id).ok_or("unusable request id")?;
     match decision_or_why(&rendered.box_name, &rendered.id) {
         Ok(None) => {}
@@ -513,7 +540,7 @@ pub fn decide(
     decided.state = if approve { "approved" } else { "denied" }.into();
     decided.remember = approve && remember;
     decided.decided = chrono::Utc::now().to_rfc3339();
-    decided.log = String::new();
+    decided.log = why.unwrap_or_default().to_string();
     write_decision(&path, &decided)?;
 
     // The answer the box can believe (SKEIN-1142), worded as the owner approved it: an approval
@@ -524,7 +551,11 @@ pub fn decide(
         &rendered.box_name,
         "package",
         &rendered.id,
-        if approve { "granted" } else { "denied" },
+        &match (approve, why) {
+            (true, _) => "granted".to_string(),
+            (false, None) => "denied".to_string(),
+            (false, Some(why)) => format!("denied: {why}"),
+        },
     ) {
         eprintln!(
             "skein: the answer to package request {} did not reach {}'s inbox: {e}",
@@ -653,11 +684,24 @@ pub fn install(sandbox: &str, box_name: &str, id: &str) -> Result<Request, Strin
     // whose reason is on stdout collapsed to "the crossing exited …" with apt's own line lost
     // (SKEIN-1143). `attempt` hands back stdout regardless of the exit code, so `state` below is
     // read from `Ran::code` and the log from `Ran::out`, not from whether the call was `Ok`.
-    let outcome = own_sandbox(sandbox).attempt(
-        &install_script(&req.kind, &req.packages),
-        &[],
-        Duration::from_secs(900),
-    );
+    //
+    // A browser is not an install into the sandbox at all: it is fetched into the fleet's store,
+    // in a namespace of its own, by `fleet::browsers` (SKEIN-1341). Its outcome is told the same
+    // way, so the record, the answer and the box's copy below need nothing of their own.
+    let outcome = if req.kind == "playwright" {
+        let filled = crate::fleet::browsers::fill(sandbox, &req.packages[0]);
+        Ok(crate::place::Ran {
+            code: if filled.is_ok() { 0 } else { 1 },
+            out: filled.unwrap_or_else(|why| why).into_bytes(),
+            err: String::new(),
+        })
+    } else {
+        own_sandbox(sandbox).attempt(
+            &install_script(&req.kind, &req.packages),
+            &[],
+            Duration::from_secs(900),
+        )
+    };
     let (state, log) = match &outcome {
         Ok(ran) if ran.code == 0 => ("installed", String::from_utf8_lossy(&ran.out).into_owned()),
         // A failure keeps BOTH streams, stdout then stderr: `install_script` puts its diagnosis
@@ -711,7 +755,7 @@ pub fn install(sandbox: &str, box_name: &str, id: &str) -> Result<Request, Strin
     // Recorded only once it actually installed. Recording on approval would put a package that
     // apt could not find into every future launch, where it fails again and takes the rest of the
     // substrate install down with it.
-    if state == "installed" && req.remember {
+    if state == "installed" && req.remember && req.kind != "playwright" {
         record(&req)?;
     }
     match outcome {
@@ -754,6 +798,11 @@ pub struct Manifest {
 /// Pure, because this is the function whose output ends up on a root command line at every future
 /// fleet launch — the one place where a bad name would persist rather than fail once.
 pub fn merged(mut m: Manifest, req: &Request) -> Manifest {
+    // A browser is in the fleet's store, not in the sandbox, so a rebuilt sandbox has nothing to
+    // reinstall for it, and it must never reach the apt list below.
+    if req.kind != "apt" && req.kind != "npm" {
+        return m;
+    }
     let list = if req.kind == "npm" {
         &mut m.npm
     } else {

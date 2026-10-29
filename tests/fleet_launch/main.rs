@@ -97,6 +97,7 @@ fn write_remote(root: &Path) -> String {
     remote.to_string_lossy().into_owned()
 }
 
+mod browsers;
 mod environment;
 mod fixture;
 mod lifecycle;
@@ -107,6 +108,7 @@ mod swapped;
 mod telemetry;
 mod trust;
 
+use environment::with_launch_env;
 use fixture::*;
 use lifecycle::*;
 use onboarding::*;

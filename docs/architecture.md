@@ -953,14 +953,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:2364`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:2372`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:2397`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:2405`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:2339`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:2372`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
@@ -1016,6 +1016,16 @@ put code in for its siblings, by that decision. Held by the real-bwrap tests
 `a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`.
 `fleet::skein_toolchain_path` keeps skein's own build off the sandbox's home for the reason it
 always had: being merely unexecuted is not the same as being safe to build skein's own server with.
+
+**The fleet's Rust toolchain and its Playwright browsers are not on this path.** Each is one copy
+under the fleet root's `.skein`, bound read-only into every box, the workshop box included
+(`grep -n 'the fleet.s Rust toolchain\|the fleet.s Playwright browsers' src/box-session.sh`). The
+browsers (SKEIN-1341, `src/fleet/browsers.rs`) are also the one shared copy a box can ask to grow:
+a request names a browser and a Playwright version, skein fetches it with no owner decision, in a
+namespace that sees no box, no `/run` and no credential, refuses what it staged if it holds a link
+or a special file, and renames it in read-only. Each box reaches them through links in its own
+`~/.cache/ms-playwright`, which the kit makes inside the box, so a link a box plants misleads that
+box alone.
 
 **2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared,
 the inbox sockets in the sandbox-wide `/run/user/1000/cc-socks/` are deliberately bound back through

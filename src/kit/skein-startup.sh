@@ -36,6 +36,33 @@ startup_done="false"
 rm -f "$markers"/skein-startup.ready* "$markers"/skein-startup.failed*
 trap '[ "$startup_done" = "true" ] || touch "$startup_failed" 2>/dev/null || true' EXIT
 
+# The fleet's Playwright browsers, one link per entry in this box's own browsers directory
+# (SKEIN-1341). The store is skein's, read-only in here, beside this script under the fleet root's
+# `.skein`; the directory is the one the launcher names as PLAYWRIGHT_BROWSERS_PATH. Built here, inside
+# the box and as the box, so a link the box planted can only mislead the box itself. A real file or
+# directory is the box's own download and is left alone; a link into the store whose entry is gone
+# is removed, so Playwright downloads that version privately instead of failing on it. Before the
+# early exit below, so every start relinks, and a sandbox with no store (per-VM) does nothing.
+skein_browsers="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/browsers"
+skein_pw="$HOME/.cache/ms-playwright"
+if [ -d "$skein_browsers" ] && mkdir -p "$skein_pw" 2>/dev/null; then
+  for skein_link in "$skein_pw"/*; do
+    [ -L "$skein_link" ] || continue
+    case "$(readlink "$skein_link")" in
+      "$skein_browsers"/*) [ -e "$skein_link" ] || rm -f "$skein_link" ;;
+    esac
+  done
+  for skein_entry in "$skein_browsers"/*; do
+    [ -d "$skein_entry" ] || continue
+    skein_name="$(basename "$skein_entry")"
+    case "$skein_name" in [a-z]*-[0-9]*) ;; *) continue ;; esac
+    case "$skein_name" in *[!a-z0-9_-]*) continue ;; esac
+    [ -e "$skein_pw/$skein_name" ] || [ -L "$skein_pw/$skein_name" ] ||
+      ln -s "$skein_entry" "$skein_pw/$skein_name" 2>/dev/null || true
+  done
+fi
+unset skein_browsers skein_pw skein_link skein_entry skein_name
+
 # Direct (non-clone) mode already has an in-repo .claude → nothing to provision.
 #
 # The test asks "did sbx clone this sandbox", but what it MEANS is "is there a skein-managed tree

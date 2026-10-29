@@ -494,8 +494,8 @@ def request_package(args):
     manager = args.get("manager")
     packages = args.get("packages")
     why = args.get("why")
-    if manager not in ("apt", "npm"):
-        return {"error": "manager-must-be-apt-or-npm"}
+    if manager not in ("apt", "npm", "playwright"):
+        return {"error": "manager-must-be-apt-npm-or-playwright"}
     # Required, and one line: the owner reads it on the card as "why: <text>".
     if not isinstance(why, str) or not why.strip() or "\n" in why or "\r" in why:
         return {"error": "why-must-be-text"}
@@ -505,7 +505,7 @@ def request_package(args):
         or not all(isinstance(p, str) and p and not p.startswith("-") for p in packages)
     ):
         return {"error": "packages-must-be-a-list-of-names"}
-    tool = "apt-get" if manager == "apt" else "npm"
+    tool = {"apt": "apt-get", "npm": "npm", "playwright": "playwright"}[manager]
     return file_through_launcher(
         "package", "substrate", ["--request-package", "--why", why.strip(), tool, "install"] + packages
     )
@@ -627,11 +627,14 @@ TOOLS = [
     {
         "name": "skein_request_package",
         "description": "Ask the fleet's owner to install a system package for every box. Nothing "
-        "is installed until they approve it in the cockpit; the answer arrives in your inbox.",
+        "is installed until they approve it in the cockpit; the answer arrives in your inbox. "
+        "For a Playwright browser the fleet lacks, use manager playwright and one package like "
+        "chromium@1.56.1 (your Playwright version): skein fetches it for every box with no "
+        "approval needed.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "manager": {"type": "string", "enum": ["apt", "npm"]},
+                "manager": {"type": "string", "enum": ["apt", "npm", "playwright"]},
                 "packages": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "why": {"type": "string"},
             },

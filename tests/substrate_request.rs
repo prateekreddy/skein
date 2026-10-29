@@ -764,3 +764,96 @@ fn the_box_and_the_host_agree_on_what_a_package_name_is() {
         }
     }
 }
+
+/// **A browser request names one browser and one Playwright version in the strict shape, or it is
+/// refused and nothing is filed** (SKEIN-1341). skein fetches these without the owner, so this is
+/// the first of the two checks between a box's words and an `npx` command line.
+///
+/// What would make it fail: `valid_package` sending `playwright` to the apt rule, which refuses the
+/// `@` (the good request is refused); a looser version pattern (`latest`, a pre-release, `2.x`);
+/// dropping the one-browser check.
+#[test]
+fn a_browser_request_names_one_browser_and_version_or_is_refused() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let f = Fleet::new("browser");
+    for bad in [
+        &["playwright", "install", "chrome@1.62.0"][..],
+        &["playwright", "install", "chromium@latest"],
+        // A pre-release, spelled in two halves: its text reads as an address to the residue gate.
+        &[
+            "playwright",
+            "install",
+            concat!("chromium@1.62.0-", "beta-1"),
+        ],
+        &["playwright", "install", "chromium@2.0.0"],
+        &["playwright", "install", "chromium@1.062.0"],
+        &["playwright", "install", "chromium"],
+        &["playwright", "install", "chromium@1.62.0;id"],
+        &["playwright", "install", "chromium@1.62.0", "firefox@1.62.0"],
+    ] {
+        let (code, said) = f.ask("web-main", bad);
+        assert_eq!(code, 3, "{bad:?} was not refused: {said}");
+    }
+    assert!(f.queued().is_empty(), "a refused browser request was filed");
+
+    let (code, said) = f.ask("web-main", &["playwright", "install", "chromium@1.62.0"]);
+    assert_eq!(code, 0, "{said}");
+    let q = f.filed_under("web-main");
+    assert_eq!(q.len(), 1, "{q:?}");
+    assert_eq!(q[0]["kind"], "playwright");
+    assert_eq!(q[0]["packages"], serde_json::json!(["chromium@1.62.0"]));
+    assert!(
+        said.contains("no approval needed"),
+        "the agent is not told skein fetches it: {said}"
+    );
+}
+
+/// **A box has one browser request waiting at a time; once it is answered, the next files**
+/// (SKEIN-1341).
+///
+/// What would make it fail: dropping the launcher's one-outstanding loop (the second files), or
+/// reading the state of any box's file rather than this box's own (a neighbour's pending request
+/// would block this box).
+#[test]
+fn a_box_has_one_browser_request_waiting_at_a_time() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let f = Fleet::new("browser-one");
+    f.plant(
+        "api-main",
+        "n1",
+        "pending",
+        "playwright",
+        &["webkit@1.62.0"],
+    );
+    let (code, said) = f.ask("web-main", &["playwright", "install", "chromium@1.62.0"]);
+    assert_eq!(code, 0, "a neighbour's request blocked this box: {said}");
+    let (code, said) = f.ask("web-main", &["playwright", "install", "firefox@1.62.0"]);
+    assert_eq!(code, 3, "a second browser request was filed: {said}");
+    assert!(
+        said.contains("already has a browser request waiting"),
+        "{said}"
+    );
+    assert_eq!(f.filed_under("web-main").len(), 1);
+
+    let first = f.filed_under("web-main")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.plant(
+        "web-main",
+        &first,
+        "installed",
+        "playwright",
+        &["chromium@1.62.0"],
+    );
+    let (code, said) = f.ask("web-main", &["playwright", "install", "firefox@1.62.0"]);
+    assert_eq!(
+        code, 0,
+        "an answered request still blocked the next: {said}"
+    );
+    assert_eq!(f.filed_under("web-main").len(), 2);
+}
