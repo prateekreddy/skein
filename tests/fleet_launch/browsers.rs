@@ -206,6 +206,11 @@ fn the_browser_store_is_read_only_in_every_box() {
 /// What would make each assertion fail:
 ///   * A's and B's links: the kit's link loop deleted, or moved after the kit's early exit (a start
 ///     that is not a provision would then link nothing).
+///   * A's first links holding only `chromium-1`: either of the kit's two `case "$skein_name"`
+///     name-shape filters removed. The store also holds `notabrowser` (no revision, which only the
+///     first filter refuses), `chro mium-1` (a space, which only the second refuses) and `Chromium-1`
+///     (upper case, which both refuse). None of them is a browser directory, and a name in the
+///     store becomes a path in every box. Watched: each filter removed alone, and both together.
 ///   * B's `chromium-2`: a store a box could write (A's plant would land there), or a kit that
 ///     followed links rather than reading them.
 ///   * A's `chromium-1` gone at its next start: the kit's dangling-link pass deleted.
@@ -222,6 +227,11 @@ fn every_start_links_the_fleets_browsers_and_a_boxs_plants_stay_its_own() {
     }
     let (root, _sandbox_home, _pins) = browser_fleet("pwlinks");
     publish_fixture(&root, &["chromium-1"]);
+    // Directories in the store that are not `<name>-<revision>`: the store only ever receives what
+    // `verify` passed, so these are put there by hand, as anything that wrote the store would.
+    for odd in ["notabrowser", "Chromium-1", "chro mium-1"] {
+        fs::create_dir_all(PathBuf::from(browsers::store_dir()).join(odd)).unwrap();
+    }
     let store = PathBuf::from(browsers::store_dir());
     let kit = skein::fleet::box_provision_path();
     let pw = "\"$HOME/.cache/ms-playwright\"";
