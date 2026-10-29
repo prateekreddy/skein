@@ -953,14 +953,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:2401`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:2409`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:2397`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:2405`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:2376`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:2372`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
@@ -981,9 +981,10 @@ directory back on purpose, which is a different thing from never having reached 
 
 Named because §9.1's cover makes the *file* axis safe and it is easy to stop there.
 
-**1 — Shared writable toolchains.** `share_paths` and `overlay_paths`
-(`grep -n 'share_paths=\|overlay_paths=' src/box-session.sh`) are bound from the sandbox's real
-`$HOME` into every box, so boxes share one toolchain and one build cache.
+**1 — Shared writable toolchains.** `overlay_paths` (`grep -n 'overlay_paths=' src/box-session.sh`)
+is laid from the sandbox's real `$HOME` over every box's own, so boxes read one toolchain. Until
+SKEIN-1350 a second list, `share_paths`, bound `~/.cargo`, `~/.rustup` and `~/.npm` from there
+read-write into every box as well.
 
 > **No shared writable path may contain anything another box executes.**
 
@@ -1001,10 +1002,20 @@ by real-bwrap tests: `a_binary_one_box_plants_is_not_what_another_box_runs`,
 `a_box_still_sees_the_shared_toolchain_under_its_private_overlay` and
 `the_npm_prefix_a_box_runs_the_agent_from_is_read_only_inside_it`.
 
-`~/.cargo`, `~/.rustup` and `~/.npm` stay read-write and shared. No entry of `box_path` points into
-them, so they are not a path another box executes from — and `fleet::skein_toolchain_path` exists
-precisely because being merely unexecuted is not the same as being safe to build skein's own server
-with.
+**Closed for the caches too — SKEIN-1350.** `~/.cargo`, `~/.rustup` and `~/.npm` were kept
+read-write and shared on the grounds that no entry of `box_path` points into them. That was false:
+`npx` installs a package under `~/.npm/_npx` and runs it from there on later calls, and cargo
+compiles whatever is in `~/.cargo/registry/src` without checking it again, build scripts included.
+Not being on `PATH` is not the same as not being executed. Nothing of the sandbox's home is bound
+read-write into a box now. Download caches belong to a repo instead: one per repo at `store/cache`,
+beside the store, bound back through the cover and shared by that repo's boxes only, which is the
+owner's decision of 2026-10-29 that a repo is one trust domain and repos are walled from each other
+(`docs/decisions/repos-are-the-trust-boundary.md`). Within a repo this path is still one a box can
+put code in for its siblings, by that decision. Held by the real-bwrap tests
+`the_sandboxs_cargo_and_npm_reach_no_box` and
+`a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`.
+`fleet::skein_toolchain_path` keeps skein's own build off the sandbox's home for the reason it
+always had: being merely unexecuted is not the same as being safe to build skein's own server with.
 
 **The fleet's Rust toolchain and its Playwright browsers are not on this path.** Each is one copy
 under the fleet root's `.skein`, bound read-only into every box, the workshop box included

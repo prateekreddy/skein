@@ -1110,25 +1110,24 @@ open_new "$tmp_at" skein-start-id && printf '%s\n' "$start_id" >&"$new_fd" && la
 # through the plugin marker. So a new box's `~/.local/state` now starts empty and holds only what
 # that box writes. Existing boxes keep what they have.
 seed_paths=(".codex" ".gitconfig" ".bashrc" ".profile")
-# Bound back through, genuinely shared. These are package caches no box needs its own copy of.
+# **Nothing from the sandbox's home is bound read-write into a box any more** (SKEIN-1350). A list
+# called `share_paths` did that, and every entry it ever had was a way for one box to decide what
+# another runs. `.local` went first (SKEIN-963): `~/.local/bin` is first on every box's PATH, so a
+# binary one box wrote there was what every other box ran next. It is in `overlay_paths` below now.
+# `.cargo`, `.rustup` and `.npm` went last. They were kept on the grounds that nothing on `box_path`
+# points into them, and that was wrong twice: `npx` installs a package under `~/.npm/_npx` and runs
+# it from there on later calls, and cargo compiles whatever is in `~/.cargo/registry/src` without
+# checking it again, build scripts included. Both are code one box could plant for another box of
+# ANY repo.
 #
-# **`.local` is no longer one of them, and that is SKEIN-963.** It carries the agent CLIs and about
-# 1.1 GB of `pip --user` libraries — software every box wants identical, which is why it was shared
-# — and `box_path` above puts `$HOME/.local/bin` FIRST on every box's PATH. Shared read-write plus
-# first on PATH is architecture §9.2 path 1 word for word: `~/.local/bin/claude` written by one box
-# is what every other box executes on its next start, persistent cross-box code execution with no
-# live target needed. It is in `overlay_paths` below instead, which keeps the reading and drops the
-# writing.
+# Download caches are a repo's now, not the sandbox's: the owner's decision of 2026-10-29
+# (`docs/decisions/repos-are-the-trust-boundary.md`). The boxes of one repo share one cache beside
+# the repo's store, bound back below with the store and pointed at by the session block, and a box
+# of another repo cannot see it. A box with no such store keeps its own caches in its own home.
 #
-# NOT ~/shared, though it is the most obviously shared thing here. It is scoped to a REPO, not to a
-# sandbox — the two were the same object when a box was a sandbox, and this is where they come apart:
-# one fleet sandbox hosts boxes from many repos, so binding its copy through would hand all of them
-# one `shared` and quietly cross project boundaries. Each box gets its own instead, created during
-# provisioning by shared-home.sh as a symlink into that box's repo store — which is host-mounted, so
-# it stays live across boxes of the SAME repo, which is what `shared` has always meant. Binding it
-# also broke provisioning outright: shared-home.sh refuses to replace a real path, and it gates
-# startup, so every fleet box would have failed to come up.
-share_paths=(".cargo" ".rustup" ".npm")
+# Not `~/shared` either, though it is the most obviously shared thing here: it is the repo's, not
+# the sandbox's, and each box links its own into the repo's store as it is provisioned
+# (shared-home.sh). The same reasoning now covers the caches.
 
 # Shared to READ, private to WRITE. Every box sees the sandbox's copy whole; every box's own writes
 # land in a tmpfs upper layer that no other box has a name for.
@@ -1801,25 +1800,22 @@ fi
 case "$skein_telemetry" in 1|on|yes|true) printf 'SKEIN_TELEMETRY 1\n' ;; *) printf 'SKEIN_TELEMETRY 0\n' ;; esac
 unset skein_telemetry SKEIN_BOX_TELEMETRY
 
-# $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
+# $HOME first, then the copy-on-write escapes ON TOP of it. bwrap resolves every source against the
 # ORIGINAL filesystem, so these still name the sandbox's real directories even though each
 # destination now sits inside the box's private HOME — a symlink could not do this, because the
 # path it would point at is the one being shadowed.
 # The held descriptors, not the names (SKEIN-1287, beside `pin_dir`). bwrap closes each one once it
 # has bound it, so none of them reaches the box.
 binds=(--bind-fd "${home_at##*/}" "$HOME")
-for rel in "${share_paths[@]}"; do
-  [ -e "$HOME/$rel" ] && binds+=(--bind "$HOME/$rel" "$HOME/$rel")
-done
-# ...and the copy-on-write ones on top of those, lower layer first.
+# ...and the copy-on-write ones on top of it, lower layer first.
 #
 # `--overlay-src` names the layer to READ and applies to the `--tmp-overlay` that follows it, which
 # is why the two are emitted as one pair per entry and never separated: a stray `--overlay-src`
 # with no overlay after it attaches itself to the next one, and the box would then see a directory
 # it was never meant to.
 #
-# The destination is the same path as the source, exactly as the share loop above does it, and for
-# the same reason — `$HOME` is already the box's private home by the time this is read inside the
+# The destination is the same path as the source, for the reason the paragraph above gives —
+# `$HOME` is already the box's private home by the time this is read inside the
 # namespace, while the SOURCE resolves against the original filesystem. So this reads the sandbox's
 # real `~/.local` and shows it at the box's own `~/.local`.
 #
@@ -2524,6 +2520,32 @@ if [ -n "${SKEIN_BOX_STORE-}" ] && [ -f "$SKEIN_BOX_STORE/shared-paths.txt" ] \
     surfaced_dir surfaced_real
 fi
 
+# --- This repo's download cache, shared by its boxes and by no other repo's (SKEIN-1350) ----------
+#
+# The owner's decision of 2026-10-29 (`docs/decisions/repos-are-the-trust-boundary.md`): the boxes
+# of one repo are one trust domain and share freely, and a box of another repo cannot see or change
+# anything that domain runs. So cargo's registry and git downloads, npm's cache with `_npx` in it,
+# pip's, uv's and pnpm's store are kept once per repo, at `store/cache` beside `store/data`, which
+# the host makes with the store (`kit::repo_cache_dir`). The session block points each tool at it.
+#
+# Bound back at its own path, after every tmpfs, the way `store/shared-home` is above: a covered box
+# sits under a tmpfs over the whole repos mount, so without the bind it would write into that tmpfs
+# and lose it at its next stop. A box that is not covered sees the path already and the bind changes
+# nothing. Only a store of the managed shape has one, only as a real directory, never a link; a
+# store kept elsewhere by `skein add --store` has no sibling any box can see, so its boxes keep
+# their own caches.
+repo_cache=""
+case "${SKEIN_BOX_STORE-}" in
+  */./* | */../* | *//*) ;;
+  /*/repos/*/store/data | /*/repos/*/store/.claude)
+    repo_cache_at="${SKEIN_BOX_STORE%/*}/cache"
+    [ "$(basename "$(dirname "${SKEIN_BOX_STORE%/store/*}")")" = repos ] &&
+      [ -d "$repo_cache_at" ] && [ ! -L "$repo_cache_at" ] && repo_cache="$repo_cache_at"
+    ;;
+esac
+[ -n "$repo_cache" ] && binds+=(--bind "$repo_cache" "$repo_cache")
+unset repo_cache_at
+
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
 # fleet, and the box has no use for it after this point.
 unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE
@@ -2738,7 +2760,7 @@ unset uncovered
 # "cargo: command not found" and grow a private `~/.rustup` of its own. Its `bin` is bound over the
 # box's own `~/.cargo/bin`, which `box_path` carries, so a crossing's PATH is still a function of
 # the box's home alone (`place::box_path`); the session block below points `RUSTUP_HOME` at it; and
-# `CARGO_HOME` stays the box's own `~/.cargo`, so the registry and build caches are the box's own.
+# `CARGO_HOME` is the repo's download cache if the box has one (SKEIN-1350), else `~/.cargo`.
 # What a box cannot do is `cargo install` into `~/.cargo/bin`, which is the shared one, so the
 # session block points `CARGO_INSTALL_ROOT` at `~/.local` instead (SKEIN-1349).
 #
@@ -3470,7 +3492,8 @@ exec bwrap \
   "${binds[@]}" \
   -- \
   bash -lc '
-    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; shift 6
+    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; repo_cache="$7"
+    shift 7
     # The box own PATH, decided at the top of this file and handed across as a positional.
     #
     # HERE and not before the exec, and not with bwrap --setenv, for the two reasons written up
@@ -3507,7 +3530,8 @@ exec bwrap \
     # spelling a profile cannot undo -- and it reaches the agent down the same tmux chain.
     export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
     # The fleet shared Rust toolchain, whose bin is already on box_path (SKEIN-1337). Exported here
-    # for the same reason as the two above. CARGO_HOME is the box own, so its caches are too.
+    # for the same reason as the two above. CARGO_HOME is the box own, unless the repo download
+    # cache below takes it.
     #
     # CARGO_INSTALL_ROOT because `cargo install` writes into CARGO_HOME/bin by default, and that is
     # the shared read-only bin, so every install failed (SKEIN-1349). ~/.local/bin is first on
@@ -3516,6 +3540,20 @@ exec bwrap \
     if [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
       export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo" \
         CARGO_INSTALL_ROOT="$HOME/.local"
+    fi
+    # This repo download cache, shared by its boxes (SKEIN-1350, bound back at fleet scope above).
+    # Every tool here is pointed at it by a variable, because what was measured on 2026-10-29 in
+    # two bwrap namespaces at once decides it: cargo, npm with npx, pip, uv and pnpm each finished
+    # every round sharing one cache. cargo shares its whole CARGO_HOME and not only registry and
+    # git, because its download lock is the CARGO_HOME file .package-cache: with registry and git
+    # shared and the lock per box, two boxes fetching one git dependency at once failed in two
+    # rounds of three. The toolchain bin stays the read-only ~/.cargo/bin on box_path, and
+    # cargo install still lands in ~/.local. UV_LINK_MODE=copy because the cache is on another
+    # file system from the tree, where uv warns at every install before it copies anyway.
+    if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]; then
+      export CARGO_HOME="$repo_cache/cargo" npm_config_cache="$repo_cache/npm" \
+        PIP_CACHE_DIR="$repo_cache/pip" UV_CACHE_DIR="$repo_cache/uv" UV_LINK_MODE=copy \
+        npm_config_store_dir="$repo_cache/pnpm" pnpm_config_store_dir="$repo_cache/pnpm"
     fi
     # The browsers directory of this box alone, where the kit links the fleet browsers (SKEIN-1341).
     # GC off, or Playwright removes the links to browsers the projects here do not use (measured).
@@ -3548,4 +3586,5 @@ exec bwrap \
     anchor="$("$tmux_bin" -S "$sock" display -p "#{pid}")" || exit 1
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
-  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${pane_cmd[@]}"
+  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${repo_cache-}" \
+    "${pane_cmd[@]}"

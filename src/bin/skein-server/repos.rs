@@ -262,6 +262,39 @@ pub(super) async fn api_pull_repo(Path(id): Path<String>) -> Response {
     }
 }
 
+/// A repo's shared download cache, measured, and which of its boxes are running (SKEIN-1350).
+/// Walks the cache, so it is asked for when the repo's card opens and never on the board's tick.
+/// `{"cache": null}` for a repo whose store is kept elsewhere, whose boxes keep their own.
+pub(super) async fn api_repo_cache(Path(id): Path<String>) -> Response {
+    let r = tokio::task::spawn_blocking(move || skein::fleet::repo_cache(&id)).await;
+    match r {
+        Ok(Ok(cache)) => Json(serde_json::json!({ "cache": cache })).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct RepoCacheCleanReq {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+/// Remove what the person confirmed from a repo's shared download cache: only paths still on the
+/// list, and only while none of the repo's boxes runs (`fleet::clean_repo_cache`).
+pub(super) async fn api_repo_cache_clean(
+    Path(id): Path<String>,
+    Json(r): Json<RepoCacheCleanReq>,
+) -> Response {
+    let done =
+        tokio::task::spawn_blocking(move || skein::fleet::clean_repo_cache(&id, &r.paths)).await;
+    match done {
+        Ok(Ok(d)) => Json(d).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

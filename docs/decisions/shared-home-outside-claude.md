@@ -38,12 +38,12 @@ How it got there is history, not a decision:
 box. The workshop box, a privileged box, a box skein cannot match to a repo, or a box started by a
 launcher older than the mount set all see the fleet's mounts as they are. A **covered** box (the
 normal case: matched to a repo, not privileged) does not. The launcher puts a tmpfs over every
-fleet mount, `~/.skein/repos` among them (`src/box-session.sh:2401`). It then binds back only the
-store it is given, `SKEIN_BOX_STORE`, which is the `.claude` directory (`src/box-session.sh:2409`).
+fleet mount, `~/.skein/repos` among them (`src/box-session.sh:2397`). It then binds back only the
+store it is given, `SKEIN_BOX_STORE`, which is the `.claude` directory (`src/box-session.sh:2405`).
 So `store/shared-home` sat under the tmpfs. A box's mountinfo still names the volume, because
 the bind of `store/.claude` comes from it, and that is likely where "the whole volume" was read
 from. So the launcher now binds the sibling back too, beside the store
-(`src/box-session.sh:2418`), only for the managed shape and never through a link. A box already
+(`src/box-session.sh:2414`), only for the managed shape and never through a link. A box already
 running keeps the namespace it started with, so it gets `~/shared` back only after a restart. Until
 then `shared-home.sh` refuses and says to restart. It does not make the directory, because a
 directory made under the tmpfs would lose its files when the box stops.
@@ -75,7 +75,7 @@ fleet, so its boxes refuse to link `$HOME/shared` and say why.
 - `skein_shared_home` (`src/probe/box-self.sh`) and `src/store/shared-home.sh`: the box's half. Test
   `shared_home_links_beside_the_store_and_repairs_an_old_link` (`src/kit.rs`), which also checks
   that no part of the link's target is a `.claude` directory.
-- The bind beside `SKEIN_BOX_STORE` (`src/box-session.sh:2418`). The bwrap test
+- The bind beside `SKEIN_BOX_STORE` (`src/box-session.sh:2414`). The bwrap test
   `a_box_whose_repo_tracks_claude_never_reports_into_its_checkout`
   (`tests/isolation_bwrap/boxself.rs`) runs a covered box and checks that `$HOME/shared` and an
   import both land in the sibling. The fleet test

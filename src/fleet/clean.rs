@@ -218,6 +218,193 @@ fn clean_box_between(
     Ok(done)
 }
 
+/// What a repo's shared download cache holds that a clean may remove, relative to it (SKEIN-1350).
+///
+/// Named one by one, as [`DOWNLOAD_CACHES`] is, and not "everything under the cache": cargo's part
+/// is a whole `CARGO_HOME`, so it can also hold a `config.toml` or a `credentials.toml` a box wrote
+/// with `cargo login`, and neither is something a tool downloads again.
+const REPO_CACHES: &[&str] = &[
+    "cargo/registry",
+    "cargo/git",
+    "npm/_cacache",
+    "npm/_npx",
+    "pip",
+    "uv",
+    "pnpm",
+];
+
+/// A repo's shared download cache (SKEIN-1350): where it is, what of it a clean may remove, and
+/// which of the repo's boxes would stop that.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepoCache {
+    /// The cache directory, `repos/<id>/store/cache` (`kit::repo_cache_dir`).
+    pub path: String,
+    /// What a clean may remove, biggest first. `shown` is relative to the cache.
+    pub items: Vec<Cleanable>,
+    /// The repo's boxes that are running. A clean waits until there are none.
+    pub running: Vec<String>,
+    /// The repo's boxes skein cannot tell about, which stop a clean just as a running one does.
+    pub unknown: Vec<String>,
+}
+
+/// Repo `id`'s shared download cache, measured, or `None` when it has none: its store is kept
+/// elsewhere, so its boxes keep their own caches.
+///
+/// Reading only. Its size is counted toward the repo and toward no box, because it is on the
+/// store's disk and outside every box's directory, which is all a box's allowance measures.
+pub fn repo_cache(id: &str) -> Result<Option<RepoCache>, String> {
+    repo_cache_given(id, &crate::fleet::fleet_liveness())
+}
+
+/// [`repo_cache`] with the liveness answer passed in.
+fn repo_cache_given(
+    id: &str,
+    liveness: &std::collections::HashMap<String, bool>,
+) -> Result<Option<RepoCache>, String> {
+    let repo = crate::repos::load_repos()
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("{id} is not a registered repo"))?;
+    let Some(dir) = crate::kit::repo_cache_dir(Path::new(&repo.store)) else {
+        return Ok(None);
+    };
+    let mut items = Vec::new();
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+        if meta.is_dir() {
+            let dev = meta.dev();
+            for rel in REPO_CACHES {
+                let path = dir.join(rel);
+                if !real_all_the_way(&dir, &path, dev) {
+                    continue;
+                }
+                let bytes = tree_bytes(&path, Some(dev));
+                if bytes > 0 {
+                    items.push(Cleanable {
+                        path: path.display().to_string(),
+                        shown: rel.to_string(),
+                        kind: "download cache",
+                        bytes,
+                    });
+                }
+            }
+        }
+    }
+    items.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.path.cmp(&b.path)));
+    let (mut running, mut unknown) = (Vec::new(), Vec::new());
+    for name in boxes_of_repo(id) {
+        match liveness.get(&name) {
+            Some(false) => {}
+            Some(true) => running.push(name),
+            None => unknown.push(name),
+        }
+    }
+    Ok(Some(RepoCache {
+        path: dir.display().to_string(),
+        items,
+        running,
+        unknown,
+    }))
+}
+
+/// Every box directory in the fleet that belongs to repo `id`, by the rule the board uses
+/// (`repos::repo_for_box`: the longest registered id the name starts with).
+fn boxes_of_repo(id: &str) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(fleet_root()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| crate::util::valid_name(n))
+        .filter(|n| crate::repos::repo_for_box(n).is_some_and(|r| r.id == id))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Remove `paths` from repo `id`'s shared download cache, when none of its boxes is running and
+/// every one of them is still on [`repo_cache`]'s list.
+///
+/// **Only with every box of the repo stopped**, which is the stricter of the two rules the item
+/// allowed. A box's own download cache may go while it runs, since only that box reads it; this
+/// one is read by every box of the repo, a removal does not take cargo's lock, and a build in a
+/// sibling may be compiling out of `cargo/registry/src` at that moment.
+pub fn clean_repo_cache(id: &str, paths: &[String]) -> Result<Cleaned, String> {
+    clean_repo_cache_given(id, paths, &crate::fleet::fleet_liveness())
+}
+
+/// [`clean_repo_cache`] with the liveness answer passed in, so each refusal can be tested on a
+/// machine with no fleet.
+pub(crate) fn clean_repo_cache_given(
+    id: &str,
+    paths: &[String],
+    liveness: &std::collections::HashMap<String, bool>,
+) -> Result<Cleaned, String> {
+    if paths.is_empty() {
+        return Err("nothing was chosen to remove".to_string());
+    }
+    let Some(now) = repo_cache_given(id, liveness)? else {
+        return Err(format!(
+            "{id} has no shared download cache: its store is kept elsewhere, so its boxes keep \
+             their own. Clean them in each box's settings."
+        ));
+    };
+    let stale: Vec<&String> = paths
+        .iter()
+        .filter(|p| !now.items.iter().any(|c| &c.path == *p))
+        .collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "{id}'s download cache changed since you looked, so skein removed nothing. Open the \
+             repo again to see what can be cleaned now."
+        ));
+    }
+    if !now.running.is_empty() {
+        return Err(format!(
+            "skein removed nothing: {} {} running, and every box of {id} shares this cache. \
+             Stop {}, then clean again.",
+            now.running.join(", "),
+            if now.running.len() == 1 { "is" } else { "are" },
+            if now.running.len() == 1 { "it" } else { "them" },
+        ));
+    }
+    if !now.unknown.is_empty() {
+        return Err(format!(
+            "skein cannot tell whether {} {} running, so it removed nothing. Try again in a \
+             moment.",
+            now.unknown.join(", "),
+            if now.unknown.len() == 1 { "is" } else { "are" },
+        ));
+    }
+    let dir = Path::new(&now.path);
+    let dev = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(dir)
+            .map(|m| m.dev())
+            .map_err(|e| format!("{id}'s download cache is gone ({e})"))?
+    };
+    let mut done = Cleaned::default();
+    for c in now.items.iter().filter(|c| paths.contains(&c.path)) {
+        if !real_all_the_way(dir, Path::new(&c.path), dev) {
+            done.failed.push((
+                c.path.clone(),
+                "part of this path is now a link, so skein left it alone".to_string(),
+            ));
+            continue;
+        }
+        match remove_without_following(dir, Path::new(&c.path), dev) {
+            Ok(()) => {
+                done.removed.push(c.path.clone());
+                done.freed += c.bytes;
+            }
+            Err(e) => done.failed.push((c.path.clone(), e.to_string())),
+        }
+    }
+    Ok(done)
+}
+
 /// Remove the directory `path` under `box_dir` in a way that cannot follow a link anywhere in it.
 ///
 /// Checking the path and then removing it by name is not enough once a running box may be cleaned:
@@ -853,5 +1040,182 @@ mod tests {
         assert_eq!(done.removed, vec![cache.clone()], "{done:?}");
         assert!(!Path::new(&cache).exists());
         assert!(b.join("tree/target/debug/big").exists());
+    }
+
+    /// A fleet with two repos, `web` and `webapp`, each with a managed store and a shared download
+    /// cache holding something of every kind, and boxes `web-main`, `web-two` and `webapp-main`.
+    /// Returns (skein home, web's cache dir, pins).
+    fn repo_caches(dir: &TempDir) -> (PathBuf, PathBuf, EnvPins) {
+        let base: &Path = dir.as_ref();
+        let home = base.join("skein");
+        let root = base.join("fleet");
+        let mut pins = env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &root);
+        pins.set("SKEIN_HOME", &home);
+        let mut repos = Vec::new();
+        for id in ["web", "webapp"] {
+            let store = home.join(format!("repos/{id}/store/data"));
+            std::fs::create_dir_all(&store).unwrap();
+            repos.push(crate::repos::Repo {
+                id: id.into(),
+                store: store.display().to_string(),
+                ..Default::default()
+            });
+            let cache = home.join(format!("repos/{id}/store/cache"));
+            for rel in [
+                "cargo/registry/cache/x.crate",
+                "cargo/git/db/x/pack",
+                "npm/_cacache/index-v5/x",
+                "npm/_npx/0123/node_modules/x/cli.js",
+                "pip/http/x",
+                "uv/wheels/x",
+                "pnpm/v10/files/x",
+            ] {
+                put(&cache.join(rel));
+            }
+            // cargo's part is a whole CARGO_HOME, so it can hold what a tool never downloads again
+            put(&cache.join("cargo/credentials.toml"));
+            put(&cache.join("cargo/config.toml"));
+        }
+        crate::repos::save_repos(&repos).unwrap();
+        for b in ["web-main", "web-two", "webapp-main"] {
+            std::fs::create_dir_all(root.join(b).join("home")).unwrap();
+        }
+        (home.clone(), home.join("repos/web/store/cache"), pins)
+    }
+
+    fn live(pairs: &[(&str, bool)]) -> std::collections::HashMap<String, bool> {
+        pairs.iter().map(|(n, b)| (n.to_string(), *b)).collect()
+    }
+
+    /// **A repo's shared download cache is cleaned only with every box of that repo stopped, and
+    /// only of what a tool downloads again** (SKEIN-1350).
+    ///
+    /// What would make it fail: letting a running box through (the first refusal is then `Ok`),
+    /// treating "cannot tell" as stopped (the second), counting a box of `webapp` as one of `web`'s
+    /// (`starts_with("web")` without the dash; the stopped-`web` clean is then refused for
+    /// `webapp-main`), or listing all of `cargo/` (its `credentials.toml` is then removed).
+    /// Watched: with the running check removed, the first `expect_err` panicked on `Ok`.
+    #[test]
+    fn a_repo_cache_is_cleaned_only_with_all_its_boxes_stopped() {
+        let _lock = env_lock();
+        let dir = tempdir();
+        let (_home, cache, _pins) = repo_caches(&dir);
+        let all = live(&[
+            ("web-main", false),
+            ("web-two", false),
+            ("webapp-main", true),
+        ]);
+        let seen = repo_cache_given("web", &all)
+            .unwrap()
+            .expect("web has a repo cache");
+        let mut shown: Vec<&str> = seen.items.iter().map(|c| c.shown.as_str()).collect();
+        shown.sort();
+        assert_eq!(
+            shown,
+            vec![
+                "cargo/git",
+                "cargo/registry",
+                "npm/_cacache",
+                "npm/_npx",
+                "pip",
+                "pnpm",
+                "uv"
+            ]
+        );
+        assert!(
+            seen.running.is_empty() && seen.unknown.is_empty(),
+            "{seen:?}"
+        );
+        let paths: Vec<String> = seen.items.iter().map(|c| c.path.clone()).collect();
+
+        let one_running = live(&[("web-main", false), ("web-two", true)]);
+        let err = clean_repo_cache_given("web", &paths, &one_running).expect_err("a box runs");
+        assert!(
+            err.contains("web-two is running") && err.contains("Stop it"),
+            "{err}"
+        );
+        let untold = live(&[("web-main", false)]);
+        let err = clean_repo_cache_given("web", &paths, &untold).expect_err("cannot tell");
+        assert!(
+            err.contains("cannot tell whether web-two is running"),
+            "{err}"
+        );
+        assert!(cache.join("npm/_npx/0123/node_modules/x/cli.js").exists());
+
+        let done = clean_repo_cache_given("web", &paths, &all).expect("all of web's boxes stopped");
+        assert_eq!(done.removed.len(), 7, "{done:?}");
+        assert!(done.failed.is_empty(), "{done:?}");
+        for gone in &paths {
+            assert!(!Path::new(gone).exists(), "{gone} is still there");
+        }
+        assert!(cache.join("cargo/credentials.toml").exists());
+        assert!(cache.join("cargo/config.toml").exists());
+        let other = cache
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("webapp/store/cache");
+        assert!(
+            other.join("npm/_npx/0123/node_modules/x/cli.js").exists(),
+            "cleaning web's cache touched webapp's"
+        );
+    }
+
+    /// **Nothing reached through a link is offered or removed, from a box or from the repo
+    /// cache** (SKEIN-1350). A box of the repo can write the repo's cache, so it can put a link
+    /// there; and a box owns its home, so it can make `~/.npm` or `~/.cargo/registry` a link into
+    /// the repo cache. Neither may lead a clean out of the place it was asked to clean: a box's
+    /// clean must never remove the cache every box of the repo reads, and the repo's clean must
+    /// never remove what a link in the cache points at.
+    ///
+    /// What would make it fail: `real_all_the_way` checking only the last component (the box's
+    /// `~/.cargo/registry` link is then offered as its own and removed into the repo cache), or
+    /// the repo listing skipping that check (the `pip` link's target is then removed). Watched:
+    /// with `real_all_the_way` returning true, the box's clean offered both links into the repo
+    /// cache and the first `assert` failed.
+    #[test]
+    fn no_clean_follows_a_link_into_or_out_of_the_repo_cache() {
+        use std::os::unix::fs::symlink;
+        let _lock = env_lock();
+        let dir = tempdir();
+        let (_home, cache, _pins) = repo_caches(&dir);
+        let base: &Path = dir.as_ref();
+        let home = base.join("fleet/web-main/home");
+        symlink(cache.join("npm"), home.join(".npm")).unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        symlink(cache.join("cargo/registry"), home.join(".cargo/registry")).unwrap();
+        let offered = box_cleanables("web-main").unwrap();
+        assert!(
+            offered.is_empty(),
+            "a box's clean offered a path through a link into the repo cache: {offered:?}"
+        );
+        let through = vec![
+            home.join(".npm/_cacache").display().to_string(),
+            home.join(".cargo/registry").display().to_string(),
+        ];
+        let err = clean_box_given("web-main", &through, Some(false)).expect_err("not on the list");
+        assert!(err.contains("removed nothing"), "{err}");
+        assert!(cache.join("npm/_cacache/index-v5/x").exists());
+        assert!(cache.join("cargo/registry/cache/x.crate").exists());
+
+        // A link inside the repo cache, to something that is nobody's cache.
+        let elsewhere = base.join("elsewhere");
+        put(&elsewhere.join("keep"));
+        std::fs::remove_dir_all(cache.join("pip")).unwrap();
+        symlink(&elsewhere, cache.join("pip")).unwrap();
+        let all = live(&[("web-main", false), ("web-two", false)]);
+        let seen = repo_cache_given("web", &all).unwrap().unwrap();
+        assert!(
+            seen.items.iter().all(|c| c.shown != "pip"),
+            "the repo cache offered a link: {seen:?}"
+        );
+        let err = clean_repo_cache_given("web", &[cache.join("pip").display().to_string()], &all)
+            .expect_err("not on the list");
+        assert!(err.contains("removed nothing"), "{err}");
+        assert!(elsewhere.join("keep").exists());
     }
 }

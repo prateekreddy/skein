@@ -70,13 +70,15 @@ pub fn skein_source_path() -> String {
 
 /// Where the Rust toolchain that builds skein lives — and **why it is not the sandbox's own**.
 ///
-/// The sandbox already has `~/.cargo` and `~/.rustup`, and using them would be the obvious thing.
-/// They are also in `box-session.sh`'s `share_paths`, bound read-write from the sandbox's real
-/// `$HOME` into *every* box, under architecture §9.2's rule: **no shared writable path may contain
-/// anything another box executes.** Build the server with that toolchain and the process holding
-/// `credentials/`, `github-pats/` and the API token is downstream of a compiler any box can
-/// overwrite — which is strictly worse than the host build it replaces, where the sandbox's most
-/// privileged process is the one thing the sandbox did not build.
+/// The sandbox may have its own `~/.cargo` and `~/.rustup`, and using them would be the obvious
+/// thing. Until SKEIN-1350 `box-session.sh`'s `share_paths` bound both read-write from the
+/// sandbox's real `$HOME` into *every* box, against architecture §9.2's rule: **no shared writable
+/// path may contain anything another box executes.** Build the server with that toolchain and the
+/// process holding `credentials/`, `github-pats/` and the API token is downstream of a compiler any
+/// box can overwrite — which is strictly worse than the host build it replaces, where the sandbox's
+/// most privileged process is the one thing the sandbox did not build. Nothing is shared that way
+/// now, and the sandbox's own home is still no place for it: [`shared_into_every_box`] is what
+/// says so if a share comes back.
 ///
 /// So `CARGO_HOME` and `RUSTUP_HOME` are pointed here explicitly. Doing nothing is the unsafe
 /// option, which is exactly the kind of default worth a paragraph.
@@ -84,7 +86,10 @@ pub fn skein_toolchain_path() -> String {
     format!("{}/.skein/toolchain", fleet_root())
 }
 
-/// Every path `src/box-session.sh` binds read-write into every box, read from the launcher itself.
+/// Every path `src/box-session.sh` binds read-write from the sandbox's home into every box, read
+/// from the launcher itself. None since SKEIN-1350, which removed the `share_paths` list; this
+/// still reads both of its spellings, so a list put back is a test failure rather than a silent
+/// grant.
 ///
 /// **Read rather than restated.** A copy of this list in Rust would be right on the day it was
 /// written and would not fail when somebody adds an entry to the shell — and the entry that
@@ -356,8 +361,8 @@ mod tests {
     ///
     /// The shared list is READ FROM `box-session.sh`, not restated here: a copy would be correct
     /// the day it was written and would not fail when somebody adds an entry to the shell, and the
-    /// entry that matters is the one nobody thought about. Adding `.skein` to `share_paths` fails
-    /// this test.
+    /// entry that matters is the one nobody thought about. Putting a `share_paths` list back, with
+    /// anything in it, fails this test.
     #[test]
     fn nothing_the_sandbox_builds_skein_with_is_writable_by_a_box() {
         let _env = env_lock();
@@ -365,9 +370,9 @@ mod tests {
 
         let shared = shared_into_every_box();
         assert!(
-            shared.iter().any(|s| s == ".cargo") && shared.iter().any(|s| s == ".rustup"),
-            "box-session.sh no longer shares .cargo/.rustup, so this test is asserting against a \
-             rule that has changed — read the launcher again before deleting it. Found: {shared:?}"
+            shared.is_empty(),
+            "box-session.sh shares {shared:?} from the sandbox's home into every box read-write \
+             again: one box can then plant what every box of every repo runs (SKEIN-1350)"
         );
 
         // **Not "is it under a share_path"**, which is the check this test had first and which can
@@ -385,8 +390,9 @@ mod tests {
         for path in [skein_source_path(), skein_toolchain_path()] {
             assert!(
                 !path.starts_with(&format!("{home}/")),
-                "{path} is under the sandbox's own home, where {shared:?} are bound read-write into \
-                 every box — a box could overwrite the compiler the fleet's server is built with"
+                "{path} is under the sandbox's own home, which every box's private home shadows \
+                 and which was once shared read-write into every box — a box could have \
+                 overwritten the compiler the fleet's server is built with"
             );
             assert!(
                 path.starts_with(&format!("{}/.skein/", fleet_root())),
@@ -592,8 +598,8 @@ mod tests {
     /// pointed, what it was asked to build, and where the binary ended up.
     ///
     /// The two variables are the whole security property and they fail **silently**: unset, the
-    /// build succeeds against the sandbox's shared toolchain, which `box-session.sh` binds
-    /// read-write into every box (architecture §9.2).
+    /// build succeeds against the sandbox's own toolchain under its home, which `box-session.sh`
+    /// bound read-write into every box until SKEIN-1350 (architecture §9.2).
     #[test]
     fn the_bootstrap_builds_with_the_private_toolchain_and_renames_the_binary_into_place() {
         // The root is pinned in THIS process as well as in the two children below, and the lock is

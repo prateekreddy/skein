@@ -164,9 +164,20 @@ exit 0
   spawnSync("tmux", ["-S", sock, "new-session", "-d", "-s", "skein-agent", "sleep 600"], { stdio: "ignore" });
   fs.writeFileSync(path.join(root, "home", "api-token"), API_TOKEN, { mode: 0o600 });
   // a registered repo, so the settings pane has a card to open and edit
+  // And one whose store skein manages, so it has a download cache its boxes share (SKEIN-1350),
+  // with something in it to measure and clean, and a config.toml a clean must leave.
+  const cacheStore = path.join(root, "home", "repos", "cachey", "store", "data");
+  fs.mkdirSync(cacheStore, { recursive: true });
+  for (const rel of ["cargo/registry/cache/x.crate", "npm/_npx/0123/node_modules/x/cli.js", "cargo/config.toml"]) {
+    const f = path.join(root, "home", "repos", "cachey", "store", "cache", rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, Buffer.alloc(64 * 1024, 7));
+  }
   fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
     { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
       check: "", plane_project: "", sync_connection: "" },
+    { id: "cachey", source: "/src/cachey", work: ws, store: cacheStore, agent: "claude",
+      check: "", plane_project: "", sync_connection: "", review_queue: false },
   ]));
   return { root, ws, sbx, bin, boxlike: box.child };
 }
@@ -496,6 +507,27 @@ await check("whether skein reads a repo's pull requests on its own is on its car
   if (stored !== true) throw new Error(`Read ahead: On should be what the repo stores, got ${JSON.stringify(stored)}`);
   const master = await page.locator("#set-prai").locator("xpath=ancestor::label[1]").locator(".set-title").textContent();
   if (!/master switch/.test(master)) throw new Error(`the fleet switch is labelled "${master}"`);
+});
+await check("a repo's card says where its boxes' downloads are kept, and cleans the shared cache", async () => {
+  // SKEIN-1350. Fails if the card loses the row, if a store kept elsewhere is not told its boxes keep
+  // their own caches, if a managed store's cache is not measured with a clean offered while none of
+  // its boxes runs, or if the clean does not remove what it listed and keep cargo's config.
+  const own = '.rcard[data-card="smoke"] [data-repocache="smoke"] [data-cacheuse]';
+  await page.waitForFunction(s => /kept elsewhere/.test(document.querySelector(s)?.textContent || ""), own, { timeout: 5000 });
+  await mustSee(own, "the kept-elsewhere sentence on the smoke repo's card");
+  const none = await page.locator('.rcard[data-card="smoke"] [data-cacheclean]').boundingBox();
+  if (none && none.width > 0) throw new Error("a repo with no shared cache is offered a Clean button");
+  await page.click('.rcard[data-card="cachey"] .rhead');
+  const use = '.rcard[data-card="cachey"] [data-repocache="cachey"] [data-cacheuse]';
+  await page.waitForFunction(s => /cargo\/registry/.test(document.querySelector(s)?.textContent || ""), use, { timeout: 5000 });
+  const btn = await mustSee('.rcard[data-card="cachey"] [data-cacheclean]', "the repo cache's Clean button");
+  if (!/^Clean /.test(await btn.textContent())) throw new Error(`the button reads "${await btn.textContent()}"`);
+  page.once("dialog", d => d.accept());
+  await btn.click();
+  await page.waitForFunction(s => /^Removed /.test(document.querySelector(s)?.textContent || ""), use, { timeout: 5000 });
+  const cache = path.join(fx.root, "home", "repos", "cachey", "store", "cache");
+  if (fs.existsSync(path.join(cache, "npm", "_npx"))) throw new Error("the clean left npm/_npx");
+  if (!fs.existsSync(path.join(cache, "cargo", "config.toml"))) throw new Error("the clean removed cargo's config.toml");
 });
 await check("a connection in use is not removed out from under its repos", async () => {
   await page.click('.set-navi[data-pane="tracking"]');

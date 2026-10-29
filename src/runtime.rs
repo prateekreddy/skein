@@ -83,7 +83,7 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         instruction_file: ".claude/CLAUDE.md",
         instruction_override: "",
         // Named after the box, because the name is the address. With the session registry shared
-        // (see `share_paths` in box-session.sh) every box's agent is reachable via `SendMessage`,
+        // (see the peer network block in box-session.sh) every box's agent is reachable via `SendMessage`,
         // and an unnamed session shows up in another box's `ListAgents` as a pid — which is not
         // something anyone can address, and not something the fleet has any other name for.
         //
