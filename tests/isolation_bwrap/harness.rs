@@ -368,7 +368,7 @@ impl Fleet {
     /// so `SKEIN_FLEET_MOUNTS` arrives empty and every cover written over the manifest silently
     /// iterates nothing. Reproduced here rather than asserted about, because the question is what
     /// the box can then reach.
-    fn mounts(&self, born: Born) -> String {
+    pub(super) fn mounts(&self, born: Born) -> String {
         if !born.matched() {
             return String::new();
         }

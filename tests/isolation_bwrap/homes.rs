@@ -6,9 +6,9 @@ use super::*;
 
 // --- The home binds: what one box can decide about another box's PATH (SKEIN-963, SKEIN-968) -----
 
-/// The launcher's three `$HOME`-relative path lists, lifted as written.
+/// The launcher's two `$HOME`-relative path lists, lifted as written.
 ///
-/// `seed_paths`, `share_paths` and `overlay_paths` — exactly one assignment of each at column 0,
+/// `seed_paths` and `overlay_paths` — exactly one assignment of each at column 0,
 /// and it **refuses to run** rather than returning a short list, for the reason
 /// `unsets_between_blocks` gives: a landmark that moved and a launcher that stopped classifying a
 /// path are indistinguishable by a missing line alone.
@@ -16,7 +16,7 @@ fn path_lists_block() -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
     let mut picked: Vec<&str> = Vec::new();
-    for want in ["seed_paths=(", "share_paths=(", "overlay_paths=("] {
+    for want in ["seed_paths=(", "overlay_paths=("] {
         let found: Vec<&str> = lines
             .iter()
             .filter(|l| l.starts_with(want))
@@ -61,7 +61,6 @@ fn home_binds_block() -> String {
         );
     let block = lines[from..=to].join("\n");
     for landmark in [
-        r#"for rel in "${share_paths[@]}"; do"#,
         r#"for rel in "${overlay_paths[@]}"; do"#,
         "--tmp-overlay",
         r#"binds+=(--bind-fd "${state_at##*/}" "$HOME/.local/state")"#,
@@ -201,6 +200,105 @@ impl Launched {
     /// prints when it does, which is what a person starting a box on that host is told.
     fn read_only_local(&self) -> bool {
         self.stderr.contains("cannot overlay ~/.local")
+    }
+}
+
+/// The bind block with the sandbox's `~/.cargo`, `~/.rustup` and `~/.npm` bound read-write into the
+/// box again, exactly as the `share_paths` loop did before SKEIN-1350: each one the sandbox has,
+/// right after the box's private home. The presence half of
+/// [`the_sandboxs_cargo_and_npm_reach_no_box`].
+fn caches_shared_again(block: String) -> String {
+    let home = r#"binds=(--bind-fd "${home_at##*/}" "$HOME")"#;
+    assert!(
+        block.contains(home),
+        "the box's private home bind moved, so the old share cannot be put back after it"
+    );
+    block.replacen(
+        home,
+        &format!(
+            "{home}\nfor rel in .cargo .rustup .npm; do\n  [ -e \"$HOME/$rel\" ] && \
+             binds+=(--bind \"$HOME/$rel\" \"$HOME/$rel\")\ndone"
+        ),
+        1,
+    )
+}
+
+/// **A sandbox home with `~/.cargo`, `~/.rustup` and `~/.npm` reaches no box read-write**
+/// (SKEIN-1350).
+///
+/// The launcher bound each of these read-write from the sandbox's home into every box, whatever
+/// repo it belonged to, whenever the sandbox had it. `~/.npm/_npx` is where `npx` installs a
+/// package and then runs it from on later calls, and cargo compiles whatever is in
+/// `~/.cargo/registry/src` without checking it again. So one box could put code there that a box
+/// of any other repo ran. Each box keeps its own now, and the boxes of one repo share a cache of
+/// their repo's instead (`repocache.rs`).
+///
+/// # The change that would make this fail, named before it was written
+///
+/// Putting `share_paths=(".cargo" ".rustup" ".npm")` and its loop back in the launcher. The FIRST
+/// half runs exactly that, through [`caches_shared_again`], and asserts the planted files reach
+/// the sandbox's copy and the second box: an absence that was never a presence proves nothing.
+#[test]
+fn the_sandboxs_cargo_and_npm_reach_no_box() {
+    if !bwrap_works() {
+        skip("bwrap cannot make a user namespace here, so whether the sandbox's caches reach a box is unchecked");
+        return;
+    }
+    let f = Homes::make("skein-share1350");
+    let files = [
+        ("npx", ".npm/_npx/0123/node_modules/skein-test/cli.js"),
+        ("cargo", ".cargo/registry/src/skein-test/build.rs"),
+        ("rustup", ".rustup/toolchains/skein-test/bin/rustc"),
+    ];
+    for (_, rel) in files {
+        let p = f.shared.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, "shared").unwrap();
+    }
+    let mut plant = String::new();
+    let mut read = String::new();
+    for (key, rel) in files {
+        plant.push_str(&format!(
+            "printf planted > \"$HOME/{rel}\" 2>/dev/null && echo '{key} wrote' || echo '{key} no'\n"
+        ));
+        read.push_str(&format!(
+            "printf '{key} %s\\n' \"$(cat \"$HOME/{rel}\" 2>/dev/null || echo none)\"\n"
+        ));
+    }
+
+    // --- presence: the launcher as it was, with the three shared read-write ---
+    let planted = f.inside("box-a", &plant, &caches_shared_again);
+    let victim = f.inside("box-b", &read, &caches_shared_again);
+    for (key, rel) in files {
+        assert_eq!(
+            answer(&planted, key),
+            "wrote",
+            "the first box could not write {rel} at all:\n{planted}"
+        );
+        assert_eq!(
+            answer(&victim, key),
+            "planted",
+            "with the old share put back, a second box did not see {rel} as the first wrote it, so \
+             the absence below would prove nothing:\n{victim}"
+        );
+        fs::write(f.shared.join(rel), "shared").unwrap();
+    }
+
+    // --- absence: the launcher as it is ---
+    let planted = f.inside("box-a", &plant, &|b| b);
+    let victim = f.inside("box-b", &read, &|b| b);
+    for (key, rel) in files {
+        assert_ne!(
+            answer(&victim, key),
+            "planted",
+            "a second box read the {rel} the first one wrote: the sandbox's copy is shared \
+             read-write into every box again (SKEIN-1350):\n{planted}\n{victim}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.shared.join(rel)).unwrap(),
+            "shared",
+            "a box's write reached the SANDBOX's {rel}, which every box of every repo would read"
+        );
     }
 }
 

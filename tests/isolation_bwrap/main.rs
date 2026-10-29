@@ -44,6 +44,7 @@ mod hookscripts;
 mod network;
 mod path;
 mod private;
+mod repocache;
 mod requests;
 mod signals;
 mod startscripts;

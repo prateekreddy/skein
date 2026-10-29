@@ -11349,6 +11349,78 @@ function repoTokenRow(r) {
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
 }
+// ---------- a repo's shared download cache (SKEIN-1350) ----------
+// cargo, npm (with npx), pip, uv and pnpm downloads, kept once per repo beside its store and shared
+// by that repo's boxes only. It is measured when the card opens, because that walks the cache, and
+// it is counted toward the repo rather than toward any box's disk allowance. A clean waits until
+// none of the repo's boxes runs, since every one of them reads it.
+const repoCacheSeen = new Map();   // repo id -> the last answer, so a re-render need not walk again
+function repoCacheRow(r) {
+  return `<div class="set-field" data-repocache="${esc(r.id)}"><span class="set-title">Download cache</span>`
+    + `<span class="desc">cargo, npm, pip, uv and pnpm downloads, shared by this repo's boxes and by no other repo's. It counts toward this repo, not toward any box's disk allowance</span>`
+    + `<div class="path-row"><span class="desc" data-cacheuse></span>`
+    + `<button type="button" class="kbtn ghost" data-cacheclean hidden></button></div></div>`;
+}
+function repoCacheParts(id) {
+  const row = document.querySelector(`[data-repocache="${CSS.escape(id)}"]`);
+  return row ? { use: row.querySelector("[data-cacheuse]"), btn: row.querySelector("[data-cacheclean]") } : null;
+}
+const namesPhrase = names => names.length === 1 ? `${names[0]} is` : `${names.join(", ")} are`;
+function loadRepoCache(id) {
+  const p = repoCacheParts(id);
+  if (!p) return;
+  p.use.textContent = "measuring…";
+  p.btn.hidden = true;
+  fetch(`/api/repos/${encodeURIComponent(id)}/cache`)
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(d => { repoCacheSeen.set(id, d.cache); showRepoCache(id, d.cache); })
+    .catch(e => { const q = repoCacheParts(id); if (q) q.use.textContent = `could not measure it: ${failText(e)}`; });
+}
+function showRepoCache(id, c, said) {
+  const p = repoCacheParts(id);
+  if (!p) return;
+  p.btn.hidden = true;
+  if (!c) {
+    p.use.textContent = "This repo's store is kept elsewhere, so each of its boxes keeps its own caches. Clean them in each box's settings.";
+    return;
+  }
+  const all = c.items.reduce((n, i) => n + i.bytes, 0);
+  const lead = said ? `${said} ` : "";
+  if (!c.items.length) { p.use.textContent = `${lead}Nothing in it yet.`; return; }
+  const size = fmtGb(mbOf(all));
+  const parts = c.items.map(i => `${i.shown} ${fmtGb(mbOf(i.bytes))}`).join(", ");
+  if (c.running.length) {
+    p.use.textContent = `${lead}${size} (${parts}). ${namesPhrase(c.running)} running. Stop ${c.running.length === 1 ? "it" : "them"} to clean this cache: every box of ${id} reads it.`;
+    return;
+  }
+  if (c.unknown.length) {
+    p.use.textContent = `${lead}${size} (${parts}). skein cannot tell whether ${namesPhrase(c.unknown)} running. Open this card again in a moment to clean it.`;
+    return;
+  }
+  p.use.textContent = `${lead}${size} (${parts}).`;
+  p.btn.hidden = false;
+  p.btn.textContent = `Clean ${size}…`;
+  p.btn.onclick = () => cleanRepoCache(id, c);
+}
+function cleanRepoCache(id, c) {
+  const all = c.items.reduce((n, i) => n + i.bytes, 0);
+  const lines = c.items.map(i => `  ${fmtGb(mbOf(i.bytes))}  ${i.shown}`).join("\n");
+  if (!confirm(`Remove these from ${id}'s download cache? Its boxes download what they need again.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}. Settings and logins kept beside the cache are not touched.`)) return;
+  const p = repoCacheParts(id);
+  if (p) { p.use.textContent = "cleaning…"; p.btn.hidden = true; }
+  fetch(`/api/repos/${encodeURIComponent(id)}/cache`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: c.items.map(i => i.path) }),
+  })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(d => {
+      const failed = d.failed.map(([path, why]) => `${path}: ${why}`).join("; ");
+      const said = `Removed ${fmtGb(mbOf(d.freed))}.` + (failed ? ` Could not remove ${failed}.` : "");
+      return fetch(`/api/repos/${encodeURIComponent(id)}/cache`)
+        .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+        .then(n => { repoCacheSeen.set(id, n.cache); showRepoCache(id, n.cache, said); });
+    })
+    .catch(e => { const q = repoCacheParts(id); if (q) q.use.textContent = failText(e); });
+}
 function renderRepoList() {
   const el = document.getElementById("set-repos");
   const n = document.getElementById("set-repon");
@@ -11399,6 +11471,7 @@ function renderRepoList() {
           [["none", "Nothing — read only"], ["comment", "Findings"], ["changes", "Findings and refusals"], ["approve", "Everything, including approvals"]])
       + repoLoopWarning(r)
       + repoTokenRow(r)
+      + repoCacheRow(r)
       + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
       + `</div></div>`;
   }).join("");
@@ -11407,7 +11480,10 @@ function renderRepoList() {
     openRepos.has(id) ? openRepos.delete(id) : openRepos.add(id);
     h.closest(".rcard").classList.toggle("open");
     h.setAttribute("aria-expanded", openRepos.has(id));
+    if (openRepos.has(id)) loadRepoCache(id);
   }));
+  // A re-render after a save shows what was last measured rather than walking the cache again.
+  for (const id of openRepos) if (repoCacheSeen.has(id)) showRepoCache(id, repoCacheSeen.get(id));
   el.querySelectorAll("[data-remove]").forEach(b => b.addEventListener("click", () => removeRepo(b.dataset.remove)));
   // The token input is excluded by name, not by luck: it carries a `data-id` like its neighbours but
   // no `data-key`, so leaving it in would POST `{undefined: "<the token>"}` to the repo settings

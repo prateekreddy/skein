@@ -175,9 +175,13 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
     // Document the layout so the user knows what they can optionally add — written only if absent.
     write_if_absent(&store.join("README.md"), STORE_README);
     ensure_probe_in(store)?;
+    // A refusal here costs the repo its shared download cache and nothing else, so it is asked
+    // before the shared home and answered after it: each refusal is about its own directory.
+    let cache = ensure_repo_cache(store);
     // Last, so that a refusal here costs the repo its `$HOME/shared` and nothing else: every other
     // part of the store above is already in place, and the launch that called this goes on.
     ensure_shared_home(store)?;
+    cache?;
     Ok(fresh)
 }
 
@@ -210,6 +214,53 @@ pub(crate) fn shared_home_dir(store: &Path) -> PathBuf {
 fn shared_home_beside(store: &Path) -> Option<PathBuf> {
     managed_store_name(store)?;
     Some(store.parent()?.join("shared-home"))
+}
+
+/// Where the boxes of one repo keep the download caches they share: cargo's registry and git
+/// downloads, npm's cache with `_npx` in it, pip's, uv's and pnpm's store (SKEIN-1350).
+///
+/// `store/cache`, beside `store/data` and `store/shared-home`, for a store skein manages, and
+/// `None` for any other. Decided from the path's shape, as [`shared_home_dir`] is and for its
+/// reason: the launcher binds this back into a covered box and points the tools at it, knowing the
+/// path and not `$SKEIN_HOME`. A store kept elsewhere by `skein add --store` is mounted on its own,
+/// so nothing beside it reaches a box, and a folder of the person's is no place for caches; its
+/// boxes keep their own (`docs/decisions/repos-are-the-trust-boundary.md`).
+pub fn repo_cache_dir(store: &Path) -> Option<PathBuf> {
+    managed_store_name(store)?;
+    Some(store.parent()?.join("cache"))
+}
+
+/// Make the repo's download cache ([`repo_cache_dir`]) when it is not there. Never through a link:
+/// the launcher binds only a real directory, so a link here would leave every box of the repo on
+/// its own caches, and making one wherever a link points would put it somewhere nobody chose.
+fn ensure_repo_cache(store: &Path) -> Result<(), String> {
+    let Some(dir) = repo_cache_dir(store) else {
+        return Ok(());
+    };
+    let refused = |what: &str| {
+        format!(
+            "{} is {what}, so skein did not make this repo's download cache there. Its boxes keep \
+             their own caches until you move it aside and start a box again.",
+            dir.display()
+        )
+    };
+    match fs::symlink_metadata(&dir) {
+        Ok(m) if m.file_type().is_symlink() => return Err(refused("a link")),
+        Ok(m) if m.is_dir() => return Ok(()),
+        Ok(_) => return Err(refused("not a folder")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("stat {}: {e}", dir.display())),
+    }
+    match fs::create_dir(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match fs::symlink_metadata(&dir) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(()),
+                _ => Err(refused("not a folder")),
+            }
+        }
+        Err(e) => Err(format!("mkdir {}: {e}", dir.display())),
+    }
 }
 
 /// The name a managed store sits under in `repos/<id>/store/`, since SKEIN-1330.
@@ -1238,6 +1289,58 @@ mod tests {
             1,
             "something was made through the link"
         );
+    }
+
+    /// **A managed store gets one download cache beside it, made only as a real directory**
+    /// (SKEIN-1350). The launcher binds `store/cache` back into the repo's boxes only when it is a
+    /// real directory, so the host must make it, and must never make it through a link: a link
+    /// there would put every box of the repo's caches wherever it points.
+    ///
+    /// What would make this fail: dropping `ensure_repo_cache` from `ensure_store` (no `cache` is
+    /// made), `create_dir_all` or `fs::metadata` in place of `symlink_metadata` (the link reads as
+    /// "already there" and is accepted, which the error assertion catches), or a store kept
+    /// elsewhere being given one inside it. Watched: with `fs::metadata` in place of
+    /// `symlink_metadata`, the first `unwrap_err` panicked on `Ok(())`.
+    #[test]
+    fn a_managed_store_gets_a_repo_cache_and_a_link_there_is_refused() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let home = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", &home);
+
+        let store = managed_store(&home);
+        ensure_store(&store).unwrap();
+        let cache = store.parent().unwrap().join("cache");
+        assert_eq!(repo_cache_dir(&store), Some(cache.clone()));
+        assert!(
+            cache.is_dir() && !cache.is_symlink(),
+            "no repo cache beside the store"
+        );
+
+        // A link where the cache goes: refused, not followed, and the shared home still made.
+        fs::remove_dir(&cache).unwrap();
+        let elsewhere = tempdir();
+        symlink(&elsewhere, &cache).unwrap();
+        let err = ensure_store(&store).unwrap_err();
+        assert!(
+            err.contains("is a link") && err.contains("download cache"),
+            "{err}"
+        );
+        assert!(cache.is_symlink(), "the link was replaced");
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "something was made through the link"
+        );
+        assert!(store.parent().unwrap().join("shared-home").is_dir());
+
+        // A store kept elsewhere has none, inside it or beside it.
+        let mine = tempdir();
+        let custom = mine.join("my-store");
+        ensure_store(&custom).unwrap();
+        assert_eq!(repo_cache_dir(&custom), None);
+        assert!(!custom.join("cache").exists() && !custom.with_file_name("cache").exists());
     }
 
     /// **`$HOME/shared` points beside `.claude` for a managed store, and an old link is repaired**
