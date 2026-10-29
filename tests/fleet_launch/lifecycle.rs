@@ -374,7 +374,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // the box: it fails on any machine without Claude Code installed, and on this one it stays green
     // with `.local` cut out of `share_paths` entirely, because `/usr/local/share/npm-global/bin/
     // claude` is still on the inherited PATH inside the box. The launcher binds the box's private
-    // home over `$HOME` (`box-session.sh:939`) and binds `share_paths` back on top of it, so the
+    // home over `$HOME` (`box-session.sh:939`) and lays `~/.local`'s overlay on top of it, so the
     // agent's own path is the one thing that says the share survived the bind.
     //
     // **It now asks about the PATH as well as the bind, because the fixture's bin directory is off

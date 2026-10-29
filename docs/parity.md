@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 109  (NOT '.route("' — that gives 95, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 110  (NOT '.route("' — that gives 95, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 177 unique, 182 occurrences
-grep -c 'function ' src/web/index.html                          # 521
+grep -c 'function ' src/web/index.html                          # 526
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -721,11 +721,12 @@ it is where the fragility lives". Nothing here is removed; the requirement is th
 carrying every box's work, by whatever mechanism, with the symlink and ignored-file rules in
 `docs/delivery.md` §5 intact.
 
-**The shared toolchain stops being shared.** `share_paths` binds `~/.cargo`, `~/.rustup` and
-`~/.npm` read-write from the sandbox into every box, so one box's `cargo install` reaches all of
-them and the build cache warms them all. Architecture §9.5.4 removes that — either read-only with a
-per-box overlay, or not shared. **The speed and the convenience are the cost**, and the `sudo`
-shim's own text currently tells users to rely on it.
+**The shared toolchain stops being shared.** `share_paths` bound `~/.cargo`, `~/.rustup` and
+`~/.npm` read-write from the sandbox into every box, so one box's `cargo install` reached all of
+them and the download cache warmed them all. SKEIN-1350 removed it: a box keeps its own, and the
+boxes of one repo share a download cache of that repo's (`docs/decisions/repos-are-the-trust-boundary.md`),
+so the warming survives within a repo and stops at its edge. **The speed across repos is the
+cost**, and the `sudo` shim's own text currently tells users to rely on it.
 
 `~/.local` is already the per-box overlay half of that answer (SKEIN-963): shared lower layer,
 tmpfs upper, so a box's `pip install --user` no longer reaches any other box and no longer survives
