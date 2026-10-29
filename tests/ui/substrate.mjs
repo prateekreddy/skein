@@ -254,4 +254,26 @@ check(
   check("and no empty box where one would be", (old.match(/class="sq-log"/g) || []).length, 0);
 }
 
+// --- a browser request: skein fetches it, so there is nothing to press and nothing to count ---
+//
+// A `playwright` request is answered by skein's own request pass with no decision (SKEIN-1341). Its
+// card says so and carries no Approve or Deny; and it is not counted on the badge or announced,
+// because it is not waiting on the person.
+//
+// Fails on: the card drawn from `state === "pending"` alone (an Approve button appears); the badge
+// counting every pending request (it reads 1).
+{
+  const card = T.subqCard(ask("pw1", { kind: "playwright", packages: ["chromium@1.62.0"] }));
+  check("a browser request has no Approve button", /Approve/.test(card), false);
+  check("and no Deny button", /Deny/.test(card), false);
+  check("and says skein fetches it itself", card.includes("skein fetches browsers itself; no approval needed"), true);
+  const fetching = T.subqCard(ask("pw2", { kind: "playwright", packages: ["chromium@1.62.0"], state: "approved" }));
+  check("an approved browser request says it is being fetched, not installed by apt",
+    fetching.includes("fetching… a browser can take a few minutes") && !/apt/.test(fetching), true);
+  T.reset();
+  T.setQueue([ask("pw3", { kind: "playwright", packages: ["chromium@1.62.0"] })]);
+  await T.pollSubq();
+  check("a waiting browser request is not counted on the badge", T.badge().n, null);
+}
+
 done();

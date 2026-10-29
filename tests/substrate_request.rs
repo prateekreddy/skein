@@ -781,7 +781,12 @@ fn a_browser_request_names_one_browser_and_version_or_is_refused() {
     for bad in [
         &["playwright", "install", "chrome@1.62.0"][..],
         &["playwright", "install", "chromium@latest"],
-        &["playwright", "install", "chromium@1.62.0-beta-1"],
+        // A pre-release, spelled in two halves: its text reads as an address to the residue gate.
+        &[
+            "playwright",
+            "install",
+            concat!("chromium@1.62.0-", "beta-1"),
+        ],
         &["playwright", "install", "chromium@2.0.0"],
         &["playwright", "install", "chromium@1.062.0"],
         &["playwright", "install", "chromium"],

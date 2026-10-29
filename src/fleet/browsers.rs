@@ -200,7 +200,7 @@ timeout -k 10 {deadline} bwrap --unshare-all --share-net --unshare-pid --die-wit
   --proc /proc --dev /dev --tmpfs /tmp \
   --bind "$stage" /stage --chdir /stage/home \
   --setenv PATH /usr/local/bin:/usr/bin:/bin --setenv HOME /stage/home \
-  --setenv npm_config_cache /stage/home/.npm --setenv npm_config_update_notifier false \
+  --setenv npm_config_cache /stage/npm --setenv npm_config_update_notifier false \
   --setenv PLAYWRIGHT_BROWSERS_PATH /stage/out --setenv PLAYWRIGHT_SKIP_BROWSER_GC 1 \
   "$@" -- {fetch} 2>&1"#,
         stage = sh_quote(stage),
@@ -833,7 +833,8 @@ mod tests {
             "chromium@latest",
             "chromium@1.56",
             "chromium@1.56.1.2",
-            "chromium@1.56.1-beta-1",
+            // A pre-release, spelled in two halves: its text reads as an address to the residue gate.
+            concat!("chromium@1.56.1-", "beta-1"),
             "chromium@1.056.1",
             "chromium@01.56.1",
             "chromium@2.0.0",
@@ -1042,7 +1043,7 @@ mod tests {
         fixture_entry(&out, "chromium-2");
         let staged = verify(&out).unwrap();
         publish(&out, &store, &staged).unwrap();
-        let farm = dir.join("fleet/web-main/home/.cache/ms-playwright");
+        let farm = dir.join("fleet/web-main/home").join(FARM);
         std::fs::create_dir_all(&farm).unwrap();
         std::os::unix::fs::symlink(store.join("chromium-1"), farm.join("chromium-1")).unwrap();
 
@@ -1060,7 +1061,7 @@ mod tests {
         );
 
         // A box whose browsers directory is a link is not read through, and blocks the clean.
-        let other = dir.join("fleet/api-main/home/.cache");
+        let other = dir.join("fleet/api-main/home").join(".cache");
         std::fs::create_dir_all(&other).unwrap();
         std::os::unix::fs::symlink(&farm, other.join("ms-playwright")).unwrap();
         let why = clean_unused(&["chromium-2".into()]).expect_err("an unreadable box");

@@ -1172,6 +1172,8 @@ mod tests {
     /// names the same set, so drift fails rather than hides.
     const SUBSTRATE_DIRS: &[&str] = &[
         "asks",
+        // The fleet's Playwright browsers (SKEIN-1341).
+        "browsers",
         "detached",
         "gitgate",
         "plugin",
