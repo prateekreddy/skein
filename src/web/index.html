@@ -9570,6 +9570,7 @@ async function showLoad() {
   let rows = [];
   try { rows = await fetch("/api/fleet/load").then(r => r.ok ? r.json() : []); } catch {}
   renderLoad(ov, rows);
+  loadBrowsers(ov);
 }
 function loadOverlay() {
   let ov = document.getElementById("load");
@@ -9610,6 +9611,55 @@ function renderLoad(ov, rows) {
     else row.style.cursor = "default";
     list.append(row);
   }
+}
+
+// ---------- the fleet's shared browsers (SKEIN-1341) ----------
+// One read-only copy of each Playwright browser for every box, fetched by skein. Shown under the load
+// rows: each entry's size and the boxes that link it, and a clean of the ones no box links, offered
+// and confirmed, never automatic. Its bytes are the fleet's, not any box's, so no row above counts them.
+function browserRow(text, fig) {
+  const row = document.createElement("div");
+  row.className = "lrow";
+  row.style.cursor = "default";
+  row.innerHTML = `<span class="nm">${esc(text)}</span>` + (fig ? `<span class="fig">${fig}</span>` : "");
+  return row;
+}
+function loadBrowsers(ov) {
+  return fetch("/api/fleet/browsers").then(r => r.ok ? r.json() : null).then(v => {
+    if (!v) return;
+    const list = ov.querySelector(".away-list");
+    list.querySelectorAll(".pw-row").forEach(n => n.remove());
+    const add = row => { row.classList.add("pw-row"); list.append(row); };
+    add(browserRow("Shared browsers", `<b>${fmtGb(mbOf(v.bytes))}</b> of ${fmtGb(mbOf(v.budget))} · not counted against any box`));
+    if (!v.entries.length) add(browserRow("none yet", "a box asks for one with skein_request_package"));
+    for (const e of v.entries) {
+      add(browserRow(e.name, `<b>${fmtGb(mbOf(e.bytes))}</b> · ${e.boxes.length ? "linked by " + esc(e.boxes.join(", ")) : "no box links it"}`));
+    }
+    if (v.full) add(browserRow(v.full));
+    else if (v.waiting.length) add(browserRow("fetching: " + v.waiting.join("; ")));
+    if (v.unknown.length) add(browserRow(`skein cannot read which browsers ${v.unknown.join(", ")} links, so nothing can be cleaned until its ~/.cache/ms-playwright is a plain directory`));
+    const unused = v.entries.filter(e => !e.boxes.length);
+    if (unused.length && !v.unknown.length) {
+      const row = browserRow("");
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "kbtn ghost";
+      btn.textContent = `Clean ${unused.length} unused (${fmtGb(mbOf(unused.reduce((n, e) => n + e.bytes, 0)))})…`;
+      btn.onclick = () => cleanBrowsers(ov, unused);
+      row.querySelector(".nm").replaceWith(btn);
+      add(row);
+    }
+  }).catch(() => {});
+}
+function cleanBrowsers(ov, unused) {
+  const lines = unused.map(e => `  ${fmtGb(mbOf(e.bytes))}  ${e.name}`).join("\n");
+  const all = unused.reduce((n, e) => n + e.bytes, 0);
+  if (!confirm(`Remove these shared browsers? No box links them. If a box needs one again, it asks and skein fetches it.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}.`)) return;
+  fetch("/api/fleet/browsers/clean", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ names: unused.map(e => e.name) }),
+  })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(d => { toast(`Removed ${fmtGb(mbOf(d.freed))} of shared browsers.`); loadBrowsers(ov); })
+    .catch(e => notice(`could not clean shared browsers: ${failText(e)}`));
 }
 
 // ---------- away digest: "while you were gone", from the server's journal ----------
@@ -10026,7 +10076,10 @@ const subqShown = new Map();
 // fleet, and a remembered one runs them again at every launch. That is what the button does, and
 // the card says so rather than leaving it to be inferred from "Approve & install".
 function subqCard(r) {
-  const pending = r.state === "pending";
+  // A browser is fetched by skein itself, with no decision to make (SKEIN-1341), so its card has
+  // no buttons and says so.
+  const browser = r.kind === "playwright";
+  const pending = r.state === "pending" && !browser;
   const log = (r.log || "").trim();
   // The box's own words for what it wants the package for, drawn the way the write card draws its
   // reason. A request the sudo shim filed has none, and gets no line rather than an empty one.
@@ -10047,7 +10100,8 @@ function subqCard(r) {
           <button class="kbtn ghost" onclick="decideSubq(${esc(JSON.stringify(key))}, false)"${busy}>Deny</button>
           ${sendingNote("subq", key)}
           <span class="sq-meta">runs as root for the whole fleet</span>` : ""}
-        ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
+        ${browser && r.state === "pending" ? `<span class="sq-meta">skein fetches browsers itself; no approval needed</span>` : ""}
+        ${r.state === "approved" ? `<span class="sq-meta">${browser ? "fetching… a browser can take a few minutes" : "installing… apt can take a few minutes"}</span>` : ""}
         ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
       </div>
       ${log ? `<div class="sq-log">${esc(log)}</div>` : ""}
@@ -10104,7 +10158,8 @@ function paintSubqBadge(n) {
 // wait for the round trip instead of guessing how many ticks it took.
 function pollSubq() {
   return fetch("/api/fleet/substrate").then(r => r.json()).then(reqs => {
-    const pending = reqs.filter(r => r.state === "pending");
+    // A browser request waits on skein, not on the owner, so it is not counted or announced.
+    const pending = reqs.filter(r => r.state === "pending" && r.kind !== "playwright");
     paintSubqBadge(pending.length);
     // The first poll only seeds: a page reload is not news, and announcing the whole backlog every
     // time the cockpit is opened is exactly the nagging this channel was fixed to stop.

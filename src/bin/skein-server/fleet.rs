@@ -94,6 +94,36 @@ pub(super) async fn api_substrate_decide(
     }
 }
 
+/// The fleet's shared Playwright browsers: each entry's size, the boxes that link it, and whether
+/// requests are waiting for room (SKEIN-1341).
+pub(super) async fn api_browsers() -> Json<skein::fleet::browsers::StoreView> {
+    // Blocking: it walks the store and reads the queue in the sandbox.
+    Json(
+        tokio::task::spawn_blocking(|| {
+            skein::fleet::browsers::store_view(&skein::place::fleet_sandbox())
+        })
+        .await
+        .unwrap_or_default(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct BrowsersCleanReq {
+    /// The entries the person confirmed, exactly as the view showed them.
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+/// Remove the browsers the person confirmed, each only if no box links it at that moment.
+pub(super) async fn api_browsers_clean(Json(r): Json<BrowsersCleanReq>) -> Response {
+    match tokio::task::spawn_blocking(move || skein::fleet::browsers::clean_unused(&r.names)).await
+    {
+        Ok(Ok(done)) => Json(done).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// Per-box CPU, memory and process count.
 ///
 /// Its own endpoint rather than a field on `/api/fleet/resources`, because the two are asked for at

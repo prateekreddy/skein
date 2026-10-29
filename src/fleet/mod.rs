@@ -57,6 +57,7 @@ use crate::util::*;
 use chrono::Utc;
 use std::time::Duration;
 
+pub mod browsers;
 mod checkout;
 mod clean;
 mod containers;

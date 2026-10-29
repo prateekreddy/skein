@@ -381,6 +381,13 @@ valid_package() {
   case "$name" in
     "" | -* | .* | *..*) return 1 ;; # empty, shaped like a flag, a hidden or relative path, a climb
   esac
+  # A browser for the fleet's store (SKEIN-1341): `<browser>@1.<minor>.<patch>`, the host's
+  # `fleet::browsers::want_is_nameable`, which checks it again before anything is fetched.
+  if [ "$1" = playwright ]; then
+    case "${name%%@*}" in chromium | chromium-headless-shell | firefox | webkit | ffmpeg) ;; *) return 1 ;; esac
+    [[ "${name#*@}" =~ ^1\.(2[0-9]|[3-9][0-9]|[1-9][0-9]{2,3})\.(0|[1-9][0-9]{0,3})$ ]]
+    return
+  fi
   if [ "$1" = npm ] && [ "${name#@}" != "$name" ]; then
     scope="${name#@}"
     case "$scope" in */*) ;; *) return 1 ;; esac
@@ -440,13 +447,14 @@ request_package() {
   case "$tool" in
     apt | apt-get) kind=apt ;;
     npm) kind=npm ;;
+    playwright) kind=playwright ;;
     *) return 2 ;;
   esac
   while [ $# -gt 0 ]; do
     case "$1" in -*) shift ;; *) verb="$1"; shift; break ;; esac
   done
   case "$kind/$verb" in
-    apt/install | npm/install | npm/i | npm/add) ;;
+    apt/install | npm/install | npm/i | npm/add | playwright/install) ;;
     *) return 2 ;;
   esac
 
@@ -460,6 +468,10 @@ request_package() {
     packages+=("$arg")
   done
   [ "${#packages[@]}" -gt 0 ] || return 2
+  if [ "$kind" = playwright ] && [ "${#packages[@]}" -ne 1 ]; then
+    echo "skein: ask for one browser at a time, like chromium@1.56.1" >&2
+    return 3
+  fi
 
   # 4 is "could not file", and the caller must not tell anyone to try again — see the shim.
   if ! command -v jq >/dev/null 2>&1; then
@@ -532,6 +544,22 @@ request_package() {
     fi
   done
 
+  # One browser request at a time per box (SKEIN-1341): skein fetches them without the owner, so
+  # this is what keeps one box from queueing the whole of Playwright's history. The host takes one
+  # per box per pass as well, for a box that writes its queue without coming through here.
+  if [ "$kind" = playwright ]; then
+    for f in "$dir"/*.json; do
+      [ -f "$f" ] || continue
+      [ "$(jq -r '.kind // ""' "$f" 2>/dev/null)" = playwright ] || continue
+      case "$(jq -r '.state // ""' "$f" 2>/dev/null)" in
+        pending | approved)
+          printf 'skein: this box already has a browser request waiting (%s). Ask again once it is answered.\n' \
+            "$(jq -r '.id // "?"' "$f")" >&2
+          return 3 ;;
+      esac
+    done
+  fi
+
   local id tmp
   id="$(date -u +%Y%m%d-%H%M%S)-$$"
   tmp="$(mktemp "$dir/.tmp.XXXXXX")" || return 4
@@ -550,6 +578,11 @@ request_package() {
   mv -f "$tmp" "$dir/$id.json" 2>/dev/null || { rm -f "$tmp"; return 4; }
   chmod 644 "$dir/$id.json" 2>/dev/null || true
 
+  if [ "$kind" = playwright ]; then
+    printf 'skein: asked the fleet for %s. Request %s is pending.\n' "${packages[*]}" "$id"
+    printf 'skein: skein fetches it for every box, with no approval needed. Until then, npx playwright install still downloads it for this box alone.\n'
+    return 0
+  fi
   printf 'skein: asked the fleet for %s (%s). Request %s is pending approval.\n' \
     "$kind" "${packages[*]}" "$id"
   printf 'skein: it installs for every box once approved in the cockpit; nothing is installed yet.\n'
@@ -2744,6 +2777,20 @@ RUSTUPSHIM
 fi
 unset toolchain
 
+# --- the fleet's Playwright browsers: one copy of each, read by every box, written by none ---------
+#
+# skein fetches each browser version once, from Playwright's own download, into the fleet root's
+# `.skein/browsers` (SKEIN-1341, `fleet::browsers`). Bound read-only into EVERY box, the workshop box
+# included, for the toolchain's reason above. The box's own `~/.cache/ms-playwright` holds one link
+# per entry, which the kit makes inside the box as it starts; the session block below names that
+# directory as `PLAYWRIGHT_BROWSERS_PATH`. A version the store lacks still downloads there, privately.
+# Made here if missing, so a box started before the first fetch still sees the ones that come later.
+browsers="${SKEIN_FLEET_ROOT:-/boxes}/.skein/browsers"
+if mkdir -p -- "$browsers" 2>/dev/null; then
+  binds+=(--ro-bind "$browsers" "$browsers")
+fi
+unset browsers
+
 # --- GitHub: one repo to write, everything else to read ------------------------------------------
 #
 # What this replaces, measured rather than assumed: every box held the same `GH_TOKEN` — a user token
@@ -3470,6 +3517,9 @@ exec bwrap \
       export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo" \
         CARGO_INSTALL_ROOT="$HOME/.local"
     fi
+    # The browsers directory of this box alone, where the kit links the fleet browsers (SKEIN-1341).
+    # GC off, or Playwright removes the links to browsers the projects here do not use (measured).
+    export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" PLAYWRIGHT_SKIP_BROWSER_GC=1
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
     # path names the OUTER /tmp, which does not exist in this box private one, so the server fails

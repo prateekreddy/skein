@@ -298,6 +298,23 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
             }
         }
     });
+    // **A box's browser request, answered without the owner** (SKEIN-1341, the owner's decision of
+    // 2026-10-29). A request names a browser and a Playwright version; skein fetches it into the
+    // fleet's read-only store from Playwright's own download, or refuses it with the reason. Its
+    // own loop, so it is answered with nobody at the cockpit. A pass waits for the fill it starts,
+    // minutes for a browser, and the next pass starts thirty seconds after it ends.
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let pass = tokio::task::spawn_blocking(|| {
+                skein::fleet::browsers::serve(&skein::place::fleet_sandbox())
+            })
+            .await;
+            for what in pass.unwrap_or_default() {
+                eprintln!("skein: {what}");
+            }
+        }
+    });
     // **The warden, said at boot.** Optional (SKEIN-1184, `docs/decisions/warden-or-prompt.md`):
     // without one skein shows the person the command instead, so this is one line saying which
     // route this fleet is on — the health check's own sentence — and never a reason not to start.
@@ -472,6 +489,8 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/machine/pressure", get(api_machine_pressure))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
+        .route("/api/fleet/browsers", get(api_browsers))
+        .route("/api/fleet/browsers/clean", post(api_browsers_clean))
         // A box's questions for its owner, and the answer to one (SKEIN-1061).
         .route("/api/fleet/asks", get(api_asks))
         .route("/api/fleet/asks/:id", post(api_ask_answer))

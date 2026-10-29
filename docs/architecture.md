@@ -1006,6 +1006,16 @@ them, so they are not a path another box executes from — and `fleet::skein_too
 precisely because being merely unexecuted is not the same as being safe to build skein's own server
 with.
 
+**The fleet's Rust toolchain and its Playwright browsers are not on this path.** Each is one copy
+under the fleet root's `.skein`, bound read-only into every box, the workshop box included
+(`grep -n 'the fleet.s Rust toolchain\|the fleet.s Playwright browsers' src/box-session.sh`). The
+browsers (SKEIN-1341, `src/fleet/browsers.rs`) are also the one shared copy a box can ask to grow:
+a request names a browser and a Playwright version, skein fetches it with no owner decision, in a
+namespace that sees no box, no `/run` and no credential, refuses what it staged if it holds a link
+or a special file, and renames it in read-only. Each box reaches them through links in its own
+`~/.cache/ms-playwright`, which the kit makes inside the box, so a link a box plants misleads that
+box alone.
+
 **2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared,
 the inbox sockets in the sandbox-wide `/run/user/1000/cc-socks/` are deliberately bound back through
 the `/run` cover (§9.5 R11), and every box's settings are seeded with `crossSessionInbound: "accept"`

@@ -386,7 +386,7 @@ fn a_crossing_into_a_box_carries_only_its_allow_list() {
 /// Asserted to have found it, so a renamed or re-quoted assignment fails here, by name, rather than
 /// leaving the launch on whatever the fixture's config chose and every assertion after it about a
 /// box of the other kind.
-fn with_launch_env(script: &str, key: &str, value: &str) -> String {
+pub(super) fn with_launch_env(script: &str, key: &str, value: &str) -> String {
     let at = script
         .find(&format!("{key}="))
         .unwrap_or_else(|| panic!("session_script no longer sets {key}: {script}"));
