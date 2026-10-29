@@ -1195,6 +1195,9 @@
   .path-row { display:flex; gap:8px; align-items:stretch; }
   .path-row input { flex:1; min-width:0; }
   .path-row .kbtn { flex:none; height:auto; }
+  /* `.kbtn`'s display beats the `hidden` attribute, so a repo cache's Clean would show while a box
+     of the repo runs, with nothing behind it (SKEIN-1350) */
+  [data-cacheclean][hidden] { display:none; }
 
   /* ---------- settings: a two-pane preferences surface ---------- */
   /* Capped at 860×560 while scrolling six screens of content through a 423px window — measured at
