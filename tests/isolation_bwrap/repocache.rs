@@ -5,7 +5,7 @@ use super::*;
 
 /// The launcher's repo-cache block, lifted: from `repo_cache=""` to `unset repo_cache_at`. It
 /// works out the cache from `$SKEIN_BOX_STORE` and binds it back through the cover.
-fn repo_cache_block() -> String {
+pub(super) fn repo_cache_block() -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
     let from = lines

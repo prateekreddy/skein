@@ -61,6 +61,15 @@ memory: |
   `skein_requests` shows the request installed, run the command that request's `link` line gives.
   Until it arrives, `npx playwright install chromium` downloads it for this box alone.
 
+  ## Freeing disk in this box
+
+  `skein_top` with `by: "disk"` shows what this box is charged for: its download caches, build
+  output and scratchpads, and its checkout's largest directories. `skein_clean` with no paths lists
+  what can be removed and made again; pass paths from that list to remove them. This box's own
+  caches and build output can go at any time, so stop whatever is using them first. The repo's
+  shared download cache is on a line of its own: it is not counted against this box, and it can be
+  removed only while no other box of this repo is running. Config and logins are never on the list.
+
   ## Git authentication in this box
 
   Before retrying a failed fetch, push, or PR, inspect the configured path:

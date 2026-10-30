@@ -21,6 +21,8 @@ const SERVER: &str = include_str!("../src/plugin/bin/skein-mcp");
 /// fleet root, and the server script sits beside them.
 struct Box_ {
     dir: Scratch,
+    /// `$HOME` for the server, when a test needs it to be the box's own home.
+    home: std::cell::RefCell<Option<std::path::PathBuf>>,
 }
 
 impl Box_ {
@@ -37,7 +39,10 @@ impl Box_ {
             fs::create_dir_all(dir.path().join(d)).unwrap();
         }
         fs::write(dir.path().join("root/proc/uptime"), "10000.00 9000.00\n").unwrap();
-        Box_ { dir }
+        Box_ {
+            dir,
+            home: std::cell::RefCell::new(None),
+        }
     }
 
     fn at(&self, rel: &str) -> std::path::PathBuf {
@@ -79,7 +84,11 @@ impl Box_ {
     }
 
     fn talk_in(&self, state: &std::path::Path, box_name: &str, messages: &[Value]) -> Vec<Value> {
-        let mut child = Command::new("python3")
+        let mut cmd = Command::new("python3");
+        if let Some(home) = self.home.borrow().as_ref() {
+            cmd.env("HOME", home);
+        }
+        let mut child = cmd
             .arg(self.at("skein-mcp"))
             .current_dir(self.at("checkout"))
             .env("SKEIN_TOOLS_FAKE_ROOT", self.at("root"))
@@ -635,7 +644,7 @@ fn resources_returns_the_signal_file() {
 }
 
 /// **The server speaks MCP over stdio**: it answers `initialize`, is silent on a notification,
-/// lists exactly its six tools, the three that only read marked read-only, and answers an unknown
+/// lists exactly its seven tools, the three that only read marked read-only, and answers an unknown
 /// method with an error rather than exiting.
 ///
 /// What would make it fail: a reply to `notifications/initialized` (the client would read it as a
@@ -671,16 +680,18 @@ fn it_speaks_mcp_over_stdio() {
         vec![
             "skein_resources",
             "skein_top",
+            "skein_clean",
             "skein_requests",
             "skein_request_package",
             "skein_request_write",
             "skein_ask_person"
         ]
     );
-    // The three that read say so, and the three that ask do not claim to.
+    // The three that read say so, and the three that ask and the one that removes do not claim to.
     for t in replies[1]["result"]["tools"].as_array().unwrap() {
         let reads = !t["name"].as_str().unwrap().starts_with("skein_request_")
-            && t["name"] != "skein_ask_person";
+            && t["name"] != "skein_ask_person"
+            && t["name"] != "skein_clean";
         assert_eq!(t["annotations"]["readOnlyHint"], reads, "{t}");
     }
     assert_eq!(replies[2]["error"]["code"], -32601);
@@ -694,7 +705,16 @@ fn it_speaks_mcp_over_stdio() {
 /// server; and it names each one it found, so a new harmless import is a one-word change here.
 #[test]
 fn it_imports_nothing_that_reaches_the_network() {
-    let allowed = ["json", "os", "re", "subprocess", "sys", "time"];
+    let allowed = [
+        "datetime",
+        "json",
+        "os",
+        "re",
+        "stat",
+        "subprocess",
+        "sys",
+        "time",
+    ];
     let mut found = Vec::new();
     for line in SERVER.lines() {
         let t = line.trim_start();
@@ -987,5 +1007,424 @@ fn a_package_request_without_a_why_is_refused() {
             .count(),
         0,
         "a request with no why was filed"
+    );
+}
+
+// ------------------------------------------------------------------------------------------------
+// skein_clean (SKEIN-1356)
+// ------------------------------------------------------------------------------------------------
+
+/// An RFC3339 stamp `ago` seconds in the past, as skein writes them.
+fn stamp_ago(ago: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(ago))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// Box `web-main` under the fixture's fleet root, laid out as a real one is, with `$HOME` its own
+/// home. Planted: a download cache holding a link to `outside/keep`, a build directory, an ended
+/// session's scratchpad, the agent's own notes in `~/.cache` (not on the list), and the repo's
+/// shared cache with cargo's credentials in it (never on the list).
+struct Cleanable {
+    root: std::path::PathBuf,
+    cache: std::path::PathBuf,
+    outside: std::path::PathBuf,
+}
+
+impl Cleanable {
+    fn plant(b: &Box_) -> Cleanable {
+        let root = b.at("fleet/web-main");
+        let cache = b.at("home/repos/web/store/cache");
+        let outside = b.at("outside/keep");
+        for rel in [
+            "fleet/web-main/home/.cache/pip/wheels/x.whl",
+            "fleet/web-main/home/.cache/agent-notes/today.md",
+            "fleet/web-main/home/.cache/skein/claude/claude-1000/-p/old/notes",
+            "fleet/web-main/tree/target/debug/big",
+            "outside/keep/precious",
+            "home/repos/web/store/cache/pip/http/x",
+            "home/repos/web/store/cache/cargo/registry/cache/x.crate",
+            "home/repos/web/store/cache/cargo/credentials.toml",
+        ] {
+            b.put(rel, "data");
+        }
+        std::os::unix::fs::symlink(&outside, root.join("home/.cache/pip/evil")).unwrap();
+        *b.home.borrow_mut() = Some(root.join("home"));
+        Cleanable {
+            root,
+            cache,
+            outside,
+        }
+    }
+
+    fn pip(&self) -> String {
+        self.root.join("home/.cache/pip").display().to_string()
+    }
+
+    /// skein's list for the box, in the signal file. `others` is (running, unknown) for the
+    /// repo's other boxes, `quiet` when skein last saw none of them running.
+    fn listed(
+        &self,
+        b: &Box_,
+        box_root: &std::path::Path,
+        others: (u64, u64),
+        quiet: Option<String>,
+    ) {
+        self.listed_ago(b, box_root, others, quiet, 30)
+    }
+
+    /// [`Cleanable::listed`], with the list itself written `ago` seconds in the past.
+    fn listed_ago(
+        &self,
+        b: &Box_,
+        box_root: &std::path::Path,
+        others: (u64, u64),
+        quiet: Option<String>,
+        ago: i64,
+    ) {
+        let item = |path: std::path::PathBuf, kind: &str| json!({"path": path.display().to_string(), "shown": "x", "kind": kind, "bytes": 4096});
+        let file = json!({
+            "at": stamp_ago(5),
+            "disk": {"mb": 2048, "limit_mb": 10240, "fleet": "under", "fleet_over_by_mb": 0},
+            "asks": [],
+            "clean": {
+                "at": stamp_ago(ago),
+                "box_root": box_root.display().to_string(),
+                "items": [
+                    item(self.root.join("home/.cache/pip"), "download cache"),
+                    item(self.root.join("tree/target"), "build output"),
+                    item(self.root.join("home/.cache/skein/claude/claude-1000/-p/old"), "scratchpad"),
+                ],
+                "repo_cache": {
+                    "path": self.cache.display().to_string(),
+                    "bytes": 8192,
+                    "items": [
+                        item(self.cache.join("pip"), "download cache"),
+                        item(self.cache.join("cargo/registry"), "download cache"),
+                    ],
+                    "others_running": others.0,
+                    "others_unknown": others.1,
+                    "none_running_at": quiet,
+                },
+            },
+        });
+        b.put("state/signals/resources.json", &file.to_string());
+    }
+}
+
+fn clean_said(b: &Box_, paths: &[String]) -> (Value, String) {
+    b.call_said("web-main", "skein_clean", json!({ "paths": paths }))
+}
+
+/// **A link planted inside a listed cache is removed as a link, and what it leads to is kept**
+/// (SKEIN-1356). The same for a listed directory that has itself become a link since skein looked.
+///
+/// A box writes its own caches, so it can put a link to anything it can name inside one. A
+/// removal that follows it empties the target as if it were part of the cache.
+///
+/// What would make it fail: walking with links followed — `os.stat(…, follow_symlinks=True)` in
+/// `remove_tree_at` and `O_NOFOLLOW` dropped from its directory opens — which empties `outside/keep` through
+/// `pip/evil`. Watched: with exactly that sabotage, `outside/keep/precious` was removed and this
+/// failed.
+#[test]
+fn a_link_in_a_listed_cache_is_removed_and_its_target_kept() {
+    let b = Box_::new("skein-tools-it-clean-link");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let (got, said) = clean_said(&b, &[c.pip()]);
+    // First, so a removal that followed the link is named as that, whatever else it did.
+    assert!(
+        c.outside.join("precious").exists(),
+        "the removal followed a link out of the cache: {got}"
+    );
+    assert_eq!(
+        got["removed"].as_array().map(Vec::len),
+        Some(1),
+        "{got} {said}"
+    );
+    assert!(
+        !c.root.join("home/.cache/pip").exists(),
+        "the cache is still there"
+    );
+    assert!(said.starts_with("skein: removed 1,"), "{said}");
+
+    // The listed directory itself is now a link to the outside.
+    let target = c.root.join("tree/target");
+    fs::remove_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&c.outside, &target).unwrap();
+    let (got, _) = clean_said(&b, &[target.display().to_string()]);
+    assert_eq!(got["removed"], json!([]), "{got}");
+    assert_eq!(got["failed"].as_array().map(Vec::len), Some(1), "{got}");
+    assert!(c.outside.join("precious").exists(), "{got}");
+    assert!(
+        fs::symlink_metadata(&target).is_ok(),
+        "the link itself was removed: {got}"
+    );
+}
+
+/// **A path that is not on skein's list is refused, and then nothing is removed**, not even the
+/// listed paths asked for beside it (SKEIN-1356). That covers what the agent put in `~/.cache`
+/// itself, and cargo's `credentials.toml` in the repo's cache.
+///
+/// What would make it fail: the tool removing a path on the agent's word (the notes go), or
+/// removing what is listed and skipping the rest (the pip cache goes with the refusal). Watched:
+/// with the `if missing:` refusal removed, the listed pip cache was removed and this failed.
+#[test]
+fn a_path_not_on_the_list_is_refused_and_nothing_is_removed() {
+    let b = Box_::new("skein-tools-it-clean-list");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    for stray in [
+        c.root.join("home/.cache/agent-notes"),
+        c.cache.join("cargo/credentials.toml"),
+        c.cache.join("cargo"),
+        c.outside.clone(),
+    ] {
+        let asked = vec![c.pip(), stray.display().to_string()];
+        let (got, said) = clean_said(&b, &asked);
+        assert_eq!(got["error"], "not-on-the-list", "{stray:?}: {got}");
+        assert!(said.starts_with("skein: removed nothing."), "{said}");
+        assert!(stray.exists(), "{stray:?} was removed");
+        assert!(
+            c.root.join("home/.cache/pip/wheels/x.whl").exists(),
+            "{stray:?}: {got}"
+        );
+    }
+    // The list itself never names them.
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let text = listing.to_string();
+    assert!(
+        !text.contains("agent-notes") && !text.contains("credentials"),
+        "{listing}"
+    );
+}
+
+/// **The repo's shared cache is refused while another box of the repo runs, while skein cannot
+/// tell, and when skein's word that none runs is stale or missing; and removed when it is fresh**
+/// (SKEIN-1356). The host's rule for its own clean (`fleet::clean_repo_cache`), applied by a box
+/// that cannot see its siblings.
+///
+/// What would make it fail: ignoring `others_running` or `others_unknown`, or dropping the
+/// freshness check on `none_running_at` (the cache is then removed on a word ten minutes old).
+/// Watched: with `or quiet > SIBLINGS_FRESH_SECONDS` removed, the stale case removed the cache and
+/// this failed.
+#[test]
+fn the_shared_cache_is_refused_while_a_sibling_runs_or_the_word_is_stale() {
+    let b = Box_::new("skein-tools-it-clean-shared");
+    let c = Cleanable::plant(&b);
+    let pip = c.cache.join("pip").display().to_string();
+    for (others, quiet, why) in [
+        (
+            (1, 0),
+            Some(stamp_ago(600)),
+            "1 other box of this repo is running",
+        ),
+        (
+            (0, 2),
+            Some(stamp_ago(600)),
+            "cannot tell whether 2 other boxes",
+        ),
+        ((0, 0), Some(stamp_ago(600)), "has not confirmed"),
+        ((0, 0), None, "has not confirmed"),
+    ] {
+        c.listed(&b, &c.root, others, quiet.clone());
+        let (got, said) = clean_said(&b, std::slice::from_ref(&pip));
+        assert_eq!(got["error"], "not-safe-now", "{others:?} {quiet:?}: {got}");
+        assert!(said.contains(why), "{others:?} {quiet:?}: {said}");
+        assert!(c.cache.join("pip/http/x").exists(), "{others:?} {quiet:?}");
+        let listing = b.call("web-main", "skein_clean", json!({}));
+        assert_eq!(
+            listing["shared_repo_cache"]["safe_to_clean_now"], false,
+            "{listing}"
+        );
+    }
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(20)));
+    let (got, said) = clean_said(&b, std::slice::from_ref(&pip));
+    assert_eq!(got["removed"], json!([pip]), "{got} {said}");
+    assert!(!c.cache.join("pip").exists());
+    assert!(c.cache.join("cargo/credentials.toml").exists());
+    assert!(c.cache.join("cargo/registry/cache/x.crate").exists());
+}
+
+/// **skein's paths are mapped to where the box sees them, and a list naming a directory that is
+/// not this box's is refused whole** (SKEIN-1356).
+///
+/// The list's paths are the fleet's. The box's home is the fleet's `<box>/home` bound at `$HOME`,
+/// so the tool shows `$HOME/.cache/pip` and takes that path back as the same item; and it believes
+/// a list only when `<box_root>/home` is one directory with `$HOME`.
+///
+/// What would make it fail: the plugin skipping its inode check (the list naming `other-main`
+/// is then acted on), or `in_box` not mapping the home (the `$HOME` path is refused as not on the
+/// list). Watched: with that inode check answering True, `other-main`'s pip cache was removed and this
+/// failed.
+#[test]
+fn paths_are_mapped_to_the_boxs_view_and_a_foreign_list_is_refused() {
+    let b = Box_::new("skein-tools-it-clean-map");
+    let c = Cleanable::plant(&b);
+    // A list for some other directory, with this box's items moved under it.
+    let other = b.at("fleet/other-main");
+    b.put("fleet/other-main/home/.cache/pip/wheels/y.whl", "data");
+    let foreign = |p: String| p.replace("/web-main/", "/other-main/");
+    c.listed(&b, &other, (0, 0), Some(stamp_ago(10)));
+    let raw = fs::read_to_string(b.at("state/signals/resources.json")).unwrap();
+    b.put("state/signals/resources.json", &foreign(raw));
+    let (got, said) = clean_said(&b, &[other.join("home/.cache/pip").display().to_string()]);
+    assert_eq!(got["error"], "not-safe-now", "{got}");
+    assert!(said.contains("not this box's"), "{said}");
+    assert!(other.join("home/.cache/pip/wheels/y.whl").exists());
+
+    // `$HOME` as the box sees it: another name for the same directory, which is what the
+    // launcher's bind of `<box>/home` at `$HOME` makes. A link stands in for the bind here.
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let home = b.at("boxhome");
+    std::os::unix::fs::symlink(c.root.join("home"), &home).unwrap();
+    *b.home.borrow_mut() = Some(home.clone());
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let pip_row = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "download cache")
+        .cloned()
+        .unwrap_or_else(|| panic!("{listing}"));
+    let seen = format!("{}/.cache/pip", home.display());
+    assert_eq!(pip_row["in_box"], json!(seen), "{listing}");
+    let (got, said) = clean_said(&b, &[seen]);
+    assert_eq!(
+        got["removed"].as_array().map(Vec::len),
+        Some(1),
+        "{got} {said}"
+    );
+    assert!(!c.root.join("home/.cache/pip").exists());
+}
+
+/// **`skein_top` by disk shows what the box is charged for, by kind, and the repo's shared cache on
+/// a line of its own that is not counted against the box** (SKEIN-1356).
+///
+/// What would make it fail: by-disk reading only the checkout (no `cleanable`), the shared cache
+/// folded into the box's kinds, or its line claiming it counts against the box.
+#[test]
+fn top_by_disk_shows_the_box_and_the_shared_cache_apart() {
+    let b = Box_::new("skein-tools-it-clean-top");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (1, 0), Some(stamp_ago(600)));
+    let top = b.call("web-main", "skein_top", json!({"by": "disk"}));
+    assert_eq!(top["charged_mb"], 2048, "{top}");
+    let kinds = &top["cleanable"]["bytes_by_kind"];
+    assert_eq!(kinds["download cache"], 4096, "{top}");
+    assert_eq!(kinds["build output"], 4096, "{top}");
+    assert_eq!(kinds["scratchpad"], 4096, "{top}");
+    assert!(kinds.get("shared download cache").is_none(), "{top}");
+    let shared = &top["shared_repo_cache"];
+    assert_eq!(shared["counted_against_this_box"], false, "{top}");
+    assert_eq!(shared["shared_with"], "every box of this repo", "{top}");
+    assert_eq!(shared["safe_to_clean_now"], false, "{top}");
+    assert!(
+        top["dirs"].is_array(),
+        "the checkout's directories are gone: {top}"
+    );
+}
+
+/// **`skein-mcp clean` on the command line is the same `skein_clean`**: one list, one set of
+/// refusals, one removal, for a caller that is not an MCP client (SKEIN-1356, for the mod of
+/// SKEIN-1358).
+///
+/// What would make it fail: the command line answering from a copy of the logic that drifts (a
+/// path not on the list removed, or a listed one refused), or a refusal that exits 0.
+#[test]
+fn the_command_line_clean_is_the_same_tool() {
+    let b = Box_::new("skein-tools-it-clean-cli");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let run = |paths: &[String]| {
+        let out = Command::new("python3")
+            .arg(b.at("skein-mcp"))
+            .arg("clean")
+            .args(paths)
+            .env("SKEIN_STATE", b.at("state"))
+            .env("HOME", c.root.join("home"))
+            .output()
+            .expect("python3");
+        let v: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        (out.status.code(), v)
+    };
+    let (code, listed) = run(&[]);
+    assert_eq!(code, Some(0), "{listed}");
+    assert_eq!(
+        listed["result"]["items"].as_array().map(Vec::len),
+        Some(5),
+        "{listed}"
+    );
+    let notes = c.root.join("home/.cache/agent-notes").display().to_string();
+    let (code, refused) = run(&[c.pip(), notes.clone()]);
+    assert_eq!(code, Some(1), "{refused}");
+    assert_eq!(refused["result"]["error"], "not-on-the-list", "{refused}");
+    assert!(std::path::Path::new(&notes).exists());
+    let (code, done) = run(&[c.pip()]);
+    assert_eq!(code, Some(0), "{done}");
+    assert!(
+        done["said"]
+            .as_str()
+            .unwrap()
+            .starts_with("skein: removed 1,"),
+        "{done}"
+    );
+    assert!(!c.root.join("home/.cache/pip").exists());
+}
+
+/// **A list skein wrote more than fifteen minutes ago is acted on for nothing**, own items and the
+/// shared cache alike, however fresh the word about the repo's other boxes (SKEIN-1356). skein
+/// lists every five minutes, so a list that old means skein is not looking, and what it says may no
+/// longer be true: a build directory may since have become tracked work.
+///
+/// What would make it fail: the plugin treating every list as fresh (`stale = False`), which
+/// removes the own cache and the shared one from a list twenty minutes old. Watched: with exactly
+/// that, the own-cache removal went ahead and this failed; with only the shared-cache branch's
+/// stale refusal removed, the shared `pip` was removed and this failed on the second call.
+#[test]
+fn a_list_skein_wrote_long_ago_is_refused_for_everything() {
+    let b = Box_::new("skein-tools-it-clean-stale");
+    let c = Cleanable::plant(&b);
+    // The sibling word is fresh; only the list is old.
+    c.listed_ago(&b, &c.root, (0, 0), Some(stamp_ago(10)), 20 * 60);
+
+    let (got, said) = clean_said(&b, &[c.pip()]);
+    assert_eq!(got["error"], "not-safe-now", "{got} {said}");
+    assert!(
+        said.contains("has not listed this box's disk lately"),
+        "{said}"
+    );
+    assert!(
+        c.root.join("home/.cache/pip/wheels/x.whl").exists(),
+        "{got}"
+    );
+
+    let shared = c.cache.join("pip").display().to_string();
+    let (got, said) = clean_said(&b, std::slice::from_ref(&shared));
+    assert_eq!(got["error"], "not-safe-now", "{got} {said}");
+    assert!(said.contains("has not listed this cache lately"), "{said}");
+    assert!(c.cache.join("pip/http/x").exists(), "{got}");
+
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let rows = listing["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listing}"));
+    assert_eq!(rows.len(), 5, "{listing}");
+    for r in rows {
+        assert_eq!(r["safe_now"], false, "{r}");
+        if r["kind"] != "scratchpad" {
+            assert!(
+                r["why_not"]
+                    .as_str()
+                    .is_some_and(|w| w.contains("has not listed")),
+                "{r}"
+            );
+        }
+    }
+    assert_eq!(listing["removable_now_bytes"], 0, "{listing}");
+    assert_eq!(
+        listing["shared_repo_cache"]["safe_to_clean_now"], false,
+        "{listing}"
     );
 }

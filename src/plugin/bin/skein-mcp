@@ -7,9 +7,11 @@
 # drop-boxes, and answers on stdin/stdout. Three tools read:
 #
 #   skein_resources   the box's signal file, `$SKEIN_STATE/signals/resources.json`, as skein wrote it.
-#   skein_top         this box's largest processes by memory or CPU, or the largest directories of
-#                     its checkout. It never offers to stop anything: the kernel's limits are the
-#                     ceiling, and this is only how the agent sees what it is holding.
+#   skein_top         this box's largest processes by memory or CPU, or by disk what the box is
+#                     charged for: skein's list of its caches, build output and scratchpads, its
+#                     checkout's largest directories, and the repo's shared cache on a line of its
+#                     own. It never offers to stop anything: the kernel's limits are the ceiling,
+#                     and this is only how the agent sees what it is holding.
 #   skein_requests    the box's own package and git-write requests and questions, and the owner's
 #                     answers.
 #
@@ -39,15 +41,38 @@
 #   the `state` the host writes back into them is a courtesy copy and is never read here, the rule
 #   `gitgate::decide` and `substrate::decide` keep on the host side.
 #
+# And one removes (SKEIN-1356), inside the box and as the box:
+#
+#   skein_clean       what in this box can be removed and made again, from the list skein writes into
+#                     the signal file, and the removal of chosen items from that list. The same
+#                     function answers `skein-mcp clean [PATH...]` on the command line, so a caller
+#                     that is not an MCP client gets the one implementation and not a second.
+#
+# Three more rules carry `skein_clean`, each with a test that fails without it:
+#
+# * **It never decides what is cleanable.** skein lists it (`fleet::box_cleanables` and
+#   `fleet::repo_cache_for_box`, written by `resource_signal::clean_list`), the same list the box's
+#   settings show; a path that is not on the list as it stands now is refused, and nothing is removed.
+# * **A removal never follows a link and never leaves the filesystem it started on.** Every
+#   directory is opened from the one above it with `O_NOFOLLOW`, checked to be on the device the
+#   listed root is on, and emptied through its descriptor (`remove_listed`); a link is unlinked as
+#   itself. A mount found inside a listed item is not entered: the rest of the item is removed,
+#   the mount and the directories above it are kept, and the item is reported as not removed. A box can swap a directory for a link at any moment, and a removal by path would follow it.
+# * **The repo's shared cache only while no other box of the repo runs**, the host's rule for its
+#   own clean (`fleet::clean_repo_cache`). This box cannot see its siblings, so it acts on skein's
+#   word in the signal file, and only while that word is recent (`SIBLINGS_FRESH_SECONDS`).
+#
 # Python 3 standard library only, as `server-doorway.py` and `skein-resources` are: it runs in every
 # box and installs nothing.
 
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 PROTOCOL = "2025-06-18"
 
@@ -218,6 +243,43 @@ def top_disk(n):
     return {"by": "disk", "checkout": where, "dirs": rows[:n]}
 
 
+def top_disk_all(n):
+    """`skein_top` by disk: what this box is charged for, and its repo's shared cache beside it.
+
+    The checkout's largest directories as before, and from the signal file skein wrote: the box's
+    disk against its allowance, its cleanable items by kind, and the repo's shared download cache on
+    a line of its own, which is counted against no box.
+    """
+    out = top_disk(n)
+    sig = signal_file()
+    if not isinstance(sig, dict):
+        out["cleanable"] = {"error": "no-signal-file"}
+        return out
+    disk = sig.get("disk") if isinstance(sig.get("disk"), dict) else {}
+    out["charged_mb"] = disk.get("mb")
+    out["limit_mb"] = disk.get("limit_mb")
+    listing = clean_rows(sig)
+    if "error" in listing:
+        out["cleanable"] = {"error": listing["error"]}
+        return out
+    own = [r for r in listing["items"] if r["where"] == "box"]
+    by_kind = {}
+    for r in own:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + r["bytes"]
+    out["cleanable"] = {
+        "listed_at": listing["listed_at"],
+        "bytes_by_kind": by_kind,
+        "items": [
+            {k: r[k] for k in ("path", "in_box", "kind", "bytes", "safe_now")} for r in own[:n]
+        ],
+        "how": "skein_clean removes them",
+    }
+    shared = listing.get("shared_repo_cache")
+    if shared is not None:
+        out["shared_repo_cache"] = shared
+    return out
+
+
 def top(args):
     by = args.get("by", "memory")
     if by not in ("memory", "cpu", "disk"):
@@ -228,7 +290,7 @@ def top(args):
         n = TOP_DEFAULT
     n = max(1, min(n, TOP_MAX))
     if by == "disk":
-        return top_disk(n)
+        return top_disk_all(n)
     cgroup = own_cgroup()
     if cgroup is None:
         return {"by": by, "error": "not-in-a-box-cgroup"}
@@ -249,6 +311,381 @@ def top(args):
         "parentless_in_box": sum(1 for p in procs if p["parentless"]),
         "processes": procs[:n],
     }
+
+
+# ------------------------------------------------------------------------------------------------
+# skein_clean
+# ------------------------------------------------------------------------------------------------
+
+# `CLEAN_SIBLINGS_FRESH` in `src/resource_signal.rs`: how recent skein's word that no other box of
+# the repo is running must be before the repo's shared cache is removed.
+SIBLINGS_FRESH_SECONDS = 180
+
+# skein lists a box's items every five minutes (`CLEAN_LIST_EVERY`); a list three periods old means
+# skein is not looking, and nothing on it is removed.
+LIST_STALE_SECONDS = 900
+
+# What this box's agent may remove at any time, because it knows what it is running (owner,
+# 2026-10-30). A scratchpad is listed and not removed here: it may be another session's.
+ANY_TIME = ("download cache", "build output")
+
+
+def signal_file():
+    """The signal file as skein wrote it, or None."""
+    state = os.environ.get("SKEIN_STATE", "")
+    if not state:
+        return None
+    try:
+        with open(os.path.join(state, "signals", "resources.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def age_seconds(stamp):
+    """Seconds since an RFC3339 stamp the way skein writes it (`2026-10-30T10:00:00Z`), or None."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        then = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return time.time() - then.timestamp()
+
+
+def same_dir(fleet_path, seen):
+    """Whether `fleet_path`, a real directory and not a link, is the directory the box sees at
+    `seen`: one inode, which is what a bind mount of one onto the other makes."""
+    try:
+        a = os.lstat(fleet_path)
+        b = os.stat(seen)
+    except OSError:
+        return False
+    return stat.S_ISDIR(a.st_mode) and (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def box_view(box_root):
+    """Where this box sees its own directory's parts, as (fleet prefix, in-box prefix) pairs, or
+    None when `box_root` is not this box's directory.
+
+    The paths skein writes are the fleet's. The launcher binds the box directory back at that same
+    path, its `home` at `$HOME` and its `vartmp` at `/var/tmp` (`box-session.sh`). So the check is
+    the mount's own answer: `<box_root>/home` and `$HOME` must be one directory. A list that names
+    some other directory is refused whole rather than mapped.
+    """
+    home = os.environ.get("HOME", "")
+    if not isinstance(box_root, str) or not box_root.startswith("/") or not home:
+        return None
+    if not same_dir(os.path.join(box_root, "home"), home):
+        return None
+    views = [(os.path.join(box_root, "home"), home.rstrip("/") or "/")]
+    if same_dir(os.path.join(box_root, "vartmp"), "/var/tmp"):
+        views.append((os.path.join(box_root, "vartmp"), "/var/tmp"))
+    return views
+
+
+def under(path, root):
+    return isinstance(path, str) and isinstance(root, str) and path.startswith(root.rstrip("/") + "/")
+
+
+def in_box(path, views):
+    """`path` as this box's agent sees it: `$HOME/…` for the box's home, `/var/tmp/…` for its
+    `vartmp`, and the path itself elsewhere, which the launcher binds at its own name."""
+    for prefix, seen in views:
+        if path == prefix or under(path, prefix):
+            return seen + path[len(prefix):]
+    return path
+
+
+def exists(path):
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
+
+
+def clean_rows(sig):
+    """Every item on skein's list for this box that is still there, with where the box sees it and
+    whether it may be removed now, and why not when it may not."""
+    clean = sig.get("clean") if isinstance(sig, dict) else None
+    if not isinstance(clean, dict):
+        return {"error": "not-listed-yet"}
+    box_root = clean.get("box_root")
+    views = box_view(box_root)
+    age = age_seconds(clean.get("at"))
+    stale = age is None or age > LIST_STALE_SECONDS
+    rows = []
+    for it in clean.get("items") or []:
+        if not isinstance(it, dict) or not under(it.get("path"), box_root):
+            continue
+        path = it["path"]
+        if not exists(path):
+            continue
+        kind = str(it.get("kind", ""))
+        why = None
+        if views is None:
+            why = "skein listed a directory that is not this box's, so nothing on the list is removed"
+        elif stale:
+            why = "skein has not listed this box's disk lately; try again in a few minutes"
+        elif kind not in ANY_TIME:
+            why = "a scratchpad may belong to a session still running in this box"
+        rows.append({
+            "path": path,
+            "in_box": in_box(path, views or []),
+            "kind": kind,
+            "bytes": int(it.get("bytes") or 0),
+            "where": "box",
+            "root": box_root,
+            "safe_now": why is None,
+            "why_not": why,
+        })
+    out = {"listed_at": clean.get("at"), "items": rows}
+    rc = clean.get("repo_cache")
+    if isinstance(rc, dict) and isinstance(rc.get("path"), str):
+        running = int(rc.get("others_running") or 0)
+        unknown = int(rc.get("others_unknown") or 0)
+        quiet = age_seconds(rc.get("none_running_at"))
+        if running:
+            why = "%d other %s of this repo %s running, and every box of the repo shares this cache" % (
+                running, "box" if running == 1 else "boxes", "is" if running == 1 else "are")
+        elif unknown:
+            why = "skein cannot tell whether %d other %s of this repo %s running" % (
+                unknown, "box" if unknown == 1 else "boxes", "is" if unknown == 1 else "are")
+        elif quiet is None or quiet > SIBLINGS_FRESH_SECONDS:
+            why = "skein has not confirmed in the last few minutes that no other box of this repo is running"
+        elif stale:
+            why = "skein has not listed this cache lately; try again in a few minutes"
+        else:
+            why = None
+        for it in rc.get("items") or []:
+            if not isinstance(it, dict) or not under(it.get("path"), rc["path"]) or not exists(it["path"]):
+                continue
+            rows.append({
+                "path": it["path"],
+                "in_box": it["path"],
+                "kind": "shared download cache",
+                "bytes": int(it.get("bytes") or 0),
+                "where": "shared",
+                "root": rc["path"],
+                "safe_now": why is None,
+                "why_not": why,
+            })
+        out["shared_repo_cache"] = {
+            "path": rc["path"],
+            "bytes": int(rc.get("bytes") or 0),
+            "shared_with": "every box of this repo",
+            "counted_against_this_box": False,
+            "safe_to_clean_now": why is None,
+            "why_not": why,
+        }
+    return out
+
+
+class Refused(Exception):
+    pass
+
+
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def safe_removal_supported():
+    """Whether this Python can remove through descriptors: every call `remove_listed` makes, taking
+    a directory descriptor and not following a link. The same test CPython makes before it calls its
+    own `rmtree` safe against links."""
+    return (
+        os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and os.rmdir in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
+        and os.scandir in os.supports_fd
+    )
+
+
+def open_dir_at(parent, name, dev, seen=None):
+    """Open directory `name` under the descriptor `parent`, never through a link. None when it is on
+    another filesystem than `dev`: a mount, which is somebody else's and is left alone."""
+    if seen is not None and seen.st_dev != dev:
+        return None
+    try:
+        fd = os.open(name, DIR_FLAGS, dir_fd=parent)
+    except OSError as e:
+        raise Refused("part of this path is now a link, so skein left it alone") from e
+    st = os.fstat(fd)
+    if st.st_dev != dev:
+        os.close(fd)
+        return None
+    if seen is not None and st.st_ino != seen.st_ino:
+        os.close(fd)
+        raise Refused("part of this path changed while skein removed it, so skein left the rest alone")
+    return fd
+
+
+def names_in(fd):
+    with os.scandir(fd) as it:
+        return [e.name for e in it]
+
+
+def remove_tree_at(parent, name, dev):
+    """Remove `name` under the descriptor `parent` and everything in it that is on `dev`, and return
+    the paths, relative to `parent`, of the mounts inside it that were left alone.
+
+    A link is unlinked as itself; a directory is opened with `O_NOFOLLOW` from its parent's
+    descriptor; a directory on another filesystem (a mount) is not entered, and neither it nor any
+    directory above it is removed, so everything in the mount survives and the rest is freed.
+    Iterative, so a deep `node_modules` cannot exhaust the stack."""
+    st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISDIR(st.st_mode):
+        os.unlink(name, dir_fd=parent)
+        return []
+    top_fd = open_dir_at(parent, name, dev, st)
+    if top_fd is None:
+        return [name]
+    # Each frame: parent descriptor, name, own descriptor, names left, whether a mount is below it.
+    stack = [[parent, name, top_fd, names_in(top_fd), False]]
+    kept = []
+    try:
+        while stack:
+            frame = stack[-1]
+            if frame[3]:
+                kid = frame[3].pop()
+                kst = os.stat(kid, dir_fd=frame[2], follow_symlinks=False)
+                if stat.S_ISDIR(kst.st_mode):
+                    kfd = open_dir_at(frame[2], kid, dev, kst)
+                    if kfd is None:
+                        kept.append("/".join([f[1] for f in stack] + [kid]))
+                        for f in stack:
+                            f[4] = True
+                        continue
+                    stack.append([frame[2], kid, kfd, None, False])
+                    stack[-1][3] = names_in(kfd)
+                else:
+                    os.unlink(kid, dir_fd=frame[2])
+            else:
+                stack.pop()
+                os.close(frame[2])
+                if not frame[4]:
+                    os.rmdir(frame[1], dir_fd=frame[0])
+    finally:
+        for frame in stack:
+            try:
+                os.close(frame[2])
+            except OSError:
+                pass
+    return kept
+
+
+def remove_listed(root, path):
+    """Remove the listed directory `path` under `root`, walking down from `root` one directory at a
+    time: never through a link, never off `root`'s filesystem. None when it was already gone, else
+    the mounts inside it that were left alone, as paths under `path`'s parent."""
+    if not under(path, root):
+        raise Refused("not under the place skein listed it in")
+    parts = path[len(root.rstrip("/")) + 1:].split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise Refused("not a plain path")
+    try:
+        fd = os.open(root, DIR_FLAGS)
+    except OSError as e:
+        raise Refused("the place skein listed it in is gone or is a link") from e
+    try:
+        dev = os.fstat(fd).st_dev
+        for part in parts[:-1]:
+            nxt = open_dir_at(fd, part, dev)
+            if nxt is None:
+                raise Refused("part of this path is on another filesystem, so skein left it alone")
+            os.close(fd)
+            fd = nxt
+        try:
+            st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            raise Refused("this is now a link or a file, so skein left it alone")
+        return remove_tree_at(fd, parts[-1], dev)
+    finally:
+        os.close(fd)
+
+
+def human(n):
+    """Bytes as the signal file's words print them: `3.2G`, or `120M` under a gigabyte."""
+    mib = n / (1024 * 1024)
+    if mib >= 1024:
+        return "%.1fG" % (mib / 1024)
+    return "%dM" % max(1, round(mib)) if n else "0M"
+
+
+def clean(args):
+    paths = args.get("paths")
+    sig = signal_file()
+    if not isinstance(sig, dict):
+        return {"error": "no-signal-file"}
+    listing = clean_rows(sig)
+    if "error" in listing:
+        return reply({"error": listing["error"]},
+                     "skein: skein has not listed this box's disk yet. Try again in a few minutes.")
+    rows = listing["items"]
+    if not paths:
+        visible = [{k: v for k, v in r.items() if k != "root"} for r in rows]
+        out = {
+            "listed_at": listing["listed_at"],
+            "items": visible,
+            "removable_now_bytes": sum(r["bytes"] for r in rows if r["safe_now"]),
+        }
+        if "shared_repo_cache" in listing:
+            out["shared_repo_cache"] = listing["shared_repo_cache"]
+        return out
+    if not isinstance(paths, list) or not all(isinstance(p, str) and p for p in paths):
+        return {"error": "paths-must-be-a-list-of-paths"}
+    chosen, missing = [], []
+    for p in paths:
+        hit = next((r for r in rows if p in (r["path"], r["in_box"])), None)
+        if hit is None:
+            missing.append(p)
+        elif hit not in chosen:
+            chosen.append(hit)
+    if missing:
+        return reply(
+            {"error": "not-on-the-list", "paths": missing},
+            "skein: removed nothing. Not on this box's list now: %s. Call skein_clean with no paths "
+            "to see what can be removed." % ", ".join(missing),
+        )
+    held = [r for r in chosen if not r["safe_now"]]
+    if held:
+        return reply(
+            {"error": "not-safe-now", "paths": [{"path": r["path"], "why": r["why_not"]} for r in held]},
+            "skein: removed nothing. %s" % " ".join("%s: %s." % (r["in_box"], r["why_not"]) for r in held),
+        )
+    if not safe_removal_supported():
+        return reply({"error": "unsafe-python"},
+                     "skein: removed nothing. This Python cannot remove without following links.")
+    done = {"removed": [], "freed_bytes": 0, "failed": []}
+    for r in chosen:
+        try:
+            kept = remove_listed(r["root"], r["path"])
+            if kept:
+                parent = os.path.dirname(r["in_box"])
+                done["failed"].append({
+                    "path": r["in_box"],
+                    "why": "removed all of it but %s, which %s another filesystem mounted inside it"
+                    % (", ".join(os.path.join(parent, k) for k in kept),
+                       "is" if len(kept) == 1 else "are"),
+                    "left_alone": [os.path.join(parent, k) for k in kept],
+                })
+            elif kept is not None:
+                done["removed"].append(r["in_box"])
+                done["freed_bytes"] += r["bytes"]
+        except Refused as e:
+            done["failed"].append({"path": r["in_box"], "why": str(e)})
+        except OSError as e:
+            done["failed"].append({"path": r["in_box"], "why": e.strerror or str(e)})
+    said = "skein: removed %d, about %s." % (len(done["removed"]), human(done["freed_bytes"]))
+    if done["failed"]:
+        said += " Could not remove: %s." % "; ".join("%s (%s)" % (f["path"], f["why"]) for f in done["failed"])
+    if any(r["where"] == "box" for r in chosen):
+        said += " This box's disk figure catches up within five minutes."
+    return reply(done, said)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -614,7 +1051,9 @@ TOOLS = [
     {
         "name": "skein_top",
         "description": "This box's largest processes by memory or CPU, with each one's age and "
-        "whether it has no parent, or the largest directories of its checkout by disk.",
+        "whether it has no parent. By disk: what this box is charged for, its download caches, "
+        "build output and scratchpads by size, and its checkout's largest directories; and on a "
+        "line of its own, the repo's shared download cache, which is not counted against this box.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -624,6 +1063,20 @@ TOOLS = [
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "skein_clean",
+        "description": "What in this box can be removed and made again: its download caches, build "
+        "output and scratchpads, and the repo's shared download cache, each with its size and "
+        "whether it is safe to remove now. Call it with no paths to see the list; pass paths from "
+        "that list to remove them. Nothing else is removed, a link is never followed, and config "
+        "and logins are never on the list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"paths": {"type": "array", "items": {"type": "string"}}},
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
     },
     {
         "name": "skein_requests",
@@ -685,6 +1138,7 @@ TOOLS = [
 HANDLERS = {
     "skein_resources": resources,
     "skein_top": top,
+    "skein_clean": clean,
     "skein_requests": requests,
     "skein_request_package": request_package,
     "skein_request_write": request_write,
@@ -730,7 +1184,21 @@ def answer(msg):
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+def run_once(argv):
+    """`skein-mcp clean [PATH...]`: the same `skein_clean` without the protocol, for callers that
+    are not an MCP client (the mod skein's plugin is becoming, SKEIN-1358). Prints the result and
+    the sentence for the agent as one JSON object; exits 1 when the result is an error."""
+    if argv[:1] != ["clean"]:
+        sys.stderr.write("usage: skein-mcp clean [PATH...]\n")
+        return 2
+    result = clean({"paths": argv[1:]})
+    sys.stdout.write(json.dumps({"result": dict(result), "said": getattr(result, "said", "")}) + "\n")
+    return 1 if "error" in result else 0
+
+
 def main():
+    if len(sys.argv) > 1:
+        sys.exit(run_once(sys.argv[1:]))
     for line in sys.stdin:
         line = line.strip()
         if not line:
