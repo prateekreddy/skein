@@ -14,7 +14,18 @@
 // have no price rather than priced as another; the lane facts are skein's own (`lanes.ts`).
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On } from 'claude-code'
+import type {
+  AgentSpawnInput,
+  AgentSpawnResult,
+  EngineInterface,
+  On,
+  SessionStartInput,
+  ToolCallInput,
+  ToolCallResult,
+  TurnCompleteInput,
+  TurnStepInput,
+  TurnStepResult,
+} from 'claude-code'
 
 import type { SkeinAgentLane, SkeinAgentRun, SkeinAgentsPanel, SkeinAgentStatus } from '../types'
 import { claimedItem, commonGitDir, heavyLock, lockOf, worktreeIn, worktrees } from './lanes'
@@ -43,36 +54,126 @@ const LOCK_EVERY_MS = 5000
 let gitDir: string | null = null
 let known: Worktree[] = []
 
-// Every hook here has a matcher, even where it selects everything it is raised for: `claude plugin
-// validate` refuses a plugin whose module registers one event twice without one, and `identity.ts`,
-// like any feature file beside this one, may hook the same event bare. A matcher on `agentId` keeps
-// a hook to subagents' loops; the code checks the id again, as a matcher is not its guard.
-// A hook that watches after its `next` keeps what `next` settled to if it fails (its `.catch`).
-const SUBAGENT = { agentId: /./ } as const
+// `register.tsx` hooks the events every feature may watch, once, and calls these in its order:
+// `onStart` as the session starts, and for each subagent `onSpawn`, `onStep`, `onTurnComplete` and
+// `onToolCall`. Only watched: each sees what `next` settled to, and changes nothing.
+
+/** As the session starts: the command, the repository, and the two clocks. */
+export async function onStart($: EngineInterface, e: SessionStartInput): Promise<void> {
+  await $.command.register({
+    name: 'agents-info',
+    description: 'Show or hide the panel of subagents: model, context, tokens, cost, time and status',
+  })
+  gitDir = await commonGitDir(files($), e.cwd)
+
+  // Ticks the running agents' clocks; quiet when nothing runs.
+  $.clock.every(1000, () => {
+    void (async () => {
+      const list = await read($, agents)
+      if (!list.some(a => a.status === 'running')) return
+      const at = await $.clock.now()
+      await update($, now, () => at)
+    })()
+  })
+  $.clock.every(LOCK_EVERY_MS, () => void refreshLock($))
+}
+
+/** A subagent started: its row, its lane if it has one, and the panel opened unless shut. */
+export async function onSpawn($: EngineInterface, e: AgentSpawnInput, started: Extract<AgentSpawnResult, { deny?: undefined }>): Promise<void> {
+  known = gitDir === null ? [] : await worktrees(files($), gitDir)
+  const tree = (e.cwd ? worktreeIn(e.cwd, known) : null) ?? worktreeIn(e.prompt, known)
+  const at = await $.clock.now()
+  const run: SkeinAgentRun = {
+    id: started.agentId ?? e.tool_use_id,
+    agentId: started.agentId ?? null,
+    type: e.subagentType,
+    description: e.description,
+    model: started.model,
+    effort: null,
+    status: 'running',
+    startedAt: at,
+    endedAt: null,
+    contextTokens: 0,
+    contextMax: windowOf(started.model),
+    tokens: 0,
+    costUsd: 0,
+    isUnpriced: false,
+    steps: 0,
+    lane: tree === null ? null : laneAt(tree, false),
+  }
+  await update($, agents, list => [...list.filter(a => a.id !== run.id), run].slice(-MAX_RUNS))
+  await update($, now, () => at)
+  const p = await read($, panel)
+  if (!p.isClosedByPerson) await openPane($)
+  if (run.lane) void refreshLock($)
+}
+
+/** Each model request of a subagent: its context, tokens and cost. */
+export async function onStep($: EngineInterface, e: TurnStepInput, result: TurnStepResult): Promise<void> {
+  const agentId = e.agentId
+  const usage = result.usage
+  if (!agentId || !usage) return
+
+  const model = usage.model || e.model
+  const cost = costOf(model, usage)
+  const prompt = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+  await update($, agents, list =>
+    list.map((a): SkeinAgentRun =>
+      a.agentId !== agentId
+        ? a
+        : {
+            ...a,
+            model,
+            effort: typeof e.effort === 'string' ? e.effort : a.effort,
+            status: 'running',
+            endedAt: null,
+            contextTokens: prompt + usage.output_tokens,
+            contextMax: windowOf(model),
+            tokens: a.tokens + prompt + usage.output_tokens,
+            costUsd: a.costUsd + (cost ?? 0),
+            isUnpriced: a.isUnpriced || cost === null,
+            steps: a.steps + 1,
+          },
+    ),
+  )
+}
+
+/** A subagent's turn ended: answered, interrupted, or failed. */
+export async function onTurnComplete($: EngineInterface, e: TurnCompleteInput): Promise<void> {
+  const agentId = e.agentId
+  if (!agentId) return
+  const at = await $.clock.now()
+  const status: SkeinAgentStatus = e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'stopped' : 'failed'
+  const usage = e.usage
+  await update($, agents, list =>
+    list.map((a): SkeinAgentRun => {
+      if (a.agentId !== agentId) return a
+      // A run whose requests went unseen still gets the turn's own sum.
+      if (a.steps > 0 || !usage) return { ...a, status, endedAt: at }
+      const cost = costOf(usage.model || a.model, usage)
+
+      return {
+        ...a,
+        status,
+        endedAt: at,
+        model: usage.model || a.model,
+        tokens: usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
+        costUsd: cost ?? 0,
+        isUnpriced: cost === null,
+      }
+    }),
+  )
+  await update($, now, () => at)
+}
+
+/** A subagent's own tool call: the item it claims, and the worktree it works in. */
+export async function onToolCall($: EngineInterface, e: ToolCallInput, answered: ToolCallResult): Promise<void> {
+  const agentId = e.agentId
+  if (!agentId) return
+  await learnFrom($, agentId, String(e.tool), JSON.stringify(e), answered.text)
+}
 
 export function register(on: On): void {
-  on('session.start', { cwd: /^/ }, async ($, e, next) => {
-    const started = await next(e)
-    await $.command.register({
-      name: 'agents-info',
-      description: 'Show or hide the panel of subagents: model, context, tokens, cost, time and status',
-    })
-    gitDir = await commonGitDir(files($), e.cwd)
-
-    // Ticks the running agents' clocks; quiet when nothing runs.
-    $.clock.every(1000, () => {
-      void (async () => {
-        const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
-        const at = await $.clock.now()
-        await update($, now, () => at)
-      })()
-    })
-    $.clock.every(LOCK_EVERY_MS, () => void refreshLock($))
-
-    return started
-  })
-
   on('command.run', { command: 'agents-info' }, async ($, e) => {
     // `/agents-info open` opens the panel, or brings it forward, without toggling it.
     const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
@@ -95,118 +196,6 @@ export function register(on: On): void {
     }
 
     return closed
-  }).catch(($, e, next) => next(e))
-
-  on('agent.spawn', { subagentType: /^/ }, async ($, e, next) => {
-    const started = await next(e)
-    if (started.deny !== undefined) return started
-
-    known = gitDir === null ? [] : await worktrees(files($), gitDir)
-    const tree = (e.cwd ? worktreeIn(e.cwd, known) : null) ?? worktreeIn(e.prompt, known)
-    const at = await $.clock.now()
-    const run: SkeinAgentRun = {
-      id: started.agentId ?? e.tool_use_id,
-      agentId: started.agentId ?? null,
-      type: e.subagentType,
-      description: e.description,
-      model: started.model,
-      effort: null,
-      status: 'running',
-      startedAt: at,
-      endedAt: null,
-      contextTokens: 0,
-      contextMax: windowOf(started.model),
-      tokens: 0,
-      costUsd: 0,
-      isUnpriced: false,
-      steps: 0,
-      lane: tree === null ? null : laneAt(tree, false),
-    }
-    await update($, agents, list => [...list.filter(a => a.id !== run.id), run].slice(-MAX_RUNS))
-    await update($, now, () => at)
-    const p = await read($, panel)
-    if (!p.isClosedByPerson) await openPane($)
-    if (run.lane) void refreshLock($)
-
-    return started
-  }).catch(($, e, next) => next(e))
-
-  // Each model request of a subagent: its context, tokens and cost.
-  on('turn.step', SUBAGENT, async function* ($, e, next) {
-    const result = yield* next(e)
-    const agentId = e.agentId
-    const usage = result.usage
-    if (!agentId || !usage) return result
-
-    const model = usage.model || e.model
-    const cost = costOf(model, usage)
-    const prompt = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
-    await update($, agents, list =>
-      list.map((a): SkeinAgentRun =>
-        a.agentId !== agentId
-          ? a
-          : {
-              ...a,
-              model,
-              effort: typeof e.effort === 'string' ? e.effort : a.effort,
-              status: 'running',
-              endedAt: null,
-              contextTokens: prompt + usage.output_tokens,
-              contextMax: windowOf(model),
-              tokens: a.tokens + prompt + usage.output_tokens,
-              costUsd: a.costUsd + (cost ?? 0),
-              isUnpriced: a.isUnpriced || cost === null,
-              steps: a.steps + 1,
-            },
-      ),
-    )
-
-    return result
-  })
-
-  on('turn.complete', SUBAGENT, async ($, e, next) => {
-    const agentId = e.agentId
-    if (agentId) {
-      const at = await $.clock.now()
-      const status: SkeinAgentStatus = e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'stopped' : 'failed'
-      const usage = e.usage
-      await update($, agents, list =>
-        list.map((a): SkeinAgentRun => {
-          if (a.agentId !== agentId) return a
-          // A run whose requests went unseen still gets the turn's own sum.
-          if (a.steps > 0 || !usage) return { ...a, status, endedAt: at }
-          const cost = costOf(usage.model || a.model, usage)
-
-          return {
-            ...a,
-            status,
-            endedAt: at,
-            model: usage.model || a.model,
-            tokens: usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
-            costUsd: cost ?? 0,
-            isUnpriced: cost === null,
-          }
-        }),
-      )
-      await update($, now, () => at)
-    }
-
-    return next(e)
-  })
-
-  // A subagent's own tool calls: the item it claims, and where it works when its brief named no
-  // worktree. Only watched; every call goes on as it came.
-  on('tool.call', SUBAGENT, async ($, e, next) => {
-    const answered = await next(e)
-    const agentId = e.agentId
-    if (!agentId) return answered
-    try {
-      await learnFrom($, agentId, String(e.tool), JSON.stringify(e), answered.text)
-    } catch {
-      // A fact not learnt leaves the row as it was; the call is not the panel's to fail.
-    }
-
-    return answered
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -280,6 +269,9 @@ export function register(on: On): void {
           </Text>
           {toggleCompact}
         </Box>
+        {list.length > 0 ? (
+          <Text dimColor>Cost is an estimate: cache writes are priced at the 5-minute rate, so 1-hour cache writes read low.</Text>
+        ) : null}
         {t.isUnpriced ? <Text dimColor>+ marks a model skein has no price for: the real cost is higher.</Text> : null}
         {p.isCompact ? (
           <Text wrap="truncate-end">

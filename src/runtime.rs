@@ -716,4 +716,50 @@ mod tests {
             }
         }
     }
+
+    /// A feature file hooks no event bare: the events several features watch are hooked once, in
+    /// `register.tsx`, which calls each feature's `on<Event>` in a written order, and every hook a
+    /// feature keeps names what it is for in a matcher (docs/decisions/skein-is-a-mod.md, "The
+    /// shape a feature takes").
+    ///
+    /// `claude plugin validate --strict` (`tools/plugin-check.sh`, step 1) refuses a module that
+    /// hooks one event bare twice. This holds the stronger rule, that only `register.tsx` hooks
+    /// bare, so a feature's lone bare hook cannot stand until a second feature collides with it.
+    ///
+    /// What would make it fail: `on('session.start', async ($, e, next) => …)` or any other
+    /// `on('<event>', <hook>)` with no matcher in a shipped `hooks/` file other than `register.tsx`.
+    #[test]
+    fn only_the_module_entry_hooks_an_event_bare() {
+        for (rel, body) in PLUGIN_FILES.iter().filter(|(r, _)| {
+            r.starts_with("hooks/")
+                && *r != "hooks/register.tsx"
+                && (r.ends_with(".ts") || r.ends_with(".tsx"))
+        }) {
+            let code = body
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut hooks = 0;
+            for (at, _) in code.match_indices("on('") {
+                let before = code[..at].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '$') {
+                    continue;
+                }
+                let rest = &code[at + "on('".len()..];
+                let Some((event, after)) = rest.split_once("',") else {
+                    continue;
+                };
+                hooks += 1;
+                assert!(
+                    after.trim_start().starts_with('{'),
+                    "{rel} hooks {event} with no matcher; hook it in register.tsx and export an on<Event>"
+                );
+            }
+            assert!(
+                hooks > 0 || !body.contains("export function register"),
+                "{rel} registers hooks this test found none of: it reads them wrong"
+            );
+        }
+    }
 }

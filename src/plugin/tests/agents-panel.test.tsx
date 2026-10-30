@@ -141,6 +141,9 @@ test('a subagent is listed with its model, context, tokens, cost, time and statu
     expect((await ui.find({ type: 'Text', text: /ctx \d+%/ }))?.text).toMatch(
       /ctx 11% · 113k · 113k tokens · ≈\$0\.11 · 1:05$/,
     )
+    expect((await ui.find({ type: 'Text', text: /estimate/ }))?.text).toBe(
+      'Cost is an estimate: cache writes are priced at the 5-minute rate, so 1-hour cache writes read low.',
+    )
     await ui.unmount()
   }
 })
