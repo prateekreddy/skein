@@ -358,6 +358,13 @@ pub struct Config {
     /// between the two is the difference between a slow box and a lost turn.
     #[serde(default)]
     pub box_memory_high: String,
+    /// How many heavy jobs may run at once across the fleet (`skein-job`, SKEIN-1388). `0` ⇒ one
+    /// for every four of the sandbox's cores, and never none (`jobs::fleet_slots_for`).
+    #[serde(default)]
+    pub jobs_fleet_slots: u32,
+    /// How many of one repo's heavy jobs may run at once. `0` ⇒ `jobs::DEFAULT_REPO_CAP`, 2.
+    #[serde(default)]
+    pub jobs_repo_cap: u32,
     /// Superseded by named `SyncConnection`s, which pair a gateway with the token that mints at it.
     /// Read once by the migration and then cleared; kept so a pre-connections `config.json` still
     /// parses. A credential was never here and never will be — this file is written 0644 and
@@ -727,6 +734,8 @@ impl Default for Config {
             git_email: String::new(),
             box_memory_max: String::new(),
             box_memory_high: String::new(),
+            jobs_fleet_slots: 0,
+            jobs_repo_cap: 0,
             sync_gateway_url: String::new(),
         }
     }

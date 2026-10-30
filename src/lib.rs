@@ -44,6 +44,7 @@ pub mod gitgate;
 pub mod github;
 pub mod handoff;
 pub mod health;
+pub mod jobs;
 pub mod kit;
 pub mod knock;
 pub mod machine;

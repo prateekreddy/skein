@@ -108,11 +108,11 @@ depends_on = ["state", "operation", "act", "signal", "box", "fleet", "warden-cli
 
 [[cycle]]
 modules = [
-  "ai", "asks", "config", "diff", "digest", "fleet", "gitgate", "kit", "mailbox", "place", "probes",
-  "registry", "repos", "runtime", "sbx", "signals", "substrate", "tracking",
+  "ai", "asks", "config", "diff", "digest", "fleet", "gitgate", "jobs", "kit", "mailbox", "place",
+  "probes", "registry", "repos", "runtime", "sbx", "signals", "substrate", "tracking",
 ]
 why = """
-Eighteen modules in one strongly connected component — two thirds of the crate. It is not a
+Nineteen modules in one strongly connected component — two thirds of the crate. It is not a
 mistake anyone made in one place: it is what a single 7,400-line crate root looked like once it was
 split, and the mutual references were function calls inside one file until then. `kit` calls
 `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads `repos` to find
@@ -130,6 +130,12 @@ tidy, not a structural change.
 destroying a box removes its ask drop-box with its package and write drop-boxes (`fleet::disk`'s
 `box_side_state`). It is in for the reason `substrate` and `gitgate` are: a queue a box writes is
 removed with the box, and the one spelling of its path is the queue module's.
+
+`jobs` joined with SKEIN-1388, by the same edge and for the same reason as `asks`: `fleet -> jobs`
+removes a box's job drop-box with the box. Its own edges into the knot are `fleet` for the fleet
+root, the box state root and the core count, and `repos` for which repo a box's jobs count against.
+It reads the resource signal's file as JSON rather than depending on `resource_signal`, which would
+have pulled that module and seven more into the knot with it.
 
 `sandbox` left with SKEIN-1201, and not by anyone setting out to untangle it: running something in
 a box stopped going through its `sbx_guest_output` and `guest_write` wrappers and asks
@@ -320,7 +326,9 @@ depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "flee
 #
 # `resource_signal` for one spawn: the loop that writes each box's signal file once a minute, for
 # the reason the disk announcement runs here rather than behind a cockpit connection (SKEIN-1054).
-depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
+#
+# `jobs` for one spawn: the heavy-work queue's 2 s loop (SKEIN-1388), for the same reason.
+depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "jobs", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -404,6 +412,9 @@ depends_on = [
   "config",
   "dockerd",
   "gitgate",
+  # `jobs` for one path, as for `asks`: the box's job drop-box, removed with the box
+  # (`disk::box_side_state`), and `.skein/jobs` known as skein's own (SKEIN-1388).
+  "jobs",
   "kit",
   "operation",
   "place",
@@ -975,3 +986,11 @@ depends_on = ["config", "health", "mailbox", "util"]
 # `boxfile` for each transcript the scan reads: the box writes them, and a FIFO among them held the
 # scan lock (SKEIN-1257).
 depends_on = ["ai", "boxfile", "config", "fleet"]
+
+[current.jobs]
+# The heavy-work queue (SKEIN-1388). `config` for the two limits, `jobs_fleet_slots` and
+# `jobs_repo_cap`, and skein's home, where the queue file is. `fleet` for the fleet root the
+# drop-boxes are under, the box state root the views go into, and the sandbox's cores the slots
+# are counted from. `repos` for the repo a box belongs to, which the per-repo cap counts by.
+# `util` for the atomic write every view and the queue go through, and the box-name whitelist.
+depends_on = ["config", "fleet", "repos", "util"]

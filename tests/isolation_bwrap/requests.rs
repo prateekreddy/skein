@@ -315,3 +315,107 @@ printf '[{"box":"web-main","repo":"acme/thing","granted":"2026-09-22T12:00:01Z",
         grants,
     }
 }
+
+/// **A box can file heavy jobs in its own drop-box and in no other box's** (SKEIN-1388), through
+/// the wrapper an agent actually runs.
+///
+/// skein-server grants slots in the order it first sees requests, and a request's box is the
+/// directory it was found in. So a box that could write a neighbour's drop-box could queue work in
+/// the neighbour's name, charging that box's repo cap, or mark the neighbour's waiting job `done`
+/// and take its place. The wrapper names its box from `$SKEIN_BOX`, a variable the box owns, so the
+/// name is not what stops it: the mount is. This runs the shipped `skein-job` inside the namespace
+/// twice, once as itself and once claiming to be `other-main`, and reads both drop-boxes back from
+/// outside.
+///
+/// **What would make it fail**: `jobs` dropped from the launcher's `for asking in …` loop (the box
+/// cannot file its own job), or the bind widened to `.skein/$asking/requests`, the parent (the
+/// sabotage that was run: the neighbour's job lands, and the queue root reads `write`).
+#[test]
+fn a_box_cannot_write_another_boxs_job_request() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create \
+             a user namespace here, so the per-box job queue was NOT exercised",
+        );
+    }
+    let fleet = Fleet::make("jobs");
+    let report = fleet.seen_by_box(Born::Covered);
+    let root = fleet.fleet_root.join(".skein/jobs/requests");
+    assert_eq!(
+        verdict(&report, &root.join("web-main")),
+        "write",
+        "the box cannot write its own job queue:\n{report}"
+    );
+    assert_eq!(
+        verdict(&report, &root.join("other-main")),
+        "see",
+        "a box can write another box's job queue:\n{report}"
+    );
+    assert_eq!(
+        verdict(&report, &root),
+        "see",
+        "the job queue root is writable, so a box can make a drop-box in another's name:\n{report}"
+    );
+
+    // The shipped wrapper, where the launcher installs the plugin, and a lock of the test's own
+    // rather than the real one the lanes running this suite hold.
+    let wrapper = fleet.fleet_root.join(".skein/plugin/bin/skein-job");
+    fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+    fs::write(&wrapper, include_str!("../../src/plugin/bin/skein-job")).unwrap();
+    let lock = fleet.dir.path().join("heavy.lock");
+    let said = String::from_utf8_lossy(
+        &fleet.in_box(
+            Born::Covered,
+            r#"for who in web-main other-main; do
+  printf '%s: ' "$who"
+  SKEIN_BOX="$who" SKEIN_STATE="$3" SKEIN_JOB_LOCK="$4" SKEIN_JOB_UNANSWERED_SECONDS=1 \
+    python3 "$2" run --class test -- echo "ran as $who" 2>&1
+done"#,
+            &[
+                String::new(),
+                wrapper.to_string_lossy().into_owned(),
+                fleet
+                    .state_parent
+                    .join("web-main")
+                    .to_string_lossy()
+                    .into_owned(),
+                lock.to_string_lossy().into_owned(),
+            ],
+        ),
+    )
+    .to_string();
+
+    let jobs_in = |owner: &str| -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(root.join(owner))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("j-"))
+            .collect();
+        v.sort();
+        v
+    };
+    let mine = jobs_in("web-main");
+    assert_eq!(
+        mine.len(),
+        1,
+        "the wrapper could not file the box's own job:\n{said}"
+    );
+    let filed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join("web-main").join(&mine[0])).unwrap())
+            .unwrap();
+    assert_eq!(
+        filed["state"], "done",
+        "the box could not mark its own job done:\n{said}"
+    );
+    assert_eq!(
+        jobs_in("other-main"),
+        Vec::<String>::new(),
+        "a box filed a job in another box's queue by naming it:\n{said}"
+    );
+    // Neither is stranded: refused a slot it cannot ask for, the wrapper still runs the command.
+    assert!(
+        said.contains("ran as web-main") && said.contains("ran as other-main"),
+        "{said}"
+    );
+}

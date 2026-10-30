@@ -2320,7 +2320,7 @@ SKEIN_ANCESTOR_MOUNTS
   # What a box gains is exactly the ability to ask, which is what the cockpit's approval panels were
   # built for. It gains no ability to answer: the grants, the decisions and the package manifest all
   # live elsewhere under `.skein` and stay read-only.
-  for asking in substrate gitgate asks; do
+  for asking in substrate gitgate asks jobs; do
     drop="$fleet_root_dir/.skein/$asking/requests/$box"
     mkdir -p "$drop" 2>/dev/null || true
     [ -d "$drop" ] && binds+=(--bind "$drop" "$drop")

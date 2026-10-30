@@ -4,7 +4,7 @@
 //! An agent asks with the `skein_ask_person` tool (`src/plugin/bin/skein-mcp`), which writes one
 //! file into the box's own drop-box, `<fleet root>/.skein/asks/requests/<box>/<id>.json`. The
 //! launcher makes that directory outside the box's mount namespace and binds it, alone, read-write
-//! into that box — the `for asking in substrate gitgate asks` loop in `src/box-session.sh` — so, as
+//! into that box — the `for asking in substrate gitgate asks jobs` loop in `src/box-session.sh` — so, as
 //! for the package and git-write queues beside it, **the directory is the identity** and every
 //! field in the file is the box's own word.
 //!

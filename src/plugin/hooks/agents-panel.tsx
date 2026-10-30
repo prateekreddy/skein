@@ -28,7 +28,7 @@ import type {
 } from 'claude-code'
 
 import type { SkeinAgentLane, SkeinAgentRun, SkeinAgentsPanel, SkeinAgentStatus } from '../types'
-import { claimedItem, commonGitDir, heavyLock, lockOf, worktreeIn, worktrees } from './lanes'
+import { claimedItem, commonGitDir, heavyLock, lockOf, ordinal, queueOf, waitingJobs, worktreeIn, worktrees } from './lanes'
 import type { Files, Worktree } from './lanes'
 import { costOf } from './prices'
 
@@ -344,20 +344,34 @@ async function refreshLock($: EngineInterface): Promise<void> {
   const list = await read($, agents)
   if (!list.some(a => a.status === 'running' && a.lane !== null)) return
   const at = await heavyLock(files($))
-  const changed = list.some(a => a.lane !== null && a.lane.lock !== (a.status === 'running' ? lockOf(a.lane.worktree, at) : null))
+  // The fleet's queue, where skein schedules this box's heavy work (SKEIN-1388).
+  const state = await $.env.get('SKEIN_STATE')
+  const jobs = waitingJobs(state ? await $.fs.read(`${state}/signals/jobs.json`).catch(() => null) : null)
+  const placed = (lane: SkeinAgentLane, isRunning: boolean): SkeinAgentLane => {
+    const lock = isRunning ? lockOf(lane.worktree, at) : null
+    return { ...lane, lock, queue: isRunning ? queueOf(lane.worktree, lock, jobs) : null }
+  }
+  const moved = (was: SkeinAgentLane, is: SkeinAgentLane) => was.lock !== is.lock || JSON.stringify(was.queue ?? null) !== JSON.stringify(is.queue ?? null)
+  const changed = list.some(a => a.lane !== null && moved(a.lane, placed(a.lane, a.status === 'running')))
   if (!changed) return
 
-  await update($, agents, all =>
-    all.map(a =>
-      a.lane === null ? a : { ...a, lane: { ...a.lane, lock: a.status === 'running' ? lockOf(a.lane.worktree, at) : null } },
-    ),
-  )
+  await update($, agents, all => all.map(a => (a.lane === null ? a : { ...a, lane: placed(a.lane, a.status === 'running') })))
 }
 
 function laneLines(lane: SkeinAgentLane): string[] {
   const item = lane.item === null ? 'no tracker item claimed' : `${lane.item.id}${lane.item.title ? ` ${lane.item.title}` : ''}${lane.item.isHeld ? '' : ' (no longer held)'}`
   const where = `${lane.worktree}${lane.branch ? ` on ${lane.branch}` : ''}`
-  const lock = lane.lock === 'waiting' ? ' · waiting for the heavy-work lock' : lane.lock === 'holding' ? ' · holds the heavy-work lock' : ''
+  const q = lane.queue ?? null
+  const why = q?.reason ? ` (${q.reason})` : ''
+  const lock = q
+    ? q.isOwn
+      ? ` · ${ordinal(q.position)} in the fleet's heavy-work queue${why}`
+      : ` · waiting behind this box's heavy job, ${ordinal(q.position)} in the fleet's queue${why}`
+    : lane.lock === 'waiting'
+      ? ' · waiting for the heavy-work lock'
+      : lane.lock === 'holding'
+        ? ' · holds the heavy-work lock'
+        : ''
 
   return [item, `${where}${lock}`]
 }
