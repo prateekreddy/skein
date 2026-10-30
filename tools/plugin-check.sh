@@ -68,7 +68,7 @@ claude plugin test "$plugin"
 
 echo "plugin-check: claude -p /skein"
 said=$(cd "$work/home" && SKEIN_BOX=plugin-check CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-  CLAUDE_CODE_PLUGIN_DIR_WATCH=1 claude -p /skein --plugin-dir "$work/plugin" </dev/null)
+  CLAUDE_CODE_PLUGIN_DIR_WATCH=1 claude -p /skein --plugin-dir "$work/plugin" </dev/null 2>&1) || true
 echo "$said"
 case "$said" in
   *"skein: version "*", in box plugin-check"*) ;;
