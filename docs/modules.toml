@@ -993,4 +993,7 @@ depends_on = ["ai", "boxfile", "config", "fleet"]
 # drop-boxes are under, the box state root the views go into, and the sandbox's cores the slots
 # are counted from. `repos` for the repo a box belongs to, which the per-repo cap counts by.
 # `util` for the atomic write every view and the queue go through, and the box-name whitelist.
-depends_on = ["config", "fleet", "repos", "util"]
+# `boxfile` for reading each request: the box writes its drop-box and skein-server can read what
+# no box may, so a request is opened without following a link or waiting on a FIFO, and only what
+# was opened is read.
+depends_on = ["boxfile", "config", "fleet", "repos", "util"]

@@ -307,7 +307,9 @@ pub fn read_requests(dir: &Path) -> BTreeMap<String, BTreeMap<String, Request>> 
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if !crate::util::valid_name(&name) {
+        // The entry's own type, which is not followed: a box's drop-box is a directory the launcher
+        // made, never a link.
+        if !crate::util::valid_name(&name) || !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let Ok(files) = std::fs::read_dir(entry.path()) else {
@@ -323,14 +325,15 @@ pub fn read_requests(dir: &Path) -> BTreeMap<String, BTreeMap<String, Request>> 
             else {
                 continue;
             };
-            // Not followed: a box can put a link in its own drop-box, and a link is not a request.
-            let Ok(meta) = std::fs::symlink_metadata(file.path()) else {
-                continue;
-            };
-            if !meta.is_file() || meta.len() > MAX_REQUEST_BYTES || !id_is_nameable(&id) {
+            if !id_is_nameable(&id) {
                 continue;
             }
-            let Some(req) = std::fs::read_to_string(file.path())
+            // **Opened, then checked, and only what was opened is read** (`boxfile::read_text`:
+            // `O_NOFOLLOW | O_NONBLOCK`, a regular file by `fstat`, at most the cap). skein-server
+            // can read what no box may, and the box writes this directory: a check of the path
+            // followed by a read of the path lets the box swap the file for a link to a host file
+            // in between, and a FIFO would park this loop until something wrote to it.
+            let Some(req) = crate::boxfile::read_text(&file.path(), MAX_REQUEST_BYTES)
                 .ok()
                 .and_then(|t| serde_json::from_str::<Request>(&t).ok())
             else {
@@ -629,7 +632,7 @@ pub fn tick(
                 Some(j) => secs_between(&j.ended, now) >= SHOW_FINISHED.as_secs() as i64,
                 None => {
                     let path = places.requests.join(name).join(format!("{id}.json"));
-                    std::fs::metadata(&path)
+                    std::fs::symlink_metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()
                         .and_then(|m| m.elapsed().ok())
@@ -957,6 +960,90 @@ mod tests {
             f.view("web-main").jobs[0].reason,
             "this box is asked to free memory"
         );
+    }
+
+    /// **A link in a box's drop-box is never read, so a host file it points at is never queued.**
+    ///
+    /// skein-server can read files no box can. A box that put a link to one in its drop-box, or
+    /// swapped a checked file for one before the read, would have skein read the host file as its
+    /// request. The host file here is a valid request with a live pid, and the control proves it:
+    /// the same bytes as a plain file in another box's drop-box are read and granted.
+    ///
+    /// What would make it fail: opening the request without `O_NOFOLLOW` (the sabotage that was
+    /// run, in `boxfile::open`: `j-link` is queued and granted), or reading by path after a check
+    /// of the path, the race this replaced.
+    #[test]
+    fn a_link_in_a_drop_box_to_a_host_file_is_never_read_or_granted() {
+        let f = Fleet::new(&["web-main", "api-main"]);
+        let host = f.places.queue.parent().unwrap().join("host-file.json");
+        std::fs::create_dir_all(host.parent().unwrap()).unwrap();
+        let body = |id: &str| {
+            serde_json::json!({"id": id, "class": "test", "argv": ["x"], "cwd": "/w",
+                               "pid": 501, "state": "waiting"})
+            .to_string()
+        };
+        std::fs::write(&host, body("j-link")).unwrap();
+        std::os::unix::fs::symlink(&host, f.places.requests.join("web-main/j-link.json")).unwrap();
+        f.live("web-main", 501, true);
+        // The control: the same request as a plain file is read and granted.
+        std::fs::write(
+            f.places.requests.join("api-main/j-real.json"),
+            body("j-real"),
+        )
+        .unwrap();
+        f.live("api-main", 501, true);
+
+        let limits = Limits {
+            fleet_slots: 4,
+            repo_cap: 4,
+        };
+        let q = f.tick(0, limits, &[]);
+        assert_eq!(
+            state_of(&q, "j-real"),
+            "granted",
+            "the control was not granted, so the fixture proves nothing: {q:#?}"
+        );
+        assert_eq!(
+            state_of(&q, "j-link"),
+            "absent",
+            "skein followed a box's link and queued a host file as its request: {q:#?}"
+        );
+        assert!(
+            !read_requests(&f.places.requests)["web-main"].contains_key("j-link"),
+            "the link was read"
+        );
+    }
+
+    /// **A FIFO in a box's drop-box does not hold up the tick.** Opened without `O_NONBLOCK`, a FIFO
+    /// with no writer parks the opener until one comes, and the tick is skein-server's only
+    /// scheduler: every box would wait with it. The box's real request beside it is still granted.
+    ///
+    /// What would make it fail: `O_NONBLOCK` dropped from `boxfile::open` (the sabotage that was
+    /// run: the tick waits on the FIFO and `within` fails at 5 s). Dropping the regular-file check
+    /// alone does **not** fail it, and cannot here: with `O_NONBLOCK` a FIFO with no writer reads as
+    /// empty at once, which parses as nothing. That check is what refuses a FIFO that does have a
+    /// writer, and anything else that is not a file.
+    #[test]
+    fn a_fifo_in_a_drop_box_does_not_hang_the_tick() {
+        let f = Fleet::new(&["web-main"]);
+        let fifo = f.places.requests.join("web-main/j-fifo.json");
+        crate::boxfile::plant_fifo(&fifo);
+        f.submit("web-main", "j-ok", 601, serde_json::json!({}));
+        let places = f.places.clone();
+        let q = crate::boxfile::within(&fifo, "the jobs tick", move || {
+            tick(
+                &places,
+                Limits {
+                    fleet_slots: 1,
+                    repo_cap: 2,
+                },
+                &|b: &str| b.to_string(),
+                at(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(state_of(&q, "j-ok"), "granted", "{q:#?}");
+        assert_eq!(state_of(&q, "j-fifo"), "absent", "{q:#?}");
     }
 
     #[test]
