@@ -246,6 +246,12 @@ pub struct Signals {
 ///
 /// Every path is the fleet's, which is also where the box sees it: the launcher binds the box's
 /// own directory and its repo's cache back at their own paths (`box-session.sh`).
+///
+/// **A contract, read by more than skein.** The plugin's `skein-mcp` reads it today and the mod
+/// skein's plugin is becoming will read it too (SKEIN-1358), so a field here is only ever added,
+/// never renamed or given a new meaning: `clean.at`, `box_root`, each item's `path`, `shown`,
+/// `kind` and `bytes`, and the repo cache's `path`, `bytes`, `items`, `others_running`,
+/// `others_unknown` and `none_running_at`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CleanList {
     /// RFC3339, when the items were listed. They are listed again every [`CLEAN_LIST_EVERY`].
@@ -707,23 +713,29 @@ mod words {
     }
 
     /// The disk ask's pointer to `skein_clean`, with the box's biggest items that its agent may
-    /// remove now (SKEIN-1356): up to three, biggest first, as `~/.cache/pip (3.2G)`.
+    /// remove now (SKEIN-1356): up to three, biggest first, as `~/.cache/pip (3.2G)`, and the exact
+    /// call that removes them, so the agent can act on the notice in one step.
     pub(super) fn clean_hint(biggest: &[CleanItem]) -> String {
-        let named: Vec<String> = biggest
+        let named: Vec<&CleanItem> = biggest
             .iter()
-            .filter(|i| nameable(&i.shown))
+            .filter(|i| nameable(&i.shown) && nameable(&i.path))
             .take(3)
+            .collect();
+        let sized: Vec<String> = named
+            .iter()
             .map(|i| format!("{} ({})", i.shown, gib_up(i.bytes.div_ceil(1024 * 1024))))
             .collect();
-        let list = match named.as_slice() {
+        let list = match sized.as_slice() {
             [] => return CLEAN.to_string(),
             [one] => one.clone(),
             [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
         };
+        let paths: Vec<&str> = named.iter().map(|i| i.path.as_str()).collect();
         format!(
-            "{} The biggest {} {list}.",
-            CLEAN,
-            if named.len() == 1 { "is" } else { "are" }
+            "{CLEAN} The biggest {} {list}; to remove {} now, call `skein_clean` with {}.",
+            if named.len() == 1 { "is" } else { "are" },
+            if named.len() == 1 { "it" } else { "them" },
+            serde_json::json!({ "paths": paths }),
         )
     }
 
@@ -2391,7 +2403,10 @@ mod tests {
 
     fn item(shown: &str, kind: &str, mib: u64) -> CleanItem {
         CleanItem {
-            path: format!("/fleet/web-main/{shown}"),
+            path: match shown.strip_prefix("~/") {
+                Some(rel) => format!("/fleet/web-main/home/{rel}"),
+                None => format!("/fleet/{shown}"),
+            },
             shown: shown.to_string(),
             kind: kind.to_string(),
             bytes: mib * 1024 * 1024,
@@ -2451,7 +2466,9 @@ mod tests {
             .expect("a disk ask");
         let hint = "`skein_clean` lists the caches and build output this box can remove, and \
                     removes them. The biggest are ~/.cache/ms-playwright (3.2G), \
-                    web-main/tree/target (2.1G) and ~/.cache/pip (0.7G).";
+                    web-main/tree/target (2.1G) and ~/.cache/pip (0.7G); to remove them now, call \
+                    `skein_clean` with {\"paths\":[\"/fleet/web-main/home/.cache/ms-playwright\",\
+                    \"/fleet/web-main/tree/target\",\"/fleet/web-main/home/.cache/pip\"]}.";
         for (which, text) in [
             ("hold", Some(disk.hold.clone())),
             ("start", disk.start.clone()),

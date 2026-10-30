@@ -1038,6 +1038,11 @@ fn a_link_in_a_listed_cache_is_removed_and_its_target_kept() {
     let c = Cleanable::plant(&b);
     c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
     let (got, said) = clean_said(&b, &[c.pip()]);
+    // First, so a removal that followed the link is named as that, whatever else it did.
+    assert!(
+        c.outside.join("precious").exists(),
+        "the removal followed a link out of the cache: {got}"
+    );
     assert_eq!(
         got["removed"].as_array().map(Vec::len),
         Some(1),
@@ -1046,10 +1051,6 @@ fn a_link_in_a_listed_cache_is_removed_and_its_target_kept() {
     assert!(
         !c.root.join("home/.cache/pip").exists(),
         "the cache is still there"
-    );
-    assert!(
-        c.outside.join("precious").exists(),
-        "the removal followed a link out of the cache: {got}"
     );
     assert!(said.starts_with("skein: removed 1,"), "{said}");
 
@@ -1228,4 +1229,52 @@ fn top_by_disk_shows_the_box_and_the_shared_cache_apart() {
         top["dirs"].is_array(),
         "the checkout's directories are gone: {top}"
     );
+}
+
+/// **`skein-mcp clean` on the command line is the same `skein_clean`**: one list, one set of
+/// refusals, one removal, for a caller that is not an MCP client (SKEIN-1356, for the mod of
+/// SKEIN-1358).
+///
+/// What would make it fail: the command line answering from a copy of the logic that drifts (a
+/// path not on the list removed, or a listed one refused), or a refusal that exits 0.
+#[test]
+fn the_command_line_clean_is_the_same_tool() {
+    let b = Box_::new("skein-tools-it-clean-cli");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let run = |paths: &[String]| {
+        let out = Command::new("python3")
+            .arg(b.at("skein-mcp"))
+            .arg("clean")
+            .args(paths)
+            .env("SKEIN_STATE", b.at("state"))
+            .env("HOME", c.root.join("home"))
+            .output()
+            .expect("python3");
+        let v: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        (out.status.code(), v)
+    };
+    let (code, listed) = run(&[]);
+    assert_eq!(code, Some(0), "{listed}");
+    assert_eq!(
+        listed["result"]["items"].as_array().map(Vec::len),
+        Some(5),
+        "{listed}"
+    );
+    let notes = c.root.join("home/.cache/agent-notes").display().to_string();
+    let (code, refused) = run(&[c.pip(), notes.clone()]);
+    assert_eq!(code, Some(1), "{refused}");
+    assert_eq!(refused["result"]["error"], "not-on-the-list", "{refused}");
+    assert!(std::path::Path::new(&notes).exists());
+    let (code, done) = run(&[c.pip()]);
+    assert_eq!(code, Some(0), "{done}");
+    assert!(
+        done["said"]
+            .as_str()
+            .unwrap()
+            .starts_with("skein: removed 1,"),
+        "{done}"
+    );
+    assert!(!c.root.join("home/.cache/pip").exists());
 }

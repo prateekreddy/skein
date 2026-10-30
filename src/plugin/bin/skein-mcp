@@ -44,7 +44,9 @@
 # And one removes (SKEIN-1356), inside the box and as the box:
 #
 #   skein_clean       what in this box can be removed and made again, from the list skein writes into
-#                     the signal file, and the removal of chosen items from that list.
+#                     the signal file, and the removal of chosen items from that list. The same
+#                     function answers `skein-mcp clean [PATH...]` on the command line, so a caller
+#                     that is not an MCP client gets the one implementation and not a second.
 #
 # Three more rules carry `skein_clean`, each with a test that fails without it:
 #
@@ -1141,7 +1143,21 @@ def answer(msg):
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+def run_once(argv):
+    """`skein-mcp clean [PATH...]`: the same `skein_clean` without the protocol, for callers that
+    are not an MCP client (the mod skein's plugin is becoming, SKEIN-1358). Prints the result and
+    the sentence for the agent as one JSON object; exits 1 when the result is an error."""
+    if argv[:1] != ["clean"]:
+        sys.stderr.write("usage: skein-mcp clean [PATH...]\n")
+        return 2
+    result = clean({"paths": argv[1:]})
+    sys.stdout.write(json.dumps({"result": dict(result), "said": getattr(result, "said", "")}) + "\n")
+    return 1 if "error" in result else 0
+
+
 def main():
+    if len(sys.argv) > 1:
+        sys.exit(run_once(sys.argv[1:]))
     for line in sys.stdin:
         line = line.strip()
         if not line:

@@ -147,16 +147,17 @@ fn a_box_removes_what_skein_listed_and_nothing_a_link_leads_to() {
     assert!(cache.join("pip/http/x").exists());
 
     let said = clean_in_box(&f, &server, &root.join("home"), &calls(&asked));
+    // First, so a removal that followed the link is named as that, whatever else it did.
+    assert!(
+        keep.join("precious").exists(),
+        "the removal followed a link into the repo's store:\n{said}"
+    );
     assert!(
         said.contains("removed 2"),
         "the box could not clean:\n{said}"
     );
     assert!(!root.join("home/.cache/pip").exists(), "{said}");
     assert!(!cache.join("pip").exists(), "{said}");
-    assert!(
-        keep.join("precious").exists(),
-        "the removal followed a link into the repo's store:\n{said}"
-    );
     assert!(cache.join("cargo/credentials.toml").exists());
     assert!(root.join("tree/README").exists());
 }
