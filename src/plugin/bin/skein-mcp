@@ -16,7 +16,9 @@
 #                     own. It never offers to stop anything: the kernel's limits are the ceiling,
 #                     and this is only how the agent sees what it is holding.
 #   skein_requests    the box's own package and git-write requests and questions, and the owner's
-#                     answers.
+#                     answers. `skein-mcp requests` answers the same on the command line, which is
+#                     how the hooks module's band and compaction keeper read it (SKEIN-1362,
+#                     SKEIN-1364).
 #
 # and three ask (SKEIN-1061), each into the box's own drop-box and nowhere else:
 #
@@ -1252,8 +1254,8 @@ def answer(msg):
 def run_once(argv):
     """`skein-mcp clean [PATH...]` and `skein-mcp requests`: the same `skein_clean` and
     `skein_requests` without the protocol, for callers that are not an MCP client (skein's hooks
-    module, SKEIN-1358). Prints the result and the sentence for the agent as one JSON object; exits
-    1 when the result is an error."""
+    module, SKEIN-1358; its compaction keeper reads `requests`, SKEIN-1364). Prints the result and
+    the sentence for the agent as one JSON object; exits 1 when the result is an error."""
     if argv[:1] == ["clean"]:
         result = clean({"paths": argv[1:]})
     elif argv == ["requests"]:
