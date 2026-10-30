@@ -1298,7 +1298,8 @@ fn the_command_line_clean_is_the_same_tool() {
 ///
 /// What would make it fail: the plugin treating every list as fresh (`stale = False`), which
 /// removes the own cache and the shared one from a list twenty minutes old. Watched: with exactly
-/// that, the own-cache removal went ahead and this failed.
+/// that, the own-cache removal went ahead and this failed; with only the shared-cache branch's
+/// stale refusal removed, the shared `pip` was removed and this failed on the second call.
 #[test]
 fn a_list_skein_wrote_long_ago_is_refused_for_everything() {
     let b = Box_::new("skein-tools-it-clean-stale");
