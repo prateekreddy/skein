@@ -331,8 +331,14 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     // file per feature it imports. Every file under `src/plugin/hooks/` is listed here, which
     // `every_hooks_module_file_ships` holds; the tests, the `$.state` contract and the tsconfig
     // are for `tools/plugin-check.sh` and stay out of a box.
-    ("hooks/register.tsx", include_str!("plugin/hooks/register.tsx")),
-    ("hooks/identity.ts", include_str!("plugin/hooks/identity.ts")),
+    (
+        "hooks/register.tsx",
+        include_str!("plugin/hooks/register.tsx"),
+    ),
+    (
+        "hooks/identity.ts",
+        include_str!("plugin/hooks/identity.ts"),
+    ),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
@@ -622,7 +628,12 @@ mod tests {
     /// module importing a value from a file that is not.
     #[test]
     fn every_hooks_module_file_ships() {
-        let shipped = |rel: &str| PLUGIN_FILES.iter().find(|(r, _)| *r == rel).map(|(_, b)| *b);
+        let shipped = |rel: &str| {
+            PLUGIN_FILES
+                .iter()
+                .find(|(r, _)| *r == rel)
+                .map(|(_, b)| *b)
+        };
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/plugin/hooks");
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
@@ -638,11 +649,20 @@ mod tests {
 
         let hooks: serde_json::Value =
             serde_json::from_str(shipped("hooks/hooks.json").unwrap()).unwrap();
-        let modules = hooks["modules"].as_array().expect("hooks.json names no module");
-        assert_eq!(modules.len(), 1, "the engine takes one hooks module: {modules:?}");
+        let modules = hooks["modules"]
+            .as_array()
+            .expect("hooks.json names no module");
+        assert_eq!(
+            modules.len(),
+            1,
+            "the engine takes one hooks module: {modules:?}"
+        );
         let entry = modules[0].as_str().unwrap();
         let entry = format!("hooks/{}", entry.trim_start_matches("./"));
-        assert!(shipped(&entry).is_some(), "{entry} is named and not shipped");
+        assert!(
+            shipped(&entry).is_some(),
+            "{entry} is named and not shipped"
+        );
 
         // Every value import of a shipped module, resolved the way the engine resolves one: the
         // path as written, or with a code suffix added.
