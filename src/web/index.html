@@ -443,6 +443,9 @@
                    border:1px solid var(--border); border-radius:5px; padding:2px 7px; white-space:nowrap;
                    cursor:help; flex:none; }
   .dockbar .scrw .hdot { margin:0 .45em 0 0; }
+  /* "mod not loaded": quieter still than the half-signal marker, no border and no dot. The box is
+     on the same inference every box had before the mod existed, so this is a note, not a caveat. */
+  .dockbar .modq { font-size:11px; color:var(--dim); opacity:.8; white-space:nowrap; cursor:help; flex:none; }
   .tab .thalf { color:var(--dim); }
   .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
   /* the focal control — a calm, centred segmented toggle */
@@ -3499,7 +3502,7 @@ let dockSig = "";
 function refreshDock() {
   if (!view.box) { dockSig = ""; return; }
   const b = boxes.find(x => x.name === view.box);
-  const sig = [view.box, view.mode, view.kind, b?.state, b?.branch, JSON.stringify(b?.diff || 0),
+  const sig = [view.box, view.mode, view.kind, b?.state, b?.branch, b?.engine_health, JSON.stringify(b?.diff || 0),
     (comments.get(view.box) || []).length].join("|");
   if (sig !== dockSig) { dockSig = sig; renderDockbar(); }
 }
@@ -3564,9 +3567,23 @@ const shUnknown = h => [
 // The one lookup all three callers share: the dock badge, the fleet row's pill, and the tab title.
 // Order matters — an unknown health is still a statement about the screen, so it outranks the
 // edge-ahead caveat, which is what you say when the screen half is fine and merely behind.
-const screenHalf = b => (SHALF[b.screen_health]
+//
+// None of it applies when the box's own engine decided the state (`status_from` "engine", skein's
+// mod): the state rests on neither half then, so a caveat about the halves would misstate it.
+const screenHalf = b => b.status_from === "engine" ? null : (SHALF[b.screen_health]
   || (b.screen_health ? shUnknown(b.screen_health) : null)
   || (b.status_from === "edge-ahead" ? EDGE_AHEAD : null));
+// `engine_health` (Rust `signals::engine_health`): whether skein's mod is reporting from inside this
+// box's Claude session. Said as a quiet note, never an alarm: without it the board reads the box the
+// way it read every box before the mod existed.
+const MODQ = {
+  absent: ["mod not loaded", "skein's mod is not reporting from this box's Claude session, so the board reads its state from the screen and the hook events instead. The mod loads when the session starts, on a Claude Code new enough to run it, and only where the account allows plugin modules.", "Restart the agent session to load it, if this box started before the update."],
+  stale:  ["mod not reporting", "skein's mod reported from this box's Claude session and has stopped, so the board reads its state from the screen and the hook events instead.", "Nothing to do if the session ended. If it is still running, restart the agent session."],
+};
+const modNote = b => {
+  const m = MODQ[b.engine_health];
+  return m ? `<span class="modq" title="${esc(m[1] + "\n\n" + m[2])}">${esc(m[0])}</span>` : "";
+};
 function screenBadge(b, isShell) {
   // A shell tab has no agent screen to read, so the caveat would be meaningless there.
   const h = !isShell && screenHalf(b);
@@ -3588,6 +3605,7 @@ function renderDockbar() {
     + (b.branch ? `<span class="br">${esc(b.branch)}</span>` : "")
     + `<span class="dstat">${diffBadge(b.diff)}</span>`
     + screenBadge(b, isShell)
+    + modNote(b)
     + `<div class="seg-toggle">
          <button data-m="term" class="${m==='term'&&!isShell?'on':''}">${esc(activeRuntimeLabel)}</button>
          <button data-m="shell" class="${m==='term'&&isShell?'on':''}">Shell</button>

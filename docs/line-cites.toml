@@ -44,15 +44,15 @@ cited_by = ["docs/decisions/install-is-one-sandbox-command.md"]
 line = "return `${done} of ${all.length} copied out. ${names} did not — that work is still only inside the sandbox, and a destroy would take it.`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["docs/architecture.md:617"]
+["docs/architecture.md:625"]
 line = "## 8. The host warden"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:668"]
+["docs/architecture.md:676"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1784"]
+["docs/architecture.md:1792"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -717,59 +717,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "// module note. `fleet` is never empty: `load_config` repairs a blank name, which is what makes"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:317"]
+["src/board.rs:326"]
 line = "pub state: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:344"]
+["src/board.rs:353"]
 line = "pub headline: Option<String>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:350"]
+["src/board.rs:359"]
 line = "pub pause: Pause,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:353"]
+["src/board.rs:362"]
 line = "/// each wants a different move from you, so the row names it instead of saying \"decision\"."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:355"]
+["src/board.rs:364"]
 line = "pub blocked_kind: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:360"]
+["src/board.rs:369"]
 line = "/// installed probe contract. See [`crate::signals::hook_health`] for what each one asks of a"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:367"]
+["src/board.rs:376"]
 line = "pub hook_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:372"]
+["src/board.rs:381"]
 line = "pub status_from: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:377"]
+["src/board.rs:391"]
 line = "pub screen_health: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:395"]
+["src/board.rs:409"]
 line = "pub foreign: bool,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:430"]
+["src/board.rs:444"]
 line = "pub cover: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:448"]
+["src/board.rs:462"]
 line = "/// Three ways to be uncapped and they are not one problem. *no-limit-computed* is skein's own"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:453"]
+["src/board.rs:467"]
 line = "pub ceiling: String,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/board.rs:468"]
+["src/board.rs:482"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1341,92 +1341,92 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:163"]
+["src/fleet/start.rs:168"]
 line = "fn mount_manifest(name: &str) -> String {"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet/start.rs:166"]
+["src/fleet/start.rs:171"]
 line = "\"skein: {name} matches no repository skein knows, so it cannot be told which mounts \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:177"]
+["src/fleet/start.rs:182"]
 line = "\"skein: {mount:?} has a newline in it, so boxes cannot be told about it — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:441"]
+["src/fleet/start.rs:446"]
 line = "\"{why}\\n {name} IS running — its session and namespace came up — but it has \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:596"]
+["src/fleet/start.rs:601"]
 line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:613"]
+["src/fleet/start.rs:618"]
 line = "return Err(format!(\"invalid box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:624"]
+["src/fleet/start.rs:629"]
 line = "ensure_fleet(&sandbox)?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:666"]
+["src/fleet/start.rs:671"]
 line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:685"]
+["src/fleet/start.rs:690"]
 line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:715"]
+["src/fleet/start.rs:720"]
 line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:804"]
+["src/fleet/start.rs:809"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/start.rs:821"]
+["src/fleet/start.rs:826"]
 line = "eprintln!(\"skein: could not set {name}'s git identity ({e}); its first commit will ask who you are\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:829"]
+["src/fleet/start.rs:834"]
 line = "eprintln!(\"skein: {name} came up, but its conversation could not be located ({e})\")"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:837"]
+["src/fleet/start.rs:842"]
 line = "\"skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:847"]
+["src/fleet/start.rs:852"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:884"]
+["src/fleet/start.rs:889"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:944"]
+["src/fleet/start.rs:949"]
 line = "\"skein: {name} has a session nothing can enter — {why} — so it is being ended \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:962"]
+["src/fleet/start.rs:967"]
 line = "\"box {name} has no checkout in {} — `skein start {name}` to build one\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:980"]
+["src/fleet/start.rs:985"]
 line = "eprintln!(\"skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there\", record.sandbox);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1017"]
+["src/fleet/start.rs:1022"]
 line = "eprintln!(\"skein: {name} had no live session, so it was restarted (its work is untouched)\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1048"]
+["src/fleet/start.rs:1053"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1891"]
+["src/fleet/start.rs:1896"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1823,12 +1823,12 @@ line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:721"]
+["src/sandbox.rs:722"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:751"]
+["src/sandbox.rs:752"]
 line = "// Same as `stop_box`: no placement record means there is no box here to tear down, and the"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1836,16 +1836,16 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_DESTROY_CMD`, the test seam that ran a shell for a box skein had not placed: Destroy on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:974"]
+["src/sandbox.rs:975"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1035"]
+["src/sandbox.rs:1036"]
 line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1144"]
+["src/sandbox.rs:1145"]
 line = "fn refusal_argv(name: &str) -> Vec<String> {"
 cited_by = ["docs/recovery-survey.md"]
 

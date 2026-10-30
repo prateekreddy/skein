@@ -12,6 +12,8 @@ import type { EngineInterface, On, SessionStartInput } from 'claude-code'
 
 import type { SkeinIdentity } from '../types'
 
+import { subcommand as bandSubcommand } from './band'
+
 const identity = atom({ plugin: 'skein', key: 'identity' } as const, null, {
   shape: 'identity-1',
 })
@@ -21,6 +23,8 @@ export async function onStart($: EngineInterface, _e: SessionStartInput): Promis
   await $.command.register({
     name: 'skein',
     description: "Show this box's name and the skein plugin's version",
+    // The subcommands are `band.tsx`'s: the hook below hands it anything after the name.
+    argumentHint: '[status | clean | requests]',
   })
   const box = (await $.env.get('SKEIN_BOX')) || null
   const version = await pluginVersion(() =>
@@ -31,14 +35,16 @@ export async function onStart($: EngineInterface, _e: SessionStartInput): Promis
 }
 
 export function register(on: On): void {
-  on('command.run', { command: 'skein' }, async $ => {
+  // `/skein` alone names the box; anything after the name is a subcommand of `band.tsx`'s.
+  on('command.run', { command: 'skein' }, async ($, e) => {
+    if (e.args.trim() !== '') return bandSubcommand($, e.args)
     const found = await read($, identity)
 
     return { text: describe(found) }
   })
 }
 
-async function pluginVersion(manifest: () => Promise<string>): Promise<string> {
+export async function pluginVersion(manifest: () => Promise<string>): Promise<string> {
   try {
     const parsed: unknown = JSON.parse(await manifest())
     if (typeof parsed === 'object' && parsed !== null && 'version' in parsed) {

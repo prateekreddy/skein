@@ -57,6 +57,117 @@ export type SkeinGuide = {
   sharedHomeHeading: string
 }
 
+/**
+ * What the attention feature last wrote for the cockpit (`hooks/attention.ts`): the moment the box
+ * needs its person, as the engine saw it. `loaded` until the first event of the session.
+ */
+export type SkeinAttentionState =
+  | 'loaded'
+  | 'working'
+  | 'permission'
+  | 'question'
+  | 'waiting'
+  | 'interrupted'
+  | 'refused'
+  | 'error'
+  | 'ended'
+
+/** The highest rate-limit mark a window has crossed, as it was when it crossed. */
+export type SkeinAttentionLimit = {
+  /** The window: `five_hour`, `seven_day`, or a gateway's `spend_limit`. */
+  kind: string
+  /** The mark crossed, one of the feature's `LIMIT_MARKS`. */
+  mark: number
+  percentUsed: number
+  /** When the window resets, ISO 8601, or empty when the engine did not say. */
+  resetsAt: string
+}
+
+/** The attention feature's session: where it writes, and what it last wrote. */
+export type SkeinAttention = {
+  /** `<store>/status/<box>.mod.json`, from `probe/box-self.sh`. */
+  file: string
+  box: string
+  /** The plugin's own version, so the cockpit can say which mod wrote it. */
+  version: string
+  session: string
+  state: SkeinAttentionState
+  /** When `state` was entered, ISO 8601; empty only between a change and its stamp. */
+  at: string
+  /** The tool asked about, or the session's end reason; empty otherwise. */
+  detail: string
+  /** The last turn's `reason` (`answer`, `aborted`, `refusal`, `error`), or empty. */
+  stop: string
+  /** The subagent whose call is waiting, or empty for the main loop. */
+  agent: string
+  /** The tool call a person is being asked about, so its return is seen to settle it. */
+  asking: string
+  /**
+   * The last call `tool.check` put to a person, not yet shown to them: a mode's classifier may still
+   * settle it. The permission dialog's notification names no call, so this names it.
+   */
+  asked: { id: string; tool: string; agent: string } | null
+  /** The last mark crossed, kept until a higher one. */
+  limit: SkeinAttentionLimit | null
+  /** The highest mark each window has reached, by window kind. */
+  marks: Record<string, number>
+}
+
+/** One item on skein's disk list for this box, as `skein-mcp clean` lists it (SKEIN-1356). */
+export type SkeinCleanRow = {
+  /** The fleet's path, which `skein-mcp clean` takes. */
+  path: string
+  /** Where the agent sees it: `$HOME/…` for the box's home. */
+  in_box: string
+  /** `download cache`, `build output`, `scratchpad`, or `shared download cache`. */
+  kind: string
+  bytes: number
+  /** `shared` for the repo's shared download cache, which is not counted against this box. */
+  where: 'box' | 'shared'
+  safe_now: boolean
+  why_not: string | null
+}
+
+/** The repo's shared download cache, on a row of its own. */
+export type SkeinSharedCache = {
+  path: string
+  bytes: number
+  safe_to_clean_now: boolean
+  why_not: string | null
+}
+
+/** One of this box's requests or questions, with its answer's state, as `skein-mcp requests` reads it. */
+export type SkeinRequestRow = {
+  queue: 'package' | 'write' | 'question'
+  id: string
+  asked: string
+  /** `waiting` until the owner's inbox answers it. */
+  state: string
+  /** What was asked, in a few words. */
+  what: string
+}
+
+/** What the band and the pane draw from, read on a timer and after a Clean (SKEIN-1362). */
+export type SkeinBand = {
+  /** From the signal file; null when there is none to believe. */
+  disk: {
+    mb: number | null
+    limit_mb: number | null
+    /** skein's disk ask of this box, when it stands. */
+    ask: { amount_mb: number; why: string } | null
+  } | null
+  /** skein's disk list; null before skein has listed it. */
+  clean: {
+    rows: SkeinCleanRow[]
+    removable_now_bytes: number
+    shared: SkeinSharedCache | null
+  } | null
+  /** null outside a box. */
+  requests: SkeinRequestRow[] | null
+  /** Unread mail; null when the mailbox could not be read. */
+  mail: number | null
+}
+
 /** Where a subagent's run stands: working, answered, ended on an error or refusal, or interrupted. */
 export type SkeinAgentStatus = 'running' | 'done' | 'failed' | 'stopped'
 
@@ -119,6 +230,10 @@ declare module 'claude-code' {
       identity: Shaped<SkeinIdentity | null>
       leases: Shaped<SkeinLeases | null>
       guide: Shaped<SkeinGuide | null>
+      attention: Shaped<SkeinAttention | null>
+      band: Shaped<SkeinBand | null>
+      /** What the last Clean said, `skein-mcp clean`'s own sentence. */
+      cleanSaid: Shaped<string | null>
       agents: Shaped<SkeinAgentRun[]>
       agentsPanel: Shaped<SkeinAgentsPanel>
       agentsNow: number

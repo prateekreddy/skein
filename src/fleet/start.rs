@@ -15,12 +15,17 @@ use super::*;
 /// are history — they describe what happened, not what is happening, and a box that has just moved
 /// is exactly when its history is worth keeping. The in-flight sub-agent counter goes too: it counts
 /// processes that died with the old session, and a stale one would make the first Notification of
-/// the new session read as "still busy" instead of "needs you".
+/// the new session read as "still busy" instead of "needs you". The mod's signal goes for the same
+/// reason as the status: it is the old session's last word, and the new one writes its own.
 ///
 /// Absent files are the normal case (a box being created for the first time), so this is silent.
 fn forget_turn_state(repo: &Repo, name: &str) {
     let status = std::path::Path::new(&repo.store).join("status");
-    for file in [format!("{name}.json"), format!("{name}.agents")] {
+    for file in [
+        format!("{name}.json"),
+        format!("{name}.mod.json"),
+        format!("{name}.agents"),
+    ] {
         let _ = std::fs::remove_file(status.join(file));
     }
 }

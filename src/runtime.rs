@@ -339,6 +339,11 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         "hooks/identity.ts",
         include_str!("plugin/hooks/identity.ts"),
     ),
+    (
+        "hooks/attention.ts",
+        include_str!("plugin/hooks/attention.ts"),
+    ),
+    ("hooks/band.tsx", include_str!("plugin/hooks/band.tsx")),
     ("hooks/keeper.ts", include_str!("plugin/hooks/keeper.ts")),
     ("hooks/guide.ts", include_str!("plugin/hooks/guide.ts")),
     ("hooks/tracker.ts", include_str!("plugin/hooks/tracker.ts")),

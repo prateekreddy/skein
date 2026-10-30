@@ -65,7 +65,8 @@ test('a compaction ends with the held items, waiting requests, running lanes and
   expect(kept).toContain('- needs-you (general-purpose, a1)')
   expect(kept).not.toContain('finished lane')
   expect(kept).toContain('- never push to main\n- ask before deleting a branch')
-  expect(w.ran).toEqual([['python3', expect.stringMatching(/\/bin\/skein-mcp$/), 'requests']])
+  // Other features run their own commands at start; the keeper's is the one requests door.
+  expect(w.ran).toEqual(expect.arrayContaining([['python3', expect.stringMatching(/\/bin\/skein-mcp$/), 'requests']]))
 })
 
 test('a session that claimed before skein heard it is told to call held first', async ($, on) => {

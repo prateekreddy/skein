@@ -626,6 +626,7 @@ fn forget_box_files(store: &Path, name: &str) {
     for p in [
         store.join("status").join(format!("{name}.json")),
         store.join("status").join(format!("{name}.pane.json")),
+        store.join("status").join(format!("{name}.mod.json")),
         store.join("status").join(format!("{name}.agents")),
         store.join("status").join(format!("{name}.agents.lock")),
         store
@@ -1644,6 +1645,7 @@ mod tests {
             [
                 store.join("status").join(format!("{name}.json")),
                 store.join("status").join(format!("{name}.pane.json")),
+                store.join("status").join(format!("{name}.mod.json")),
                 store.join("status").join(format!("{name}.agents")),
                 store
                     .join("skein")
