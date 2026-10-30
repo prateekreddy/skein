@@ -309,6 +309,7 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
     for (path, body) in [
         (box_session_path(), launcher.as_str()),
         (box_provision_path(), KIT_STARTUP_SH),
+        (box_link_browsers_path(), KIT_LINK_BROWSERS_SH),
         (git_credential_helper_path(), GIT_CREDENTIAL_SH),
     ] {
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");

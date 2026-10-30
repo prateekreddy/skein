@@ -3099,6 +3099,8 @@ mod tests {
     /// (no directory is named, so no turn-state hook loads); the turn-state variant not installed,
     /// or installed without its hooks; either variant missing any of the 24 entries; the full one
     /// losing its resource hooks; or the narrow one carrying the holds, the monitor or the tools.
+    /// And for the hooks module (SKEIN-1359): the merge dropping hooks.json's `modules` key, the
+    /// full variant not installing `hooks/register.tsx`, or the narrow one gaining the module.
     #[test]
     fn turn_state_hooks_load_whichever_way_the_switch_is_set() {
         let _lock = crate::testutil::env_lock();
@@ -3156,12 +3158,19 @@ mod tests {
             let resources = hooks.to_string().contains("bin/skein-resources");
             let tools = file(&dir, ".mcp.json").is_some();
             let monitor = file(&dir, "monitors/monitors.json").is_some();
+            // The hooks module (SKEIN-1359): named in the installed hooks.json, which the merge of
+            // the turn-state hooks above rewrites, and its file installed beside it.
+            let module = hooks["modules"] == serde_json::json!(["./register.tsx"])
+                && file(&dir, "hooks/register.tsx").is_some();
             match switch {
-                "on" => assert!(resources && tools && monitor, "on lost the holds or tools"),
+                "on" => assert!(
+                    resources && tools && monitor && module,
+                    "on lost the holds, the tools, the monitor or the hooks module ({module})"
+                ),
                 _ => assert!(
-                    !resources && !tools && !monitor,
-                    "off still loads a hold ({resources}), the tools ({tools}) or the monitor \
-                     ({monitor})"
+                    !resources && !tools && !monitor && !module,
+                    "off still loads a hold ({resources}), the tools ({tools}), the monitor \
+                     ({monitor}) or the hooks module ({module})"
                 ),
             }
         }

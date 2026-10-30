@@ -22,7 +22,8 @@ fn publish_fixture(root: &Path, names: &[&str]) {
     for name in names {
         fixture_browser(&out, name, &format!("skein-test-{name}"));
     }
-    let staged = browsers::verify(&out).expect("a fixture browser passes the check");
+    let staged = browsers::verify(&out, browsers::DEFAULT_FILL_CAP)
+        .expect("a fixture browser passes the check");
     let store = PathBuf::from(browsers::store_dir());
     fs::create_dir_all(&store).unwrap();
     browsers::publish(&out, &store, &staged).expect("published");
@@ -439,5 +440,225 @@ fn a_browser_request_is_answered_without_the_owner() {
     assert!(
         state("web-main", "a22").is_none(),
         "a box's second browser request was taken in the same pass: {did:?}"
+    );
+}
+
+/// Start box `name` with `agent` as its agent, wait for it to write `/tmp/<report>.report`, and
+/// place it the way a start does, so skein's crossing can find it. Returns the anchor, and leaves
+/// the box running: [`end_box`] stops it.
+fn start_running(name: &str, sandbox_home: &Path, agent: &str, report: &str) -> (u32, String) {
+    let launched = own_sandbox(FLEET)
+        .exec(
+            &session_script(name, "skein-agent", agent),
+            Duration::from_secs(60),
+        )
+        .unwrap_or_else(|e| panic!("start {name}: {e}"));
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+    let report_path = PathBuf::from(format!("{}/tmp/{report}.report", box_root(name)));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !report_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let said = fs::read_to_string(&report_path).unwrap_or_default();
+    let ns_start = sh(&format!(
+        "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
+    ))
+    .trim()
+    .parse::<u64>()
+    .expect("the anchor's start time");
+    record_place(
+        name,
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            ns_pid: anchor,
+            home: sandbox_home.display().to_string(),
+            tree: "/".into(),
+            sock: box_sock(name),
+            generation: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .expect("a boot id")
+                .trim()
+                .to_string(),
+            ns_start,
+            ..Default::default()
+        },
+    )
+    .expect("place the box");
+    (anchor, said)
+}
+
+fn end_box(name: &str, anchor: u32) {
+    forget_place(name);
+    let limits = fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+    let _ = Command::new("tmux")
+        .args(["-S", &box_sock(name), "kill-server"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    anchor_gone(anchor);
+    if limits.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .status();
+    }
+}
+
+/// The links in a browsers directory, read from the sandbox's side without following any.
+fn links_in(dir: &Path) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let to = fs::read_link(e.path()).ok()?;
+            Some((
+                e.file_name().to_string_lossy().into_owned(),
+                to.display().to_string(),
+            ))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// **A browser skein fetches reaches the boxes running now, without a restart: each links it
+/// inside itself, as itself, by the kit's own function; a link a box planted stays its own; a box
+/// whose browsers directory is a link gets the links where that link leads inside the box, never
+/// where it leads from outside; and a box that is not running is left for its next start**
+/// (SKEIN-1355).
+///
+/// Box A starts, runs the kit and plants its own link at `chromium-7`, the name the fill will
+/// publish. Box B makes its browsers directory a link into its own `/tmp`, then runs the kit. Box C
+/// is placed but not running. The fill is the real one, with a fixture standing where `npx` stands,
+/// and it stages `chromium-7` and `ffmpeg-8`. Neither A nor B is restarted.
+///
+/// What would make each assertion fail:
+///   * A's `ffmpeg-8` and B's two links: the post-fill pass skipped (`fill_with` not calling
+///     `link_running_boxes`), or the kit's function no longer cut whole out of the kit.
+///   * A's `chromium-7` still `/tmp/a-own`: a pass that replaces what is at an entry's name.
+///   * nothing at B's link target as seen from the sandbox: the link run from the sandbox's side
+///     with the box's home as `HOME` rather than inside the box, which follows B's link out to the
+///     sandbox's own `/tmp`.
+///   * A's anchor the same process: a pass that restarts boxes to link them.
+///   * C among the later ones, and "Linked now in 2": a pass that counts a box that is not running.
+#[test]
+fn a_fetched_browser_reaches_running_boxes_without_a_restart() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so linking a fetched \
+             browser into running boxes was NOT exercised",
+        );
+    }
+    let (root, sandbox_home, _pins) = browser_fleet("pwlive");
+    publish_fixture(&root, &["chromium-1"]);
+    let store = PathBuf::from(browsers::store_dir());
+    let to = |name: &str| store.join(name).display().to_string();
+    let kit = skein::fleet::box_provision_path();
+    let pw = "\"$HOME/.cache/ms-playwright\"";
+    let start =
+        format!("mkdir -p /tmp/m && SKEIN_STARTUP_MARKERS=/tmp/m bash '{kit}' >/tmp/kit.out 2>&1");
+    // A name of B's own, inside B's private `/tmp`, that would be the SANDBOX's `/tmp` if anything
+    // followed B's link from out here. Made, empty, on the sandbox's side too, so a pass that
+    // followed the link from here would find a directory to write into rather than stopping at a
+    // dangling link, and is caught by what it wrote.
+    let b_farm = format!("/tmp/skein-test-pwlive-{}", std::process::id());
+    let _ = fs::remove_dir_all(&b_farm);
+    fs::create_dir_all(&b_farm).unwrap();
+
+    let (a, a_said) = start_running(
+        "pwlive-main",
+        &sandbox_home,
+        &format!(
+            "{start}; ln -s /tmp/a-own {pw}/chromium-7; echo ready > /tmp/r.tmp && \
+             mv /tmp/r.tmp /tmp/r.report; exec sleep 300"
+        ),
+        "r",
+    );
+    let (b, b_said) = start_running(
+        "pwlive-two",
+        &sandbox_home,
+        &format!(
+            "rm -rf {pw}; mkdir -p \"$HOME/.cache\" '{b_farm}'; ln -s '{b_farm}' {pw}; {start}; \
+             echo ready > /tmp/r.tmp && mv /tmp/r.tmp /tmp/r.report; exec sleep 300"
+        ),
+        "r",
+    );
+    record_place(
+        "pwlive-gone",
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            home: sandbox_home.display().to_string(),
+            tree: "/".into(),
+            sock: box_sock("pwlive-gone"),
+            ..Default::default()
+        },
+    )
+    .expect("place the stopped box");
+
+    let a_farm = PathBuf::from(box_root("pwlive-main")).join("home/.cache/ms-playwright");
+    let b_own = PathBuf::from(box_root("pwlive-two")).join(b_farm.trim_start_matches('/'));
+    let a_before = links_in(&a_farm);
+    let b_before = links_in(&b_own);
+
+    let said = browsers::fill_with(
+        FLEET,
+        "chromium@1.62.0",
+        &fixture_fetch(&root, "mkdir -p \"$PLAYWRIGHT_BROWSERS_PATH/ffmpeg-8\";"),
+    );
+    let a_after = links_in(&a_farm);
+    let b_after = links_in(&b_own);
+    let host_side = links_in(Path::new(&b_farm));
+    let a_alive = Path::new(&format!("/proc/{a}")).exists();
+    end_box("pwlive-main", a);
+    end_box("pwlive-two", b);
+    forget_place("pwlive-gone");
+    let _ = fs::remove_dir_all(&b_farm);
+
+    let said = said.unwrap_or_else(|e| panic!("the fixture fill failed: {e}"));
+    assert_eq!(a_said.trim(), "ready", "box A did not come up");
+    assert_eq!(b_said.trim(), "ready", "box B did not come up");
+    assert_eq!(
+        a_before,
+        [
+            ("chromium-1".to_string(), to("chromium-1")),
+            ("chromium-7".to_string(), "/tmp/a-own".to_string()),
+        ],
+        "box A's start did not link the store, or its plant did not land"
+    );
+    assert_eq!(
+        b_before,
+        [("chromium-1".to_string(), to("chromium-1"))],
+        "box B's start did not link the store through its own link"
+    );
+    assert_eq!(
+        a_after,
+        [
+            ("chromium-1".to_string(), to("chromium-1")),
+            ("chromium-7".to_string(), "/tmp/a-own".to_string()),
+            ("ffmpeg-8".to_string(), to("ffmpeg-8")),
+        ],
+        "running box A did not gain the fetched browser, or lost its own link: {said}"
+    );
+    assert!(
+        host_side.is_empty(),
+        "something followed box B's link from the sandbox's side and wrote into {b_farm} there: \
+         {host_side:?}"
+    );
+    assert_eq!(
+        b_after,
+        [
+            ("chromium-1".to_string(), to("chromium-1")),
+            ("chromium-7".to_string(), to("chromium-7")),
+            ("ffmpeg-8".to_string(), to("ffmpeg-8")),
+        ],
+        "running box B did not gain the fetched browsers inside itself: {said}"
+    );
+    assert!(a_alive, "box A was restarted to link the browser");
+    assert!(
+        said.contains(
+            "Linked now in 2 running box(es); 1 other box(es) link it at their next start."
+        ),
+        "{said}"
     );
 }

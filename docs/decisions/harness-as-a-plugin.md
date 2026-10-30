@@ -1,5 +1,10 @@
 # Research, parked: which part of the box harness could be a Claude Code plugin
 
+**Superseded on 2026-10-30 by [skein-is-a-mod.md](skein-is-a-mod.md).** skein's plugin now carries
+a hooks module. Both blockers below were measured there: a `--plugin-dir` hooks module loads in a
+tmux-launched box with no confirmation screen, and Codex keeps the command hooks as its baseline.
+What follows is the research as it was parked, kept for its reasoning.
+
 **Decision.** Parked, with no code written. About half of skein's box harness could be packaged as a
 Claude Code plugin and half provably cannot. Two blockers are to be tested before any of it is
 built. This record is the research, kept so the question is not re-derived from scratch; the

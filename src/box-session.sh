@@ -2965,8 +2965,9 @@ unset SKEIN_BOX_VERSIONS
 # skein fetches each browser version once, from Playwright's own download, into the fleet root's
 # `.skein/browsers` (SKEIN-1341, `fleet::browsers`). Bound read-only into EVERY box, the workshop box
 # included, for the toolchain's reason above. The box's own `~/.cache/ms-playwright` holds one link
-# per entry, which the kit makes inside the box as it starts; the session block below names that
-# directory as `PLAYWRIGHT_BROWSERS_PATH`. A version the store lacks still downloads there, privately.
+# per entry, made inside the box by `.skein/skein-link-browsers.sh`: the kit runs it as the box
+# starts, and skein runs it in each running box after a fill (SKEIN-1355). The session block below
+# names that directory as `PLAYWRIGHT_BROWSERS_PATH`. A version the store lacks still downloads there, privately.
 # Made here if missing, so a box started before the first fetch still sees the ones that come later.
 browsers="${SKEIN_FLEET_ROOT:-/boxes}/.skein/browsers"
 if mkdir -p -- "$browsers" 2>/dev/null; then

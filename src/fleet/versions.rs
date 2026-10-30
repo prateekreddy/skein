@@ -1338,6 +1338,44 @@ mod tests {
         depot::make_writable(&dir);
     }
 
+    /// **CI checks the mod against the version the fleet rolls out: both read
+    /// `src/claude-code.version`, and nothing writes the number a second time** (SKEIN-1380).
+    ///
+    /// What would make it fail: the `plugin` job naming a version of its own again (a
+    /// `CLAUDE_CODE_VERSION:` literal, or the pin's number anywhere in the workflow), or no longer
+    /// reading the file into `CLAUDE_CODE_VERSION`; a pin file that is not one plain version.
+    #[test]
+    fn the_ci_pin_is_the_fleets_pin() {
+        let pin = pinned("claude").expect("claude is pinned");
+        assert!(
+            version_is_nameable(pin),
+            "src/claude-code.version is {pin:?}"
+        );
+        let ci = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+        )
+        .expect("the CI workflow");
+        let job = ci
+            .split("\n  plugin:\n")
+            .nth(1)
+            .expect("the CI workflow has no `plugin` job");
+        let job = job.split("\n\n").next().unwrap_or(job);
+        assert!(
+            job.lines().any(|l| l.contains("src/claude-code.version")
+                && l.contains("CLAUDE_CODE_VERSION=")
+                && l.contains("GITHUB_ENV")),
+            "the plugin job does not read CLAUDE_CODE_VERSION from src/claude-code.version:\n{job}"
+        );
+        assert!(
+            !ci.contains("CLAUDE_CODE_VERSION:"),
+            "the workflow sets CLAUDE_CODE_VERSION to a value of its own"
+        );
+        assert!(
+            !ci.contains(pin),
+            "the workflow writes the pin's number {pin} itself, beside the file it should read"
+        );
+    }
+
     /// **The restart rule: an idle box that is behind is restarted; a working one, one waiting on a
     /// person, one whose state is unknown, or one behind on nothing, is not; and without an ask the
     /// grace must pass first.**

@@ -32,7 +32,10 @@ puts it.
 - Download caches are a repo's. Each repo has one, at `repos/<id>/store/cache` beside its store,
   shared by that repo's boxes for cargo's registry and git downloads, npm's cache with `_npx` in
   it, pip's and uv's caches, and pnpm's store. The launcher binds it back through the cover, the way
-  it binds `store/shared-home`, and points each tool at it. A box of another repo cannot see it. A
+  it binds `store/shared-home`, and points each tool at it. A command skein runs into a box by a
+  crossing, rather than in its session, takes the same values from the box's session (SKEIN-1354),
+  so a crossing's cargo and npm use the repo's cache too, and a box the launcher gave no cache keeps
+  its own in its crossings as well. A box of another repo cannot see it. A
   repo whose store is kept elsewhere by `skein add --store` has none, for the reason
   [`shared-home-outside-claude.md`](shared-home-outside-claude.md) gives for its shared files: no
   box can see beside such a store. Its boxes keep their own caches.
@@ -59,7 +62,13 @@ puts it.
   `share_paths` list comes back.
 - The repo cache: bwrap test `a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`
   (`tests/isolation_bwrap/repocache.rs`); its bind is `src/box-session.sh:2546` and the tools are
-  pointed at it at `src/box-session.sh:3554`.
+  pointed at it at `src/box-session.sh:3555`.
+- A crossing points the tools where the session does: fleet tests
+  `a_crossing_into_a_box_uses_its_repos_download_cache` and
+  `a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names`
+  (`tests/fleet_launch/environment.rs`); the names are read out of the launcher by
+  `place::session_cache_names`, pinned by
+  `the_names_a_crossing_takes_for_the_repo_cache_are_the_session_blocks` (`src/place/crossing.rs`).
 - The cache is made only as a real directory: test
   `a_managed_store_gets_a_repo_cache_and_a_link_there_is_refused` (`src/kit.rs`).
 - Cleaning: tests `a_repo_cache_is_cleaned_only_with_all_its_boxes_stopped` and
