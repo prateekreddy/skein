@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:512"]
+["CONTRIBUTING.md:513"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:526"]
+["CONTRIBUTING.md:527"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:557"]
+["CONTRIBUTING.md:558"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -817,84 +817,84 @@ cited_by = ["docs/threat-model.md"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2021"]
-line = "binds+=(--remount-ro \"$npm_prefix\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:2023"]
-line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:2309"]
+["src/box-session.sh:2193"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2356"]
+["src/box-session.sh:2240"]
 line = "binds+=(--tmpfs \"$fleet_root_dir\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2399"]
+["src/box-session.sh:2283"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2467"]
+["src/box-session.sh:2351"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2491"]
+["src/box-session.sh:2375"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2516"]
+["src/box-session.sh:2400"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2524"]
+["src/box-session.sh:2408"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2533"]
+["src/box-session.sh:2417"]
 line = "box_shared_home=\"${SKEIN_BOX_STORE%/*}/shared-home\""
 cited_by = ["docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2665"]
+["src/box-session.sh:2549"]
 line = "[ -n \"$repo_cache\" ] && binds+=(--bind \"$repo_cache\" \"$repo_cache\")"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2720"]
+["src/box-session.sh:2604"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2721"]
+["src/box-session.sh:2605"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2784"]
+["src/box-session.sh:2668"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3021"]
+["src/box-session.sh:2871"]
+line = "binds+=(--remount-ro \"$npm_prefix\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2873"]
+line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:3023"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3149"]
+["src/box-session.sh:3151"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3592"]
+["src/box-session.sh:3594"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3656"]
+["src/box-session.sh:3658"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3699"]
+["src/box-session.sh:3701"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3729"]
+["src/box-session.sh:3731"]
 line = "export CARGO_HOME=\"$repo_cache/cargo\" npm_config_cache=\"$repo_cache/npm\" \\"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
