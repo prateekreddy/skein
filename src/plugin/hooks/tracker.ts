@@ -15,7 +15,9 @@
 // never heard. So once a session, as soon as the tracker's `held` is listed, the module asks it
 // itself: through `$.tool.call`, which runs every hook but the caller's, so the `tool.call` hook
 // below hears the answer exactly as it hears the model's own `held`. It is asked only where the
-// permission check already allows it, so no dialog ever opens for it (SKEIN-1400).
+// permission check already allows it, so no dialog ever opens for it (SKEIN-1400). `held` names an
+// item only by its id, so each one this session knows no better is then looked up once with the
+// tracker's read-only `why`, on the same rule; where that is not allowed it keeps its id (SKEIN-1401).
 //
 // The compaction keeper (keeper.ts) reads the same list, through `heldNow`.
 
@@ -87,7 +89,34 @@ async function seed($: Engine): Promise<void> {
   const { decision } = await $.tool.check({ tool: held, input: {} })
   if (decision !== 'allow') return
   // Heard by the `tool.call` hook in `register`, like the model's own `held`.
-  await $.tool.call({ tool: held })
+  const done = await $.tool.call({ tool: held })
+  if (done.deny !== undefined || done.isError === true) return
+  await nameSeeded($, held, done.text ?? '')
+}
+
+/**
+ * Each lease `held` answered that this session knew no name for, named by one `why` (SKEIN-1401),
+ * heard by the same `tool.call` hook. Only where allowed.
+ *
+ * Driven by `held`'s own answer, which also gives the project `why` needs: every read of `$.state`
+ * in one dispatch reads one moment, so the ledger read here is as it stood before `held` was folded
+ * in, which is exactly the names already known.
+ */
+async function nameSeeded($: Engine, held: `mcp__${string}__held`, text: string): Promise<void> {
+  const why = `${held.slice(0, -'held'.length)}why` as `mcp__${string}__why`
+  if (!(await $.tool.list()).some(t => t.name === why)) return
+  const listed = field(parse(text), 'leases')
+  if (!Array.isArray(listed)) return
+  const known = (await read($, leases))?.items ?? []
+  for (const l of listed) {
+    const workItemId = str(l, 'workItemId')
+    const projectId = str(l, 'projectId')
+    if (workItemId === null || projectId === null || field(l, 'thisSession') === false) continue
+    if (known.some(k => k.workItemId === workItemId && k.readableId !== null)) continue
+    const input = { projectId, workItemId }
+    if ((await $.tool.check({ tool: why, input })).decision !== 'allow') continue
+    await $.tool.call({ tool: why, ...input })
+  }
 }
 
 /** The tracker's `held`, by the name the engine lists it under. */
@@ -135,6 +164,15 @@ async function heard($: Engine, tool: string, input: Record<string, unknown>, te
       }
     } else if ((tool === 'complete' || tool === 'release') && id !== null) {
       items = items.filter(l => l.workItemId !== id)
+    } else if (tool === 'why') {
+      // The tracker's own word for an item: its readable id and title, where this session holds it.
+      const item = field(answer, 'item')
+      const about = str(item, 'workItemId')
+      items = items.map(l =>
+        l.workItemId === about
+          ? { ...l, readableId: str(item, 'readableId') ?? l.readableId, title: str(item, 'title') ?? l.title }
+          : l,
+      )
     } else if (tool === 'held') {
       const listed = field(answer, 'leases')
       if (Array.isArray(listed)) {

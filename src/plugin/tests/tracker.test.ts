@@ -139,13 +139,20 @@ test("a subagent's turn is not one of the box's turns", async ($, on) => {
 const HELD = 'mcp__plugin_sync_sync__held'
 const MINE = '9ed966bb-2e95-461d-8de1-883eb9763392'
 const THEIRS = '5b14e31d-6ed0-4f5f-8b9c-8b7aca7603a3'
+const WHY = 'mcp__plugin_sync_sync__why'
+const PROJECT = '5b00388b-e528-4770-94f5-c0e9dccfcfb5'
 
-/** The tracker beneath the plugin, whose `held` answers one lease of this session's and one of another's. */
+/**
+ * The tracker beneath the plugin, whose `held` answers one lease of this session's and one of
+ * another's, and whose `why` names an item. `w.tools` gets each call, `why`'s with what it named.
+ */
 function holding(on: On, w: World): void {
   on('tool.call', (_, e) => {
-    w.tools.push(String(e.tool))
+    const input = e as Record<string, unknown>
+    w.tools.push(e.tool === WHY ? `${WHY} ${String(input.projectId)} ${String(input.workItemId)}` : String(e.tool))
     const lease = (workItemId: string, thisSession: boolean) => ({
       workItemId,
+      projectId: PROJECT,
       epoch: 1,
       state: 'held',
       claimedAt: new Date(NOW - 60000).toISOString(),
@@ -153,20 +160,38 @@ function holding(on: On, w: World): void {
       expiresAt: new Date(NOW + 600000).toISOString(),
       thisSession,
     })
-    const text = e.tool === HELD ? JSON.stringify({ leases: [lease(MINE, true), lease(THEIRS, false)] }) : '{"ok":true}'
+    const named = {
+      item: {
+        workItemId: String(input.workItemId),
+        readableId: 'SKEIN-1400',
+        title: 'The tracker ledger knows a claim by name',
+      },
+      claimable: false,
+      reasons: [],
+    }
+    const text =
+      e.tool === HELD
+        ? JSON.stringify({ leases: [lease(MINE, true), lease(THEIRS, false)] })
+        : e.tool === WHY
+          ? JSON.stringify(named)
+          : '{"ok":true}'
 
     return { result: { content: [{ type: 'text', text }] }, text }
   })
 }
 
 /** The tools the engine lists, read again on every ask, and the permission verdict for each. */
-function engine(on: On, listed: { names: string[] }, decision: 'allow' | 'ask' = 'allow'): string[] {
+function engine(
+  on: On,
+  listed: { names: string[] },
+  decision: 'allow' | 'ask' | ((tool: string) => 'allow' | 'ask') = 'allow',
+): string[] {
   const checked: string[] = []
   on('tool.list', () => ({ value: listed.names.map(name => ({ name, description: '', mcp: name.startsWith('mcp__') })) }))
   on('tool.check', (_, e) => {
     checked.push(e.tool)
 
-    return { decision }
+    return { decision: typeof decision === 'function' ? decision(e.tool) : decision }
   })
 
   return checked
@@ -219,4 +244,42 @@ test('held is not asked where the permission check would put it to someone', asy
 
   expect(checked).toEqual([HELD])
   expect(w.tools).toEqual([])
+})
+
+// Named, not numbered (SKEIN-1401): an item `held` names only by its id is looked up once with the
+// tracker's read-only `why`, on the same permission rule, and keeps its id where that is not allowed.
+
+const COMPACT = { trigger: 'manual', messages: [{ role: 'user', text: 'long', toolUses: [] }] } as const
+
+test("a claim made before skein loaded is named by the tracker's why, once, in the compaction", async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: NOW })
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
+  holding(on, w)
+  engine(on, { names: [HELD, WHY] })
+  w.stats.set(WATCH, NOW)
+
+  await start($)
+  for (let i = 0; i < 2; i++) await $.turn.complete(ENDED)
+  const kept = (await $.session.compact(COMPACT)).messages?.at(-1)?.text ?? ''
+
+  expect(w.tools).toEqual([HELD, `${WHY} ${PROJECT} ${MINE}`])
+  expect(kept).toContain(`- SKEIN-1400: The tracker ledger knows a claim by name (${MINE})`)
+})
+
+test('an item why may not be asked about keeps its id, and why is not called', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: NOW })
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
+  holding(on, w)
+  const checked = engine(on, { names: [HELD, WHY] }, tool => (tool === WHY ? 'ask' : 'allow'))
+  w.stats.set(WATCH, NOW)
+
+  await start($)
+  const kept = (await $.session.compact(COMPACT)).messages?.at(-1)?.text ?? ''
+
+  // held's query, held's call (a call is checked again as it runs), then why's query, which asks.
+  expect(checked).toEqual([HELD, HELD, WHY])
+  expect(w.tools).toEqual([HELD])
+  expect(kept).toContain(`- 9ed966bb (${MINE})`)
 })
