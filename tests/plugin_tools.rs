@@ -988,13 +988,25 @@ impl Cleanable {
         others: (u64, u64),
         quiet: Option<String>,
     ) {
+        self.listed_ago(b, box_root, others, quiet, 30)
+    }
+
+    /// [`Cleanable::listed`], with the list itself written `ago` seconds in the past.
+    fn listed_ago(
+        &self,
+        b: &Box_,
+        box_root: &std::path::Path,
+        others: (u64, u64),
+        quiet: Option<String>,
+        ago: i64,
+    ) {
         let item = |path: std::path::PathBuf, kind: &str| json!({"path": path.display().to_string(), "shown": "x", "kind": kind, "bytes": 4096});
         let file = json!({
             "at": stamp_ago(5),
             "disk": {"mb": 2048, "limit_mb": 10240, "fleet": "under", "fleet_over_by_mb": 0},
             "asks": [],
             "clean": {
-                "at": stamp_ago(30),
+                "at": stamp_ago(ago),
                 "box_root": box_root.display().to_string(),
                 "items": [
                     item(self.root.join("home/.cache/pip"), "download cache"),
@@ -1277,4 +1289,59 @@ fn the_command_line_clean_is_the_same_tool() {
         "{done}"
     );
     assert!(!c.root.join("home/.cache/pip").exists());
+}
+
+/// **A list skein wrote more than fifteen minutes ago is acted on for nothing**, own items and the
+/// shared cache alike, however fresh the word about the repo's other boxes (SKEIN-1356). skein
+/// lists every five minutes, so a list that old means skein is not looking, and what it says may no
+/// longer be true: a build directory may since have become tracked work.
+///
+/// What would make it fail: `clean_rows` treating every list as fresh (`stale = False`), which
+/// removes the own cache and the shared one from a list twenty minutes old. Watched: with exactly
+/// that, the own-cache removal went ahead and this failed.
+#[test]
+fn a_list_skein_wrote_long_ago_is_refused_for_everything() {
+    let b = Box_::new("skein-tools-it-clean-stale");
+    let c = Cleanable::plant(&b);
+    // The sibling word is fresh; only the list is old.
+    c.listed_ago(&b, &c.root, (0, 0), Some(stamp_ago(10)), 20 * 60);
+
+    let (got, said) = clean_said(&b, &[c.pip()]);
+    assert_eq!(got["error"], "not-safe-now", "{got} {said}");
+    assert!(
+        said.contains("has not listed this box's disk lately"),
+        "{said}"
+    );
+    assert!(
+        c.root.join("home/.cache/pip/wheels/x.whl").exists(),
+        "{got}"
+    );
+
+    let shared = c.cache.join("pip").display().to_string();
+    let (got, said) = clean_said(&b, std::slice::from_ref(&shared));
+    assert_eq!(got["error"], "not-safe-now", "{got} {said}");
+    assert!(said.contains("has not listed this cache lately"), "{said}");
+    assert!(c.cache.join("pip/http/x").exists(), "{got}");
+
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let rows = listing["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listing}"));
+    assert_eq!(rows.len(), 5, "{listing}");
+    for r in rows {
+        assert_eq!(r["safe_now"], false, "{r}");
+        if r["kind"] != "scratchpad" {
+            assert!(
+                r["why_not"]
+                    .as_str()
+                    .is_some_and(|w| w.contains("has not listed")),
+                "{r}"
+            );
+        }
+    }
+    assert_eq!(listing["removable_now_bytes"], 0, "{listing}");
+    assert_eq!(
+        listing["shared_repo_cache"]["safe_to_clean_now"], false,
+        "{listing}"
+    );
 }
