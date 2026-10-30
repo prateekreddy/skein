@@ -189,13 +189,13 @@ pub(crate) fn turn_state(name: &str, agent: &str) -> TurnState {
     }
 }
 
-/// The shape of skein's mod signal this build reads: `SIGNAL_SHAPE` in
-/// `src/plugin/hooks/attention.ts`. A file of another shape is read as no signal, so a newer mod
-/// beside an older cockpit falls back to the inference that cockpit already has.
+/// The shape of skein's mod signal this build reads: the shape tag `src/plugin/hooks/attention.ts`
+/// writes. A file of another shape is read as no signal, so a newer mod beside an older cockpit
+/// falls back to the inference that cockpit already has.
 pub(crate) const ENGINE_SHAPE: &str = "attention-1";
 
-/// How long the mod's word is believed after its last heartbeat: three of its `HEARTBEAT_MS`
-/// (30s), so one late beat, or one torn read of a file being rewritten, does not flicker the row.
+/// How long the mod's word is believed after its last heartbeat: three of its heartbeats (30s
+/// each), so one late beat, or one torn read of a file being rewritten, does not flicker the row.
 /// A session that died stops beating, and within this the board is back on its own reading.
 pub(crate) const ENGINE_FRESH_SECS: i64 = 90;
 

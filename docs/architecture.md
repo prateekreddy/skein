@@ -175,6 +175,14 @@ what it was. Given a level observation `(screen, t_level)` and an edge `(status,
 Rule 3's outcome list is load-bearing: a *progress* edge must never override a level, or a stale hook
 re-latches the bug this primitive exists to prevent.
 
+**Above fusion, the engine's own word, while it is still speaking.** A Claude box running skein's
+mod writes the state its engine is in, entered on the event itself (a permission a person must
+answer, a question opened, a turn's end and why), with a heartbeat. While the heartbeat is fresh
+that state is shown, with provenance `engine`, and fusion is not consulted; past it, or with no
+such signal, fusion decides as above. It is not an edge in fusion's sense: the heartbeat makes it
+re-readable and self-healing, which is what a level is, and a session that dies is seen to stop.
+Its six things are declared on `signals::EngineSignal` (SKEIN-1360).
+
 **Where the disclosure law is currently violated, and it is rule 3.** Provenance is a *separate*
 function from fusion — it reports `hooks only`, `screen lost`, `screen unread` on its own conditions.
 Rules 1, 2 and 4 land on one of those, so they disclose. **Rule 3 does not**: the screen is fresh and
@@ -1428,7 +1436,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
    written over a root. **Built**: the launcher is *given* the mount set rather than learning it, as
-   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet/start.rs:156`), and each box gets back only its
+   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet/start.rs:161`), and each box gets back only its
    own repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that

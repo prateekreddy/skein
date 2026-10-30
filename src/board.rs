@@ -224,6 +224,9 @@ pub fn load_views() -> Vec<BoxView> {
                 raw_pane.as_ref(),
                 live == Some(Liveness::Running),
             );
+            // Whether skein's mod is reporting from inside the session, said quietly on the row.
+            let engine_health =
+                engine_health(&agent, &engine, live == Some(Liveness::Running)).to_string();
             // Read once and asked twice below: whether skein placed this box at all, and which
             // cover it was placed under.
             let record = shared_record(&name);
@@ -258,8 +261,7 @@ pub fn load_views() -> Vec<BoxView> {
                 hook_health,
                 screen_health: screen.to_string(),
                 status_from: status_from.key().to_string(),
-                engine_health: engine_health(&agent, &engine, live == Some(Liveness::Running))
-                    .to_string(),
+                engine_health,
                 // Two file reads against the repo's store — no box is woken to answer this, which is
                 // what makes it affordable on a signal computed for every row on every snapshot.
                 docs_update: repo
