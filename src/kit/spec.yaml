@@ -29,14 +29,15 @@ commands:
       description: Link skein store into the clone, then check out the box branch
 
 memory: |
-  ## skein workspace (clone + shared store)
+  ## skein workspace (box, checkout and shared store)
 
-  This sandbox is a private `--clone` of the repo (isolated code, full git); the
-  store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
-  shared mount linked in at startup and is LIVE across every parallel sandbox.
+  This box is one of several in skein's fleet sandbox. It has its own checkout of the
+  repo on its own branch, with full git, and its own build output. The repo's other
+  boxes share its store (memory, skills, mailbox) and `~/shared`, live; boxes of
+  other repos see none of it.
   Re-opening a box attaches to its persistent `skein-agent` tmux session; `skein-shell`
-  is the separate persistent shell. UI reloads reattach to the live process; only a
-  missing tmux process falls back to Claude's `--continue` or Codex's `resume --last`.
+  is the separate persistent shell. Reloading the cockpit reattaches to the live process;
+  only a missing tmux process falls back to Claude's `--continue` or Codex's `resume --last`.
   Cross-provider takeover creates a single-runtime replacement box and restores an
   immutable worktree/context snapshot before its agent starts; the source remains intact.
 
