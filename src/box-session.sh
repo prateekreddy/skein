@@ -1906,124 +1906,8 @@ binds+=(--bind-fd "${state_at##*/}" "$HOME/.local/state")
 #
 # Conditional because it is an absolute path on a substrate that need not have it: a `--ro-bind` of
 # a missing source fails the whole launch.
-#
-# --- the fleet's agent CLIs: each one a version skein fetched, tested and rolled out (SKEIN-1372) --
-#
-# `fleet::versions` keeps each CLI version as its own immutable npm prefix in the depot,
-# `.skein/depot/agent-cli/<runtime>@<version>`, and skein names the rolled-out one for this box in
-# `SKEIN_BOX_VERSIONS` (`claude=claude@2.1.314 codex=codex@0.170.0`). When it names any, the prefix
-# above is not bound whole: a read-only tmpfs takes its place, holding everything of the sandbox's
-# own prefix read-only as before, except that each named CLI's package directory is bound from its
-# depot entry and its command is the link npm made in that entry. So a box runs exactly the version
-# skein rolled out, at the path its PATH already names, and a rollout changes nothing under a running
-# box: it changes what the NEXT start binds, and the box is shown "restart to apply". A CLI with
-# nothing rolled out is the sandbox's own copy, as before. What was bound is reported on the
-# `SKEIN_VERSIONS` line below, and the placement record keeps it.
-#
-# `SKEIN_NPM_PREFIX` exists for the fleet tests, which cannot write the real prefix; skein never
-# sets it, and it names where the projection goes, not anything a box chooses.
-npm_prefix="${SKEIN_NPM_PREFIX:-/usr/local/share/npm-global}"
-depot="${SKEIN_FLEET_ROOT:-/boxes}/.skein/depot"
-# The whole depot read-only in EVERY box, the workshop box included, for the reason the toolchain
-# and browser binds below give: a covered box sees `.skein` read-only already, but the workshop box
-# and an uncovered one see the fleet root as the sandbox does, and an entry's directory keeps its
-# owner's write bit. Made here if missing, so a box started before the first fill still sees it.
-if mkdir -p -- "$depot" 2>/dev/null; then
-  binds+=(--ro-bind "$depot" "$depot")
-fi
-versions_bound=""
-rustup_home=""
-# `box_version <key>`: the entry `SKEIN_BOX_VERSIONS` names for the key, when it is the shape of an
-# entry and a real directory of the depot rather than a link; fails otherwise. Read into an array,
-# so nothing in the value is globbed.
-box_version() {
-  local kv entry dir="$depot/agent-cli"
-  local -a kvs=()
-  read -r -a kvs <<<"${SKEIN_BOX_VERSIONS-}"
-  case "$1" in rust | rust-repo) dir="$depot/rust-toolchain" ;; esac
-  for kv in "${kvs[@]}"; do
-    [ "${kv%%=*}" = "$1" ] || continue
-    entry="${kv#*=}"
-    case "$entry" in "" | .* | *..* | */* | *[!A-Za-z0-9._@+-]*) return 1 ;; esac
-    [ -d "$dir/$entry" ] && [ ! -L "$dir/$entry" ] || return 1
-    printf '%s' "$entry"
-    return 0
-  done
-  return 1
-}
-# The CLIs skein manages, `<runtime> <package> <command>`: `fleet::versions::CLIS`, which a test
-# holds to this table.
-skein_clis=("claude @anthropic-ai/claude-code claude" "codex @openai/codex codex")
-cli_rows=()
-for row in "${skein_clis[@]}"; do
-  read -r rt pkg cmd <<<"$row"
-  entry="$(box_version "$rt")" || continue
-  # The command must be the link npm made into the entry's own package, as the entry's test found it.
-  link="$(readlink -- "$depot/agent-cli/$entry/bin/$cmd" 2>/dev/null)" || continue
-  case "$link" in "../lib/node_modules/$pkg/"*) ;; *) continue ;; esac
-  case "$link" in */../*) continue ;; esac
-  [ -d "$depot/agent-cli/$entry/lib/node_modules/$pkg" ] || continue
-  cli_rows+=("$rt $entry $pkg $cmd $link")
-done
-if [ -d "$npm_prefix" ] && [ "${#cli_rows[@]}" -gt 0 ]; then
-  managed_pkgs=" "; managed_cmds=" "
-  for row in "${cli_rows[@]}"; do
-    read -r rt entry pkg cmd link <<<"$row"
-    managed_pkgs+="$pkg "; managed_cmds+="$cmd "
-  done
-  binds+=(--tmpfs "$npm_prefix" --dir "$npm_prefix/bin" --dir "$npm_prefix/lib/node_modules")
-  # `share_item <path>`: the sandbox's own item, at its own path, read-only; a link as the same link.
-  share_item() {
-    if [ -L "$1" ]; then
-      binds+=(--symlink "$(readlink -- "$1")" "$1")
-    else
-      binds+=(--ro-bind "$1" "$1")
-    fi
-  }
-  for item in "$npm_prefix"/* "$npm_prefix"/.[!.]*; do
-    [ -e "$item" ] || [ -L "$item" ] || continue
-    case "${item##*/}" in
-      bin)
-        for one in "$item"/* "$item"/.[!.]*; do
-          [ -e "$one" ] || [ -L "$one" ] || continue
-          case "$managed_cmds" in *" ${one##*/} "*) continue ;; esac
-          share_item "$one"
-        done ;;
-      lib)
-        for one in "$item"/* "$item"/.[!.]*; do
-          [ -e "$one" ] || [ -L "$one" ] || continue
-          [ "${one##*/}" = node_modules ] || { share_item "$one"; continue; }
-          for mod in "$one"/* "$one"/.[!.]*; do
-            [ -e "$mod" ] || [ -L "$mod" ] || continue
-            case "${mod##*/}" in
-              @*)
-                for scoped in "$mod"/*; do
-                  [ -e "$scoped" ] || [ -L "$scoped" ] || continue
-                  case "$managed_pkgs" in *" ${mod##*/}/${scoped##*/} "*) continue ;; esac
-                  share_item "$scoped"
-                done ;;
-              *)
-                case "$managed_pkgs" in *" ${mod##*/} "*) continue ;; esac
-                share_item "$mod" ;;
-            esac
-          done
-        done ;;
-      *) share_item "$item" ;;
-    esac
-  done
-  unset -f share_item
-  for row in "${cli_rows[@]}"; do
-    read -r rt entry pkg cmd link <<<"$row"
-    binds+=(--ro-bind "$depot/agent-cli/$entry/lib/node_modules/$pkg" "$npm_prefix/lib/node_modules/$pkg")
-    binds+=(--symlink "$link" "$npm_prefix/bin/$cmd")
-    versions_bound+=" $rt=$entry"
-  done
-  binds+=(--remount-ro "$npm_prefix")
-elif [ -d "$npm_prefix" ]; then
-  binds+=(--ro-bind "$npm_prefix" "$npm_prefix")
-fi
-unset cli_rows row rt pkg cmd entry link item one mod scoped managed_pkgs managed_cmds
-unset SKEIN_NPM_PREFIX
+[ -d /usr/local/share/npm-global ] \
+  && binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)
 # The conversation lives on the HOST, not in this VM.
 #
 # Everything else here is about isolating boxes from each other; this is about surviving the sandbox
@@ -2872,6 +2756,124 @@ if [ -n "$announce" ]; then
   echo "skein: $announce" >&2
 fi
 unset uncovered
+
+# --- the fleet's agent CLIs: each one a version skein fetched, tested and rolled out (SKEIN-1372) --
+#
+# `fleet::versions` keeps each CLI version as its own immutable npm prefix in the depot,
+# `.skein/depot/agent-cli/<runtime>@<version>`, and skein names the rolled-out one for this box in
+# `SKEIN_BOX_VERSIONS` (`claude=claude@2.1.314 codex=codex@0.170.0`). When it names any, a
+# read-only tmpfs is mounted over the prefix bound above, holding everything of the sandbox's
+# own prefix read-only as before, except that each named CLI's package directory is bound from its
+# depot entry and its command is the link npm made in that entry. So a box runs exactly the version
+# skein rolled out, at the path its PATH already names, and a rollout changes nothing under a running
+# box: it changes what the NEXT start binds, and the box is shown "restart to apply". A CLI with
+# nothing rolled out is the sandbox's own copy, as before. What was bound is reported on the
+# `SKEIN_VERSIONS` line below, and the placement record keeps it.
+#
+# `SKEIN_NPM_PREFIX` exists for the fleet tests, which cannot write the real prefix; skein never
+# sets it, and it names where the projection goes, not anything a box chooses.
+npm_prefix="${SKEIN_NPM_PREFIX:-/usr/local/share/npm-global}"
+depot="${SKEIN_FLEET_ROOT:-/boxes}/.skein/depot"
+# The whole depot read-only in EVERY box, the workshop box included, for the reason the toolchain
+# and browser binds below give: a covered box sees `.skein` read-only already, but the workshop box
+# and an uncovered one see the fleet root as the sandbox does, and an entry's directory keeps its
+# owner's write bit. Made here if missing, so a box started before the first fill still sees it.
+if mkdir -p -- "$depot" 2>/dev/null; then
+  binds+=(--ro-bind "$depot" "$depot")
+fi
+versions_bound=""
+rustup_home=""
+# `box_version <key>`: the entry `SKEIN_BOX_VERSIONS` names for the key, when it is the shape of an
+# entry and a real directory of the depot rather than a link; fails otherwise. Read into an array,
+# so nothing in the value is globbed.
+box_version() {
+  local kv entry dir="$depot/agent-cli"
+  local -a kvs=()
+  read -r -a kvs <<<"${SKEIN_BOX_VERSIONS-}"
+  case "$1" in rust | rust-repo) dir="$depot/rust-toolchain" ;; esac
+  for kv in "${kvs[@]}"; do
+    [ "${kv%%=*}" = "$1" ] || continue
+    entry="${kv#*=}"
+    case "$entry" in "" | .* | *..* | */* | *[!A-Za-z0-9._@+-]*) return 1 ;; esac
+    [ -d "$dir/$entry" ] && [ ! -L "$dir/$entry" ] || return 1
+    printf '%s' "$entry"
+    return 0
+  done
+  return 1
+}
+# The CLIs skein manages, `<runtime> <package> <command>`: `fleet::versions::CLIS`, which a test
+# holds to this table.
+skein_clis=("claude @anthropic-ai/claude-code claude" "codex @openai/codex codex")
+cli_rows=()
+for row in "${skein_clis[@]}"; do
+  read -r rt pkg cmd <<<"$row"
+  entry="$(box_version "$rt")" || continue
+  # The command must be the link npm made into the entry's own package, as the entry's test found it.
+  link="$(readlink -- "$depot/agent-cli/$entry/bin/$cmd" 2>/dev/null)" || continue
+  case "$link" in "../lib/node_modules/$pkg/"*) ;; *) continue ;; esac
+  case "$link" in */../*) continue ;; esac
+  [ -d "$depot/agent-cli/$entry/lib/node_modules/$pkg" ] || continue
+  cli_rows+=("$rt $entry $pkg $cmd $link")
+done
+if [ -d "$npm_prefix" ] && [ "${#cli_rows[@]}" -gt 0 ]; then
+  managed_pkgs=" "; managed_cmds=" "
+  for row in "${cli_rows[@]}"; do
+    read -r rt entry pkg cmd link <<<"$row"
+    managed_pkgs+="$pkg "; managed_cmds+="$cmd "
+  done
+  binds+=(--tmpfs "$npm_prefix" --dir "$npm_prefix/bin" --dir "$npm_prefix/lib/node_modules")
+  # `share_item <path>`: the sandbox's own item, at its own path, read-only; a link as the same link.
+  share_item() {
+    if [ -L "$1" ]; then
+      binds+=(--symlink "$(readlink -- "$1")" "$1")
+    else
+      binds+=(--ro-bind "$1" "$1")
+    fi
+  }
+  for item in "$npm_prefix"/* "$npm_prefix"/.[!.]*; do
+    [ -e "$item" ] || [ -L "$item" ] || continue
+    case "${item##*/}" in
+      bin)
+        for one in "$item"/* "$item"/.[!.]*; do
+          [ -e "$one" ] || [ -L "$one" ] || continue
+          case "$managed_cmds" in *" ${one##*/} "*) continue ;; esac
+          share_item "$one"
+        done ;;
+      lib)
+        for one in "$item"/* "$item"/.[!.]*; do
+          [ -e "$one" ] || [ -L "$one" ] || continue
+          [ "${one##*/}" = node_modules ] || { share_item "$one"; continue; }
+          for mod in "$one"/* "$one"/.[!.]*; do
+            [ -e "$mod" ] || [ -L "$mod" ] || continue
+            case "${mod##*/}" in
+              @*)
+                for scoped in "$mod"/*; do
+                  [ -e "$scoped" ] || [ -L "$scoped" ] || continue
+                  case "$managed_pkgs" in *" ${mod##*/}/${scoped##*/} "*) continue ;; esac
+                  share_item "$scoped"
+                done ;;
+              *)
+                case "$managed_pkgs" in *" ${mod##*/} "*) continue ;; esac
+                share_item "$mod" ;;
+            esac
+          done
+        done ;;
+      *) share_item "$item" ;;
+    esac
+  done
+  unset -f share_item
+  for row in "${cli_rows[@]}"; do
+    read -r rt entry pkg cmd link <<<"$row"
+    binds+=(--ro-bind "$depot/agent-cli/$entry/lib/node_modules/$pkg" "$npm_prefix/lib/node_modules/$pkg")
+    binds+=(--symlink "$link" "$npm_prefix/bin/$cmd")
+    versions_bound+=" $rt=$entry"
+  done
+  binds+=(--remount-ro "$npm_prefix")
+elif [ -d "$npm_prefix" ] && [ "$npm_prefix" != /usr/local/share/npm-global ]; then
+  binds+=(--ro-bind "$npm_prefix" "$npm_prefix")
+fi
+unset cli_rows row rt pkg cmd entry link item one mod scoped managed_pkgs managed_cmds
+unset SKEIN_NPM_PREFIX
 
 # --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------
 #
@@ -3762,4 +3764,4 @@ exec bwrap \
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
   ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${repo_cache-}" \
-    "$rustup_home" "${pane_cmd[@]}"
+    "${rustup_home-}" "${pane_cmd[@]}"
