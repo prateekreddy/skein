@@ -301,8 +301,10 @@ test('a lane is what skein-mcp lane list reports, with its phase and item, and a
   await start($)
   await spawn($, 'u9', 'Your worktree is /fixture/lanes/a.')
   await spawn($, 'u10', 'Your worktree is /fixture/lanes/b.')
-  expect(seen.ran.filter(argv => argv.slice(-2).join(' ') === 'lane list').length).toBe(2)
-  expect(seen.ran.every(argv => argv[0] === 'python3' && argv[1]?.endsWith('/bin/skein-mcp'))).toBe(true)
+  // Once per subagent, through the plugin's own skein-mcp.
+  const listed = seen.ran.filter(argv => argv.slice(-2).join(' ') === 'lane list')
+  expect(listed.length).toBe(2)
+  expect(listed.every(argv => argv[0] === 'python3' && (argv[1] ?? '').endsWith('/bin/skein-mcp'))).toBe(true)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
