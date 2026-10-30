@@ -765,6 +765,59 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// **`mailbox.sh unread` counts what `inbox` would deliver, and marks none of it** (SKEIN-1362).
+    /// skein's band above the prompt shows the number on a timer, so a count that marked mail seen
+    /// would swallow it before the turn-boundary hooks deliver it to the agent.
+    ///
+    /// What would make it fail: `unread` marking `seenBy` or the seen-file (the second count and
+    /// `inbox` then find nothing), counting the box's own mail or another box's, or skipping the
+    /// owner's inbox. Watched: with `unread` running the `inbox` branch's marking `jq`, the second
+    /// count read 0 and this failed; with the owner's loop removed, the first count read 1.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mailbox_unread_counts_without_marking() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> String {
+            let out = box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let send = |from: &str, to: &str, body: &str| {
+            run(from, &["send", "--to", to, "--kind", "note", "--body", body]);
+        };
+        send("boxA", "broadcast", "to everyone");
+        send("boxA", "boxB", "to B");
+        send("boxA", "boxC", "to C, not B");
+        send("boxB", "broadcast", "B's own");
+        let inbox = home.join(".box-script").join("state").join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("1-skein.json"),
+            r#"{"from":"skein","to":"boxB","kind":"note","body":"from the owner","ts":"2026-10-30T10:00:00Z"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(run("boxB", &["unread"]), "3");
+        assert_eq!(run("boxB", &["unread"]), "3", "the count marked mail seen");
+        let delivered = run("boxB", &["inbox"]);
+        for body in ["to everyone", "to B", "from the owner"] {
+            assert!(delivered.contains(body), "{body} was not delivered: {delivered}");
+        }
+        assert_eq!(run("boxB", &["unread"]), "0");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn relay_cross_project_mail_delivers_across_stores() {
         let _g = env_lock();

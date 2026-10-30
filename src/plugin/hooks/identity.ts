@@ -19,6 +19,8 @@ export function register(on: On): void {
     await $.command.register({
       name: 'skein',
       description: "Show this box's name and the skein plugin's version",
+      // The subcommands are `band.tsx`'s, which answers `/skein` with anything after the name.
+      argumentHint: '[status | clean | requests]',
     })
     const box = (await $.env.get('SKEIN_BOX')) || null
     const version = await pluginVersion(() =>
@@ -30,7 +32,8 @@ export function register(on: On): void {
     return next(e)
   })
 
-  on('command.run', { command: 'skein' }, async $ => {
+  // `/skein` alone; with a subcommand it is `band.tsx`'s.
+  on('command.run', { command: 'skein', args: /^\s*$/ }, async $ => {
     const found = await read($, identity)
 
     return { text: describe(found) }

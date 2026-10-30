@@ -339,6 +339,7 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         "hooks/identity.ts",
         include_str!("plugin/hooks/identity.ts"),
     ),
+    ("hooks/band.tsx", include_str!("plugin/hooks/band.tsx")),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {

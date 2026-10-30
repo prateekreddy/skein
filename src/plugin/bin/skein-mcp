@@ -48,6 +48,9 @@
 #                     function answers `skein-mcp clean [PATH...]` on the command line, so a caller
 #                     that is not an MCP client gets the one implementation and not a second.
 #
+# `skein-mcp requests` is `skein_requests` on the command line the same way, for the band skein's
+# hooks module draws above the prompt (SKEIN-1362).
+#
 # Three more rules carry `skein_clean`, each with a test that fails without it:
 #
 # * **It never decides what is cleanable.** skein lists it (`fleet::box_cleanables` and
@@ -1185,13 +1188,17 @@ def answer(msg):
 
 
 def run_once(argv):
-    """`skein-mcp clean [PATH...]`: the same `skein_clean` without the protocol, for callers that
-    are not an MCP client (the mod skein's plugin is becoming, SKEIN-1358). Prints the result and
-    the sentence for the agent as one JSON object; exits 1 when the result is an error."""
-    if argv[:1] != ["clean"]:
-        sys.stderr.write("usage: skein-mcp clean [PATH...]\n")
+    """`skein-mcp clean [PATH...]` and `skein-mcp requests`: the same `skein_clean` and
+    `skein_requests` without the protocol, for callers that are not an MCP client (skein's hooks
+    module, SKEIN-1358). Prints the result and the sentence for the agent as one JSON object; exits
+    1 when the result is an error."""
+    if argv[:1] == ["clean"]:
+        result = clean({"paths": argv[1:]})
+    elif argv == ["requests"]:
+        result = requests({})
+    else:
+        sys.stderr.write("usage: skein-mcp clean [PATH...] | skein-mcp requests\n")
         return 2
-    result = clean({"paths": argv[1:]})
     sys.stdout.write(json.dumps({"result": dict(result), "said": getattr(result, "said", "")}) + "\n")
     return 1 if "error" in result else 0
 

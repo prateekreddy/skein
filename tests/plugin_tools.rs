@@ -1428,3 +1428,133 @@ fn a_list_skein_wrote_long_ago_is_refused_for_everything() {
         "{listing}"
     );
 }
+
+// ------------------------------------------------------------------------------------------------
+// The two doors of skein's clean, and of skein's requests (SKEIN-1362)
+// ------------------------------------------------------------------------------------------------
+
+/// The answers both doors of skein's clean are held to, shared with the hooks module's own test.
+const CLEAN_CONTRACT: &str = include_str!("../src/plugin/tests/clean-contract.ts");
+
+/// The contract's cases, read as the JSON that follows `CLEAN_CONTRACT = ` in its file.
+fn contract_cases() -> Vec<Value> {
+    let (_, json) = CLEAN_CONTRACT
+        .split_once("export const CLEAN_CONTRACT = ")
+        .expect("clean-contract.ts declares CLEAN_CONTRACT");
+    let cases: Value = serde_json::from_str(json.trim()).expect("CLEAN_CONTRACT is JSON");
+    cases.as_array().expect("CLEAN_CONTRACT is a list").clone()
+}
+
+/// A value with the fixture's directory written as `/fixture`, as the contract writes it.
+fn as_contract(v: &Value, fixture: &str) -> Value {
+    serde_json::from_str(&v.to_string().replace(fixture, "/fixture")).unwrap()
+}
+
+/// A fresh box with its list written, the contract's paths for it, and its directory.
+fn contract_box(case: &Value) -> (Box_, Vec<String>, String) {
+    let b = Box_::new("skein-tools-it-clean-contract");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let fixture = b.dir.path().display().to_string();
+    let paths = case["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().replace("/fixture", &fixture))
+        .collect();
+    (b, paths, fixture)
+}
+
+/// **One input gives one answer at both doors of skein's clean**: the `skein_clean` MCP tool, and
+/// `skein-mcp clean` on the command line, which the hooks module's `clean` tool runs
+/// (docs/decisions/skein-is-a-mod.md, SKEIN-1362). Each is held to the answer
+/// `src/plugin/tests/clean-contract.ts` writes down, and `band.test.tsx` holds the hooks module's
+/// tool to the same answer given the command line's output, so the three cannot drift apart.
+///
+/// What would make it fail: a removal, a refusal or its sentence changed at one door and not the
+/// other (the command line building its own answer rather than calling `clean`), a refusal that
+/// exits 0, or the contract no longer saying what skein says. Watched: with the command line's
+/// `said` replaced by "", this failed on the first case; with the success sentence's "about"
+/// changed in `clean` alone, it failed on the MCP door against the contract.
+#[test]
+fn both_doors_of_clean_give_the_contracts_answer() {
+    let cases = contract_cases();
+    assert_eq!(cases.len(), 3, "the contract lost a case");
+    for case in &cases {
+        let wanted_error = case["result"].get("error").is_some();
+
+        let (b, paths, fixture) = contract_box(case);
+        let replies = b.talk(
+            "web-main",
+            &[json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                     "params":{"name":"skein_clean","arguments":{"paths":paths}}})],
+        );
+        let content = &replies[0]["result"]["content"];
+        let result: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+        let said = content[1]["text"].as_str().unwrap_or("").replace(&fixture, "/fixture");
+        assert_eq!(as_contract(&result, &fixture), case["result"], "MCP: {result}");
+        assert_eq!(said, case["said"].as_str().unwrap(), "MCP");
+        assert_eq!(replies[0]["result"]["isError"], json!(wanted_error), "MCP");
+
+        // A fresh fixture: the MCP door's removal took the first one's cache.
+        let (b, paths, fixture) = contract_box(case);
+        let out = Command::new("python3")
+            .arg(b.at("skein-mcp"))
+            .arg("clean")
+            .args(&paths)
+            .env("SKEIN_STATE", b.at("state"))
+            .env("HOME", b.at("fleet/web-main/home"))
+            .output()
+            .expect("python3");
+        let line: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        assert_eq!(
+            as_contract(&line, &fixture),
+            json!({"result": case["result"], "said": case["said"]}),
+            "the command line"
+        );
+        assert_eq!(out.status.code(), Some(if wanted_error { 1 } else { 0 }));
+    }
+}
+
+/// **`skein-mcp requests` on the command line is the `skein_requests` tool**, for the band the
+/// hooks module draws above the prompt (SKEIN-1362): the same rows, the same states, read the same
+/// way, and only the inbox's word is an answer.
+///
+/// What would make it fail: the command line answering from anything but `requests` (a copy that
+/// trusts the file's own `state`, which reads the box-written `granted` as granted), or exiting
+/// non-zero on a list. Watched: with the door answering `{"requests": []}`, this failed.
+#[test]
+fn the_command_line_requests_is_the_same_tool() {
+    let b = Box_::new("skein-tools-it-requests-cli");
+    b.put(
+        "fleet/.skein/substrate/requests/web-main/7.json",
+        &json!({"id":"7","kind":"apt","packages":["jq"],"asked":"2026-09-24T10:00:00Z","state":"granted"})
+            .to_string(),
+    );
+    b.put(
+        "fleet/.skein/gitgate/requests/web-main/8.json",
+        &json!({"id":"8","repo":"acme/site","reason":"docs","asked":"2026-09-24T10:01:00Z"})
+            .to_string(),
+    );
+    b.answered(1, "write request 8, granted");
+    let tool = b.call("web-main", "skein_requests", json!({}));
+    let out = Command::new("python3")
+        .arg(b.at("skein-mcp"))
+        .arg("requests")
+        .env("SKEIN_STATE", b.at("state"))
+        .env("SKEIN_FLEET_ROOT", b.at("fleet"))
+        .env("SKEIN_BOX", "web-main")
+        .output()
+        .expect("python3");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let line: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(line["result"], tool, "{line}");
+    let states: Vec<&str> = tool["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, vec!["waiting", "granted"], "{tool}");
+}
