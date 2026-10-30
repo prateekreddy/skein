@@ -77,7 +77,7 @@ pub const CLEAN_LIST_EVERY: Duration = Duration::from_secs(300);
 /// How recent "no other box of the repo is running" must be for the plugin to remove from the
 /// repo's shared cache: three ticks, so one slow or missed tick does not refuse, and a sibling
 /// that started is seen within a minute and refused from then on. The plugin carries the same
-/// number (`SIBLINGS_FRESH_SECONDS` in `skein-mcp`).
+/// number, in `skein-mcp`.
 pub const CLEAN_SIBLINGS_FRESH: Duration = Duration::from_secs(180);
 
 /// Where the file lives for one box, given that box's state directory.
@@ -996,18 +996,9 @@ pub(crate) fn clean_list(
         Some(p) => p.clone(),
         None => {
             let items = crate::fleet::box_cleanables(name).ok()?;
-            let repo = crate::repos::repo_for_box(name).map(|r| r.id);
-            let cache = match repo {
-                Some(id) => repo_caches
-                    .entry(id.clone())
-                    .or_insert_with(|| {
-                        crate::fleet::repo_cache_for_box(name, liveness)
-                            .ok()
-                            .flatten()
-                    })
-                    .clone(),
-                None => None,
-            };
+            let cache = crate::fleet::repo_cache_for_box(name, liveness, repo_caches)
+                .ok()
+                .flatten();
             CleanList {
                 at: stamp(at),
                 box_root: crate::fleet::box_root(name),

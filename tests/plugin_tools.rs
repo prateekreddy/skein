@@ -1029,7 +1029,7 @@ fn clean_said(b: &Box_, paths: &[String]) -> (Value, String) {
 /// removal that follows it empties the target as if it were part of the cache.
 ///
 /// What would make it fail: walking with links followed — `os.stat(…, follow_symlinks=True)` in
-/// `remove_tree_at` and `O_NOFOLLOW` dropped from `DIR_FLAGS` — which empties `outside/keep` through
+/// `remove_tree_at` and `O_NOFOLLOW` dropped from its directory opens — which empties `outside/keep` through
 /// `pip/evil`. Watched: with exactly that sabotage, `outside/keep/precious` was removed and this
 /// failed.
 #[test]
@@ -1159,9 +1159,9 @@ fn the_shared_cache_is_refused_while_a_sibling_runs_or_the_word_is_stale() {
 /// so the tool shows `$HOME/.cache/pip` and takes that path back as the same item; and it believes
 /// a list only when `<box_root>/home` is one directory with `$HOME`.
 ///
-/// What would make it fail: `box_view` skipping the inode check (the list naming `other-main`
+/// What would make it fail: the plugin skipping its inode check (the list naming `other-main`
 /// is then acted on), or `in_box` not mapping the home (the `$HOME` path is refused as not on the
-/// list). Watched: with `same_dir` returning True, `other-main`'s pip cache was removed and this
+/// list). Watched: with that inode check answering True, `other-main`'s pip cache was removed and this
 /// failed.
 #[test]
 fn paths_are_mapped_to_the_boxs_view_and_a_foreign_list_is_refused() {

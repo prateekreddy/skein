@@ -72,6 +72,7 @@
 "/Users/y" = "a home that is a string-prefix of /Users/you and must not read as under it — the collision src/fleet/create.rs:1405 exists to refuse"
 "/Users/you" = "the same placeholder on macOS, in bootstrap.sh's install instructions"
 "/home/..." = "an elision inside a doc comment, not a path"
+"/home/.cache" = "a box's own `<box>/home/.cache` under the fleet root in the clean tests and the disk notice's test (SKEIN-1356), not a person's home"
 "/home/.claude" = "the `$HOME/.claude` store, written with the variable already expanded away"
 "/home/.config" = "the same, for `$HOME/.config`, in a launch test"
 "/home/.skein" = "the same, for `$HOME/.skein`"

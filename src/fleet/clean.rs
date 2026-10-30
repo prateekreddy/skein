@@ -409,14 +409,25 @@ pub(crate) fn clean_repo_cache_given(
 /// `skein_clean` (SKEIN-1356). `None` when the box has no repo or the repo's store is kept
 /// elsewhere. `running` and `unknown` name the repo's OTHER boxes only, so a box is never held back
 /// by itself: its agent knows what it is running.
+///
+/// `measured` holds each repo's cache as measured once, keyed by repo id, so a pass over many boxes
+/// of one repo walks its cache once.
 pub fn repo_cache_for_box(
     name: &str,
     liveness: &std::collections::HashMap<String, bool>,
+    measured: &mut std::collections::BTreeMap<String, Option<RepoCache>>,
 ) -> Result<Option<RepoCache>, String> {
     let Some(repo) = crate::repos::repo_for_box(name) else {
         return Ok(None);
     };
-    let mut found = repo_cache_given(&repo.id, liveness)?;
+    let mut found = match measured.get(&repo.id) {
+        Some(m) => m.clone(),
+        None => {
+            let m = repo_cache_given(&repo.id, liveness)?;
+            measured.insert(repo.id.clone(), m.clone());
+            m
+        }
+    };
     if let Some(rc) = found.as_mut() {
         let (running, unknown) = others_of_box(name, liveness);
         rc.running = running;

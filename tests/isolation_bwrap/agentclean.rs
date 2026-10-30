@@ -76,7 +76,7 @@ fn clean_in_box(f: &Fleet, server: &Path, home_from: &Path, input: &str) -> Stri
 /// different directory bound at `$HOME`, the same list is refused.
 ///
 /// What would make it fail: the walk following links (`store/data/keep/precious` is removed);
-/// the repo cache not bound back into the covered box (its removal fails); `box_view` trusting
+/// the repo cache not bound back into the covered box (its removal fails); the plugin trusting
 /// the list without the inode check (the control's removal goes ahead). Watched: with links
 /// followed in `remove_tree_at`, `precious` was removed through the link and this failed.
 #[test]
