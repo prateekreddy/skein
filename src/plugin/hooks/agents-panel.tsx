@@ -38,9 +38,10 @@ const MAX_RUNS = 200
 // folder of each process at a lock.
 const LOCK_EVERY_MS = 5000
 
-// The repository's git directory, found once when the session starts. Not drawn from, so not in
-// `$.state`: a reload finds it again at its own `session.start`.
+// The repository's git directory, found once when the session starts, and its worktrees, read
+// again as each subagent starts. Not drawn from, so not in `$.state`: a reload finds them again.
 let gitDir: string | null = null
+let known: Worktree[] = []
 
 // Every hook here has a matcher, even where it selects everything it is raised for: `claude plugin
 // validate` refuses a plugin whose module registers one event twice without one, and `identity.ts`,
@@ -100,7 +101,7 @@ export function register(on: On): void {
     const started = await next(e)
     if (started.deny !== undefined) return started
 
-    const known = gitDir === null ? [] : await worktrees(files($), gitDir)
+    known = gitDir === null ? [] : await worktrees(files($), gitDir)
     const tree = (e.cwd ? worktreeIn(e.cwd, known) : null) ?? worktreeIn(e.prompt, known)
     const at = await $.clock.now()
     const run: SkeinAgentRun = {
@@ -330,8 +331,8 @@ async function learnFrom($: EngineInterface, agentId: string, tool: string, call
   if (!run) return
 
   let lane = run.lane
-  if (!lane?.isSeenAtWork && gitDir !== null) {
-    const tree = worktreeIn(call, await worktrees(files($), gitDir))
+  if (!lane?.isSeenAtWork) {
+    const tree = worktreeIn(call, known)
     if (tree !== null) lane = tree.path === lane?.worktree ? { ...lane, isSeenAtWork: true } : laneAt(tree, true)
   }
   const sync = SYNC_TOOL.exec(tool)?.[1]
