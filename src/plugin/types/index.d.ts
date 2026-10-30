@@ -229,6 +229,8 @@ declare module 'claude-code' {
     skein: {
       identity: Shaped<SkeinIdentity | null>
       leases: Shaped<SkeinLeases | null>
+      /** True once this session asked the tracker's `held` itself (SKEIN-1400). */
+      leasesSeeded: boolean
       guide: Shaped<SkeinGuide | null>
       attention: Shaped<SkeinAttention | null>
       band: Shaped<SkeinBand | null>

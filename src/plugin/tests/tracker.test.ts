@@ -132,3 +132,91 @@ test("a subagent's turn is not one of the box's turns", async ($, on) => {
 
   expect(rows.appended()).toHaveLength(0)
 })
+
+// A claim made before skein's module loaded (SKEIN-1400): the session asks the tracker's `held`
+// once itself, so the claim is known by its item, never by a hint to go and look.
+
+const HELD = 'mcp__plugin_sync_sync__held'
+const MINE = '9ed966bb-2e95-461d-8de1-883eb9763392'
+const THEIRS = '5b14e31d-6ed0-4f5f-8b9c-8b7aca7603a3'
+
+/** The tracker beneath the plugin, whose `held` answers one lease of this session's and one of another's. */
+function holding(on: On, w: World): void {
+  on('tool.call', (_, e) => {
+    w.tools.push(String(e.tool))
+    const lease = (workItemId: string, thisSession: boolean) => ({
+      workItemId,
+      epoch: 1,
+      state: 'held',
+      claimedAt: new Date(NOW - 60000).toISOString(),
+      heartbeatAt: new Date(NOW).toISOString(),
+      expiresAt: new Date(NOW + 600000).toISOString(),
+      thisSession,
+    })
+    const text = e.tool === HELD ? JSON.stringify({ leases: [lease(MINE, true), lease(THEIRS, false)] }) : '{"ok":true}'
+
+    return { result: { content: [{ type: 'text', text }] }, text }
+  })
+}
+
+/** The tools the engine lists, read again on every ask, and the permission verdict for each. */
+function engine(on: On, listed: { names: string[] }, decision: 'allow' | 'ask' = 'allow'): string[] {
+  const checked: string[] = []
+  on('tool.list', () => ({ value: listed.names.map(name => ({ name, description: '', mcp: name.startsWith('mcp__') })) }))
+  on('tool.check', (_, e) => {
+    checked.push(e.tool)
+
+    return { decision }
+  })
+
+  return checked
+}
+
+test('a claim made before skein loaded is named in the compaction, and the model never called held', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: NOW })
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
+  holding(on, w)
+  engine(on, { names: ['Read', HELD] })
+  w.stats.set(WATCH, NOW)
+
+  await start($)
+  const done = await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'long', toolUses: [] }] })
+  const kept = done.messages?.at(-1)?.text ?? ''
+
+  expect(w.tools).toEqual([HELD])
+  expect(kept).toContain(`- 9ed966bb (${MINE})`)
+  expect(kept).not.toContain(THEIRS)
+  expect(kept).not.toContain('This session has claimed tracker items')
+})
+
+test('held is asked once a session, at the first turn end it is listed by', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: NOW })
+  holding(on, w)
+  const listed = { names: ['Read'] }
+  engine(on, listed)
+  w.stats.set(WATCH, NOW)
+
+  await start($)
+  await $.turn.complete(ENDED)
+  expect(w.tools).toEqual([])
+
+  listed.names.push(HELD)
+  for (let i = 0; i < 3; i++) await $.turn.complete(ENDED)
+  expect(w.tools).toEqual([HELD])
+})
+
+test('held is not asked where the permission check would put it to someone', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: NOW })
+  holding(on, w)
+  const checked = engine(on, { names: [HELD] }, 'ask')
+  w.stats.set(WATCH, NOW)
+
+  await start($)
+  for (let i = 0; i < 3; i++) await $.turn.complete(ENDED)
+
+  expect(checked).toEqual([HELD])
+  expect(w.tools).toEqual([])
+})

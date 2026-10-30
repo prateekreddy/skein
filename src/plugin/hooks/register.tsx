@@ -42,7 +42,7 @@ import { register as band, onStart as bandStart, onTurnComplete as bandTurnCompl
 import { register as guide, onTurnComplete as guideTurnComplete } from './guide'
 import { register as identity, onStart as identityStart } from './identity'
 import { register as keeper, onStart as keeperStart } from './keeper'
-import { register as tracker, onTurnComplete as trackerTurnComplete } from './tracker'
+import { register as tracker, onStart as trackerStart, onTurnComplete as trackerTurnComplete } from './tracker'
 
 export const register: Register = on => {
   identity(on)
@@ -60,6 +60,7 @@ export const register: Register = on => {
     await quietly(attentionStart($, e))
     await quietly(bandStart($, e))
     await quietly(keeperStart($, e))
+    await quietly(trackerStart($, e))
 
     return started
   })
