@@ -86,6 +86,10 @@ const GATED: &[(&str, &str)] = &[
         "holds the mailbox lock with util-linux `flock` and reads the lock file's inode",
     ),
     (
+        "mailbox_unread_counts_without_marking",
+        "runs the mailbox scripts skein installs into a box",
+    ),
+    (
         "mail_to_a_box_that_no_longer_exists_is_kept_and_flagged",
         "runs mailbox.sh's list and prune, and ages messages with GNU `touch -d`",
     ),
