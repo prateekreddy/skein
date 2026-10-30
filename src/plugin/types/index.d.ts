@@ -171,9 +171,9 @@ export type SkeinBand = {
 /** Where a subagent's run stands: working, answered, ended on an error or refusal, or interrupted. */
 export type SkeinAgentStatus = 'running' | 'done' | 'failed' | 'stopped'
 
-/** What skein knows of a subagent that works as a lane: in the worktree of a lane skein made. */
+/** What skein knows of a subagent that works as a lane: in a lane skein made, or a worktree made by hand. */
 export type SkeinAgentLane = {
-  /** The lane's worktree, as its record names it (`skein-mcp lane list`, SKEIN-1374). */
+  /** The lane's worktree, as its record names it (`skein-mcp lane list`, SKEIN-1374) or git does. */
   worktree: string
   /**
    * True once one of its own tool calls named the worktree. Until then it is the one its brief
@@ -186,6 +186,8 @@ export type SkeinAgentLane = {
   recordedItem: string | null
   /** The lane's phase, as its record names it: `created` until later phases write more. */
   phase: string | null
+  /** False for a worktree made by hand, which skein found in git's records and has no record of. */
+  isMadeBySkein: boolean
   /** The tracker item it claimed, as the claim's own answer named it; null before a claim. */
   item: { id: string; title: string; isHeld: boolean } | null
   /** Its place at the shared heavy-work lock: waiting for it, holding it, or neither. */

@@ -58,10 +58,10 @@
 #
 # And one makes and removes this box's lanes (SKEIN-1374):
 #
-#   skein_lane        a worktree, branch and brief per lane, recorded in `$SKEIN_STATE/lanes/`, and
-#                     its removal. `skein-mcp lane create|drop|list` is the same function on the
-#                     command line, which the hooks module's agents panel reads. Its rules are
-#                     written above `lane_root`.
+#   skein_lane        a worktree, branch and brief per lane, recorded in the box's private
+#                     `~/.local/state/skein/lanes/`, and its removal. `skein-mcp lane
+#                     create|drop|list` is the same function on the command line, which the hooks
+#                     module's agents panel reads. Its rules are written above `lane_root`.
 #
 # Three more rules carry `skein_clean`, each with a test that fails without it:
 #
@@ -1109,8 +1109,8 @@ def ask_person(args):
 #
 # A lane is a worktree of this box's repository where a subagent does one tracker item's work, on a
 # branch of its own, with its build output inside it (SKEIN-1374). skein records each one in
-# `$SKEIN_STATE/lanes/<name>.json`, carrying `"schema": 1`, and this is the one implementation of
-# making, listing and removing them: the `skein_lane` tool and `skein-mcp lane create|drop|list` on
+# `~/.local/state/skein/lanes/<name>.json` (`lanes_dir`), carrying `"schema": 1`, and this is the
+# one implementation of making, listing and removing them: the `skein_lane` tool and `skein-mcp lane create|drop|list` on
 # the command line both call it, and the hooks module's agents panel reads `lane list`
 # (docs/decisions/skein-is-a-mod.md). skein never merges a lane and drives no merge.
 #
@@ -1135,8 +1135,13 @@ def lane_root():
 
 
 def lanes_dir():
-    state = os.environ.get("SKEIN_STATE", "")
-    return os.path.join(state, "lanes") if state else None
+    """`~/.local/state/skein/lanes`: the box's own private state, which the launcher binds back from
+    the box's home at `$HOME/.local/state` and keeps across restarts (`box-session.sh`, the
+    `state_at` bind). Spelled as `keeper.ts`'s `rulesPath` spells it, from `$HOME` and never from
+    `$XDG_STATE_HOME`, which the bind does not follow. Not `$SKEIN_STATE`: the launcher binds that
+    read-only into a box, and it stays so (SKEIN-1403)."""
+    home = os.environ.get("HOME", "")
+    return os.path.join(home, ".local", "state", "skein", "lanes") if home else None
 
 
 def git(argv, cwd=None):
@@ -1193,7 +1198,7 @@ def lane_brief(rec, rules_text):
 def lane_list(_args):
     d = lanes_dir()
     if d is None:
-        return {"error": "no-state"}
+        return {"error": "no-home"}
     try:
         files = sorted(n for n in os.listdir(d) if n.endswith(".json"))
     except FileNotFoundError:
@@ -1244,7 +1249,7 @@ def lane_create(args):
         return reply({"error": "no-rules"}, "skein: made no lane. Cannot read the rules file %s." % rules)
     d = lanes_dir()
     if d is None:
-        return {"error": "no-state"}
+        return {"error": "no-home"}
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -1320,7 +1325,7 @@ def lane_drop(args):
         return reply({"error": "bad-name"}, "skein: removed nothing. That is not a lane's name.")
     d = lanes_dir()
     if d is None:
-        return {"error": "no-state"}
+        return {"error": "no-home"}
     path = os.path.join(d, name + ".json")
     if not os.path.lexists(path):
         return reply({"error": "no-such-lane", "name": name},

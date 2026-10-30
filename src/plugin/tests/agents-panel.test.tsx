@@ -328,3 +328,38 @@ test('with no lane list, a subagent shows no lane lines', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-a/ })).toBe(undefined)
   await ui.unmount()
 })
+
+// A repository at /repo with two worktrees: one a lane skein made, and one made by hand, which only
+// git's own records know.
+const HAND_BOX: Box = {
+  lanes: { result: { root: '/var/tmp', lanes: [lane('wt-a', 'feat/a', 'SKEIN-9')], refused: [] }, said: '' },
+  dirs: {
+    '/repo/.git': ['worktrees'],
+    '/repo/.git/worktrees': ['wt-a', 'wt-hand'],
+  },
+  files: {
+    '/repo/.git/worktrees/wt-a/gitdir': '/var/tmp/wt-a/.git\n',
+    '/repo/.git/worktrees/wt-a/HEAD': 'ref: refs/heads/feat/a\n',
+    '/repo/.git/worktrees/wt-hand/gitdir': '/var/tmp/wt-hand/.git\n',
+    '/repo/.git/worktrees/wt-hand/HEAD': 'ref: refs/heads/feat/hand\n',
+  },
+}
+
+test('a worktree made by hand is still a lane, marked not made by skein, with no phase', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on, HAND_BOX)
+
+  await start($)
+  await spawn($, 'u12', 'Worktree: /var/tmp/wt-hand')
+  await spawn($, 'u13', 'Worktree: /var/tmp/wt-a')
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-hand/ }))?.text).toBe(
+      '  /var/tmp/wt-hand on feat/hand · not made by skein',
+    )
+    // The lane skein made is known by its record, once, with its phase.
+    expect((await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-a\b/ }))?.text).toBe('  /var/tmp/wt-a on feat/a · created')
+    await ui.unmount()
+  }
+})

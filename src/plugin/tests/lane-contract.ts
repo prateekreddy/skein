@@ -2,10 +2,11 @@
 // shape a feature takes"): the `skein_lane` MCP tool and `skein-mcp lane list` on the command line,
 // which the hooks module's agents panel reads (SKEIN-1374).
 //
-// `records` are the files in `$SKEIN_STATE/lanes/`, by lane name; `result` and `said` are what skein
-// answers for them. `tests/plugin_lanes.rs` (`both_doors_of_lane_list_give_the_contracts_answer`)
-// writes the records under a directory written here as `/fixture`, with the lane root at
-// `/fixture/lanes`, and holds both doors to this answer. Then `agents-panel.test.tsx` hands the
+// `records` are the files in `~/.local/state/skein/lanes/`, by lane name; `result` and `said` are
+// what skein answers for them. `tests/plugin_lanes.rs`
+// (`both_doors_of_lane_list_give_the_contracts_answer`) writes the records under a directory
+// written here as `/fixture`, with the lane root at `/fixture/lanes`, and holds both doors to this
+// answer. Then `agents-panel.test.tsx` hands the
 // command line's answer to the panel and holds it to the lanes in it: lane `a` is drawn, and lane
 // `b`, from a newer skein, is not. So a change at either door that the other does not share fails
 // one of the two.
@@ -24,7 +25,7 @@ export const LANE_CONTRACT = {
       "base_sha": "0123456789abcdef0123456789abcdef01234567",
       "target": "/fixture/lanes/a/target",
       "rules": "/fixture/rules.md",
-      "brief": "/fixture/state/lanes/a.brief.md",
+      "brief": "/fixture/home/.local/state/skein/lanes/a.brief.md",
       "git_dir": "/fixture/repo/.git",
       "phase": "created",
       "created": "2026-10-30T10:00:00Z",
@@ -52,7 +53,7 @@ export const LANE_CONTRACT = {
         "base_sha": "0123456789abcdef0123456789abcdef01234567",
         "target": "/fixture/lanes/a/target",
         "rules": "/fixture/rules.md",
-        "brief": "/fixture/state/lanes/a.brief.md",
+        "brief": "/fixture/home/.local/state/skein/lanes/a.brief.md",
         "git_dir": "/fixture/repo/.git",
         "phase": "created",
         "created": "2026-10-30T10:00:00Z",

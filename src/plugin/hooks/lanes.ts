@@ -1,6 +1,6 @@
 // What skein knows of a subagent that works as a lane (SKEIN-1361, SKEIN-1374): the lanes skein
-// made, as `skein-mcp lane list` reports them, `/proc/locks` and `/proc/<pid>/{cwd,fd}`, and the
-// text of the subagent's own tool calls. Nothing here reaches the network or runs a process; the
+// made, as `skein-mcp lane list` reports them, and, for a worktree made by hand, git's own worktree
+// records; `/proc/locks` and `/proc/<pid>/{cwd,fd}`; and the text of the subagent's own tool calls. Nothing here reaches the network or runs a process; the
 // panel runs `skein-mcp` and hands its output to `lanesListed`.
 //
 // The agents panel (`agents-panel.tsx`) calls these; each takes the few `$.fs` calls it needs as
@@ -13,7 +13,10 @@ export type Files = {
   realPath: (path: string) => Promise<string | null>
 }
 
-/** A lane skein made (`skein-mcp lane create`), as `skein-mcp lane list` reports it. */
+/**
+ * A lane: one skein made (`skein-mcp lane create`), as `skein-mcp lane list` reports it, or a
+ * worktree made by hand, from git's own records.
+ */
 export type Lane = {
   name: string
   /** Its worktree: `<lane root>/<name>`. */
@@ -21,8 +24,10 @@ export type Lane = {
   branch: string | null
   /** The tracker item it was made for, as its record names it. */
   item: string | null
-  /** Where it stands: `created` until later phases write more. */
+  /** Where it stands: `created` until later phases write more; null for one skein did not make. */
   phase: string | null
+  /** False for a worktree made by hand, found only in git's records. */
+  isMadeBySkein: boolean
 }
 
 /**
@@ -36,9 +41,9 @@ export const HEAVY_LOCK = '/var/tmp/skein-lanes-heavy.lock'
 /**
  * The lanes in what `skein-mcp lane list` printed, `{ result: { lanes } }`.
  *
- * skein-mcp is the one reader of the lane records (`$SKEIN_STATE/lanes/<name>.json`), so a record
- * it refused, one a newer skein wrote, is not among them. A row without a name or a worktree is
- * left out; none when the output is not a list.
+ * skein-mcp is the one reader of the lane records (`~/.local/state/skein/lanes/<name>.json`), so
+ * a record it refused, one a newer skein wrote, is not among them. A row without a name or a
+ * worktree is left out; none when the output is not a list.
  */
 export function lanesListed(stdout: string): Lane[] {
   let parsed: unknown
@@ -58,10 +63,64 @@ export function lanesListed(stdout: string): Lane[] {
       branch: typeof row.branch === 'string' ? row.branch : null,
       item: typeof row.item === 'string' ? row.item : null,
       phase: typeof row.phase === 'string' ? row.phase : null,
+      isMadeBySkein: true,
     })
   }
 
   return found
+}
+
+/**
+ * The repository's git directory shared by all its worktrees, from the session's folder.
+ *
+ * A main checkout's `.git` is that directory; a worktree's `.git` is a file naming its own, whose
+ * `commondir` leads back to the shared one. Null outside a git checkout.
+ */
+export async function commonGitDir(fs: Files, cwd: string): Promise<string | null> {
+  const dotGit = `${cwd.replace(/\/+$/, '')}/.git`
+  try {
+    const text = await fs.read(dotGit)
+    const own = /^gitdir:\s*(.+)$/m.exec(text)?.[1]?.trim()
+    if (!own) return null
+    const common = (await fs.read(`${own}/commondir`).catch(() => '')).trim()
+    if (!common) return own
+    return common.startsWith('/') ? common : normalise(`${own}/${common}`)
+  } catch {
+    // `.git` is a directory (a main checkout), or there is none.
+  }
+  return fs.list(dotGit).then(
+    () => dotGit,
+    () => null,
+  )
+}
+
+/**
+ * Every worktree git records for the repository, from `<git dir>/worktrees/<name>/`, as lanes skein
+ * did not make: no item and no phase. The fallback for lanes made by hand, which have no record.
+ */
+export async function worktrees(fs: Files, gitDir: string): Promise<Lane[]> {
+  const names = await fs.list(`${gitDir}/worktrees`).catch(() => [])
+  const found: Lane[] = []
+  for (const { name } of names) {
+    const record = `${gitDir}/worktrees/${name}`
+    const gitdir = (await fs.read(`${record}/gitdir`).catch(() => '')).trim()
+    if (!gitdir.endsWith('/.git')) continue
+    const head = (await fs.read(`${record}/HEAD`).catch(() => '')).trim()
+    const branch = /^ref:\s*refs\/heads\/(.+)$/.exec(head)?.[1] ?? null
+    found.push({ name, path: gitdir.slice(0, -'/.git'.length), branch, item: null, phase: null, isMadeBySkein: false })
+  }
+
+  return found
+}
+
+/**
+ * The lanes a subagent may work in: every lane skein made, then every other worktree git records,
+ * marked as not made by skein. A worktree skein made is known by its record, not twice.
+ */
+export function withHandMade(made: readonly Lane[], recorded: readonly Lane[]): Lane[] {
+  const ours = new Set(made.map(l => l.path))
+
+  return [...made, ...recorded.filter(t => !ours.has(t.path))]
 }
 
 /**
@@ -168,6 +227,17 @@ async function hasOpen(fs: Files, pid: string, path: string): Promise<boolean> {
   }
 
   return false
+}
+
+function normalise(path: string): string {
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+
+  return `/${out.join('/')}`
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

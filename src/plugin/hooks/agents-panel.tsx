@@ -28,7 +28,7 @@ import type {
 } from 'claude-code'
 
 import type { SkeinAgentLane, SkeinAgentRun, SkeinAgentsPanel, SkeinAgentStatus } from '../types'
-import { claimedItem, heavyLock, lanesListed, lockOf, worktreeIn } from './lanes'
+import { claimedItem, commonGitDir, heavyLock, lanesListed, lockOf, withHandMade, worktreeIn, worktrees } from './lanes'
 import type { Files, Lane } from './lanes'
 import { costOf } from './prices'
 
@@ -49,20 +49,24 @@ const MAX_RUNS = 200
 // folder of each process at a lock.
 const LOCK_EVERY_MS = 5000
 
-// The lanes skein made, read again as each subagent starts from `skein-mcp lane list`, the one
-// reader of their records. Not drawn from, so not in `$.state`: a reload finds them again.
+// The repository's git directory, found once when the session starts, and the lanes, read again as
+// each subagent starts: those skein made, from `skein-mcp lane list`, the one reader of their
+// records, and any other worktree git records, made by hand. Not drawn from, so not in `$.state`:
+// a reload finds them again.
+let gitDir: string | null = null
 let known: Lane[] = []
 
 // `register.tsx` hooks the events every feature may watch, once, and calls these in its order:
 // `onStart` as the session starts, and for each subagent `onSpawn`, `onStep`, `onTurnComplete` and
 // `onToolCall`. Only watched: each sees what `next` settled to, and changes nothing.
 
-/** As the session starts: the command and the two clocks. */
-export async function onStart($: EngineInterface, _e: SessionStartInput): Promise<void> {
+/** As the session starts: the command, the repository, and the two clocks. */
+export async function onStart($: EngineInterface, e: SessionStartInput): Promise<void> {
   await $.command.register({
     name: 'agents-info',
     description: 'Show or hide the panel of subagents: model, context, tokens, cost, time and status',
   })
+  gitDir = await commonGitDir(files($), e.cwd)
 
   // Ticks the running agents' clocks; quiet when nothing runs.
   $.clock.every(1000, () => {
@@ -78,7 +82,7 @@ export async function onStart($: EngineInterface, _e: SessionStartInput): Promis
 
 /** A subagent started: its row, its lane if it has one, and the panel opened unless shut. */
 export async function onSpawn($: EngineInterface, e: AgentSpawnInput, started: Extract<AgentSpawnResult, { deny?: undefined }>): Promise<void> {
-  known = await lanesOf($)
+  known = withHandMade(await lanesOf($), gitDir === null ? [] : await worktrees(files($), gitDir))
   const tree = (e.cwd ? worktreeIn(e.cwd, known) : null) ?? worktreeIn(e.prompt, known)
   const at = await $.clock.now()
   const run: SkeinAgentRun = {
@@ -313,6 +317,7 @@ const laneAt = (tree: Lane, isSeenAtWork: boolean): SkeinAgentLane => ({
   branch: tree.branch,
   recordedItem: tree.item,
   phase: tree.phase,
+  isMadeBySkein: tree.isMadeBySkein,
   item: null,
   lock: null,
 })
@@ -372,7 +377,8 @@ function laneLines(lane: SkeinAgentLane): string[] {
       : lane.recordedItem !== null
         ? `${lane.recordedItem}, not claimed yet`
         : 'no tracker item claimed'
-  const where = `${lane.worktree}${lane.branch ? ` on ${lane.branch}` : ''}${lane.phase ? ` · ${lane.phase}` : ''}`
+  const made = lane.isMadeBySkein ? (lane.phase ? ` · ${lane.phase}` : '') : ' · not made by skein'
+  const where = `${lane.worktree}${lane.branch ? ` on ${lane.branch}` : ''}${made}`
   const lock = lane.lock === 'waiting' ? ' · waiting for the heavy-work lock' : lane.lock === 'holding' ? ' · holds the heavy-work lock' : ''
 
   return [item, `${where}${lock}`]
