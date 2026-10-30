@@ -339,6 +339,17 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         "hooks/identity.ts",
         include_str!("plugin/hooks/identity.ts"),
     ),
+    ("hooks/keeper.ts", include_str!("plugin/hooks/keeper.ts")),
+    ("hooks/guide.ts", include_str!("plugin/hooks/guide.ts")),
+    ("hooks/tracker.ts", include_str!("plugin/hooks/tracker.ts")),
+    // What `hooks/guide.ts` puts in the system prompt (SKEIN-1365), as the bytes of each one source:
+    // the kit's box guide, the trust levels, and the shared-home rules the kit's guide writer holds.
+    ("guide/kit-spec.yaml", include_str!("kit/spec.yaml")),
+    (
+        "guide/repos-are-the-trust-boundary.md",
+        include_str!("../docs/decisions/repos-are-the-trust-boundary.md"),
+    ),
+    ("guide/agent-guide.sh", include_str!("store/agent-guide.sh")),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
@@ -611,6 +622,58 @@ mod tests {
             "the tools run something the plugin does not ship: {mcp}"
         );
         assert!(file("bin/skein-mcp").starts_with("#!/usr/bin/env python3"));
+    }
+
+    /// **The guide's three sources keep the shapes `hooks/guide.ts` reads them by** (SKEIN-1365):
+    /// the kit spec's `memory: |` block, the trust decision's `**Decision.**` … `**Date.**`, and
+    /// the shared-home block between its markers in the guide writer, the heading it opens with
+    /// being what says an instruction file already carries it. guide.ts reads each from the
+    /// shipped copy and adds nothing where a shape is gone, so a source reworded out of shape
+    /// would drop out of every Claude box's prompt without a word; this says so instead.
+    ///
+    /// What would make it fail: `memory:` written as another kind of YAML scalar, its block empty,
+    /// the decision's `**Decision.**` or `**Date.**` renamed, or the shared-home markers or the
+    /// heading under them gone; a `guide/` file not shipped.
+    #[test]
+    fn the_guide_sources_keep_the_shapes_the_mod_reads() {
+        let shipped = |rel: &str| {
+            PLUGIN_FILES
+                .iter()
+                .find(|(r, _)| *r == rel)
+                .map(|(_, b)| *b)
+                .unwrap_or_else(|| panic!("the plugin ships no {rel}"))
+        };
+        let spec = shipped("guide/kit-spec.yaml");
+        let mut lines = spec.lines().skip_while(|l| *l != "memory: |").skip(1);
+        let first = lines.find(|l| !l.trim().is_empty()).unwrap_or_default();
+        assert!(
+            first.starts_with("  ## "),
+            "the kit's guide is no `memory: |` block opening with a heading: {first:?}"
+        );
+
+        let trust = shipped("guide/repos-are-the-trust-boundary.md");
+        let from = trust.find("**Decision.**").expect("no **Decision.**");
+        let to = trust.find("**Date.**").expect("no **Date.**");
+        assert!(
+            trust[from..to].contains("\n1. ") && trust[from..to].contains("\n3. "),
+            "the three levels are not between **Decision.** and **Date.**"
+        );
+
+        let writer = shipped("guide/agent-guide.sh");
+        let start = writer
+            .rfind("<!-- skein:shared-home:start -->")
+            .expect("no start marker");
+        let end = writer
+            .rfind("<!-- skein:shared-home:end -->")
+            .expect("no end marker");
+        assert!(start < end);
+        assert!(
+            writer[start..end]
+                .lines()
+                .nth(1)
+                .is_some_and(|l| l.starts_with("## ")),
+            "the shared-home block does not open with its heading"
+        );
     }
 
     /// **The hooks module a box loads is the whole of it** (SKEIN-1359): `hooks/hooks.json` names

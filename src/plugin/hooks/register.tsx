@@ -12,7 +12,13 @@
 import type { Register } from 'claude-code'
 
 import { register as identity } from './identity'
+import { register as keeper } from './keeper'
+import { register as guide } from './guide'
+import { register as tracker } from './tracker'
 
 export const register: Register = on => {
   identity(on)
+  keeper(on)
+  guide(on)
+  tracker(on)
 }

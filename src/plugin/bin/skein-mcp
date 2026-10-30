@@ -13,7 +13,8 @@
 #                     own. It never offers to stop anything: the kernel's limits are the ceiling,
 #                     and this is only how the agent sees what it is holding.
 #   skein_requests    the box's own package and git-write requests and questions, and the owner's
-#                     answers.
+#                     answers. `skein-mcp requests` answers the same on the command line, which is
+#                     how the mod's compaction keeper reads it (SKEIN-1364).
 #
 # and three ask (SKEIN-1061), each into the box's own drop-box and nowhere else:
 #
@@ -1185,13 +1186,17 @@ def answer(msg):
 
 
 def run_once(argv):
-    """`skein-mcp clean [PATH...]`: the same `skein_clean` without the protocol, for callers that
-    are not an MCP client (the mod skein's plugin is becoming, SKEIN-1358). Prints the result and
-    the sentence for the agent as one JSON object; exits 1 when the result is an error."""
-    if argv[:1] != ["clean"]:
-        sys.stderr.write("usage: skein-mcp clean [PATH...]\n")
+    """`skein-mcp clean [PATH...]` and `skein-mcp requests`: the same `skein_clean` and
+    `skein_requests` without the protocol, for callers that are not an MCP client (the mod skein's
+    plugin is becoming, SKEIN-1358; its compaction keeper reads `requests`, SKEIN-1364). Prints the
+    result and the sentence for the agent as one JSON object; exits 1 when the result is an error."""
+    if argv[:1] == ["clean"]:
+        result = clean({"paths": argv[1:]})
+    elif argv == ["requests"]:
+        result = requests({})
+    else:
+        sys.stderr.write("usage: skein-mcp clean [PATH...] | skein-mcp requests\n")
         return 2
-    result = clean({"paths": argv[1:]})
     sys.stdout.write(json.dumps({"result": dict(result), "said": getattr(result, "said", "")}) + "\n")
     return 1 if "error" in result else 0
 

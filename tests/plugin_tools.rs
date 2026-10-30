@@ -1428,3 +1428,37 @@ fn a_list_skein_wrote_long_ago_is_refused_for_everything() {
         "{listing}"
     );
 }
+
+/// **`skein-mcp requests` on the command line is the same `skein_requests`**, so the mod's
+/// compaction keeper (SKEIN-1364) reads the box's requests through the one implementation: a
+/// waiting request stays waiting, and an answer is only ever the inbox's.
+///
+/// What would make it fail: the command line answering from a copy of the logic that drifts (the
+/// box-written `granted` believed), or `requests` not answered there at all (exit 2).
+#[test]
+fn the_command_line_requests_is_the_same_tool() {
+    let b = Box_::new("skein-tools-it-requests-cli");
+    b.put(
+        "fleet/.skein/substrate/requests/example/a.json",
+        r#"{"id":"a","kind":"npm","packages":["left-pad"],"asked":"2026-09-24T10:00:00Z",
+            "state":"granted"}"#,
+    );
+    let tool = b.call("example", "skein_requests", json!({}));
+    let out = Command::new("python3")
+        .arg(b.at("skein-mcp"))
+        .arg("requests")
+        .env("SKEIN_STATE", b.at("state"))
+        .env("SKEIN_FLEET_ROOT", b.at("fleet"))
+        .env("SKEIN_BOX", "example")
+        .output()
+        .expect("python3");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(line["result"], tool, "{line}");
+    assert_eq!(line["result"]["requests"][0]["state"], "waiting", "{line}");
+}
