@@ -737,9 +737,14 @@ fn it_imports_nothing_that_reaches_the_network() {
     for m in &found {
         assert!(allowed.contains(&m.as_str()), "the server imports {m}");
     }
-    // The two subprocesses are `du`, over the box's own checkout, and the launcher's own filing
-    // entry points, which write into the box's own drop-boxes.
-    assert_eq!(SERVER.matches("subprocess.run(").count(), 2);
+    // The three subprocesses are `du`, over the box's own checkout, the launcher's own filing
+    // entry points, which write into the box's own drop-boxes, and `git`, for the box's own lanes
+    // (SKEIN-1374), which runs no command that reaches a remote.
+    assert_eq!(SERVER.matches("subprocess.run(").count(), 3);
+    assert!(SERVER.contains(r#"subprocess.run(["git"] + argv"#));
+    for remote in ["\"fetch\"", "\"push\"", "\"pull\"", "\"clone\"", "\"ls-remote\""] {
+        assert!(!SERVER.contains(remote), "the server runs git {remote}");
+    }
     assert!(SERVER.contains(r#"["du", "-x", "-k", "--max-depth=1", where]"#));
     assert!(SERVER.contains(r#"["bash", launcher()] + argv[:1] + [box] + argv[1:]"#));
 }
