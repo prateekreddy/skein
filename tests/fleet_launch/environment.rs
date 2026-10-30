@@ -1373,6 +1373,188 @@ fn a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names() {
     );
 }
 
+/// **A crossing into a box carries every tool variable its session holds, so its `cargo` reaches
+/// the fleet's toolchain** (SKEIN-1371).
+///
+/// The session block exports `RUSTUP_HOME`, `CARGO_INSTALL_ROOT`, the Playwright and auto-update
+/// names and the repo cache's, and a crossing used to carry only the cache's (SKEIN-1354). So a
+/// crossing's `cargo` reached the rustup proxy in `~/.cargo/bin` with no `RUSTUP_HOME`, and a box
+/// has no `~/.rustup`. This is a real box over a fixture toolchain laid out as `bootstrap.sh` lays
+/// out the fleet's, its `cargo` a stand-in for rustup's proxy: it refuses without a `RUSTUP_HOME`
+/// that is a directory, and otherwise runs the real `cargo` building this test. Every name
+/// `place::session_exports` reads is compared between the box's own agent and a crossing made with
+/// `Place::exec`, and so is `PATH`, which the crossing builds itself rather than carrying.
+///
+/// This process stands for skein-server and carries a `RUSTUP_HOME`, `CARGO_INSTALL_ROOT` and
+/// `PLAYWRIGHT_BROWSERS_PATH` of its own, none of them this box's, so a crossing that kept the
+/// server's is seen.
+///
+/// What would make it fail: dropping `session_exports` from `as_the_session_holds` (the crossing
+/// then carries none of the tool names, and its `cargo` refuses); a `session_exports` that reads only
+/// the repo-cache `if`, which is SKEIN-1354's; `place::box_path` drifting from the launcher's
+/// `box_path` (the PATH line). The launcher no longer exporting a name fails the session line,
+/// before the crossing's.
+#[test]
+fn a_crossing_into_a_box_carries_its_sessions_tool_variables() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    let real_cargo = PathBuf::from(env!("CARGO"));
+    let real_rustc = real_cargo.with_file_name("rustc");
+    if !bwrap_works() || !have("tmux") || !real_rustc.is_file() {
+        return skip(
+            "this machine cannot make a bwrap namespace, lacks tmux, or has no rustc beside the \
+             cargo running this test, so it cannot run cargo in a box",
+        );
+    }
+    let name = "crosstool-main";
+    let root = scratch_named("crosstool");
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        .set("RUSTUP_HOME", root.join("skein-test-server-rustup"))
+        .set("CARGO_INSTALL_ROOT", root.join("skein-test-server-install"))
+        .set(
+            "PLAYWRIGHT_BROWSERS_PATH",
+            root.join("skein-test-server-browsers"),
+        );
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    let toolchain = root.join("boxes/.skein/toolchain");
+    let bin = toolchain.join("cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(toolchain.join("rustup")).unwrap();
+    fs::write(
+        bin.join("cargo"),
+        format!(
+            "#!/bin/sh\n[ -d \"${{RUSTUP_HOME-}}\" ] || \
+             {{ echo 'skein-test-proxy: no RUSTUP_HOME' >&2; exit 1; }}\n\
+             RUSTC='{}' exec '{}' \"$@\"\n",
+            real_rustc.display(),
+            real_cargo.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let report: String = skein::place::session_exports()
+        .iter()
+        .map(|n| format!("printf 'var {n} %s\\n' \"${{{n}-none}}\"; "))
+        .chain(["printf 'path %s\\n' \"$PATH\"; ".to_string()])
+        .collect();
+    let script = session_script(
+        name,
+        "skein-agent",
+        &format!(
+            "{{ {report} }} > /tmp/s.tmp && mv /tmp/s.tmp /tmp/session.report; exec sleep 300"
+        ),
+    );
+    let launched = own_sandbox(FLEET)
+        .exec(&script, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("start the box: {e}"));
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+    let ns_start = sh(&format!(
+        "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
+    ))
+    .parse::<u64>()
+    .expect("the anchor's start time");
+    record_place(
+        name,
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            ns_pid: anchor,
+            home: sandbox_home.display().to_string(),
+            tree: "/".into(),
+            sock: box_sock(name),
+            generation: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .expect("a boot id")
+                .trim()
+                .to_string(),
+            ns_start,
+            ..Default::default()
+        },
+    )
+    .expect("place the box");
+    let crossed = place_of(name).expect("placed").exec(
+        &format!(
+            "{report}\
+             v=$(cargo --version 2>&1); printf 'cargo %s\\n' \"$?\"; printf 'says %s\\n' \"$v\""
+        ),
+        Duration::from_secs(60),
+    );
+    let session_path = PathBuf::from(format!("{}/tmp/session.report", box_root(name)));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !session_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let session = fs::read_to_string(&session_path).unwrap_or_default();
+    let limits = fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
+    forget_place(name);
+    let _ = Command::new("tmux")
+        .args(["-S", &box_sock(name), "kill-server"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    anchor_gone(anchor);
+    if limits.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .status();
+    }
+    let crossed = crossed.unwrap_or_else(|e| panic!("the crossing into the box did not run: {e}"));
+
+    assert_eq!(
+        field_of(&session, "var RUSTUP_HOME"),
+        toolchain.join("rustup").display().to_string(),
+        "the box's session does not hold the fleet's RUSTUP_HOME, so the crossing below has \
+         nothing to agree with: {session:?}"
+    );
+    // The ones this box's session must hold, so the comparison below is about values and not
+    // only about `none` on both sides. `RUSTUP_AUTO_INSTALL` is the depot's toolchain's, and the
+    // cache's names are a managed store's, and this box has neither.
+    for tool in [
+        "CARGO_INSTALL_ROOT",
+        "DISABLE_AUTOUPDATER",
+        "DISABLE_UPDATES",
+        "PLAYWRIGHT_BROWSERS_PATH",
+        "PLAYWRIGHT_SKIP_BROWSER_GC",
+    ] {
+        assert_ne!(
+            field_of(&session, &format!("var {tool}")),
+            "none",
+            "the box's session does not hold {tool}: {session:?}"
+        );
+    }
+    for tool in skein::place::session_exports() {
+        let key = format!("var {tool}");
+        assert_eq!(
+            field_of(&crossed, &key),
+            field_of(&session, &key),
+            "a crossing into the box does not carry the session's {tool}: {crossed:?}"
+        );
+    }
+    assert_eq!(
+        field_of(&crossed, "path"),
+        field_of(&session, "path"),
+        "a crossing into the box runs on a PATH other than its session's"
+    );
+    assert_eq!(
+        (
+            field_of(&crossed, "cargo"),
+            field_of(&crossed, "says").starts_with("cargo ")
+        ),
+        ("0".to_string(), true),
+        "`cargo --version` failed through a crossing into the box: {crossed:?}"
+    );
+}
+
 /// A report of `<key> <value>` lines fit to print in a failure message: a value that is one of
 /// this file's own `skein-test-` sentinels, or `none`, is shown; anything else is a credential the
 /// machine supplied, and only its length is (SKEIN-1342).
