@@ -303,6 +303,11 @@ pub(super) async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Re
     // The merge happens INSIDE the lock, against settings read inside it. Reading the base outside
     // is what made two tabs lose each other: each merged its patch onto a snapshot taken before the
     // other saved, so the second write put the first one's field back to what it had been.
+    //
+    // A value the settings refuse is a 400 carrying the sentence, and nothing is written: the browser
+    // store's limits are checked here (SKEIN-1357), against the merged result, so a page that sends
+    // one of the pair is judged with the other as stored.
+    let mut refused: Option<String> = None;
     let saved = skein::config::update_config(|c| {
         let mut merged = match serde_json::to_value(&*c) {
             Ok(serde_json::Value::Object(map)) => map,
@@ -311,10 +316,20 @@ pub(super) async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Re
         for (key, value) in patch {
             merged.insert(key.clone(), value.clone());
         }
-        *c =
+        let next: skein::config::Config =
             serde_json::from_value(serde_json::Value::Object(merged)).map_err(|e| e.to_string())?;
+        if let Err(why) =
+            skein::fleet::browsers::limits_from(&next.browser_store_budget, &next.browser_fill_cap)
+        {
+            refused = Some(why.clone());
+            return Err(why);
+        }
+        *c = next;
         Ok(c.clone())
     });
+    if let Some(why) = refused {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
     let c = match &saved {
         Ok(c) => c.clone(),
         Err(_) => skein::config::Config::default(),
@@ -328,6 +343,65 @@ pub(super) async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The browser store's limits are refused on save when the cap is over the budget, under
+    /// 512 MB, or not a whole size, with the sentence in a 400 and nothing written; a good pair is
+    /// saved** (SKEIN-1357).
+    ///
+    /// What would make it fail: `api_set_settings` not calling `limits_from` (the bad pair is saved
+    /// and answered 200); the refusal returned as a 500, or written before it is judged.
+    #[test]
+    fn browser_store_limits_that_do_not_fit_are_refused_and_nothing_is_saved() {
+        let _env = super::env_lock();
+        let home = super::scratch_dir("1357");
+        let mut env = super::review::review_routes::env_pins();
+        env.set("SKEIN_HOME", &home);
+        let post = |body: serde_json::Value| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a tokio runtime for this test's body")
+                .block_on(async {
+                    let response = api_set_settings(Json(body)).await;
+                    let status = response.status();
+                    let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+                        .await
+                        .unwrap();
+                    (status, String::from_utf8_lossy(&body).to_string())
+                })
+        };
+        for (budget, cap, says) in [
+            ("1g", "2g", "more than the browser store budget"),
+            ("6g", "100m", "too small"),
+            ("6", "2g", "not a size"),
+        ] {
+            let (status, why) = post(serde_json::json!({
+                "browser_store_budget": budget, "browser_fill_cap": cap,
+            }));
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{budget}/{cap}: {why}");
+            assert!(why.contains(says), "{budget}/{cap}: {why}");
+            let stored = skein::config::load_config();
+            assert_eq!(
+                (
+                    stored.browser_store_budget.as_str(),
+                    stored.browser_fill_cap.as_str()
+                ),
+                ("6g", "2g"),
+                "a refused pair was written"
+            );
+        }
+        let (status, why) = post(serde_json::json!({
+            "browser_store_budget": "3g", "browser_fill_cap": "1g",
+        }));
+        assert_eq!(status, StatusCode::OK, "{why}");
+        assert_eq!(
+            skein::fleet::browsers::limits(),
+            skein::fleet::browsers::Limits {
+                budget: 3 << 30,
+                fill_cap: 1 << 30
+            }
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// **A box's tracking choice that is not a connection id, or names none that is configured, is
     /// refused with the value in the answer, and clearing it with `""` still works** (SKEIN-538,

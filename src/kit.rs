@@ -28,6 +28,12 @@ const KIT_SPEC_YAML: &str = include_str!("kit/spec.yaml");
 /// be a second set of ways for a box to come up looking healthy with no hooks wired.
 pub(crate) const KIT_STARTUP_SH: &str = include_str!("kit/skein-startup.sh");
 
+/// The one copy of the logic that links the fleet's Playwright browsers into a box's own browsers
+/// directory, run inside the box as the box by three callers: the kit at each start, skein after a
+/// fill ([`crate::fleet::browsers::link_running_boxes`]), and the box's own agent (SKEIN-1355).
+/// Installed beside the kit, under the fleet root's read-only `.skein`.
+pub(crate) const KIT_LINK_BROWSERS_SH: &str = include_str!("kit/skein-link-browsers.sh");
+
 /// The marker line in the spec that [`kit_spec`] replaces with the script body.
 const KIT_STARTUP_MARKER: &str = "        # @SKEIN_STARTUP_SCRIPT@";
 

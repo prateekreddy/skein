@@ -1024,8 +1024,9 @@ browsers (SKEIN-1341, `src/fleet/browsers.rs`) are also the one shared copy a bo
 a request names a browser and a Playwright version, skein fetches it with no owner decision, in a
 namespace that sees no box, no `/run` and no credential, refuses what it staged if it holds a link
 or a special file, and renames it in read-only. Each box reaches them through links in its own
-`~/.cache/ms-playwright`, which the kit makes inside the box, so a link a box plants misleads that
-box alone.
+`~/.cache/ms-playwright`, made inside the box, as the box, by one script under `.skein` that the
+kit runs at each start and skein runs in every running box right after a fill (SKEIN-1355), so a
+link a box plants misleads that box alone.
 
 **2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared,
 the inbox sockets in the sandbox-wide `/run/user/1000/cc-socks/` are deliberately bound back through

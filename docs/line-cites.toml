@@ -52,7 +52,7 @@ cited_by = ["docs/decisions/warden-or-prompt.md"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1781"]
+["docs/architecture.md:1782"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -870,27 +870,27 @@ cited_by = ["docs/threat-model.md"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2859"]
+["src/box-session.sh:2860"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2987"]
+["src/box-session.sh:2988"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3430"]
+["src/box-session.sh:3431"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3489"]
+["src/box-session.sh:3490"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3531"]
+["src/box-session.sh:3532"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3554"]
+["src/box-session.sh:3555"]
 line = "export CARGO_HOME=\"$repo_cache/cargo\" npm_config_cache=\"$repo_cache/npm\" \\"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
@@ -902,11 +902,11 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "#[serde(default = \"default_review_identity\")]"
 cited_by = ["docs/decisions/one-identity.md"]
 
-["src/config.rs:520"]
+["src/config.rs:545"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/config.rs:595"]
+["src/config.rs:620"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2173,11 +2173,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load the diff — ${esc(failText(e))}</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:566"]
+["src/web/app/panels.js:567"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:1051"]
+["src/web/app/panels.js:1052"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2257,46 +2257,46 @@ cited_by = ["docs/recovery-survey.md"]
 line = "if (d.error) toast(\"the workflow file has a problem — fix it before editing here\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:323"]
+["src/web/app/settings.js:326"]
 line = ".catch(e => notice(failText(e)));"
 window = "})\u000b.catch(e => notice(failText(e)));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:331"]
+["src/web/app/settings.js:334"]
 line = ".catch(e => notice(failText(e)));"
-window = ".then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })\u000b.catch(e => notice(failText(e)));\u000b}"
+window = ".then(s => { syncStatus = s; renderSync(); if (s.warning) notice(s.warning); else toast(`forgot the token for ${id}`); })\u000b.catch(e => notice(failText(e)));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:339"]
+["src/web/app/settings.js:342"]
 line = ".catch(e => notice(failText(e)));"
-window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); })\u000b.catch(e => notice(failText(e)));\u000b}"
+window = ".then(s => { syncStatus = s; renderSync(); renderRepoList(); if (s.warning) notice(s.warning); })\u000b.catch(e => notice(failText(e)));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:493"]
+["src/web/app/settings.js:496"]
 line = "? \"this repo was registered from a path, and skein can no longer read a remote from one. Add it again by its GitHub URL and this becomes a token field.\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:495"]
+["src/web/app/settings.js:498"]
 line = "? `${esc(host)} is not GitHub, and skein only holds GitHub push credentials, so this repo's boxes can commit but skein gives them nothing to push with. Nothing about your repo needs changing; this is a limit of skein.`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:790"]
+["src/web/app/settings.js:793"]
 line = ".catch(e => notice(`pull failed: ${failText(e)}`))"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:865"]
+["src/web/app/settings.js:884"]
 line = ".catch(e => notice(`couldn't save: ${failText(e)}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:910"]
+["src/web/app/settings.js:929"]
 line = ".catch(e => { out.textContent = `nothing was copied out: ${e.message}`; })"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:924"]
+["src/web/app/settings.js:943"]
 line = "row.appendChild(document.createTextNode(` — not saved: ${one.error}`));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/settings.js:1577"]
+["src/web/app/settings.js:1596"]
 line = "arSetMsg(`${host} is not GitHub: boxes of this repo can commit but not push, and it has no review queue. Add it anyway?`, \"warn\");"
 cited_by = ["docs/recovery-survey.md"]
 

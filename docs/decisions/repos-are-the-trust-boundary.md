@@ -59,7 +59,7 @@ puts it.
   `share_paths` list comes back.
 - The repo cache: bwrap test `a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`
   (`tests/isolation_bwrap/repocache.rs`); its bind is `src/box-session.sh:2546` and the tools are
-  pointed at it at `src/box-session.sh:3554`.
+  pointed at it at `src/box-session.sh:3555`.
 - The cache is made only as a real directory: test
   `a_managed_store_gets_a_repo_cache_and_a_link_there_is_refused` (`src/kit.rs`).
 - Cleaning: tests `a_repo_cache_is_cleaned_only_with_all_its_boxes_stopped` and
