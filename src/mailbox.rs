@@ -771,8 +771,8 @@ mod tests {
     ///
     /// What would make it fail: `unread` marking `seenBy` or the seen-file (the second count and
     /// `inbox` then find nothing), counting the box's own mail or another box's, or skipping the
-    /// owner's inbox. Watched: with `unread` running the `inbox` branch's marking `jq`, the second
-    /// count read 0 and this failed; with the owner's loop removed, the first count read 1.
+    /// owner's inbox. Watched: with `unread` delivering through `inbox` before it counts, the first
+    /// count read 0 and this failed; with the owner's loop removed, the first count read 2.
     #[cfg(target_os = "linux")]
     #[test]
     fn mailbox_unread_counts_without_marking() {
