@@ -12,8 +12,8 @@
 // * the unread count from `mailbox.sh unread`, which marks nothing: mail is delivered by the
 //   turn-boundary hooks alone;
 // * the box's own spend today and over 7 days from `$SKEIN_STATE/signals/usage.json`, which
-//   skein-server writes beside the resource signal every five minutes (SKEIN-1384). The fleet runs
-//   on a Claude login, so the dollars are an estimate at the API's prices, and say so.
+//   skein-server writes beside the resource signal once an hour (SKEIN-1384). The fleet runs on a
+//   Claude login, so the dollars are an estimate at the API's prices, and say so.
 //
 // The `clean` tool this file registers (`mcp__skein__clean`) is `skein-mcp clean` too, and answers
 // what the MCP tool answers, which `tests/band.test.tsx` holds against `tests/clean-contract.ts`
@@ -41,6 +41,11 @@ const PANE = 'skein'
 // skein writes the signal file every 60 s, and the plugin's command hooks believe nothing in one
 // older than five minutes (`STALE_AFTER` in `bin/skein-resources`): neither does the band.
 const STALE_AFTER_MS = 300_000
+
+// skein-server reads the fleet's usage once an hour (`USAGE_MAX_AGE` in skein-server's
+// `health.rs`) and writes the box's spend from each reading. The band trusts that file for the hour
+// and ten minutes more, so a reading that takes a while does not blank the line.
+const SPEND_STALE_AFTER_MS = 70 * 60_000
 
 // How often the band reads again. skein lists the box's disk every five minutes and writes the
 // signal file every minute; a request answered shows within a minute.
@@ -273,12 +278,12 @@ async function readSpend($: Engine): Promise<SkeinBand['spend']> {
   const parsed = await parsedFile($, `${state}/signals/usage.json`)
   if (!isRecord(parsed) || typeof parsed.at !== 'string') return null
   const at = Date.parse(parsed.at)
-  if (Number.isNaN(at) || (await $.clock.now()) - at > STALE_AFTER_MS) return null
+  if (Number.isNaN(at) || (await $.clock.now()) - at > SPEND_STALE_AFTER_MS) return null
   const today = isRecord(parsed.today) ? numberOr(parsed.today.cost, null) : null
   const week = isRecord(parsed.week) ? numberOr(parsed.week.cost, null) : null
   if (today === null || week === null) return null
 
-  return { today, week, unpriced: parsed.unpriced === true }
+  return { at: utcTime(at), today, week, unpriced: parsed.unpriced === true }
 }
 
 async function readClean($: Engine): Promise<SkeinBand['clean']> {
@@ -514,7 +519,7 @@ function status(found: SkeinBand | null): string {
   )
   lines.push(mailLine(found?.mail ?? null))
   const spend = found?.spend ?? null
-  lines.push(spend === null ? "skein has not written this box's spend in the last five minutes." : spendLine(spend))
+  lines.push(spend === null ? "skein has not written this box's spend in the last 70 minutes." : spendLine(spend))
   if (spend?.unpriced) lines.push('+ means some of it was on a model skein has no price for, so it is left out.')
 
   // The engine heads the answer with `skein:`, so the first line reads as a sentence after it.
@@ -525,12 +530,20 @@ function status(found: SkeinBand | null): string {
 function spendLine(spend: NonNullable<SkeinBand['spend']>): string {
   const more = spend.unpriced ? '+' : ''
 
-  return `Spend, estimated at API prices: today ≈${dollars(spend.today)}${more} · 7 days ≈${dollars(spend.week)}${more}`
+  return `Spend, estimated at API prices, as of ${spend.at} UTC: today ≈${dollars(spend.today)}${more} · 7 days ≈${dollars(spend.week)}${more}`
 }
 
 // ------------------------------------------------------------------------------------------------
 // Numbers
 // ------------------------------------------------------------------------------------------------
+
+/** `14:05`, the UTC time of `ms`. */
+function utcTime(ms: number): string {
+  const d = new Date(ms)
+  const two = (n: number) => String(n).padStart(2, '0')
+
+  return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`
+}
 
 /** `$4.20`, or whole dollars from $100: `$1,234`. */
 function dollars(n: number): string {

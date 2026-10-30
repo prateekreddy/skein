@@ -356,7 +356,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     tokio::spawn(skein::announce::watch_fleet_disk());
     // Each box's resource signal file, which the box plugin's hooks read (SKEIN-1054).
     tokio::spawn(skein::resource_signal::watch_box_resources());
-    // The fleet's usage every five minutes, and each box's own spend from it (SKEIN-1384).
+    // The fleet's usage once an hour, and each box's own spend from it (SKEIN-1384).
     tokio::spawn(health::warm_usage());
     tokio::spawn(skein::fleet::watch_runtime_updates());
     // The fleet's agent CLI and Rust toolchain versions (SKEIN-1372): new ones fetched and tested

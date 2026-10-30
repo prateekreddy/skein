@@ -168,9 +168,10 @@ export type SkeinBand = {
   mail: number | null
   /**
    * This box's own spend from `signals/usage.json`, in dollars at the API's prices; null when the
-   * file is missing or more than five minutes old. `unpriced`: a model in the week has no price.
+   * file is missing or more than 70 minutes old. `at`: when skein read it, `HH:MM` in UTC.
+   * `unpriced`: a model in the week has no price.
    */
-  spend: { today: number; week: number; unpriced: boolean } | null
+  spend: { at: string; today: number; week: number; unpriced: boolean } | null
 }
 
 /** Where a subagent's run stands: working, answered, ended on an error or refusal, or interrupted. */

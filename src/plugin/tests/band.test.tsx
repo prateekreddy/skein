@@ -395,7 +395,7 @@ test('/skein status says the disk, the ask, the requests and the mail', async ($
       'skein asks this box to free 1.2G of disk: it is over its own allowance.',
       '1 request waiting. /skein requests lists them.',
       '2 unread. The agent reads them at the start of its next turn.',
-      "skein has not written this box's spend in the last five minutes.",
+      "skein has not written this box's spend in the last 70 minutes.",
     ].join('\n'),
   )
 })
@@ -406,7 +406,7 @@ test('/skein status says the disk, the ask, the requests and the mail', async ($
 test('the band and /skein status say the spend is an estimate, with + when something had no price', async ($, on) => {
   const w = world({ usage: usage(60, 1.2, 31.084) })
   await started(on, w, $)
-  const line = 'Spend, estimated at API prices: today ≈$1.20 · 7 days ≈$31.08'
+  const line = 'Spend, estimated at API prices, as of 11:59 UTC: today ≈$1.20 · 7 days ≈$31.08'
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
@@ -420,21 +420,29 @@ test('the band and /skein status say the spend is an estimate, with + when somet
   w.usage = usage(60, 1.2, 140.5, true)
   const status = (await $.command.run(TYPED('status'))).text?.split('\n') ?? []
   expect(status.slice(-2)).toEqual([
-    'Spend, estimated at API prices: today ≈$1.20+ · 7 days ≈$141+',
+    'Spend, estimated at API prices, as of 11:59 UTC: today ≈$1.20+ · 7 days ≈$141+',
     '+ means some of it was on a model skein has no price for, so it is left out.',
   ])
 })
 
-// Fails if the spend file is believed whatever its age. Watched: with the age check in
-// `readSpend` removed, the band drew the six-minute-old figure and this failed.
-test('spend skein wrote six minutes ago is not shown', async ($, on) => {
+// skein reads the fleet's usage once an hour, and the band trusts the file for 70 minutes. Fails if
+// the file is believed whatever its age, or for the resource signal's five minutes. Watched: with
+// `readSpend` judging age by `STALE_AFTER_MS`, the 69-minute figure was not shown and this failed;
+// with the age check removed, the 71-minute figure was shown and this failed.
+test('spend is shown for 70 minutes after skein read it, and not after', async ($, on) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
     return <Text>engine</Text>
   })
-  const w = world({ usage: usage(360, 1.2, 8.4) })
+  const w = world({ usage: usage(69 * 60, 1.2, 8.4) })
   await started(on, w, $)
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(
+    'Spend, estimated at API prices, as of 10:51 UTC: today ≈$1.20 · 7 days ≈$8.40',
+  )
+
+  w.usage = usage(71 * 60, 1.2, 8.4)
+  await $.command.run(TYPED('status'))
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
@@ -443,7 +451,7 @@ test('spend skein wrote six minutes ago is not shown', async ($, on) => {
     await ui.unmount()
   }
   expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(
-    "skein has not written this box's spend in the last five minutes.",
+    "skein has not written this box's spend in the last 70 minutes.",
   )
 })
 

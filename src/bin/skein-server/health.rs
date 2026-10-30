@@ -96,8 +96,9 @@ pub(super) async fn api_health() -> Json<serde_json::Value> {
 /// old" at forty minutes would still be telling the truth about the reading it is showing, so the
 /// two are free to differ and neither is a copy of the other.
 ///
-/// Since SKEIN-1384 [`warm_usage`] reads the fleet every five minutes on its own, so while it runs
-/// a page load finds a reading younger than this and the hour is the ceiling only when it fails.
+/// It is also the period of [`warm_usage`], which reads the fleet once an hour with nobody asking,
+/// so each box's own spend is never older than this (SKEIN-1384). The box's band trusts that file
+/// for this hour and ten minutes more: the spend's own window in `src/plugin/hooks/band.tsx`.
 const USAGE_MAX_AGE: Duration = Duration::from_secs(3600);
 
 /// One fleet scan at a time, across every caller.
@@ -119,12 +120,6 @@ const USAGE_MAX_AGE: Duration = Duration::from_secs(3600);
 /// and is then answered from the newer reading.
 static USAGE_SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// How often skein-server reads the fleet's usage with nobody asking, so that each box's own
-/// spend, `signals/usage.json`, is never older than this (SKEIN-1384). The band in the box treats
-/// that file as out of date past the same five minutes. A reading with nothing changed re-stats
-/// the transcripts and parses none of them: 0.11 s in `src/usage.rs`'s cost table.
-const USAGE_WARM_EVERY: Duration = Duration::from_secs(300);
-
 /// A reading of the fleet's usage, written into every box as that box's own spend before it is
 /// handed on (SKEIN-1384). A box whose file could not be written is said on stderr and does not
 /// cost the caller its reading.
@@ -139,10 +134,11 @@ fn told(
     taken
 }
 
-/// The fleet's usage, read every [`USAGE_WARM_EVERY`] behind [`USAGE_SCAN`], so the cockpit's
-/// cached reading and every box's own spend stay current with nobody watching. Never returns.
+/// The fleet's usage, read once every [`USAGE_MAX_AGE`] behind [`USAGE_SCAN`]: the owner's "once in
+/// a while", so each box's own spend is at most that old with nobody watching (SKEIN-1384). Never
+/// returns.
 pub(super) async fn warm_usage() {
-    let mut tick = tokio::time::interval(USAGE_WARM_EVERY);
+    let mut tick = tokio::time::interval(USAGE_MAX_AGE);
     loop {
         tick.tick().await;
         let _one_at_a_time = USAGE_SCAN.lock().await;
