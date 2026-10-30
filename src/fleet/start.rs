@@ -41,7 +41,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
          SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
          SKEIN_BOX_PEERS={peers_q} SKEIN_BOX_TELEMETRY={telemetry_q} \
-         SKEIN_FLEET_NAME={fleetname_q} \
+         SKEIN_FLEET_NAME={fleetname_q} SKEIN_BOX_VERSIONS={versions_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // Where the agent in this box keeps its model scratch, as a path relative to the box's own
@@ -117,6 +117,13 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // Unset (an older launcher), the shim says it was not told the name rather than emitting an
         // empty `--sandbox `, which would look complete and not be.
         fleetname_q = sh_quote(&crate::place::fleet_sandbox()),
+        // The agent CLI and Rust toolchain entries this box is to bind, `key=entry` apart
+        // (SKEIN-1372): what each component has rolled out, and the box's repo's own toolchain.
+        // Empty when nothing is rolled out, and then the launcher binds what it did before. The
+        // launcher reports what it actually bound, and that is what the record keeps.
+        versions_q = sh_quote(&super::versions::versions_env(
+            &super::versions::wanted_versions(name),
+        )),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -771,6 +778,9 @@ fn start_box_inner(
             scoped: launched.as_deref().and_then(scope_from_launch),
             exposure: launched.as_deref().and_then(exposure_from_launch),
             telemetry: launched.as_deref().and_then(telemetry_from_launch),
+            versions: launched
+                .as_deref()
+                .and_then(super::versions::versions_from_launch),
             // Threaded from the caller rather than defaulted, because this is the one place in
             // the tree where the answer is *decided* rather than copied: everything else that
             // builds a record is a fixture. The guard at the top of this function is what stops it
@@ -993,6 +1003,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             scoped: scope_from_launch(&out),
             exposure: exposure_from_launch(&out),
             telemetry: telemetry_from_launch(&out),
+            versions: super::versions::versions_from_launch(&out),
             ..record.clone()
         },
     )?;

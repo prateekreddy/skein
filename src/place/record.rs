@@ -97,6 +97,13 @@ pub struct PlaceRecord {
     /// launcher writes into the box's own settings then and only then.
     #[serde(default)]
     pub telemetry: Option<bool>,
+    /// The depot entries the launcher bound into this box at start: each agent CLI's version and
+    /// its Rust toolchains, as `SKEIN_VERSIONS` reported them (`fleet::versions`, SKEIN-1372).
+    /// Each entry is immutable, so this is what the box runs until it restarts. A component absent
+    /// from the map is one the box runs the sandbox's own copy of. `None` is a launcher too old to
+    /// say, read as neither current nor stale, as [`Self::peers`] is.
+    #[serde(default)]
+    pub versions: Option<std::collections::BTreeMap<String, String>>,
     /// Why this box exists — see [`Purpose`].
     ///
     /// Recorded here rather than derived, because nothing else on the host can answer it: a box

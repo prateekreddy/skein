@@ -587,10 +587,10 @@ static RESTARTING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::ne
 
 /// This server's hold on one box's restart, released when it is dropped — on every way out of the
 /// route, a panic in the blocking task included.
-struct Restarting(String);
+pub(super) struct Restarting(String);
 
 impl Restarting {
-    fn take(name: &str) -> Option<Self> {
+    pub(super) fn take(name: &str) -> Option<Self> {
         let mut held = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
         if held.iter().any(|n| n == name) {
             return None;

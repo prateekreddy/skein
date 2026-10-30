@@ -7,6 +7,9 @@
 # drop-boxes, and answers on stdin/stdout. Three tools read:
 #
 #   skein_resources   the box's signal file, `$SKEIN_STATE/signals/resources.json`, as skein wrote it.
+#                     With `restart`, it also writes the box's one ask about itself: restart me onto
+#                     the rolled-out versions once this turn ends (SKEIN-1372), into its own
+#                     package drop-box.
 #   skein_top         this box's largest processes by memory or CPU, or the largest directories of
 #                     its checkout. It never offers to stop anything: the kernel's limits are the
 #                     ceiling, and this is only how the agent sees what it is holding.
@@ -80,7 +83,7 @@ def read_text(path):
 # ------------------------------------------------------------------------------------------------
 
 
-def resources(_args):
+def read_signals():
     state = os.environ.get("SKEIN_STATE", "")
     if not state:
         return {"error": "no-state", "state": None}
@@ -92,6 +95,58 @@ def resources(_args):
         return {"error": "no-signal-file", "path": path}
     except ValueError:
         return {"error": "unreadable-signal-file", "path": path}
+
+
+def resources(args):
+    """The signal file, and, with `restart`, this box's say in when it moves onto a rollout.
+
+    `updates` in the file lists the agent CLI and Rust toolchain versions rolled out since this box
+    started (SKEIN-1372). `restart: "when-idle"` asks skein to restart the box onto them as soon
+    as its turn has ended, instead of after it has sat idle a while; `"cancel"` takes that back.
+    The ask is one file in the box's own package drop-box, `restart-when-idle`. It is the box's
+    word and nothing more: skein restarts only a box that is behind on a version and idle at that
+    moment, through its own restart path, and removes the file when it has.
+    """
+    restart = args.get("restart")
+    if restart is None:
+        return read_signals()
+    if restart not in ("when-idle", "cancel"):
+        return {"error": "restart-must-be-when-idle-or-cancel"}
+    d = own_queue("substrate")
+    if d is None:
+        return {"error": "no-box-name"}
+    ask = os.path.join(d, "restart-when-idle")
+    if restart == "cancel":
+        try:
+            os.unlink(ask)
+        except OSError:
+            pass
+        return reply(dict(read_signals(), restart="not-asked"), "skein: the restart ask is withdrawn.")
+    signals = read_signals()
+    if not signals.get("updates"):
+        return reply(
+            dict(signals, error="nothing-to-apply"),
+            "skein: nothing has been rolled out that a restart would give this box, so there is "
+            "nothing to ask for.",
+        )
+    if not os.access(d, os.W_OK):
+        return {"error": "not-recorded", "queue": d}
+    tmp = os.path.join(d, ".tmp.restart-when-idle.%d" % os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+        os.replace(tmp, ask)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return {"error": "not-recorded", "queue": d}
+    return reply(
+        dict(signals, restart="when-idle"),
+        "skein: this box restarts onto the new versions once this turn ends. Its conversation is "
+        "reopened, and anything still running in it stops.",
+    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -599,9 +654,16 @@ TOOLS = [
     {
         "name": "skein_resources",
         "description": "This box's resource signal file as skein wrote it: its disk, memory, "
-        "throttle rate and process count against its limits, and anything skein asks of it.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+        "throttle rate and process count against its limits, anything skein asks of it, and "
+        "under updates any agent CLI or Rust toolchain version a restart would give it. Pass "
+        "restart when-idle to be restarted onto those as soon as this turn ends (the "
+        "conversation is reopened), or cancel to take that back.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"restart": {"type": "string", "enum": ["when-idle", "cancel"]}},
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
     {
         "name": "skein_top",

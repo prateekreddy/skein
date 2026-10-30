@@ -835,7 +835,7 @@ async function loadUpdate(again) {
   if (!box) return;
   // The boxes still on an old agent CLI: asked once per opening, not on the re-read below, because
   // it asks every running box when its agent started.
-  if (!again) loadAgentsBehind();
+  if (!again) { loadAgentsBehind(); loadVersions(); }
   if (!updateState) box.innerHTML = `<div class="set-note">reading…</div>`;
   try {
     updateState = await fetch("/api/update").then(r => r.json());
@@ -910,7 +910,8 @@ function renderUpdate() {
     <div id="upd-stall" class="set-note warn" hidden></div>
     <pre id="upd-log" class="set-log" ${updateState.running || updateSaw ? "" : "hidden"}>${esc(updateSaw)}</pre>
     ${renderRuntimeUpdates(updateState.runtimes || [])}
-    <div id="upd-agents">${agentsBehindHtml()}</div>`;
+    <div id="upd-agents">${agentsBehindHtml()}</div>
+    <div id="upd-versions">${versionsHtml()}</div>`;
   renderUpdateStall();
   // Redrawn from the saved text, so put the reader back at the end — the stall notice points at the
   // log's last lines, and a redraw that left the scroll at the top would be pointing at the first.
@@ -1226,6 +1227,90 @@ function agentsBehindHtml() {
     }
   }
   return html;
+}
+
+// ---------- the fleet's versions: agent CLIs and Rust toolchains (SKEIN-1372) ----------
+// skein fetches and tests each new CLI version on its own; nothing changes until "Roll out" is
+// pressed here. A rollout changes what boxes START on: a running box is shown "restart to apply" and
+// moves once it is idle. Removing a version is offered only for one no box uses and that is neither
+// current nor kept for rollback, and the server checks that again when it removes it.
+let versionsView = null;
+const VERSIONS_WORDS = {
+  title: c => c === "rust" ? "Rust toolchain" : `${c} CLI`,
+  current: (c, e) => `New boxes start on ${e}.`,
+  none: c => c === "rust"
+    ? "Nothing rolled out: boxes use the toolchain the sandbox was set up with."
+    : `Nothing rolled out: boxes run the sandbox's own ${c}.`,
+  upstream: v => `Newest on npm: ${v}.`,
+  waiting: names => `${names.length === 1 ? "1 running box moves" : `${names.length} running boxes move`} onto it when next idle: ${names.join(", ")}.`,
+  rollout: "Roll out",
+  remove: "Remove",
+  confirmRollout: (c, e) => `Roll out ${e}? Boxes started from now run it. Running boxes keep their version until they are idle, then restart onto it with their conversation reopened.`,
+  confirmRemove: e => `Remove ${e}? No box uses it, and it is not the current version or the one kept for rollback.`,
+  rolled: e => `Rolled out ${e}.`,
+  removed: (e, n) => `Removed ${e} (${n}).`,
+};
+function versionStatus(e) {
+  if (e.current) return "current";
+  if (e.previous) return "kept for rollback";
+  if (!e.tested) return "not tested yet";
+  return e.tested.ok ? "passed its tests" : "failed its tests";
+}
+async function loadVersions() {
+  try { versionsView = await fetch("/api/fleet/versions").then(r => r.json()); } catch { return; }
+  const el = document.getElementById("upd-versions");
+  if (el) el.innerHTML = versionsHtml();
+}
+function versionsHtml() {
+  if (!versionsView || !Array.isArray(versionsView.components)) return "";
+  let html = "";
+  for (const c of versionsView.components) {
+    if (!c.entries.length && !c.current) continue;
+    html += `<div class="set-note upd-version"><b>${esc(VERSIONS_WORDS.title(c.component))}</b> · `
+      + esc(c.current ? VERSIONS_WORDS.current(c.component, c.current) : VERSIONS_WORDS.none(c.component))
+      + (c.upstream ? ` ${esc(VERSIONS_WORDS.upstream(c.upstream))}` : "") + `</div>`;
+    if (c.waiting_to_restart.length) html += `<div class="set-note behind">${esc(VERSIONS_WORDS.waiting(c.waiting_to_restart))}</div>`;
+    for (const e of [...c.entries].reverse()) {
+      const can = !e.current && (c.kind !== "agent-cli" || e.tested?.ok);
+      html += `<div class="set-row upd-version" style="${AGENT_ROW}"><code>${esc(e.name)}</code>`
+        + `<span class="dim">${esc(versionStatus(e))} · ${fmtGb(mbOf(e.bytes))}${e.boxes.length ? " · used by " + esc(e.boxes.join(", ")) : ""}</span>`
+        + (can ? `<button type="button" class="kbtn" data-c="${esc(c.component)}" data-e="${esc(e.name)}" onclick="pressRollout(this)">${VERSIONS_WORDS.rollout}</button>` : "")
+        + (e.removable ? `<button type="button" class="kbtn ghost" data-k="${esc(c.kind)}" data-e="${esc(e.name)}" onclick="pressRemoveVersion(this)">${VERSIONS_WORDS.remove}</button>` : "")
+        + `</div>`;
+    }
+  }
+  return html;
+}
+async function pressRollout(btn) {
+  const { c, e } = btn.dataset;
+  if (!confirm(VERSIONS_WORDS.confirmRollout(c, e))) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/fleet/versions/rollout", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ component: c, entry: e }),
+    });
+    if (!r.ok) throw await refused(r);
+    toast(VERSIONS_WORDS.rolled(e));
+  } catch (err) {
+    notice(`could not roll out ${e}: ${failText(err)}`);
+  }
+  loadVersions();
+}
+async function pressRemoveVersion(btn) {
+  const { k, e } = btn.dataset;
+  if (!confirm(VERSIONS_WORDS.confirmRemove(e))) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/fleet/versions/clean", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: k, names: [e] }),
+    });
+    if (!r.ok) throw await refused(r);
+    const d = await r.json();
+    toast(VERSIONS_WORDS.removed(e, fmtGb(mbOf(d.freed))));
+  } catch (err) {
+    notice(`could not remove ${e}: ${failText(err)}`);
+  }
+  loadVersions();
 }
 
 // The press: ONE box, the one on the button. The server reads its turn state again and refuses it

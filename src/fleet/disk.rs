@@ -222,6 +222,8 @@ fn installed_substrate_dirs() -> std::collections::BTreeSet<String> {
         crate::substrate::substrate_dir(),
         // The fleet's Playwright browsers (SKEIN-1341).
         super::browsers::store_dir(),
+        // The fleet's agent CLI and Rust toolchain versions (SKEIN-1372).
+        super::depot::depot_dir(),
         crate::gitgate::gitgate_dir(),
         // A box's questions for its owner (SKEIN-1061), the third request queue.
         crate::asks::asks_dir(),
@@ -1174,6 +1176,8 @@ mod tests {
         "asks",
         // The fleet's Playwright browsers (SKEIN-1341).
         "browsers",
+        // The fleet's agent CLI and Rust toolchain versions (SKEIN-1372).
+        "depot",
         "detached",
         "gitgate",
         "plugin",

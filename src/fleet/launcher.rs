@@ -75,6 +75,15 @@ pub fn why_cover_is_stale(name: &str, record: &crate::place::PlaceRecord) -> Vec
     {
         stale.push("telemetry");
     }
+    // The agent CLIs and Rust toolchains it was born with, against what a start would bind now
+    // (SKEIN-1372). Two keys, because the person is told which moved: `agent-cli` and
+    // `rust-toolchain`. `None` is a launcher too old to say, left alone like the others.
+    if let Some(born) = &record.versions {
+        stale.extend(super::versions::stale_keys(
+            born,
+            &super::versions::wanted_versions(name),
+        ));
+    }
     stale
 }
 
@@ -654,6 +663,31 @@ mod tests {
         assert_eq!(
             decided(Some(true), Some("workshop"), Some(true)),
             vec!["scope", "workshop", "telemetry"]
+        );
+
+        // SKEIN-1372: the versions it was born with, against a fleet with nothing rolled out. What
+        // would make these fail: dropping the versions comparison (the second row reads empty), or
+        // reading `None` as an answer (the first row is not empty).
+        let born = |versions: Option<&[(&str, &str)]>| {
+            why_cover_is_stale(
+                "no-such-repo-box",
+                &crate::place::PlaceRecord {
+                    launcher: current.clone(),
+                    versions: versions.map(|v| {
+                        v.iter()
+                            .map(|(k, e)| (k.to_string(), e.to_string()))
+                            .collect()
+                    }),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(born(None), Vec::<&str>::new());
+        assert_eq!(born(Some(&[])), Vec::<&str>::new());
+        assert_eq!(born(Some(&[("claude", "claude@1.0.0")])), vec!["agent-cli"]);
+        assert_eq!(
+            born(Some(&[("rust", "1.97.0-x86_64-unknown-linux-gnu")])),
+            vec!["rust-toolchain"]
         );
     }
 
