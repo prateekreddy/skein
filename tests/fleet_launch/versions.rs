@@ -601,8 +601,9 @@ fn the_clean_refuses_a_version_in_use() {
             "a refused clean removed something"
         );
     }
-    let done = versions::clean("agent-cli", &[unused.clone()]).expect("unused is removed");
-    assert_eq!(done.removed, [unused.clone()]);
+    let done =
+        versions::clean("agent-cli", std::slice::from_ref(&unused)).expect("unused is removed");
+    assert_eq!(done.removed, vec![unused.clone()]);
     assert!(!depot::is_published(&AGENT_CLI, &unused));
     for keep in [&used, &previous, &current] {
         assert!(depot::is_published(&AGENT_CLI, keep), "{keep} was removed");
