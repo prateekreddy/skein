@@ -2043,6 +2043,7 @@ mod tests {
             "server.tmux",
             "skein",
             "skein-home",
+            "skein-link-browsers.sh",
             "skein-server",
             "skein-startup.sh",
             "start-door.sh",

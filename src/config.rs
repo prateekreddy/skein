@@ -313,6 +313,21 @@ pub struct Config {
     /// command it prints name the same files.
     #[serde(default = "default_stale_build_days")]
     pub stale_build_days: u32,
+    /// The most the fleet's shared Playwright browser store may hold, e.g. "6g" (SKEIN-1357). A
+    /// fetch starts only while the store has room for [`Config::browser_fill_cap`] under this, so
+    /// the store never passes it. Lowering it below what the store holds already is allowed: it
+    /// removes nothing, and new browser requests wait until a clean makes room.
+    ///
+    /// Read at the moment a fetch is decided ([`crate::fleet::browsers::limits`]), so a change
+    /// applies to the next request without a restart. Checked when saved
+    /// ([`crate::fleet::browsers::limits_from`]); a hand-edited value that does not pass is ignored
+    /// for the default, and the cockpit's browser view says so.
+    #[serde(default = "default_browser_store_budget")]
+    pub browser_store_budget: String,
+    /// The most one browser fetch may add to that store, e.g. "2g" (SKEIN-1357). At least 512 MB,
+    /// since one chromium with its headless shell is about 1 GB, and never more than the budget.
+    #[serde(default = "default_browser_fill_cap")]
+    pub browser_fill_cap: String,
     /// The `user.name` every box commits as. Empty ⇒ read from this host's **global** git config.
     ///
     /// A box's checkout is a fresh clone into a private HOME, so it inherits neither the host's
@@ -364,6 +379,16 @@ fn default_fleet_sandbox() -> String {
 
 fn default_box_disk_max() -> String {
     "10g".to_string()
+}
+
+/// About three versions of everything (SKEIN-1341's measurement); see [`Config::browser_store_budget`].
+fn default_browser_store_budget() -> String {
+    "6g".to_string()
+}
+
+/// Twice the largest fetch measured on 2026-10-29; see [`Config::browser_fill_cap`].
+fn default_browser_fill_cap() -> String {
+    "2g".to_string()
 }
 
 /// Five whole days. See [`Config::stale_build_days`] for why this one is the owner's to change.
@@ -696,6 +721,8 @@ impl Default for Config {
             fleet_one_disk: default_fleet_one_disk(),
             box_disk_max: default_box_disk_max(),
             stale_build_days: default_stale_build_days(),
+            browser_store_budget: default_browser_store_budget(),
+            browser_fill_cap: default_browser_fill_cap(),
             git_name: String::new(),
             git_email: String::new(),
             box_memory_max: String::new(),

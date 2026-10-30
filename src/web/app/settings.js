@@ -180,6 +180,9 @@ function openSettings(pane = "repos") {
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
     document.getElementById("set-staledays").value = settings.stale_build_days ?? "";
+    document.getElementById("set-pwbudget").value = settings.browser_store_budget || "";
+    document.getElementById("set-pwcap").value = settings.browser_fill_cap || "";
+    renderBrowserUse();
     document.getElementById("set-gitname").value = settings.git_name || "";
     document.getElementById("set-gitemail").value = settings.git_email || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
@@ -797,6 +800,19 @@ function removeRepo(id) {
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
     .catch(e => notice(`remove failed: ${failText(e)}`));
 }
+// What the shared browser store holds now, under its two settings (SKEIN-1357): a reading, so it is
+// fetched as the pane opens rather than written into the form.
+function renderBrowserUse() {
+  const note = document.getElementById("set-pwuse");
+  note.textContent = "";
+  fetch("/api/fleet/browsers").then(r => r.ok ? r.json() : null).then(v => {
+    if (!v) return;
+    let said = `The store holds ${fmtGb(mbOf(v.bytes))} of ${fmtGb(mbOf(v.budget))} now, in ${v.entries.length} browser${v.entries.length === 1 ? "" : "s"}.`;
+    if (v.bytes + v.fill_cap > v.budget) said += " New browser requests wait until there is room for one more fetch.";
+    if (v.limits_problem) said += " " + v.limits_problem;
+    note.textContent = said;
+  }).catch(() => {});
+}
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
 function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
 // **Escape, ✕ and a click outside ask first when there is something to lose** (SKEIN-1260, the
@@ -833,6 +849,9 @@ function settingsPayload() {
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.
     stale_build_days: Math.max(0, parseInt(document.getElementById("set-staledays").value, 10) || 0),
+    // Blank means the default, said the way the placeholder shows it. The server checks the pair.
+    browser_store_budget: document.getElementById("set-pwbudget").value.trim() || "6g",
+    browser_fill_cap: document.getElementById("set-pwcap").value.trim() || "2g",
     git_name: document.getElementById("set-gitname").value.trim(),
     git_email: document.getElementById("set-gitemail").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),

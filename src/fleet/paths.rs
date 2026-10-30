@@ -113,6 +113,12 @@ pub fn box_provision_path() -> String {
     format!("{}/.skein/skein-startup.sh", fleet_root())
 }
 
+/// Where the browser-linking script is installed: beside the provisioning script, which runs it at
+/// each start, and the same path inside every box, where `.skein` is read-only (SKEIN-1355).
+pub fn box_link_browsers_path() -> String {
+    format!("{}/.skein/skein-link-browsers.sh", fleet_root())
+}
+
 /// One box's root inside the fleet sandbox. Callers must have validated `name`; every path skein
 /// derives for a box hangs off this, so a name containing `..` would escape the layout entirely.
 pub fn box_root(name: &str) -> String {

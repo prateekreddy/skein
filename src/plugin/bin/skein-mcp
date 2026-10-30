@@ -428,6 +428,14 @@ def requests(_args):
                 row["answered"] = why
             elif why:
                 row["why"] = why
+            # A browser skein fetched is linked into every running box as it arrives (SKEIN-1355).
+            # Where that did not reach this box, its agent can do the same itself, with the one
+            # script the kit and skein run: it touches nothing of the box's own.
+            if kind == "package" and r.get("kind") == "playwright" and decision == "installed":
+                row["link"] = (
+                    "The browser is in the fleet's store. If Playwright still says it is missing, "
+                    "run: bash %s/.skein/skein-link-browsers.sh" % fleet
+                )
             out.append(row)
     out.sort(key=lambda r: r["asked"])
     return {"box": box, "requests": out}
@@ -620,7 +628,8 @@ TOOLS = [
     {
         "name": "skein_requests",
         "description": "This box's own package and repository-write requests and questions, and "
-        "the owner's answer to each, from the inbox only the owner can write.",
+        "the owner's answer to each, from the inbox only the owner can write. A filled browser "
+        "request says how to link the browser into this box now.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },

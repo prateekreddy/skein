@@ -56,9 +56,10 @@ memory: |
   Playwright's browsers are shared by the whole fleet, read-only, and linked into
   `~/.cache/ms-playwright` when this box starts. If Playwright says a browser is missing, ask for it
   with `skein_request_package`: manager `playwright`, one package like `chromium@1.56.1` (your
-  version is `npx playwright --version`). skein fetches it for every box with no approval needed, and
-  this box links it at its next start. Until then, `npx playwright install chromium` downloads it for
-  this box alone.
+  version is `npx playwright --version`). skein fetches it for every box with no approval needed and
+  links it into this box as soon as it arrives. If Playwright still says it is missing once
+  `skein_requests` shows the request installed, run the command that request's `link` line gives.
+  Until it arrives, `npx playwright install chromium` downloads it for this box alone.
 
   ## Git authentication in this box
 

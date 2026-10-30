@@ -449,6 +449,88 @@ fn an_install_and_a_revoke_are_answers_skein_requests_reports() {
     );
 }
 
+/// **A browser request the inbox answers `installed` tells the agent how to link the browser into
+/// its own box now, by the one script skein and the kit run; nothing else carries that line**
+/// (SKEIN-1355).
+///
+/// What would make it fail: the hint dropped, or naming another script than the installed
+/// `skein-link-browsers.sh`; it being given for an apt install, for a browser that did not install,
+/// or for one whose request file merely says `installed` (a box can write that file, and only the
+/// inbox answers).
+#[test]
+fn a_filled_browser_request_says_how_to_link_it_now() {
+    let b = Box_::new("skein-tools-it-pwlink");
+    for (id, kind, pkg, state) in [
+        (
+            "20261030-100000-1",
+            "playwright",
+            "chromium@1.62.0",
+            "approved",
+        ),
+        ("20261030-100000-2", "apt", "libnss3", "approved"),
+        (
+            "20261030-100000-3",
+            "playwright",
+            "firefox@1.62.0",
+            "approved",
+        ),
+        (
+            "20261030-100000-4",
+            "playwright",
+            "webkit@1.62.0",
+            "installed",
+        ),
+    ] {
+        b.put(
+            &format!("fleet/.skein/substrate/requests/example/{id}.json"),
+            &format!(
+                r#"{{"id":"{id}","box":"example","kind":"{kind}","packages":["{pkg}"],"state":"{state}","asked":"2026-10-30T10:00:0{}Z"}}"#,
+                &id[id.len() - 1..]
+            ),
+        );
+    }
+    for (n, body) in [
+        (1, "package request 20261030-100000-1, installed"),
+        (2, "package request 20261030-100000-2, installed"),
+        (
+            3,
+            "package request 20261030-100000-3, not installed: the fetch staged no browser",
+        ),
+    ] {
+        b.put(
+            &format!("state/inbox/{n}-skein.json"),
+            &format!(
+                r#"{{"from":"skein","kind":"answer","body":"{body}","ts":"2026-10-30T10:01:00Z"}}"#
+            ),
+        );
+    }
+    let got = b.call("example", "skein_requests", json!({}));
+    let rows = got["requests"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{got}"));
+    let row = |id: &str| {
+        rows.iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("no row for {id}: {got}"))
+    };
+    let script = format!(
+        "bash {}/.skein/skein-link-browsers.sh",
+        b.at("fleet").display()
+    );
+    let link = row("20261030-100000-1")["link"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a filled browser request has no link line: {got}"))
+        .to_string();
+    assert!(link.ends_with(&script), "{link}");
+    for id in [
+        "20261030-100000-2",
+        "20261030-100000-3",
+        "20261030-100000-4",
+    ] {
+        assert!(row(id).get("link").is_none(), "{id} has a link line: {got}");
+    }
+}
+
 /// **A decision the owner makes is the answer `skein_requests` reports**, end to end: the real
 /// `substrate::decide` and `gitgate::decide`, the real inbox they write into, and the shipped
 /// server reading it back as the box would (SKEIN-1142).

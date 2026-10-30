@@ -15,10 +15,13 @@
 //!     browser revision exactly as Playwright lays it out (`chromium-1234`, `ffmpeg-1011`). The
 //!     launcher binds it read-only into every box, the workshop box included, beside the fleet's
 //!     Rust toolchain (`box-session.sh`, "the fleet's Playwright browsers").
-//!   * **The links**, built by the kit inside each box, as the box: one symlink per store entry in
-//!     the box's own `~/.cache/ms-playwright`, which the launcher names as `PLAYWRIGHT_BROWSERS_PATH`
-//!     with `PLAYWRIGHT_SKIP_BROWSER_GC=1` (`src/kit/skein-startup.sh`). A version the store lacks
-//!     still downloads, privately, into the same directory, so nothing a box did before breaks.
+//!   * **The links**, built inside each box, as the box, by one script
+//!     (`src/kit/skein-link-browsers.sh`): one symlink per store entry in the box's own
+//!     `~/.cache/ms-playwright`, which the launcher names as `PLAYWRIGHT_BROWSERS_PATH` with
+//!     `PLAYWRIGHT_SKIP_BROWSER_GC=1`. The kit runs it at each start, [`link_running_boxes`] runs
+//!     it in every running box after a fill (SKEIN-1355), and the box's agent may run it itself. A
+//!     version the store lacks still downloads, privately, into the same directory, so nothing a
+//!     box did before breaks.
 //!   * **The request**, through the package queue a box already has: kind `playwright`, one
 //!     `<browser>@<version>`, refused unless both are strictly the shape of a real one
 //!     ([`want_is_nameable`]). [`serve`] approves it without the owner and fills it.
@@ -61,15 +64,118 @@ pub const BROWSERS: &[&str] = &[
     "ffmpeg",
 ];
 
-/// The most one fill may add to the store. Measured for Playwright 1.62.0 on 2026-10-29: `install
-/// chromium` brought chromium (641 MB), its headless shell (340 MB) and ffmpeg (3.3 MB), about
-/// 1 GB, and no single browser is larger. Twice that, so a bigger build next year is not refused.
-pub const FILL_CAP: u64 = 2 << 30;
+/// The most one fill may add to the store, unless the owner set another
+/// ([`crate::config::Config::browser_fill_cap`], SKEIN-1357). Measured for Playwright 1.62.0 on
+/// 2026-10-29: `install chromium` brought chromium (641 MB), its headless shell (340 MB) and ffmpeg
+/// (3.3 MB), about 1 GB, and no single browser is larger. Twice that, so a bigger build next year is
+/// not refused.
+pub const DEFAULT_FILL_CAP: u64 = 2 << 30;
 
-/// The store's budget. A fill starts only while the store has room for [`FILL_CAP`] under it, so
-/// the store never passes this. About three versions of everything; the 14-box survey found 5.3 GB
-/// of browsers in total, mostly copies.
-pub const BUDGET: u64 = 6 << 30;
+/// The store's budget, unless the owner set another
+/// ([`crate::config::Config::browser_store_budget`]). A fill starts only while the store has room
+/// for the fill cap under it, so the store never passes this. About three versions of everything;
+/// the 14-box survey found 5.3 GB of browsers in total, mostly copies.
+pub const DEFAULT_BUDGET: u64 = 6 << 30;
+
+/// The smallest fill cap a setting may name: one chromium with its headless shell is about 1 GB, so
+/// a cap much under that refuses every real fetch, and half a gigabyte is where that stops being a
+/// choice anyone means.
+pub const FILL_CAP_FLOOR: u64 = 512 << 20;
+
+/// The store's budget and the most one fill may add, as skein uses them now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Limits {
+    pub budget: u64,
+    pub fill_cap: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            budget: DEFAULT_BUDGET,
+            fill_cap: DEFAULT_FILL_CAP,
+        }
+    }
+}
+
+/// A whole size with its unit, `6g` or `512m` (`GB`, `GiB`, `MB` and `MiB` read the same), as bytes.
+///
+/// Stricter than the memory settings' parser on purpose: no bare number, since a bare number reads
+/// as bytes there and nobody means a browser store of six bytes, and no fraction.
+pub fn parse_size(text: &str) -> Result<u64, String> {
+    let t = text.trim().to_ascii_lowercase();
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let unit = t[digits.len()..].trim();
+    let scale: u64 = match unit {
+        "g" | "gb" | "gi" | "gib" => 1 << 30,
+        "m" | "mb" | "mi" | "mib" => 1 << 20,
+        _ => {
+            return Err(format!(
+                "{:?} is not a size. Write a whole number with g or m, like 6g or 512m.",
+                text.trim()
+            ))
+        }
+    };
+    match digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(scale))
+    {
+        Some(0) => Err(format!(
+            "{:?} is zero. Write a size above zero.",
+            text.trim()
+        )),
+        Some(bytes) => Ok(bytes),
+        None => Err(format!(
+            "{:?} is not a size. Write a whole number with g or m, like 6g or 512m.",
+            text.trim()
+        )),
+    }
+}
+
+/// The two settings, checked together: both whole sizes, the cap at least [`FILL_CAP_FLOOR`], and
+/// the cap no more than the budget. A budget below what the store already holds is allowed; it
+/// removes nothing and only makes new requests wait.
+pub fn limits_from(budget: &str, fill_cap: &str) -> Result<Limits, String> {
+    let b = parse_size(budget).map_err(|e| format!("Browser store budget: {e}"))?;
+    let c = parse_size(fill_cap).map_err(|e| format!("Largest browser fetch: {e}"))?;
+    if c < FILL_CAP_FLOOR {
+        return Err(format!(
+            "Largest browser fetch: {} MB is too small. One chromium is about 1 GB, so use at \
+             least {} MB.",
+            c >> 20,
+            FILL_CAP_FLOOR >> 20
+        ));
+    }
+    if c > b {
+        return Err(format!(
+            "Largest browser fetch ({} MB) is more than the browser store budget ({} MB). Raise \
+             the budget or lower the fetch size.",
+            c >> 20,
+            b >> 20
+        ));
+    }
+    Ok(Limits {
+        budget: b,
+        fill_cap: c,
+    })
+}
+
+/// The limits as configured **now**, read from the settings at each call so a change applies to
+/// the next request. A stored pair that does not pass [`limits_from`] (only a hand edit can make
+/// one) falls back to the defaults, and [`limits_problem`] says why.
+pub fn limits() -> Limits {
+    let c = crate::config::load_config();
+    limits_from(&c.browser_store_budget, &c.browser_fill_cap).unwrap_or_default()
+}
+
+/// Why the stored limits are not in use, when they are not.
+fn limits_problem() -> Option<String> {
+    let c = crate::config::load_config();
+    limits_from(&c.browser_store_budget, &c.browser_fill_cap)
+        .err()
+        .map(|why| format!("{why} skein is using the defaults, 6g and 2g, until it is fixed."))
+}
 
 /// How long one fill may take before it is stopped. 1 GB took two minutes on 2026-10-29.
 const FILL_DEADLINE: Duration = Duration::from_secs(20 * 60);
@@ -218,7 +324,7 @@ pub struct Staged {
 }
 
 /// Check what a fill staged in `out`, **without following anything**, and refuse it whole on the
-/// first thing that is not a plain browser directory.
+/// first thing that is not a plain browser directory, or when it is larger than `fill_cap`.
 ///
 /// Refused: a symlink anywhere (a link in the store would lead every box that runs the browser
 /// somewhere the fill chose); anything that is not a regular file or a directory (a device, a pipe,
@@ -230,7 +336,7 @@ pub struct Staged {
 /// Measured on 2026-10-29 for chromium, its headless shell and ffmpeg at Playwright 1.62.0: no
 /// link, no special file, no hard link, no setuid bit in 1 GB of browser, so a refusal here is a
 /// fill that did something a browser download does not.
-pub fn verify(out: &Path) -> Result<Staged, String> {
+pub fn verify(out: &Path, fill_cap: u64) -> Result<Staged, String> {
     let top = std::fs::symlink_metadata(out).map_err(|e| format!("nothing was staged ({e})"))?;
     if !top.is_dir() {
         return Err("what was staged is not a directory".into());
@@ -292,11 +398,11 @@ pub fn verify(out: &Path) -> Result<Staged, String> {
     if entries.is_empty() {
         return Err("the fetch staged no browser".into());
     }
-    if bytes > FILL_CAP {
+    if bytes > fill_cap {
         return Err(format!(
             "the fetch staged {} MB, more than the {} MB one fill may add",
             bytes >> 20,
-            FILL_CAP >> 20
+            fill_cap >> 20
         ));
     }
     entries.sort();
@@ -431,14 +537,21 @@ fn published() -> Vec<String> {
     names
 }
 
-/// Why a fill cannot start now, or `None` when the store has room for one.
+/// Why a fill cannot start now, or `None` when the store has room for one, by the limits as they
+/// are configured at this moment ([`limits`]).
 fn no_room(used: u64) -> Option<String> {
-    (used + FILL_CAP > BUDGET).then(|| {
+    no_room_under(used, limits())
+}
+
+fn no_room_under(used: u64, limits: Limits) -> Option<String> {
+    (used.saturating_add(limits.fill_cap) > limits.budget).then(|| {
         format!(
-            "The fleet's browser store is full: {} MB of {} MB. New browser requests wait. Clean \
-             versions no box uses to make room.",
+            "The fleet's browser store is full: {} MB of {} MB, with room needed for a {} MB \
+             fetch. New browser requests wait. Clean versions no box uses to make room, or raise \
+             the budget in Settings.",
             used >> 20,
-            BUDGET >> 20
+            limits.budget >> 20,
+            limits.fill_cap >> 20
         )
     })
 }
@@ -460,15 +573,40 @@ pub fn fill(sandbox: &str, want: &str) -> Result<String, String> {
 }
 
 /// [`fill`] with the fetch passed in, so a test can stage a fixture tree through the real namespace.
+///
+/// A fill that published something new is followed by [`link_running_boxes`], once the fill lock
+/// is let go, so a box that is running now can use the browser without a restart (SKEIN-1355).
 pub fn fill_with(sandbox: &str, want: &str, fetch: &[String]) -> Result<String, String> {
+    let (said, new) = fill_locked(sandbox, want, fetch)?;
+    if new.is_empty() {
+        return Ok(said);
+    }
+    let pass = link_running_boxes();
+    for line in &pass.log {
+        eprintln!("skein: {line}");
+    }
+    Ok(format!("{said}\n{}", pass.summary()))
+}
+
+fn fill_locked(
+    sandbox: &str,
+    want: &str,
+    fetch: &[String],
+) -> Result<(String, Vec<String>), String> {
     let _one = FILLING.lock().unwrap_or_else(|p| p.into_inner());
     let store = PathBuf::from(store_dir());
     if let Some(had) = fills().get(want) {
         if !had.is_empty() && had.iter().all(|n| store.join(n).is_dir()) {
-            return Ok(format!("already in the fleet's store: {}", had.join(", ")));
+            return Ok((
+                format!("already in the fleet's store: {}", had.join(", ")),
+                Vec::new(),
+            ));
         }
     }
-    if let Some(full) = no_room(store_bytes()) {
+    // Read once, here, so the room check and the size check of this fill agree with each other
+    // even if the owner saves new limits while it runs.
+    let limits = limits();
+    if let Some(full) = no_room_under(store_bytes(), limits) {
         return Err(full);
     }
     let stage = staging_root().join(format!(
@@ -478,7 +616,7 @@ pub fn fill_with(sandbox: &str, want: &str, fetch: &[String]) -> Result<String, 
     ));
     std::fs::create_dir_all(&stage).map_err(|e| format!("cannot stage a fill: {e}"))?;
     let _ = std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700));
-    let outcome = fill_staged(sandbox, want, fetch, &stage, &store);
+    let outcome = fill_staged(sandbox, want, fetch, &stage, &store, limits.fill_cap);
     let _ = remove_tree(&stage);
     outcome
 }
@@ -489,7 +627,8 @@ fn fill_staged(
     fetch: &[String],
     stage: &Path,
     store: &Path,
-) -> Result<String, String> {
+    fill_cap: u64,
+) -> Result<(String, Vec<String>), String> {
     let ran = crate::place::own_sandbox(sandbox).attempt(
         &namespace_script(&stage.display().to_string(), fetch),
         &[],
@@ -506,7 +645,7 @@ fn fill_staged(
     }
     // The namespace has exited and its PID namespace with it, so nothing is writing any more.
     let out = stage.join("out");
-    let staged = verify(&out).map_err(|why| format!("refused: {why}"))?;
+    let staged = verify(&out, fill_cap).map_err(|why| format!("refused: {why}"))?;
     std::fs::create_dir_all(store).map_err(|e| e.to_string())?;
     let new = publish(&out, store, &staged)?;
     crate::util::update_json(
@@ -516,7 +655,7 @@ fn fill_staged(
             Ok(())
         },
     )?;
-    Ok(format!(
+    let said = format!(
         "{said}\nin the fleet's store: {}{}",
         staged.entries.join(", "),
         if new.is_empty() {
@@ -526,7 +665,90 @@ fn fill_staged(
         }
     )
     .trim()
-    .to_string())
+    .to_string();
+    Ok((said, new))
+}
+
+/// What runs inside a box, as the box, to link the store's browsers into its own browsers
+/// directory: the installed `skein-link-browsers.sh` ([`super::box_link_browsers_path`]), the same
+/// file the kit runs at each start and the box's agent can run itself (SKEIN-1355).
+///
+/// **One copy, three callers.** A second spelling here would be two sets of rules about which
+/// names are browsers and which links are the box's own, and the day they disagree a box's own
+/// download is replaced, or a link skein made is left dangling. The file is installed by
+/// [`super::install_launcher`] beside the kit, from the same build as this binary, under `.skein`,
+/// which every box sees read-only at the same path.
+pub fn link_script() -> String {
+    format!("bash {}", sh_quote(&super::box_link_browsers_path()))
+}
+
+/// What one post-fill pass did, for the server's log and the fill's answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkPass {
+    /// Running boxes that ran the link.
+    pub linked: Vec<String>,
+    /// Boxes that are not running, or whose crossing failed: each links the browser at its next
+    /// start, as every box always did.
+    pub later: Vec<String>,
+    /// A line per box that did not link now, and why.
+    pub log: Vec<String>,
+}
+
+impl LinkPass {
+    fn summary(&self) -> String {
+        match (self.linked.len(), self.later.len()) {
+            (0, 0) => "No box is placed yet; each links it when it starts.".into(),
+            (n, 0) => format!("Linked now in {n} running box(es)."),
+            (0, l) => {
+                format!("No running box linked it now; {l} box(es) link it at their next start.")
+            }
+            (n, l) => format!(
+                "Linked now in {n} running box(es); {l} other box(es) link it at their next start."
+            ),
+        }
+    }
+}
+
+/// **The post-fill pass** (SKEIN-1355): every running box runs [`link_script`] through skein's
+/// crossing into it, so it can use a browser the moment it is published.
+///
+/// **Inside each box, as the box, and never from here.** The host side never writes into a box's
+/// home: a box's `~/.cache` or browsers directory can be a link it planted, and followed from out
+/// here that link lands wherever the box chose, outside its namespace. Inside, it lands where it
+/// would for the box itself, which is where the kit's start-time pass already runs.
+///
+/// A box that is stopped, or whose crossing fails, is not an error: it links the browser at its
+/// next start, as it always has, and the line saying so goes to the server's log. Never fails the
+/// fill, which has already published.
+pub fn link_running_boxes() -> LinkPass {
+    let mut pass = LinkPass::default();
+    let script = link_script();
+    crate::fleet::forget_fleet_liveness();
+    let live = crate::fleet::fleet_liveness();
+    for (name, _) in crate::place::placed_boxes(&crate::place::fleet_sandbox()) {
+        if !live.get(&name).copied().unwrap_or(false) {
+            pass.log.push(format!(
+                "{name} is not running; it links the new browser at its next start"
+            ));
+            pass.later.push(name);
+            continue;
+        }
+        match crate::place::place_of(&name)
+            .ok_or_else(|| crate::place::unplaced(&name))
+            .and_then(|p| p.exec(&script, Duration::from_secs(30)))
+        {
+            Ok(_) => pass.linked.push(name),
+            Err(why) => {
+                pass.log.push(format!(
+                    "could not link the new browser into {name} now ({}); it links it at its next \
+                     start",
+                    why.lines().next().unwrap_or("")
+                ));
+                pass.later.push(name);
+            }
+        }
+    }
+    pass
 }
 
 /// Leftovers of a fill this process did not finish: a crash or a stop between staging and the
@@ -613,7 +835,11 @@ pub struct Shelf {
 pub struct StoreView {
     pub entries: Vec<Shelf>,
     pub bytes: u64,
+    /// The budget and the fill cap in use now ([`limits`]).
     pub budget: u64,
+    pub fill_cap: u64,
+    /// Why the stored limits are not in use, when a hand edit left them unreadable.
+    pub limits_problem: Option<String>,
     /// Why new requests are waiting, when they are.
     pub full: Option<String>,
     /// Browser requests not answered yet, `<box>: <browser>@<version>`.
@@ -707,6 +933,7 @@ pub fn store_view(sandbox: &str) -> StoreView {
         })
         .collect();
     let bytes = entries.iter().map(|e| e.bytes).sum();
+    let limits = limits();
     let waiting: Vec<String> = crate::substrate::list(sandbox)
         .unwrap_or_default()
         .into_iter()
@@ -714,10 +941,12 @@ pub fn store_view(sandbox: &str) -> StoreView {
         .map(|r| format!("{}: {}", r.box_name, r.packages.join(" ")))
         .collect();
     StoreView {
-        full: no_room(bytes).filter(|_| !waiting.is_empty()),
+        full: no_room_under(bytes, limits).filter(|_| !waiting.is_empty()),
         entries,
         bytes,
-        budget: BUDGET,
+        budget: limits.budget,
+        fill_cap: limits.fill_cap,
+        limits_problem: limits_problem(),
         waiting,
         unknown,
     }
@@ -874,15 +1103,125 @@ mod tests {
         assert!(m.apt.is_empty() && m.npm.is_empty(), "{m:?}");
     }
 
-    /// **A fill starts only while the store has room for the largest one under its budget.**
+    /// **A fill starts only while the store has room for the largest one under its budget, and the
+    /// budget and the largest fill are the settings as they are at the moment of asking**
+    /// (SKEIN-1357).
     ///
-    /// What would make it fail: `no_room` comparing without `FILL_CAP`, so a store one byte under
-    /// the budget starts a fill that takes it a gigabyte over.
+    /// What would make it fail: `no_room` comparing without the fill cap, so a store one byte under
+    /// the budget starts a fill that takes it a gigabyte over; `no_room` or `limits` reading the
+    /// defaults instead of the settings (the store that had room under 6g/2g still has it under
+    /// 4g/1g, and the 8g/512m store still has none); `limits` remembering the first answer it read.
     #[test]
     fn a_fill_waits_while_the_store_has_no_room_for_one_more() {
-        assert_eq!(no_room(BUDGET - FILL_CAP), None);
-        let full = no_room(BUDGET - FILL_CAP + 1).expect("no room");
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", dir.join("home"))
+            .set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        assert_eq!(no_room(DEFAULT_BUDGET - DEFAULT_FILL_CAP), None);
+        let full = no_room(DEFAULT_BUDGET - DEFAULT_FILL_CAP + 1).expect("no room");
         assert!(full.contains("Clean versions no box uses"), "{full}");
+
+        let set = |budget: &str, cap: &str| {
+            crate::config::save_config(&crate::config::Config {
+                browser_store_budget: budget.into(),
+                browser_fill_cap: cap.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        };
+        // 3.5 GB held: room under the defaults (3.5 + 2 <= 6), none under 4g with a 1g fetch.
+        let held = (7 << 30) / 2;
+        assert_eq!(no_room(held), None, "the defaults left no room");
+        set("4g", "1g");
+        let full = no_room(held).expect("a lowered budget still had room");
+        assert!(full.contains("4096 MB"), "{full}");
+        // 7 GB held: no room under the defaults, room under 8g with a 512m fetch.
+        let held = 7 << 30;
+        set("6g", "2g");
+        assert!(no_room(held).is_some());
+        set("8g", "512m");
+        assert_eq!(no_room(held), None, "a raised budget still had no room");
+        // A pair that does not pass is ignored for the defaults, and says so.
+        set("1g", "2g");
+        assert_eq!(limits(), Limits::default());
+        assert!(limits_problem().is_some_and(|w| w.contains("more than the browser store budget")));
+    }
+
+    /// **The settings take only whole sizes, a fill cap of at least 512 MB, and a cap no larger than
+    /// the budget** (SKEIN-1357).
+    ///
+    /// What would make it fail: `parse_size` taking a bare number, a fraction, zero or a unit it
+    /// does not know; dropping the floor; dropping the cap-against-budget check.
+    #[test]
+    fn the_browser_limits_take_whole_sizes_and_keep_the_cap_under_the_budget() {
+        assert_eq!(
+            limits_from("6g", "2g"),
+            Ok(Limits {
+                budget: 6 << 30,
+                fill_cap: 2 << 30
+            })
+        );
+        assert_eq!(
+            limits_from(" 6GiB ", "512MB").map(|l| l.fill_cap),
+            Ok(512 << 20)
+        );
+        assert_eq!(limits_from("2g", "2g").map(|l| l.budget), Ok(2 << 30));
+        for (budget, cap, says) in [
+            ("6", "2g", "not a size"),
+            ("6g", "2048", "not a size"),
+            ("1.5g", "512m", "not a size"),
+            ("-6g", "2g", "not a size"),
+            ("0g", "2g", "zero"),
+            ("6t", "2g", "not a size"),
+            ("", "2g", "not a size"),
+            ("6g", "511m", "too small"),
+            ("1g", "2g", "more than the browser store budget"),
+            ("99999999999999g", "2g", "not a size"),
+        ] {
+            let why = limits_from(budget, cap).expect_err(&format!("{budget}/{cap} was taken"));
+            assert!(why.contains(says), "{budget}/{cap}: {why}");
+        }
+    }
+
+    /// **The post-fill pass, the kit's start and the box's agent run one installed file**
+    /// (SKEIN-1355).
+    ///
+    /// What would make it fail: the crossing sending a script of its own instead of running the
+    /// installed file; the kit's start no longer running that file from beside itself; the file
+    /// left out of what `install_launcher` installs; the loop copied back into the kit.
+    #[test]
+    fn the_post_fill_link_runs_the_one_installed_script() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_HOME", dir.join("home"))
+            .set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        assert_eq!(
+            link_script(),
+            format!(
+                "bash {}",
+                sh_quote(&format!(
+                    "{}/fleet/.skein/skein-link-browsers.sh",
+                    dir.display()
+                ))
+            )
+        );
+        let kit = crate::kit::KIT_STARTUP_SH;
+        assert!(
+            kit.contains("pwd)/skein-link-browsers.sh\"") && kit.contains("bash \"$skein_linker\""),
+            "the kit's start does not run the linking script from beside itself"
+        );
+        assert!(
+            !kit.contains("ln -s \"$skein_entry\""),
+            "the kit carries a second copy of the link loop"
+        );
+        let launcher = include_str!("launcher.rs");
+        assert!(
+            launcher.contains("(box_link_browsers_path(), KIT_LINK_BROWSERS_SH)"),
+            "install_launcher does not install the linking script"
+        );
+        assert_eq!(crate::kit::KIT_LINK_BROWSERS_SH.matches("ln -s").count(), 1);
     }
 
     #[test]
@@ -929,17 +1268,17 @@ mod tests {
             out
         };
         let clean = fresh("clean");
-        let staged = verify(&clean).expect("a plain browser tree passes");
+        let staged = verify(&clean, DEFAULT_FILL_CAP).expect("a plain browser tree passes");
         assert_eq!(staged.entries, ["chromium-1234", "ffmpeg-1011"]);
 
         let link = fresh("link");
         std::os::unix::fs::symlink("/etc", link.join("chromium-1234/chrome-linux/lib")).unwrap();
-        let why = verify(&link).expect_err("a link was staged");
+        let why = verify(&link, DEFAULT_FILL_CAP).expect_err("a link was staged");
         assert!(why.contains("is a link"), "{why}");
 
         let top_link = fresh("toplink");
         std::os::unix::fs::symlink("/usr", top_link.join("webkit-1")).unwrap();
-        assert!(verify(&top_link)
+        assert!(verify(&top_link, DEFAULT_FILL_CAP)
             .expect_err("a link entry")
             .contains("is a link"));
 
@@ -949,14 +1288,14 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        let why = verify(&pipe).expect_err("a pipe was staged");
+        let why = verify(&pipe, DEFAULT_FILL_CAP).expect_err("a pipe was staged");
         assert!(why.contains("not a file or a directory"), "{why}");
 
         // A socket, the third special kind. A device cannot be made without root, which a test does
         // not have; it takes the same branch as these two.
         let sock = fresh("sock");
         let _listener = std::os::unix::net::UnixListener::bind(sock.join("ffmpeg-1011/s")).unwrap();
-        let why = verify(&sock).expect_err("a socket was staged");
+        let why = verify(&sock, DEFAULT_FILL_CAP).expect_err("a socket was staged");
         assert!(why.contains("not a file or a directory"), "{why}");
 
         let hard = fresh("hard");
@@ -965,13 +1304,13 @@ mod tests {
             hard.join("ffmpeg-1011/chrome"),
         )
         .unwrap();
-        assert!(verify(&hard)
+        assert!(verify(&hard, DEFAULT_FILL_CAP)
             .expect_err("a hard link")
             .contains("hard link"));
 
         let named = fresh("named");
         std::fs::create_dir_all(named.join("..hidden-1")).unwrap();
-        assert!(verify(&named)
+        assert!(verify(&named, DEFAULT_FILL_CAP)
             .expect_err("a name that is not an entry")
             .contains("not a browser directory"));
 
@@ -981,7 +1320,9 @@ mod tests {
             std::fs::Permissions::from_mode(0o4755),
         )
         .unwrap();
-        assert!(verify(&setuid).expect_err("setuid").contains("setuid"));
+        assert!(verify(&setuid, DEFAULT_FILL_CAP)
+            .expect_err("setuid")
+            .contains("setuid"));
     }
 
     /// **What is published is read-only, whole, and never replaced.**
@@ -996,7 +1337,7 @@ mod tests {
         std::fs::create_dir_all(&store).unwrap();
         let out = dir.join("out");
         fixture_entry(&out, "chromium-1234");
-        let staged = verify(&out).unwrap();
+        let staged = verify(&out, DEFAULT_FILL_CAP).unwrap();
         assert_eq!(publish(&out, &store, &staged).unwrap(), ["chromium-1234"]);
         let file = store.join("chromium-1234/chrome-linux/chrome");
         let mode = std::fs::metadata(&file).unwrap().mode();
@@ -1014,7 +1355,7 @@ mod tests {
         let again = dir.join("again");
         fixture_entry(&again, "chromium-1234");
         std::fs::write(again.join("chromium-1234/INSTALLATION_COMPLETE"), "second").unwrap();
-        let staged = verify(&again).unwrap();
+        let staged = verify(&again, DEFAULT_FILL_CAP).unwrap();
         assert!(publish(&again, &store, &staged).unwrap().is_empty());
         assert_eq!(
             std::fs::read_to_string(store.join("chromium-1234/INSTALLATION_COMPLETE")).unwrap(),
@@ -1041,7 +1382,7 @@ mod tests {
         let out = dir.join("out");
         fixture_entry(&out, "chromium-1");
         fixture_entry(&out, "chromium-2");
-        let staged = verify(&out).unwrap();
+        let staged = verify(&out, DEFAULT_FILL_CAP).unwrap();
         publish(&out, &store, &staged).unwrap();
         let farm = dir.join("fleet/web-main/home").join(FARM);
         std::fs::create_dir_all(&farm).unwrap();

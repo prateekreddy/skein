@@ -42,7 +42,7 @@
 
 use crate::config::skein_home;
 use crate::config::*;
-use crate::kit::KIT_STARTUP_SH;
+use crate::kit::{KIT_LINK_BROWSERS_SH, KIT_STARTUP_SH};
 use crate::place::{anchor_probe, parse_anchor_probe};
 use crate::place::{
     own_sandbox, place_of, placed_boxes, record_place, shared_record, Place, PlaceRecord,

@@ -80,6 +80,7 @@ function loadBrowsers(ov) {
     for (const e of v.entries) {
       add(browserRow(e.name, `<b>${fmtGb(mbOf(e.bytes))}</b> · ${e.boxes.length ? "linked by " + esc(e.boxes.join(", ")) : "no box links it"}`));
     }
+    if (v.limits_problem) add(browserRow(v.limits_problem));
     if (v.full) add(browserRow(v.full));
     else if (v.waiting.length) add(browserRow("fetching: " + v.waiting.join("; ")));
     if (v.unknown.length) add(browserRow(`skein cannot read which browsers ${v.unknown.join(", ")} links, so nothing can be cleaned until its ~/.cache/ms-playwright is a plain directory`));

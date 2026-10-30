@@ -2141,6 +2141,12 @@
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with, unless you pick another for that box when you create it</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">The share of the fleet's one filesystem a box may take. Blank means unlimited. <details><summary>how it is measured and enforced</summary>how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</details></span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Offer old build output after</span><span class="desc">Days a compiler artefact may go untouched before a full disk offers it back. <b>0 turns the offer off.</b> <details><summary>why this one is a judgement and not a measurement</summary>Everything else skein offers to delete it can <b>prove</b> dead — a directory under <code>.skein</code> that belongs to neither skein nor any live box, or a build directory whose own dependency files name a source tree that is no longer on disk. Cargo's superseded generations cannot be proved dead at all: rebuild a crate under a changed feature set and the old <code>.rlib</code> stays beside the new one for ever, and nothing in either file says which is which — cargo's own fingerprint register does not either, because it keeps one per generation and removes none. The only handle left is how long since something read or wrote the file, and skein admits it <b>here and nowhere else</b> because of what being wrong costs: the artefact is regenerated from source nobody touched, so the price is a <b>slower rebuild and never lost work</b>. It is yours to set because its correctness is local — a fleet whose lanes run for a week is wrong to call five days dead. skein never deletes any of it; it names what it would remove, with the age and the size, and prints the command.</details></span><input id="set-staledays" type="number" min="0" step="1" placeholder="5" autocomplete="off" /></label>
+            <!-- The fleet's shared browser store (SKEIN-1357). Checked by the server on save:
+                 whole sizes, a fetch of at least 512m, and no more than the budget. The usage line
+                 under them is read from `/api/fleet/browsers` as the pane opens. -->
+            <label class="set-field narrow"><span class="set-title">Browser store budget</span><span class="desc">The most the fleet's shared Playwright browsers may take, like <code>6g</code>. Lowering it below what the store holds removes nothing: new browser requests wait until you clean versions no box uses.</span><input id="set-pwbudget" placeholder="6g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Largest browser fetch</span><span class="desc">The most one browser request may add, like <code>2g</code>. At least <code>512m</code>, since one chromium is about 1 GB, and no more than the budget.</span><input id="set-pwcap" placeholder="2g" autocomplete="off" spellcheck="false" /></label>
+            <p class="set-note" id="set-pwuse"></p>
             <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as, from each box's next start. Blank reads it from this sandbox's global git config — a box has a private HOME, so it inherits no gitconfig of its own. One box can commit as someone else in its own settings.</span><input id="set-gitname" placeholder="(from this sandbox's git config)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits, from each box's next start</span><input id="set-gitemail" placeholder="(from this sandbox's git config)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
@@ -9638,6 +9644,7 @@ function loadBrowsers(ov) {
     for (const e of v.entries) {
       add(browserRow(e.name, `<b>${fmtGb(mbOf(e.bytes))}</b> · ${e.boxes.length ? "linked by " + esc(e.boxes.join(", ")) : "no box links it"}`));
     }
+    if (v.limits_problem) add(browserRow(v.limits_problem));
     if (v.full) add(browserRow(v.full));
     else if (v.waiting.length) add(browserRow("fetching: " + v.waiting.join("; ")));
     if (v.unknown.length) add(browserRow(`skein cannot read which browsers ${v.unknown.join(", ")} links, so nothing can be cleaned until its ~/.cache/ms-playwright is a plain directory`));
@@ -11036,6 +11043,9 @@ function openSettings(pane = "repos") {
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
     document.getElementById("set-staledays").value = settings.stale_build_days ?? "";
+    document.getElementById("set-pwbudget").value = settings.browser_store_budget || "";
+    document.getElementById("set-pwcap").value = settings.browser_fill_cap || "";
+    renderBrowserUse();
     document.getElementById("set-gitname").value = settings.git_name || "";
     document.getElementById("set-gitemail").value = settings.git_email || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
@@ -11653,6 +11663,19 @@ function removeRepo(id) {
     .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
     .catch(e => notice(`remove failed: ${failText(e)}`));
 }
+// What the shared browser store holds now, under its two settings (SKEIN-1357): a reading, so it is
+// fetched as the pane opens rather than written into the form.
+function renderBrowserUse() {
+  const note = document.getElementById("set-pwuse");
+  note.textContent = "";
+  fetch("/api/fleet/browsers").then(r => r.ok ? r.json() : null).then(v => {
+    if (!v) return;
+    let said = `The store holds ${fmtGb(mbOf(v.bytes))} of ${fmtGb(mbOf(v.budget))} now, in ${v.entries.length} browser${v.entries.length === 1 ? "" : "s"}.`;
+    if (v.bytes + v.fill_cap > v.budget) said += " New browser requests wait until there is room for one more fetch.";
+    if (v.limits_problem) said += " " + v.limits_problem;
+    note.textContent = said;
+  }).catch(() => {});
+}
 // Closes whatever the form holds — what Save does once it has saved, what Cancel and Discard mean.
 function closeSettings() { settingsTicket++; settingsModal().classList.remove("open"); document.getElementById("set-leave").hidden = true; }
 // **Escape, ✕ and a click outside ask first when there is something to lose** (SKEIN-1260, the
@@ -11689,6 +11712,9 @@ function settingsPayload() {
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.
     stale_build_days: Math.max(0, parseInt(document.getElementById("set-staledays").value, 10) || 0),
+    // Blank means the default, said the way the placeholder shows it. The server checks the pair.
+    browser_store_budget: document.getElementById("set-pwbudget").value.trim() || "6g",
+    browser_fill_cap: document.getElementById("set-pwcap").value.trim() || "2g",
     git_name: document.getElementById("set-gitname").value.trim(),
     git_email: document.getElementById("set-gitemail").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),
