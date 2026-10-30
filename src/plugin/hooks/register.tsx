@@ -11,8 +11,10 @@
 
 import type { Register } from 'claude-code'
 
+import { register as agentsPanel } from './agents-panel'
 import { register as identity } from './identity'
 
 export const register: Register = on => {
   identity(on)
+  agentsPanel(on)
 }

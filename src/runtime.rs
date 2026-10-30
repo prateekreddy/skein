@@ -339,6 +339,18 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         "hooks/identity.ts",
         include_str!("plugin/hooks/identity.ts"),
     ),
+    // The agents panel (SKEIN-1361), its lane facts and price table, and the MIT notice of the
+    // mod it was adapted from, which ships with the code it covers.
+    (
+        "hooks/agents-panel.tsx",
+        include_str!("plugin/hooks/agents-panel.tsx"),
+    ),
+    (
+        "hooks/agents-panel.LICENSE",
+        include_str!("plugin/hooks/agents-panel.LICENSE"),
+    ),
+    ("hooks/lanes.ts", include_str!("plugin/hooks/lanes.ts")),
+    ("hooks/prices.ts", include_str!("plugin/hooks/prices.ts")),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
