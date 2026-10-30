@@ -109,14 +109,12 @@ bound read-only as a box binds it, and a stand-in `resources.json` asking for a 
 - The narrower plugin a fleet gets with its plugin switch off (`turn_state_plugin_dir`) carries no
   module.
 
-**The CLI version.** CI installs one pinned Claude Code, `CLAUDE_CODE_VERSION` in
-`.github/workflows/ci.yml`, and `tools/plugin-check.sh` refuses to run on any other. The boxes are not
-pinned: the sandbox installs `@anthropic-ai/claude-code` once into the npm-global prefix every box
-shares, and the cockpit's update installs whatever npm's newest is then
-(`update_runtimes` in `src/fleet/substrate.rs`). The two numbers were equal on 2026-10-30, at
-2.1.314, read from that prefix's `package.json`. Nothing holds them equal after the next update:
-pinning the boxes changes what the update button does, which is the owner's call. Until then, an
-update that moves the boxes is followed by moving the CI pin and running the check.
+**The CLI version.** One number, `src/claude-code.version`, read by both sides (SKEIN-1380, the
+owner's option (a)). CI's `plugin` job installs that Claude Code and `tools/plugin-check.sh` refuses
+to run on any other; the fleet fetches that same version into its depot, tests it with the same
+script, and rolls out no other claude-code version to its boxes
+(`docs/decisions/versions-roll-out-when-idle.md`). So moving a box to a newer build is a reviewed
+commit to that file, whose CI checks the mod first, and then the owner's "Roll out".
 
 **Rules out.** A second hooks module in the plugin (the engine refuses one). Removing a command hook
 because a mod version exists, before that version is proven in a box. Writing a feature's logic
