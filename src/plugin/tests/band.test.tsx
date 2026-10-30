@@ -544,3 +544,16 @@ test('a short one-line question is shown whole, and the cut never leaves under 2
   )
   await narrow.unmount()
 })
+
+test('a question with more lines than its first shows that line and `…`', async ($, on) => {
+  const w = world({ questions: [question('q1', '2026-10-30T08:00:00Z', 'Merge now?\nCI is green.')] })
+  await started(on, w, $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /Waiting for your answer/ }))?.text.trim()).toBe(
+      'Waiting for your answer: “Merge now?…”',
+    )
+    await ui.unmount()
+  }
+})
