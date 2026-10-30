@@ -817,6 +817,14 @@ cited_by = ["docs/threat-model.md"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
+["src/box-session.sh:2021"]
+line = "binds+=(--remount-ro \"$npm_prefix\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2023"]
+line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
+cited_by = ["docs/threat-model.md"]
+
 ["src/box-session.sh:2309"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
@@ -880,6 +888,10 @@ cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:3656"]
 line = "exec bwrap \\"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:3699"]
+line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:3729"]
