@@ -13,6 +13,19 @@ fn calls(paths: &[String]) -> String {
 /// block, its `$HOME` bound from `home_from` as the launcher binds `<box>/home`, and run the
 /// shipped `skein-mcp` in it with `input` on stdin. Returns what the server printed.
 fn clean_in_box(f: &Fleet, server: &Path, home_from: &Path, input: &str) -> String {
+    clean_in_box_with(f, server, home_from, input, "", "exec python3 \"$1\"")
+}
+
+/// [`clean_in_box`], with `extra` appended to the bwrap arguments after the launcher's, and `shell`
+/// run by `/bin/sh` in the box in place of the server alone, with the server's path as `$1`.
+fn clean_in_box_with(
+    f: &Fleet,
+    server: &Path,
+    home_from: &Path,
+    input: &str,
+    extra: &str,
+    shell: &str,
+) -> String {
     let root = f.fleet_root.join("web-main");
     let state = f.state_parent.join("web-main");
     let boxhome = f.dir.path().join("boxhome");
@@ -28,10 +41,10 @@ fn clean_in_box(f: &Fleet, server: &Path, home_from: &Path, input: &str) -> Stri
          SKEIN_FLEET_MOUNTS={mounts} SKEIN_BOX_STORE={store}\n\
          {iso}\n\
          {cache}\n\
-         binds+=(--bind {home_from} {boxhome})\n\
+         binds+=(--bind {home_from} {boxhome} {extra})\n\
          exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} -- \
            /usr/bin/env HOME={boxhome} SKEIN_STATE=\"$state\" SKEIN_BOX=web-main \
-           python3 {server}\n",
+           /bin/sh -c {shell} skein-probe {server}\n",
         root = q(&root),
         state = q(&state),
         fleet = q(&f.fleet_root),
@@ -42,6 +55,7 @@ fn clean_in_box(f: &Fleet, server: &Path, home_from: &Path, input: &str) -> Stri
         home_from = q(home_from),
         boxhome = q(&boxhome),
         server = q(server),
+        shell = skein::util::sh_quote(shell),
     );
     let mut child = Command::new("bash")
         .arg("-c")
@@ -159,5 +173,88 @@ fn a_box_removes_what_skein_listed_and_nothing_a_link_leads_to() {
     assert!(!root.join("home/.cache/pip").exists(), "{said}");
     assert!(!cache.join("pip").exists(), "{said}");
     assert!(cache.join("cargo/credentials.toml").exists());
+    assert!(root.join("tree/README").exists());
+}
+
+/// **A mount inside a listed cache is left alone, and the rest of the cache is removed**
+/// (SKEIN-1356). A removal never leaves the filesystem it started on.
+///
+/// The choice: remove what is on the box's own filesystem and keep the mount and the directories
+/// above it, reporting the item as not removed and naming what was left. Refusing the whole item
+/// would leave a cache the agent cannot free at all because something is mounted somewhere inside
+/// it; entering the mount would remove what belongs to some other filesystem, which in a box can be
+/// a bind of something shared.
+///
+/// A tmpfs is mounted inside `~/.cache/pip`, as the box's directory is seen through the fleet path
+/// the removal walks, and a file is written into it in the box before the clean. The file is read
+/// back in the same box afterwards: a tmpfs lives only in the namespace.
+///
+/// What would make it fail: dropping both device checks in the plugin's `open_dir_at` (the walk
+/// then enters the tmpfs and removes the file in it). Watched: with exactly that, the file in the
+/// mount was gone and this failed.
+#[test]
+fn a_mount_inside_a_listed_cache_is_left_alone_and_the_rest_removed() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create a user namespace here, so skein_clean's filesystem boundary was \
+             NOT exercised in a box",
+        );
+    }
+    let f = Fleet::make("agentcleanmount");
+    let root = f.fleet_root.join("web-main");
+    let pip = root.join("home/.cache/pip");
+    let mnt = pip.join("mnt");
+    for p in [pip.join("wheels/x.whl"), root.join("tree/README")] {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, "data").unwrap();
+    }
+    fs::create_dir_all(&mnt).unwrap();
+    let server = f.fleet_root.join(".skein/plugin/bin/skein-mcp");
+    fs::create_dir_all(server.parent().unwrap()).unwrap();
+    fs::write(&server, include_str!("../../src/plugin/bin/skein-mcp")).unwrap();
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let signals = f.state_parent.join("web-main/signals");
+    fs::create_dir_all(&signals).unwrap();
+    fs::write(
+        signals.join("resources.json"),
+        serde_json::json!({
+            "at": now, "asks": [],
+            "clean": {
+                "at": now,
+                "box_root": root.display().to_string(),
+                "items": [{"path": pip.display().to_string(), "shown": "~/.cache/pip",
+                           "kind": "download cache", "bytes": 4096}],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let m = skein::util::sh_quote(mnt.to_string_lossy().as_ref());
+    let said = clean_in_box_with(
+        &f,
+        &server,
+        &root.join("home"),
+        &calls(&[pip.display().to_string()]),
+        &format!("--tmpfs {m}"),
+        &format!(
+            "mkdir -p {m}/deep && echo kept > {m}/deep/inmount && python3 \"$1\"; \
+             echo; echo \"inmount: $(cat {m}/deep/inmount 2>/dev/null || echo gone)\""
+        ),
+    );
+    // First, so a removal that entered the mount is named as that, whatever else it did.
+    assert!(
+        said.contains("inmount: kept"),
+        "the removal crossed into a filesystem mounted inside the cache:\n{said}"
+    );
+    assert!(
+        !pip.join("wheels").exists(),
+        "the part of the cache on the box's own filesystem was not removed:\n{said}"
+    );
+    assert!(
+        said.contains("another filesystem mounted inside it") && said.contains("left_alone"),
+        "the clean did not say what it left:\n{said}"
+    );
+    assert!(mnt.is_dir(), "the mount point itself was removed:\n{said}");
     assert!(root.join("tree/README").exists());
 }

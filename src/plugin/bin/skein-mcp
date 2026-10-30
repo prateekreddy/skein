@@ -56,7 +56,8 @@
 # * **A removal never follows a link and never leaves the filesystem it started on.** Every
 #   directory is opened from the one above it with `O_NOFOLLOW`, checked to be on the device the
 #   listed root is on, and emptied through its descriptor (`remove_listed`); a link is unlinked as
-#   itself. A box can swap a directory for a link at any moment, and a removal by path would follow it.
+#   itself. A mount found inside a listed item is not entered: the rest of the item is removed,
+#   the mount and the directories above it are kept, and the item is reported as not removed. A box can swap a directory for a link at any moment, and a removal by path would follow it.
 # * **The repo's shared cache only while no other box of the repo runs**, the host's rule for its
 #   own clean (`fleet::clean_repo_cache`). This box cannot see its siblings, so it acts on skein's
 #   word in the signal file, and only while that word is recent (`SIBLINGS_FRESH_SECONDS`).
@@ -503,17 +504,21 @@ def safe_removal_supported():
 
 
 def open_dir_at(parent, name, dev, seen=None):
-    """Open directory `name` under the descriptor `parent`, never through a link, and only on `dev`."""
+    """Open directory `name` under the descriptor `parent`, never through a link. None when it is on
+    another filesystem than `dev`: a mount, which is somebody else's and is left alone."""
     if seen is not None and seen.st_dev != dev:
-        raise Refused("part of this is on another filesystem, so skein left it alone")
+        return None
     try:
         fd = os.open(name, DIR_FLAGS, dir_fd=parent)
     except OSError as e:
         raise Refused("part of this path is now a link, so skein left it alone") from e
     st = os.fstat(fd)
-    if st.st_dev != dev or (seen is not None and st.st_ino != seen.st_ino):
+    if st.st_dev != dev:
         os.close(fd)
-        raise Refused("part of this path changed or is on another filesystem, so skein left it alone")
+        return None
+    if seen is not None and st.st_ino != seen.st_ino:
+        os.close(fd)
+        raise Refused("part of this path changed while skein removed it, so skein left the rest alone")
     return fd
 
 
@@ -523,15 +528,23 @@ def names_in(fd):
 
 
 def remove_tree_at(parent, name, dev):
-    """Remove `name` under the descriptor `parent` and everything in it. A link is unlinked as
-    itself; a directory is opened with `O_NOFOLLOW` from its parent's descriptor; a directory on
-    another device is a refusal. Iterative, so a deep `node_modules` cannot exhaust the stack."""
+    """Remove `name` under the descriptor `parent` and everything in it that is on `dev`, and return
+    the paths, relative to `parent`, of the mounts inside it that were left alone.
+
+    A link is unlinked as itself; a directory is opened with `O_NOFOLLOW` from its parent's
+    descriptor; a directory on another filesystem (a mount) is not entered, and neither it nor any
+    directory above it is removed, so everything in the mount survives and the rest is freed.
+    Iterative, so a deep `node_modules` cannot exhaust the stack."""
     st = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if not stat.S_ISDIR(st.st_mode):
         os.unlink(name, dir_fd=parent)
-        return
+        return []
     top_fd = open_dir_at(parent, name, dev, st)
-    stack = [[parent, name, top_fd, names_in(top_fd)]]
+    if top_fd is None:
+        return [name]
+    # Each frame: parent descriptor, name, own descriptor, names left, whether a mount is below it.
+    stack = [[parent, name, top_fd, names_in(top_fd), False]]
+    kept = []
     try:
         while stack:
             frame = stack[-1]
@@ -540,25 +553,33 @@ def remove_tree_at(parent, name, dev):
                 kst = os.stat(kid, dir_fd=frame[2], follow_symlinks=False)
                 if stat.S_ISDIR(kst.st_mode):
                     kfd = open_dir_at(frame[2], kid, dev, kst)
-                    stack.append([frame[2], kid, kfd, None])
+                    if kfd is None:
+                        kept.append("/".join([f[1] for f in stack] + [kid]))
+                        for f in stack:
+                            f[4] = True
+                        continue
+                    stack.append([frame[2], kid, kfd, None, False])
                     stack[-1][3] = names_in(kfd)
                 else:
                     os.unlink(kid, dir_fd=frame[2])
             else:
                 stack.pop()
                 os.close(frame[2])
-                os.rmdir(frame[1], dir_fd=frame[0])
+                if not frame[4]:
+                    os.rmdir(frame[1], dir_fd=frame[0])
     finally:
         for frame in stack:
             try:
                 os.close(frame[2])
             except OSError:
                 pass
+    return kept
 
 
 def remove_listed(root, path):
     """Remove the listed directory `path` under `root`, walking down from `root` one directory at a
-    time: never through a link, never off `root`'s filesystem."""
+    time: never through a link, never off `root`'s filesystem. None when it was already gone, else
+    the mounts inside it that were left alone, as paths under `path`'s parent."""
     if not under(path, root):
         raise Refused("not under the place skein listed it in")
     parts = path[len(root.rstrip("/")) + 1:].split("/")
@@ -572,16 +593,17 @@ def remove_listed(root, path):
         dev = os.fstat(fd).st_dev
         for part in parts[:-1]:
             nxt = open_dir_at(fd, part, dev)
+            if nxt is None:
+                raise Refused("part of this path is on another filesystem, so skein left it alone")
             os.close(fd)
             fd = nxt
         try:
             st = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError:
-            return False
+            return None
         if not stat.S_ISDIR(st.st_mode):
             raise Refused("this is now a link or a file, so skein left it alone")
-        remove_tree_at(fd, parts[-1], dev)
-        return True
+        return remove_tree_at(fd, parts[-1], dev)
     finally:
         os.close(fd)
 
@@ -641,7 +663,17 @@ def clean(args):
     done = {"removed": [], "freed_bytes": 0, "failed": []}
     for r in chosen:
         try:
-            if remove_listed(r["root"], r["path"]):
+            kept = remove_listed(r["root"], r["path"])
+            if kept:
+                parent = os.path.dirname(r["in_box"])
+                done["failed"].append({
+                    "path": r["in_box"],
+                    "why": "removed all of it but %s, which %s another filesystem mounted inside it"
+                    % (", ".join(os.path.join(parent, k) for k in kept),
+                       "is" if len(kept) == 1 else "are"),
+                    "left_alone": [os.path.join(parent, k) for k in kept],
+                })
+            elif kept is not None:
                 done["removed"].append(r["in_box"])
                 done["freed_bytes"] += r["bytes"]
         except Refused as e:
