@@ -344,6 +344,8 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // The launcher's package-request leg shells out through `jq` to file the request; a machine
     // without it skips both tests that drive that leg.
     ("plugin_tools", &[JQ]),
+    // Every lane is a real worktree of a real repository (SKEIN-1374).
+    ("plugin_lanes", &[GIT]),
     // **`tmux` was always needed here and was written down nowhere** (SKEIN-765). Every spawn in
     // `tests/server/` runs the real `main`, whose `heal_fleet` reaches `fleet::start_server` — a
     // `tmux new-session` — before the port is bound, so a machine without tmux has been running

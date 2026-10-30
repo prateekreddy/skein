@@ -1,10 +1,12 @@
 // The agents panel, through the whole module: `claude plugin test src/plugin` loads the plugin
 // from its folder, so these go through register.tsx. Each `on` here stands for the engine; the
-// box it reads (a repository, its worktrees, `/proc`) is made up below.
+// box it reads (the lanes `skein-mcp lane list` reports, `/proc`) is made up below.
 
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, TurnUsage } from 'claude-code'
+
+import { LANE_CONTRACT } from './lane-contract'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -31,16 +33,21 @@ const TYPED = {
 
 const LOCK = '/var/tmp/skein-lanes-heavy.lock'
 
-/** A box: files by path, folders by path, links by path, and what a tool answers, by tool. */
+/**
+ * A box: files by path, folders by path, links by path, what a tool answers, by tool, and the lanes
+ * `skein-mcp lane list` prints.
+ */
 type Box = {
   answers?: Record<string, string>
+  lanes?: unknown
   files?: Record<string, string>
   dirs?: Record<string, string[]>
   links?: Record<string, string>
 }
 
-function engine(on: On, box: Box = {}): { opened: string[]; panes: Set<string> } {
+function engine(on: On, box: Box = {}): { opened: string[]; panes: Set<string>; ran: string[][] } {
   const opened: string[] = []
+  const ran: string[][] = []
   const panes = new Set<string>()
   // `/skein` reads the box's name as the session starts; this file is not about it.
   mock.env(on, {})
@@ -80,8 +87,22 @@ function engine(on: On, box: Box = {}): { opened: string[]; panes: Set<string> }
   })
   on('agent.spawn', (_, e) => ({ model: e.model ?? 'claude-opus-5-5', agentId: `agent-${e.tool_use_id}` }))
   on('tool.call', (_, e) => ({ result: {}, text: box.answers?.[String(e.tool)] ?? '' }))
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const isList = e.argv.slice(-2).join(' ') === 'lane list' && box.lanes !== undefined
 
-  return { opened, panes }
+    return {
+      value: {
+        exitCode: isList ? 0 : 2,
+        stdout: isList ? JSON.stringify(box.lanes) : '',
+        stderr: '',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    }
+  })
+
+  return { opened, panes, ran }
 }
 
 async function spawn($: Engine, id: string, prompt: string, model?: string): Promise<void> {
@@ -186,20 +207,23 @@ test('the panel opens when a subagent starts, and stays shut once the person shu
   expect(seen.opened).toEqual(['skein-agents', 'skein-agents', 'skein-agents'])
 })
 
-// A repository at /repo with two worktrees, and a lane in the first one waiting on the heavy lock
-// while a process in the second holds it.
+// Two lanes skein made, and the one in the first waiting on the heavy lock while a process in the
+// second holds it.
+const lane = (name: string, branch: string | null, item: string | null) => ({
+  schema: 1,
+  name,
+  item,
+  worktree: `/var/tmp/${name}`,
+  branch,
+  phase: 'created',
+})
 const LANE_BOX: Box = {
+  lanes: { result: { root: '/var/tmp', lanes: [lane('wt-a', 'feat/a', 'SKEIN-9'), lane('wt-ab', null, null)], refused: [] }, said: '' },
   dirs: {
-    '/repo/.git': ['worktrees'],
-    '/repo/.git/worktrees': ['wt-a', 'wt-ab'],
     '/proc/41/fd': ['0', '3'],
     '/proc/42/fd': ['3'],
   },
   files: {
-    '/repo/.git/worktrees/wt-a/gitdir': '/var/tmp/wt-a/.git\n',
-    '/repo/.git/worktrees/wt-a/HEAD': 'ref: refs/heads/feat/a\n',
-    '/repo/.git/worktrees/wt-ab/gitdir': '/var/tmp/wt-ab/.git\n',
-    '/repo/.git/worktrees/wt-ab/HEAD': '0123456789abcdef0123456789abcdef01234567\n',
     '/proc/locks': [
       '1: POSIX  ADVISORY  READ 7 00:1d:99 128 128',
       '2: FLOCK  ADVISORY  WRITE 41 00:1d:7 0 EOF',
@@ -236,7 +260,7 @@ test('a lane shows the item it claimed, its worktree and branch, and its wait fo
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /SKEIN-9/ }))?.text).toBe('  SKEIN-9 Do the thing')
     expect((await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-a/ }))?.text).toBe(
-      '  /var/tmp/wt-a on feat/a · waiting for the heavy-work lock',
+      '  /var/tmp/wt-a on feat/a · created · waiting for the heavy-work lock',
     )
     await ui.unmount()
   }
@@ -266,5 +290,39 @@ test('a subagent in no worktree shows no lane lines', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-a/ })).toBe(undefined)
   expect(await ui.find({ type: 'Text', text: /tracker item/ })).toBe(undefined)
+  await ui.unmount()
+})
+
+test('a lane is what skein-mcp lane list reports, with its phase and item, and a lane it refused is not one', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  // The command line's answer to the contract's records, as `tests/plugin_lanes.rs` holds it.
+  const seen = engine(on, { lanes: { result: LANE_CONTRACT.result, said: LANE_CONTRACT.said } })
+
+  await start($)
+  await spawn($, 'u9', 'Your worktree is /fixture/lanes/a.')
+  await spawn($, 'u10', 'Your worktree is /fixture/lanes/b.')
+  expect(seen.ran.filter(argv => argv.slice(-2).join(' ') === 'lane list').length).toBe(2)
+  expect(seen.ran.every(argv => argv[0] === 'python3' && argv[1]?.endsWith('/bin/skein-mcp'))).toBe(true)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /\/fixture\/lanes\/a/ }))?.text).toBe('  /fixture/lanes/a on lane/a · created')
+    expect((await ui.find({ type: 'Text', text: /SKEIN-9/ }))?.text).toBe('  SKEIN-9, not claimed yet')
+    // Lane b's record is from a newer skein: its subagent has no lane lines.
+    expect(await ui.find({ type: 'Text', text: /\/fixture\/lanes\/b/ })).toBe(undefined)
+    expect(await ui.find({ type: 'Text', text: /SKEIN-10/ })).toBe(undefined)
+    await ui.unmount()
+  }
+})
+
+test('with no lane list, a subagent shows no lane lines', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on, { ...LANE_BOX, lanes: undefined })
+
+  await start($)
+  await spawn($, 'u11', 'Worktree: /var/tmp/wt-a')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-a/ })).toBe(undefined)
   await ui.unmount()
 })
