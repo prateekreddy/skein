@@ -1,4 +1,8 @@
 {
   "name": "skein",
-  "version": "0.1.0"
+  "version": "0.1.0",
+  "description": "skein's tools, resource holds and turn-state hooks inside a box's Claude session",
+  "author": {
+    "name": "skein"
+  }
 }
