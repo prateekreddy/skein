@@ -299,8 +299,8 @@ test('a lane is what skein-mcp lane list reports, with its phase and item, and a
   const seen = engine(on, { lanes: { result: LANE_CONTRACT.result, said: LANE_CONTRACT.said } })
 
   await start($)
-  await spawn($, 'u9', 'Your worktree is /fixture/lanes/a.')
-  await spawn($, 'u10', 'Your worktree is /fixture/lanes/b.')
+  await spawn($, 'u9', 'Your worktree is /fixture/lanes/a, on its branch')
+  await spawn($, 'u10', 'Your worktree is /fixture/lanes/b, on its branch')
   // Once per subagent, through the plugin's own skein-mcp.
   const listed = seen.ran.filter(argv => argv.slice(-2).join(' ') === 'lane list')
   expect(listed.length).toBe(2)
