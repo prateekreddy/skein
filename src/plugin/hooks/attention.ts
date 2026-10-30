@@ -63,7 +63,8 @@ let heartbeat: Timer | null = null
 
 type Change = (was: SkeinAttention) => SkeinAttention | null
 
-// Its parts of the events several features watch, which `register.tsx` hooks once, after `next`.
+// Its parts of the events several features watch, which `register.tsx` hooks once and calls before
+// or after `next`, in the order written there.
 
 /** As the session starts: find the box, say the mod is loaded, and start the heartbeat. */
 export async function onStart($: EngineInterface, e: SessionStartInput): Promise<void> {

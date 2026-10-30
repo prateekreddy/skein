@@ -7,8 +7,10 @@
 //
 // The events more than one feature watches are hooked here, once, bare: a module may hook an event
 // without a matcher only once (`claude plugin validate --strict` refuses a second), and one hook
-// here says in what order the features hear it. Each calls `next(e)` itself, once, then hands the
-// event, and what it settled to, to each feature's function in the order written. A feature whose
+// here says in what order the features hear it. Each calls `next(e)` exactly once, and runs the
+// features' parts before or after it, in the order written: after it where a part needs what the
+// event settled to (`session.start`, `tool.call`), before it where the part is about the moment the
+// event names (`turn.start`, `turn.complete`, `session.measure`, `session.end`). A feature whose
 // part fails is passed by and the rest still hear the event. A hook that refuses or rewrites stays
 // in its feature file under a matcher of its own (a tool, a command, a component), where the order
 // and `next` are the feature's (docs/decisions/skein-is-a-mod.md, "The shape a feature takes").
