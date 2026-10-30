@@ -19,7 +19,17 @@
 // one answer every script skein ships into a box uses (SKEIN-1174), never worked out again here.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On, Timer } from 'claude-code'
+import type {
+  EngineInterface,
+  On,
+  SessionEndInput,
+  SessionMeasureInput,
+  SessionStartInput,
+  Timer,
+  ToolCallInput,
+  TurnCompleteInput,
+  TurnStartInput,
+} from 'claude-code'
 
 import type { SkeinAttention, SkeinAttentionLimit, SkeinAttentionState } from '../types'
 import { pluginVersion } from './identity'
@@ -53,86 +63,147 @@ let heartbeat: Timer | null = null
 
 type Change = (was: SkeinAttention) => SkeinAttention | null
 
-export function register(on: On): void {
-  // Interactive sessions only, by matcher: see "One writer" above.
-  on('session.start', { isInteractive: true }, async ($, e, next) => {
-    const result = await next(e)
-    heartbeat?.cancel()
-    heartbeat = null
+// Its parts of the events several features watch, which `register.tsx` hooks once, after `next`.
 
-    let where: string[] = []
-    try {
-      const dir = (await $.env.get('CLAUDE_PROJECT_DIR')) || e.cwd
-      const ran = await $.process.run(
-        ['bash', '-c', WHERE, 'skein-attention', `${$.plugin.root}/probe/box-self.sh`, dir],
-        { timeoutMs: 10_000 },
-      )
-      if (ran.exitCode === 0) where = ran.stdout.split('\n').filter(line => line !== '')
-    } catch {
-      // No bash, no helper, or it hung: not a box skein can file a signal for.
-    }
-    if (where.length !== 2) return result
-    const [store, box] = where as [string, string]
+/** As the session starts: find the box, say the mod is loaded, and start the heartbeat. */
+export async function onStart($: EngineInterface, e: SessionStartInput): Promise<void> {
+  // Interactive sessions only: see "One writer" above.
+  if (!e.isInteractive) return
+  heartbeat?.cancel()
+  heartbeat = null
 
-    const version = await pluginVersion(() =>
-      $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`),
+  let where: string[] = []
+  try {
+    const dir = (await $.env.get('CLAUDE_PROJECT_DIR')) || e.cwd
+    const ran = await $.process.run(
+      ['bash', '-c', WHERE, 'skein-attention', `${$.plugin.root}/probe/box-self.sh`, dir],
+      { timeoutMs: 10_000 },
     )
-    const now = await stamp($)
-    const started: SkeinAttention = {
-      file: `${store}/status/${box}.mod.json`,
-      box,
-      version,
-      session: await $.session.id(),
-      state: 'loaded',
-      at: now,
-      detail: '',
-      stop: '',
-      agent: '',
-      asking: '',
-      limit: null,
-      marks: {},
-    }
-    await update($, attention, () => started)
-    await write($, started, now)
+    if (ran.exitCode === 0) where = ran.stdout.split('\n').filter(line => line !== '')
+  } catch {
+    // No bash, no helper, or it hung: not a box skein can file a signal for.
+  }
+  if (where.length !== 2) return
+  const [store, box] = where as [string, string]
 
-    heartbeat = $.clock.every(HEARTBEAT_MS, () => {
-      void beat()
-    })
-    async function beat(): Promise<void> {
-      const held = await read($, attention)
-      if (held !== null) await write($, held, await stamp($))
-    }
+  const version = await pluginVersion(() =>
+    $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`),
+  )
+  const now = await stamp($)
+  const started: SkeinAttention = {
+    file: `${store}/status/${box}.mod.json`,
+    box,
+    version,
+    session: await $.session.id(),
+    state: 'loaded',
+    at: now,
+    detail: '',
+    stop: '',
+    agent: '',
+    asking: '',
+    limit: null,
+    marks: {},
+  }
+  await update($, attention, () => started)
+  await write($, started, now)
 
-    return result
+  heartbeat = $.clock.every(HEARTBEAT_MS, () => {
+    void beat()
   })
+  async function beat(): Promise<void> {
+    const held = await read($, attention)
+    if (held !== null) await write($, held, await stamp($))
+  }
+}
 
-  on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await change($, was => moved(was, 'working', { detail: '', stop: '' }))
+/** A turn of the main loop began. A subagent's turn is not the box's. */
+export async function onTurnStart($: EngineInterface, e: TurnStartInput): Promise<void> {
+  if (e.agentId === undefined) await change($, was => moved(was, 'working', { detail: '', stop: '' }))
+}
+
+/**
+ * A tool call returned, whoever answered it: the permission it was asked about, or the question
+ * it put, is settled. Every other call changes nothing.
+ */
+export async function onToolCall($: EngineInterface, e: ToolCallInput): Promise<void> {
+  await change($, was =>
+    was.asking === e.tool_use_id && was.asking !== ''
+      ? moved(was, 'working', { detail: '', asking: '', agent: '' })
+      : null,
+  )
+}
+
+/** A turn of the main loop ended, and why. */
+export async function onTurnComplete($: EngineInterface, e: TurnCompleteInput): Promise<void> {
+  if (e.agentId !== undefined) return
+  const state: SkeinAttentionState =
+    e.reason === 'answer'
+      ? 'waiting'
+      : e.reason === 'aborted'
+        ? 'interrupted'
+        : e.reason === 'refusal'
+          ? 'refused'
+          : 'error'
+  await change($, was => moved(was, state, { stop: e.reason, asking: '', agent: '', detail: '' }))
+}
+
+/** The session's usage moved: a rate-limit window that crossed a mark is written. */
+export async function onMeasure($: EngineInterface, e: SessionMeasureInput): Promise<void> {
+  if (!e.changed.includes('rateLimits')) return
+  await change($, was => {
+    const marks = { ...was.marks }
+    let crossed: SkeinAttentionLimit | null = null
+    for (const window of e.rateLimits) {
+      const mark = highestMark(window.percentUsed)
+      const had = marks[window.kind] ?? 0
+      // A window that fell below its mark has reset: the next crossing is news again.
+      if (mark < had) marks[window.kind] = mark
+      if (mark > had) {
+        marks[window.kind] = mark
+        if (crossed === null || mark > crossed.mark) {
+          crossed = {
+            kind: window.kind,
+            mark,
+            percentUsed: window.percentUsed,
+            resetsAt: window.resetsAt ?? '',
+          }
+        }
+      }
+    }
+    const same = JSON.stringify(marks) === JSON.stringify(was.marks)
+    if (crossed === null && same) return null
+
+    return { ...was, marks, limit: crossed ?? was.limit }
+  })
+}
+
+/** The session ended. A /clear ends the conversation and not the process. */
+export async function onEnd($: EngineInterface, e: SessionEndInput): Promise<void> {
+  if (e.reason === 'clear') {
+    // The person is at an empty prompt.
+    await change($, was => moved(was, 'waiting', { detail: 'clear', stop: '', asking: '', agent: '' }))
+    return
+  }
+  await change($, was => moved(was, 'ended', { detail: e.reason, stop: '', asking: '', agent: '' }))
+  heartbeat?.cancel()
+  heartbeat = null
+}
+
+// The hooks that are this feature's alone, each under a matcher of its own.
+export function register(on: On): void {
+  // A question put to the person opens as its call starts; `onToolCall` sees it answered.
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    await change($, was =>
+      moved(was, 'question', { detail: '', asking: e.tool_use_id, agent: e.agentId ?? '' }),
+    )
 
     return next(e)
   })
 
-  // A question put to the person opens before the tool runs and is answered when it returns. Every
-  // other tool's ask is heard at `tool.check` below; this is where both are seen to be settled.
-  on('tool.call', async ($, e, next) => {
-    if (e.tool === 'AskUserQuestion') {
-      await change($, was =>
-        moved(was, 'question', { detail: '', asking: e.tool_use_id, agent: e.agentId ?? '' }),
-      )
-    }
-    const result = await next(e)
-    await change($, was =>
-      was.asking === e.tool_use_id && was.asking !== ''
-        ? moved(was, 'working', { detail: '', asking: '', agent: '' })
-        : null,
-    )
-
-    return result
-  })
-
   // The engine's verdict, read and handed up unchanged: this feature never decides a call. An ask
   // that a person answers is the box needing its person; one the mode's classifier or a host
-  // answers is not, and `approver` says which before anything is shown.
+  // answers is not, and `approver` says which before anything is shown. `onToolCall` sees the
+  // call return.
   on('tool.check', { approver: 'person' }, async ($, e, next) => {
     const verdict = await next(e)
     if (verdict.decision === 'ask' && e.tool !== 'AskUserQuestion') {
@@ -146,67 +217,6 @@ export function register(on: On): void {
     }
 
     return verdict
-  })
-
-  on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) {
-      const state: SkeinAttentionState =
-        e.reason === 'answer'
-          ? 'waiting'
-          : e.reason === 'aborted'
-            ? 'interrupted'
-            : e.reason === 'refusal'
-              ? 'refused'
-              : 'error'
-      await change($, was => moved(was, state, { stop: e.reason, asking: '', agent: '', detail: '' }))
-    }
-
-    return next(e)
-  })
-
-  on('session.measure', async ($, e, next) => {
-    if (e.changed.includes('rateLimits')) {
-      await change($, was => {
-        const marks = { ...was.marks }
-        let crossed: SkeinAttentionLimit | null = null
-        for (const window of e.rateLimits) {
-          const mark = highestMark(window.percentUsed)
-          const had = marks[window.kind] ?? 0
-          // A window that fell below its mark has reset: the next crossing is news again.
-          if (mark < had) marks[window.kind] = mark
-          if (mark > had) {
-            marks[window.kind] = mark
-            if (crossed === null || mark > crossed.mark) {
-              crossed = {
-                kind: window.kind,
-                mark,
-                percentUsed: window.percentUsed,
-                resetsAt: window.resetsAt ?? '',
-              }
-            }
-          }
-        }
-        const same = JSON.stringify(marks) === JSON.stringify(was.marks)
-        if (crossed === null && same) return null
-
-        return { ...was, marks, limit: crossed ?? was.limit }
-      })
-    }
-
-    return next(e)
-  })
-
-  on('session.end', async ($, e, next) => {
-    // A /clear ends the conversation and not the process: the person is at an empty prompt.
-    if (e.reason === 'clear') {
-      await change($, was => moved(was, 'waiting', { detail: 'clear', stop: '', asking: '', agent: '' }))
-    } else {
-      await change($, was => moved(was, 'ended', { detail: e.reason, stop: '', asking: '', agent: '' }))
-      heartbeat?.cancel()
-      heartbeat = null
-    }
-
-    return next(e)
   })
 }
 

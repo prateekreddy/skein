@@ -2,11 +2,13 @@
 // plugin it runs. Harmless, and observable from a test, from a box's pane and from `claude -p`, so
 // the foundation has something to prove (SKEIN-1359).
 //
-// The shape every feature file follows: one exported `register(on)` that `register.tsx` calls, its
-// state under its own key in `types/index.d.ts`, and its tests in `tests/<feature>.test.ts`.
+// The shape every feature file follows: one exported `register(on)` that `register.tsx` calls, an
+// exported `on<Event>` for each shared event it watches, which `register.tsx` hooks once for every
+// feature, its state under its own key in `types/index.d.ts`, and its tests in
+// `tests/<feature>.test.ts`.
 
 import { atom, read, update } from 'claude-code'
-import type { On } from 'claude-code'
+import type { EngineInterface, On, SessionStartInput } from 'claude-code'
 
 import type { SkeinIdentity } from '../types'
 
@@ -14,22 +16,21 @@ const identity = atom({ plugin: 'skein', key: 'identity' } as const, null, {
   shape: 'identity-1',
 })
 
-export function register(on: On): void {
-  on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'skein',
-      description: "Show this box's name and the skein plugin's version",
-    })
-    const box = (await $.env.get('SKEIN_BOX')) || null
-    const version = await pluginVersion(() =>
-      $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`),
-    )
-    const found: SkeinIdentity = { box, version }
-    await update($, identity, () => found)
-
-    return next(e)
+/** As the session starts (`register.tsx`'s one `session.start` hook calls it). */
+export async function onStart($: EngineInterface, _e: SessionStartInput): Promise<void> {
+  await $.command.register({
+    name: 'skein',
+    description: "Show this box's name and the skein plugin's version",
   })
+  const box = (await $.env.get('SKEIN_BOX')) || null
+  const version = await pluginVersion(() =>
+    $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`),
+  )
+  const found: SkeinIdentity = { box, version }
+  await update($, identity, () => found)
+}
 
+export function register(on: On): void {
   on('command.run', { command: 'skein' }, async $ => {
     const found = await read($, identity)
 
