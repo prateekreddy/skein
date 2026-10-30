@@ -164,7 +164,13 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         reaching.sort();
-        assert_eq!(reaching, vec!["agents.rs".to_string()]);
+        // `versions.rs` is the rollout loop (SKEIN-1372), which is no route and no press: it moves
+        // a box onto a rolled-out version once that box is idle, one box per restart, under the
+        // cockpit's restart hold. The one-box-per-press rule below is about this file's handler.
+        assert_eq!(
+            reaching,
+            vec!["agents.rs".to_string(), "versions.rs".to_string()]
+        );
 
         let this = std::fs::read_to_string(dir.join("agents.rs")).unwrap();
         // The code, without its comments: a doc line that names the reopen calls nothing.

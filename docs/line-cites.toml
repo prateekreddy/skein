@@ -20,15 +20,15 @@
 line = "[env]"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["CONTRIBUTING.md:512"]
+["CONTRIBUTING.md:513"]
 line = "* **A changed md5 proves the file changed, not that the change you named applied.** A two-part"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:526"]
+["CONTRIBUTING.md:527"]
 line = "5. **Commit by explicit path, and do not stage early.** `git add -A` from the repo root once swept a"
 cited_by = ["docs/decisions/parallel-agents-share-more-than-files.md"]
 
-["CONTRIBUTING.md:557"]
+["CONTRIBUTING.md:558"]
 line = "**And never rewrite a commit a record has cited** (SKEIN-667). A sha is evidence, and evidence"
 cited_by = ["docs/decisions/commit-before-the-gates.md", "docs/decisions/parallel-agents-share-more-than-files.md"]
 
@@ -251,55 +251,55 @@ cited_by = ["docs/recovery-survey.md"]
 line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:131"]
+["src/bin/skein-server/main.rs:133"]
 line = "eprintln!(\"skein-server: {msg}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:142"]
+["src/bin/skein-server/main.rs:144"]
 line = "eprintln!(\"skein-server: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:148"]
+["src/bin/skein-server/main.rs:150"]
 line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:154"]
+["src/bin/skein-server/main.rs:156"]
 line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:157"]
+["src/bin/skein-server/main.rs:159"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:182"]
+["src/bin/skein-server/main.rs:184"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:190"]
+["src/bin/skein-server/main.rs:192"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:203"]
+["src/bin/skein-server/main.rs:205"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:322"]
+["src/bin/skein-server/main.rs:324"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:639"]
+["src/bin/skein-server/main.rs:648"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:649"]
+["src/bin/skein-server/main.rs:658"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:740"]
+["src/bin/skein-server/main.rs:749"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:746"]
+["src/bin/skein-server/main.rs:755"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -777,120 +777,124 @@ cited_by = ["docs/recovery-survey.md"]
 line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.cargo/bin:$PATH\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:939"]
+["src/box-session.sh:942"]
 line = "own_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:962"]
+["src/box-session.sh:965"]
 line = "pin_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1041"]
+["src/box-session.sh:1044"]
 line = "open_new \"$tmp_at\" skein-start-id && printf '%s\\n' \"$start_id\" >&\"$new_fd\" && land_new =rw || { drop_new; exit 1; }"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1112"]
+["src/box-session.sh:1115"]
 line = "seed_paths=(\".codex\" \".gitconfig\" \".bashrc\" \".profile\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1157"]
+["src/box-session.sh:1160"]
 line = "overlay_paths=(\".local\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1286"]
+["src/box-session.sh:1289"]
 line = "login_life() {"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/box-session.sh:1484"]
+["src/box-session.sh:1487"]
 line = "merge_login \"$mine\" \"$canon\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1700"]
+["src/box-session.sh:1703"]
 line = "data[\"crossSessionInbound\"] = \"accept\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1848"]
+["src/box-session.sh:1851"]
 line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1882"]
+["src/box-session.sh:1885"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1907"]
-line = "&& binds+=(--ro-bind /usr/local/share/npm-global /usr/local/share/npm-global)"
-cited_by = ["docs/threat-model.md"]
-
-["src/box-session.sh:2190"]
+["src/box-session.sh:2193"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2237"]
+["src/box-session.sh:2240"]
 line = "binds+=(--tmpfs \"$fleet_root_dir\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2280"]
+["src/box-session.sh:2283"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2348"]
+["src/box-session.sh:2351"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2372"]
+["src/box-session.sh:2375"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2397"]
+["src/box-session.sh:2400"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2405"]
+["src/box-session.sh:2408"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2414"]
+["src/box-session.sh:2417"]
 line = "box_shared_home=\"${SKEIN_BOX_STORE%/*}/shared-home\""
 cited_by = ["docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2546"]
+["src/box-session.sh:2549"]
 line = "[ -n \"$repo_cache\" ] && binds+=(--bind \"$repo_cache\" \"$repo_cache\")"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2601"]
+["src/box-session.sh:2604"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2602"]
+["src/box-session.sh:2605"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2665"]
+["src/box-session.sh:2668"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2860"]
+["src/box-session.sh:2871"]
+line = "binds+=(--remount-ro \"$npm_prefix\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2873"]
+line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:3023"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2988"]
+["src/box-session.sh:3151"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3431"]
+["src/box-session.sh:3594"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3490"]
+["src/box-session.sh:3658"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3532"]
+["src/box-session.sh:3701"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3555"]
+["src/box-session.sh:3731"]
 line = "export CARGO_HOME=\"$repo_cache/cargo\" npm_config_cache=\"$repo_cache/npm\" \\"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
@@ -1120,25 +1124,25 @@ cited_by = ["docs/decisions/build-output-stays-in-the-worktree.md"]
 line = "// `<fleet root>/.skein` is the one entry in the fleet root that is not a box, and on 2026-09-05 it"
 cited_by = ["docs/decisions/build-output-stays-in-the-worktree.md"]
 
-["src/fleet/disk.rs:305"]
+["src/fleet/disk.rs:307"]
 line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:309"]
+["src/fleet/disk.rs:311"]
 line = "return Err(format!("
 window = "if installed.is_empty() {\u000breturn Err(format!(\u000b\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:310"]
+["src/fleet/disk.rs:312"]
 line = "\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:317"]
+["src/fleet/disk.rs:319"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
 window = "return Err(format!(\u000b\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\\u000bin {places} — so every directory under {dir} would read as belonging to nobody. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:396"]
+["src/fleet/disk.rs:398"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1337,92 +1341,92 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:156"]
+["src/fleet/start.rs:163"]
 line = "fn mount_manifest(name: &str) -> String {"
 cited_by = ["docs/architecture.md"]
 
-["src/fleet/start.rs:159"]
+["src/fleet/start.rs:166"]
 line = "\"skein: {name} matches no repository skein knows, so it cannot be told which mounts \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:170"]
+["src/fleet/start.rs:177"]
 line = "\"skein: {mount:?} has a newline in it, so boxes cannot be told about it — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:434"]
+["src/fleet/start.rs:441"]
 line = "\"{why}\\n {name} IS running — its session and namespace came up — but it has \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:589"]
+["src/fleet/start.rs:596"]
 line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:606"]
+["src/fleet/start.rs:613"]
 line = "return Err(format!(\"invalid box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:617"]
+["src/fleet/start.rs:624"]
 line = "ensure_fleet(&sandbox)?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:659"]
+["src/fleet/start.rs:666"]
 line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:678"]
+["src/fleet/start.rs:685"]
 line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:708"]
+["src/fleet/start.rs:715"]
 line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:794"]
+["src/fleet/start.rs:804"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/start.rs:811"]
+["src/fleet/start.rs:821"]
 line = "eprintln!(\"skein: could not set {name}'s git identity ({e}); its first commit will ask who you are\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:819"]
+["src/fleet/start.rs:829"]
 line = "eprintln!(\"skein: {name} came up, but its conversation could not be located ({e})\")"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:827"]
+["src/fleet/start.rs:837"]
 line = "\"skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:837"]
+["src/fleet/start.rs:847"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:874"]
+["src/fleet/start.rs:884"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:934"]
+["src/fleet/start.rs:944"]
 line = "\"skein: {name} has a session nothing can enter — {why} — so it is being ended \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:952"]
+["src/fleet/start.rs:962"]
 line = "\"box {name} has no checkout in {} — `skein start {name}` to build one\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:970"]
+["src/fleet/start.rs:980"]
 line = "eprintln!(\"skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there\", record.sandbox);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1006"]
+["src/fleet/start.rs:1017"]
 line = "eprintln!(\"skein: {name} had no live session, so it was restarted (its work is untouched)\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1037"]
+["src/fleet/start.rs:1048"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1880"]
+["src/fleet/start.rs:1891"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1616,11 +1620,11 @@ cited_by = ["docs/modules.toml"]
 line = "gone and so is everything else that was running in it — start them again with: skein \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/place/record.rs:124"]
+["src/place/record.rs:131"]
 line = "/// `CAP_SYS_ADMIN` in its own user namespace, so it can mount over its view of `/proc` and answer"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/place/record.rs:282"]
+["src/place/record.rs:289"]
 line = ".filter(|sandbox| !sandbox.is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2039,47 +2043,47 @@ cited_by = ["docs/recovery-survey.md"]
 line = "else notice(`could not continue ${name}: ${d.error || \"no reason given\"}`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:407"]
+["src/web/app/board.js:410"]
 line = "if (session) { session.dead = true; reconnectSession(name, \"agent\"); }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:410"]
+["src/web/app/board.js:413"]
 line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:840"]
+["src/web/app/board.js:843"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:891"]
+["src/web/app/board.js:894"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:895"]
+["src/web/app/board.js:898"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:904"]
+["src/web/app/board.js:907"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:942"]
+["src/web/app/board.js:945"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:943"]
+["src/web/app/board.js:946"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1033"]
+["src/web/app/board.js:1036"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1263"]
+["src/web/app/board.js:1266"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1295"]
+["src/web/app/board.js:1298"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2112,28 +2116,28 @@ cited_by = ["docs/recovery-survey.md"]
 line = "? `the fleet's ${esc(l.runtime)} login was refused at ${esc(localStamp(l.expired_at))}${l.said ? `: ${esc(l.said)}` : \"\"} — summaries, critiques and workflows are declining model calls`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1272"]
+["src/web/app/boot.js:1361"]
 line = "if (!r.ok) { notice(`could not start the update: ${r.error}`); if (btn) { btn.disabled = false; btn.textContent = \"Update skein\"; } return; }"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1298"]
+["src/web/app/boot.js:1387"]
 line = "updateTail = setTimeout(step, 1500);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1315"]
+["src/web/app/boot.js:1404"]
 line = "toast(r.ok ? \"skein updated — reloading\" : \"the update failed; the log says where\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1390"]
+["src/web/app/boot.js:1479"]
 line = "loadHealth();"
 window = "host.innerHTML = \"\";\u000bloadHealth();\u000btoast(st.said || `${runtime} login closed — nothing changed`);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1585"]
+["src/web/app/boot.js:1674"]
 line = "setInterval(loadHealth, 15000);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/boot.js:1593"]
+["src/web/app/boot.js:1682"]
 line = "setInterval(pollSubq, 20000);"
 cited_by = ["docs/recovery-survey.md"]
 

@@ -51,6 +51,7 @@ mod settings;
 mod terminal;
 mod update;
 mod upload;
+mod versions;
 mod workflows;
 
 use agents::*;
@@ -68,6 +69,7 @@ use settings::*;
 use terminal::*;
 use update::*;
 use upload::*;
+use versions::*;
 use workflows::*;
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
 // They are no longer four constants and four handlers — `skein::assets` generates the table from the
@@ -355,6 +357,10 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // Each box's resource signal file, which the box plugin's hooks read (SKEIN-1054).
     tokio::spawn(skein::resource_signal::watch_box_resources());
     tokio::spawn(skein::fleet::watch_runtime_updates());
+    // The fleet's agent CLI and Rust toolchain versions (SKEIN-1372): new ones fetched and tested
+    // on skein's own clock, and boxes behind a rollout restarted onto it once they are idle.
+    tokio::spawn(watch_versions());
+    tokio::spawn(watch_rollout_restarts());
     // Containers and cgroups no box owns: report the containers, remove the empty cgroups.
     tokio::spawn(skein::fleet::watch_unowned());
     // Keep every running box's GitHub write token ahead of its expiry.
@@ -495,6 +501,9 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
         .route("/api/fleet/browsers", get(api_browsers))
         .route("/api/fleet/browsers/clean", post(api_browsers_clean))
+        .route("/api/fleet/versions", get(api_versions))
+        .route("/api/fleet/versions/rollout", post(api_versions_rollout))
+        .route("/api/fleet/versions/clean", post(api_versions_clean))
         // A box's questions for its owner, and the answer to one (SKEIN-1061).
         .route("/api/fleet/asks", get(api_asks))
         .route("/api/fleet/asks/:id", post(api_ask_answer))

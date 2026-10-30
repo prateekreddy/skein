@@ -479,9 +479,13 @@ mod tests {
                 "SKEIN_BOX_STORE",
                 // SKEIN-1225: the telemetry switch, consumed by the launcher and held by no box.
                 "SKEIN_BOX_TELEMETRY",
+                // SKEIN-1372: the versions to bind, and the tests' npm prefix, both consumed by
+                // the launcher and held by no box.
+                "SKEIN_BOX_VERSIONS",
                 "SKEIN_FLEET_LIMITS",
                 "SKEIN_FLEET_MOUNTS",
                 "SKEIN_MODEL_SCRATCH",
+                "SKEIN_NPM_PREFIX",
                 "SSH_AUTH_SOCK",
             ],
             "the names a crossing takes from the box's session are not the inherited names \
