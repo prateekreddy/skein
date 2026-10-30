@@ -29,7 +29,7 @@ impl Fixture {
     fn new(prefix: &str) -> Fixture {
         let dir = Scratch::temp(prefix);
         fs::write(dir.path().join("skein-mcp"), SERVER).unwrap();
-        for d in ["state", "home", "skein-home", "fleet", "repo"] {
+        for d in ["state", "boxhome", "skein-home", "fleet", "repo"] {
             fs::create_dir_all(dir.path().join(d)).unwrap();
         }
         fs::write(
@@ -68,7 +68,7 @@ impl Fixture {
     fn env<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
         cmd.env("SKEIN_STATE", self.at("state"))
             .env("SKEIN_LANE_ROOT", self.at("lanes"))
-            .env("HOME", self.at("home"))
+            .env("HOME", self.at("boxhome"))
             .env("SKEIN_HOME", self.at("skein-home"))
             .env("SKEIN_FLEET_ROOT", self.at("fleet"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -187,8 +187,10 @@ fn a_lanes_build_output_is_inside_its_worktree() {
     assert_eq!(rec["schema"], 1);
     assert_eq!(rec["phase"], "created");
     assert_eq!(rec["item"], "SKEIN-9");
-    let on_disk: Value =
-        serde_json::from_str(&fs::read_to_string(f.at("home/.local/state/skein/lanes/a.json")).unwrap()).unwrap();
+    let on_disk: Value = serde_json::from_str(
+        &fs::read_to_string(f.at("boxhome/.local/state/skein/lanes/a.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(on_disk, rec);
 }
 
@@ -204,7 +206,7 @@ fn a_record_from_a_newer_skein_is_refused() {
     }
     let f = Fixture::new("skein-lanes-it-schema");
     f.create("b");
-    let path = f.at("home/.local/state/skein/lanes/b.json");
+    let path = f.at("boxhome/.local/state/skein/lanes/b.json");
     let mut rec: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     rec["schema"] = json!(2);
     fs::write(&path, rec.to_string()).unwrap();
@@ -278,18 +280,18 @@ fn drop_removes_the_worktree_and_nothing_outside_it() {
     );
     assert!(!f.at("lanes/a").exists(), "the worktree is still there");
     assert!(
-        !f.at("home/.local/state/skein/lanes/a.json").exists(),
+        !f.at("boxhome/.local/state/skein/lanes/a.json").exists(),
         "the record is still there"
     );
     assert!(
-        !f.at("home/.local/state/skein/lanes/a.brief.md").exists(),
+        !f.at("boxhome/.local/state/skein/lanes/a.brief.md").exists(),
         "the brief is still there"
     );
     for p in [
         "lanes/b/README",
         "lanes/beside",
         "outside/kept",
-        "home/.local/state/skein/lanes/b.json",
+        "boxhome/.local/state/skein/lanes/b.json",
     ] {
         assert!(f.at(p).exists(), "{p} was removed");
     }
@@ -305,7 +307,7 @@ fn drop_removes_the_worktree_and_nothing_outside_it() {
     );
 
     // A record naming a worktree outside the lane root is refused, and that worktree kept.
-    let path = f.at("home/.local/state/skein/lanes/b.json");
+    let path = f.at("boxhome/.local/state/skein/lanes/b.json");
     let mut rec: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     rec["worktree"] = json!(f.s("outside"));
     fs::write(&path, rec.to_string()).unwrap();
@@ -340,10 +342,10 @@ fn both_doors_of_lane_list_give_the_contracts_answer() {
     let c = contract();
     let f = Fixture::new("skein-lanes-it-contract");
     let fixture = f.dir.path().display().to_string();
-    fs::create_dir_all(f.at("home/.local/state/skein/lanes")).unwrap();
+    fs::create_dir_all(f.at("boxhome/.local/state/skein/lanes")).unwrap();
     for (name, rec) in c["records"].as_object().unwrap() {
         fs::write(
-            f.at(&format!("home/.local/state/skein/lanes/{name}.json")),
+            f.at(&format!("boxhome/.local/state/skein/lanes/{name}.json")),
             rec.to_string().replace("/fixture", &fixture),
         )
         .unwrap();
