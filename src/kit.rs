@@ -3144,9 +3144,26 @@ mod tests {
                 local["permissions"]["additionalDirectories"], want,
                 "{ships:?}: {local}"
             );
+            // The person's own rule kept, and the tracker's read-only `held` added once, after two
+            // starts (SKEIN-1404). What would make it fail: the merge leaving `allow` alone, adding
+            // `held` on every start, or allowing any other tracker tool, a wildcard over the sync
+            // server included.
             assert_eq!(
                 local["permissions"]["allow"],
-                serde_json::json!(["Bash(ls)"])
+                serde_json::json!(["Bash(ls)", crate::probes::TRACKER_HELD_TOOL]),
+                "{ships:?}: {local}"
+            );
+            let tracker: Vec<&str> = local["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t.as_str())
+                .filter(|t| t.contains("sync__") || t.contains('*'))
+                .collect();
+            assert_eq!(
+                tracker,
+                ["mcp__plugin_sync_sync__held"],
+                "{ships:?}: a box allows a tracker tool other than held: {local}"
             );
 
             // A memory directory the person chose is theirs.

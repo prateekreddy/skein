@@ -476,7 +476,9 @@ fi
 # memory is read and written there directly rather than through a link under `~/.claude`, which
 # Claude Code guards; and `$HOME/shared` is in `permissions.additionalDirectories`, so default and
 # acceptEdits mode write it as they write the checkout. The store's `skills/` is deliberately not
-# there: a shared skill reaches every box of the repo, so writing one asks. Claude honours a local `autoMemoryDirectory`
+# there: a shared skill reaches every box of the repo, so writing one asks. The defaults' `allow` goes into
+# `permissions.allow`, once: the tracker's read-only `held` and nothing else (SKEIN-1404), so skein's mod
+# can ask it without a prompt. Claude honours a local `autoMemoryDirectory`
 # only in a trusted folder, and the launcher trusts this one. What else goes in is skein's `tui`,
 # `subagentPromptCacheTtl` and `statusLine` defaults, read from the plugin's read-only
 # `settings-defaults.json` and never from the store. Each default
@@ -612,7 +614,11 @@ else
         | (if (.permissions | type) == "object" or .permissions == null
            then .permissions = ((.permissions // {})
              | [$shared] as $ours
-             | .additionalDirectories = (((.additionalDirectories // []) | map(select(. as $dir | ($ours + [$skills]) | index($dir) | not))) + $ours))
+             | .additionalDirectories = (((.additionalDirectories // []) | map(select(. as $dir | ($ours + [$skills]) | index($dir) | not))) + $ours)
+             | ($d.allow // []) as $allow
+             | if ($allow | length) > 0
+               then .allow = (((.allow // []) | map(select(. as $tool | $allow | index($tool) | not))) + $allow)
+               else . end)
            else . end)
       ' "$rc/settings.local.json" "$defaults" "$shared" 2>/dev/null)"
       if [ -n "$merged" ]; then
