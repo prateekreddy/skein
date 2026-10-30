@@ -133,7 +133,7 @@ export function register(on: On): void {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const found = await read($, band)
     const said = await read($, cleanSaid)
-    const asks = asked(found)
+    const asks = asked(found, e.props.bodyColumns)
     if (e.props.hasSurvey || (asks.length === 0 && said === null)) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
@@ -366,13 +366,32 @@ async function cleanFromPane($: Engine, paths: string[]): Promise<void> {
 // A line with no `button` has nothing for the person to press: mail is the agent's to read.
 type Ask = { key: string; text: string; button?: string; isLoud: boolean }
 
-/** What the band says, loudest first; empty when there is nothing to say. */
-function asked(found: SkeinBand | null): Ask[] {
+/** What the band says, loudest first, in `columns` cells; empty when there is nothing to say. */
+function asked(found: SkeinBand | null, columns: number): Ask[] {
   if (found === null) return []
   const out: Ask[] = []
   const ask = found.disk?.ask
   if (ask) out.push({ key: 'disk', text: askLine(ask), button: 'Free disk', isLoud: true })
-  const waiting = (found.requests ?? []).filter(r => r.state === 'waiting').length
+  // The oldest waiting question in its own words, since it has waited longest for the person; the
+  // rest are counted. The pane has every question whole.
+  const questions = (found.requests ?? [])
+    .filter(r => r.state === 'waiting' && r.queue === 'question')
+    .sort((a, b) => (a.asked < b.asked ? -1 : a.asked > b.asked ? 1 : 0))
+  const oldest = questions[0]
+  if (oldest !== undefined) {
+    const more = questions.length - 1
+    const after = more === 0 ? '' : ` And ${more} more ${more === 1 ? 'question' : 'questions'}.`
+    const before = 'Waiting for your answer: '
+    // The quotes, the button `[ Read ]` and the space before it take 11 cells.
+    const room = columns - before.length - after.length - 11
+    out.push({
+      key: 'question',
+      text: `${before}“${oneLine(oldest.what, room)}”${after}`,
+      button: 'Read',
+      isLoud: false,
+    })
+  }
+  const waiting = (found.requests ?? []).filter(r => r.state === 'waiting' && r.queue !== 'question').length
   if (waiting > 0) {
     out.push({
       key: 'requests',
@@ -422,9 +441,27 @@ function whatWasAsked(queue: SkeinRequestRow['queue'], r: Record<string, unknown
     return [typeof r.kind === 'string' ? r.kind : '', packages].filter(s => s !== '').join(' ')
   }
   if (queue === 'write') return String(r.repo ?? '')
-  const question = String(r.question ?? '')
+  // Whole: the pane and `/skein requests` show it as asked, and the band cuts its own copy.
+  return String(r.question ?? '')
+}
 
-  return question.length > 80 ? `${question.slice(0, 79)}…` : question
+/**
+ * A question cut to one line of at most `room` cells (never fewer than 20): its first line, its
+ * runs of space made one, cut at the last space past half the room, or mid-word when a word fills
+ * more than half, and `…` where anything was left out.
+ */
+function oneLine(text: string, room: number): string {
+  const width = Math.max(20, room)
+  const lines = text.trim().split('\n')
+  const first = (lines[0] ?? '').replace(/\s+/g, ' ').trim()
+  const isCut = lines.length > 1 || first.length > width
+  if (!isCut) return first
+  // One cell is the `…`'s. A space just past the kept cells counts: the word before it is whole.
+  const head = first.slice(0, width - 1)
+  const space = first.slice(0, width).lastIndexOf(' ')
+  const kept = first.length <= width - 1 ? first : space > width / 2 ? first.slice(0, space) : head
+
+  return `${kept.trimEnd()}…`
 }
 
 function requestLine(r: SkeinRequestRow): string {

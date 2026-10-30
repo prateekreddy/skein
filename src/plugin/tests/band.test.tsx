@@ -94,13 +94,14 @@ const LISTED = {
 }
 
 /** What `skein-mcp requests` prints: one waiting package request and one granted write. */
-function requests(waiting: number) {
+function requests(waiting: number, questions: readonly Record<string, unknown>[] = []) {
   const rows = [
     { queue: 'write', id: '8', asked: '2026-10-30T09:00:00Z', repo: 'acme/site', state: 'granted' },
   ]
   for (let i = 0; i < waiting; i++) {
     rows.push({ queue: 'package', id: `p${i}`, asked: '2026-10-30T10:00:00Z', kind: 'apt', packages: ['jq'], state: 'waiting' } as never)
   }
+  rows.push(...(questions as never[]))
 
   return { result: { box: 'web-main', requests: rows }, said: '' }
 }
@@ -109,6 +110,8 @@ type World = {
   signal: string
   mail: string
   waiting: number
+  /** Questions to the person, as `skein-mcp requests` lists them. */
+  questions?: readonly Record<string, unknown>[]
   /** What a `skein-mcp clean <paths>` run prints. */
   removal?: { result: Record<string, unknown>; said: string }
   /** Every argv the plugin ran, in order. */
@@ -144,7 +147,7 @@ function engine(on: On, w: World) {
     const argv = [...e.argv]
     w.ran.push(argv)
     if (argv[1]?.endsWith('/probe/mailbox.sh') && argv[2] === 'unread') return out(`${w.mail}\n`)
-    if (argv[1]?.endsWith('/bin/skein-mcp') && argv[2] === 'requests') return out(JSON.stringify(requests(w.waiting)))
+    if (argv[1]?.endsWith('/bin/skein-mcp') && argv[2] === 'requests') return out(JSON.stringify(requests(w.waiting, w.questions)))
     if (argv[1]?.endsWith('/bin/skein-mcp') && argv[2] === 'clean') {
       if (argv.length === 3) return out(JSON.stringify(LISTED))
       const removal = w.removal ?? { result: { error: 'unexpected' }, said: '' }
@@ -470,6 +473,87 @@ test('unread mail is said in the band with no button to press', async ($, on) =>
       "2 unread messages, read at the agent's next turn.",
     )
     expect(await ui.find({ type: 'Button' })).toBe(undefined)
+    await ui.unmount()
+  }
+})
+
+// ------------------------------------------------------------------------------------------------
+// A question waiting for the person
+// ------------------------------------------------------------------------------------------------
+
+const LONG =
+  'Should I drop the legacy importer now that every repo has moved, or keep it until the next ' +
+  'release so the two boxes still on it can finish?\nThe tests for it take four minutes.'
+
+const question = (id: string, asked: string, text: string, state = 'waiting') => ({
+  queue: 'question',
+  id,
+  asked,
+  question: text,
+  options: [],
+  state,
+})
+
+test('the band shows the oldest waiting question in its own words, cut to one line', async ($, on) => {
+  const w = world({
+    questions: [
+      question('q3', '2026-10-30T11:00:00Z', 'Is the newer one shown? It should not be.'),
+      question('q1', '2026-10-30T08:00:00Z', LONG),
+      question('q0', '2026-10-30T07:00:00Z', 'Answered long ago.', 'answered'),
+    ],
+  })
+  await started(on, w, $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 100 } })
+    // 100 cells less "Waiting for your answer: ", " And 1 more question." and 11 for the
+    // quotes and the button: 43 cells for the question and its `…`, cut after a whole word.
+    expect((await ui.find({ type: 'Text', text: /Waiting for your answer/ }))?.text.trim()).toBe(
+      'Waiting for your answer: “Should I drop the legacy importer now that…” And 1 more question.',
+    )
+    expect(await ui.find({ type: 'Button', key: 'band:question' })).not.toBe(undefined)
+    // Questions are not counted again among the requests.
+    expect(await ui.find({ type: 'Text', text: /requests? (is|are) waiting/ })).toBe(undefined)
+    await ui.unmount()
+
+    // The pane keeps every question whole.
+    const pane = await $.ui.mount({ ...PANE, surface })
+    expect((await pane.find({ type: 'Text', text: /legacy importer/ }))?.text).toBe(`question ${LONG}: waiting`)
+    await pane.unmount()
+  }
+})
+
+test('a short one-line question is shown whole, and the cut never leaves under 20 cells', async ($, on) => {
+  const w = world({ questions: [question('q1', '2026-10-30T08:00:00Z', 'Merge now?')] })
+  await started(on, w, $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /Waiting for your answer/ }))?.text.trim()).toBe(
+      'Waiting for your answer: “Merge now?”',
+    )
+    await ui.unmount()
+  }
+  w.questions = [question('q1', '2026-10-30T08:00:00Z', LONG)]
+  await $.command.run(TYPED('status'))
+
+  // 30 cells leave less than 20, so the question gets 20, `…` included.
+  const narrow = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 30 } })
+  expect((await narrow.find({ type: 'Text', text: /Waiting for your answer/ }))?.text.trim()).toBe(
+    'Waiting for your answer: “Should I drop the…”',
+  )
+  await narrow.unmount()
+})
+
+test('a question with more lines than its first shows that line and `…`', async ($, on) => {
+  const w = world({ questions: [question('q1', '2026-10-30T08:00:00Z', 'Merge now?\nCI is green.')] })
+  await started(on, w, $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /Waiting for your answer/ }))?.text.trim()).toBe(
+      'Waiting for your answer: “Merge now?…”',
+    )
     await ui.unmount()
   }
 })
