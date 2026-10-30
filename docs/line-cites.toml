@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:648"]
+["src/bin/skein-server/main.rs:650"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:658"]
+["src/bin/skein-server/main.rs:660"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:749"]
+["src/bin/skein-server/main.rs:751"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:755"]
+["src/bin/skein-server/main.rs:757"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 

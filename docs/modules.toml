@@ -695,7 +695,9 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # note goes to, computed once. `health` for the disk demand and `gib`, so figures print as the
 # health row prints them. `fleet` for the box list's root, each box's cgroup path, its disk
 # allowance and the disk walk's figures. `util` to write the file atomically.
-depends_on = ["announce", "fleet", "health", "util"]
+# `usage` for `box_spend`: each box's own spend, written beside its resource signal from a reading
+# skein-server already took (SKEIN-1384). This module writes the file; usage says what is in it.
+depends_on = ["announce", "fleet", "health", "usage", "util"]
 
 [current.runtime]
 # `config` for one read: the fleet's box-plugin switch (SKEIN-1058). `for_box` is where every start

@@ -85,6 +85,12 @@ pub fn signal_path(state: &Path) -> PathBuf {
     state.join("signals").join("resources.json")
 }
 
+/// Where one box's own spend lives, beside [`signal_path`] in the same read-only directory
+/// (SKEIN-1384).
+pub fn usage_path(state: &Path) -> PathBuf {
+    signal_path(state).with_file_name("usage.json")
+}
+
 // ------------------------------------------------------------------------------------------------
 // What is measured
 // ------------------------------------------------------------------------------------------------
@@ -1112,6 +1118,46 @@ pub fn write_every_box() -> Result<usize, String> {
             .collect();
         match write_box_with(&entry.path(), &reading, updates) {
             Ok(_) => written += 1,
+            Err(e) => failed.push(format!("{name}: {e}")),
+        }
+    }
+    match failed.is_empty() {
+        true => Ok(written),
+        false => Err(failed.join("; ")),
+    }
+}
+
+/// Each box's own spend from one reading of the fleet, [`usage_path`] in every box's state
+/// directory (SKEIN-1384).
+///
+/// The same list of boxes as [`write_every_box`]: every directory under the state root. Each file
+/// is [`crate::usage::box_spend`] for that box alone, zeros for a box with no turn in the reading,
+/// so no box is told another's figure.
+pub fn write_box_spend(report: &crate::usage::UsageReport) -> Result<usize, String> {
+    let root = crate::fleet::box_state_root();
+    let entries = std::fs::read_dir(&root).map_err(|e| format!("{root}: {e}"))?;
+    let mut written = 0;
+    let mut failed = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') || !entry.path().is_dir() {
+            continue;
+        }
+        let path = usage_path(&entry.path());
+        let wrote = path
+            .parent()
+            .ok_or_else(|| format!("{} has no directory", path.display()))
+            .and_then(|dir| {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+                let spend = crate::usage::box_spend(report, &name);
+                let bytes = serde_json::to_vec_pretty(&spend).map_err(|e| e.to_string())?;
+                crate::util::write_atomic(&path, dir, &bytes)
+            });
+        match wrote {
+            Ok(()) => written += 1,
             Err(e) => failed.push(format!("{name}: {e}")),
         }
     }
@@ -2654,5 +2700,117 @@ mod tests {
             stamp(at(6)),
             "the items were never walked again"
         );
+    }
+
+    /// One assistant turn as the CLI writes it, `input` and `output` tokens on `claude-opus-5`.
+    fn turn_line(id: &str, ts: &str, input: u64, output: u64) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": ts,
+            "requestId": id,
+            "message": {
+                "id": id,
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "a message body"}],
+                "usage": {"input_tokens": input, "output_tokens": output}
+            }
+        })
+        .to_string()
+    }
+
+    /// A fleet of three boxes read by `usage::refresh`, today in UTC: `alpha` with a conversation
+    /// and one subagent's transcript, `beta` with a conversation, `gamma` with nothing. Returns the
+    /// pins and the reading.
+    fn spend_fleet(dir: &Path) -> (crate::testutil::EnvPins, crate::usage::UsageReport) {
+        let home = dir.join("skein");
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", &home);
+        pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        pins.set("HOME", dir.join("bare"));
+        let ts = format!("{}T00:00:01Z", Utc::now().format("%Y-%m-%d"));
+        let put = |rel: &str, body: String| {
+            let p = home.join("boxes").join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put(
+            "alpha/claude-projects/-w/s1.jsonl",
+            turn_line("m1", &ts, 1000, 2000),
+        );
+        put(
+            "alpha/claude-projects/-w/s1/subagents/agent-a.jsonl",
+            turn_line("m2", &ts, 3000, 4000),
+        );
+        put(
+            "beta/claude-projects/-w/s2.jsonl",
+            turn_line("m3", &ts, 10_000, 0),
+        );
+        std::fs::create_dir_all(home.join("boxes/gamma")).unwrap();
+        let report = crate::usage::refresh().expect("the fixture fleet reads");
+        (pins, report)
+    }
+
+    fn spend_of(name: &str) -> crate::usage::BoxSpend {
+        let state = PathBuf::from(crate::fleet::box_state(name));
+        let body = std::fs::read_to_string(usage_path(&state)).expect("a box's spend was written");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    /// **A box's file carries the cockpit's figure for that box, its subagents included**
+    /// (SKEIN-1384).
+    ///
+    /// `alpha`'s day is $0.17 at Opus 5's rates, $0.115 of it in a subagent's transcript. Fails if
+    /// the file is figured from anything but the cells the cockpit sums, and if subagent
+    /// transcripts are dropped. Watched: with `walk_jsonl` made to skip a `subagents` directory, the
+    /// file read $0.055 and this failed.
+    #[test]
+    fn a_boxs_spend_file_is_the_cockpits_figure_for_it() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let (_pins, report) = spend_fleet(dir.as_ref());
+        assert_eq!(write_box_spend(&report), Ok(3));
+
+        let alpha = spend_of("alpha");
+        let cockpit = report.boxes.iter().find(|b| b.name == "alpha").unwrap();
+        let day = report.daily.last().unwrap();
+        assert!(
+            (alpha.today.cost - 0.17).abs() < 1e-9,
+            "a subagent's spend is missing: {alpha:?}"
+        );
+        assert_eq!(
+            alpha.today.cost, cockpit.cost,
+            "not the cockpit's box figure"
+        );
+        assert_eq!(
+            alpha.today.cost, day.by_box["alpha"],
+            "not the cockpit's day figure"
+        );
+        assert_eq!((alpha.today.input, alpha.today.output), (4000, 6000));
+        assert_eq!(alpha.week, alpha.today, "the only day is today");
+        assert_eq!(alpha.at, report.read_at);
+        assert_eq!(alpha.prices_as_of, crate::usage::PRICES_AS_OF);
+        assert!(!alpha.unpriced);
+    }
+
+    /// **A box's file holds that box's figure and no other's** (SKEIN-1384).
+    ///
+    /// Fails if a box is told the fleet's day, or another box's, or a box with no turn is given
+    /// anything but zeros. Watched: with `box_spend` reading the day's `cost` in place of the box's
+    /// own cell, `alpha` read $0.22, the fleet's day, and this failed.
+    #[test]
+    fn a_boxs_spend_file_holds_only_that_box() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let (_pins, report) = spend_fleet(dir.as_ref());
+        write_box_spend(&report).unwrap();
+
+        let (alpha, beta, gamma) = (spend_of("alpha"), spend_of("beta"), spend_of("gamma"));
+        assert!((alpha.today.cost - 0.17).abs() < 1e-9, "{alpha:?}");
+        assert!((beta.today.cost - 0.05).abs() < 1e-9, "{beta:?}");
+        assert!((alpha.week.cost - 0.17).abs() < 1e-9, "{alpha:?}");
+        assert_eq!(alpha.today.input, 4000, "{alpha:?}");
+        assert_eq!(beta.today.input, 10_000, "{beta:?}");
+        assert_eq!(gamma.today, crate::usage::SpendWindow::default());
+        assert_eq!(gamma.week, crate::usage::SpendWindow::default());
     }
 }

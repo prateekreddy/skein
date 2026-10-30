@@ -10,6 +10,10 @@
 //! message is a distinctive secret and asserts that none of it survives serialisation — it fails if
 //! a field is ever added that carries text out of a record.
 //!
+//! The same holds for the one thing that goes back **into** a box, [`BoxSpend`]: its own spend
+//! today and this week, written beside its resource signal (SKEIN-1384). The same test holds its
+//! keys to a fixed list of counts, a flag and two dates, so a field added to it fails there too.
+//!
 //! # Where the data is
 //!
 //! `box_state(name)/claude-projects/`, on the host, the same tree [`crate::transcript`] reads.
@@ -322,6 +326,104 @@ pub struct DayRow {
     pub day: String,
     pub cost: f64,
     pub by_box: BTreeMap<String, f64>,
+    /// Each box's tokens that day, beside its cost in [`by_box`](Self::by_box): what
+    /// [`box_spend`] tells a box of its own day (SKEIN-1384).
+    #[serde(default)]
+    pub box_tokens: BTreeMap<String, BoxDay>,
+}
+
+/// One box's tokens on one day. Counts and a flag; nothing here can hold text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoxDay {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// The box used a model [`price_of`] does not know that day, so its cost that day is short by
+    /// that model's share.
+    #[serde(default)]
+    pub unpriced: bool,
+}
+
+/// Days in a box's week: today and the six UTC days before it.
+pub const WEEK_DAYS: i64 = 7;
+
+/// One window of a box's own spend: the cost of its priced models and its four token counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpendWindow {
+    pub cost: f64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl SpendWindow {
+    fn add(&mut self, cost: f64, t: &BoxDay) {
+        self.cost += cost;
+        self.input += t.input;
+        self.output += t.output;
+        self.cache_read += t.cache_read;
+        self.cache_write += t.cache_write;
+    }
+}
+
+/// What one box is told of its own spend, in `<box_state>/signals/usage.json` (SKEIN-1384).
+///
+/// **That box's figure and no other's**, not even another box of the same repo: every number is
+/// read from the box's own cell of [`DayRow::by_box`] and [`DayRow::box_tokens`], the cells the
+/// cockpit's per-box figures are summed from. Counts only, like [`UsageReport`]; the dollar figure
+/// is what the same tokens would cost at the API's list prices, not what the fleet's login is
+/// charged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BoxSpend {
+    /// When the transcripts behind these figures were read, [`UsageReport::read_at`].
+    pub at: String,
+    pub prices_as_of: String,
+    /// The UTC day of [`at`](Self::at).
+    pub today: SpendWindow,
+    /// Today and the six UTC days before it.
+    pub week: SpendWindow,
+    /// Something this box used in the week has no price, so the costs are short by its share.
+    pub unpriced: bool,
+}
+
+/// Box `name`'s own spend today and over its last [`WEEK_DAYS`] UTC days, as of `report.read_at`.
+///
+/// Zeros for a box the report has no turn of. A report whose `read_at` does not parse has no
+/// "today", and is answered with zeros rather than with a guess at the day.
+pub fn box_spend(report: &UsageReport, name: &str) -> BoxSpend {
+    let mut out = BoxSpend {
+        at: report.read_at.clone(),
+        prices_as_of: report.prices_as_of.clone(),
+        ..Default::default()
+    };
+    let Some(today) = chrono::DateTime::parse_from_rfc3339(&report.read_at)
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc).date_naive())
+    else {
+        return out;
+    };
+    for row in &report.daily {
+        let Ok(day) = chrono::NaiveDate::parse_from_str(&row.day, "%Y-%m-%d") else {
+            continue;
+        };
+        let back = (today - day).num_days();
+        // A day after `read_at` is a record stamped ahead of the clock that read it: not today's.
+        if back < 0 {
+            continue;
+        }
+        if back < WEEK_DAYS {
+            let cost = row.by_box.get(name).copied().unwrap_or(0.0);
+            let tokens = row.box_tokens.get(name).copied().unwrap_or_default();
+            out.week.add(cost, &tokens);
+            out.unpriced |= tokens.unpriced;
+            if back == 0 {
+                out.today.add(cost, &tokens);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1163,6 +1265,7 @@ fn aggregate(
     let mut by_month: BTreeMap<String, Tokens> = BTreeMap::new();
     let mut by_month_cost: BTreeMap<String, f64> = BTreeMap::new();
     let mut by_day: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut by_day_tokens: BTreeMap<String, BTreeMap<String, BoxDay>> = BTreeMap::new();
     let mut day_cost: BTreeMap<String, f64> = BTreeMap::new();
     let mut boxes: Vec<BoxRow> = Vec::new();
 
@@ -1207,6 +1310,16 @@ fn aggregate(
                 .or_default()
                 .entry(name.clone())
                 .or_default() += cost;
+            let cell = by_day_tokens
+                .entry(turn.day.clone())
+                .or_default()
+                .entry(name.clone())
+                .or_default();
+            cell.input += turn.tokens.input;
+            cell.output += turn.tokens.output;
+            cell.cache_read += turn.tokens.cache_read;
+            cell.cache_write += turn.tokens.cache_write;
+            cell.unpriced |= price_of(&turn.model).is_none();
         }
         row.tokens = box_tokens.total();
         row.days = days.len() as u64;
@@ -1300,6 +1413,7 @@ fn aggregate(
         .into_iter()
         .map(|(day, cost)| DayRow {
             by_box: by_day.remove(&day).unwrap_or_default(),
+            box_tokens: by_day_tokens.remove(&day).unwrap_or_default(),
             cost,
             day,
         })
@@ -1703,6 +1817,88 @@ mod tests {
         );
         assert_eq!(report.totals.input, 5, "the counts did come through");
         assert_eq!(report.totals.output, 7);
+
+        // What goes back into the box (SKEIN-1384): the same counts, and only these keys. A field
+        // added to `BoxSpend` or `SpendWindow` fails here, whatever it carries.
+        let read_at = epoch_ms("2026-08-09T18:00:00Z").unwrap() as u64 / 1000;
+        let report = aggregate(&per_box, &[], Notes::default(), 1, 0, read_at);
+        let spend = serde_json::to_value(box_spend(&report, "boxy")).unwrap();
+        let text = spend.to_string();
+        assert!(
+            !text.contains(SECRET),
+            "a message body reached a box: {text}"
+        );
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&spend),
+            ["at", "prices_as_of", "today", "unpriced", "week"],
+            "the box's file grew a field: {text}"
+        );
+        for window in ["today", "week"] {
+            let w = &spend[window];
+            assert_eq!(
+                keys(w),
+                ["cache_read", "cache_write", "cost", "input", "output"],
+                "the box's {window} grew a field: {text}"
+            );
+            assert!(w.as_object().unwrap().values().all(|v| v.is_number()));
+        }
+        assert_eq!(spend["at"], "2026-08-09T18:00:00Z");
+        assert_eq!(spend["prices_as_of"], PRICES_AS_OF);
+        assert_eq!(
+            spend["today"]["input"], 5,
+            "the box's counts did come through"
+        );
+    }
+
+    /// A daily row with one box's cost and tokens.
+    fn day(d: &str, name: &str, cost: f64, input: u64) -> DayRow {
+        DayRow {
+            day: d.into(),
+            cost,
+            by_box: [(name.to_string(), cost)].into(),
+            box_tokens: [(
+                name.to_string(),
+                BoxDay {
+                    input,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+        }
+    }
+
+    /// **A box's week is today and the six UTC days before it, and no more** (SKEIN-1384).
+    ///
+    /// Fails if the window takes in a seventh day back (`back < WEEK_DAYS` written `<=`: the week
+    /// reads $111.50 and 1,106 input), if today is not the day of `read_at`, or if a day stamped after
+    /// `read_at` is counted.
+    #[test]
+    fn a_boxs_week_is_seven_utc_days_ending_today() {
+        let report = UsageReport {
+            prices_as_of: PRICES_AS_OF.into(),
+            read_at: "2026-10-30T00:30:00Z".into(),
+            daily: vec![
+                day("2026-10-23", "a", 100.0, 1000),
+                day("2026-10-24", "a", 10.0, 100),
+                day("2026-10-29", "a", 0.5, 5),
+                day("2026-10-30", "a", 1.0, 1),
+                day("2026-10-31", "a", 1000.0, 10_000),
+            ],
+            ..Default::default()
+        };
+        let s = box_spend(&report, "a");
+        assert_eq!((s.today.cost, s.today.input), (1.0, 1));
+        assert_eq!(
+            (s.week.cost, s.week.input),
+            (11.5, 106),
+            "the week is 10-24 through 10-30"
+        );
+        assert!(!s.unpriced);
     }
 
     /// Fails if the walker stops at the depth `transcript::walk_jsonl` stops at, which would drop
