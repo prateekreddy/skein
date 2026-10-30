@@ -2471,9 +2471,13 @@ mod tests {
             kit.json("settings.local.json"),
             serde_json::json!({
                 "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"],
-                // Not defaults: where this box's memory and shared files are (SKEIN-1330).
+                // Not defaults: where this box's memory and shared files are (SKEIN-1330), and
+                // the tracker's read-only `held`, the one tool a box allows (SKEIN-1404).
                 "autoMemoryDirectory": kit.store.join("memory"),
-                "permissions": { "additionalDirectories": [kit.home.join("shared")] },
+                "permissions": {
+                    "additionalDirectories": [kit.home.join("shared")],
+                    "allow": [crate::probes::TRACKER_HELD_TOOL],
+                },
             }),
             "the box's local settings override what the repo chose"
         );
