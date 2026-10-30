@@ -71,6 +71,61 @@ export type SkeinAttention = {
   marks: Record<string, number>
 }
 
+/** One item on skein's disk list for this box, as `skein-mcp clean` lists it (SKEIN-1356). */
+export type SkeinCleanRow = {
+  /** The fleet's path, which `skein-mcp clean` takes. */
+  path: string
+  /** Where the agent sees it: `$HOME/…` for the box's home. */
+  in_box: string
+  /** `download cache`, `build output`, `scratchpad`, or `shared download cache`. */
+  kind: string
+  bytes: number
+  /** `shared` for the repo's shared download cache, which is not counted against this box. */
+  where: 'box' | 'shared'
+  safe_now: boolean
+  why_not: string | null
+}
+
+/** The repo's shared download cache, on a row of its own. */
+export type SkeinSharedCache = {
+  path: string
+  bytes: number
+  safe_to_clean_now: boolean
+  why_not: string | null
+}
+
+/** One of this box's requests or questions, with its answer's state, as `skein-mcp requests` reads it. */
+export type SkeinRequestRow = {
+  queue: 'package' | 'write' | 'question'
+  id: string
+  asked: string
+  /** `waiting` until the owner's inbox answers it. */
+  state: string
+  /** What was asked, in a few words. */
+  what: string
+}
+
+/** What the band and the pane draw from, read on a timer and after a Clean (SKEIN-1362). */
+export type SkeinBand = {
+  /** From the signal file; null when there is none to believe. */
+  disk: {
+    mb: number | null
+    limit_mb: number | null
+    /** skein's disk ask of this box, when it stands. */
+    ask: { amount_mb: number; why: string } | null
+  } | null
+  /** skein's disk list; null before skein has listed it. */
+  clean: {
+    rows: SkeinCleanRow[]
+    removable_now_bytes: number
+    shared: SkeinSharedCache | null
+  } | null
+  /** null outside a box. */
+  requests: SkeinRequestRow[] | null
+  /** Unread mail; null when the mailbox could not be read. */
+  mail: number | null
+}
+
 /** Where a subagent's run stands: working, answered, ended on an error or refusal, or interrupted. */
 export type SkeinAgentStatus = 'running' | 'done' | 'failed' | 'stopped'
 
@@ -132,6 +187,9 @@ declare module 'claude-code' {
     skein: {
       identity: Shaped<SkeinIdentity | null>
       attention: Shaped<SkeinAttention | null>
+      band: Shaped<SkeinBand | null>
+      /** What the last Clean said, `skein-mcp clean`'s own sentence. */
+      cleanSaid: Shaped<string | null>
       agents: Shaped<SkeinAgentRun[]>
       agentsPanel: Shaped<SkeinAgentsPanel>
       agentsNow: number

@@ -343,6 +343,7 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         "hooks/attention.ts",
         include_str!("plugin/hooks/attention.ts"),
     ),
+    ("hooks/band.tsx", include_str!("plugin/hooks/band.tsx")),
     // The agents panel (SKEIN-1361), its lane facts and price table, and the MIT notice of the
     // mod it was adapted from, which ships with the code it covers.
     (

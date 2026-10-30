@@ -38,18 +38,21 @@ import {
   onToolCall as agentsPanelToolCall,
   onTurnComplete as agentsPanelTurnComplete,
 } from './agents-panel'
+import { register as band, onStart as bandStart, onTurnComplete as bandTurnComplete } from './band'
 import { register as identity, onStart as identityStart } from './identity'
 
 export const register: Register = on => {
   identity(on)
   agentsPanel(on)
   attention(on)
+  band(on)
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await quietly(identityStart($, e))
     await quietly(agentsPanelStart($, e))
     await quietly(attentionStart($, e))
+    await quietly(bandStart($, e))
 
     return started
   })
@@ -78,6 +81,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     await quietly(agentsPanelTurnComplete($, e))
     await quietly(attentionTurnComplete($, e))
+    await quietly(bandTurnComplete($, e))
 
     return next(e)
   })

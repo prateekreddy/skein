@@ -28,6 +28,7 @@
 #   mailbox.sh inbox        # unread for THIS box (UserPromptSubmit hook); prints them, marks seen
 #   mailbox.sh stop-check   # same delivery, but for the Stop hook: silent exit 0 if nothing unread,
 #                           # else prints to stderr and exit 2 (blocks the stop so it can't be missed)
+#   mailbox.sh unread       # how many `inbox` would deliver now, as one number; marks nothing
 #   mailbox.sh list         # all messages (read-only, no seen mutation)
 #   mailbox.sh prune [days] # delete fully-seen messages older than N days (default 14)
 set -uo pipefail
@@ -118,6 +119,18 @@ notabox="${notabox//\//-}"
 cmd="${1:-inbox}"; shift || true
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?'; }
+
+# Which messages are this box's unread mail, said once for `inbox`, `stop-check` and `unread`: a
+# shared message another box sent to this one, a broadcast or everyone, that this box has not seen;
+# and an owner's message to this box, a broadcast or everyone (whether it was seen is `$seen_file`).
+for_me_unseen='
+  (.from // "") != $v
+  and ((.to // "broadcast") as $to | $to == "broadcast" or $to == "all-projects" or $to == $v)
+  and (((.seenBy // []) | index($v)) == null)
+'
+owner_for_me='
+  ((.to // "broadcast") as $to | $to == "broadcast" or $to == "all-projects" or $to == $v)
+'
 
 # Every registered box EXCEPT the sandbox's own name — see `notabox` above. Prints nothing at all
 # when the registry cannot be read, which is not the same answer as "no boxes".
@@ -224,11 +237,7 @@ case "$cmd" in
       # message would make it repeat forever and could trap Stop in a continuation loop.
       line="$({
         flock -w 5 8 || exit 1
-        jq -e --arg v "$vmid" '
-          (.from // "") != $v
-          and ((.to // "broadcast") as $to | $to == "broadcast" or $to == "all-projects" or $to == $v)
-          and (((.seenBy // []) | index($v)) == null)
-        ' "$f" >/dev/null 2>&1 || exit 1
+        jq -e --arg v "$vmid" "$for_me_unseen" "$f" >/dev/null 2>&1 || exit 1
         tmp="$(mktemp "$box/.mail-seen.XXXXXX" 2>/dev/null)" || exit 1
         jq --arg v "$vmid" '.seenBy = ((.seenBy // []) + [$v] | unique)' "$f" >"$tmp" 2>/dev/null \
           && mv "$tmp" "$f" || { rm -f "$tmp"; exit 1; }
@@ -256,9 +265,7 @@ case "$cmd" in
         # Delivered-once is remembered here rather than in the file, because the file is read-only
         # to this box by design. `grep -Fx` so an id is matched whole and not as a prefix.
         grep -Fxq "$id" "$seen_file" 2>/dev/null && continue
-        jq -e --arg v "$vmid" '
-          ((.to // "broadcast") as $to | $to == "broadcast" or $to == "all-projects" or $to == $v)
-        ' "$f" >/dev/null 2>&1 || continue
+        jq -e --arg v "$vmid" "$owner_for_me" "$f" >/dev/null 2>&1 || continue
         line="$(jq -r '"  • [\(.kind // "note")] from you: \(.body // "")"' "$f" 2>/dev/null)" || continue
         printf '%s\n' "$id" >> "$seen_file" 2>/dev/null || true
         if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
@@ -284,6 +291,25 @@ case "$cmd" in
     [ "$found" -eq 0 ] && exit 0
     ;;
 
+  unread)
+    # Read-only, so it takes no lock: a message marked while this counts is off by one until the
+    # next count, and nothing is marked or pruned here. Read by skein's band above the prompt
+    # (SKEIN-1362), which must never deliver mail itself: delivery is the turn-boundary hooks'.
+    n=0
+    for f in "$box"/*.json; do
+      [ -e "$f" ] || break
+      jq -e --arg v "$vmid" "$for_me_unseen" "$f" >/dev/null 2>&1 && n=$((n+1))
+    done
+    if [ -d "$own" ]; then
+      for f in "$own"/*.json; do
+        [ -e "$f" ] || break
+        grep -Fxq "$(basename "$f")" "$seen_file" 2>/dev/null && continue
+        jq -e --arg v "$vmid" "$owner_for_me" "$f" >/dev/null 2>&1 && n=$((n+1))
+      done
+    fi
+    echo "$n"
+    ;;
+
   list)
     boxes="$(registered_boxes)"
     for f in "$box"/*.json; do
@@ -299,6 +325,6 @@ case "$cmd" in
     prune_seen "$days" 1
     ;;
 
-  *) echo "usage: mailbox.sh {send|inbox|stop-check|list|prune}" >&2; exit 2;;
+  *) echo "usage: mailbox.sh {send|inbox|stop-check|unread|list|prune}" >&2; exit 2;;
 esac
 exit 0
