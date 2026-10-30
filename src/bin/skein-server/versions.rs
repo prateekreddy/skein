@@ -5,11 +5,20 @@
 use super::*;
 
 /// Each component's current and previous version, every version the depot holds with its size,
-/// tests and users, and the running boxes still waiting to restart onto the current one.
+/// tests and users, and the running boxes still waiting to restart onto the current one. Beside them,
+/// the TypeScript the mod is checked with, which is shown and never rolled out.
 pub(super) async fn api_versions() -> Json<serde_json::Value> {
-    let found = tokio::task::spawn_blocking(skein::fleet::versions::view).await;
+    let found = tokio::task::spawn_blocking(|| {
+        (
+            skein::fleet::versions::view(),
+            skein::fleet::versions::typescript_view(),
+        )
+    })
+    .await;
     Json(match found {
-        Ok(components) => serde_json::json!({ "components": components }),
+        Ok((components, typescript)) => {
+            serde_json::json!({ "components": components, "typescript": typescript })
+        }
         Err(e) => serde_json::json!({ "error": e.to_string() }),
     })
 }

@@ -14055,6 +14055,11 @@ const VERSIONS_WORDS = {
   confirmRemove: e => `Remove ${e}? No box uses it, and it is not the current version or the one kept for rollback.`,
   rolled: e => `Rolled out ${e}.`,
   removed: (e, n) => `Removed ${e} (${n}).`,
+  // SKEIN-1396: the TypeScript the mod's check runs, shown and never rolled out.
+  typescriptTitle: "TypeScript",
+  typescript: (e, published) => `skein's mod is type-checked with ${e} before a claude version can be rolled out. `
+    + (published ? "It is in the fleet's store." : "Not fetched yet: claude versions are tested once skein has it.")
+    + " Moving it is a change to src/typescript.version, checked in CI first.",
 };
 function versionStatus(e) {
   if (e.current) return "current";
@@ -14087,6 +14092,9 @@ function versionsHtml() {
         + `</div>`;
     }
   }
+  const ts = versionsView.typescript;
+  if (ts) html += `<div class="set-note upd-version upd-typescript"><b>${esc(VERSIONS_WORDS.typescriptTitle)}</b> · `
+    + `${esc(VERSIONS_WORDS.typescript(ts.entry, ts.published))}</div>`;
   return html;
 }
 async function pressRollout(btn) {
