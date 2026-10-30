@@ -1046,6 +1046,55 @@ mod tests {
         assert_eq!(state_of(&q, "j-fifo"), "absent", "{q:#?}");
     }
 
+    /// **One box cannot queue more than [`PER_BOX`] jobs, and another box's job still runs.**
+    ///
+    /// The queue is shared, and a box writes as many request files as it likes. One box files
+    /// `PER_BOX + 1` jobs, each with a live wrapper; exactly `PER_BOX` are queued. The fleet has
+    /// exactly one slot more than that, so the other box's job, filed a tick later, is granted
+    /// only if the flooding box was held to its share.
+    ///
+    /// What would make it fail: the `active >= PER_BOX` check in [`merge`] removed (the sabotage
+    /// that was run: all `PER_BOX + 1` are queued and granted, and the other box's job waits with
+    /// `fleet full`), or the count taken per tick rather than over the box's active jobs.
+    #[test]
+    fn a_box_cannot_queue_more_than_its_share_of_jobs() {
+        let f = Fleet::new(&["web-main", "api-main"]);
+        let limits = Limits {
+            fleet_slots: PER_BOX + 1,
+            repo_cap: 100,
+        };
+        for n in 0..=PER_BOX {
+            f.submit(
+                "web-main",
+                &format!("j-flood-{n:02}"),
+                700 + n as u32,
+                serde_json::json!({}),
+            );
+        }
+        let q = f.tick(0, limits, &[]);
+        let queued = q.jobs.iter().filter(|j| j.box_name == "web-main").count();
+        assert_eq!(
+            queued,
+            PER_BOX,
+            "one box queued more than its share: {queued} of {} filed",
+            PER_BOX + 1
+        );
+
+        f.submit("api-main", "j-other", 799, serde_json::json!({}));
+        let q = f.tick(2, limits, &[]);
+        assert_eq!(
+            q.jobs.iter().filter(|j| j.box_name == "web-main").count(),
+            PER_BOX,
+            "a later tick let the flooding box past its share"
+        );
+        assert_eq!(
+            state_of(&q, "j-other"),
+            "granted",
+            "another box's job did not get its turn: {:?}",
+            q.jobs.iter().find(|j| j.id == "j-other")
+        );
+    }
+
     #[test]
     fn the_fleet_has_one_slot_for_every_four_cores_and_never_none() {
         assert_eq!(fleet_slots_for(0), 1);
