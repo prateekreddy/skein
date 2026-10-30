@@ -1183,6 +1183,8 @@ mod tests {
         "depot",
         "detached",
         "gitgate",
+        // A box's heavy jobs (SKEIN-1388).
+        "jobs",
         "plugin",
         "plugin-turn-state",
         "private",

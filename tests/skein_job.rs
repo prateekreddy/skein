@@ -6,7 +6,10 @@
 //! directory, and the box's heavy lock is a file of the test's own (`SKEIN_JOB_LOCK`), never the
 //! `/var/tmp/skein-lanes-heavy.lock` the lanes running this suite hold.
 
-// Every test here is Linux's (`tests/platform_gates.rs` says why), and the helpers are theirs.
+// Every test here is Linux's, and the helpers are theirs: the wrapper reads /proc/<pid>/status
+// and /proc/locks, one test reads the job's /proc/self/cgroup and the box's cgroup.procs (cgroup
+// v2), and one holds the lock with util-linux `flock`. `tests/platform_gates.rs`' `GATED` list
+// covers the library's tests, not this binary's, so the reasons are here.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 mod common;
@@ -14,6 +17,7 @@ mod common;
 use common::{skip, Scratch};
 use std::fs;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -113,6 +117,11 @@ fn finish_within(
             break;
         }
         if started.elapsed() > bound {
+            // The whole group: a wrapper stuck behind a killed `flock` is its grandchild, and
+            // killing only the child would leave it waiting for ever.
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status();
             let _ = child.kill();
             let _ = child.wait();
             let mut err = String::new();
@@ -191,6 +200,7 @@ fn a_job_runs_in_the_submitting_boxs_cgroup() {
     let child = fleet
         .wrapper()
         .args(["run", "--class", "test", "--", "sh", "-c", &probe])
+        .process_group(0)
         .spawn()
         .unwrap();
     let wrapper_pid = child.id();
@@ -267,6 +277,7 @@ fn a_nested_skein_job_runs_without_waiting() {
     let child = fleet
         .wrapper()
         .args(["run", "--class", "build", "--", "sh", "-c", &inner])
+        .process_group(0)
         .spawn()
         .unwrap();
     let (out, err) = finish_within(child, Duration::from_secs(5)).unwrap_or_else(|e| {
@@ -319,6 +330,7 @@ fn a_skein_job_under_a_raw_flock_of_the_same_lock_does_not_wait_on_itself() {
     let child = flocked
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .unwrap();
     let (out, err) = finish_within(child, Duration::from_secs(5))

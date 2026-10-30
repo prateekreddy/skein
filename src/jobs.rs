@@ -824,7 +824,7 @@ mod tests {
 
     /// **A repo at its cap is skipped, keeps its place, and the next repo's job runs.**
     ///
-    /// Two of repo `web`'s jobs run and a third waits; behind it is a job of repo `api`. With four
+    /// Two of repo `web`'s jobs run and a third waits; behind it is a job of repo `api`. With three
     /// fleet slots, the third `web` job is skipped with its reason and the `api` job is granted
     /// past it. When a `web` job finishes, the waiting `web` job is next, ahead of an `api` job
     /// that came after it.
@@ -836,7 +836,7 @@ mod tests {
     fn a_repo_at_cap_is_skipped_and_the_next_repo_runs() {
         let f = Fleet::new(&["web-1", "web-2", "web-3", "api-1"]);
         let limits = Limits {
-            fleet_slots: 4,
+            fleet_slots: 3,
             repo_cap: 2,
         };
         let repos = [
@@ -878,7 +878,7 @@ mod tests {
         assert_eq!(state_of(&q, "j-a2"), "waiting", "{q:#?}");
         assert_eq!(
             q.jobs.iter().find(|j| j.id == "j-a2").unwrap().reason,
-            "fleet full 4/4"
+            "fleet full 3/3"
         );
     }
 
@@ -900,8 +900,9 @@ mod tests {
             repo_cap: 2,
         };
         f.submit("web-main", "j-dies", 301, serde_json::json!({}));
+        f.tick(0, limits, &[]);
         f.submit("api-main", "j-next", 302, serde_json::json!({}));
-        let q = f.tick(0, limits, &[]);
+        let q = f.tick(2, limits, &[]);
         let procs =
             std::fs::read_to_string(f.places.cgroups.join("web-main/cgroup.procs")).unwrap();
         assert!(

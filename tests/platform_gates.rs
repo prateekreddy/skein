@@ -37,19 +37,6 @@ use std::path::Path;
 /// are deciding whether a green run on their machine means what they want it to mean.
 const GATED: &[(&str, &str)] = &[
     (
-        "a_job_runs_in_the_submitting_boxs_cgroup",
-        "reads the job's /proc/self/cgroup and the box's cgroup.procs under /sys/fs/cgroup, which \
-         are Linux's cgroup v2",
-    ),
-    (
-        "a_nested_skein_job_runs_without_waiting",
-        "runs skein-job, whose liveness and lock checks read /proc/<pid> and /proc/locks",
-    ),
-    (
-        "a_skein_job_under_a_raw_flock_of_the_same_lock_does_not_wait_on_itself",
-        "holds the lock with util-linux `flock` and finds its holder in /proc/locks",
-    ),
-    (
         "a_box_that_cannot_be_entered_says_which_proof_failed",
         "runs the crossing guard, whose subject is /proc/<pid>/stat and the kernel's boot id",
     ),
