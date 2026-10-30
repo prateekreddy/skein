@@ -6,7 +6,7 @@
 import { mock } from 'claude-code/testing'
 import type { AgentInfo, On } from 'claude-code'
 
-export const HOME = '/home/box'
+export const HOME = '/home/agent'
 export const SESSION = 'sess-1'
 export const RULES = `${HOME}/.local/state/skein/standing-rules.md`
 export const WATCH = `${HOME}/.claude/sync/${SESSION}.watch`

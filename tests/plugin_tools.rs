@@ -1449,6 +1449,7 @@ fn the_command_line_requests_is_the_same_tool() {
         .arg("requests")
         .env("SKEIN_STATE", b.at("state"))
         .env("SKEIN_FLEET_ROOT", b.at("fleet"))
+        .env("SKEIN_HOME", b.at("home"))
         .env("SKEIN_BOX", "example")
         .output()
         .expect("python3");
