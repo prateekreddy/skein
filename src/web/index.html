@@ -14002,6 +14002,8 @@ const VERSIONS_WORDS = {
     ? "Nothing rolled out: boxes use the toolchain the sandbox was set up with."
     : `Nothing rolled out: boxes run the sandbox's own ${c}.`,
   upstream: v => `Newest on npm: ${v}.`,
+  // SKEIN-1380: claude is pinned to the build skein's mod is checked against.
+  pinned: (c, v) => `skein's mod is checked against ${c} ${v}, so that is the version that can be rolled out. Moving it is a change to src/claude-code.version, checked in CI first.`,
   waiting: names => `${names.length === 1 ? "1 running box moves" : `${names.length} running boxes move`} onto it when next idle: ${names.join(", ")}.`,
   rollout: "Roll out",
   remove: "Remove",
@@ -14029,9 +14031,11 @@ function versionsHtml() {
     html += `<div class="set-note upd-version"><b>${esc(VERSIONS_WORDS.title(c.component))}</b> · `
       + esc(c.current ? VERSIONS_WORDS.current(c.component, c.current) : VERSIONS_WORDS.none(c.component))
       + (c.upstream ? ` ${esc(VERSIONS_WORDS.upstream(c.upstream))}` : "") + `</div>`;
+    if (c.pinned) html += `<div class="set-note">${esc(VERSIONS_WORDS.pinned(c.component, c.pinned))}</div>`;
     if (c.waiting_to_restart.length) html += `<div class="set-note behind">${esc(VERSIONS_WORDS.waiting(c.waiting_to_restart))}</div>`;
     for (const e of [...c.entries].reverse()) {
-      const can = !e.current && (c.kind !== "agent-cli" || e.tested?.ok);
+      const can = !e.current && (c.kind !== "agent-cli" || e.tested?.ok)
+        && (!c.pinned || e.name === `${c.component}@${c.pinned}`);
       html += `<div class="set-row upd-version" style="${AGENT_ROW}"><code>${esc(e.name)}</code>`
         + `<span class="dim">${esc(versionStatus(e))} · ${fmtGb(mbOf(e.bytes))}${e.boxes.length ? " · used by " + esc(e.boxes.join(", ")) : ""}</span>`
         + (can ? `<button type="button" class="kbtn" data-c="${esc(c.component)}" data-e="${esc(e.name)}" onclick="pressRollout(this)">${VERSIONS_WORDS.rollout}</button>` : "")

@@ -10,6 +10,14 @@ box is never restarted. Rust is per repo: a repo whose tree pins a toolchain in 
 or `rust-toolchain` gets that toolchain, fetched once and shared read-only; every other repo gets the
 fleet's default, which is rolled out like a CLI.
 
+**Claude Code is pinned** (SKEIN-1380, the owner's option (a), "skein tests, I click"). The one
+version skein's mod is checked against is written in `src/claude-code.version`, and it is also the
+only claude-code version the fleet fetches and the only one "Roll out" accepts. Moving it is a
+reviewed commit, whose CI checks the mod against the new build before any box can be given it. A
+newer release on npm is shown and nothing more. Codex is not pinned and follows npm's newest. A
+claude-code version is tested by the version check and by the mod's own `tools/plugin-check.sh`,
+run with that entry's `claude` first on `PATH` and `CLAUDE_CODE_VERSION` set to it.
+
 **Date.** 2026-10-30.
 
 **Decided by.** The project owner (SKEIN-1372), with the coordinator's addition of the same day that
@@ -26,6 +34,8 @@ work, and an agent between tasks knows better than a heuristic when it is free.
 
 - Installing or updating a CLI or toolchain in place, anywhere a box executes from.
 - Rolling out a CLI version that has not passed its tests (`fleet::versions::rollout` refuses).
+- Rolling out a claude-code version other than `src/claude-code.version`, or writing that number
+  anywhere else.
 - Restarting a box onto a rollout while it is working, waiting on a person, or in a state skein
   cannot read; and restarting without reading its state again at that moment.
 - Removing a version automatically, or removing one a placed box records, the current one, or the

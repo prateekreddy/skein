@@ -261,9 +261,16 @@ pub fn rollout(component: &str, entry: &str) -> Result<Rolled, String> {
     if !depot::is_published(kind, entry) {
         return Err(format!("{entry} is not in the fleet's {} store", kind.name));
     }
-    if let Some((cli, _)) = cli_entry_parts(entry) {
+    if let Some((cli, version)) = cli_entry_parts(entry) {
         if cli.runtime != component {
             return Err(format!("{entry} is not a version of {component}"));
+        }
+        if let Some(pin) = pinned(component).filter(|p| *p != version) {
+            return Err(format!(
+                "skein's mod is checked against {component} {pin}, so only {component}@{pin} can \
+                 be rolled out. To move to {version}, change src/claude-code.version in a \
+                 reviewed commit; its CI checks the mod against {version} first."
+            ));
         }
     } else if component != RUST {
         return Err(format!("{entry} is not a version of {component}"));
@@ -533,60 +540,76 @@ pub fn toolchain_fill(name: &str) -> Result<depot::Fill, String> {
     })
 }
 
+/// The one Claude Code version skein's mod is checked against, and so the one the fleet may roll
+/// out (SKEIN-1380, the owner's option (a)). `src/claude-code.version` is the only place it is
+/// written: CI's `plugin` job reads the same file, and `the_ci_pin_is_the_fleets_pin` fails if
+/// either stops doing so. Moving it is a reviewed commit, whose CI runs `tools/plugin-check.sh`
+/// against the new build before any box can be given it.
+pub const CLAUDE_CODE_PIN: &str = include_str!("../claude-code.version");
+
+/// The version `runtime` is pinned to, when it is: claude-code is; codex follows npm's newest.
+pub fn pinned(runtime: &str) -> Option<&'static str> {
+    (runtime == "claude").then(|| CLAUDE_CODE_PIN.trim())
+}
+
 /// A check run against a CLI entry before it may be rolled out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliCheck {
     pub name: &'static str,
-    /// Which runtimes it applies to.
-    pub runtime: &'static str,
-    /// The command, run with the entry bound read-only at `/cli` and `/cli/bin` first on `PATH`.
-    /// `{plugin}` is skein's box plugin, bound read-only at `/plugin`.
-    pub argv: &'static [&'static str],
+    /// The command, run in [`check_script`]'s namespace: the entry read-only at `/cli`, with
+    /// `/cli/bin` first on `PATH`, and skein's own source read-only at `/skein-src`.
+    pub argv: Vec<String>,
+    /// Variables set for it.
+    pub env: Vec<(String, String)>,
 }
 
-/// **The hook for the plugin's own checks against a new CLI** (SKEIN-1358, SKEIN-1359).
-///
-/// Empty here on purpose. `claude plugin validate {plugin}` and `claude plugin test {plugin}` are
-/// being added to `src/plugin` by another lane; when they land, each is one row here, run by
-/// [`test_cli`] exactly as the version check is, in the same namespace, against the published entry.
-/// An entry passes only when every row for its runtime does.
-pub const PLUGIN_CHECKS: &[CliCheck] = &[];
-
-/// Every check for `cli`: the version check first (SKEIN-870's lesson: the version is what the
-/// binary says when asked, not what a file name claims), then the plugin's.
-pub fn checks_for(cli: &Cli) -> Vec<CliCheck> {
+/// Every check for `version` of `cli`. First the version check (SKEIN-870's lesson: the version is
+/// what the binary says when asked, not what a file name claims). Then, for Claude Code, **the
+/// mod's own check** (SKEIN-1359): `tools/plugin-check.sh` from skein's source, with the entry's
+/// `claude` first on `PATH` and `CLAUDE_CODE_VERSION` set, so it refuses a build other than the one
+/// under test. It validates and tests `src/plugin` with that build, runs it headless offline, and
+/// type-checks the hooks module against the declarations that build lays. A check the script says
+/// it cannot run (exit 2, a tool missing) is a failure: an untested build is not rolled out.
+pub fn checks_for(cli: &Cli, version: &str) -> Vec<CliCheck> {
     let mut all = vec![CliCheck {
         name: "version",
-        runtime: cli.runtime,
-        argv: &["--version"],
+        argv: vec![format!("/cli/bin/{}", cli.command), "--version".into()],
+        env: Vec::new(),
     }];
-    all.extend(
-        PLUGIN_CHECKS
-            .iter()
-            .filter(|c| c.runtime == cli.runtime)
-            .cloned(),
-    );
+    if cli.runtime == "claude" {
+        all.push(CliCheck {
+            name: "plugin-check",
+            argv: vec!["bash".into(), "/skein-src/tools/plugin-check.sh".into()],
+            env: vec![("CLAUDE_CODE_VERSION".into(), version.to_string())],
+        });
+    }
     all
 }
 
-/// The namespace a check runs in: the entry read-only at `/cli`, skein's plugin read-only at
-/// `/plugin`, `/usr` and `/etc` read-only, a private `/tmp` as `HOME`, **no network**, a cleared
-/// environment, its own PID namespace, ended with its parent.
-fn check_script(entry_dir: &str, plugin: &str, argv: &[String]) -> String {
-    let argv = argv
+/// The namespace a check runs in: the entry read-only at `/cli`, skein's source read-only at
+/// `/skein-src`, `/usr` and `/etc` read-only, a private `/tmp` as `HOME` and `TMPDIR`, **no
+/// network**, a cleared environment, its own PID namespace, ended with its parent.
+fn check_script(entry_dir: &str, source: &str, check: &CliCheck) -> String {
+    let argv = check
+        .argv
         .iter()
         .map(|a| sh_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
+    let env: String = check
+        .env
+        .iter()
+        .map(|(k, v)| format!(" --setenv {} {}", sh_quote(k), sh_quote(v)))
+        .collect();
     format!(
-        "timeout -k 5 120 bwrap --unshare-all --unshare-pid --die-with-parent --new-session \
+        "timeout -k 5 600 bwrap --unshare-all --unshare-pid --die-with-parent --new-session \
          --clearenv --ro-bind /usr /usr --ro-bind-try /bin /bin --ro-bind-try /lib /lib \
          --ro-bind-try /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp \
-         --ro-bind {entry} /cli --ro-bind-try {plugin} /plugin --chdir /tmp \
-         --setenv HOME /tmp --setenv PATH /cli/bin:/usr/local/bin:/usr/bin:/bin \
-         --setenv DISABLE_AUTOUPDATER 1 -- {argv} 2>&1",
+         --ro-bind {entry} /cli --ro-bind-try {source} /skein-src --chdir /tmp \
+         --setenv HOME /tmp --setenv TMPDIR /tmp --setenv PATH /cli/bin:/usr/local/bin:/usr/bin:/bin \
+         --setenv DISABLE_AUTOUPDATER 1{env} -- {argv} 2>&1",
         entry = sh_quote(entry_dir),
-        plugin = sh_quote(plugin),
+        source = sh_quote(source),
     )
 }
 
@@ -636,20 +659,20 @@ pub fn test_cli(sandbox: &str, entry: &str) -> Result<Tested, String> {
             said: why,
         });
     } else {
-        let plugin = crate::runtime::plugin_dir();
-        for check in checks_for(cli) {
-            let mut argv = vec![format!("/cli/bin/{}", cli.command)];
-            argv.extend(check.argv.iter().map(|a| a.replace("{plugin}", "/plugin")));
+        let source = skein_source_path();
+        for check in checks_for(cli, version) {
             let ran = crate::place::own_sandbox(sandbox).attempt(
-                &check_script(&dir.display().to_string(), &plugin, &argv),
+                &check_script(&dir.display().to_string(), &source, &check),
                 &[],
-                Duration::from_secs(150),
+                Duration::from_secs(660),
             );
             let (ok, said) = match ran {
                 Ok(r) => {
                     let said = String::from_utf8_lossy(&r.out).trim().to_string();
                     let ok = r.code == 0 && (check.name != "version" || said.contains(version));
-                    (ok, said.lines().take(6).collect::<Vec<_>>().join("\n"))
+                    let lines: Vec<&str> = said.lines().collect();
+                    let tail = lines[lines.len().saturating_sub(8)..].join("\n");
+                    (ok, tail)
                 }
                 Err(e) => (false, e),
             };
@@ -734,7 +757,15 @@ pub fn watch_pass(sandbox: &str) -> Vec<String> {
         r.upstream.extend(upstream.clone());
         Ok(())
     });
-    for (runtime, version) in &upstream {
+    // The version each CLI is fetched at: its pin when it has one (SKEIN-1380), npm's newest
+    // otherwise. A pinned CLI's newer releases are only shown.
+    let mut wanted: BTreeMap<String, String> = upstream.clone();
+    for c in CLIS {
+        if let Some(pin) = pinned(c.runtime) {
+            wanted.insert(c.runtime.to_string(), pin.to_string());
+        }
+    }
+    for (runtime, version) in &wanted {
         let entry = format!("{runtime}@{version}");
         if depot::is_published(&AGENT_CLI, &entry) {
             continue;
@@ -885,6 +916,8 @@ pub struct ComponentView {
     pub previous: Option<String>,
     /// The newest version upstream, for a CLI.
     pub upstream: Option<String>,
+    /// The only version that can be rolled out, for a pinned CLI (`src/claude-code.version`).
+    pub pinned: Option<String>,
     pub entries: Vec<EntryView>,
     /// Running boxes still on another entry, which move when they are idle.
     pub waiting_to_restart: Vec<String>,
@@ -944,6 +977,7 @@ pub fn view() -> Vec<ComponentView> {
             current: rolled.map(|c| c.entry.clone()),
             previous: rolled.and_then(|c| c.previous.clone()),
             upstream: r.upstream.get(component).cloned(),
+            pinned: pinned(component).map(str::to_string),
             entries,
             waiting_to_restart: behind.remove(component).unwrap_or_default(),
         });
@@ -1256,11 +1290,12 @@ mod tests {
         depot::publish(&out, &depot::kind_dir(kind), &staged).unwrap();
     }
 
-    /// **A CLI is rolled out only once it has passed its tests, and the version before it is kept
-    /// as the rollback.**
+    /// **A CLI is rolled out only once it has passed its tests, the version before it is kept as
+    /// the rollback, and a pinned CLI only at its pin.**
     ///
     /// What would make it fail: `rollout` skipping the `tested` check (the untested entry rolls out),
-    /// or not carrying `previous`.
+    /// not carrying `previous`, or not holding claude to `src/claude-code.version` (the tested
+    /// `claude@1.0.0` rolls out).
     #[test]
     fn an_untested_cli_is_not_rolled_out_and_the_last_one_is_kept() {
         let _g = env_lock();
@@ -1268,12 +1303,14 @@ mod tests {
         let mut pins = env_pins();
         pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"))
             .set("SKEIN_HOME", dir.join("home"));
-        publish_fixture(&AGENT_CLI, "claude@1.0.0");
-        publish_fixture(&AGENT_CLI, "claude@1.0.1");
-        let why = rollout("claude", "claude@1.0.0").expect_err("untested");
+        let pin = format!("claude@{}", pinned("claude").expect("claude is pinned"));
+        for e in ["codex@1.0.0", "codex@1.0.1", "claude@1.0.0", pin.as_str()] {
+            publish_fixture(&AGENT_CLI, e);
+        }
+        let why = rollout("codex", "codex@1.0.0").expect_err("untested");
         assert!(why.contains("has not passed its tests"), "{why}");
         update_rollouts(|r| {
-            for e in ["claude@1.0.0", "claude@1.0.1"] {
+            for e in ["codex@1.0.0", "codex@1.0.1", "claude@1.0.0", pin.as_str()] {
                 r.tested.insert(
                     e.into(),
                     Tested {
@@ -1289,15 +1326,15 @@ mod tests {
             rollout("codex", "claude@1.0.0").is_err(),
             "a claude entry rolled out as codex"
         );
-        rollout("claude", "claude@1.0.0").unwrap();
-        let rolled = rollout("claude", "claude@1.0.1").unwrap();
-        assert_eq!(rolled.previous.as_deref(), Some("claude@1.0.0"));
-        assert_eq!(
-            wanted_versions("web-main")
-                .get("claude")
-                .map(String::as_str),
-            Some("claude@1.0.1")
-        );
+        let off_pin = rollout("claude", "claude@1.0.0").expect_err("claude is pinned");
+        assert!(off_pin.contains("src/claude-code.version"), "{off_pin}");
+        rollout("claude", &pin).expect("the pin rolls out");
+        rollout("codex", "codex@1.0.0").unwrap();
+        let rolled = rollout("codex", "codex@1.0.1").unwrap();
+        assert_eq!(rolled.previous.as_deref(), Some("codex@1.0.0"));
+        let want = wanted_versions("web-main");
+        assert_eq!(want.get("codex").map(String::as_str), Some("codex@1.0.1"));
+        assert_eq!(want.get("claude"), Some(&pin));
         depot::make_writable(&dir);
     }
 

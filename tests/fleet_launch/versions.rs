@@ -23,6 +23,7 @@ fn versions_fleet(what: &str) -> (Scratch, PathBuf, common::EnvPins) {
     })
     .expect("configure the fleet this test is standing in");
     install_launcher(FLEET).expect("install box-session.sh and the kit");
+    plant_plugin_check(&root);
     let prefix = root.join("npm-prefix");
     npm_package(
         &prefix,
@@ -57,17 +58,30 @@ fn npm_package(prefix: &Path, package: &str, file: &str, command: &str, says: &s
     .unwrap();
 }
 
-/// Publish a fixture claude version into the depot the way a fill does after its check, test it
-/// through the real check namespace, and return its entry name.
-fn publish_claude(root: &Path, version: &str) -> String {
-    let entry = format!("claude@{version}");
+/// Publish a fixture CLI version into the depot the way a fill does after its check, test it
+/// through the real check namespace, and return its entry name. Its binary answers `--version` the
+/// way the real one does: `<version> (Claude Code)`, `codex-cli <version>`.
+fn publish_cli(root: &Path, runtime: &str, version: &str) -> String {
+    let entry = format!("{runtime}@{version}");
     let out = root.join(format!("staged-{entry}"));
+    let (package, file, says) = match runtime {
+        "claude" => (
+            "@anthropic-ai/claude-code",
+            "bin/claude.exe",
+            format!("{version} (Claude Code)"),
+        ),
+        _ => (
+            "@openai/codex",
+            "bin/codex.js",
+            format!("codex-cli {version}"),
+        ),
+    };
     npm_package(
         &out.join(&entry),
-        "@anthropic-ai/claude-code",
-        "bin/claude.exe",
-        "claude",
-        &format!("echo '{version} (Claude Code)'"),
+        package,
+        file,
+        runtime,
+        &format!("echo '{says}'"),
     );
     let staged = depot::verify(&out, &AGENT_CLI).expect("a fixture prefix passes the check");
     depot::publish(&out, &depot::kind_dir(&AGENT_CLI), &staged).expect("published");
@@ -77,6 +91,25 @@ fn publish_claude(root: &Path, version: &str) -> String {
         "the fixture {entry} failed its own test: {tested:?}"
     );
     entry
+}
+
+/// A stand-in for `tools/plugin-check.sh` in skein's source, as the mod's check (SKEIN-1359)
+/// behaves at its door: it refuses a `claude` on `PATH` other than `$CLAUDE_CODE_VERSION`, and says
+/// which one it ran.
+fn plant_plugin_check(root: &Path) {
+    let tools = root.join("boxes/.skein/src/tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(
+        tools.join("plugin-check.sh"),
+        concat!(
+            "#!/usr/bin/env bash\n",
+            "have=$(claude --version | awk '{print $1}')\n",
+            "[ -n \"$CLAUDE_CODE_VERSION\" ] && [ \"$have\" = \"$CLAUDE_CODE_VERSION\" ] || ",
+            "{ echo \"claude is $have, asked for $CLAUDE_CODE_VERSION\"; exit 1; }\n",
+            "echo \"fixture plugin-check ran claude $have from $(command -v claude)\"\n",
+        ),
+    )
+    .unwrap();
 }
 
 /// A fixture toolchain entry whose `rustc` says which one it is.
@@ -191,7 +224,23 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
         );
     }
     let (root, prefix, _pins) = versions_fleet("clirod");
-    let entry = publish_claude(&root, "1.0.0");
+    let pin = versions::pinned("claude").expect("claude is pinned");
+    let entry = publish_cli(&root, "claude", pin);
+    // The mod's check ran, against this entry's `claude` and the version under test. What would
+    // make it fail: `checks_for` without the plugin-check row, or without `CLAUDE_CODE_VERSION`.
+    let tested = &versions::rollouts().tested[&entry];
+    let plugin = tested
+        .checks
+        .iter()
+        .find(|c| c.name == "plugin-check")
+        .expect("the mod's check was not run");
+    assert!(
+        plugin.ok
+            && plugin
+                .said
+                .contains(&format!("ran claude {pin} from /cli/bin/claude")),
+        "{plugin:?}"
+    );
     versions::rollout("claude", &entry).expect("roll out the fixture");
     let depot_entry = depot::kind_dir(&AGENT_CLI).join(&entry);
     let exe = depot_entry.join("lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe");
@@ -219,7 +268,7 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
         end(name, anchor);
         assert_eq!(
             field(&report, "cli"),
-            "1.0.0 (Claude Code)",
+            format!("{pin} (Claude Code)"),
             "the {case} box does not run the rolled-out claude: {report:?}"
         );
         assert_eq!(
@@ -267,7 +316,7 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
 /// apply" without touching what it runs; an idle box is then restarted onto the new version, and a
 /// working box is not** (the owner's decisions 1 and 2).
 ///
-/// Two boxes start on `claude@1.0.0`. `1.0.1` is published, tested and rolled out. Both are then
+/// Two boxes start on `codex@1.0.0`. `1.0.1` is published, tested and rolled out. Both are then
 /// stale, and both still run 1.0.0. Both ask to be restarted, through the drop-box file the box's
 /// tool writes, and the restart pass runs with the board reading one `waiting` and the other
 /// `working`. The
@@ -294,11 +343,11 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         );
     }
     let (root, prefix, _pins) = versions_fleet("cliroll");
-    let first = publish_claude(&root, "1.0.0");
-    versions::rollout("claude", &first).expect("roll out 1.0.0");
+    let first = publish_cli(&root, "codex", "1.0.0");
+    versions::rollout("codex", &first).expect("roll out 1.0.0");
     let p = prefix.display().to_string();
     let agent = format!(
-        "{{ printf 'cli %s\\n' \"$('{p}/bin/claude' --version 2>&1)\"; }} > /tmp/v.tmp \
+        "{{ printf 'cli %s\\n' \"$('{p}/bin/codex' --version 2>&1)\"; }} > /tmp/v.tmp \
          && mv /tmp/v.tmp /tmp/v.report; exec sleep 300"
     );
     let mut anchors = std::collections::BTreeMap::new();
@@ -306,14 +355,14 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         let (launched, anchor, report) = start(name, false, &prefix, &agent, "v");
         assert_eq!(
             field(&report, "cli"),
-            "1.0.0 (Claude Code)",
+            "codex-cli 1.0.0",
             "{name}: {report:?}"
         );
         record_start(name, &launched, anchor);
         assert_eq!(
             shared_record(name).unwrap().versions,
             Some(std::collections::BTreeMap::from([(
-                "claude".to_string(),
+                "codex".to_string(),
                 first.clone()
             )])),
             "{name} did not record the version it started on"
@@ -326,8 +375,8 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         "a box on the current version reads stale"
     );
 
-    let second = publish_claude(&root, "1.0.1");
-    versions::rollout("claude", &second).expect("roll out 1.0.1");
+    let second = publish_cli(&root, "codex", "1.0.1");
+    versions::rollout("codex", &second).expect("roll out 1.0.1");
     for name in ["rollidle-main", "rollbusy-main"] {
         assert!(
             stale(name).contains(&"agent-cli"),
@@ -337,7 +386,7 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         let still = own_sandbox(FLEET)
             .exec(
                 &format!(
-                    "nsenter -t {} -U -m --preserve-credentials '{p}/bin/claude' --version",
+                    "nsenter -t {} -U -m --preserve-credentials '{p}/bin/codex' --version",
                     anchors[name]
                 ),
                 Duration::from_secs(30),
@@ -345,7 +394,7 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
             .unwrap_or_default();
         assert_eq!(
             still.trim(),
-            "1.0.0 (Claude Code)",
+            "codex-cli 1.0.0",
             "a rollout changed what the running {name} runs"
         );
     }
@@ -396,13 +445,13 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(
         field(&moved.borrow(), "cli"),
-        "1.0.1 (Claude Code)",
+        "codex-cli 1.0.1",
         "the idle box was not moved onto the rollout"
     );
     assert_eq!(
         shared_record("rollidle-main").unwrap().versions,
         Some(std::collections::BTreeMap::from([(
-            "claude".to_string(),
+            "codex".to_string(),
             second.clone()
         )]))
     );
@@ -525,18 +574,18 @@ fn the_clean_refuses_a_version_in_use() {
     let _env = env_lock();
     let _real = skein::place::seam::real_crossings();
     let (root, _prefix, _pins) = versions_fleet("cliclean");
-    let used = publish_claude(&root, "1.0.0");
-    let previous = publish_claude(&root, "1.0.1");
-    let current = publish_claude(&root, "1.0.2");
-    let unused = publish_claude(&root, "1.0.3");
-    versions::rollout("claude", &previous).unwrap();
-    versions::rollout("claude", &current).unwrap();
+    let used = publish_cli(&root, "codex", "1.0.0");
+    let previous = publish_cli(&root, "codex", "1.0.1");
+    let current = publish_cli(&root, "codex", "1.0.2");
+    let unused = publish_cli(&root, "codex", "1.0.3");
+    versions::rollout("codex", &previous).unwrap();
+    versions::rollout("codex", &current).unwrap();
     record_place(
         "cleanuse-main",
         &PlaceRecord {
             sandbox: FLEET.into(),
             versions: Some(std::collections::BTreeMap::from([(
-                "claude".to_string(),
+                "codex".to_string(),
                 used.clone(),
             )])),
             ..Default::default()
