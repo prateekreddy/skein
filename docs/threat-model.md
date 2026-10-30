@@ -152,6 +152,18 @@ the session does not use. A box with no repo cache gets none of them, and skein-
 `a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names`
 (`tests/fleet_launch/environment.rs`).
 
+**A crossing carries every tool variable the session block exports** (SKEIN-1371). The cache names
+above are one block of the session's exports; the toolchain's `RUSTUP_HOME`, `CARGO_INSTALL_ROOT`,
+the Playwright names and the agent's auto-update switches are the rest, and a crossing used to get
+none of them, so its `cargo` reached rustup's proxy with no `RUSTUP_HOME`. `place::session_exports`
+now reads every `export` in the session block, and `Place::enter` takes each from the anchor the
+same way: the session's value, or none. `PATH` is read and not carried: the parse accepts only
+`PATH="$box_path"`, which `Place::wrap` builds again past the hop, so the box's own `~/.local/bin`
+never reaches the `env` and `nsenter` in front of it. `HOME`, `LD_*`, `BASH_ENV`, `ENV`, `IFS`,
+`SHELLOPTS` and `BASHOPTS` are refused by the parse. Tests
+`a_crossing_into_a_box_carries_its_sessions_tool_variables` (`tests/fleet_launch/environment.rs`)
+and `the_names_a_crossing_takes_from_the_session_are_every_export` (`src/place/crossing.rs`).
+
 **A box's own-repo token is read from its file on every call, never held in its environment**
 (SKEIN-1240, SKEIN-1332). The host rewrites the placed file the moment a key is replaced and removes
 it when one is forgotten or a share ends. git reads it through the credential helper, and a scoped

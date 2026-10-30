@@ -1,7 +1,7 @@
 //! What a crossing carries into a box: the fixed PATHs on either side of the hop, and the
 //! environment it keeps — the launcher's `inherited_env` list, the names the session decides
-//! per box, the names the session points at its repo's download cache, and the shell that takes
-//! those two from the session's own environment (SKEIN-1085, SKEIN-1095, SKEIN-1354).
+//! per box, every name the session block exports for the box's tools, and the shell that takes
+//! those two from the session's own environment (SKEIN-1085, SKEIN-1095, SKEIN-1354, SKEIN-1371).
 
 /// The PATH every fleet-scope script resolves against — root-owned directories and nothing else.
 ///
@@ -56,7 +56,7 @@ pub fn box_path(home: &str) -> String {
 }
 
 /// The launcher, embedded for what this module reads out of it: its `inherited_env` list, its
-/// `unset`s, and the session block's repo-cache exports.
+/// `unset`s, and the session block's exports.
 const LAUNCHER: &str = include_str!("../box-session.sh");
 
 /// **The names a box receives from the environment of whatever reached into it** — the launcher's
@@ -230,8 +230,10 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
 /// session block exports inside its `if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]` (SKEIN-1350),
 /// read out of the launcher's text (SKEIN-1354).
 ///
-/// A crossing takes these from the session as it takes [`session_decides`]: the value the box's
-/// own session holds, or none. So a crossing into a box whose repo has a managed store gets
+/// A crossing carries these as part of [`session_exports`], which reads every export in the
+/// block; this list is the part of it that names the cache, for what is said about the cache. A
+/// crossing takes them from the session as it takes [`session_decides`]: the value the box's own
+/// session holds, or none. So a crossing into a box whose repo has a managed store gets
 /// `CARGO_HOME`, `npm_config_cache` and the rest with the session's own values, and a crossing into
 /// a box the launcher gave no cache (a store kept elsewhere by `skein add --store`, a cache that is
 /// missing or is a link) gets none of them and keeps the box's own `~/.cargo` and `~/.npm`. Whether
@@ -303,9 +305,173 @@ fn parse_session_cache_names(script: &str) -> Vec<String> {
     names
 }
 
+/// **Every name the session block exports for the box's tools** — the toolchain (`RUSTUP_HOME`,
+/// `CARGO_HOME`, `CARGO_INSTALL_ROOT`), the browsers (`PLAYWRIGHT_*`), the agent's auto-update
+/// switches (`DISABLE_*`) and the repo cache's names of [`session_cache_names`] among them, read out
+/// of the launcher's `bash -lc` block (SKEIN-1371).
+///
+/// The owner's decision on SKEIN-1371: a crossing carries **every** tool variable the launcher
+/// exports to the session, not named blocks of them. So this reads every `export` in the block and
+/// not only the ones inside some `if`, and an export the block gains, inside the repo-cache `if` or
+/// anywhere else, is one every crossing carries with nothing else to edit. The value is the
+/// session's, taken from the anchor by [`as_the_session_holds`], so an export the block makes only
+/// on a condition (the toolchain, the cache) reaches a crossing exactly when the session has it.
+///
+/// **`PATH` is read and not carried.** The block exports `PATH="$box_path"`, and `Place::wrap`
+/// already gives a crossing `box_path(home)` past the hop, the same string the launcher builds
+/// (`tests/isolation_bwrap/path.rs` measures the two agree). Taking the session's would put the
+/// box's own `~/.local/bin` in front of the `env` and `nsenter` a crossing resolves at fleet scope,
+/// which is ISO-1. So the parse accepts PATH only with exactly that value, and panics on any other:
+/// a session PATH computed some other way is one `Place::wrap` no longer reproduces.
+///
+/// Refused outright, as [`session_cache_names`] refuses them: `HOME` and every name the `env`,
+/// `nsenter` or `bash` in front of the hop would read (`LD_*`, `BASH_ENV`, `ENV`, `IFS`,
+/// `SHELLOPTS`, `BASHOPTS`). The value is the box's session's, which a box can influence.
+///
+/// Parsed strictly: the block from the line `bash -lc '` to the line that opens `' bash `, with
+/// `\` continuations joined, comments dropped, and every word after an `export` a shell
+/// identifier, alone or with `=`. `the_names_a_crossing_takes_from_the_session_are_every_export`
+/// pins what this reads today.
+pub fn session_exports() -> &'static [String] {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| parse_session_exports(LAUNCHER))
+}
+
+/// The line that opens the session block, as `src/box-session.sh` spells it, and the start of the
+/// line that closes it.
+const SESSION_OPEN: &str = "bash -lc '";
+const SESSION_CLOSE: &str = "' bash ";
+
+/// The one value of `PATH` the session block may export: the launcher's `box_path`, which
+/// `Place::wrap` reproduces as [`box_path`].
+const SESSION_PATH: &str = "\"$box_path\"";
+
+fn parse_session_exports(script: &str) -> Vec<String> {
+    let mut lines = script.lines().skip_while(|l| l.trim() != SESSION_OPEN);
+    assert!(
+        lines.next().is_some(),
+        "src/box-session.sh has no `{SESSION_OPEN}` line, so a crossing cannot tell which names \
+         the session exports for the box's tools"
+    );
+    let mut logical: Vec<String> = Vec::new();
+    let mut pending = String::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim_start().starts_with(SESSION_CLOSE) {
+            closed = true;
+            break;
+        }
+        if pending.is_empty() && line.trim_start().starts_with('#') {
+            continue;
+        }
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                pending.push_str(head);
+                pending.push(' ');
+            }
+            None => {
+                pending.push_str(line);
+                logical.push(std::mem::take(&mut pending));
+            }
+        }
+    }
+    assert!(
+        closed,
+        "the launcher's session block has no line opening `{SESSION_CLOSE}`"
+    );
+    let mut names: Vec<String> = Vec::new();
+    let mut path_seen = false;
+    for line in &logical {
+        for statement in shell_statements(line) {
+            let mut words = statement.iter();
+            if !words.by_ref().any(|w| w == "export") {
+                continue;
+            }
+            for word in words {
+                let (name, value) = match word.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
+                    None => (word.as_str(), None),
+                };
+                assert!(
+                    is_identifier(name),
+                    "{word:?} after an `export` in the launcher's session block is not a variable \
+                     name, so a crossing cannot tell what the session exports"
+                );
+                assert!(
+                    !matches!(
+                        name,
+                        "HOME" | "BASH_ENV" | "ENV" | "IFS" | "SHELLOPTS" | "BASHOPTS"
+                    ) && !name.starts_with("LD_"),
+                    "src/box-session.sh exports {name} to the session, and a crossing must not \
+                     take the session's {name} in front of its hop — see `place::session_exports`"
+                );
+                if name == "PATH" {
+                    assert_eq!(
+                        value,
+                        Some(SESSION_PATH),
+                        "src/box-session.sh exports a session PATH other than {SESSION_PATH}, which \
+                         `Place::wrap` no longer reproduces — see `place::session_exports`"
+                    );
+                    path_seen = true;
+                    continue;
+                }
+                if !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        path_seen && !names.is_empty(),
+        "the launcher's session block exports no PATH, or nothing else, so this parse is reading \
+         something other than the block"
+    );
+    names
+}
+
+/// One logical shell line split into statements of words: whitespace outside double quotes
+/// separates words, an unquoted `;`, `&&` or `||` ends a statement, and an unquoted `#` at the
+/// start of a word ends the line. The session block is one single-quoted argument, so it holds no
+/// single quotes, and nothing in it is escaped inside a double-quoted word.
+fn shell_statements(line: &str) -> Vec<Vec<String>> {
+    let mut statements = vec![Vec::new()];
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    let end_word = |word: &mut String, statements: &mut Vec<Vec<String>>| {
+        if !word.is_empty() {
+            statements.last_mut().unwrap().push(std::mem::take(word));
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                word.push(c);
+            }
+            _ if quoted => word.push(c),
+            '#' if word.is_empty() => break,
+            ';' => {
+                end_word(&mut word, &mut statements);
+                statements.push(Vec::new());
+            }
+            '&' | '|' if chars.peek() == Some(&c) => {
+                chars.next();
+                end_word(&mut word, &mut statements);
+                statements.push(Vec::new());
+            }
+            c if c.is_whitespace() => end_word(&mut word, &mut statements),
+            _ => word.push(c),
+        }
+    }
+    end_word(&mut word, &mut statements);
+    statements.retain(|s| !s.is_empty());
+    statements
+}
+
 /// The shell, run after [`keep_only_listed`] and in front of the hop, that gives a crossing **the
-/// session's value of every name in [`session_decides`] and [`session_cache_names`], or none**
-/// (SKEIN-1095, SKEIN-1354).
+/// session's value of every name in [`session_decides`] and [`session_exports`], or none**
+/// (SKEIN-1095, SKEIN-1354, SKEIN-1371).
 ///
 /// # Why a crossing reads the answer rather than working it out again
 ///
@@ -337,7 +503,10 @@ fn parse_session_cache_names(script: &str) -> Vec<String> {
 /// crossings get the same paths into that cache; a session it gave none holds none, so its
 /// crossings get none either and whatever skein-server had for `CARGO_HOME` stays out of the box,
 /// as [`keep_only_listed`] already made it. Never a path the box cannot see: the value is the one
-/// the box's own session runs on, and the crossing runs in that box's namespace.
+/// the box's own session runs on, and the crossing runs in that box's namespace. The rest of the
+/// block's exports go the same way: a session that found the fleet's toolchain holds its
+/// `RUSTUP_HOME`, so a crossing's `cargo` reaches the same toolchain, and one that found none holds
+/// none.
 ///
 /// **A box can influence what is read here, and gains nothing by it.** The anchor is the box's own
 /// process, so a box could arrange a different value. What that buys is a crossing that runs inside
@@ -345,10 +514,12 @@ fn parse_session_cache_names(script: &str) -> Vec<String> {
 /// are `env` and `nsenter`, which read none of these names, and the value is handed to `export` as
 /// one word: never evaluated, never on an argv.
 pub(super) fn as_the_session_holds(ns_pid: u32) -> String {
-    let names: Vec<&String> = session_decides()
-        .iter()
-        .chain(session_cache_names())
-        .collect();
+    let mut names: Vec<&String> = Vec::new();
+    for name in session_decides().iter().chain(session_exports()) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
     let patterns = names
         .iter()
         .map(|n| format!("{n}=*"))
@@ -455,6 +626,72 @@ mod tests {
                 std::panic::catch_unwind(|| parse_session_cache_names(&script)).is_err(),
                 "a session block that points {bad} at the cache would have a crossing take the \
                  box's {bad} in front of its hop, and the parse let it through"
+            );
+        }
+    }
+
+    /// **What a crossing takes from the box's session for its tools is every name the session
+    /// block exports** (SKEIN-1371).
+    ///
+    /// Pinned by name, so that a launcher edit which changes the set is seen and read. What would
+    /// make it fail: a parse that reads only the repo-cache `if` (it then misses `RUSTUP_HOME` and
+    /// the rest, which is SKEIN-1371); one that drops the second line of a `\\` continuation
+    /// (`CARGO_INSTALL_ROOT`, `RUSTUP_AUTO_INSTALL`); one that reads a comment. And the session's
+    /// `PATH` carried rather than reproduced, or a name read in front of the hop let through, which
+    /// the parse refuses.
+    #[test]
+    fn the_names_a_crossing_takes_from_the_session_are_every_export() {
+        let mut got: Vec<&str> = session_exports().iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [
+                "CARGO_HOME",
+                "CARGO_INSTALL_ROOT",
+                "DISABLE_AUTOUPDATER",
+                "DISABLE_UPDATES",
+                "PIP_CACHE_DIR",
+                "PLAYWRIGHT_BROWSERS_PATH",
+                "PLAYWRIGHT_SKIP_BROWSER_GC",
+                "RUSTUP_AUTO_INSTALL",
+                "RUSTUP_HOME",
+                "UV_CACHE_DIR",
+                "UV_LINK_MODE",
+                "npm_config_cache",
+                "npm_config_store_dir",
+                "pnpm_config_store_dir",
+            ],
+            "the names a crossing takes from the box's session are not the names \
+             src/box-session.sh's session block exports"
+        );
+        for name in session_cache_names() {
+            assert!(
+                session_exports().contains(name),
+                "{name} points the session at the repo cache and a crossing does not carry it"
+            );
+        }
+        let block =
+            |body: &str| format!("  bash -lc '\n    export PATH=\"$box_path\"\n{body}  ' bash x\n");
+        assert_eq!(
+            parse_session_exports(&block(
+                "    # export SKEIN_TEST_COMMENT=1\n\
+                 \x20   if [ -d x ]; then export A=\"$HOME/a b\" \\\n\
+                 \x20     B=1; fi; export C # D=1\n"
+            )),
+            ["A", "B", "C"],
+            "the parse reads a comment, splits a quoted value, or drops a continuation line"
+        );
+        for bad in [
+            "export PATH=\"$box_path:/x\"\n",
+            "export HOME=/x\n",
+            "export LD_PRELOAD=/x\n",
+            "export BASH_ENV=/x\n",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| parse_session_exports(&block(bad))).is_err(),
+                "a session block with `{}` would have a crossing take or lose a name it must \
+                 not, and the parse let it through",
+                bad.trim()
             );
         }
     }
