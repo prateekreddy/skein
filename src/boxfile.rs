@@ -100,6 +100,144 @@ impl Dir {
     }
 }
 
+/// The cap for one file in a box's drop-box (`substrate`, `gitgate`, `asks`, `jobs`): a request
+/// is one small JSON object, and the largest a real one gets is an ask at the 2048-byte cap
+/// `asks::MAX_BYTES` sets on its text. 64 KiB is room for any of them and nothing a poll should
+/// hold.
+pub const DROP_BOX_CAP: u64 = 64 << 10;
+
+/// One file read out of a drop-box queue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dropped {
+    /// The directory it was found in, which is the box it is from. Empty for a file directly under
+    /// the queue root, from before the queues were split per box.
+    pub box_name: String,
+    /// The file's own name, `<id>.json`.
+    pub name: String,
+    /// What it holds, read by [`read_text`].
+    pub text: String,
+}
+
+/// Every `*.json` file in the drop-box queue at `root`: `<root>/<box>/*.json`, and `<root>/*.json`
+/// as well when `flat`. A file that is a link, a FIFO, a device, over `cap`, or gone by the time it
+/// is opened is left out. So is a name starting with a dot, the way a shell glob leaves out the
+/// writer's `.tmp.XXXXXX`.
+///
+/// **This is the listing and the read in one**, because the box writes these directories and
+/// skein-server can read what no box may. A listing that checks a path and a read that opens it
+/// again let the box swap the file for a link in between, which is what the queues' old
+/// `[ -f "$f" ]` followed by `jq "$f"` did (SKEIN-1406). Here a name is only ever opened once,
+/// with [`open`]'s flags, and what was opened is what is read. Each box's directory is held as a
+/// [`Dir`], so its files are reached through the directory that was opened.
+pub fn drop_box(root: &Path, flat: bool, cap: u64) -> Vec<Dropped> {
+    let Ok(queue) = Dir::open(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for name in box_dirs(&queue) {
+        // Judged a directory by its own entry above, and opened here with `Dir::open`, which
+        // refuses a link as well, so an entry swapped for one in between is not walked into.
+        if let Ok(held) = Dir::open(&queue.path(&name)) {
+            for file in names(&held) {
+                if let Some(text) = read_named(&held, &file, cap) {
+                    out.push(Dropped {
+                        box_name: name.clone(),
+                        name: file,
+                        text,
+                    });
+                }
+            }
+        }
+    }
+    if flat {
+        for file in names(&queue) {
+            if let Some(text) = read_named(&queue, &file, cap) {
+                out.push(Dropped {
+                    box_name: String::new(),
+                    name: file,
+                    text,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// [`drop_box`], as the JSON objects its files hold, each stamped `"box"` with the directory it
+/// was found in, overwriting whatever the file said. This is the shape the three queues' `jq`
+/// listings printed, so their parsers take it unchanged.
+///
+/// A file may hold more than one object, as `jq`'s `inputs` read it, and anything that is not an
+/// object is dropped. A file that does not parse is dropped on its own. Under `jq` it ended the
+/// whole listing, and since `jq` reads its files as one stream, a box's half-written object could
+/// swallow the start of the next box's file.
+pub fn drop_box_objects(root: &Path, flat: bool) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for file in drop_box(root, flat, DROP_BOX_CAP) {
+        let values: Result<Vec<serde_json::Value>, _> =
+            serde_json::Deserializer::from_str(&file.text)
+                .into_iter::<serde_json::Value>()
+                .collect();
+        let Ok(values) = values else {
+            continue;
+        };
+        for mut value in values {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("box".into(), file.box_name.clone().into());
+                out.push(value);
+            }
+        }
+    }
+    out
+}
+
+/// The bytes of the file `name` in the drop-box directory `dir`, for a caller that needs one file
+/// rather than the queue: the directory is opened as a [`Dir`] and the file read through it, by
+/// [`read_text`].
+pub fn read_in(dir: &Path, name: &str, cap: u64) -> io::Result<String> {
+    read_text(&Dir::open(dir)?.path(name), cap)
+}
+
+/// The names of files in `dir` a listing considers: UTF-8, not starting with a dot. Only names:
+/// nothing here is opened, and what each one is is decided by opening it, with [`read_text`].
+fn names(dir: &Dir) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir.path("")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    out.sort();
+    out
+}
+
+/// The names in the queue `dir` whose own entries say they are directories: the boxes'
+/// drop-boxes. The type is the entry's `d_type`, which is not followed, so a box entry that is
+/// itself a link is skipped here; only the fleet side can make one, and none is a drop-box.
+fn box_dirs(dir: &Dir) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir.path("")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    out.sort();
+    out
+}
+
+/// A `*.json` name in `dir`, read by [`read_text`], or `None`.
+fn read_named(dir: &Dir, name: &str, cap: u64) -> Option<String> {
+    if !name.ends_with(".json") || name == ".json" {
+        return None;
+    }
+    read_text(&dir.path(name), cap).ok()
+}
+
 /// Make a FIFO at `path`, for a test that plants one where a box could.
 #[cfg(test)]
 pub(crate) fn plant_fifo(path: &Path) {
@@ -214,6 +352,154 @@ mod tests {
         assert!(
             Dir::open(&projects).is_err(),
             "a link at a directory's path was opened as the directory"
+        );
+    }
+
+    // ─────────────── the drop-box queues (SKEIN-1406) ───────────────
+
+    /// A queue root with one box's drop-box in it, `web-main`, and a file outside it that holds a
+    /// valid record, standing for what skein-server can read and no box may.
+    fn queue() -> (crate::testutil::TempDir, PathBuf, PathBuf) {
+        let dir = tempdir();
+        let root = dir.join("requests");
+        fs::create_dir_all(root.join("web-main")).unwrap();
+        let secret = dir.join("private.json");
+        fs::write(
+            &secret,
+            r#"{"id":"planted","why":"skein-test-not-a-secret"}"#,
+        )
+        .unwrap();
+        (dir, root, secret)
+    }
+
+    fn listed(root: &Path, flat: bool) -> Vec<(String, String)> {
+        drop_box(root, flat, DROP_BOX_CAP)
+            .into_iter()
+            .map(|d| (d.box_name, d.name))
+            .collect()
+    }
+
+    // Fails if the listing reads its own files any other way than `read`'s: what a box writes is
+    // listed, under its directory's name, and the queue root's files only when `flat` asks.
+    #[test]
+    fn a_drop_box_lists_the_boxs_own_json_files_and_nothing_else() {
+        let (_dir, root, _) = queue();
+        fs::write(root.join("web-main/a.json"), "{}").unwrap();
+        fs::write(root.join("web-main/.tmp.abc123"), "{}").unwrap();
+        fs::write(root.join("web-main/.hidden.json"), "{}").unwrap();
+        fs::write(root.join("web-main/notes.txt"), "{}").unwrap();
+        fs::write(root.join("old.json"), "{}").unwrap();
+        let web = |n: &str| ("web-main".to_string(), n.to_string());
+        assert_eq!(listed(&root, false), vec![web("a.json")]);
+        assert_eq!(
+            listed(&root, true),
+            vec![web("a.json"), (String::new(), "old.json".into())]
+        );
+    }
+
+    // Fails if `O_NOFOLLOW` is dropped from `open`: the link is followed and the record it names
+    // is listed as the box's own.
+    #[test]
+    fn a_link_in_a_drop_box_is_never_read() {
+        let (_dir, root, secret) = queue();
+        std::os::unix::fs::symlink(&secret, root.join("web-main/planted.json")).unwrap();
+        // And a box entry that is itself a link, which only the fleet side could make, is not
+        // walked into either. Two walls stand here, the entry's own `d_type` in `box_dirs` and
+        // `Dir::open`'s `O_NOFOLLOW`, so this fails only with both taken away.
+        fs::create_dir_all(root.parent().unwrap().join("elsewhere")).unwrap();
+        fs::write(root.parent().unwrap().join("elsewhere/x.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(
+            root.parent().unwrap().join("elsewhere"),
+            root.join("linked"),
+        )
+        .unwrap();
+        assert_eq!(listed(&root, true), Vec::<(String, String)>::new());
+        assert!(drop_box_objects(&root, true).is_empty());
+    }
+
+    // The race, made deterministic: the listing has taken the name, then the box swaps the file
+    // for a link before it is read. Fails if `O_NOFOLLOW` is dropped from `open` — the read
+    // returns the link's target — or if the read goes back to the path a check approved.
+    #[test]
+    fn a_file_swapped_for_a_link_between_listing_and_reading_is_not_read() {
+        let (_dir, root, secret) = queue();
+        fs::write(root.join("web-main/r.json"), r#"{"id":"r"}"#).unwrap();
+        let held = Dir::open(&root.join("web-main")).unwrap();
+        let names = names(&held);
+        assert_eq!(
+            names,
+            vec!["r.json".to_string()],
+            "the premise: it was listed"
+        );
+        fs::remove_file(root.join("web-main/r.json")).unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("web-main/r.json")).unwrap();
+        assert_eq!(read_named(&held, "r.json", DROP_BOX_CAP), None);
+        assert!(
+            read_in(&root.join("web-main"), "r.json", DROP_BOX_CAP).is_err(),
+            "the single-file read the write-backs use followed the link"
+        );
+    }
+
+    // Fails if `O_NONBLOCK` is dropped from `open`: the listing opens the FIFO and waits for a
+    // writer that never comes.
+    #[test]
+    fn a_fifo_in_a_drop_box_does_not_hang_the_listing() {
+        let (_dir, root, _) = queue();
+        fs::write(root.join("web-main/a.json"), "{}").unwrap();
+        let fifo = root.join("web-main/fifo.json");
+        plant_fifo(&fifo);
+        let at = root.clone();
+        let got = within(&fifo, "listing a drop-box", move || listed(&at, false));
+        assert_eq!(got, vec![("web-main".to_string(), "a.json".to_string())]);
+    }
+
+    // Fails if the cap is not applied: the file is one byte over it and would be listed.
+    #[test]
+    fn an_oversized_file_in_a_drop_box_is_skipped() {
+        let (_dir, root, _) = queue();
+        let body = |n: usize| format!(r#"{{"id":"x","pad":"{}"}}"#, "p".repeat(n));
+        let at = body(DROP_BOX_CAP as usize - body(0).len());
+        assert_eq!(at.len() as u64, DROP_BOX_CAP);
+        fs::write(root.join("web-main/at.json"), &at).unwrap();
+        fs::write(root.join("web-main/over.json"), format!("{at} ")).unwrap();
+        assert_eq!(
+            listed(&root, false),
+            vec![("web-main".to_string(), "at.json".to_string())]
+        );
+    }
+
+    // The shape the three queues' parsers take. Fails if `"box"` is not overwritten from the
+    // directory, if a non-object is kept, if a file holding two objects yields one, or if a file
+    // that does not parse takes the rest of the queue with it, as it did under `jq`.
+    #[test]
+    fn drop_box_objects_are_stamped_with_their_directory_and_one_bad_file_costs_only_itself() {
+        let (_dir, root, _) = queue();
+        fs::create_dir_all(root.join("api")).unwrap();
+        fs::write(root.join("web-main/a.json"), r#"{"id":"a","box":"api"}"#).unwrap();
+        fs::write(root.join("web-main/arr.json"), "[1,2]").unwrap();
+        fs::write(root.join("web-main/two.json"), r#"{"id":"b"} {"id":"c"}"#).unwrap();
+        fs::write(root.join("api/half.json"), r#"{"id":"#).unwrap();
+        fs::write(root.join("api/d.json"), r#"{"id":"d"}"#).unwrap();
+        fs::write(root.join("old.json"), r#"{"id":"e","box":"web-main"}"#).unwrap();
+        let got: Vec<(String, String)> = drop_box_objects(&root, true)
+            .iter()
+            .map(|v| {
+                (
+                    v["id"].as_str().unwrap().into(),
+                    v["box"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        let pair = |i: &str, b: &str| (i.to_string(), b.to_string());
+        assert_eq!(
+            got,
+            vec![
+                pair("d", "api"),
+                pair("a", "web-main"),
+                pair("b", "web-main"),
+                pair("c", "web-main"),
+                pair("e", ""),
+            ]
         );
     }
 }

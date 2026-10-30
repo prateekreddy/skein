@@ -39,6 +39,7 @@ fn script(name: &str) -> PathBuf {
 mod agentclean;
 mod boxself;
 mod cover;
+mod dropbox;
 mod harness;
 mod homes;
 mod hookscripts;

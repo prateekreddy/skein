@@ -162,6 +162,23 @@ pub fn own_sandbox(name: &str) -> Place {
     }
 }
 
+/// `Ok` when `sandbox` is the one this skein is standing in, so its files are this process's files,
+/// and [`Place::exec`]'s refusal otherwise.
+///
+/// For a reader that reads a sandbox's files itself rather than through a script there — the
+/// drop-box queues, which must not be read by a shell that follows links (SKEIN-1406). A script
+/// addressed to another sandbox is refused in-band; reading here instead must refuse it the same
+/// way, rather than read this sandbox's files under another one's name.
+pub fn standing_in(sandbox: &str) -> Result<(), String> {
+    match own_sandbox(sandbox).unreachable_from_fleet() {
+        None => Ok(()),
+        Some(_) => Err(format!(
+            "{sandbox} is not the sandbox this skein is running inside, so its files cannot be \
+             read from here"
+        )),
+    }
+}
+
 /// The name of the one sandbox that hosts every box.
 ///
 /// Empty is not a second model any more — it is a fleet with no name, which no box can be started in.
