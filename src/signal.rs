@@ -262,6 +262,9 @@ pub enum Signal {
     BoxScreen,
     /// The hook edges: turn state, outcome, detail.
     BoxStatusEdge,
+    /// The box's own engine, through skein's mod: the moment it needs its person, and a heartbeat
+    /// that says it is still saying so. The six things are on [`crate::signals::EngineSignal`].
+    BoxEngine,
     /// The narrative signal the launcher writes — the last message, and why it stopped.
     BoxNarrative,
     /// What the box is doing right now.
@@ -311,13 +314,14 @@ impl Signal {
     ///
     /// [`Signal::FleetListing`] is deliberately **not** here. It is a real signal with a real cost;
     /// it is simply not one a board tick observes any more.
-    pub const ON_THE_BOARD: [Signal; 11] = [
+    pub const ON_THE_BOARD: [Signal; 12] = [
         Signal::FleetDisk,
         Signal::FleetLiveness,
         Signal::Registry,
         Signal::BoxPlacement,
         Signal::BoxScreen,
         Signal::BoxStatusEdge,
+        Signal::BoxEngine,
         Signal::BoxNarrative,
         Signal::BoxTask,
         Signal::BoxDiff,
@@ -334,6 +338,7 @@ impl Signal {
             Signal::BoxPlacement => "box-placement",
             Signal::BoxScreen => "box-screen",
             Signal::BoxStatusEdge => "box-status-edge",
+            Signal::BoxEngine => "box-engine",
             Signal::BoxNarrative => "box-narrative",
             Signal::BoxTask => "box-task",
             Signal::BoxDiff => "box-diff",
@@ -376,6 +381,7 @@ impl Signal {
             | Signal::BoxPlacement
             | Signal::BoxScreen
             | Signal::BoxStatusEdge
+            | Signal::BoxEngine
             | Signal::BoxNarrative
             | Signal::BoxTask
             | Signal::BoxDiff
@@ -399,6 +405,7 @@ impl Signal {
             Signal::BoxPlacement
             | Signal::BoxScreen
             | Signal::BoxStatusEdge
+            | Signal::BoxEngine
             | Signal::BoxNarrative
             | Signal::BoxTask
             | Signal::BoxDiff
@@ -420,6 +427,7 @@ impl Signal {
             Signal::BoxPlacement
             | Signal::BoxScreen
             | Signal::BoxStatusEdge
+            | Signal::BoxEngine
             | Signal::BoxNarrative
             | Signal::BoxTask
             | Signal::BoxDiff
@@ -448,6 +456,7 @@ impl Signal {
             | Signal::BoxPlacement
             | Signal::BoxScreen
             | Signal::BoxStatusEdge
+            | Signal::BoxEngine
             | Signal::BoxNarrative
             | Signal::BoxTask
             | Signal::BoxDiff
@@ -496,6 +505,7 @@ impl Signal {
             }
             Signal::BoxScreen => Cost::free("the observer's file, src/signals.rs `read_pane_raw`"),
             Signal::BoxStatusEdge => Cost::free("the hook's file, src/signals.rs `status_edge`"),
+            Signal::BoxEngine => Cost::free("the mod's file, src/signals.rs `engine_signal`"),
             Signal::BoxNarrative => {
                 Cost::free("the launcher's file, src/signals.rs `session_signal`")
             }

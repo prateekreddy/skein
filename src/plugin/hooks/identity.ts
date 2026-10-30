@@ -38,7 +38,7 @@ export function register(on: On): void {
   })
 }
 
-async function pluginVersion(manifest: () => Promise<string>): Promise<string> {
+export async function pluginVersion(manifest: () => Promise<string>): Promise<string> {
   try {
     const parsed: unknown = JSON.parse(await manifest())
     if (typeof parsed === 'object' && parsed !== null && 'version' in parsed) {
