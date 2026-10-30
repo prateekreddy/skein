@@ -78,6 +78,8 @@ impl Fleet {
         c.arg(self.dir.path().join("skein-job"))
             .env("SKEIN_BOX", &self.name)
             .env("SKEIN_FLEET_ROOT", self.dir.path().join("fleet"))
+            // Not read by the wrapper; pinned so nothing it starts could reach the real ~/.skein.
+            .env("SKEIN_HOME", self.dir.path().join("home"))
             .env("SKEIN_STATE", self.places.states.join(&self.name))
             .env("SKEIN_JOB_LOCK", self.lock())
             // Long enough that a fallback cannot pass for a grant inside any bound asserted here.
@@ -312,7 +314,7 @@ fn a_skein_job_under_a_raw_flock_of_the_same_lock_does_not_wait_on_itself() {
         1,
     );
     fs::write(fleet.lock(), "").unwrap();
-    let mut c = fleet.wrapper();
+    let c = fleet.wrapper();
     let wrapper = c.get_args().next().unwrap().to_owned();
     let mut flocked = Command::new("flock");
     flocked.arg(fleet.lock()).arg("python3").arg(wrapper).args([
