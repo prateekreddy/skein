@@ -268,8 +268,9 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
 /// working box is not** (the owner's decisions 1 and 2).
 ///
 /// Two boxes start on `claude@1.0.0`. `1.0.1` is published, tested and rolled out. Both are then
-/// stale, and both still run 1.0.0. The restart pass runs with the board reading one box `waiting`
-/// (it asked, through the drop-box file the box's tool writes) and the other `working`. The
+/// stale, and both still run 1.0.0. Both ask to be restarted, through the drop-box file the box's
+/// tool writes, and the restart pass runs with the board reading one `waiting` and the other
+/// `working`. The
 /// restart it is handed is the launcher's relaunch, so what the moved box runs afterwards is read
 /// from inside it.
 ///
@@ -280,7 +281,8 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
 ///   * `still 1.0.0` after the rollout: a projection that follows the rollout live (a bind of the
 ///     depot rather than of the entry the box started with).
 ///   * the idle box on 1.0.1: `restart_onto_rollouts` not restarting an idle box that asked.
-///   * the working box untouched: dropping the idle check (it is restarted, its anchor dies).
+///   * the working box untouched: dropping both idle checks, the pass's and the one at the moment
+///     of the restart (it is restarted, its anchor dies, its ask is spent).
 #[test]
 fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
     let _env = env_lock();
@@ -348,9 +350,16 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         );
     }
 
+    // Both asked, as a box does when it calls `skein_resources` with `restart: when-idle`: the
+    // working one asked and then took up another task, which is the case the idle check is for.
+    // Without its ask the ten-minute grace would hold it back on its own, and the idle check would
+    // go untested.
     let ask = versions::restart_request_path("rollidle-main");
-    fs::create_dir_all(ask.parent().unwrap()).unwrap();
-    fs::write(&ask, "").unwrap();
+    let busy_ask = versions::restart_request_path("rollbusy-main");
+    for a in [&ask, &busy_ask] {
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::write(a, "").unwrap();
+    }
     let boxes = vec![
         versions::BoxNow {
             name: "rollidle-main".into(),
@@ -405,6 +414,10 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
     assert!(
         !ask.exists(),
         "the box's ask outlived the restart it asked for"
+    );
+    assert!(
+        busy_ask.exists(),
+        "the working box's ask was spent without a restart"
     );
     assert!(
         Path::new(&format!("/proc/{}", anchors["rollbusy-main"])).exists(),
