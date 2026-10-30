@@ -47,7 +47,8 @@ not deleted: a reversed decision says what replaced it and why.
 | [shared-home-outside-claude.md](shared-home-outside-claude.md) | a repo's shared working files live beside its store's `.claude`, not inside it |
 | [store-is-not-dot-claude.md](store-is-not-dot-claude.md) | a repo's store is `store/data`, and nothing a box writes is reached through a `.claude` path |
 | [repos-are-the-trust-boundary.md](repos-are-the-trust-boundary.md) | the three levels of the security model: a hard wall around the person, a light wall between repos, one trust domain inside a repo |
-| [harness-as-a-plugin.md](harness-as-a-plugin.md) | research, parked: which part of the box harness could be a Claude Code plugin |
+| [skein-is-a-mod.md](skein-is-a-mod.md) | skein's plugin carries a Claude Code hooks module beside its command hooks, and how a feature is added to it |
+| [harness-as-a-plugin.md](harness-as-a-plugin.md) | research, parked and superseded by skein-is-a-mod.md: which part of the box harness could be a Claude Code plugin |
 
 Two more pieces of settled knowledge already live in the design documents, and are not repeated here:
 
