@@ -435,6 +435,9 @@
                    border:1px solid var(--border); border-radius:5px; padding:2px 7px; white-space:nowrap;
                    cursor:help; flex:none; }
   .dockbar .scrw .hdot { margin:0 .45em 0 0; }
+  /* "mod not loaded": quieter still than the half-signal marker, no border and no dot. The box is
+     on the same inference every box had before the mod existed, so this is a note, not a caveat. */
+  .dockbar .modq { font-size:11px; color:var(--dim); opacity:.8; white-space:nowrap; cursor:help; flex:none; }
   .tab .thalf { color:var(--dim); }
   .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
   /* the focal control — a calm, centred segmented toggle */

@@ -11,8 +11,10 @@
 
 import type { Register } from 'claude-code'
 
+import { register as attention } from './attention'
 import { register as identity } from './identity'
 
 export const register: Register = on => {
   identity(on)
+  attention(on)
 }

@@ -147,6 +147,9 @@ pub(crate) struct TurnState {
     pub pane: Option<PaneObs>,
     /// What the usable observation classified as, with its timestamp.
     pub level: Option<(Screen, i64)>,
+    /// What the box's own engine last said, through skein's mod ([`engine_signal`]), and whether
+    /// it is still being said. [`engine_health`] needs it to say "mod not loaded".
+    pub engine: EngineRead,
 }
 
 /// See [`TurnState`]. `agent` is the box's runtime, which decides the screen grammar.
@@ -167,7 +170,14 @@ pub(crate) fn turn_state(name: &str, agent: &str) -> TurnState {
     let raw_pane = read_pane_raw(name);
     let pane = raw_pane.clone().filter(|obs| pane_usable(obs, name));
     let level = pane.as_ref().map(|obs| (classify_pane(agent, obs), obs.ts));
-    let (status, blocked_kind, from) = fuse_status(status_edge(name), level.clone());
+    let edge = status_edge(name);
+    let engine = engine_signal(name);
+    // The engine's own word first, while it is fresh: it is the one half that saw the moment
+    // rather than inferring it (SKEIN-1360). Otherwise the two halves, fused, exactly as before.
+    let (status, blocked_kind, from) = match engine_decides(&engine, edge.as_ref()) {
+        Some((status, kind)) => (Some(status.to_string()), kind, StatusFrom::Engine),
+        None => fuse_status(edge, level.clone()),
+    };
     TurnState {
         status,
         blocked_kind,
@@ -175,6 +185,146 @@ pub(crate) fn turn_state(name: &str, agent: &str) -> TurnState {
         raw_pane,
         pane,
         level,
+        engine,
+    }
+}
+
+/// The shape of skein's mod signal this build reads: `SIGNAL_SHAPE` in
+/// `src/plugin/hooks/attention.ts`. A file of another shape is read as no signal, so a newer mod
+/// beside an older cockpit falls back to the inference that cockpit already has.
+pub(crate) const ENGINE_SHAPE: &str = "attention-1";
+
+/// How long the mod's word is believed after its last heartbeat: three of its `HEARTBEAT_MS`
+/// (30s), so one late beat, or one torn read of a file being rewritten, does not flicker the row.
+/// A session that died stops beating, and within this the board is back on its own reading.
+pub(crate) const ENGINE_FRESH_SECS: i64 = 90;
+
+/// **The box's engine's own word on whether it needs you** — `<store>/status/<box>.mod.json`,
+/// written from inside the agent's Claude Code session by skein's mod (`hooks/attention.ts`).
+///
+/// The signal's six things (docs/architecture.md §2.2):
+///
+/// * **subject** — the box, by name; the file says which and a file naming another box, or none,
+///   is refused. One writer: the box's interactive session alone, so no helper `claude -p` in the
+///   box can write over the agent's state.
+/// * **kind** — level. Each state is entered on an event (an ask a person answers, a question
+///   opened, a turn's end and its reason, a session's end), and the file is rewritten on a
+///   heartbeat while the session lives, so an observation missed costs one beat and a session that
+///   died is seen to have stopped. Without the beat it would be one more edge nothing clears.
+/// * **source** — `file`, in the repo's store, which every box of the repo can write: requested
+///   state, never authoritative (§2.1). It decides only what the board shows.
+/// * **observed_at** — `seen`, the last heartbeat; `at` is when the state was entered.
+/// * **cost** — one file read per box per board tick, no fork ([`crate::signal::Signal::BoxEngine`]).
+/// * **cadence** — the mod beats every 30s and the board believes it for [`ENGINE_FRESH_SECS`];
+///   ungated, like every other per-box file on the tick.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct EngineSignal {
+    #[serde(default, rename = "box")]
+    pub box_name: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub shape: String,
+    /// The plugin's version, as the mod read its own manifest.
+    #[serde(default)]
+    pub version: String,
+    /// `loaded`, `working`, `permission`, `question`, `waiting`, `interrupted`, `refused`,
+    /// `error` or `ended`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub seen: String,
+    /// The tool a permission is asked for, or why the session ended.
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// What [`engine_signal`] found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum EngineRead {
+    /// The mod is beating, and this is what it says.
+    Fresh(EngineSignal),
+    /// The mod wrote this, and has not beaten for longer than [`ENGINE_FRESH_SECS`].
+    Stale(EngineSignal),
+    /// No mod signal for this box: none written, unreadable, another box's, or a shape this build
+    /// does not read. For a running Claude box that is a session whose mod did not load.
+    #[default]
+    Absent,
+}
+
+/// Read [`EngineSignal`] for `name`, freshness applied. A future `seen` is accepted, as a pane
+/// observation's is: clock skew between the box and the host must not blind the signal.
+pub(crate) fn engine_signal(name: &str) -> EngineRead {
+    let Some(store) = valid_name(name).then(|| store_for_box(name)).flatten() else {
+        return EngineRead::Absent;
+    };
+    let path = store.join("status").join(format!("{name}.mod.json"));
+    let Some(sig) = read_signal(&path)
+        .ok()
+        .and_then(|txt| serde_json::from_str::<EngineSignal>(&txt).ok())
+    else {
+        return EngineRead::Absent;
+    };
+    // Named, and named this box: the mod always writes the name box-self.sh gave it, so a file
+    // that names nobody did not come from it.
+    if sig.from != "mod" || sig.shape != ENGINE_SHAPE || sig.box_name != name {
+        return EngineRead::Absent;
+    }
+    let fresh = DateTime::parse_from_rfc3339(&sig.seen)
+        .is_ok_and(|t| (Utc::now() - t.with_timezone(&Utc)).num_seconds() <= ENGINE_FRESH_SECS);
+    match fresh {
+        true => EngineRead::Fresh(sig),
+        false => EngineRead::Stale(sig),
+    }
+}
+
+/// The status a fresh engine signal decides, with its blocking kind, or `None` to leave the
+/// decision to [`fuse_status`].
+///
+/// `loaded` decides nothing: the mod has heard no event yet, so the session's state is whatever the
+/// screen says. `done` on the hook edge is a person's verdict about the box, which the engine
+/// cannot contradict, the same exception fusion's rule 4 makes.
+fn engine_decides(
+    engine: &EngineRead,
+    edge: Option<&(String, i64)>,
+) -> Option<(&'static str, &'static str)> {
+    let EngineRead::Fresh(sig) = engine else {
+        return None;
+    };
+    if edge.is_some_and(|(status, _)| status == "done") {
+        return None;
+    }
+    match sig.state.as_str() {
+        "working" => Some(("working", "")),
+        "permission" => Some(("blocked", Blocked::Permission.key())),
+        "question" => Some(("blocked", Blocked::Question.key())),
+        // Each is the turn over and the person's move: the answer, an interrupt they made, or a
+        // refusal they now have to word around.
+        "waiting" | "interrupted" | "refused" => Some(("waiting", "")),
+        "error" => Some(("error", "")),
+        "ended" => Some(("ended", "")),
+        _ => None,
+    }
+}
+
+/// Whether skein's mod is reporting for this box, said quietly beside the row: `""` when it is,
+/// or when it is not expected to (a box that is not running, a runtime other than Claude);
+/// `"absent"` for a running Claude box with no mod signal — the account's
+/// `tengu_plugin_hooks_modules` is off, the CLI is too old, or the session started before skein
+/// shipped the mod; `"stale"` for one whose mod stopped beating.
+///
+/// Not a fault in either case, and not in `skein doctor`: the board falls back to the inference it
+/// had before the mod existed, and says where its state came from through [`StatusFrom`].
+pub fn engine_health(agent: &str, engine: &EngineRead, running: bool) -> &'static str {
+    if !running || agent != "claude" {
+        return "";
+    }
+    match engine {
+        EngineRead::Fresh(_) => "",
+        EngineRead::Stale(_) => "stale",
+        EngineRead::Absent => "absent",
     }
 }
 
@@ -929,6 +1079,10 @@ pub enum StatusFrom {
     /// observer is perfectly healthy — so nothing said that what is displayed came from an edge,
     /// and the next sample either confirms it or silently corrects it.
     EdgeAheadOfScreen,
+    /// The box's own engine said it, through skein's mod, and is still beating ([`engine_signal`]).
+    /// Neither inferred from a screen nor an edge nothing clears: the event itself, at the moment
+    /// it happened.
+    Engine,
 }
 
 impl StatusFrom {
@@ -937,6 +1091,7 @@ impl StatusFrom {
             StatusFrom::Screen => "screen",
             StatusFrom::Edge => "edge",
             StatusFrom::EdgeAheadOfScreen => "edge-ahead",
+            StatusFrom::Engine => "engine",
         }
     }
 }

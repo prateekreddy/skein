@@ -25,9 +25,9 @@ use crate::repos::{branch_from_box, launch_spec_agent, launch_spec_branch, repo_
 use crate::runtime::valid_runtime;
 use crate::sbx::{box_liveness, git_branch_for, Liveness};
 use crate::signals::{
-    classify_message, current_status_detail, current_task, hook_health, is_generic_wait,
-    screen_health, session_signal, title_activity, title_is_fresh, turn_state, Pause, Screen,
-    TurnState,
+    classify_message, current_status_detail, current_task, engine_health, hook_health,
+    is_generic_wait, screen_health, session_signal, title_activity, title_is_fresh, turn_state,
+    Pause, Screen, TurnState,
 };
 use crate::tracking::sync_docs_available;
 use crate::util::{first_line, shorten};
@@ -118,6 +118,7 @@ pub fn load_views() -> Vec<BoxView> {
                 raw_pane,
                 pane,
                 level,
+                engine,
             } = turn_state(&name, &agent);
             let sb = Sandbox {
                 branch: branch.clone(),
@@ -257,6 +258,8 @@ pub fn load_views() -> Vec<BoxView> {
                 hook_health,
                 screen_health: screen.to_string(),
                 status_from: status_from.key().to_string(),
+                engine_health: engine_health(&agent, &engine, live == Some(Liveness::Running))
+                    .to_string(),
                 // Two file reads against the repo's store — no box is woken to answer this, which is
                 // what makes it affordable on a signal computed for every row on every snapshot.
                 docs_update: repo
@@ -370,6 +373,11 @@ pub struct BoxView {
     /// [`crate::signals::StatusFrom`] — the last one is a healthy observer whose reading lost to a
     /// newer edge, which nothing disclosed before it existed.
     pub status_from: String,
+    /// Whether skein's mod is reporting for this box: "" | "absent" | "stale". See
+    /// [`crate::signals::engine_health`]. Quiet by design: a box without the mod is a box on the
+    /// inference every box had before the mod existed, not a box with a fault.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine_health: String,
     /// "" | "none" | "stale" | "unreadable" | "unsupported" | "newer" | "misfiled". See
     /// [`screen_health`]. Without it,
     /// falling back to hook-only turn state looks exactly like everything working.
