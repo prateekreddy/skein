@@ -2,11 +2,13 @@
 // plugin it runs. Harmless, and observable from a test, from a box's pane and from `claude -p`, so
 // the foundation has something to prove (SKEIN-1359).
 //
-// The shape every feature file follows: one exported `register(on)` that `register.tsx` calls, its
-// state under its own key in `types/index.d.ts`, and its tests in `tests/<feature>.test.ts`.
+// The shape every feature file follows: one exported `register(on)` that `register.tsx` calls, an
+// exported `on<Event>` for each shared event it watches, which `register.tsx` hooks once for every
+// feature, its state under its own key in `types/index.d.ts`, and its tests in
+// `tests/<feature>.test.ts`.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface, On, SessionStartInput } from 'claude-code'
 
 import type { SkeinIdentity } from '../types'
 
@@ -14,8 +16,8 @@ const identity = atom({ plugin: 'skein', key: 'identity' } as const, null, {
   shape: 'identity-1',
 })
 
-/** At the session's start, from the one `session.start` hook register.tsx holds (SKEIN-1387). */
-export async function onStart($: EngineInterface): Promise<void> {
+/** As the session starts (`register.tsx`'s one `session.start` hook calls it). */
+export async function onStart($: EngineInterface, _e: SessionStartInput): Promise<void> {
   await $.command.register({
     name: 'skein',
     description: "Show this box's name and the skein plugin's version",

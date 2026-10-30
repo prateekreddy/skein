@@ -14,7 +14,7 @@
 //     line. `/skein-rule <rule>` and the `remember_rule` tool add to it; `/skein-rule` lists it.
 //     `~/.local/state` is the box's own and outlives a restart (`src/box-session.sh`).
 
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface, On, SessionStartInput } from 'claude-code'
 
 import { heldNow, name } from './tracker'
 
@@ -28,7 +28,7 @@ const RULE_MAX = 500
 const RULES_MAX = 6000
 
 /** At the session's start, from the one `session.start` hook register.tsx holds (SKEIN-1387). */
-export async function onStart($: Engine): Promise<void> {
+export async function onStart($: Engine, _e: SessionStartInput): Promise<void> {
   await $.command.register({
     name: 'skein-rule',
     description: 'Record a standing rule for this box, kept across compactions; with nothing after it, list them',
@@ -65,9 +65,11 @@ export function register(on: On): void {
     return { result: await addRule($, rule) }
   })
 
-  on('session.compact', async ($, e, next) => {
+  // Every compaction but a `precompute`, which installs nothing: its result is kept for the
+  // compaction that comes, and this hook runs again there.
+  on('session.compact', { trigger: ['manual', 'auto', 'plugin'] }, async ($, e, next) => {
     const done = await next(e)
-    if (e.trigger === 'precompute' || done.skip !== undefined) return done
+    if (done.skip !== undefined) return done
     const kept = await keep($, e.agentId)
     if (kept === null) return done
 

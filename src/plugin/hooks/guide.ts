@@ -16,11 +16,14 @@
 //     `$.ui.invalidate("prompt.section")`, so the text is part of the cached prompt and costs
 //     nothing per turn until it changes. A plugin's own section added through `prompt.compose`
 //     is composed once per session and never asked again (measured on 2.1.314), so it could not
-//     follow a change; it is only the fallback for a prompt with no `env_info_simple`.
+//     follow a change. Both the full prompt and the short one carry `env_info_simple`; `--bare`'s
+//     one-line prompt does not, and gets no guide.
 //   - The shared-home rules go in through `prompt.context`, as a block of the first message, and
 //     only when the instruction files the session loaded do not already carry them: a Claude box's
 //     kit writes them into `~/.claude/CLAUDE.md`, and a second copy would be paid for on every
-//     request. Codex boxes read that file and nothing here.
+//     request. Codex boxes read that file and nothing here. The hook is matched on the session
+//     loading instruction files at all (a `claudeMd` block), so a session that loads none, which
+//     no box is, gets none.
 //   - Nothing that changes from turn to turn is put in either. The resource asks do change, so
 //     they stay where they are: `skein-resources` puts each standing ask beside the prompt it
 //     concerns, after the cached prefix. The guide only says where they come from.
@@ -41,9 +44,6 @@ export const guide = atom({ plugin: 'skein', key: 'guide' } as const, null, {
 
 /** The engine section skein's guidance is added to. */
 export const CARRIER = 'env_info_simple'
-
-/** skein's own section, where a prompt has no `CARRIER`. */
-export const OWN_SECTION = 'skein:guide'
 
 /** The context block the shared-home rules go in, where no instruction file carries them. */
 export const SHARED_HOME_BLOCK = 'skeinSharedHome'
@@ -69,15 +69,7 @@ export function register(on: On): void {
     return { text: done.text === null ? g.section : `${done.text}\n\n${g.section}` }
   })
 
-  on('prompt.compose', async ($, e, next) => {
-    const done = await next(e)
-    const g = await current($)
-    if (g.section === '' || done.sections.some(s => s.id === CARRIER || s.id === OWN_SECTION)) return done
-
-    return { sections: [...done.sections, { id: OWN_SECTION, text: g.section, scope: 'session' }] }
-  })
-
-  on('prompt.context', async ($, e, next) => {
+  on('prompt.context', { blocks: { name: 'claudeMd' } }, async ($, e, next) => {
     const done = await next(e)
     const g = await current($)
     if (g.sharedHome === '') return done

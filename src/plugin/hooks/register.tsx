@@ -5,37 +5,85 @@
 // each, not a loop over a list: `claude plugin validate` reads the module's source and refuses a
 // call it cannot trace to a function the module declares or imports.
 //
+// The events more than one feature watches are hooked here, once, bare: a module may hook an event
+// without a matcher only once (`claude plugin validate --strict` refuses a second), and one hook
+// here says in what order the features hear it. Each calls `next(e)` itself, once, then hands the
+// event, and what it settled to, to each feature's function in the order written. A feature whose
+// part fails is passed by and the rest still hear the event. A hook that refuses or rewrites stays
+// in its feature file under a matcher of its own (a tool, a command, a component), where the order
+// and `next` are the feature's (docs/decisions/skein-is-a-mod.md, "The shape a feature takes").
+//
 // The command hooks in `hooks.json`, the monitor and the skein-mcp server load beside this module
 // unchanged: a command hook is replaced only once its mod version is proven, one at a time
 // (docs/decisions/skein-is-a-mod.md).
 
 import type { Register } from 'claude-code'
 
-import { onStart as identityStart, register as identity } from './identity'
-import { onStart as keeperStart, register as keeper } from './keeper'
-import { onTurnComplete as guideTurnComplete, register as guide } from './guide'
-import { onTurnComplete as trackerTurnComplete, register as tracker } from './tracker'
+import {
+  register as agentsPanel,
+  onSpawn as agentsPanelSpawn,
+  onStart as agentsPanelStart,
+  onStep as agentsPanelStep,
+  onToolCall as agentsPanelToolCall,
+  onTurnComplete as agentsPanelTurnComplete,
+} from './agents-panel'
+import { register as guide, onTurnComplete as guideTurnComplete } from './guide'
+import { register as identity, onStart as identityStart } from './identity'
+import { register as keeper, onStart as keeperStart } from './keeper'
+import { register as tracker, onTurnComplete as trackerTurnComplete } from './tracker'
 
 export const register: Register = on => {
-  // The one bare hook for each observe-only event several features need (SKEIN-1387):
-  // `claude plugin validate` refuses two unmatched hooks on one event, so each fans out here,
-  // in a fixed order, to what the features export, and calls `next` once, itself.
-  on('session.start', async ($, e, next) => {
-    await identityStart($)
-    await keeperStart($)
-
-    return next(e)
-  })
-  on('turn.complete', async ($, e, next) => {
-    const done = await next(e)
-    await guideTurnComplete($, e)
-    await trackerTurnComplete($, e)
-
-    return done
-  })
-
   identity(on)
+  agentsPanel(on)
   keeper(on)
   guide(on)
   tracker(on)
+
+  on('session.start', async ($, e, next) => {
+    const started = await next(e)
+    await quietly(identityStart($, e))
+    await quietly(agentsPanelStart($, e))
+    await quietly(keeperStart($, e))
+
+    return started
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (started.deny !== undefined) return started
+    await quietly(agentsPanelSpawn($, e, started))
+
+    return started
+  }).catch(($, e, next) => next(e))
+
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    await quietly(agentsPanelStep($, e, result))
+
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    await quietly(agentsPanelTurnComplete($, e))
+    await quietly(guideTurnComplete($, e))
+    await quietly(trackerTurnComplete($, e))
+
+    return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const answered = await next(e)
+    await quietly(agentsPanelToolCall($, e, answered))
+
+    return answered
+  }).catch(($, e, next) => next(e))
+}
+
+// One feature's part of an event: a failure stays the feature's, and the next part still runs.
+async function quietly(part: Promise<void>): Promise<void> {
+  try {
+    await part
+  } catch {
+    // Passed by: the event is not the feature's to fail.
+  }
 }

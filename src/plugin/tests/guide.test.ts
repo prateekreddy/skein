@@ -44,7 +44,6 @@ function sources(w: World, spec = SPEC): void {
   w.files.set('guide/agent-guide.sh', WRITER)
 }
 
-const FACTS = { model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] }
 const ENV = { name: 'env_info_simple', text: 'Working directory: /work' } as const
 
 test('the guide rides at the end of the environment section, from the shipped sources', async ($, on) => {
@@ -115,19 +114,3 @@ test('a plugin with none of its sources adds nothing', async ($, on) => {
   expect((await $.prompt.context({ blocks: [] })).blocks).toEqual([])
 })
 
-test('a prompt with no environment section gets the guide as a section of its own', async ($, on) => {
-  const w = world(on)
-  sources(w)
-  const sections = (ids: string[]) => ids.map(id => ({ id, text: id, scope: 'session' as const }))
-  let core = sections(['intro', 'memory'])
-  on('prompt.compose', () => ({ sections: core }))
-
-  await start($)
-  const without = await $.prompt.compose(FACTS)
-  expect(without.sections.map(s => s.id)).toEqual(['intro', 'memory', 'skein:guide'])
-  expect(without.sections.at(-1)?.text).toContain('# skein box guide')
-
-  core = sections(['intro', 'env_info_simple'])
-  const withEnv = await $.prompt.compose(FACTS)
-  expect(withEnv.sections.map(s => s.id)).toEqual(['intro', 'env_info_simple'])
-})
