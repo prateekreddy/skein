@@ -180,7 +180,10 @@ function holding(on: On, w: World): void {
   })
 }
 
-/** The tools the engine lists, read again on every ask, and the permission verdict for each. */
+/**
+ * The tools the engine lists, read again on every ask, and the permission verdict for each. Each
+ * check is recorded by its tool, with ` call` after it for the check a call raises as it runs.
+ */
 function engine(
   on: On,
   listed: { names: string[] },
@@ -189,7 +192,7 @@ function engine(
   const checked: string[] = []
   on('tool.list', () => ({ value: listed.names.map(name => ({ name, description: '', mcp: name.startsWith('mcp__') })) }))
   on('tool.check', (_, e) => {
-    checked.push(e.tool)
+    checked.push(e.tool_use_id === undefined ? e.tool : `${e.tool} call`)
 
     return { decision: typeof decision === 'function' ? decision(e.tool) : decision }
   })
@@ -249,8 +252,6 @@ test('held is not asked where the permission check would put it to someone', asy
 // Named, not numbered (SKEIN-1401): an item `held` names only by its id is looked up once with the
 // tracker's read-only `why`, on the same permission rule, and keeps its id where that is not allowed.
 
-const COMPACT = { trigger: 'manual', messages: [{ role: 'user', text: 'long', toolUses: [] }] } as const
-
 test("a claim made before skein loaded is named by the tracker's why, once, in the compaction", async ($, on) => {
   const w = world(on)
   mock.clock(on, { now: NOW })
@@ -261,7 +262,8 @@ test("a claim made before skein loaded is named by the tracker's why, once, in t
 
   await start($)
   for (let i = 0; i < 2; i++) await $.turn.complete(ENDED)
-  const kept = (await $.session.compact(COMPACT)).messages?.at(-1)?.text ?? ''
+  const done = await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'long', toolUses: [] }] })
+  const kept = done.messages?.at(-1)?.text ?? ''
 
   expect(w.tools).toEqual([HELD, `${WHY} ${PROJECT} ${MINE}`])
   expect(kept).toContain(`- SKEIN-1400: The tracker ledger knows a claim by name (${MINE})`)
@@ -276,10 +278,12 @@ test('an item why may not be asked about keeps its id, and why is not called', a
   w.stats.set(WATCH, NOW)
 
   await start($)
-  const kept = (await $.session.compact(COMPACT)).messages?.at(-1)?.text ?? ''
+  const done = await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'long', toolUses: [] }] })
+  const kept = done.messages?.at(-1)?.text ?? ''
 
-  // held's query, held's call (a call is checked again as it runs), then why's query, which asks.
-  expect(checked).toEqual([HELD, HELD, WHY])
+  // held's query, held's call (a call is checked again as it runs), then why's query, which asks:
+  // why is never called, so no dialog could open for it.
+  expect(checked).toEqual([HELD, `${HELD} call`, WHY])
   expect(w.tools).toEqual([HELD])
   expect(kept).toContain(`- 9ed966bb (${MINE})`)
 })
