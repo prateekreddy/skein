@@ -76,7 +76,7 @@ export async function onTurnComplete($: Engine, e: TurnCompleteInput): Promise<v
  */
 async function seed($: Engine): Promise<void> {
   if (await read($, seeded)) return
-  const held = (await $.tool.list()).find(t => t.mcp && TRACKER_TOOL.exec(t.name)?.[1] === 'held')
+  const held = (await $.tool.list()).map(t => t.name).find(isHeld)
   if (held === undefined) return
   let first = false
   await update($, seeded, was => {
@@ -84,10 +84,15 @@ async function seed($: Engine): Promise<void> {
     return true
   })
   if (!first) return
-  const { decision } = await $.tool.check({ tool: held.name, input: {} })
+  const { decision } = await $.tool.check({ tool: held, input: {} })
   if (decision !== 'allow') return
   // Heard by the `tool.call` hook in `register`, like the model's own `held`.
-  await $.tool.call({ tool: held.name })
+  await $.tool.call({ tool: held })
+}
+
+/** The tracker's `held`, by the name the engine lists it under. */
+function isHeld(name: string): name is `mcp__${string}__held` {
+  return TRACKER_TOOL.exec(name)?.[1] === 'held'
 }
 
 /** What the session holds now, and whether there is a tracker at all, for the compaction keeper. */
