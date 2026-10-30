@@ -6,7 +6,7 @@
 // state under its own key in `types/index.d.ts`, and its tests in `tests/<feature>.test.ts`.
 
 import { atom, read, update } from 'claude-code'
-import type { On } from 'claude-code'
+import type { EngineInterface, On } from 'claude-code'
 
 import type { SkeinIdentity } from '../types'
 
@@ -14,22 +14,21 @@ const identity = atom({ plugin: 'skein', key: 'identity' } as const, null, {
   shape: 'identity-1',
 })
 
-export function register(on: On): void {
-  on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'skein',
-      description: "Show this box's name and the skein plugin's version",
-    })
-    const box = (await $.env.get('SKEIN_BOX')) || null
-    const version = await pluginVersion(() =>
-      $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`),
-    )
-    const found: SkeinIdentity = { box, version }
-    await update($, identity, () => found)
-
-    return next(e)
+/** At the session's start, from the one `session.start` hook register.tsx holds (SKEIN-1387). */
+export async function onStart($: EngineInterface): Promise<void> {
+  await $.command.register({
+    name: 'skein',
+    description: "Show this box's name and the skein plugin's version",
   })
+  const box = (await $.env.get('SKEIN_BOX')) || null
+  const version = await pluginVersion(() =>
+    $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`),
+  )
+  const found: SkeinIdentity = { box, version }
+  await update($, identity, () => found)
+}
 
+export function register(on: On): void {
   on('command.run', { command: 'skein' }, async $ => {
     const found = await read($, identity)
 

@@ -97,6 +97,7 @@ test('/skein-rule records a rule in the box file, lists it, and the next compact
   compactor(on)
 
   await start($)
+  expect(w.registered).toEqual(expect.arrayContaining(['/skein-rule', 'mcp__skein__remember_rule']))
   const none = await $.command.run({ command: 'skein-rule', ...TYPED })
   expect(none.text).toBe('no standing rules are recorded for this box.')
 

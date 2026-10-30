@@ -11,12 +11,29 @@
 
 import type { Register } from 'claude-code'
 
-import { register as identity } from './identity'
-import { register as keeper } from './keeper'
-import { register as guide } from './guide'
-import { register as tracker } from './tracker'
+import { onStart as identityStart, register as identity } from './identity'
+import { onStart as keeperStart, register as keeper } from './keeper'
+import { onTurnComplete as guideTurnComplete, register as guide } from './guide'
+import { onTurnComplete as trackerTurnComplete, register as tracker } from './tracker'
 
 export const register: Register = on => {
+  // The one bare hook for each observe-only event several features need (SKEIN-1387):
+  // `claude plugin validate` refuses two unmatched hooks on one event, so each fans out here,
+  // in a fixed order, to what the features export, and calls `next` once, itself.
+  on('session.start', async ($, e, next) => {
+    await identityStart($)
+    await keeperStart($)
+
+    return next(e)
+  })
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    await guideTurnComplete($, e)
+    await trackerTurnComplete($, e)
+
+    return done
+  })
+
   identity(on)
   keeper(on)
   guide(on)

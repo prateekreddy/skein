@@ -27,31 +27,27 @@ export const KEPT_HEADING = 'skein: what this box must not forget, read again as
 const RULE_MAX = 500
 const RULES_MAX = 6000
 
-export function register(on: On): void {
-  // `claude plugin validate` refuses a second hook on one event without a matcher, and
-  // identity.ts already holds `session.start`. Every session's `cwd` is absolute, so this matcher
-  // selects every start: it is here to be a matcher, not to choose.
-  on('session.start', { cwd: /^\// }, async ($, e, next) => {
-    await $.command.register({
-      name: 'skein-rule',
-      description: 'Record a standing rule for this box, kept across compactions; with nothing after it, list them',
-      argumentHint: '[rule]',
-    })
-    await $.tool.register({
-      name: 'remember_rule',
-      description:
-        'Record a standing rule the owner gave this box, one that should hold from now on (for example ' +
-        '"never push to main"). skein keeps every recorded rule in front of you after each compaction.',
-      inputSchema: {
-        type: 'object',
-        properties: { rule: { type: 'string', description: 'The rule, in one line.' } },
-        required: ['rule'],
-      },
-    })
-
-    return next(e)
+/** At the session's start, from the one `session.start` hook register.tsx holds (SKEIN-1387). */
+export async function onStart($: Engine): Promise<void> {
+  await $.command.register({
+    name: 'skein-rule',
+    description: 'Record a standing rule for this box, kept across compactions; with nothing after it, list them',
+    argumentHint: '[rule]',
   })
+  await $.tool.register({
+    name: 'remember_rule',
+    description:
+      'Record a standing rule the owner gave this box, one that should hold from now on (for example ' +
+      '"never push to main"). skein keeps every recorded rule in front of you after each compaction.',
+    inputSchema: {
+      type: 'object',
+      properties: { rule: { type: 'string', description: 'The rule, in one line.' } },
+      required: ['rule'],
+    },
+  })
+}
 
+export function register(on: On): void {
   on('command.run', { command: 'skein-rule' }, async ($, e) => {
     const rule = e.args.trim()
     if (rule === '') {

@@ -14,7 +14,7 @@
 // The compaction keeper (keeper.ts) reads the same list, through `heldNow`.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface, On, TurnCompleteInput } from 'claude-code'
 
 import type { SkeinLease, SkeinLeases } from '../types'
 
@@ -42,13 +42,11 @@ export function register(on: On): void {
 
     return done
   })
+}
 
-  on('turn.complete', async ($, e, next) => {
-    const done = await next(e)
-    if (e.agentId === undefined) await remind($)
-
-    return done
-  })
+/** As a turn ends, from the one `turn.complete` hook register.tsx holds (SKEIN-1387). */
+export async function onTurnComplete($: Engine, e: TurnCompleteInput): Promise<void> {
+  if (e.agentId === undefined) await remind($)
 }
 
 /** What the session holds now, and whether there is a tracker at all, for the compaction keeper. */

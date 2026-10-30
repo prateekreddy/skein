@@ -27,6 +27,8 @@ export type World = {
   tools: string[]
   /** The argv of every process run. */
   ran: string[][]
+  /** Every command and tool the plugin registered. */
+  registered: string[]
 }
 
 export function world(on: On, env: Record<string, string> = {}): World {
@@ -39,6 +41,7 @@ export function world(on: On, env: Record<string, string> = {}): World {
     invalidated: [],
     tools: [],
     ran: [],
+    registered: [],
   }
   const find = (path: string): string | undefined => {
     if (w.files.has(path)) return w.files.get(path)
@@ -50,8 +53,16 @@ export function world(on: On, env: Record<string, string> = {}): World {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
-  on('tool.register', (_, e) => ({ value: { tool: `mcp__skein__${e.name}` } }))
+  on('command.register', (_, e) => {
+    w.registered.push(`/${e.name}`)
+
+    return { value: { command: e.name } }
+  })
+  on('tool.register', (_, e) => {
+    w.registered.push(`mcp__skein__${e.name}`)
+
+    return { value: { tool: `mcp__skein__${e.name}` } }
+  })
   on('session.id', () => ({ value: SESSION }))
   on('fs.read', (_, e) => {
     const got = find(e.path)

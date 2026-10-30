@@ -4,7 +4,7 @@
 
 import { expect, test } from 'claude-code/testing'
 
-import { start, world } from './world'
+import { ENDED, start, world } from './world'
 import type { World } from './world'
 
 // The shapes of the three sources, cut down: the kit spec, the trust decision, the guide writer.
@@ -74,18 +74,18 @@ test('a guide that did not change is not asked again; one that did is, from the 
 
   await start($)
   await $.prompt.section(ENV)
-  await $.turn.start({ text: 'one', turnId: 't1' })
-  await $.turn.start({ text: 'two', turnId: 't2' })
+  await $.turn.complete({ ...ENDED, turnId: 't1' })
+  await $.turn.complete({ ...ENDED, turnId: 't2' })
   expect(w.invalidated).toEqual([])
 
   sources(w, SPEC.replace('see what this box holds', 'see what this box is charged for'))
-  await $.turn.start({ text: 'three', turnId: 't3' })
+  await $.turn.complete({ ...ENDED, turnId: 't3' })
   expect(w.invalidated).toEqual(['prompt.section'])
   expect((await $.prompt.section(ENV)).text).toContain('see what this box is charged for')
 
   // A subagent's turn reads nothing.
   sources(w)
-  await $.turn.start({ text: 'lane', turnId: 't4', agentId: 'lane-1' })
+  await $.turn.complete({ ...ENDED, turnId: 't4', agentId: 'lane-1' })
   expect(w.invalidated).toEqual(['prompt.section'])
 })
 

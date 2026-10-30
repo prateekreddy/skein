@@ -26,10 +26,10 @@
 //     concerns, after the cached prefix. The guide only says where they come from.
 //
 // The texts are read when the prompt is first built and again as each main-conversation turn
-// starts; a change is invalidated there.
+// ends; a change is invalidated there and reaches the model on the next turn.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface, On, TurnCompleteInput } from 'claude-code'
 
 import type { SkeinGuide } from '../types'
 
@@ -51,16 +51,16 @@ export const SHARED_HOME_BLOCK = 'skeinSharedHome'
 const MARK_START = '<!-- skein:shared-home:start -->'
 const MARK_END = '<!-- skein:shared-home:end -->'
 
+/**
+ * As a turn ends, from the one `turn.complete` hook register.tsx holds (SKEIN-1387): read the
+ * texts again after a main-conversation turn, and invalidate the section when they changed, so
+ * the change reaches the model on the next turn.
+ */
+export async function onTurnComplete($: Engine, e: TurnCompleteInput): Promise<void> {
+  if (e.agentId === undefined && (await refresh($))) $.ui.invalidate('prompt.section')
+}
+
 export function register(on: On): void {
-  // Read again as each main-conversation turn starts: `turn.complete` and `session.start` are
-  // held by other features, and `claude plugin validate` refuses a second unmatched hook on one
-  // event. A change seen here is asked again of `prompt.section` for the turn after.
-  on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined && (await refresh($))) $.ui.invalidate('prompt.section')
-
-    return next(e)
-  })
-
   on('prompt.section', { name: CARRIER }, async ($, e, next) => {
     const done = await next(e)
     const g = await current($)
