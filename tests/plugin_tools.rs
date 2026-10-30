@@ -742,7 +742,13 @@ fn it_imports_nothing_that_reaches_the_network() {
     // (SKEIN-1374), which runs no command that reaches a remote.
     assert_eq!(SERVER.matches("subprocess.run(").count(), 3);
     assert!(SERVER.contains(r#"subprocess.run(["git"] + argv"#));
-    for remote in ["\"fetch\"", "\"push\"", "\"pull\"", "\"clone\"", "\"ls-remote\""] {
+    for remote in [
+        "\"fetch\"",
+        "\"push\"",
+        "\"pull\"",
+        "\"clone\"",
+        "\"ls-remote\"",
+    ] {
         assert!(!SERVER.contains(remote), "the server runs git {remote}");
     }
     assert!(SERVER.contains(r#"["du", "-x", "-k", "--max-depth=1", where]"#));
