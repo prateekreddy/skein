@@ -60,6 +60,11 @@ export type SkeinAttention = {
   agent: string
   /** The tool call a person is being asked about, so its return is seen to settle it. */
   asking: string
+  /**
+   * The last call `tool.check` put to a person, not yet shown to them: a mode's classifier may still
+   * settle it. The permission dialog's notification names no call, so this names it.
+   */
+  asked: { id: string; tool: string; agent: string } | null
   /** The last mark crossed, kept until a higher one. */
   limit: SkeinAttentionLimit | null
   /** The highest mark each window has reached, by window kind. */

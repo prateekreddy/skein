@@ -25,9 +25,9 @@ use crate::repos::{branch_from_box, launch_spec_agent, launch_spec_branch, repo_
 use crate::runtime::valid_runtime;
 use crate::sbx::{box_liveness, git_branch_for, Liveness};
 use crate::signals::{
-    classify_message, current_status_detail, current_task, engine_health, hook_health,
-    is_generic_wait, screen_health, session_signal, title_activity, title_is_fresh, turn_state,
-    Pause, Screen, TurnState,
+    classify_message, current_status_detail, current_task, engine_health, engine_stop_line,
+    hook_health, is_generic_wait, screen_health, session_signal, title_activity, title_is_fresh,
+    turn_state, Pause, Screen, TurnState,
 };
 use crate::tracking::sync_docs_available;
 use crate::util::{first_line, shorten};
@@ -202,6 +202,10 @@ pub fn load_views() -> Vec<BoxView> {
                 if let Some(d) = current_status_detail(&name) {
                     headline = Some(d);
                 }
+            }
+            // A refused turn reads as waiting on you, and says why: the engine's stop reason.
+            if let Some(line) = engine_stop_line(&engine) {
+                headline = Some(line.to_string());
             }
             let pause = if tier == 3 || is_outcome {
                 Pause::None // still working, or a terminal outcome whose pill speaks for itself

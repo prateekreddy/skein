@@ -44,7 +44,7 @@ export const LIMIT_MARKS = [75, 90, 100] as const
 export const SIGNAL_SHAPE = 'attention-1'
 
 const attention = atom({ plugin: 'skein', key: 'attention' } as const, null, {
-  shape: 'attention-1',
+  shape: 'attention-2',
 })
 
 // Prints the store and the box's name, one per line, through box-self.sh's two functions, or
@@ -101,6 +101,7 @@ export async function onStart($: EngineInterface, e: SessionStartInput): Promise
     stop: '',
     agent: '',
     asking: '',
+    asked: null,
     limit: null,
     marks: {},
   }
@@ -126,11 +127,14 @@ export async function onTurnStart($: EngineInterface, e: TurnStartInput): Promis
  * it put, is settled. Every other call changes nothing.
  */
 export async function onToolCall($: EngineInterface, e: ToolCallInput): Promise<void> {
-  await change($, was =>
-    was.asking === e.tool_use_id && was.asking !== ''
-      ? moved(was, 'working', { detail: '', asking: '', agent: '' })
-      : null,
-  )
+  await change($, was => {
+    const settles =
+      was.asking === e.tool_use_id || (was.state === 'permission' && was.asking === '')
+    if (was.state !== 'permission' && was.state !== 'question') return null
+
+    return settles ? moved(was, 'working', { detail: '', asking: '', agent: '' }) : null
+  })
+  await remember($, was => (was.asked?.id === e.tool_use_id ? { ...was, asked: null } : was))
 }
 
 /** A turn of the main loop ended, and why. */
@@ -144,7 +148,7 @@ export async function onTurnComplete($: EngineInterface, e: TurnCompleteInput): 
         : e.reason === 'refusal'
           ? 'refused'
           : 'error'
-  await change($, was => moved(was, state, { stop: e.reason, asking: '', agent: '', detail: '' }))
+  await change($, was => moved(was, state, { stop: e.reason, asking: '', agent: '', detail: '', asked: null }))
 }
 
 /** The session's usage moved: a rate-limit window that crossed a mark is written. */
@@ -201,22 +205,37 @@ export function register(on: On): void {
   })
 
   // The engine's verdict, read and handed up unchanged: this feature never decides a call. An ask
-  // that a person answers is the box needing its person; one the mode's classifier or a host
-  // answers is not, and `approver` says which before anything is shown. `onToolCall` sees the
-  // call return.
+  // here is not yet the person's: auto mode's classifier, or a settings hook, may settle it before
+  // any dialog opens, and writing it would flash "needs you" on a box nobody had to touch. So the
+  // ask is only remembered, to name the call when the dialog is seen to open below.
   on('tool.check', { approver: 'person' }, async ($, e, next) => {
     const verdict = await next(e)
     if (verdict.decision === 'ask' && e.tool !== 'AskUserQuestion') {
-      await change($, was =>
-        moved(was, 'permission', {
-          detail: e.tool,
-          asking: e.tool_use_id ?? '',
-          agent: e.agentId ?? '',
-        }),
-      )
+      await remember($, was => ({
+        ...was,
+        asked: { id: e.tool_use_id ?? '', tool: e.tool, agent: e.agentId ?? '' },
+      }))
     }
 
     return verdict
+  })
+
+  // The permission dialog opened in front of the person. The engine draws that dialog alone, with
+  // no `ui.render` site (the types' RenderComponent), so this is the event that says it is shown:
+  // the same notification `box-status.sh notify-blocked` is wired to. It names no call, so the ask
+  // remembered above names it; `onToolCall` sees that call return. With nothing remembered, the
+  // next call to return settles it.
+  on('classic.Notification', { notification_type: 'permission_prompt' }, async ($, e, next) => {
+    await change($, was =>
+      moved(was, 'permission', {
+        detail: was.asked?.tool ?? '',
+        asking: was.asked?.id ?? '',
+        agent: was.asked?.agent ?? '',
+        asked: null,
+      }),
+    )
+
+    return next(e)
   })
 }
 
@@ -231,7 +250,7 @@ export function highestMark(percent: number): number {
 function moved(
   was: SkeinAttention,
   state: SkeinAttentionState,
-  fields: Partial<Pick<SkeinAttention, 'detail' | 'stop' | 'asking' | 'agent'>>,
+  fields: Partial<Pick<SkeinAttention, 'detail' | 'stop' | 'asking' | 'agent' | 'asked'>>,
 ): SkeinAttention {
   return { ...was, ...fields, state, at: '' }
 }
@@ -247,6 +266,13 @@ async function change($: EngineInterface, fn: Change): Promise<void> {
   const stamped: SkeinAttention = { ...next, at: next.at === '' ? now : next.at }
   await update($, attention, () => stamped)
   await write($, stamped, now)
+}
+
+// Keeps what `fn` gives without writing the file: for what the session knows and the cockpit
+// need not, yet.
+async function remember($: EngineInterface, fn: (was: SkeinAttention) => SkeinAttention): Promise<void> {
+  const held = await read($, attention)
+  if (held !== null) await update($, attention, () => fn(held))
 }
 
 async function stamp($: EngineInterface): Promise<string> {

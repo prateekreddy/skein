@@ -54,6 +54,8 @@ function engine(on: On, where: string | null = `${STORE}\n${BOX}\n`): Box {
   on('turn.complete', () => ({ text: '' }))
   on('session.measure', (_, e) => ({ changed: e.changed }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  // No settings hook beneath: the notification goes on with nothing added.
+  on('classic.Notification', () => ({}))
   mock.env(on, { SKEIN_BOX: BOX })
   const clock = mock.clock(on, { now: NOON })
   const last = () => {
@@ -68,6 +70,12 @@ function engine(on: On, where: string | null = `${STORE}\n${BOX}\n`): Box {
 const NOON = Date.UTC(2026, 9, 30, 12, 0, 0)
 
 const START = { cwd: '/boxes/web-main/tree', surface: 'terminal', isInteractive: true } as const
+
+// The notification the engine raises as the permission dialog opens in front of the person.
+const SHOWN = {
+  message: 'Claude needs your permission to use Bash',
+  notification_type: 'permission_prompt',
+} as const
 
 const TURN_END = { answer: '', durationMs: 5, isAborted: false, turnId: 't1' } as const
 
@@ -160,7 +168,7 @@ test("a subagent's turn is not the box's turn", async ($, on) => {
   expect(box.last().state).toBe('working')
 })
 
-test('an ask a person answers is a permission wait, and the verdict passes unchanged', async ($, on) => {
+test('a permission wait is written when its dialog opens, not when the verdict asks', async ($, on) => {
   const box = engine(on)
   on('tool.check', () => ({ decision: 'ask', reason: 'not allowed yet' }))
   await $.session.start(START)
@@ -173,10 +181,51 @@ test('an ask a person answers is a permission wait, and the verdict passes uncha
     approver: 'person',
   })
 
+  // Handed up unchanged, and not yet the person's: a classifier may still settle it.
   expect(verdict.decision).toBe('ask')
   expect(verdict.reason).toBe('not allowed yet')
+  expect(box.states()).toEqual(['loaded', 'working'])
+
+  await $.classic.Notification(SHOWN)
   expect(box.last().state).toBe('permission')
   expect(box.last().detail).toBe('Bash')
+})
+
+test('an ask that auto mode settles before any dialog opens never reads as a wait', async ($, on) => {
+  const box = engine(on)
+  // The person's check asks; the mode settles it (here, as a background loop does) and the tool
+  // runs with no dialog, so no permission notification is raised.
+  on('tool.check', (_, e) => ({ decision: e.approver === 'person' ? 'ask' : 'allow' }))
+  on('tool.call', async (_, e) => {
+    await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'make' },
+      tool_use_id: e.tool_use_id,
+      approver: 'person',
+    })
+    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+  })
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+
+  await $.tool.call({ tool: 'Bash', command: 'make' })
+  await $.turn.complete({ ...TURN_END, reason: 'answer' })
+
+  expect(box.states()).toEqual(['loaded', 'working', 'waiting'])
+})
+
+test('a dialog shown with no ask remembered is still a wait, settled by the next call back', async ($, on) => {
+  const box = engine(on)
+  on('tool.call', () => ({ result: { stdout: 'ok', stderr: '', interrupted: false } }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+
+  await $.classic.Notification(SHOWN)
+  expect(box.last().state).toBe('permission')
+  expect(box.last().detail).toBe('')
+
+  await $.tool.call({ tool: 'Bash', command: 'make' })
+  expect(box.last().state).toBe('working')
 })
 
 test('an ask nobody but a host answers, or an allow, is not a wait on the person', async ($, on) => {
@@ -208,6 +257,7 @@ test('a permission wait ends when the call it asked about returns', async ($, on
       tool_use_id: e.tool_use_id,
       approver: 'person',
     })
+    await $.classic.Notification(SHOWN)
     return { result: { stdout: 'ok', stderr: '', interrupted: false } }
   })
   await $.session.start(START)
@@ -216,6 +266,7 @@ test('a permission wait ends when the call it asked about returns', async ($, on
   await $.tool.call({ tool: 'Bash', command: 'make' })
 
   expect(box.states()).toEqual(['loaded', 'working', 'permission', 'working'])
+  expect(box.writes[2]?.signal.detail).toBe('Bash')
 })
 
 test('an AskUserQuestion is a question while it is open, and working once answered', async ($, on) => {

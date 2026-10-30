@@ -166,6 +166,21 @@ fn a_fresh_mod_signal_decides_the_board_and_a_stale_or_absent_one_falls_back() {
         ("waiting", "engine")
     );
 
+    // The model refused the turn: the person's move, and the row says why.
+    let mut refused = signal("refused", 10);
+    refused["stop"] = "refusal".into();
+    write_mod(&status, refused);
+    let row_refused = row();
+    assert_eq!(
+        (row_refused.state.as_str(), row_refused.status_from.as_str()),
+        ("waiting", "engine")
+    );
+    assert_eq!(
+        row_refused.headline.as_deref(),
+        Some("The model refused the last turn. Reword it and try again."),
+        "a refused turn must say so, or it reads like any answered one"
+    );
+
     // The heartbeat stopped two minutes ago: the session may be gone, so its word is not believed
     // and the board is back on its own reading.
     write_mod(&status, signal("permission", 120));

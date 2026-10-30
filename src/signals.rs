@@ -239,6 +239,21 @@ pub struct EngineSignal {
     /// The tool a permission is asked for, or why the session ended.
     #[serde(default)]
     pub detail: String,
+    /// Why the last turn ended: `answer`, `aborted`, `refusal` or `error`.
+    #[serde(default)]
+    pub stop: String,
+}
+
+/// The line a row says for a turn the engine says ended the way the person must read about:
+/// a refusal. It shows as `waiting` (the person's move), so the reason has to be said in words, or
+/// the row would read like any answered turn.
+pub fn engine_stop_line(engine: &EngineRead) -> Option<&'static str> {
+    match engine {
+        EngineRead::Fresh(sig) if sig.state == "refused" => {
+            Some("The model refused the last turn. Reword it and try again.")
+        }
+        _ => None,
+    }
 }
 
 /// What [`engine_signal`] found.
