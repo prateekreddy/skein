@@ -27,7 +27,7 @@ import {
   onToolCall as agentsPanelToolCall,
   onTurnComplete as agentsPanelTurnComplete,
 } from './agents-panel'
-import { register as band, onStart as bandStart } from './band'
+import { register as band, onStart as bandStart, onTurnComplete as bandTurnComplete } from './band'
 import { register as identity, onStart as identityStart } from './identity'
 
 export const register: Register = on => {
@@ -61,6 +61,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     await quietly(agentsPanelTurnComplete($, e))
+    await quietly(bandTurnComplete($, e))
 
     return next(e)
   })

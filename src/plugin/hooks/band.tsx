@@ -17,7 +17,14 @@
 // and `tests/plugin_tools.rs` holds the MCP tool to.
 
 import { atom, read, update } from 'claude-code'
-import type { CommandRunResult, EngineInterface as Engine, On, SessionStartInput } from 'claude-code'
+import type {
+  CommandRunResult,
+  EngineInterface as Engine,
+  On,
+  SessionStartInput,
+  Timer,
+  TurnCompleteInput,
+} from 'claude-code'
 
 import type { SkeinBand, SkeinCleanRow, SkeinRequestRow, SkeinSharedCache } from '../types'
 
@@ -49,9 +56,15 @@ const CLEAN_DESCRIPTION =
   'them. The same as the skein_clean tool: nothing else is removed, a link is never followed, ' +
   'and config and logins are never on the list.'
 
+// The one timer that keeps the band current. A resumed session raises `session.start` again, so a
+// start cancels the timer the last one left before it starts its own: one look per interval.
+let ticker: Timer | null = null
+
 /** Setup, called from the one `session.start` hook `register.tsx` owns (SKEIN-1387): the `clean`
- * tool, and the looks that keep the band current. */
-export async function onStart($: Engine, _e: SessionStartInput): Promise<void> {
+ * tool, and, in a session a person watches, the looks that keep the band current. */
+export async function onStart($: Engine, e: SessionStartInput): Promise<void> {
+  ticker?.cancel()
+  ticker = null
   await $.tool.register({
     name: 'clean',
     description: CLEAN_DESCRIPTION,
@@ -61,10 +74,19 @@ export async function onStart($: Engine, _e: SessionStartInput): Promise<void> {
       additionalProperties: false,
     },
   })
+  // A `claude -p` draws no band, so it looks only when asked: `/skein status` looks for itself.
+  if (!e.isInteractive) return
   // The first look after the session starts rather than inside it: three small processes the
   // first prompt need not wait for.
   $.clock.after(0, () => void look($))
-  $.clock.every(LOOK_EVERY_MS, () => void look($))
+  ticker = $.clock.every(LOOK_EVERY_MS, () => void look($))
+}
+
+/** After each turn of the main loop (`register.tsx`'s one `turn.complete` hook calls it): the
+ * agent may have asked for something or cleaned, so the band looks again, after the turn. */
+export async function onTurnComplete($: Engine, e: TurnCompleteInput): Promise<void> {
+  if (e.agentId) return
+  $.clock.after(0, () => void look($))
 }
 
 /** `/skein <args>`, handed over by `identity.ts`, which owns the command's hook. */
@@ -124,7 +146,9 @@ export function register(on: On): void {
             <Text bold={ask.isLoud} color={ask.isLoud ? 'warning' : undefined}>
               {ask.text}{' '}
             </Text>
-            <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />
+            {ask.button !== undefined && (
+              <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />
+            )}
           </Box>
         ))}
         {said !== null && (
@@ -339,7 +363,8 @@ async function cleanFromPane($: Engine, paths: string[]): Promise<void> {
 // Words
 // ------------------------------------------------------------------------------------------------
 
-type Ask = { key: string; text: string; button: string; isLoud: boolean }
+// A line with no `button` has nothing for the person to press: mail is the agent's to read.
+type Ask = { key: string; text: string; button?: string; isLoud: boolean }
 
 /** What the band says, loudest first; empty when there is nothing to say. */
 function asked(found: SkeinBand | null): Ask[] {
@@ -361,7 +386,6 @@ function asked(found: SkeinBand | null): Ask[] {
     out.push({
       key: 'mail',
       text: `${mail} unread ${mail === 1 ? 'message' : 'messages'}, read at the agent's next turn.`,
-      button: 'Details',
       isLoud: false,
     })
   }

@@ -407,3 +407,69 @@ test('/skein clean opens the list, and /skein alone still names the box', async 
     'there is no /skein bogus. Try /skein status, /skein clean or /skein requests.',
   )
 })
+
+// ------------------------------------------------------------------------------------------------
+// When the band looks
+// ------------------------------------------------------------------------------------------------
+
+/** How many times the band has read the requests: one per look. */
+const looks = (w: World) => w.ran.filter(a => a[2] === 'requests').length
+
+test('a resumed session looks once an interval, not once per start', async ($, on) => {
+  const w = world()
+  const clock = engine(on, w)
+  // A resume raises `session.start` again in the same module.
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const before = looks(w)
+
+  await clock.advance(60_000)
+  expect(looks(w) - before).toBe(1)
+  await clock.advance(60_000)
+  expect(looks(w) - before).toBe(2)
+})
+
+test('a claude -p session runs nothing on a timer, and /skein status still answers', async ($, on) => {
+  const w = world({ signal: signal(30, true) })
+  const clock = engine(on, w)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await clock.settle()
+  await clock.advance(180_000)
+  expect(w.ran).toEqual([])
+
+  const ran = await $.command.run(TYPED('status'))
+  expect(ran.text?.split('\n')[1]).toBe(
+    'skein asks this box to free 1.2G of disk: it is over its own allowance.',
+  )
+})
+
+test("the band looks again after the main loop's turn, not after a subagent's", async ($, on) => {
+  const w = world()
+  // The engine, beneath: a turn's end answers with its text.
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  const clock = await started(on, w, $)
+  const before = looks(w)
+  const turn = { reason: 'answer', answer: 'done', durationMs: 1, isAborted: false } as const
+
+  await $.turn.complete({ ...turn, turnId: 't1', agentId: 'a1' })
+  await clock.settle()
+  expect(looks(w)).toBe(before)
+
+  await $.turn.complete({ ...turn, turnId: 't2' })
+  await clock.settle()
+  expect(looks(w)).toBe(before + 1)
+})
+
+test('unread mail is said in the band with no button to press', async ($, on) => {
+  await started(on, world({ mail: '2' }), $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /unread/ }))?.text.trim()).toBe(
+      "2 unread messages, read at the agent's next turn.",
+    )
+    expect(await ui.find({ type: 'Button' })).toBe(undefined)
+    await ui.unmount()
+  }
+})
