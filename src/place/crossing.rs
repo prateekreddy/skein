@@ -1,7 +1,7 @@
 //! What a crossing carries into a box: the fixed PATHs on either side of the hop, and the
 //! environment it keeps — the launcher's `inherited_env` list, the names the session decides
-//! per box, and the shell that takes those from the session's own environment (SKEIN-1085,
-//! SKEIN-1095).
+//! per box, the names the session points at its repo's download cache, and the shell that takes
+//! those two from the session's own environment (SKEIN-1085, SKEIN-1095, SKEIN-1354).
 
 /// The PATH every fleet-scope script resolves against — root-owned directories and nothing else.
 ///
@@ -55,7 +55,8 @@ pub fn box_path(home: &str) -> String {
     format!("{home}/.local/bin:{BOX_PATH_HEAD}:{home}/.cargo/bin:{FLEET_PATH}")
 }
 
-/// The launcher, embedded for the one thing this module reads out of it: its `inherited_env` list.
+/// The launcher, embedded for what this module reads out of it: its `inherited_env` list, its
+/// `unset`s, and the session block's repo-cache exports.
 const LAUNCHER: &str = include_str!("../box-session.sh");
 
 /// **The names a box receives from the environment of whatever reached into it** — the launcher's
@@ -225,8 +226,86 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
     names
 }
 
+/// **The names the session points at the repo's download cache** — every `NAME=` the launcher's
+/// session block exports inside its `if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]` (SKEIN-1350),
+/// read out of the launcher's text (SKEIN-1354).
+///
+/// A crossing takes these from the session as it takes [`session_decides`]: the value the box's
+/// own session holds, or none. So a crossing into a box whose repo has a managed store gets
+/// `CARGO_HOME`, `npm_config_cache` and the rest with the session's own values, and a crossing into
+/// a box the launcher gave no cache (a store kept elsewhere by `skein add --store`, a cache that is
+/// missing or is a link) gets none of them and keeps the box's own `~/.cargo` and `~/.npm`. Whether
+/// a box has a cache is decided once, by the launcher, from `$SKEIN_BOX_STORE`; a crossing working
+/// it out again from the repo's store would be a second copy of that rule, and the first one to be
+/// wrong about a box whose store was moved after it started.
+///
+/// **Read out of the launcher rather than listed here**, for the reason [`inherited_env`] is: a
+/// tool the session block starts pointing at the cache is a name every crossing carries, with
+/// nothing else to edit. `the_names_a_crossing_takes_for_the_repo_cache_are_the_session_blocks`
+/// pins what this reads today.
+///
+/// Refused outright: `PATH`, `HOME`, and every name that the `env`, `nsenter` or `bash` a crossing
+/// runs in front of its hop would read (`LD_*`, `BASH_ENV`, `ENV`, `IFS`, `SHELLOPTS`,
+/// `BASHOPTS`). The value is the box's session's, which a box can influence, so it must never be
+/// a name anything at fleet scope acts on. The cache names are read by cargo, npm, pip, uv and
+/// pnpm, and none of those runs in front of the hop.
+pub fn session_cache_names() -> &'static [String] {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| parse_session_cache_names(LAUNCHER))
+}
+
+/// The line that opens the session block's repo-cache exports, as `src/box-session.sh` spells it.
+const CACHE_EXPORTS_OPEN: &str = r#"if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]; then"#;
+
+fn parse_session_cache_names(script: &str) -> Vec<String> {
+    let mut lines = script
+        .lines()
+        .skip_while(|l| l.trim() != CACHE_EXPORTS_OPEN);
+    assert!(
+        lines.next().is_some(),
+        "src/box-session.sh has no `{CACHE_EXPORTS_OPEN}` line, so a crossing cannot tell which \
+         names point a box at its repo's download cache"
+    );
+    let mut names: Vec<String> = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        let code = line.trim();
+        if code == "fi" {
+            closed = true;
+            break;
+        }
+        if code.starts_with('#') {
+            continue;
+        }
+        for word in code.split_whitespace() {
+            let Some((name, _)) = word.split_once('=') else {
+                continue;
+            };
+            if is_identifier(name) && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    assert!(
+        closed && !names.is_empty(),
+        "the launcher's repo-cache exports have no `fi`, or export nothing"
+    );
+    for name in &names {
+        assert!(
+            !matches!(
+                name.as_str(),
+                "PATH" | "HOME" | "BASH_ENV" | "ENV" | "IFS" | "SHELLOPTS" | "BASHOPTS"
+            ) && !name.starts_with("LD_"),
+            "src/box-session.sh points {name} at the repo cache, and a crossing must not take \
+             the session's {name} in front of its hop — see `place::session_cache_names`"
+        );
+    }
+    names
+}
+
 /// The shell, run after [`keep_only_listed`] and in front of the hop, that gives a crossing **the
-/// session's value of every name in [`session_decides`], or none** (SKEIN-1095).
+/// session's value of every name in [`session_decides`] and [`session_cache_names`], or none**
+/// (SKEIN-1095, SKEIN-1354).
 ///
 /// # Why a crossing reads the answer rather than working it out again
 ///
@@ -254,13 +333,22 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
 /// the launcher takes when it is unsure of the scope, and the `nsenter` that follows would fail on
 /// the same permission anyway.
 ///
+/// The cache names go the same way: a session the launcher gave a repo cache holds them, so its
+/// crossings get the same paths into that cache; a session it gave none holds none, so its
+/// crossings get none either and whatever skein-server had for `CARGO_HOME` stays out of the box,
+/// as [`keep_only_listed`] already made it. Never a path the box cannot see: the value is the one
+/// the box's own session runs on, and the crossing runs in that box's namespace.
+///
 /// **A box can influence what is read here, and gains nothing by it.** The anchor is the box's own
 /// process, so a box could arrange a different value. What that buys is a crossing that runs inside
 /// that same box with a value the box chose. The only programs that run with it in front of the hop
 /// are `env` and `nsenter`, which read none of these names, and the value is handed to `export` as
 /// one word: never evaluated, never on an argv.
 pub(super) fn as_the_session_holds(ns_pid: u32) -> String {
-    let names = session_decides();
+    let names: Vec<&String> = session_decides()
+        .iter()
+        .chain(session_cache_names())
+        .collect();
     let patterns = names
         .iter()
         .map(|n| format!("{n}=*"))
@@ -272,7 +360,11 @@ pub(super) fn as_the_session_holds(ns_pid: u32) -> String {
          \x20 case \"$skein_e\" in {patterns}) export \"$skein_e\" ;; esac\n\
          done; }} 2>/dev/null </proc/{ns_pid}/environ\n\
          unset skein_e\n",
-        unset = names.join(" "),
+        unset = names
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
     )
 }
 
@@ -326,6 +418,43 @@ mod tests {
             assert!(
                 !inherited_env().iter().any(|n| n == cockpit) && !CROSSING_ALSO.contains(&cockpit),
                 "{cockpit} is the cockpit's and must not cross into a box"
+            );
+        }
+    }
+
+    /// **What a crossing takes from the box's session for the repo cache is what the session
+    /// block points at it** (SKEIN-1354).
+    ///
+    /// Pinned by name, for the reason the test below is. What would make it fail: the session
+    /// block gaining or losing a tool without this list being read again; a parse that stops at
+    /// the first line's `\\` or reads the `if` line's `$repo_cache`; the launcher moving the
+    /// exports out of their `if`, which panics here rather than in a crossing. And a name that a
+    /// crossing's `env`, `nsenter` or `bash` reads in front of the hop, which the parse refuses.
+    #[test]
+    fn the_names_a_crossing_takes_for_the_repo_cache_are_the_session_blocks() {
+        let mut got: Vec<&str> = session_cache_names().iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            [
+                "CARGO_HOME",
+                "PIP_CACHE_DIR",
+                "UV_CACHE_DIR",
+                "UV_LINK_MODE",
+                "npm_config_cache",
+                "npm_config_store_dir",
+                "pnpm_config_store_dir",
+            ],
+            "the names a crossing takes from the box's session for the repo cache are not the \
+             names src/box-session.sh exports inside its repo-cache `if`"
+        );
+        for bad in ["PATH", "LD_PRELOAD", "BASH_ENV"] {
+            let script =
+                format!("  {CACHE_EXPORTS_OPEN}\n    export {bad}=\"$repo_cache/x\"\n  fi\n");
+            assert!(
+                std::panic::catch_unwind(|| parse_session_cache_names(&script)).is_err(),
+                "a session block that points {bad} at the cache would have a crossing take the \
+                 box's {bad} in front of its hop, and the parse let it through"
             );
         }
     }

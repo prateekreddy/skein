@@ -1091,6 +1091,288 @@ fn cargo_install_in_a_box_lands_on_its_path() {
     );
 }
 
+/// What one box of a managed-store repo reported, through its session and through a crossing.
+struct CacheCrossing {
+    /// `var <NAME> <value or none>` for each name the session block points at the repo cache,
+    /// written by the box's own agent from inside its session.
+    session: String,
+    /// The same lines from a `Place::exec` crossing into that box, then `cargo <rc>` and
+    /// `npm <rc or absent>` for a cache write by each tool, run through the same crossing.
+    crossed: String,
+    /// `repos/<id>/store/cache` on this side of the box.
+    cache: PathBuf,
+    /// Where `cache` links to when the case makes it a link, and otherwise nothing.
+    elsewhere: PathBuf,
+    /// The fixture both paths are in, kept until the assertions on them are done.
+    _root: Scratch,
+}
+
+/// Start box `<tag>-main` of a repo whose store has the managed shape, `repos/<tag>/store/data`,
+/// cross into it with `Place::exec`, and run a cargo and an npm cache write through that crossing.
+/// With `linked`, the repo's `store/cache` is a link to another directory, which the launcher
+/// refuses, so the box has no repo cache.
+///
+/// This process's environment stands for skein-server's, as in the tests above, and it carries a
+/// `CARGO_HOME`, `npm_config_cache` and `PIP_CACHE_DIR` of its own: skein-server runs with them on
+/// a real fleet (`bootstrap.sh` exports `CARGO_HOME`), and none of them is this box's.
+fn cross_into_a_box_of_a_managed_store(tag: &str, linked: bool) -> CacheCrossing {
+    let real_cargo = PathBuf::from(env!("CARGO"));
+    let real_rustc = real_cargo.with_file_name("rustc");
+    let name = format!("{tag}-main");
+    let root = scratch_named(tag);
+    let sandbox_home = sandbox_home_with_agent(&root);
+    let mut pins = env_pins();
+    pins.set("HOME", &sandbox_home)
+        .set("SKEIN_HOME", root.join("skein"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"))
+        .set("CARGO_HOME", root.join("skein-test-server-cargo"))
+        .set("npm_config_cache", root.join("skein-test-server-npm"))
+        .set("PIP_CACHE_DIR", root.join("skein-test-server-pip"));
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..Config::default()
+    })
+    .expect("configure the fleet this test is standing in");
+    install_launcher(FLEET).expect("install box-session.sh");
+
+    let store = root.join(format!("skein/repos/{tag}/store/data"));
+    ensure_store(&store).expect("a managed store, with its repo cache");
+    let cache = store.parent().unwrap().join("cache");
+    assert!(
+        cache.is_dir() && !cache.is_symlink(),
+        "ensure_store made no repo cache beside a managed store, so nothing below is about one"
+    );
+    let elsewhere = root.join("elsewhere-cache");
+    if linked {
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::remove_dir(&cache).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &cache).unwrap();
+    }
+
+    let report: String = skein::place::session_cache_names()
+        .iter()
+        .map(|n| format!("printf 'var {n} %s\\n' \"${{{n}-none}}\"; "))
+        .collect();
+    let script = with_launch_env(
+        &session_script(
+            &name,
+            "skein-agent",
+            &format!(
+                "{{ {report} }} > /tmp/s.tmp && mv /tmp/s.tmp /tmp/session.report; exec sleep 300"
+            ),
+        ),
+        "SKEIN_BOX_STORE",
+        &skein::util::sh_quote(store.to_string_lossy().as_ref()),
+    );
+    let launched = own_sandbox(FLEET)
+        .exec(&script, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("start the box: {e}"));
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+    let ns_start = sh(&format!(
+        "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
+    ))
+    .parse::<u64>()
+    .expect("the anchor's start time");
+    record_place(
+        &name,
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            ns_pid: anchor,
+            home: sandbox_home.display().to_string(),
+            tree: "/".into(),
+            sock: box_sock(&name),
+            generation: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .expect("a boot id")
+                .trim()
+                .to_string(),
+            ns_start,
+            ..Default::default()
+        },
+    )
+    .expect("place the box");
+
+    // A crate with no dependencies, in the box's private /tmp: resolving it offline still takes
+    // cargo's download lock, the file `.package-cache` at the top of `CARGO_HOME`. `npm cache
+    // verify` makes `_cacache` in npm's cache. Each is a write into the cache the tool was pointed
+    // at, and neither needs the network.
+    let krate = PathBuf::from(format!("{}/tmp/k", box_root(&name)));
+    fs::create_dir_all(krate.join("src")).unwrap();
+    fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"skein-test-k\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [workspace]\n",
+    )
+    .unwrap();
+    fs::write(krate.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let crossed = place_of(&name).expect("placed").exec(
+        &format!(
+            "{report}\
+             RUSTC={rustc} {cargo} generate-lockfile --offline --manifest-path /tmp/k/Cargo.toml \
+               > /tmp/k/cargo.log 2>&1; printf 'cargo %s\\n' \"$?\"; \
+             if command -v npm >/dev/null 2>&1; then npm cache verify > /tmp/k/npm.log 2>&1; \
+               printf 'npm %s\\n' \"$?\"; else echo 'npm absent'; fi",
+            rustc = skein::util::sh_quote(real_rustc.to_string_lossy().as_ref()),
+            cargo = skein::util::sh_quote(real_cargo.to_string_lossy().as_ref()),
+        ),
+        Duration::from_secs(120),
+    );
+    let session_path = PathBuf::from(format!("{}/tmp/session.report", box_root(&name)));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !session_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let session = fs::read_to_string(&session_path).unwrap_or_default();
+    let limits =
+        fs::read_to_string(format!("{}/limits.state", box_root(&name))).unwrap_or_default();
+    forget_place(&name);
+    let _ = Command::new("tmux")
+        .args(["-S", &box_sock(&name), "kill-server"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    anchor_gone(anchor);
+    if limits.starts_with("capped ") {
+        let _ = Command::new("sudo")
+            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .status();
+    }
+    CacheCrossing {
+        session,
+        crossed: crossed.unwrap_or_else(|e| panic!("the crossing into the box did not run: {e}")),
+        cache,
+        elsewhere,
+        _root: root,
+    }
+}
+
+/// The value a `<key> <value>` report gives `key`, or the empty string.
+fn field_of(report: &str, key: &str) -> String {
+    report
+        .lines()
+        .find_map(|l| l.strip_prefix(&format!("{key} ")))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// **A crossing into a box of a managed-store repo points cargo, npm, pip, uv and pnpm at the
+/// repo's cache, with its session's values, and a cache write through it lands there**
+/// (SKEIN-1354).
+///
+/// SKEIN-1350 pointed each tool at `repos/<id>/store/cache` in the box's session only. A command
+/// skein runs into the box through a crossing (provisioning, a model call, the attach shell) fell
+/// back to the box's own `~/.cargo` and `~/.npm`. This is that crossing, for real, into a real box:
+/// every name the session block exports for the cache is compared between the box's own agent and
+/// the crossing, and a real `cargo` and `npm` run through the crossing must write into the repo
+/// cache.
+///
+/// What would make it fail: dropping `session_cache_names` from `as_the_session_holds` (the
+/// crossing then carries none of the names, and cargo writes into the box's own home); a crossing
+/// that kept the names from skein-server's environment rather than taking the session's, which
+/// carries `skein-test-server-cargo`. Each was run and failed this test. The launcher no longer
+/// binding the cache back or exporting the names fails the session line, before the crossing's.
+#[test]
+fn a_crossing_into_a_box_uses_its_repos_download_cache() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") || !PathBuf::from(env!("CARGO")).is_file() {
+        return skip(
+            "this machine cannot make a bwrap namespace, lacks tmux, or has no cargo binary at \
+             the path that built this test, so it cannot run a cache write in a box",
+        );
+    }
+    let got = cross_into_a_box_of_a_managed_store("crosscache", false);
+    let cache = got.cache.display().to_string();
+    for name in skein::place::session_cache_names() {
+        let key = format!("var {name}");
+        let session = field_of(&got.session, &key);
+        assert!(
+            session == "copy" || session.starts_with(&format!("{cache}/")),
+            "the box's session does not point {name} at its repo's cache {cache}, so the crossing \
+             below has nothing to agree with: {:?}",
+            got.session
+        );
+        assert_eq!(
+            field_of(&got.crossed, &key),
+            session,
+            "a crossing into the box does not carry the session's {name}: {:?}",
+            got.crossed
+        );
+    }
+    assert_eq!(
+        field_of(&got.crossed, "cargo"),
+        "0",
+        "cargo failed through the crossing: {:?}",
+        got.crossed
+    );
+    assert!(
+        got.cache.join("cargo/.package-cache").is_file(),
+        "cargo run through a crossing did not take its download lock in the repo's cache, so it \
+         used a CARGO_HOME of its own: {:?}",
+        got.crossed
+    );
+    if field_of(&got.crossed, "npm") != "absent" {
+        assert!(
+            got.cache.join("npm/_cacache").is_dir(),
+            "npm run through a crossing did not write into the repo's cache: {:?}",
+            got.crossed
+        );
+    }
+}
+
+/// **A crossing into a box the launcher gave no repo cache carries none of the cache names, so the
+/// box keeps its own `~/.cargo` and `~/.npm`** (SKEIN-1354).
+///
+/// The store has the managed shape and `store/cache` is there, but as a link, which the launcher
+/// refuses (`[ ! -L "$repo_cache_at" ]`). That stands for every box with no repo cache: a store
+/// kept elsewhere with `skein add --store` and a missing cache leave `$repo_cache` empty by the
+/// same line, before anything is exported. skein-server's own `CARGO_HOME`, `npm_config_cache`
+/// and `PIP_CACHE_DIR` are set in this environment, so a crossing that let them through is seen.
+///
+/// What would make it fail: a crossing that keeps the cache names from skein-server's environment
+/// (on `keep_only_listed`'s list) rather than taking them from the session, which carries
+/// `skein-test-server-cargo`; and the cache names put on the launcher's `inherited_env`, the
+/// obvious way to carry them, which hands the session and every crossing skein-server's own
+/// caches. Each was run and failed this test. (Dropping the launcher's link check fails it too,
+/// but earlier: bwrap then cannot start the box at all.)
+#[test]
+fn a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") || !PathBuf::from(env!("CARGO")).is_file() {
+        return skip(
+            "this machine cannot make a bwrap namespace, lacks tmux, or has no cargo binary at \
+             the path that built this test, so it cannot run a cache write in a box",
+        );
+    }
+    let got = cross_into_a_box_of_a_managed_store("crossnocache", true);
+    for name in skein::place::session_cache_names() {
+        let key = format!("var {name}");
+        assert_eq!(
+            (
+                field_of(&got.session, &key).as_str(),
+                field_of(&got.crossed, &key).as_str()
+            ),
+            ("none", "none"),
+            "a box with no repo cache has {name} set in its session or in a crossing into it: \
+             session {:?}, crossing {:?}",
+            got.session,
+            got.crossed
+        );
+    }
+    assert_eq!(
+        field_of(&got.crossed, "cargo"),
+        "0",
+        "cargo failed through the crossing, so the empty cache below says nothing: {:?}",
+        got.crossed
+    );
+    assert_eq!(
+        fs::read_dir(&got.elsewhere).unwrap().count(),
+        0,
+        "a cache write through a crossing went through the refused link into {}",
+        got.elsewhere.display()
+    );
+}
+
 /// A report of `<key> <value>` lines fit to print in a failure message: a value that is one of
 /// this file's own `skein-test-` sentinels, or `none`, is shown; anything else is a credential the
 /// machine supplied, and only its length is (SKEIN-1342).

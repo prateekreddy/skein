@@ -52,7 +52,7 @@ cited_by = ["docs/decisions/warden-or-prompt.md"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1781"]
+["docs/architecture.md:1783"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 

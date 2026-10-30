@@ -1011,7 +1011,9 @@ read-write into a box now. Download caches belong to a repo instead: one per rep
 beside the store, bound back through the cover and shared by that repo's boxes only, which is the
 owner's decision of 2026-10-29 that a repo is one trust domain and repos are walled from each other
 (`docs/decisions/repos-are-the-trust-boundary.md`). Within a repo this path is still one a box can
-put code in for its siblings, by that decision. Held by the real-bwrap tests
+put code in for its siblings, by that decision. A crossing into a box takes the session's cache
+variables from the session itself, so it uses the same cache, or none when the box has none
+(SKEIN-1354). Held by the real-bwrap tests
 `the_sandboxs_cargo_and_npm_reach_no_box` and
 `a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`.
 `fleet::skein_toolchain_path` keeps skein's own build off the sandbox's home for the reason it
