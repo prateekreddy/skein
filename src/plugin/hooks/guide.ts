@@ -23,7 +23,7 @@
 //     kit writes them into `~/.claude/CLAUDE.md`, and a second copy would be paid for on every
 //     request. Codex boxes read that file and nothing here. The hook is matched on the session
 //     loading instruction files at all (a `claudeMd` block), so a session that loads none, which
-//     no box is, gets none.
+//     no box is, gets no shared-home rules: the owner accepted that on SKEIN-1365.
 //   - Nothing that changes from turn to turn is put in either. The resource asks do change, so
 //     they stay where they are: `skein-resources` puts each standing ask beside the prompt it
 //     concerns, after the cached prefix. The guide only says where they come from.
