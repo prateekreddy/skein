@@ -70,6 +70,16 @@ pub const DISK_HOLD_OVER_PCT: u64 = 10;
 /// The kinds an ask can be. **There is no `cpu`**, and the plugin's hook holds only for these.
 pub const ASK_KINDS: [&str; 3] = ["disk", "memory", "pids"];
 
+/// How often a box's cleanable items are listed again. The period of the fleet's own disk walk
+/// (`fleet_disk_usage`), since this is a second walk of part of the same trees.
+pub const CLEAN_LIST_EVERY: Duration = Duration::from_secs(300);
+
+/// How recent "no other box of the repo is running" must be for the plugin to remove from the
+/// repo's shared cache: three ticks, so one slow or missed tick does not refuse, and a sibling
+/// that started is seen within a minute and refused from then on. The plugin carries the same
+/// number (`SIBLINGS_FRESH_SECONDS` in `skein-mcp`).
+pub const CLEAN_SIBLINGS_FRESH: Duration = Duration::from_secs(180);
+
 /// Where the file lives for one box, given that box's state directory.
 pub fn signal_path(state: &Path) -> PathBuf {
     state.join("signals").join("resources.json")
@@ -166,6 +176,9 @@ pub struct Reading {
     pub disk_limit_mb: Option<u64>,
     pub fleet: FleetDisk,
     pub cgroup: Option<Cgroup>,
+    /// What in this box can be removed and made again ([`clean_list`]). `None` when the box has no
+    /// directory to list.
+    pub clean: Option<CleanList>,
 }
 
 /// This box's share of a fleet that is over its line, from the same audience the fleet-disk note
@@ -218,6 +231,71 @@ pub struct Signals {
     /// absent.
     #[serde(default)]
     pub cleared: BTreeMap<String, String>,
+    /// What in this box can be removed and made again, for the plugin's `skein_clean` and
+    /// `skein_top` (SKEIN-1356). Absent when skein has not listed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<CleanList>,
+}
+
+/// What in one box can be removed and made again, as `fleet::box_cleanables` lists it, and its
+/// repo's shared download cache as `fleet::repo_cache_for_box` measures it (SKEIN-1356).
+///
+/// **One classifier.** The host decides what is cleanable and of what kind, here and in the box's
+/// settings alike; the plugin's `skein_clean` reads this list and removes, inside the box and as
+/// the box, only what is on it. It never classifies a path itself.
+///
+/// Every path is the fleet's, which is also where the box sees it: the launcher binds the box's
+/// own directory and its repo's cache back at their own paths (`box-session.sh`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CleanList {
+    /// RFC3339, when the items were listed. They are listed again every [`CLEAN_LIST_EVERY`].
+    pub at: String,
+    /// The box's own directory. Every path in `items` is under it.
+    pub box_root: String,
+    /// Biggest first.
+    pub items: Vec<CleanItem>,
+    /// The repo's shared download cache, when the repo has one.
+    #[serde(default)]
+    pub repo_cache: Option<RepoCacheList>,
+}
+
+/// One thing that can be removed: `fleet::Cleanable`, owned.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanItem {
+    pub path: String,
+    pub shown: String,
+    /// `download cache`, `build output` or `scratchpad`.
+    pub kind: String,
+    pub bytes: u64,
+}
+
+impl From<crate::fleet::Cleanable> for CleanItem {
+    fn from(c: crate::fleet::Cleanable) -> CleanItem {
+        CleanItem {
+            path: c.path,
+            shown: c.shown,
+            kind: c.kind.to_string(),
+            bytes: c.bytes,
+        }
+    }
+}
+
+/// A repo's shared download cache, as one box is told about it. Counted against no box: it is on
+/// the store's disk, outside every box's directory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepoCacheList {
+    pub path: String,
+    /// The sum of `items`.
+    pub bytes: u64,
+    pub items: Vec<CleanItem>,
+    /// The repo's OTHER boxes that are running, read on every tick.
+    pub others_running: usize,
+    /// The repo's other boxes skein cannot tell about, which count as running.
+    pub others_unknown: usize,
+    /// RFC3339, the last reading at which no other box of the repo was running or unknown. The
+    /// plugin removes from this cache only while that is recent ([`CLEAN_SIBLINGS_FRESH`]).
+    #[serde(default)]
+    pub none_running_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -383,6 +461,21 @@ fn disk_holds(d: &DiskAsk, limit: Option<u64>) -> bool {
     asked.saturating_mul(100) > share.saturating_mul(DISK_HOLD_OVER_PCT)
 }
 
+/// The box's own items its agent may remove at any time, biggest first: download caches and build
+/// output (owner, 2026-10-30). Not the repo's shared cache, which counts against no box, and not
+/// scratchpads, which may belong to a session still running in the box.
+fn removable_now(clean: Option<&CleanList>) -> Vec<CleanItem> {
+    clean
+        .map(|c| {
+            c.items
+                .iter()
+                .filter(|i| i.kind == "download cache" || i.kind == "build output")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Memory: hot on this reading and the one before it, and near its line.
 fn memory_band(
     cg: Option<&Cgroup>,
@@ -484,6 +577,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
         },
         asks: Vec::new(),
         cleared: BTreeMap::new(),
+        clean: r.clean.clone(),
     };
 
     let prev_ask = |kind: &str| prev.and_then(|p| p.asks.iter().find(|a| a.kind == kind));
@@ -507,7 +601,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 
     match disk_band(r) {
         Band::Asked(d) => {
-            let mut ask = words::disk(&d);
+            let mut ask = words::disk(&d, &removable_now(r.clean.as_ref()));
             if !disk_holds(&d, r.disk_limit_mb) {
                 // Told, not held: the plugin holds only an ask with words to hold it with.
                 ask.hold = String::new();
@@ -553,8 +647,11 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 /// `feature-wording.md`. Two of the owner's decisions shape them: the `skein_top` and
 /// `skein_resources` sentences were left out until those tools shipped, and are in now that they
 /// have (SKEIN-1059); and the closing "This one command was held so you would see this; the next
-/// will run." stays. No field a box can write reaches any of them: every
-/// argument is a number skein measured.
+/// will run." stays. Every argument is a number skein measured, with one exception: the disk
+/// ask's [`words::clean_hint`] names the box's biggest cleanable items by path (SKEIN-1356), and a
+/// box names its own directories. Only a path of plain characters is named
+/// ([`words::nameable`]), so no name can carry a line break or a sentence of its own into the
+/// words, and only the box's own items are named, to the box's own agent.
 ///
 /// Every live ask carries all four: a hold, a start line (4), a reminder (5) and an entering line
 /// (6). The texts for the cases the first draft did not cover — (4), (5) and (6) for every disk
@@ -598,7 +695,57 @@ mod words {
         }
     }
 
-    pub(super) fn disk(d: &DiskAsk) -> Ask {
+    /// Whether a cleanable item's path may be named in the words: short, and nothing but the
+    /// characters a path of a cache or a build directory is made of. A box chooses the names of
+    /// its own directories, so anything else is left out rather than quoted.
+    pub(super) fn nameable(shown: &str) -> bool {
+        !shown.is_empty()
+            && shown.len() <= 120
+            && shown
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/~._+@-".contains(c))
+    }
+
+    /// The disk ask's pointer to `skein_clean`, with the box's biggest items that its agent may
+    /// remove now (SKEIN-1356): up to three, biggest first, as `~/.cache/pip (3.2G)`.
+    pub(super) fn clean_hint(biggest: &[CleanItem]) -> String {
+        let named: Vec<String> = biggest
+            .iter()
+            .filter(|i| nameable(&i.shown))
+            .take(3)
+            .map(|i| format!("{} ({})", i.shown, gib_up(i.bytes.div_ceil(1024 * 1024))))
+            .collect();
+        let list = match named.as_slice() {
+            [] => return CLEAN.to_string(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        };
+        format!(
+            "{} The biggest {} {list}.",
+            CLEAN,
+            if named.len() == 1 { "is" } else { "are" }
+        )
+    }
+
+    /// The sentence every disk ask's hold, start and entering line carries (SKEIN-1356).
+    pub(super) const CLEAN: &str =
+        "`skein_clean` lists the caches and build output this box can remove, and removes them.";
+
+    pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem]) -> Ask {
+        let hint = clean_hint(biggest);
+        let mut ask = disk_words(d);
+        // Before the closing sentence of the hold and the start line, which the owner fixed
+        // (`HELD`, `WHERE`); at the end of the entering line.
+        ask.hold = ask.hold.replace(HELD, &format!("{hint} {HELD}"));
+        ask.start = ask
+            .start
+            .map(|s| s.replace(WHERE, &format!("{hint} {WHERE}")));
+        ask.enter = ask.enter.map(|e| format!("{e} {hint}"));
+        ask
+    }
+
+    /// The owner's approved words (SKEIN-1055) before [`clean_hint`] is added.
+    pub(super) fn disk_words(d: &DiskAsk) -> Ask {
         match d {
             // (1a), (4), (5), (6).
             DiskAsk::Share(s) => Ask {
@@ -816,6 +963,67 @@ pub fn write_box(state: &Path, r: &Reading) -> Result<Signals, String> {
     Ok(signals)
 }
 
+/// Box `name`'s [`CleanList`] for this tick: its items listed again when the previous list is
+/// [`CLEAN_LIST_EVERY`] old or missing, carried otherwise; and the fact about its repo's other
+/// boxes read again every tick, since that is what the plugin's refusal turns on.
+///
+/// `repo_caches` measures each repo's shared cache once per tick, however many of its boxes are
+/// listed in it. `None` when the box has no directory in the fleet.
+pub(crate) fn clean_list(
+    name: &str,
+    prev: Option<&CleanList>,
+    liveness: &std::collections::HashMap<String, bool>,
+    at: DateTime<Utc>,
+    repo_caches: &mut BTreeMap<String, Option<crate::fleet::RepoCache>>,
+) -> Option<CleanList> {
+    let fresh = prev.filter(|p| {
+        minutes_since(Some(p.at.as_str()), at)
+            .is_some_and(|m| m * 60.0 < CLEAN_LIST_EVERY.as_secs_f64())
+    });
+    let mut list = match fresh {
+        Some(p) => p.clone(),
+        None => {
+            let items = crate::fleet::box_cleanables(name).ok()?;
+            let repo = crate::repos::repo_for_box(name).map(|r| r.id);
+            let cache = match repo {
+                Some(id) => repo_caches
+                    .entry(id.clone())
+                    .or_insert_with(|| {
+                        crate::fleet::repo_cache_for_box(name, liveness)
+                            .ok()
+                            .flatten()
+                    })
+                    .clone(),
+                None => None,
+            };
+            CleanList {
+                at: stamp(at),
+                box_root: crate::fleet::box_root(name),
+                items: items.into_iter().map(CleanItem::from).collect(),
+                repo_cache: cache.map(|rc| RepoCacheList {
+                    path: rc.path,
+                    bytes: rc.items.iter().map(|i| i.bytes).sum(),
+                    items: rc.items.into_iter().map(CleanItem::from).collect(),
+                    others_running: 0,
+                    others_unknown: 0,
+                    none_running_at: prev
+                        .and_then(|p| p.repo_cache.as_ref())
+                        .and_then(|c| c.none_running_at.clone()),
+                }),
+            }
+        }
+    };
+    if let Some(rc) = list.repo_cache.as_mut() {
+        let (running, unknown) = crate::fleet::others_of_box(name, liveness);
+        rc.others_running = running.len();
+        rc.others_unknown = unknown.len();
+        if running.is_empty() && unknown.is_empty() {
+            rc.none_running_at = Some(stamp(at));
+        }
+    }
+    Some(list)
+}
+
 /// One tick over the whole fleet: a file for every box that has a state directory.
 ///
 /// The state directories are the list, as they are for the owner's inbox (`mailbox::load_mailbox`):
@@ -829,6 +1037,8 @@ pub fn write_every_box() -> Result<usize, String> {
     let measured = crate::fleet::fleet_resources().is_some();
     let demand = crate::health::disk_demand();
     let usage = crate::fleet::fleet_disk_usage();
+    let liveness = crate::fleet::fleet_liveness();
+    let mut repo_caches = BTreeMap::new();
     let at = Utc::now();
     let mut written = 0;
     let mut failed = Vec::new();
@@ -848,6 +1058,13 @@ pub fn write_every_box() -> Result<usize, String> {
                 false => FleetDisk::Unknown,
             },
             cgroup: read_cgroup(Path::new(&crate::fleet::box_cgroup(&name))),
+            clean: clean_list(
+                &name,
+                read(&entry.path()).and_then(|p| p.clean).as_ref(),
+                &liveness,
+                at,
+                &mut repo_caches,
+            ),
         };
         match write_box(&entry.path(), &reading) {
             Ok(_) => written += 1,
@@ -911,6 +1128,7 @@ mod tests {
             disk_limit_mb: None,
             fleet: FleetDisk::NotAsked { over_by: 0 },
             cgroup: cg,
+            clean: None,
         }
     }
 
@@ -1164,7 +1382,8 @@ mod tests {
         assert_eq!(
             files[3].asks[0].hold,
             "skein: clear 2.3G of storage you are not using before you continue. This box holds \
-             12.3G against its 10.0G share of the fleet's disk. This one command was held so you \
+             12.3G against its 10.0G share of the fleet's disk. `skein_clean` lists the caches and \
+             build output this box can remove, and removes them. This one command was held so you \
              would see this; the next will run."
         );
     }
@@ -1198,7 +1417,7 @@ mod tests {
         let cases: Vec<(&str, Ask, [String; 4])> = vec![
             (
                 "(1a), two others",
-                words::disk(&DiskAsk::Share(share(2, false))),
+                words::disk_words(&DiskAsk::Share(share(2, false))),
                 [
                     share_hold("; 2 other boxes have been asked for the rest"),
                     share_start.into(),
@@ -1208,7 +1427,7 @@ mod tests {
             ),
             (
                 "(1a), one other",
-                words::disk(&DiskAsk::Share(share(1, false))),
+                words::disk_words(&DiskAsk::Share(share(1, false))),
                 [
                     share_hold("; 1 other box has been asked for the rest"),
                     share_start.into(),
@@ -1218,7 +1437,7 @@ mod tests {
             ),
             (
                 "(1a), alone",
-                words::disk(&DiskAsk::Share(share(0, false))),
+                words::disk_words(&DiskAsk::Share(share(0, false))),
                 [
                     share_hold(""),
                     share_start.into(),
@@ -1228,7 +1447,7 @@ mod tests {
             ),
             (
                 "(1b)",
-                words::disk(&DiskAsk::EveryBox(Share {
+                words::disk_words(&DiskAsk::EveryBox(Share {
                     over_by: 6144,
                     ..share(3, true)
                 })),
@@ -1252,7 +1471,7 @@ mod tests {
             ),
             (
                 "(1c)",
-                words::disk(&DiskAsk::Allowance {
+                words::disk_words(&DiskAsk::Allowance {
                     excess: 2355,
                     holds: 12595,
                     limit: 10240,
@@ -1421,7 +1640,7 @@ mod tests {
                 limit: 1,
             },
         ] {
-            let a = words::disk(&d);
+            let a = words::disk(&d, &[]);
             texts.extend(
                 [Some(a.hold), a.start, a.remind, a.enter]
                     .into_iter()
@@ -1636,7 +1855,7 @@ mod tests {
                 limit: 10240,
             },
         ] {
-            let a = words::disk(&d);
+            let a = words::disk(&d, &[]);
             if let DiskAsk::Allowance { .. } = d {
                 assert!(
                     a.hold.contains("holds 10.1G against its 10.0G share"),
@@ -1770,6 +1989,7 @@ mod tests {
                     disk_limit_mb: None,
                     fleet,
                     cgroup: Some(cg),
+                    clean: None,
                 },
             )
             .unwrap()
@@ -2024,6 +2244,7 @@ mod tests {
                     disk_limit_mb: Some(10240),
                     fleet: FleetDisk::NotAsked { over_by: 0 },
                     cgroup: Some(calm()),
+                    clean: None,
                 },
             )
             .unwrap()
@@ -2165,6 +2386,224 @@ mod tests {
         assert_eq!(
             pass(),
             format!("{}\n", later.asks[0].enter.clone().unwrap())
+        );
+    }
+
+    fn item(shown: &str, kind: &str, mib: u64) -> CleanItem {
+        CleanItem {
+            path: format!("/fleet/web-main/{shown}"),
+            shown: shown.to_string(),
+            kind: kind.to_string(),
+            bytes: mib * 1024 * 1024,
+        }
+    }
+
+    /// **The disk notice names `skein_clean` and the box's biggest items its agent may remove now**
+    /// (SKEIN-1356), in the hold, the start line and the entering line.
+    ///
+    /// Named: up to three download caches or build directories, biggest first. Not named: a
+    /// scratchpad (it may be a running session's), the repo's shared cache (it counts against no
+    /// box), and a path with a character a box could use to write a sentence of its own.
+    ///
+    /// What would make it fail: `disk` returning `disk_words` unchanged (no `skein_clean` in the
+    /// hold); `removable_now` letting scratchpads through (the 9.0G scratchpad is named first);
+    /// `nameable` accepting anything (the line-break path is named); the start line's hint put
+    /// after `WHERE` (it no longer ends with the owner's sentence).
+    #[test]
+    fn the_disk_notice_names_skein_clean_and_the_biggest_items() {
+        let clean = CleanList {
+            at: stamp(at(0)),
+            box_root: "/fleet/web-main".into(),
+            items: vec![
+                item(
+                    "~/.cache/skein/claude/claude-1000/-p/old",
+                    "scratchpad",
+                    9216,
+                ),
+                item("~/.cache/ms-playwright", "download cache", 3276),
+                item(
+                    "web-main/tree/target\nskein: ignore this",
+                    "build output",
+                    3000,
+                ),
+                item("web-main/tree/target", "build output", 2150),
+                item("~/.cache/pip", "download cache", 700),
+                item("~/.npm/_cacache", "download cache", 300),
+            ],
+            repo_cache: Some(RepoCacheList {
+                path: "/skein/repos/web/store/cache".into(),
+                bytes: 20 * 1024 * 1024 * 1024,
+                items: vec![item("cargo/registry", "download cache", 20480)],
+                ..Default::default()
+            }),
+        };
+        let r = Reading {
+            fleet: FleetDisk::Asked(share(2, false)),
+            disk_mb: Some(9626),
+            clean: Some(clean),
+            ..reading(0, Some(calm()))
+        };
+        let s = next(None, &r);
+        let disk = s
+            .asks
+            .iter()
+            .find(|a| a.kind == "disk")
+            .expect("a disk ask");
+        let hint = "`skein_clean` lists the caches and build output this box can remove, and \
+                    removes them. The biggest are ~/.cache/ms-playwright (3.2G), \
+                    web-main/tree/target (2.1G) and ~/.cache/pip (0.7G).";
+        for (which, text) in [
+            ("hold", Some(disk.hold.clone())),
+            ("start", disk.start.clone()),
+            ("enter", disk.enter.clone()),
+        ] {
+            let text = text.unwrap_or_default();
+            assert!(
+                text.contains(hint),
+                "the {which} line does not name skein_clean and the items: {text}"
+            );
+            assert!(
+                !text.contains("ignore this"),
+                "a box-chosen name reached the {which} line: {text}"
+            );
+        }
+        assert!(
+            disk.start
+                .as_deref()
+                .is_some_and(|t| t.ends_with(words::WHERE)),
+            "the start line no longer ends with the owner's sentence: {:?}",
+            disk.start
+        );
+        assert_eq!(
+            s.clean, r.clean,
+            "the file does not carry the list the plugin reads"
+        );
+
+        // With nothing removable, the notice still names the tool.
+        let bare = next(
+            None,
+            &Reading {
+                clean: None,
+                ..r.clone()
+            },
+        );
+        let hold = &bare.asks.iter().find(|a| a.kind == "disk").unwrap().hold;
+        assert!(
+            hold.contains(words::CLEAN) && !hold.contains("The biggest"),
+            "{hold}"
+        );
+    }
+
+    /// A fleet with repo `web` (managed store, shared cache) and its boxes `web-main` and
+    /// `web-two`. Returns the pins.
+    fn repo_fleet(dir: &Path) -> crate::testutil::EnvPins {
+        let home = dir.join("skein");
+        let root = dir.join("fleet");
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &root);
+        pins.set("SKEIN_HOME", &home);
+        let store = home.join("repos/web/store/data");
+        std::fs::create_dir_all(&store).unwrap();
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "web".into(),
+            store: store.display().to_string(),
+            ..Default::default()
+        }])
+        .unwrap();
+        let put = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![7u8; 16 * 1024]).unwrap();
+        };
+        put(home.join("repos/web/store/cache/pip/http/x"));
+        put(home.join("repos/web/store/cache/cargo/credentials.toml"));
+        put(root.join("web-main/home/.cache/pip/http/x"));
+        std::fs::create_dir_all(root.join("web-two/home")).unwrap();
+        pins
+    }
+
+    /// **The fact the repo cache's clean turns on is read every tick, and "when it was last true"
+    /// does not move while another box of the repo runs or cannot be told about** (SKEIN-1356).
+    ///
+    /// The items are walked at most every [`CLEAN_LIST_EVERY`]; the other boxes are asked every
+    /// tick, and the box itself never counts.
+    ///
+    /// What would make it fail: stamping `none_running_at` whatever the other boxes are doing
+    /// (the plugin would remove the cache under a running sibling); counting the box itself
+    /// (`others_running` would be 1 with only `web-main` running); carrying the sibling counts with
+    /// the items (the second tick would still say 1); or re-walking every tick (`at` would move).
+    /// Watched: with the `if running.is_empty() && unknown.is_empty()` guard removed, the third
+    /// tick's `none_running_at` moved to minute 2 and this failed.
+    #[test]
+    fn the_sibling_fact_is_read_every_tick_and_only_stamped_when_true() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let _pins = repo_fleet(dir.as_ref());
+        let live = |pairs: &[(&str, bool)]| -> std::collections::HashMap<String, bool> {
+            pairs.iter().map(|(n, b)| (n.to_string(), *b)).collect()
+        };
+        let mut memo = BTreeMap::new();
+        let first = clean_list(
+            "web-main",
+            None,
+            &live(&[("web-main", true), ("web-two", true)]),
+            at(0),
+            &mut memo,
+        )
+        .expect("a box with a directory is listed");
+        let shown: Vec<&str> = first.items.iter().map(|i| i.shown.as_str()).collect();
+        assert_eq!(shown, vec!["~/.cache/pip"]);
+        let rc = first.repo_cache.clone().expect("web has a shared cache");
+        let cached: Vec<&str> = rc.items.iter().map(|i| i.shown.as_str()).collect();
+        assert_eq!(cached, vec!["pip"], "cargo's credentials are never listed");
+        assert_eq!((rc.others_running, rc.others_unknown), (1, 0));
+        assert_eq!(rc.none_running_at, None);
+
+        let mut memo = BTreeMap::new();
+        let second = clean_list(
+            "web-main",
+            Some(&first),
+            &live(&[("web-main", true), ("web-two", false)]),
+            at(1),
+            &mut memo,
+        )
+        .unwrap();
+        let rc = second.repo_cache.clone().unwrap();
+        assert_eq!(
+            second.at, first.at,
+            "the items were walked again inside the period"
+        );
+        assert_eq!((rc.others_running, rc.others_unknown), (0, 0), "{rc:?}");
+        assert_eq!(rc.none_running_at, Some(stamp(at(1))));
+
+        for (n, liveness) in [
+            (2, live(&[("web-main", true), ("web-two", true)])),
+            (3, live(&[("web-main", true)])),
+        ] {
+            let later = clean_list("web-main", Some(&second), &liveness, at(n), &mut memo).unwrap();
+            let rc = later.repo_cache.unwrap();
+            assert_eq!(
+                rc.others_running + rc.others_unknown,
+                1,
+                "minute {n}: {rc:?}"
+            );
+            assert_eq!(
+                rc.none_running_at,
+                Some(stamp(at(1))),
+                "minute {n}: the last time no other box ran moved while one ran or was unknown"
+            );
+        }
+        let relisted = clean_list(
+            "web-main",
+            Some(&second),
+            &live(&[("web-two", false)]),
+            at(6),
+            &mut memo,
+        )
+        .unwrap();
+        assert_eq!(
+            relisted.at,
+            stamp(at(6)),
+            "the items were never walked again"
         );
     }
 }

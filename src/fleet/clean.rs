@@ -405,6 +405,49 @@ pub(crate) fn clean_repo_cache_given(
     Ok(done)
 }
 
+/// The shared download cache of box `name`'s repo, as [`repo_cache`] measures it, for the box's own
+/// `skein_clean` (SKEIN-1356). `None` when the box has no repo or the repo's store is kept
+/// elsewhere. `running` and `unknown` name the repo's OTHER boxes only, so a box is never held back
+/// by itself: its agent knows what it is running.
+pub fn repo_cache_for_box(
+    name: &str,
+    liveness: &std::collections::HashMap<String, bool>,
+) -> Result<Option<RepoCache>, String> {
+    let Some(repo) = crate::repos::repo_for_box(name) else {
+        return Ok(None);
+    };
+    let mut found = repo_cache_given(&repo.id, liveness)?;
+    if let Some(rc) = found.as_mut() {
+        let (running, unknown) = others_of_box(name, liveness);
+        rc.running = running;
+        rc.unknown = unknown;
+    }
+    Ok(found)
+}
+
+/// The other boxes of box `name`'s repo that are running, and those skein cannot tell about, by
+/// the rule [`clean_repo_cache`] uses. Cheap: a directory listing and a liveness map, no walk.
+pub fn others_of_box(
+    name: &str,
+    liveness: &std::collections::HashMap<String, bool>,
+) -> (Vec<String>, Vec<String>) {
+    let (mut running, mut unknown) = (Vec::new(), Vec::new());
+    let Some(repo) = crate::repos::repo_for_box(name) else {
+        return (running, unknown);
+    };
+    for other in boxes_of_repo(&repo.id) {
+        if other == name {
+            continue;
+        }
+        match liveness.get(&other) {
+            Some(false) => {}
+            Some(true) => running.push(other),
+            None => unknown.push(other),
+        }
+    }
+    (running, unknown)
+}
+
 /// Remove the directory `path` under `box_dir` in a way that cannot follow a link anywhere in it.
 ///
 /// Checking the path and then removing it by name is not enough once a running box may be cleaned:
