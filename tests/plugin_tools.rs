@@ -687,11 +687,13 @@ fn it_speaks_mcp_over_stdio() {
             "skein_ask_person"
         ]
     );
-    // The three that read say so, and the three that ask and the one that removes do not claim to.
+    // The two that only read say so; the three that ask, the one that removes, and
+    // skein_resources, which with `restart` writes the box's restart ask (SKEIN-1372), do not.
     for t in replies[1]["result"]["tools"].as_array().unwrap() {
         let reads = !t["name"].as_str().unwrap().starts_with("skein_request_")
             && t["name"] != "skein_ask_person"
-            && t["name"] != "skein_clean";
+            && t["name"] != "skein_clean"
+            && t["name"] != "skein_resources";
         assert_eq!(t["annotations"]["readOnlyHint"], reads, "{t}");
     }
     assert_eq!(replies[2]["error"]["code"], -32601);

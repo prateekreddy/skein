@@ -17,7 +17,7 @@
 // and `tests/plugin_tools.rs` holds the MCP tool to.
 
 import { atom, read, update } from 'claude-code'
-import type { CommandRunResult, EngineInterface as Engine, On } from 'claude-code'
+import type { CommandRunResult, EngineInterface as Engine, On, SessionStartInput } from 'claude-code'
 
 import type { SkeinBand, SkeinCleanRow, SkeinRequestRow, SkeinSharedCache } from '../types'
 
@@ -51,7 +51,7 @@ const CLEAN_DESCRIPTION =
 
 /** Setup, called from the one `session.start` hook `register.tsx` owns (SKEIN-1387): the `clean`
  * tool, and the looks that keep the band current. */
-export async function onStart($: Engine): Promise<void> {
+export async function onStart($: Engine, _e: SessionStartInput): Promise<void> {
   await $.tool.register({
     name: 'clean',
     description: CLEAN_DESCRIPTION,

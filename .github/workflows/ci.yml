@@ -396,18 +396,21 @@ jobs:
   # carries a hooks module, whose API is early access and changes between releases, so it is
   # checked by one exact build: `claude plugin validate --strict`, `claude plugin test`, an offline
   # `claude -p /skein` that must answer, and `tsc` against the declarations that same build lays.
-  # `tools/plugin-check.sh` is the whole of it and refuses a CLI other than the one named here.
+  # `tools/plugin-check.sh` is the whole of it and refuses a CLI other than the one it is given.
   #
   # Not `tools/gates.sh run`, for the reason gitleaks is not: a contributor's machine need not have
-  # Claude Code. docs/decisions/skein-is-a-mod.md says why this number and the boxes' can drift
-  # apart, and what moves it: when an update moves the boxes, move this and run the check.
+  # Claude Code. **The build is `src/claude-code.version`, read here and nowhere written twice**
+  # (SKEIN-1380): the fleet rolls out only that same version to its boxes (`fleet::versions`), so a
+  # bump is one reviewed commit, and this job checks the mod against the new build before any box
+  # can be given it. `fleet::versions`' `the_ci_pin_is_the_fleets_pin` fails if this job stops
+  # reading that file or names a version of its own.
   plugin:
     runs-on: ubuntu-24.04
     env:
-      CLAUDE_CODE_VERSION: "2.1.314"
       TYPESCRIPT_VERSION: "5.9.3"
     steps:
       - uses: actions/checkout@v7
+      - run: echo "CLAUDE_CODE_VERSION=$(tr -d '[:space:]' < src/claude-code.version)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
