@@ -11,10 +11,20 @@
 
 import type { Register } from 'claude-code'
 
-import { register as band } from './band'
-import { register as identity } from './identity'
+import { onStart as bandStart, register as band } from './band'
+import { onStart as identityStart, register as identity } from './identity'
 
 export const register: Register = on => {
+  // The one bare hook of each observe-only event more than one feature needs, fanning out in a
+  // fixed order and calling `next(e)` once (SKEIN-1387): `claude plugin validate` refuses a second
+  // bare hook of one event in a module.
+  on('session.start', async ($, e, next) => {
+    await identityStart($)
+    await bandStart($)
+
+    return next(e)
+  })
+
   identity(on)
   band(on)
 }

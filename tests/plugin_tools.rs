@@ -1491,8 +1491,15 @@ fn both_doors_of_clean_give_the_contracts_answer() {
         );
         let content = &replies[0]["result"]["content"];
         let result: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
-        let said = content[1]["text"].as_str().unwrap_or("").replace(&fixture, "/fixture");
-        assert_eq!(as_contract(&result, &fixture), case["result"], "MCP: {result}");
+        let said = content[1]["text"]
+            .as_str()
+            .unwrap_or("")
+            .replace(&fixture, "/fixture");
+        assert_eq!(
+            as_contract(&result, &fixture),
+            case["result"],
+            "MCP: {result}"
+        );
         assert_eq!(said, case["said"].as_str().unwrap(), "MCP");
         assert_eq!(replies[0]["result"]["isError"], json!(wanted_error), "MCP");
 
@@ -1544,10 +1551,16 @@ fn the_command_line_requests_is_the_same_tool() {
         .arg("requests")
         .env("SKEIN_STATE", b.at("state"))
         .env("SKEIN_FLEET_ROOT", b.at("fleet"))
+        .env("SKEIN_HOME", b.at("home"))
         .env("SKEIN_BOX", "web-main")
         .output()
         .expect("python3");
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let line: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(line["result"], tool, "{line}");
     let states: Vec<&str> = tool["requests"]

@@ -17,7 +17,7 @@
 // and `tests/plugin_tools.rs` holds the MCP tool to.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, On } from 'claude-code'
+import type { CommandRunResult, EngineInterface as Engine, On } from 'claude-code'
 
 import type { SkeinBand, SkeinCleanRow, SkeinRequestRow, SkeinSharedCache } from '../types'
 
@@ -49,27 +49,52 @@ const CLEAN_DESCRIPTION =
   'them. The same as the skein_clean tool: nothing else is removed, a link is never followed, ' +
   'and config and logins are never on the list.'
 
-export function register(on: On): void {
-  // A matcher every session meets. `claude plugin validate` refuses a second hook on one event
-  // without a matcher in one module, and `identity.ts` holds the unmatched `session.start`.
-  on('session.start', { isInteractive: [true, false] }, async ($, e, next) => {
-    await $.tool.register({
-      name: 'clean',
-      description: CLEAN_DESCRIPTION,
-      inputSchema: {
-        type: 'object',
-        properties: { paths: { type: 'array', items: { type: 'string' } } },
-        additionalProperties: false,
-      },
-    })
-    // The first look after the session starts rather than inside it: three small processes the
-    // first prompt need not wait for.
-    $.clock.after(0, () => void look($))
-    $.clock.every(LOOK_EVERY_MS, () => void look($))
-
-    return next(e)
+/** Setup, called from the one `session.start` hook `register.tsx` owns (SKEIN-1387): the `clean`
+ * tool, and the looks that keep the band current. */
+export async function onStart($: Engine): Promise<void> {
+  await $.tool.register({
+    name: 'clean',
+    description: CLEAN_DESCRIPTION,
+    inputSchema: {
+      type: 'object',
+      properties: { paths: { type: 'array', items: { type: 'string' } } },
+      additionalProperties: false,
+    },
   })
+  // The first look after the session starts rather than inside it: three small processes the
+  // first prompt need not wait for.
+  $.clock.after(0, () => void look($))
+  $.clock.every(LOOK_EVERY_MS, () => void look($))
+}
 
+/** `/skein <args>`, handed over by `identity.ts`, which owns the command's hook. */
+export async function subcommand($: Engine, args: string): Promise<CommandRunResult> {
+  const sub = args.trim().split(/\s+/)[0]
+  if (sub === 'status') {
+    await look($)
+
+    return { text: status(await read($, band)) }
+  }
+  if (sub === 'requests') {
+    await look($)
+
+    return { text: requestLines(await read($, band)) }
+  }
+  if (sub === 'clean') {
+    await look($)
+    const opened = await $.ui.open({ id: PANE, title: 'skein', focus: true })
+
+    return {
+      text: opened.isPlaced
+        ? 'the list of what this box can remove is open.'
+        : 'the list could not be opened here. skein_clean lists the same items.',
+    }
+  }
+
+  return { text: `there is no /skein ${sub}. Try /skein status, /skein clean or /skein requests.` }
+}
+
+export function register(on: On): void {
   on('tool.call', { tool: 'mcp__skein__clean' }, async ($, e) => {
     const paths = 'paths' in e ? e.paths : undefined
     // The MCP tool's own refusal, word for word: a list of anything but paths never reaches the
@@ -82,32 +107,6 @@ export function register(on: On): void {
 
     return { result: mcpAnswer(ran.result ?? { error: 'clean-did-not-answer' }, ran.said) }
   }).catch(() => ({ result: mcpAnswer({ error: 'clean-did-not-answer' }, '') }))
-
-  on('command.run', { command: 'skein', args: /\S/ }, async ($, e) => {
-    const sub = e.args.trim().split(/\s+/)[0]
-    if (sub === 'status') {
-      await look($)
-
-      return { text: status(await read($, band)) }
-    }
-    if (sub === 'requests') {
-      await look($)
-
-      return { text: requestLines(await read($, band)) }
-    }
-    if (sub === 'clean') {
-      await look($)
-      const opened = await $.ui.open({ id: PANE, title: 'skein', focus: true })
-
-      return {
-        text: opened.isPlaced
-          ? "the list of what this box can remove is open."
-          : 'the list could not be opened here. skein_clean lists the same items.',
-      }
-    }
-
-    return { text: `there is no /skein ${sub}. Try /skein status, /skein clean or /skein requests.` }
-  })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const found = await read($, band)

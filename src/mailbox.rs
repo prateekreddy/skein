@@ -778,7 +778,8 @@ mod tests {
     fn mailbox_unread_counts_without_marking() {
         let _g = env_lock();
         let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
@@ -790,11 +791,18 @@ mod tests {
                 .env("SANDBOX_VM_ID", "the-shared-sandbox")
                 .output()
                 .expect("run mailbox.sh");
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let send = |from: &str, to: &str, body: &str| {
-            run(from, &["send", "--to", to, "--kind", "note", "--body", body]);
+            run(
+                from,
+                &["send", "--to", to, "--kind", "note", "--body", body],
+            );
         };
         send("boxA", "broadcast", "to everyone");
         send("boxA", "boxB", "to B");
@@ -812,10 +820,12 @@ mod tests {
         assert_eq!(run("boxB", &["unread"]), "3", "the count marked mail seen");
         let delivered = run("boxB", &["inbox"]);
         for body in ["to everyone", "to B", "from the owner"] {
-            assert!(delivered.contains(body), "{body} was not delivered: {delivered}");
+            assert!(
+                delivered.contains(body),
+                "{body} was not delivered: {delivered}"
+            );
         }
         assert_eq!(run("boxB", &["unread"]), "0");
-        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
