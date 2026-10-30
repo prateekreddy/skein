@@ -559,9 +559,12 @@ fn a_fetched_browser_reaches_running_boxes_without_a_restart() {
     let start =
         format!("mkdir -p /tmp/m && SKEIN_STARTUP_MARKERS=/tmp/m bash '{kit}' >/tmp/kit.out 2>&1");
     // A name of B's own, inside B's private `/tmp`, that would be the SANDBOX's `/tmp` if anything
-    // followed B's link from out here.
+    // followed B's link from out here. Made, empty, on the sandbox's side too, so a pass that
+    // followed the link from here would find a directory to write into rather than stopping at a
+    // dangling link, and is caught by what it wrote.
     let b_farm = format!("/tmp/skein-test-pwlive-{}", std::process::id());
     let _ = fs::remove_dir_all(&b_farm);
+    fs::create_dir_all(&b_farm).unwrap();
 
     let (a, a_said) = start_running(
         "pwlive-main",
@@ -605,7 +608,7 @@ fn a_fetched_browser_reaches_running_boxes_without_a_restart() {
     );
     let a_after = links_in(&a_farm);
     let b_after = links_in(&b_own);
-    let host_side = Path::new(&b_farm).exists();
+    let host_side = links_in(Path::new(&b_farm));
     let a_alive = Path::new(&format!("/proc/{a}")).exists();
     end_box("pwlive-main", a);
     end_box("pwlive-two", b);
@@ -638,8 +641,9 @@ fn a_fetched_browser_reaches_running_boxes_without_a_restart() {
         "running box A did not gain the fetched browser, or lost its own link: {said}"
     );
     assert!(
-        !host_side,
-        "something followed box B's link from the sandbox's side and wrote {b_farm} there"
+        host_side.is_empty(),
+        "something followed box B's link from the sandbox's side and wrote into {b_farm} there: \
+         {host_side:?}"
     );
     assert_eq!(
         b_after,
