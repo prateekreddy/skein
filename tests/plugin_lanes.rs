@@ -32,7 +32,11 @@ impl Fixture {
         for d in ["state", "home", "skein-home", "fleet", "repo"] {
             fs::create_dir_all(dir.path().join(d)).unwrap();
         }
-        fs::write(dir.path().join("rules.md"), "Rule one: stay in your worktree.\n").unwrap();
+        fs::write(
+            dir.path().join("rules.md"),
+            "Rule one: stay in your worktree.\n",
+        )
+        .unwrap();
         let f = Fixture { dir };
         f.git(&f.at("repo"), &["init", "-q", "-b", "master"]);
         fs::write(f.at("repo/README"), "hello\n").unwrap();
@@ -175,7 +179,11 @@ fn a_lanes_build_output_is_inside_its_worktree() {
         "{brief}"
     );
     // A real worktree on its own branch, from the base.
-    assert_eq!(f.git(&f.at("lanes/a"), &["branch", "--show-current"]).trim(), "lane/a");
+    assert_eq!(
+        f.git(&f.at("lanes/a"), &["branch", "--show-current"])
+            .trim(),
+        "lane/a"
+    );
     assert_eq!(rec["schema"], 1);
     assert_eq!(rec["phase"], "created");
     assert_eq!(rec["item"], "SKEIN-9");
@@ -251,7 +259,12 @@ fn drop_removes_the_worktree_and_nothing_outside_it() {
     std::os::unix::fs::symlink(f.at("outside"), f.at("lanes/a/target/link")).unwrap();
 
     // Everything that must survive was there before the drop.
-    for p in ["lanes/b/README", "lanes/beside", "outside/kept", "lanes/a/target/debug/big"] {
+    for p in [
+        "lanes/b/README",
+        "lanes/beside",
+        "outside/kept",
+        "lanes/a/target/debug/big",
+    ] {
         assert!(f.at(p).exists(), "{p} was never there");
     }
     let (code, done) = f.cli(&["drop", "a"]);
@@ -264,15 +277,32 @@ fn drop_removes_the_worktree_and_nothing_outside_it() {
         )
     );
     assert!(!f.at("lanes/a").exists(), "the worktree is still there");
-    assert!(!f.at("state/lanes/a.json").exists(), "the record is still there");
-    assert!(!f.at("state/lanes/a.brief.md").exists(), "the brief is still there");
-    for p in ["lanes/b/README", "lanes/beside", "outside/kept", "state/lanes/b.json"] {
+    assert!(
+        !f.at("state/lanes/a.json").exists(),
+        "the record is still there"
+    );
+    assert!(
+        !f.at("state/lanes/a.brief.md").exists(),
+        "the brief is still there"
+    );
+    for p in [
+        "lanes/b/README",
+        "lanes/beside",
+        "outside/kept",
+        "state/lanes/b.json",
+    ] {
         assert!(f.at(p).exists(), "{p} was removed");
     }
     let listed = f.git(&f.at("repo"), &["worktree", "list", "--porcelain"]);
-    assert!(!listed.contains(&f.s("lanes/a")), "git still records it: {listed}");
+    assert!(
+        !listed.contains(&f.s("lanes/a")),
+        "git still records it: {listed}"
+    );
     assert!(listed.contains(&f.s("lanes/b")), "{listed}");
-    assert_eq!(f.git(&f.at("repo"), &["branch", "--list", "lane/a"]).trim(), "lane/a");
+    assert_eq!(
+        f.git(&f.at("repo"), &["branch", "--list", "lane/a"]).trim(),
+        "lane/a"
+    );
 
     // A record naming a worktree outside the lane root is refused, and that worktree kept.
     let path = f.at("state/lanes/b.json");
