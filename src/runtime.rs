@@ -99,7 +99,12 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // same failure. Fall back to a fresh conversation (the takeover brief is on disk, so the new
         // agent still picks up the context). Mirrors Codex's `resume --last || codex` below.
         interactive_resume: "claude --name '{box}' --plugin-dir {plugin} --continue || claude --name '{box}' --plugin-dir {plugin}",
-        headless_resume: "claude --plugin-dir {plugin} --continue --print {prompt} || claude --plugin-dir {plugin} --print {prompt}",
+        // `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` on both halves, so a headless run loads skein's
+        // hooks module where the build asks for the switch (SKEIN-1359). Measured on a throwaway
+        // home with no network: 2.1.272 left the module out under `--print` unless it was set,
+        // its flag "off, from the default"; 2.1.314 loads it either way. Here rather than in the
+        // launcher's exports, because this runs through a crossing that does not inherit them.
+        headless_resume: "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir {plugin} --continue --print {prompt} || CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir {plugin} --print {prompt}",
         context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
     RuntimeAdapter {
@@ -322,6 +327,18 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     // plugin's own `.mcp.json`, so it loads and unloads with the plugin.
     (".mcp.json", include_str!("plugin/.mcp.json")),
     ("bin/skein-mcp", include_str!("plugin/bin/skein-mcp")),
+    // The hooks module (SKEIN-1359): the file `hooks/hooks.json` names under `modules`, and one
+    // file per feature it imports. Every file under `src/plugin/hooks/` is listed here, which
+    // `every_hooks_module_file_ships` holds; the tests, the `$.state` contract and the tsconfig
+    // are for `tools/plugin-check.sh` and stay out of a box.
+    (
+        "hooks/register.tsx",
+        include_str!("plugin/hooks/register.tsx"),
+    ),
+    (
+        "hooks/identity.ts",
+        include_str!("plugin/hooks/identity.ts"),
+    ),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
@@ -398,9 +415,13 @@ mod tests {
     ///
     /// What would make it fail: dropping `--plugin-dir {plugin}` from any of the three strings, or
     /// from the fallback half of one (a box whose `--continue` finds nothing would then start
-    /// without the plugin); or `for_box` leaving `{plugin}` unresolved.
+    /// without the plugin); or `for_box` leaving `{plugin}` unresolved. And a headless half
+    /// without `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in front of its `claude` (SKEIN-1359): a
+    /// build that asks for the switch would then run the headless turn without skein's hooks
+    /// module.
     #[test]
     fn every_claude_the_adapter_starts_loads_skeins_plugin() {
+        const MODS: &str = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 ";
         let claude = runtime_adapter("claude").unwrap();
         for (what, command) in [
             ("interactive_start", claude.interactive_start),
@@ -409,6 +430,12 @@ mod tests {
         ] {
             let starts: Vec<&str> = command.split("||").map(str::trim).collect();
             for start in starts {
+                let start = match what {
+                    "headless_resume" => start.strip_prefix(MODS).unwrap_or_else(|| {
+                        panic!("{what} starts a claude without the hooks-module switch: {start:?}")
+                    }),
+                    _ => start,
+                };
                 assert!(
                     start.starts_with("claude ") && start.contains(" --plugin-dir {plugin}"),
                     "{what} starts a claude without skein's plugin: {start:?}"
@@ -584,5 +611,97 @@ mod tests {
             "the tools run something the plugin does not ship: {mcp}"
         );
         assert!(file("bin/skein-mcp").starts_with("#!/usr/bin/env python3"));
+    }
+
+    /// **The hooks module a box loads is the whole of it** (SKEIN-1359): `hooks/hooks.json` names
+    /// a module the build ships, every file under `src/plugin/hooks/` ships with the bytes it has
+    /// on disk, and every file a shipped module imports for its values ships too. A box gets only
+    /// [`PLUGIN_FILES`], so a feature file written beside `register.tsx` and not listed there loads
+    /// in `claude plugin test` and fails in every box.
+    ///
+    /// `import type` is left out of the last rule: the engine strips it, so `../types` (the
+    /// `$.state` contract, which a box does not get) is imported that way, and it was measured
+    /// loading from the shipped files alone.
+    ///
+    /// What would make it fail: a file in `src/plugin/hooks/` missing from `PLUGIN_FILES`, or
+    /// listed there with other bytes; `modules` naming a file that is not shipped; or a shipped
+    /// module importing a value from a file that is not.
+    #[test]
+    fn every_hooks_module_file_ships() {
+        let shipped = |rel: &str| {
+            PLUGIN_FILES
+                .iter()
+                .find(|(r, _)| *r == rel)
+                .map(|(_, b)| *b)
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/plugin/hooks");
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let rel = format!("hooks/{name}");
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                shipped(&rel),
+                Some(on_disk.as_str()),
+                "src/plugin/{rel} is not in PLUGIN_FILES as it is on disk"
+            );
+        }
+
+        let hooks: serde_json::Value =
+            serde_json::from_str(shipped("hooks/hooks.json").unwrap()).unwrap();
+        let modules = hooks["modules"]
+            .as_array()
+            .expect("hooks.json names no module");
+        assert_eq!(
+            modules.len(),
+            1,
+            "the engine takes one hooks module: {modules:?}"
+        );
+        let entry = modules[0].as_str().unwrap();
+        let entry = format!("hooks/{}", entry.trim_start_matches("./"));
+        assert!(
+            shipped(&entry).is_some(),
+            "{entry} is named and not shipped"
+        );
+
+        // Every value import of a shipped module, resolved the way the engine resolves one: the
+        // path as written, or with a code suffix added.
+        const SUFFIXES: [&str; 9] = [
+            "", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts",
+        ];
+        // A statement at a time rather than a line, so an import a formatter spread over several
+        // lines is read whole: everything from one `import ` to its first `from '…'`.
+        for (rel, body) in PLUGIN_FILES.iter().filter(|(r, _)| r.starts_with("hooks/")) {
+            let statements = body
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for statement in statements.split("import ").skip(1) {
+                if statement.starts_with("type ") {
+                    continue;
+                }
+                let Some(target) = statement
+                    .split_once("from '")
+                    .and_then(|(_, rest)| rest.split_once('\''))
+                    .map(|(target, _)| target)
+                else {
+                    continue;
+                };
+                let Some(local) = target.strip_prefix("./") else {
+                    assert!(
+                        !target.starts_with('.'),
+                        "{rel} imports {target}, outside hooks/, which a box may not have"
+                    );
+                    continue;
+                };
+                assert!(
+                    SUFFIXES
+                        .iter()
+                        .any(|s| shipped(&format!("hooks/{local}{s}")).is_some()),
+                    "{rel} imports {target}, which the plugin does not ship"
+                );
+            }
+        }
     }
 }

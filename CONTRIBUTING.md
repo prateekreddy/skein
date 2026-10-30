@@ -233,14 +233,17 @@ gate that reads the tree rather than running it), `test` (`submodule-check` and 
 `citation` (`citation-check`) and `coverage`, whose `noskip-check` step judges the log of that job's
 own run of the suite rather than running it again (SKEIN-1273) — because one job running them in turn
 took thirty minutes a push (SKEIN-1228); each gate is still one step in one job, so a red X still
-names it. Twenty of the workflow's `- run:` steps are not gates. Seven are in the `test` job and the
+names it. Twenty-two of the workflow's `- run:` steps are not gates. Seven are in the `test` job and the
 same seven in `coverage`, the two set up alike so that a skip means the same in both: four
 prepare the machine, one builds the bubblewrap release pinned by its checksum in the workflow's
 `env:` (the runner's own is too old to overlay `~/.local`, SKEIN-1217), one proves bwrap actually
 works, one proves it is that release and that it overlays. One in `check` runs gitleaks — a release
 pinned by its checksum, with `.gitleaks.toml` as its allow-list, and not a gate only because a
 contributor's machine has no gitleaks — and one in `citation` deepens the clone for the step after
-it. Two are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds every
+it. Two are the `plugin` job: one installs the Claude Code and TypeScript releases pinned in its
+`env:`, and one runs `tools/plugin-check.sh`, which checks skein's box plugin and its hooks module
+with that build — not a gate for the reason gitleaks is not (docs/decisions/skein-is-a-mod.md). Two
+are the `msrv` job, which reads `rust-version` out of `Cargo.toml` and builds every
 target at it, and two more are the `coverage` job's measurements, which hold line coverage at a
 floor — both under
 "Releases, and what CI covers" below. The step that reports
@@ -251,7 +254,7 @@ holds one more that CI deliberately does not run. Both numbers below are checked
 `gate-list-check`, so neither can go stale the way the pair here did before SKEIN-741:
 
 ```sh
-grep -c '^      - run:' .github/workflows/ci.yml     # → 42
+grep -c '^      - run:' .github/workflows/ci.yml     # → 44
 tools/gates.sh --list | wc -l                        # → 23
 ```
 
