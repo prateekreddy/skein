@@ -2539,8 +2539,8 @@ mod tests {
     /// (the plugin would remove the cache under a running sibling); counting the box itself
     /// (`others_running` would be 1 with only `web-main` running); carrying the sibling counts with
     /// the items (the second tick would still say 1); or re-walking every tick (`at` would move).
-    /// Watched: with the `if running.is_empty() && unknown.is_empty()` guard removed, the third
-    /// tick's `none_running_at` moved to minute 2 and this failed.
+    /// Watched: with the `if running.is_empty() && unknown.is_empty()` guard made `if true`, the
+    /// first tick stamped `none_running_at` while `web-two` ran, and this failed.
     #[test]
     fn the_sibling_fact_is_read_every_tick_and_only_stamped_when_true() {
         let _lock = crate::testutil::env_lock();
