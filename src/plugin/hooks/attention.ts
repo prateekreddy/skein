@@ -22,6 +22,7 @@ import { atom, read, update } from 'claude-code'
 import type {
   EngineInterface,
   On,
+  Origin,
   SessionEndInput,
   SessionMeasureInput,
   SessionStartInput,
@@ -125,9 +126,11 @@ export async function onTurnStart($: EngineInterface, e: TurnStartInput): Promis
 
 /**
  * A tool call returned, whoever answered it: the permission it was asked about, or the question
- * it put, is settled. Every other call changes nothing.
+ * it put, is settled. Every other call changes nothing, and one this module made itself (the
+ * tracker's `held` at a start, SKEIN-1400) settles nothing: no dialog was the box's (SKEIN-1402).
  */
-export async function onToolCall($: EngineInterface, e: ToolCallInput): Promise<void> {
+export async function onToolCall($: EngineInterface, e: ToolCallInput, origin?: Origin): Promise<void> {
+  if (origin !== undefined && ours($, origin)) return
   await change($, was => {
     const settles =
       was.asking === e.tool_use_id || (was.state === 'permission' && was.asking === '')
@@ -209,9 +212,12 @@ export function register(on: On): void {
   // here is not yet the person's: auto mode's classifier, or a settings hook, may settle it before
   // any dialog opens, and writing it would flash "needs you" on a box nobody had to touch. So the
   // ask is only remembered, to name the call when the dialog is seen to open below.
+  // A query (`$.tool.check`, the tracker's own at a start among them) has no call behind it and
+  // opens no dialog, so its ask is not remembered (SKEIN-1402).
   on('tool.check', { approver: 'person' }, async ($, e, next) => {
     const verdict = await next(e)
-    if (verdict.decision === 'ask' && e.tool !== 'AskUserQuestion') {
+    const isCall = e.tool_use_id !== undefined
+    if (verdict.decision === 'ask' && e.tool !== 'AskUserQuestion' && isCall) {
       await remember($, was => ({
         ...was,
         asked: { id: e.tool_use_id ?? '', tool: e.tool, agent: e.agentId ?? '' },
@@ -302,4 +308,9 @@ async function write($: EngineInterface, held: SkeinAttention, seen: string): Pr
   } catch {
     // Read-only, gone, or full: see above.
   }
+}
+
+/** Raised by this module itself, through its own `$`. */
+function ours($: EngineInterface, origin: Origin): boolean {
+  return origin.plugin === $.plugin.name
 }

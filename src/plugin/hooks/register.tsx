@@ -99,7 +99,7 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const answered = await next(e)
     await quietly(agentsPanelToolCall($, e, answered))
-    await quietly(attentionToolCall($, e))
+    await quietly(attentionToolCall($, e, next.origin))
 
     return answered
   }).catch(($, e, next) => next(e))
