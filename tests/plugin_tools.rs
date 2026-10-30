@@ -1296,7 +1296,7 @@ fn the_command_line_clean_is_the_same_tool() {
 /// lists every five minutes, so a list that old means skein is not looking, and what it says may no
 /// longer be true: a build directory may since have become tracked work.
 ///
-/// What would make it fail: `clean_rows` treating every list as fresh (`stale = False`), which
+/// What would make it fail: the plugin treating every list as fresh (`stale = False`), which
 /// removes the own cache and the shared one from a list twenty minutes old. Watched: with exactly
 /// that, the own-cache removal went ahead and this failed.
 #[test]
