@@ -11,16 +11,25 @@
 // file (`~/.claude/sync/<session>.watch`). So that file's modification time is the last renewal.
 // Only its time is read. The file holds a credential, and it is never opened here.
 //
+// A claim made before this module loaded (a resumed session, a CLI restart onto a new rollout) was
+// never heard. So once a session, as soon as the tracker's `held` is listed, the module asks it
+// itself: through `$.tool.call`, which runs every hook but the caller's, so the `tool.call` hook
+// below hears the answer exactly as it hears the model's own `held`. It is asked only where the
+// permission check already allows it, so no dialog ever opens for it (SKEIN-1400).
+//
 // The compaction keeper (keeper.ts) reads the same list, through `heldNow`.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On, TurnCompleteInput } from 'claude-code'
+import type { EngineInterface, On, SessionStartInput, TurnCompleteInput } from 'claude-code'
 
 import type { SkeinLease, SkeinLeases } from '../types'
 
 export const leases = atom({ plugin: 'skein', key: 'leases' } as const, null, {
   shape: 'leases-1',
 })
+
+/** True once this session has asked the tracker's `held` for itself, or decided not to. */
+export const seeded = atom({ plugin: 'skein', key: 'leasesSeeded' } as const, false)
 
 /** A tracker tool, by the name the engine lists it under: `mcp__plugin_sync_sync__claim` and the like. */
 const TRACKER_TOOL = /^mcp__(?:.+_)?sync__([a-z_]+)$/
@@ -44,9 +53,46 @@ export function register(on: On): void {
   })
 }
 
+/** At the session's start, from the one `session.start` hook register.tsx holds (SKEIN-1387). */
+export async function onStart($: Engine, _e: SessionStartInput): Promise<void> {
+  await seed($)
+}
+
 /** As a turn ends, from the one `turn.complete` hook register.tsx holds (SKEIN-1387). */
 export async function onTurnComplete($: Engine, e: TurnCompleteInput): Promise<void> {
-  if (e.agentId === undefined) await remind($)
+  if (e.agentId !== undefined) return
+  // The tracker's tools may not have been listed yet when the session started.
+  try {
+    await seed($)
+  } catch {
+    // Not asked this time; the reminders still run on what was heard.
+  }
+  await remind($)
+}
+
+/**
+ * Ask the tracker's `held` once a session, so a claim made before this module loaded is known by
+ * its item. Nothing before the tracker is listed; never where the permission check would ask.
+ */
+async function seed($: Engine): Promise<void> {
+  if (await read($, seeded)) return
+  const held = (await $.tool.list()).map(t => t.name).find(isHeld)
+  if (held === undefined) return
+  let first = false
+  await update($, seeded, was => {
+    first = !was
+    return true
+  })
+  if (!first) return
+  const { decision } = await $.tool.check({ tool: held, input: {} })
+  if (decision !== 'allow') return
+  // Heard by the `tool.call` hook in `register`, like the model's own `held`.
+  await $.tool.call({ tool: held })
+}
+
+/** The tracker's `held`, by the name the engine lists it under. */
+function isHeld(name: string): name is `mcp__${string}__held` {
+  return TRACKER_TOOL.exec(name)?.[1] === 'held'
 }
 
 /** What the session holds now, and whether there is a tracker at all, for the compaction keeper. */
