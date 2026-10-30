@@ -1632,8 +1632,9 @@ mod tests {
         let script = check_script("/depot/agent-cli/claude@2.1.314", "/src", plugin);
         assert!(
             script.contains(&format!(
-                " --ro-bind {} /tsc ",
-                sh_quote(&ts.display().to_string())
+                " --ro-bind {} {} ",
+                sh_quote(&ts.display().to_string()),
+                sh_quote("/tsc")
             )),
             "{script}"
         );
