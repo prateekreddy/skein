@@ -771,7 +771,10 @@ inherited_env=(
   # the ones a box has no use for as it reads them.
   SKEIN_FLEET_LIMITS SKEIN_FLEET_GUARANTEES SKEIN_GIT_SCOPE SKEIN_BOX_REPO SKEIN_BOX_PRIVILEGED
   SKEIN_MODEL_SCRATCH SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE SKEIN_BOX_PEERS SKEIN_FLEET_NAME
-  SKEIN_BOX_TELEMETRY
+  SKEIN_BOX_TELEMETRY SKEIN_BOX_VERSIONS
+  # Where the agent CLIs' npm prefix is, for the fleet tests, which cannot write the real one.
+  # Unset in production, where it is /usr/local/share/npm-global (SKEIN-1372).
+  SKEIN_NPM_PREFIX
   # Where the fleet's own files are. Unset in production (it defaults to /boxes); a test fixture
   # sets it, and then the probes and the request helpers inside its boxes must resolve the
   # fixture's launcher and queues rather than the live fleet's.
@@ -2754,6 +2757,124 @@ if [ -n "$announce" ]; then
 fi
 unset uncovered
 
+# --- the fleet's agent CLIs: each one a version skein fetched, tested and rolled out (SKEIN-1372) --
+#
+# `fleet::versions` keeps each CLI version as its own immutable npm prefix in the depot,
+# `.skein/depot/agent-cli/<runtime>@<version>`, and skein names the rolled-out one for this box in
+# `SKEIN_BOX_VERSIONS` (`claude=claude@2.1.314 codex=codex@0.170.0`). When it names any, a
+# read-only tmpfs is mounted over the prefix bound above, holding everything of the sandbox's
+# own prefix read-only as before, except that each named CLI's package directory is bound from its
+# depot entry and its command is the link npm made in that entry. So a box runs exactly the version
+# skein rolled out, at the path its PATH already names, and a rollout changes nothing under a running
+# box: it changes what the NEXT start binds, and the box is shown "restart to apply". A CLI with
+# nothing rolled out is the sandbox's own copy, as before. What was bound is reported on the
+# `SKEIN_VERSIONS` line below, and the placement record keeps it.
+#
+# `SKEIN_NPM_PREFIX` exists for the fleet tests, which cannot write the real prefix; skein never
+# sets it, and it names where the projection goes, not anything a box chooses.
+npm_prefix="${SKEIN_NPM_PREFIX:-/usr/local/share/npm-global}"
+depot="${SKEIN_FLEET_ROOT:-/boxes}/.skein/depot"
+# The whole depot read-only in EVERY box, the workshop box included, for the reason the toolchain
+# and browser binds below give: a covered box sees `.skein` read-only already, but the workshop box
+# and an uncovered one see the fleet root as the sandbox does, and an entry's directory keeps its
+# owner's write bit. Made here if missing, so a box started before the first fill still sees it.
+if mkdir -p -- "$depot" 2>/dev/null; then
+  binds+=(--ro-bind "$depot" "$depot")
+fi
+versions_bound=""
+rustup_home=""
+# `box_version <key>`: the entry `SKEIN_BOX_VERSIONS` names for the key, when it is the shape of an
+# entry and a real directory of the depot rather than a link; fails otherwise. Read into an array,
+# so nothing in the value is globbed.
+box_version() {
+  local kv entry dir="$depot/agent-cli"
+  local -a kvs=()
+  read -r -a kvs <<<"${SKEIN_BOX_VERSIONS-}"
+  case "$1" in rust | rust-repo) dir="$depot/rust-toolchain" ;; esac
+  for kv in "${kvs[@]}"; do
+    [ "${kv%%=*}" = "$1" ] || continue
+    entry="${kv#*=}"
+    case "$entry" in "" | .* | *..* | */* | *[!A-Za-z0-9._@+-]*) return 1 ;; esac
+    [ -d "$dir/$entry" ] && [ ! -L "$dir/$entry" ] || return 1
+    printf '%s' "$entry"
+    return 0
+  done
+  return 1
+}
+# The CLIs skein manages, `<runtime> <package> <command>`: `fleet::versions::CLIS`, which a test
+# holds to this table.
+skein_clis=("claude @anthropic-ai/claude-code claude" "codex @openai/codex codex")
+cli_rows=()
+for row in "${skein_clis[@]}"; do
+  read -r rt pkg cmd <<<"$row"
+  entry="$(box_version "$rt")" || continue
+  # The command must be the link npm made into the entry's own package, as the entry's test found it.
+  link="$(readlink -- "$depot/agent-cli/$entry/bin/$cmd" 2>/dev/null)" || continue
+  case "$link" in "../lib/node_modules/$pkg/"*) ;; *) continue ;; esac
+  case "$link" in */../*) continue ;; esac
+  [ -d "$depot/agent-cli/$entry/lib/node_modules/$pkg" ] || continue
+  cli_rows+=("$rt $entry $pkg $cmd $link")
+done
+if [ -d "$npm_prefix" ] && [ "${#cli_rows[@]}" -gt 0 ]; then
+  managed_pkgs=" "; managed_cmds=" "
+  for row in "${cli_rows[@]}"; do
+    read -r rt entry pkg cmd link <<<"$row"
+    managed_pkgs+="$pkg "; managed_cmds+="$cmd "
+  done
+  binds+=(--tmpfs "$npm_prefix" --dir "$npm_prefix/bin" --dir "$npm_prefix/lib/node_modules")
+  # `share_item <path>`: the sandbox's own item, at its own path, read-only; a link as the same link.
+  share_item() {
+    if [ -L "$1" ]; then
+      binds+=(--symlink "$(readlink -- "$1")" "$1")
+    else
+      binds+=(--ro-bind "$1" "$1")
+    fi
+  }
+  for item in "$npm_prefix"/* "$npm_prefix"/.[!.]*; do
+    [ -e "$item" ] || [ -L "$item" ] || continue
+    case "${item##*/}" in
+      bin)
+        for one in "$item"/* "$item"/.[!.]*; do
+          [ -e "$one" ] || [ -L "$one" ] || continue
+          case "$managed_cmds" in *" ${one##*/} "*) continue ;; esac
+          share_item "$one"
+        done ;;
+      lib)
+        for one in "$item"/* "$item"/.[!.]*; do
+          [ -e "$one" ] || [ -L "$one" ] || continue
+          [ "${one##*/}" = node_modules ] || { share_item "$one"; continue; }
+          for mod in "$one"/* "$one"/.[!.]*; do
+            [ -e "$mod" ] || [ -L "$mod" ] || continue
+            case "${mod##*/}" in
+              @*)
+                for scoped in "$mod"/*; do
+                  [ -e "$scoped" ] || [ -L "$scoped" ] || continue
+                  case "$managed_pkgs" in *" ${mod##*/}/${scoped##*/} "*) continue ;; esac
+                  share_item "$scoped"
+                done ;;
+              *)
+                case "$managed_pkgs" in *" ${mod##*/} "*) continue ;; esac
+                share_item "$mod" ;;
+            esac
+          done
+        done ;;
+      *) share_item "$item" ;;
+    esac
+  done
+  unset -f share_item
+  for row in "${cli_rows[@]}"; do
+    read -r rt entry pkg cmd link <<<"$row"
+    binds+=(--ro-bind "$depot/agent-cli/$entry/lib/node_modules/$pkg" "$npm_prefix/lib/node_modules/$pkg")
+    binds+=(--symlink "$link" "$npm_prefix/bin/$cmd")
+    versions_bound+=" $rt=$entry"
+  done
+  binds+=(--remount-ro "$npm_prefix")
+elif [ -d "$npm_prefix" ] && [ "$npm_prefix" != /usr/local/share/npm-global ]; then
+  binds+=(--ro-bind "$npm_prefix" "$npm_prefix")
+fi
+unset cli_rows row rt pkg cmd entry link item one mod scoped managed_pkgs managed_cmds
+unset SKEIN_NPM_PREFIX
+
 # --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------
 #
 # `bootstrap.sh` installs one toolchain under the fleet root's `.skein`, and every box used to say
@@ -2771,6 +2892,12 @@ unset uncovered
 # `rustup` would then fail on a read-only file system with a message about a settings file. The
 # shim bound over the box's `~/.cargo/bin/rustup` says why instead, for the subcommands that change
 # a toolchain, and runs the real one for everything else (`rustup show`, a bare `rustup default`).
+#
+# **The shim is also what `cargo`, `rustc` and every other proxy reach** (SKEIN-1379). bootstrap
+# makes them relative links to `rustup` in that same `bin`, so in a box each resolves to this shim,
+# and rustup decides which tool to be by the name it was run as. The shim used to `exec` rustup by
+# its own path, so `cargo --version` in a box printed rustup's version instead. It is bash, to keep
+# the name it was called by with `exec -a`, and it refuses only when that name is `rustup`.
 toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
 if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/null; then
   binds+=(--ro-bind "$toolchain" "$toolchain")
@@ -2778,9 +2905,11 @@ if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/nul
   if [ -f "$toolchain/cargo/bin/rustup" ]; then
     open_new "$bin_at" rustup || exit 1
     {
-      printf '#!/bin/sh\n'
+      printf '#!/bin/bash\n'
       printf 'skein_rustup=%q\n' "$toolchain/cargo/bin/rustup"
       cat <<'RUSTUPSHIM'
+called="${0##*/}"
+[ "$called" = rustup ] || exec -a "$called" "$skein_rustup" "$@"
 sub=''; arg=''
 for a in "$@"; do
   case "$a" in -*|+*) continue ;; esac
@@ -2796,8 +2925,42 @@ RUSTUPSHIM
     } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
     binds+=(--ro-bind-fd "$new_fd" "$HOME/.cargo/bin/rustup")
   fi
+  # **Which toolchains, once skein has rolled one out (SKEIN-1372).** Each toolchain is then an
+  # immutable entry of the depot, `.skein/depot/rust-toolchain/<version>-<triple>`, and this box's
+  # rustup home is put together here from what `SKEIN_BOX_VERSIONS` names: a read-only tmpfs at
+  # `~/.rustup` holding the fleet's default toolchain (also under `stable-<triple>`, so a repo that
+  # says `stable` gets it), the box's repo's own toolchain when its `rust-toolchain.toml` pins one
+  # skein has fetched, rustup's `settings.toml` naming the default, and the empty `update-hashes`
+  # rustup insists on. rustup then picks the repo's toolchain by its file, from a home nothing can
+  # write (measured 2026-10-30 with rustup 1.29.0: selection by `rust-toolchain.toml` works from a
+  # read-only home once `update-hashes` exists). The proxies stay the bootstrap's, bound above.
+  # `~/.rustup` is made by name only when absent and used only when it is a real directory, so a
+  # link the box put there is never followed out of the box.
+  rust_default="$(box_version rust)" || rust_default=""
+  rust_repo="$(box_version rust-repo)" || rust_repo=""
+  if [ -n "$rust_default" ]; then
+    [ -e "$home_at/.rustup" ] || [ -L "$home_at/.rustup" ] || mkdir -- "$home_at/.rustup" 2>/dev/null
+    if [ -d "$home_at/.rustup" ] && [ ! -L "$home_at/.rustup" ] && open_new "$bin_at" rustup-settings.toml; then
+      printf 'version = "12"\ndefault_toolchain = "%s"\nprofile = "minimal"\n\n[overrides]\n' \
+        "$rust_default" >&"$new_fd" && land_new 644 keep || { drop_new; exit 1; }
+      rustup_home="$HOME/.rustup"
+      binds+=(--tmpfs "$rustup_home" --dir "$rustup_home/update-hashes" --dir "$rustup_home/toolchains")
+      binds+=(--ro-bind "$depot/rust-toolchain/$rust_default" "$rustup_home/toolchains/$rust_default")
+      case "$rust_default" in
+        1.*) binds+=(--ro-bind "$depot/rust-toolchain/$rust_default" "$rustup_home/toolchains/stable-${rust_default#*-}") ;;
+      esac
+      versions_bound+=" rust=$rust_default"
+      if [ -n "$rust_repo" ] && [ "$rust_repo" != "$rust_default" ]; then
+        binds+=(--ro-bind "$depot/rust-toolchain/$rust_repo" "$rustup_home/toolchains/$rust_repo")
+        versions_bound+=" rust-repo=$rust_repo"
+      fi
+      binds+=(--ro-bind-fd "$new_fd" "$rustup_home/settings.toml" --remount-ro "$rustup_home")
+    fi
+  fi
 fi
-unset toolchain
+unset toolchain rust_default rust_repo
+unset -f box_version
+unset SKEIN_BOX_VERSIONS
 
 # --- the fleet's Playwright browsers: one copy of each, read by every box, written by none ---------
 #
@@ -3455,6 +3618,11 @@ tmux_bin="$(command -v tmux || true)"
 # the only moment the answer exists. The namespace is about to be made, and afterwards nothing on
 # the host can ask which script made it — so it is said here and recorded in the placement.
 printf "SKEIN_LAUNCHER %s\n" "$launcher_revision"
+# What this box was given from the depot (SKEIN-1372), `key=entry` apart: each agent CLI and Rust
+# toolchain the binds above actually made, which is what the box runs until it restarts. Always
+# printed, empty when nothing was, so a box on the sandbox's own copies reads as that and not as
+# a launcher too old to say. Before the namespace exists, for `SKEIN_LAUNCHER`'s reason.
+printf "SKEIN_VERSIONS%s\n" "$versions_bound"
 
 # SURFACE 1 — the box's own terminal (SKEIN-846).
 #
@@ -3494,7 +3662,8 @@ exec bwrap \
   -- \
   bash -lc '
     tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; repo_cache="$7"
-    shift 7
+    rustup_home="$8"
+    shift 8
     # The box own PATH, decided at the top of this file and handed across as a positional.
     #
     # HERE and not before the exec, and not with bwrap --setenv, for the two reasons written up
@@ -3538,7 +3707,14 @@ exec bwrap \
     # the shared read-only bin, so every install failed (SKEIN-1349). ~/.local/bin is first on
     # box_path. ~/.local is the per-box copy-on-write overlay, so an install lasts until the box
     # restarts; the box guide (src/kit/spec.yaml) says so.
-    if [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
+    #
+    # Once a toolchain is rolled out (SKEIN-1372), RUSTUP_HOME is the read-only home the launcher put
+    # together at ~/.rustup instead, and RUSTUP_AUTO_INSTALL=0 turns a toolchain it lacks into
+    # rustup saying it is not installed, where an install attempt failed on a read-only temp root.
+    if [ -n "$rustup_home" ]; then
+      export RUSTUP_HOME="$rustup_home" CARGO_HOME="$HOME/.cargo" CARGO_INSTALL_ROOT="$HOME/.local" \
+        RUSTUP_AUTO_INSTALL=0
+    elif [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
       export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo" \
         CARGO_INSTALL_ROOT="$HOME/.local"
     fi
@@ -3588,4 +3764,4 @@ exec bwrap \
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
   ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${repo_cache-}" \
-    "${pane_cmd[@]}"
+    "${rustup_home-}" "${pane_cmd[@]}"

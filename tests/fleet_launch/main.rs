@@ -107,6 +107,7 @@ mod sudo;
 mod swapped;
 mod telemetry;
 mod trust;
+mod versions;
 
 use environment::with_launch_env;
 use fixture::*;

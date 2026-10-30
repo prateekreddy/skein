@@ -28,18 +28,43 @@ import {
   onTurnComplete as attentionTurnComplete,
   onTurnStart as attentionTurnStart,
 } from './attention'
+import {
+  register as agentsPanel,
+  onSpawn as agentsPanelSpawn,
+  onStart as agentsPanelStart,
+  onStep as agentsPanelStep,
+  onToolCall as agentsPanelToolCall,
+  onTurnComplete as agentsPanelTurnComplete,
+} from './agents-panel'
 import { register as identity, onStart as identityStart } from './identity'
 
 export const register: Register = on => {
   identity(on)
+  agentsPanel(on)
   attention(on)
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await quietly(identityStart($, e))
+    await quietly(agentsPanelStart($, e))
     await quietly(attentionStart($, e))
 
     return started
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (started.deny !== undefined) return started
+    await quietly(agentsPanelSpawn($, e, started))
+
+    return started
+  }).catch(($, e, next) => next(e))
+
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    await quietly(agentsPanelStep($, e, result))
+
+    return result
   })
 
   on('turn.start', async ($, e, next) => {
@@ -49,6 +74,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    await quietly(agentsPanelTurnComplete($, e))
     await quietly(attentionTurnComplete($, e))
 
     return next(e)
@@ -56,6 +82,7 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const answered = await next(e)
+    await quietly(agentsPanelToolCall($, e, answered))
     await quietly(attentionToolCall($, e))
 
     return answered

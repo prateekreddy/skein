@@ -628,6 +628,14 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "after a whole-box restart the record does not name the launcher that started it — the \
          box's own profile wrote `forged-by-the-box` over it, or the old record survived"
     );
+    // And what it was given from the depot (SKEIN-1372): nothing is rolled out here, so the map is
+    // empty, but present. What would make this fail: `restart_box`'s start not recording
+    // `versions_from_launch`, which leaves `None`, the answer of a launcher too old to say.
+    assert_eq!(
+        after.versions,
+        Some(Default::default()),
+        "a restarted box does not record the versions it was started on"
+    );
     fs::remove_file(&profile).unwrap();
 
     // ---- stopping and destroying settle the gate too, and this is also the teardown ----

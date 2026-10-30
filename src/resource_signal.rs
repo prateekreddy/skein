@@ -231,10 +231,31 @@ pub struct Signals {
     /// absent.
     #[serde(default)]
     pub cleared: BTreeMap<String, String>,
+    /// Versions rolled out since this box started that a restart would give it (SKEIN-1372): an
+    /// agent CLI or a Rust toolchain. Empty when it runs what a start would bind now. The box
+    /// chooses its moment with `skein_resources`' `restart: "when-idle"`; otherwise skein restarts
+    /// it once it has been idle a while (`fleet::versions::restart_onto_rollouts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updates: Vec<Update>,
     /// What in this box can be removed and made again, for the plugin's `skein_clean` and
     /// `skein_top` (SKEIN-1356). Absent when skein has not listed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<CleanList>,
+}
+
+/// One version a restart would move this box onto.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Update {
+    /// `claude`, `codex`, `rust`, or `rust-repo` for the toolchain the box's repo names.
+    pub component: String,
+    /// What the box runs: a depot entry, or empty for the sandbox's own copy.
+    pub have: String,
+    /// What a restart gives it, in the same terms.
+    pub new: String,
+    /// Always `restart`: nothing else applies it.
+    pub applies: String,
+    /// Whether this box has asked to be restarted onto it once its turn ends.
+    pub restart_requested: bool,
 }
 
 /// What in one box can be removed and made again, as `fleet::box_cleanables` lists it, and its
@@ -583,6 +604,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
         },
         asks: Vec::new(),
         cleared: BTreeMap::new(),
+        updates: Vec::new(),
         clean: r.clean.clone(),
     };
 
@@ -963,8 +985,14 @@ pub fn read(state: &Path) -> Option<Signals> {
 
 /// Work out and write one box's file from its previous one and a reading.
 pub fn write_box(state: &Path, r: &Reading) -> Result<Signals, String> {
+    write_box_with(state, r, Vec::new())
+}
+
+/// [`write_box`] with the versions a restart would move the box onto.
+pub fn write_box_with(state: &Path, r: &Reading, updates: Vec<Update>) -> Result<Signals, String> {
     let prev = read(state);
-    let signals = next(prev.as_ref(), r);
+    let mut signals = next(prev.as_ref(), r);
+    signals.updates = updates;
     let path = signal_path(state);
     let dir = path
         .parent()
@@ -1069,7 +1097,20 @@ pub fn write_every_box() -> Result<usize, String> {
                 &mut repo_caches,
             ),
         };
-        match write_box(&entry.path(), &reading) {
+        let asked = crate::fleet::versions::restart_requested(&name);
+        let updates = crate::fleet::running_record(&name)
+            .map(|record| crate::fleet::versions::pending_for(&record, &name))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| Update {
+                component: p.component,
+                have: p.have,
+                new: p.new,
+                applies: "restart".into(),
+                restart_requested: asked,
+            })
+            .collect();
+        match write_box_with(&entry.path(), &reading, updates) {
             Ok(_) => written += 1,
             Err(e) => failed.push(format!("{name}: {e}")),
         }

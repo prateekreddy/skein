@@ -71,11 +71,70 @@ export type SkeinAttention = {
   marks: Record<string, number>
 }
 
+/** Where a subagent's run stands: working, answered, ended on an error or refusal, or interrupted. */
+export type SkeinAgentStatus = 'running' | 'done' | 'failed' | 'stopped'
+
+/** What skein knows of a subagent that works as a lane: in a git worktree of this repository. */
+export type SkeinAgentLane = {
+  /** The worktree it works in, as git records it under `.git/worktrees/`. */
+  worktree: string
+  /**
+   * True once one of its own tool calls named the worktree. Until then it is the one its brief
+   * named first, and its first tool call that names a worktree replaces it.
+   */
+  isSeenAtWork: boolean
+  /** The worktree's branch, from its `HEAD`; null when detached or unreadable. */
+  branch: string | null
+  /** The tracker item it claimed, as the claim's own answer named it; null before a claim. */
+  item: { id: string; title: string; isHeld: boolean } | null
+  /** Its place at the shared heavy-work lock: waiting for it, holding it, or neither. */
+  lock: 'waiting' | 'holding' | null
+}
+
+/** One subagent of this session, as the agents panel draws it (SKEIN-1361). */
+export type SkeinAgentRun = {
+  /** The engine's agent id, or the Agent call's id when none was given. */
+  id: string
+  agentId: string | null
+  /** The agent type: `general-purpose`, `Explore`, a plugin's. */
+  type: string
+  /** The Agent call's few words. */
+  description: string
+  model: string
+  effort: string | null
+  status: SkeinAgentStatus
+  startedAt: number
+  endedAt: number | null
+  /** The last request's prompt and output: how full its context is. */
+  contextTokens: number
+  contextMax: number
+  /** Every token of every request it made. */
+  tokens: number
+  /** Dollars, from `hooks/prices.ts`, of the requests whose model has a price. */
+  costUsd: number
+  /** True once a request was made on a model with no price: the cost is then a floor. */
+  isUnpriced: boolean
+  /** Requests seen. */
+  steps: number
+  lane: SkeinAgentLane | null
+}
+
+/** The agents panel's own settings for the session. */
+export type SkeinAgentsPanel = {
+  isCompact: boolean
+  isDoneCollapsed: boolean
+  /** The person closed the panel: a new subagent no longer opens it until they open it again. */
+  isClosedByPerson: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     skein: {
       identity: Shaped<SkeinIdentity | null>
       attention: Shaped<SkeinAttention | null>
+      agents: Shaped<SkeinAgentRun[]>
+      agentsPanel: Shaped<SkeinAgentsPanel>
+      agentsNow: number
     }
   }
 }

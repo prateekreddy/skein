@@ -337,6 +337,9 @@ const RESTART_REASONS = {
   workshop: "its workshop setting was changed",
   exposure: "its repository was added or removed",
   telemetry: "the telemetry setting was changed",
+  // SKEIN-1372: a version rolled out in Settings → Update. The box moves on its own once it is idle.
+  "agent-cli": "a new agent CLI version was rolled out",
+  "rust-toolchain": "a new Rust toolchain was rolled out",
 };
 function staleReasons(name) {
   const said = (boxes.find(b => b.name === name)?.stale || []).map(k => RESTART_REASONS[k]).filter(Boolean);
