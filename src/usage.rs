@@ -95,7 +95,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 ///
 /// It is carried out to the caller on every report so a number on a page can say how old the rates
 /// behind it are, rather than looking equally current a year from now.
-pub const PRICES_AS_OF: &str = "2026-09-12";
+pub const PRICES_AS_OF: &str = "2026-10-30";
 
 /// Dollars per million tokens, one row per model.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -111,19 +111,30 @@ pub struct Price {
 ///
 /// Input and output are the list prices. Cache read is 0.1× input and cache writes are 1.25×
 /// (5-minute) and 2× (1-hour) input — **except `claude-fable-5-1`, whose cache read is $0.25 rather
-/// than the $1.00 the multiplier would give**, which is exactly why the five numbers are written out
-/// per model instead of derived from two.
+/// than the $1.00 the multiplier would give, and `claude-opus-5-5`, whose cache read is $0.20 rather
+/// than $0.40**, which is exactly why the five numbers are written out per model instead of derived
+/// from two.
+///
+/// `claude-opus-5-5` and `claude-sonnet-5-5` have rows of their own because the prefix rule below
+/// would otherwise price them as `claude-opus-5` and `claude-sonnet-5`. For Sonnet the numbers are
+/// the same; for Opus 5.5 they are lower, and before its row it read 25% dear.
+///
+/// The agents panel in the box's hooks module prices with this same table, copied row for row into
+/// `src/plugin/hooks/prices.ts`; `the_mods_price_table_is_usages` holds the two equal.
 ///
 /// **What is deliberately absent.** `claude-mythos-5-1` and `claude-sonnet-4-5` are used by this
 /// fleet or adjacent to it and are *not* here, because their cache-read rate is either unsettled or
-/// not something this file can cite. They therefore surface in [`UsageReport::unpriced`]. That is
+/// not something this file can cite. Nor is `claude-haiku-5-5`, whose price depends on the length
+/// of each request's prompt, which a per-model row cannot say. They therefore surface in [`UsageReport::unpriced`]. That is
 /// the honest outcome and it is the point of the mechanism: a guessed rate would produce a number
 /// that looks exactly like a known one.
 const PRICES: &[(&str, Price)] = &[
+    ("claude-opus-5-5", OPUS_5_5),
     ("claude-opus-5", OPUS),
     ("claude-opus-4-8", OPUS),
     ("claude-opus-4-7", OPUS),
     ("claude-opus-4-6", OPUS),
+    ("claude-sonnet-5-5", SONNET_5),
     ("claude-sonnet-5", SONNET_5),
     ("claude-sonnet-4-6", SONNET_4_6),
     ("claude-haiku-4-5", HAIKU),
@@ -131,6 +142,13 @@ const PRICES: &[(&str, Price)] = &[
     ("claude-fable-5-1", FABLE_5_1),
 ];
 
+const OPUS_5_5: Price = Price {
+    input: 4.0,
+    output: 20.0,
+    cache_read: 0.2,
+    cache_write_5m: 5.0,
+    cache_write_1h: 8.0,
+};
 const OPUS: Price = Price {
     input: 5.0,
     output: 25.0,
@@ -1569,6 +1587,64 @@ mod tests {
             "but they are still counted as tokens"
         );
         assert!(!r.models[0].priced, "the model row says it was not priced");
+    }
+
+    /// The agents panel's price table (`src/plugin/hooks/prices.ts`) is this one, row for row.
+    ///
+    /// Fails if a row is added, dropped or changed on one side only, if a row there no longer reads
+    /// as `['<model>', in, out, read, write_5m, write_1h],`, or if the two dates differ: the box
+    /// would then show a subagent's cost on prices the cockpit does not use.
+    #[test]
+    fn the_mods_price_table_is_usages() {
+        let source = include_str!("plugin/hooks/prices.ts");
+        let date = source
+            .lines()
+            .find_map(|l| l.strip_prefix("export const PRICES_AS_OF = '"))
+            .and_then(|rest| rest.strip_suffix('\''))
+            .expect("prices.ts states PRICES_AS_OF");
+        assert_eq!(date, PRICES_AS_OF);
+
+        let rows: Vec<(String, [f64; 5])> = source
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("['claude-"))
+            .map(|l| {
+                let inner = l
+                    .strip_prefix('[')
+                    .and_then(|r| r.strip_suffix("],"))
+                    .unwrap_or_else(|| panic!("a row that does not read as one: {l}"));
+                let mut parts = inner.split(',').map(str::trim);
+                let model = parts.next().unwrap().trim_matches('\'').to_string();
+                let nums: Vec<f64> = parts
+                    .map(|n| n.parse().unwrap_or_else(|_| panic!("not a number in {l}")))
+                    .collect();
+                let nums: [f64; 5] = nums
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("five prices in {l}"));
+                (model, nums)
+            })
+            .collect();
+        let ours: Vec<(String, [f64; 5])> = PRICES
+            .iter()
+            .map(|(m, p)| {
+                let prices = [
+                    p.input,
+                    p.output,
+                    p.cache_read,
+                    p.cache_write_5m,
+                    p.cache_write_1h,
+                ];
+                (m.to_string(), prices)
+            })
+            .collect();
+        assert_eq!(rows, ours);
+    }
+
+    /// Opus 5.5 is priced as itself, not as Opus 5 through the prefix rule.
+    #[test]
+    fn opus_5_5_is_not_priced_as_opus_5() {
+        assert_eq!(price_of("claude-opus-5-5"), Some(OPUS_5_5));
+        assert_eq!(price_of("claude-opus-5"), Some(OPUS));
     }
 
     /// A dated snapshot is the model it is a snapshot of.

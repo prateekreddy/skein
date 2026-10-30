@@ -68,6 +68,18 @@ bound read-only as a box binds it, and a stand-in `resources.json` asking for a 
 - One file per feature in `src/plugin/hooks/`, exporting `register(on: On): void`. `register.tsx`
   imports it under the feature's name and calls it in one line. A direct call, never a loop over a
   list: `claude plugin validate` reads the module's source and refuses a call it cannot trace.
+- An event that more than one feature only watches is hooked once, bare, in `register.tsx`:
+  `session.start`, `agent.spawn`, `turn.step`, `turn.complete`, `tool.call` today, and any other
+  the moment a second feature needs it. That hook calls `next(e)` itself, once, then calls each
+  feature's exported `on<Event>` (`onStart($, e)`, `onSpawn($, e, started)`) in the order written
+  there, each passed by if it fails, so the order the features hear an event is read in one place.
+  A hook that refuses or rewrites, where its place in the chain and its `next` matter, stays in its
+  feature file under a real matcher of its own: a tool, a command, a component, a pane's id.
+  `claude plugin validate --strict` refuses a module that hooks one event bare twice (measured on
+  2.1.314: `on("session.start") is registered twice without a matcher`), and
+  `only_the_module_entry_hooks_an_event_bare` in `src/runtime.rs` holds the stronger rule, that a
+  feature file hooks nothing bare at all. A matcher that selects everything (`{ cwd: /^/ }`) to
+  get past the first is ruled out: it hides which feature runs when.
 - A value the feature keeps for the session is a `$.state` key under `skein` in
   `src/plugin/types/index.d.ts`, declared `Shaped<T>` and read and written through `atom` with a
   `shape` tag; a value's fields change, its tag changes in the same commit. Types are imported with
@@ -118,6 +130,8 @@ twice, once in the MCP server and once in the module. A loop over a feature list
   `tsc` against the declarations that build lays.
 - `every_hooks_module_file_ships` in `src/runtime.rs`: every file under `src/plugin/hooks/` ships,
   as it is on disk, and every value a shipped module imports ships too.
+- `only_the_module_entry_hooks_an_event_bare` in `src/runtime.rs`: a feature file's every hook has
+  a matcher; the shared events are hooked in `register.tsx` alone.
 - `turn_state_hooks_load_whichever_way_the_switch_is_set` in `src/probes.rs`: the installed
   `hooks.json` keeps `modules` after the turn-state hooks are merged into it, and the narrow variant
   has none.
