@@ -68,6 +68,7 @@ impl Fleet {
                         &|b| b.to_string(),
                         chrono::Utc::now(),
                         &mut rates,
+                        None,
                     );
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -457,6 +458,11 @@ fn a_job_skein_never_answered_is_still_told_its_cores() {
         err.contains("has not answered"),
         "it did not fall back:\n{err}"
     );
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("skein-job: asked 3 cores, used ") && !l.contains("GB")),
+        "a run skein never measured did not end with the wrapper's own count:\n{err}"
+    );
     assert_eq!(
         out.lines().collect::<Vec<_>>(),
         [
@@ -486,6 +492,65 @@ fn a_job_skein_never_answered_is_still_told_its_cores() {
             "MAKEFLAGS=-j2",
         ],
         "{err}"
+    );
+}
+
+/// **A job ends with one line saying what it asked for and what it used, as skein measured it
+/// from the job's own cgroup** (SKEIN-1421).
+///
+/// The box's cgroups are plain files in a scratch directory, laid out as the launcher lays them
+/// out (a leaf, `cpu` and `memory` handed on), so skein's real tick makes the job's cgroup and
+/// reads it back. The kernel's counters are what the job writes into that cgroup itself before it
+/// ends: 6 CPU-seconds and 1.5 GB at most. The wrapper must print the line from skein's reading,
+/// with the 1.5 GB in it, which its own count of its children cannot know.
+///
+/// What would make it fail: the wrapper not printing the line (the sabotage that was run: the
+/// `say(said_used(…))` call taken out, and no line starts `asked 2 cores`), not waiting for
+/// skein's measurement (the line has no `GB peak`: the wrapper's own count has no memory), or
+/// skein's view of an ended job without `used`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_job_ends_with_what_it_asked_for_and_what_it_used() {
+    let cgroups = Scratch::temp("skein-job-used-cg");
+    let boxcg = cgroups.path().join("web-main");
+    fs::create_dir_all(boxcg.join("box")).unwrap();
+    fs::write(boxcg.join("cgroup.subtree_control"), "cpu memory\n").unwrap();
+    fs::write(boxcg.join("cgroup.procs"), "").unwrap();
+    fs::write(boxcg.join("box/cgroup.procs"), "").unwrap();
+    let fleet = Fleet::new(
+        "skein-job-used",
+        "web-main",
+        cgroups.path().to_path_buf(),
+        4,
+    );
+    // The job writes what the kernel would have counted into its own cgroup, found by its job id.
+    let probe = format!(
+        "cg={}/job-$SKEIN_JOB_ID; printf 'usage_usec 6000000\\n' > \"$cg/cpu.stat\" && \
+         printf '%s\\n' {} > \"$cg/memory.peak\" && echo wrote",
+        boxcg.display(),
+        3u64 << 29
+    );
+    let child = fleet
+        .wrapper()
+        .args(["run", "--class", "test", "--", "sh", "-c", &probe])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    // In the box, as the kernel would say once its shell started it.
+    fs::write(boxcg.join("box/cgroup.procs"), format!("{}\n", child.id())).unwrap();
+    let (out, err) = finish_within(child, Duration::from_secs(20)).unwrap();
+    assert_eq!(
+        out.trim(),
+        "wrote",
+        "the job did not run in a cgroup of its own:\n{err}"
+    );
+    let line = err
+        .lines()
+        .find_map(|l| l.strip_prefix("skein-job: asked 2 cores, used "))
+        .unwrap_or_else(|| panic!("no line of what it used:\n{err}"));
+    assert!(
+        line.contains(" avg") && line.contains(", 1.5 GB peak, ") && line.ends_with('s'),
+        "the line is not skein's measurement: {line:?}\n{err}"
     );
 }
 
