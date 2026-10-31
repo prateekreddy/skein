@@ -49,6 +49,6 @@ and run before the `ci/` push. `commit-before-the-gates.md` still holds inside a
 - A local whole-suite run on the merged tree as a step before the push.
 - A force-push to `master` to undo a red commit.
 
-**Enforced at.** Nothing mechanical yet. A GitHub branch rule on `master` requiring CI's checks to
-pass would enforce it: the fast-forward push carries a commit that already has a passing check. That
-is a repository setting, and nobody has turned it on.
+**Enforced at.** By the agents that push, not by GitHub. A branch rule on `master` requiring CI's
+checks would enforce it mechanically, and the owner chose not to add one (2026-10-31): the flow above
+is the coordinator's to follow.
