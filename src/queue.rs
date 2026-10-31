@@ -321,19 +321,23 @@ fn decisions(
 ) -> Vec<Row> {
     let repo = |name: &str| repo_of.get(name).cloned().unwrap_or_default();
     let mut rows = Vec::new();
-    rows.extend(asks.into_iter().filter(|a| a.state == "waiting").map(|a| Row {
-        source: Source::Question,
-        need: Need::You,
-        repo: repo(&a.box_name),
-        headline: a.question,
-        state: "waiting".into(),
-        waiting_secs: seconds_since(&a.asked),
-        url: "/#askq".into(),
-        fix: String::new(),
-        blocked: String::new(),
-        why: String::new(),
-        name: a.box_name,
-    }));
+    rows.extend(
+        asks.into_iter()
+            .filter(|a| a.state == "waiting")
+            .map(|a| Row {
+                source: Source::Question,
+                need: Need::You,
+                repo: repo(&a.box_name),
+                headline: a.question,
+                state: "waiting".into(),
+                waiting_secs: seconds_since(&a.asked),
+                url: "/#askq".into(),
+                fix: String::new(),
+                blocked: String::new(),
+                why: String::new(),
+                name: a.box_name,
+            }),
+    );
     rows.extend(
         packages
             .into_iter()
@@ -591,7 +595,10 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", &home);
 
-        let rows = inbox(crate::asks::shown(&listed("q-00000001", serde_json::Value::Null)));
+        let rows = inbox(crate::asks::shown(&listed(
+            "q-00000001",
+            serde_json::Value::Null,
+        )));
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(
             (rows[0].source, rows[0].need, rows[0].name.as_str()),

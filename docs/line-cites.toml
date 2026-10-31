@@ -2051,39 +2051,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:843"]
+["src/web/app/board.js:870"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:894"]
+["src/web/app/board.js:921"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:898"]
+["src/web/app/board.js:925"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:907"]
+["src/web/app/board.js:934"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:945"]
+["src/web/app/board.js:972"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:946"]
+["src/web/app/board.js:973"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1036"]
+["src/web/app/board.js:1063"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1266"]
+["src/web/app/board.js:1293"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1298"]
+["src/web/app/board.js:1325"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 

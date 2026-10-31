@@ -391,8 +391,7 @@ mod tests {
             return;
         };
         assert_eq!(
-            opens,
-            r#"["askq","subq","gitq","terminal",null,null,null]"#,
+            opens, r#"["askq","subq","gitq","terminal",null,null,null]"#,
             "a card without an action, or a decision with none"
         );
         let html = run_bundle(&rows, "decisionsHtml(rows, 0, null)").unwrap();
