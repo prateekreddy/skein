@@ -477,8 +477,8 @@ fi
 # Claude Code guards; and `$HOME/shared` is in `permissions.additionalDirectories`, so default and
 # acceptEdits mode write it as they write the checkout. The store's `skills/` is deliberately not
 # there: a shared skill reaches every box of the repo, so writing one asks. The defaults' `allow` goes into
-# `permissions.allow`, once: the tracker's read-only `held` and nothing else (SKEIN-1404), so skein's mod
-# can ask it without a prompt. Claude honours a local `autoMemoryDirectory`
+# `permissions.allow`, once: the tracker's read-only `held` and `why` and nothing else (SKEIN-1404), so
+# skein's mod can ask them without a prompt. Claude honours a local `autoMemoryDirectory`
 # only in a trusted folder, and the launcher trusts this one. What else goes in is skein's `tui`,
 # `subagentPromptCacheTtl` and `statusLine` defaults, read from the plugin's read-only
 # `settings-defaults.json` and never from the store. Each default
