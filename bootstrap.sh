@@ -318,8 +318,9 @@ _skein_bounded() {
 # the package missing for the length of an `rm -rf` rather than of an npm install. Each command
 # link is renamed over the old one. The old package goes with the staging directory, as npm's
 # own install removed it. `--globalconfig` keeps the live prefix's npmrc, which npm would
-# otherwise look for under the staging prefix. Under `flock` where there is one, so two launches
-# cannot both find a package missing and both put theirs there.
+# otherwise look for under the staging prefix. Two installs at once each stage their own copy;
+# in the remove-and-rename case, one that finds the package already back keeps that one.
+# No dollar-brace expansions: the kit's copy is read by sbx, which takes them for placeholders.
 skein_npm_install() {
   _skein_log=$1
   shift
@@ -331,18 +332,6 @@ skein_npm_install() {
   fi
   _skein_as=""
   [ -w "$_skein_prefix" ] || _skein_as="sudo -n"
-  if command -v flock >/dev/null 2>&1; then
-    (
-      flock -w 300 9 || true
-      _skein_npm_swap_in "$@"
-    ) 9>>"${TMPDIR:-/tmp}/skein-npm-install.lock"
-  else
-    _skein_npm_swap_in "$@"
-  fi
-}
-
-# _skein_npm_swap_in PACKAGE... — skein_npm_install's staging and swap, with its variables set.
-_skein_npm_swap_in() {
   _skein_nm="$_skein_prefix/lib/node_modules"
   $_skein_as mkdir -p "$_skein_nm" "$_skein_prefix/bin" >>"$_skein_log" 2>&1 || return 1
   _skein_stage="$($_skein_as mktemp -d "$_skein_nm/.skein-stage.XXXXXX" 2>>"$_skein_log")" || return 1
@@ -350,23 +339,25 @@ _skein_npm_swap_in() {
     --globalconfig "$_skein_prefix/etc/npmrc" "$@" >>"$_skein_log" 2>&1
   _skein_rc=$?
   if [ "$_skein_rc" -eq 0 ]; then
-    for _skein_pkg in "$_skein_stage"/lib/node_modules/* "$_skein_stage"/lib/node_modules/@*/*; do
-      [ -d "$_skein_pkg" ] || continue
-      case "${_skein_pkg##*/}" in @*) continue ;; esac
-      _skein_name="${_skein_pkg#"$_skein_stage"/lib/node_modules/}"
+    # Package names, `name` or `@scope/name`; npm's names hold no white space.
+    for _skein_name in $(cd "$_skein_stage/lib/node_modules" 2>/dev/null && for n in * @*/*; do
+      case "$n" in @*/* | [!@]*) [ -d "$n" ] && echo "$n" ;; esac
+    done); do
+      _skein_pkg="$_skein_stage/lib/node_modules/$_skein_name"
       _skein_live="$_skein_nm/$_skein_name"
-      case "$_skein_name" in */*) $_skein_as mkdir -p "${_skein_live%/*}" ;; esac
+      $_skein_as mkdir -p "$(dirname "$_skein_live")"
       if [ -e "$_skein_live" ] || [ -L "$_skein_live" ]; then
         $_skein_as mv -T --exchange "$_skein_pkg" "$_skein_live" 2>/dev/null \
-          || { $_skein_as rm -rf "$_skein_live" && $_skein_as mv "$_skein_pkg" "$_skein_live"; } \
+          || { $_skein_as rm -rf "$_skein_live" && { [ -e "$_skein_live" ] || $_skein_as mv "$_skein_pkg" "$_skein_live"; }; } \
           || _skein_rc=1
       else
         $_skein_as mv "$_skein_pkg" "$_skein_live" || _skein_rc=1
       fi
     done
-    for _skein_bin in "$_skein_stage"/bin/*; do
-      [ -e "$_skein_bin" ] || [ -L "$_skein_bin" ] || continue
-      $_skein_as mv -f "$_skein_bin" "$_skein_prefix/bin/${_skein_bin##*/}" || _skein_rc=1
+    for _skein_cmd in $(cd "$_skein_stage/bin" 2>/dev/null && for n in *; do
+      { [ -e "$n" ] || [ -L "$n" ]; } && echo "$n"
+    done); do
+      $_skein_as mv -f "$_skein_stage/bin/$_skein_cmd" "$_skein_prefix/bin/$_skein_cmd" || _skein_rc=1
     done
   fi
   $_skein_as rm -rf "$_skein_stage"
