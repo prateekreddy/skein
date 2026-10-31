@@ -113,6 +113,12 @@ pub const CLIS: [Cli; 2] = [
 pub const RUST: &str = "rust";
 /// The key a box's own repo toolchain is recorded under.
 pub const RUST_REPO: &str = "rust-repo";
+/// The key for a toolchain the box's repo pins and the depot does not hold yet (SKEIN-1415). The
+/// launcher binds nothing for it: it names the entry in the box's rustup shim, which tells a cargo
+/// run in the repo what is missing in place of rustup's read-only-file-system error, and reports
+/// it back like a bound entry. So the box records what it was told, and when the entry arrives
+/// the box is stale for `rust-toolchain` and moves onto it when idle, as onto any rollout.
+pub const RUST_REPO_MISSING: &str = "rust-repo-missing";
 
 fn cli(runtime: &str) -> Option<&'static Cli> {
     CLIS.iter().find(|c| c.runtime == runtime)
@@ -179,10 +185,11 @@ pub fn channel_is_pinned(c: &str) -> bool {
     (version_is_nameable(c) && c.starts_with("1.")) || dated_channel(c)
 }
 
-/// `<pinned channel>-<triple>`, the name rustup gives the toolchain and the entry's name.
-fn toolchain_is_nameable(name: &str) -> bool {
+/// `<pinned channel>-<triple>`, the name rustup gives the toolchain, split into its channel and
+/// triple.
+fn toolchain_base_parts(name: &str) -> Option<(&str, &str)> {
     if name.len() > 80 {
-        return false;
+        return None;
     }
     let triple_ok = |t: &str| {
         let parts: Vec<&str> = t.split('-').collect();
@@ -199,9 +206,135 @@ fn toolchain_is_nameable(name: &str) -> bool {
     } else {
         name.find('-')
     };
-    let Some(at) = split else { return false };
+    let at = split?;
     let (channel, triple) = (&name[..at], &name[at + 1..]);
-    channel_is_pinned(channel) && triple_ok(triple)
+    (channel_is_pinned(channel) && triple_ok(triple)).then_some((channel, triple))
+}
+
+/// The components every toolchain entry holds, so an entry's name never lists them: the minimal
+/// profile's three, and the clippy and rustfmt the fleet's agents run on every repo.
+const BASELINE_COMPONENTS: [&str; 5] = ["cargo", "clippy", "rust-std", "rustc", "rustfmt"];
+
+/// The most extra components, and the most extra targets, one entry may hold. A repo's file names
+/// them and a box writes that file, so each one is a fetch skein makes on the box's say.
+const MAX_EXTRAS: usize = 8;
+
+/// A rustup component name: `llvm-tools`, `rust-src`, `rust-analyzer`. Lowercase words joined by
+/// single dashes, starting with a letter. It reaches rustup's command line and the entry's name.
+fn component_is_nameable(c: &str) -> bool {
+    c.len() <= 40
+        && c.starts_with(|ch: char| ch.is_ascii_lowercase())
+        && c.split('-').all(|w| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        })
+}
+
+/// A target triple: `wasm32-unknown-unknown`, `thumbv8m.main-none-eabi`. Two to five dashed parts
+/// of lowercase letters, digits, `_` and `.`, each starting with a letter or digit, so never `..`.
+fn target_is_nameable(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('-').collect();
+    t.len() <= 60
+        && (2..=5).contains(&parts.len())
+        && parts.iter().all(|p| {
+            p.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && !p.contains("..")
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+        })
+}
+
+/// A toolchain entry, read from its name: the toolchain rustup knows it by, and the components and
+/// targets it holds beyond [`BASELINE_COMPONENTS`] and its own host target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolchainEntry<'a> {
+    /// `<pinned channel>-<triple>`: the directory name rustup looks for under `toolchains/`.
+    pub toolchain: &'a str,
+    pub components: Vec<&'a str>,
+    pub targets: Vec<&'a str>,
+}
+
+/// **A toolchain entry's name says what it holds** (SKEIN-1415):
+/// `<channel>-<triple>[+<component>…][@<target>…]`, for example
+/// `1.98.1-aarch64-unknown-linux-gnu@wasm32-unknown-unknown`, or
+/// `1.98.1-aarch64-unknown-linux-gnu+llvm-tools+rust-src@wasm32-unknown-unknown`. Two repos pinning
+/// one version with different targets are two entries, and two that ask for the same set are one.
+/// Neither `+` nor `@` can appear in a channel, component or target, so the split is unambiguous,
+/// and both are in the launcher's `box_version` shape check. Only the canonical spelling is an entry:
+/// each list sorted, without repeats, without a baseline component or the host target, so one set
+/// has one name.
+pub fn toolchain_entry_parts(entry: &str) -> Option<ToolchainEntry<'_>> {
+    if entry.len() > 240 {
+        return None;
+    }
+    let (head, targets) = match entry.split_once('@') {
+        Some((h, t)) => (h, t.split('@').collect::<Vec<_>>()),
+        None => (entry, Vec::new()),
+    };
+    let (toolchain, components) = match head.split_once('+') {
+        Some((tc, c)) => (tc, c.split('+').collect::<Vec<_>>()),
+        None => (head, Vec::new()),
+    };
+    let (_, triple) = toolchain_base_parts(toolchain)?;
+    let ascending = |v: &[&str]| v.windows(2).all(|w| w[0] < w[1]);
+    let ok = components.len() <= MAX_EXTRAS
+        && targets.len() <= MAX_EXTRAS
+        && ascending(&components)
+        && ascending(&targets)
+        && components
+            .iter()
+            .all(|c| component_is_nameable(c) && !BASELINE_COMPONENTS.contains(c))
+        && targets
+            .iter()
+            .all(|t| target_is_nameable(t) && *t != triple);
+    ok.then_some(ToolchainEntry {
+        toolchain,
+        components,
+        targets,
+    })
+}
+
+/// The entry name for `toolchain` with these components and targets, in the canonical spelling
+/// [`toolchain_entry_parts`] reads: the baseline components and the host target are dropped, the
+/// rest sorted. `None` when any name is not the shape of one, or there are too many.
+pub fn toolchain_entry(
+    toolchain: &str,
+    components: &[String],
+    targets: &[String],
+) -> Option<String> {
+    let (_, triple) = toolchain_base_parts(toolchain)?;
+    // Each name is checked before it is joined: `a+b` is not a component, though its two halves,
+    // read back from the joined name, would each be one.
+    if !(components.iter().all(|c| component_is_nameable(c))
+        && targets.iter().all(|t| target_is_nameable(t)))
+    {
+        return None;
+    }
+    let components: BTreeSet<&str> = components
+        .iter()
+        .map(String::as_str)
+        .filter(|c| !BASELINE_COMPONENTS.contains(c))
+        .collect();
+    let targets: BTreeSet<&str> = targets
+        .iter()
+        .map(String::as_str)
+        .filter(|t| *t != triple)
+        .collect();
+    let mut name = toolchain.to_string();
+    for c in &components {
+        name.push('+');
+        name.push_str(c);
+    }
+    for t in &targets {
+        name.push('@');
+        name.push_str(t);
+    }
+    toolchain_entry_parts(&name).is_some().then_some(name)
+}
+
+fn toolchain_is_nameable(name: &str) -> bool {
+    toolchain_entry_parts(name).is_some()
 }
 
 /// The kind a component's entries are of.
@@ -330,13 +463,18 @@ pub fn rollout(component: &str, entry: &str) -> Result<Rolled, String> {
 // What a box gets
 // ------------------------------------------------------------------------------------------------
 
-/// The toolchain a box's tree names, read **as data**: `rust-toolchain.toml`'s `[toolchain]
-/// channel`, or the one line of a legacy `rust-toolchain`. `None` when there is no file, the file is
-/// a link or larger than 4 KB, or it names a channel that moves (`stable`, `nightly`, `1.80`), which
-/// the fleet's default then serves.
+/// The toolchain entry a box's tree names, read **as data**: `rust-toolchain.toml`'s
+/// `[toolchain]` `channel`, `components` and `targets`, or the one line of a legacy
+/// `rust-toolchain`, named as [`toolchain_entry`] names it. `None` when there is no file, the file
+/// is a link or larger than 4 KB, it names a channel that moves (`stable`, `nightly`, `1.80`),
+/// which the fleet's default then serves, or any component or target is not the shape of one.
 ///
 /// The tree is the box's, so this is hostile input read on skein's side: opened without following
-/// a link at its last component, read to a bound, and only a pinned channel's exact shape is used.
+/// a link at its last component, read to a bound, and only a pinned channel's exact shape, and
+/// component and target names of their exact shapes, are used. A file with one bad name pins
+/// nothing, rather than a toolchain that silently lacks what the repo asked for. The file's
+/// `profile` is not read: every entry is the minimal profile plus the baseline and what the file
+/// names, and a box's rustup never installs, so the profile has nothing to choose.
 pub fn repo_toolchain(tree: &Path) -> Option<String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -355,28 +493,35 @@ pub fn repo_toolchain(tree: &Path) -> Option<String> {
         if f.take(4097).read_to_string(&mut text).is_err() || text.len() > 4096 {
             return None;
         }
-        let channel = if toml || text.contains("[toolchain]") {
-            toml_channel(&text)?
+        let (channel, components, targets) = if toml || text.contains("[toolchain]") {
+            (
+                toml_string(&toml_value(&text, "channel")?)?,
+                toml_list(toml_value(&text, "components").as_deref())?,
+                toml_list(toml_value(&text, "targets").as_deref())?,
+            )
         } else {
-            text.lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())?
-                .to_string()
+            let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+            (line.to_string(), Vec::new(), Vec::new())
         };
         let triple = host_triple();
         let channel = channel
             .strip_suffix(&format!("-{triple}"))
             .unwrap_or(&channel)
             .to_string();
-        return channel_is_pinned(&channel).then(|| format!("{channel}-{triple}"));
+        if !channel_is_pinned(&channel) {
+            return None;
+        }
+        return toolchain_entry(&format!("{channel}-{triple}"), &components, &targets);
     }
     None
 }
 
-/// `channel = "<x>"` in the `[toolchain]` table, and nothing cleverer.
-fn toml_channel(text: &str) -> Option<String> {
+/// The raw value of `key = …` in the `[toolchain]` table, comments dropped, and nothing cleverer.
+/// An array that opens on the key's line and closes on a later one is joined into one line.
+fn toml_value(text: &str, key: &str) -> Option<String> {
     let mut in_table = false;
-    for line in text.lines() {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') {
             in_table = line == "[toolchain]";
@@ -385,23 +530,61 @@ fn toml_channel(text: &str) -> Option<String> {
         if !in_table {
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((k, value)) = line.split_once('=') else {
             continue;
         };
-        if key.trim() == "channel" {
-            let v = value.trim();
-            return v
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .map(str::to_string);
+        if k.trim() != key {
+            continue;
         }
+        let mut v = value.trim().to_string();
+        if v.starts_with('[') {
+            // An array never closed comes back unclosed, for `toml_list` to refuse, rather than
+            // as no value, which would read as no list at all.
+            while !v.contains(']') {
+                let Some(more) = lines.next() else { break };
+                v.push_str(more.split('#').next().unwrap_or("").trim());
+            }
+        }
+        return Some(v);
     }
     None
 }
 
+/// A TOML basic or literal string, `"x"` or `'x'`, unquoted.
+fn toml_string(v: &str) -> Option<String> {
+    let v = v.trim();
+    v.strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .map(str::to_string)
+}
+
+/// A TOML array of strings, `["a", 'b',]`; empty when the key is absent, `None` when it is not
+/// that shape. The names in it are checked by [`toolchain_entry`], not here.
+fn toml_list(v: Option<&str>) -> Option<Vec<String>> {
+    let Some(v) = v else {
+        return Some(Vec::new());
+    };
+    let inner = v.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let mut out = Vec::new();
+    for item in inner.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        out.push(toml_string(item)?);
+    }
+    (out.len() <= 2 * MAX_EXTRAS).then_some(out)
+}
+
 /// The versions skein would hand box `name` if it started now: each CLI's and the default
-/// toolchain's current entry, and the box's own repo toolchain, each only when it is published.
-/// A component with nothing rolled out is absent, and the box binds what it did before.
+/// toolchain's current entry, each only when it is published, and the box's own repo toolchain:
+/// under [`RUST_REPO`] when it is published, under [`RUST_REPO_MISSING`] when it is not. A
+/// component with nothing rolled out is absent, and the box binds what it did before.
+///
+/// **A repo's pin does not wait for a fleet default** (SKEIN-1415). With none rolled out, the
+/// launcher puts the box's rustup home together from the bootstrap's own toolchains, still the
+/// default, and the repo's entry beside them (`box-session.sh`, "Which toolchains").
 pub fn wanted_versions(name: &str) -> BTreeMap<String, String> {
     wanted_with(&rollouts(), &Path::new(&box_root(name)).join("tree"))
 }
@@ -422,11 +605,13 @@ fn wanted_with(r: &Rollouts, tree: &Path) -> BTreeMap<String, String> {
         .filter(|e| depot::is_published(&RUST_TOOLCHAIN, e));
     if let Some(default) = &default {
         want.insert(RUST.to_string(), default.clone());
-        if let Some(own) = repo_toolchain(tree) {
-            if &own != default && depot::is_published(&RUST_TOOLCHAIN, &own) {
-                want.insert(RUST_REPO.to_string(), own);
-            }
-        }
+    }
+    if let Some(own) = repo_toolchain(tree).filter(|own| default.as_ref() != Some(own)) {
+        let key = match depot::is_published(&RUST_TOOLCHAIN, &own) {
+            true => RUST_REPO,
+            false => RUST_REPO_MISSING,
+        };
+        want.insert(key.to_string(), own);
     }
     want
 }
@@ -454,7 +639,7 @@ pub fn versions_from_launch(out: &str) -> Option<BTreeMap<String, String>> {
         line.split_whitespace()
             .filter_map(|kv| kv.split_once('='))
             .filter(|(k, v)| match *k {
-                RUST | RUST_REPO => toolchain_is_nameable(v),
+                RUST | RUST_REPO | RUST_REPO_MISSING => toolchain_is_nameable(v),
                 k => cli_entry_parts(v).is_some_and(|(c, _)| c.runtime == k),
             })
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -474,7 +659,7 @@ pub fn stale_keys(
     if CLIS.iter().any(|c| moved(c.runtime)) {
         keys.push("agent-cli");
     }
-    if moved(RUST) || moved(RUST_REPO) {
+    if moved(RUST) || moved(RUST_REPO) || moved(RUST_REPO_MISSING) {
         keys.push("rust-toolchain");
     }
     keys
@@ -494,7 +679,9 @@ pub struct Pending {
     pub new: String,
 }
 
-/// What box `name` would get from a restart, against what it was born with.
+/// What box `name` would get from a restart, against what it was born with. A missing repo
+/// toolchain is not a version a restart gives, so [`RUST_REPO_MISSING`] is never one; when its
+/// entry arrives, the `rust-repo` row says so.
 pub fn pending_for(record: &crate::place::PlaceRecord, name: &str) -> Vec<Pending> {
     let Some(born) = &record.versions else {
         return Vec::new();
@@ -502,7 +689,7 @@ pub fn pending_for(record: &crate::place::PlaceRecord, name: &str) -> Vec<Pendin
     let now = wanted_versions(name);
     let keys: BTreeSet<&String> = born.keys().chain(now.keys()).collect();
     keys.into_iter()
-        .filter(|k| born.get(*k) != now.get(*k))
+        .filter(|k| *k != RUST_REPO_MISSING && born.get(*k) != now.get(*k))
         .map(|k| Pending {
             component: k.clone(),
             have: born.get(k).cloned().unwrap_or_default(),
@@ -564,35 +751,55 @@ pub fn typescript_fill(entry: &str) -> Result<depot::Fill, String> {
     Ok(npm_prefix_fill(entry, "typescript", version, false))
 }
 
-/// The fill for a toolchain: the sandbox's own rustup, bound read-only into the depot's namespace,
-/// installing into a rustup home inside staging. rustup checks every component against the
-/// channel manifest's sha256.
+/// The fill for a toolchain entry: the sandbox's own rustup, bound read-only into the depot's
+/// namespace, installing into a rustup home inside staging. rustup checks every component against
+/// the channel manifest's sha256.
+///
+/// It installs the entry's toolchain with the minimal profile, [`BASELINE_COMPONENTS`]' clippy and
+/// rustfmt and the components the entry's name lists, and the targets it lists (SKEIN-1415), then
+/// moves rustup's `toolchains/<toolchain>` to `out/<entry>`, since the entry is named for all of
+/// that and rustup names the directory for the toolchain alone. Every name reaches the command as
+/// its own argument, after the shell's script, so none of it is ever read as shell.
 pub fn toolchain_fill(name: &str) -> Result<depot::Fill, String> {
-    if !toolchain_is_nameable(name) {
-        return Err(format!(
-            "{name:?} is not a pinned toolchain, like 1.98.0-{}",
+    let entry = toolchain_entry_parts(name).ok_or_else(|| {
+        format!(
+            "{name:?} is not a pinned toolchain, like 1.98.0-{} or 1.98.0-{}@wasm32-unknown-unknown",
+            host_triple(),
             host_triple()
-        ));
-    }
+        )
+    })?;
     let rustup = format!("{}/cargo/bin/rustup", skein_toolchain_path());
+    let components = ["clippy", "rustfmt"]
+        .into_iter()
+        .chain(entry.components.iter().copied())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut fetch: Vec<String> = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        r#"set -e; r=$1; e=$2; t=$3; shift 3; "$r" toolchain install "$t" "$@"; mv -- "/stage/rh/toolchains/$t" "/stage/out/$e""#.into(),
+        "sh".into(),
+        "/opt/skein-rustup/rustup".into(),
+        name.into(),
+        entry.toolchain.into(),
+        "--profile".into(),
+        "minimal".into(),
+        "--component".into(),
+        components,
+    ];
+    if !entry.targets.is_empty() {
+        fetch.push("--target".into());
+        fetch.push(entry.targets.join(","));
+    }
+    fetch.push("--no-self-update".into());
     Ok(depot::Fill {
-        fetch: vec![
-            "/opt/skein-rustup/rustup".into(),
-            "toolchain".into(),
-            "install".into(),
-            name.into(),
-            "--profile".into(),
-            "minimal".into(),
-            "--component".into(),
-            "clippy,rustfmt".into(),
-            "--no-self-update".into(),
-        ],
+        fetch,
         env: vec![
             ("RUSTUP_HOME".into(), "/stage/rh".into()),
             ("CARGO_HOME".into(), "/stage/ch".into()),
         ],
         read_only: vec![(rustup, "/opt/skein-rustup/rustup".into())],
-        out: "rh/toolchains".into(),
+        out: "out".into(),
     })
 }
 
@@ -923,13 +1130,11 @@ pub fn test_pass(sandbox: &str) -> Vec<String> {
     said
 }
 
-/// Fill the toolchain any placed box's repo names that the depot lacks, one per pass. Only once the
-/// fleet has a default rolled out: before that, boxes run the bootstrap's toolchain and a repo's
-/// own could not be projected beside it.
+/// Fill the toolchain any placed box's repo names that the depot lacks, one per pass, whether or
+/// not the fleet has a default rolled out: the launcher binds a repo's entry beside the
+/// bootstrap's toolchain as well as beside a default (SKEIN-1415). A fill that failed is not tried
+/// again; its reason is kept in [`Rollouts::failed`].
 pub fn serve_repo_toolchains(sandbox: &str) -> Vec<String> {
-    if !rollouts().current.contains_key(RUST) {
-        return Vec::new();
-    }
     let failed = rollouts().failed;
     let mut wants: BTreeSet<String> = BTreeSet::new();
     for (name, _) in crate::place::placed_boxes(sandbox) {
@@ -1424,6 +1629,264 @@ mod tests {
         .unwrap();
         assert_eq!(repo_toolchain(&linked), None, "a link was followed");
         assert_eq!(repo_toolchain(&tree(&[])), None);
+    }
+
+    /// A tree holding one `rust-toolchain.toml` with `body`.
+    fn toml_tree(dir: &Path, body: &str) -> PathBuf {
+        let d = dir.join(format!("t{}", rand_suffix()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("rust-toolchain.toml"), body).unwrap();
+        d
+    }
+
+    /// **A toolchain entry is named for everything it holds: the toolchain, then the components and
+    /// targets beyond the baseline, in one spelling per set** (SKEIN-1415).
+    ///
+    /// What would make it fail: `repo_toolchain` reading only the channel (synapse's file names
+    /// `1.98.1-<triple>` and the box gets no wasm32); `toolchain_entry` not sorting or not dropping
+    /// repeats (the two spellings of one set are two entries); not dropping the baseline or the host
+    /// target (a file naming only clippy and rustfmt is no longer the plain entry a default is);
+    /// `toml_value` not joining a multi-line array.
+    #[test]
+    fn a_toolchain_entry_is_named_for_everything_it_holds() {
+        let dir = tempdir();
+        let t = host_triple();
+        let synapse = toml_tree(
+            &dir,
+            "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\", \"rustfmt\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
+        );
+        assert_eq!(
+            repo_toolchain(&synapse),
+            Some(format!("1.98.1-{t}@wasm32-unknown-unknown"))
+        );
+        let other_target = toml_tree(
+            &dir,
+            "[toolchain]\nchannel = \"1.98.1\"\ntargets = [\"thumbv8m.main-none-eabi\"]\n",
+        );
+        assert_eq!(
+            repo_toolchain(&other_target),
+            Some(format!("1.98.1-{t}@thumbv8m.main-none-eabi"))
+        );
+        let one = toml_tree(
+            &dir,
+            &format!(
+                "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\n  \"rust-src\", # for the analyzer\n  'llvm-tools',\n  \"clippy\",\n]\ntargets = [\"wasm32-unknown-unknown\", \"{t}\", \"x86_64-unknown-linux-musl\"]\n"
+            ),
+        );
+        let same = toml_tree(
+            &dir,
+            "[toolchain]\nchannel = \"1.98.1\"\ntargets = [\"x86_64-unknown-linux-musl\", \"wasm32-unknown-unknown\", \"wasm32-unknown-unknown\"]\ncomponents = [\"llvm-tools\", \"rust-src\", \"llvm-tools\"]\n",
+        );
+        let named = format!(
+            "1.98.1-{t}+llvm-tools+rust-src@wasm32-unknown-unknown@x86_64-unknown-linux-musl"
+        );
+        assert_eq!(repo_toolchain(&one), Some(named.clone()));
+        assert_eq!(repo_toolchain(&same), Some(named.clone()));
+        let parts = toolchain_entry_parts(&named).expect("the name reads back");
+        assert_eq!(parts.toolchain, format!("1.98.1-{t}"));
+        assert_eq!(parts.components, ["llvm-tools", "rust-src"]);
+        assert_eq!(
+            parts.targets,
+            ["wasm32-unknown-unknown", "x86_64-unknown-linux-musl"]
+        );
+        let baseline = toml_tree(
+            &dir,
+            &format!("[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\", \"rustfmt\", \"rust-std\"]\ntargets = [\"{t}\"]\n"),
+        );
+        assert_eq!(repo_toolchain(&baseline), Some(format!("1.98.1-{t}")));
+    }
+
+    /// **A toolchain file with one name that is not the shape of one pins nothing, and no entry
+    /// name but the canonical one is an entry.** The file is in the box's tree, so every name in it
+    /// is the box's say.
+    ///
+    /// What would make it fail: `target_is_nameable` or `component_is_nameable` letting a path, a
+    /// space, a shell word, a capital or `..` through; `toml_list` skipping an item it cannot read
+    /// instead of refusing the file; dropping `MAX_EXTRAS`; `toolchain_entry_parts` accepting an
+    /// unsorted list, a baseline component, the host target or an empty list (two names for one
+    /// set, or a name the launcher would bind at a path skein never fetched).
+    #[test]
+    fn a_hostile_toolchain_file_pins_nothing() {
+        let dir = tempdir();
+        let t = host_triple();
+        for targets in [
+            "[\"../../etc\"]",
+            "[\"wasm32/unknown-unknown\"]",
+            "[\"wasm32-unknown..-unknown\"]",
+            "[\"wasm32-unknown-unknown; rm -rf ~\"]",
+            "[\"$(id)-unknown-unknown\"]",
+            "[\"WASM32-unknown-unknown\"]",
+            "[\"wasm32 unknown unknown\"]",
+            "[\"wasm32\"]",
+            "[\"wasm32-unknown-unknown\", 7]",
+            "[\"wasm32-unknown-unknown\"",
+            "\"wasm32-unknown-unknown\"",
+            "[\"a+b-c-d\"]",
+            "[\"a@b-c-d\"]",
+            "[\"t0-a-b\", \"t1-a-b\", \"t2-a-b\", \"t3-a-b\", \"t4-a-b\", \"t5-a-b\", \"t6-a-b\", \"t7-a-b\", \"t8-a-b\"]",
+        ] {
+            let d = toml_tree(
+                &dir,
+                &format!("[toolchain]\nchannel = \"1.98.1\"\ntargets = {targets}\n"),
+            );
+            assert_eq!(repo_toolchain(&d), None, "targets = {targets}");
+        }
+        for components in [
+            "[\"clippy;id\"]",
+            "[\"rust src\"]",
+            "[\"Rust-src\"]",
+            "[\"-src\"]",
+            "[\"rust--src\"]",
+            "[\"../x\"]",
+            "[\"a+b\"]",
+        ] {
+            let d = toml_tree(
+                &dir,
+                &format!("[toolchain]\nchannel = \"1.98.1\"\ncomponents = {components}\n"),
+            );
+            assert_eq!(repo_toolchain(&d), None, "components = {components}");
+        }
+        let base = format!("1.98.1-{t}");
+        for bad in [
+            format!("{base}@x86_64-unknown-linux-musl@wasm32-unknown-unknown"),
+            format!("{base}@wasm32-unknown-unknown@wasm32-unknown-unknown"),
+            format!("{base}+rust-src+llvm-tools"),
+            format!("{base}+clippy"),
+            format!("{base}@{t}"),
+            format!("{base}@"),
+            format!("{base}+"),
+            format!("{base}+@wasm32-unknown-unknown"),
+            format!("{base}@wasm32-unknown-unknown/.."),
+            format!("{base}@..-a"),
+            format!("stable-{t}@wasm32-unknown-unknown"),
+            // Each target the right shape, the whole past the 240 bytes a name may be.
+            format!(
+                "{base}{}",
+                (0..4)
+                    .map(|i| format!("@t{i}-{}", "a".repeat(55)))
+                    .collect::<String>()
+            ),
+        ] {
+            assert!(!toolchain_is_nameable(&bad), "{bad:?}");
+            assert!(toolchain_fill(&bad).is_err(), "{bad:?} was filled");
+        }
+    }
+
+    /// **The fill installs the entry's toolchain with clippy, rustfmt and every component and
+    /// target its name lists, and names the result for the entry.**
+    ///
+    /// What would make it fail: `toolchain_fill` dropping `--target` or the entry's components (the
+    /// wasm32 entry is filled without wasm32, the bug SKEIN-1415 was filed for); not moving rustup's
+    /// directory to the entry's name (the staged name is the toolchain's, and `fill_entry` refuses
+    /// it as "staged … and not …"); passing a name inside the shell script rather than after it.
+    #[test]
+    fn the_fill_installs_what_the_entry_is_named_for() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"))
+            .set("SKEIN_HOME", dir.join("home"));
+        let t = host_triple();
+        let script = r#"set -e; r=$1; e=$2; t=$3; shift 3; "$r" toolchain install "$t" "$@"; mv -- "/stage/rh/toolchains/$t" "/stage/out/$e""#;
+        let entry =
+            format!("1.98.1-{t}+llvm-tools@wasm32-unknown-unknown@x86_64-unknown-linux-musl");
+        let fill = toolchain_fill(&entry).expect("a canonical entry is filled");
+        assert_eq!(
+            fill.fetch,
+            [
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                "/opt/skein-rustup/rustup",
+                entry.as_str(),
+                &format!("1.98.1-{t}"),
+                "--profile",
+                "minimal",
+                "--component",
+                "clippy,rustfmt,llvm-tools",
+                "--target",
+                "wasm32-unknown-unknown,x86_64-unknown-linux-musl",
+                "--no-self-update",
+            ]
+        );
+        assert_eq!(fill.out, "out");
+        let plain = toolchain_fill(&format!("1.98.1-{t}")).expect("a plain entry is filled");
+        assert_eq!(
+            plain.fetch[5..],
+            [
+                format!("1.98.1-{t}"),
+                format!("1.98.1-{t}"),
+                "--profile".into(),
+                "minimal".into(),
+                "--component".into(),
+                "clippy,rustfmt".into(),
+                "--no-self-update".into(),
+            ]
+        );
+    }
+
+    /// **A repo's pin is handed to its boxes with no fleet default rolled out, as `rust-repo` when
+    /// the depot has it and as `rust-repo-missing` when it does not; and a box told it is missing
+    /// is stale once it arrives.**
+    ///
+    /// What would make it fail: `wanted_with` looking at the repo's file only inside `if let
+    /// Some(default)` (the SKEIN-1415 gap: nothing comes back without a default); handing over an
+    /// unpublished entry as `rust-repo` (the launcher binds nothing and the record says it did);
+    /// `stale_keys` not comparing `rust-repo-missing`; `versions_from_launch` dropping the key (a
+    /// box told of a missing toolchain would read as stale for ever, and be restarted each idle).
+    #[test]
+    fn a_repos_pin_is_handed_over_without_a_fleet_default() {
+        let _g = env_lock();
+        let dir = tempdir();
+        let mut pins = env_pins();
+        pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"))
+            .set("SKEIN_HOME", dir.join("home"));
+        let t = host_triple();
+        let tree = toml_tree(
+            &dir,
+            "[toolchain]\nchannel = \"1.98.1\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+        );
+        let entry = format!("1.98.1-{t}@wasm32-unknown-unknown");
+        let none = Rollouts::default();
+        let missing = wanted_with(&none, &tree);
+        assert_eq!(
+            missing,
+            BTreeMap::from([(RUST_REPO_MISSING.to_string(), entry.clone())])
+        );
+        publish_fixture(&RUST_TOOLCHAIN, &entry);
+        let bound = wanted_with(&none, &tree);
+        assert_eq!(
+            bound,
+            BTreeMap::from([(RUST_REPO.to_string(), entry.clone())])
+        );
+        assert_eq!(stale_keys(&missing, &bound), ["rust-toolchain"]);
+        // The same toolchain without wasm32 as the default is another entry, so the repo's is
+        // still handed over beside it.
+        let plain = format!("1.98.1-{t}");
+        publish_fixture(&RUST_TOOLCHAIN, &plain);
+        let mut with_default = Rollouts::default();
+        with_default.current.insert(
+            RUST.into(),
+            Rolled {
+                entry: plain.clone(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            wanted_with(&with_default, &tree),
+            BTreeMap::from([
+                (RUST.to_string(), plain.clone()),
+                (RUST_REPO.to_string(), entry.clone()),
+            ])
+        );
+        with_default.current.get_mut(RUST).unwrap().entry = entry.clone();
+        assert_eq!(
+            wanted_with(&with_default, &tree),
+            BTreeMap::from([(RUST.to_string(), entry.clone())])
+        );
+        let said = format!("SKEIN_VERSIONS rust-repo-missing={entry}\n");
+        assert_eq!(versions_from_launch(&said), Some(missing));
     }
 
     fn rand_suffix() -> u64 {
