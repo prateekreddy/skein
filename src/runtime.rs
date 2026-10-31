@@ -330,6 +330,9 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     // The heavy-work wrapper (SKEIN-1388): `skein-job run -- <argv>` waits for a fleet slot and
     // runs the command as its own child, in the box's cgroup.
     ("bin/skein-job", include_str!("plugin/bin/skein-job")),
+    // The repo's install lock (SKEIN-1431): `skein-lock [name] -- <argv>` runs the command under
+    // an flock in the repo's tools area, which every box of the repo shares.
+    ("bin/skein-lock", include_str!("plugin/bin/skein-lock")),
     // The hooks module (SKEIN-1359): the file `hooks/hooks.json` names under `modules`, and one
     // file per feature it imports. Every file under `src/plugin/hooks/` is listed here, which
     // `every_hooks_module_file_ships` holds; the tests, the `$.state` contract and the tsconfig

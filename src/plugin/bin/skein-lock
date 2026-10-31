@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# skein-lock: run one command while holding a lock every box of this repo shares (SKEIN-1431).
+#
+#   skein-lock [name] -- <command> [args...]
+#
+# The lock is an flock on `<repo tools area>/.locks/<name>`, `tools` when no name is given. The
+# area is `$SKEIN_REPO_TOOLS`, which every box of the repo has at one path (`~/.repo-tools`), so two
+# boxes of the repo that both run `skein-lock -- rustup toolchain install 1.90.0` take turns, and a
+# box of another repo never waits on them. Many installers are not safe for two processes on one
+# home at once (rustup is not: rust-lang/rustup#988), and the area is one home for the whole repo.
+#
+# The fleet's rustup shim takes the `tools` lock itself when it installs a missing toolchain, so a
+# manual install wrapped in this one waits for it, and the other way round.
+#
+# The command is exec'd with the lock's descriptor open, so the lock is held exactly while the
+# command, and anything it leaves running, keeps it. Its exit status is the command's.
+#
+# With no area (a box whose repo has none, or outside a box), it says so and runs the command
+# without a lock rather than refusing: the caller still gets its install, as it would have before
+# the lock existed.
+set -u
+
+say() { printf 'skein-lock: %s\n' "$1" >&2; }
+usage() {
+  say "usage: skein-lock [name] -- <command> [args...]   (name defaults to 'tools')"
+  exit 2
+}
+
+name=tools
+if [ "${1-}" != "--" ]; then
+  [ $# -gt 0 ] || usage
+  name="$1"
+  shift
+fi
+[ "${1-}" = "--" ] || usage
+shift
+[ $# -gt 0 ] || usage
+case "$name" in
+  "" | .* | -* | *[!A-Za-z0-9._-]*)
+    say "'$name' is not a lock name: use letters, digits, '.', '_' and '-', not starting with '.' or '-'."
+    exit 2 ;;
+esac
+
+area="${SKEIN_REPO_TOOLS-}"
+if [ -z "$area" ] || [ ! -d "$area" ]; then
+  say "this box has no repo tools area (SKEIN_REPO_TOOLS is not set), so there is no shared lock here; running the command without one."
+  exec "$@"
+fi
+if ! mkdir -p -- "$area/.locks" 2>/dev/null || ! exec {fd}>>"$area/.locks/$name"; then
+  say "could not open the lock $area/.locks/$name; running the command without it."
+  exec "$@"
+fi
+if ! flock -n "$fd"; then
+  say "another box of this repo holds the '$name' lock; waiting for it."
+  flock "$fd" || { say "could not take the lock $area/.locks/$name"; exit 1; }
+fi
+exec "$@"

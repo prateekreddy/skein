@@ -961,14 +961,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:2422`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:2430`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:2425`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:2433`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:2397`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:2400`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
@@ -1015,15 +1015,16 @@ read-write and shared on the grounds that no entry of `box_path` points into the
 `npx` installs a package under `~/.npm/_npx` and runs it from there on later calls, and cargo
 compiles whatever is in `~/.cargo/registry/src` without checking it again, build scripts included.
 Not being on `PATH` is not the same as not being executed. Nothing of the sandbox's home is bound
-read-write into a box now. Download caches belong to a repo instead: one per repo at `store/cache`,
-beside the store, bound back through the cover and shared by that repo's boxes only, which is the
+read-write into a box now. Download caches belong to a repo instead: one tools area per repo on the
+fleet's disk, at `<fleet root>/.repo-tools/<repo id>` (SKEIN-1431; `store/cache` beside the store
+before it), bound into that repo's boxes only at `~/.repo-tools`, which is the
 owner's decision of 2026-10-29 that a repo is one trust domain and repos are walled from each other
 (`docs/decisions/repos-are-the-trust-boundary.md`). Within a repo this path is still one a box can
 put code in for its siblings, by that decision. A crossing into a box takes the session's cache
 variables from the session itself, so it uses the same cache, or none when the box has none
 (SKEIN-1354). Held by the real-bwrap tests
 `the_sandboxs_cargo_and_npm_reach_no_box` and
-`a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`.
+`a_repos_boxes_share_its_tools_area_and_another_repos_box_sees_none_of_it`.
 `fleet::skein_toolchain_path` keeps skein's own build off the sandbox's home for the reason it
 always had: being merely unexecuted is not the same as being safe to build skein's own server with.
 
