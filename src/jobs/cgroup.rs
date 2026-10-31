@@ -268,8 +268,8 @@ pub(crate) fn place_with(
         writes.push(("cpu.max", cpu_max_for(c)));
     }
     // The box's memory floor reaches its children only through theirs: with the controller handed
-    // on, a child's `memory.min` of 0 is protected by none of its parent's (unless the hierarchy is
-    // mounted `memory_recursiveprot`). `max` takes all of the parent's, shared out by usage when
+    // on, a child's `memory.min` of 0 is protected by none of its parent's (unless cgroupfs is mounted
+    // with recursive memory protection). `max` takes all of the parent's, shared out by usage when
     // the children together want more than it, which is the box's floor covering its jobs as it did
     // when they ran in its own cgroup.
     if has("memory") {
