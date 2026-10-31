@@ -2813,4 +2813,79 @@ mod tests {
         assert_eq!(gamma.today, crate::usage::SpendWindow::default());
         assert_eq!(gamma.week, crate::usage::SpendWindow::default());
     }
+
+    /// **A box that used a model skein has no price for is told so, and only that box**
+    /// (SKEIN-1384).
+    ///
+    /// `alpha` made a turn today on `claude-mythos-5-1`, which the price table leaves out; `beta`
+    /// used only a priced model; `gamma`'s unpriced turn is eight days old, outside the week. Fails
+    /// if the flag is dropped on its way to the file (`alpha` reads false), if it is the fleet's
+    /// rather than the box's (`beta` reads true), or if a day outside the week raises it (`gamma`
+    /// reads true). Watched: with `out.unpriced |= false && tokens.unpriced` in `box_spend`, `alpha`
+    /// read false and this failed.
+    #[test]
+    fn a_box_that_used_an_unpriced_model_is_told_so_and_no_other_box_is() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir: &Path = dir.as_ref();
+        let home = dir.join("skein");
+        let mut pins = crate::testutil::env_pins();
+        pins.set("SKEIN_HOME", &home);
+        pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        pins.set("HOME", dir.join("bare"));
+        let now = Utc::now();
+        let today = format!("{}T00:00:01Z", now.format("%Y-%m-%d"));
+        let old = format!(
+            "{}T00:00:01Z",
+            (now - chrono::Duration::days(8)).format("%Y-%m-%d")
+        );
+        let unpriced = |id: &str, ts: &str| {
+            turn_line(id, ts, 500, 500).replace("claude-opus-5", "claude-mythos-5-1")
+        };
+        assert!(crate::usage::price_of("claude-mythos-5-1").is_none());
+        let put = |rel: &str, body: String| {
+            let p = home.join("boxes").join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put(
+            "alpha/claude-projects/-w/s1.jsonl",
+            [turn_line("a1", &today, 1000, 0), unpriced("a2", &today)].join("\n"),
+        );
+        put(
+            "beta/claude-projects/-w/s2.jsonl",
+            turn_line("b1", &today, 1000, 0),
+        );
+        put(
+            "gamma/claude-projects/-w/s3.jsonl",
+            [turn_line("g1", &today, 1000, 0), unpriced("g2", &old)].join("\n"),
+        );
+        let report = crate::usage::refresh().expect("the fixture fleet reads");
+        assert_eq!(
+            report
+                .unpriced
+                .iter()
+                .map(|u| u.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-mythos-5-1"],
+            "the fixture's unpriced model was not read as unpriced"
+        );
+        write_box_spend(&report).unwrap();
+
+        let (alpha, beta, gamma) = (spend_of("alpha"), spend_of("beta"), spend_of("gamma"));
+        assert!(
+            alpha.unpriced,
+            "alpha used an unpriced model today: {alpha:?}"
+        );
+        assert!(!beta.unpriced, "beta used no unpriced model: {beta:?}");
+        assert!(
+            !gamma.unpriced,
+            "gamma's unpriced turn is outside the week: {gamma:?}"
+        );
+        assert!(
+            (alpha.today.cost - 0.005).abs() < 1e-9,
+            "the unpriced turn is priced at nothing: {alpha:?}"
+        );
+        assert_eq!(alpha.today.input, 1500, "its tokens are still counted");
+    }
 }
