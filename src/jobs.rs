@@ -2446,6 +2446,48 @@ mod tests {
         );
     }
 
+    /// **The owner's stop names a box as well as a job: of two boxes' jobs with the same id, only
+    /// the one stopped ends.**
+    ///
+    /// A job id is the box's own choice, so two boxes can file the same one. `web-main` and
+    /// `api-main` each have `j-same` waiting behind a job that holds the one core. The owner stops
+    /// `web-main`'s; `api-main`'s still waits, and is the one granted when the core is freed.
+    ///
+    /// What would make it fail: a stop matched by id alone (the sabotage that was run, by the
+    /// coordinator: `stops.iter().any(|(_, i)| i == &job.id)` in `apply_owner_stops`, and
+    /// `api-main`'s `j-same` reads `stopped` too).
+    #[test]
+    fn the_owners_stop_of_one_boxs_job_leaves_another_boxs_job_of_the_same_id() {
+        let f = Fleet::new(&["web-main", "api-main"]);
+        let one = Limits {
+            oversubscribe: 1.0,
+            ..machine(1)
+        };
+        f.submit("web-main", "j-hold", 100, serde_json::json!({"cores": 1}));
+        f.tick(0, one, &[]);
+        f.submit("web-main", "j-same", 101, serde_json::json!({"cores": 1}));
+        f.submit("api-main", "j-same", 201, serde_json::json!({"cores": 1}));
+        f.tick(2, one, &[]);
+        let state = |q: &Queue, b: &str| -> String {
+            q.jobs
+                .iter()
+                .find(|j| j.box_name == b && j.id == "j-same")
+                .map(|j| j.state.clone())
+                .unwrap_or_else(|| "absent".into())
+        };
+
+        ask_owner_stop(&f.places, "web-main", "j-same").unwrap();
+        let q = f.tick(4, one, &[]);
+        assert_eq!(
+            (state(&q, "web-main"), state(&q, "api-main")),
+            ("stopped".to_string(), "waiting".to_string()),
+            "{q:#?}"
+        );
+        f.submit("web-main", "j-hold", 100, serde_json::json!({"state": "done"}));
+        let q = f.tick(6, one, &[]);
+        assert_eq!(state(&q, "api-main"), "granted", "{q:#?}");
+    }
+
     /// **The cockpit's list has every waiting and running job in the fleet, running ones first and
     /// waiting ones in the order they go, and the cores.**
     ///
