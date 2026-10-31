@@ -461,3 +461,69 @@ fn a_claude_installed_into_the_area_does_not_shadow_the_fleets() {
         "the repo's own claude in its tools area shadows the fleet's:\n{said}"
     );
 }
+
+/// **A file held open inside a box, where the box sees its repo's area at `~/.repo-tools`, marks
+/// that version open in that repo's area, and not the same version in another repo's** (SKEIN-1432:
+/// a version is removable only while no running box of the repo has a file in it open).
+///
+/// skein looks from outside every box, at the whole process table; a box process spells the area
+/// `<its home>/.repo-tools`, as every box of every repo does, so which area it is has to be asked of
+/// the process's own root. A box of `web` holds a file of a Rust toolchain open; `other` has the
+/// same toolchain at the same place in its own area.
+///
+/// What would make it fail: matching on the path inside the area without asking which area it is
+/// (`other`'s toolchain reads open); asking the host's view of the path rather than the process's
+/// root (the box's `~/.repo-tools` is not there outside it, and nothing reads open).
+#[test]
+fn a_file_a_box_holds_open_marks_the_version_open_in_its_repos_area_only() {
+    if !bwrap_works() {
+        skip("bwrap cannot make a user namespace here, so whether skein sees a box's open tool is unchecked");
+        return;
+    }
+    let f = Fleet::make("repotoolsopen");
+    let tc = "rustup/toolchains/1.80.0-x86_64-unknown-linux-gnu";
+    let web_area = f.fleet_root.join(".repo-tools/web");
+    let other_area = f.fleet_root.join(".repo-tools/other");
+    for area in [&web_area, &other_area] {
+        fs::create_dir_all(area.join(tc).join("bin")).unwrap();
+        fs::write(area.join(tc).join("bin/rustc"), "x").unwrap();
+    }
+    let ready = f.fleet_root.join("web-main/tree/ready");
+    let done = f.fleet_root.join("web-main/tree/done");
+    let hold = format!(
+        "exec 3<\"$SKEIN_REPO_TOOLS/{tc}/bin/rustc\"\n\
+         : > {ready}\n\
+         for _ in $(seq 1 300); do [ -e {done} ] && break; sleep 0.1; done\n\
+         echo held",
+        ready = skein::util::sh_quote(ready.to_string_lossy().as_ref()),
+        done = skein::util::sh_quote(done.to_string_lossy().as_ref()),
+    );
+    let (said, open) = std::thread::scope(|sc| {
+        let boxed = sc.spawn(|| in_repo_box(&f, "web-main", "web", &hold, &web_area));
+        for _ in 0..300 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let open = ready
+            .exists()
+            .then(|| skein::fleet::open_tool_files(&[web_area.clone(), other_area.clone()]));
+        fs::write(&done, "").unwrap();
+        (boxed.join().unwrap(), open)
+    });
+    let open = open.expect("the box never came up to hold the file");
+    assert_eq!(said.trim(), "held", "{said}");
+    let open = open.expect("the process table can be read");
+    let none = std::collections::BTreeSet::new();
+    let web = open.get(&web_area.display().to_string()).unwrap_or(&none);
+    let other = open.get(&other_area.display().to_string()).unwrap_or(&none);
+    assert!(
+        skein::fleet::version_is_open(web, tc),
+        "a file a box of web holds open in its area was not seen: {open:?}"
+    );
+    assert!(
+        !skein::fleet::version_is_open(other, tc),
+        "another repo's same toolchain read open: {open:?}"
+    );
+}
