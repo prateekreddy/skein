@@ -28,11 +28,11 @@ import type {
 } from 'claude-code'
 
 import type { SkeinAgentLane, SkeinAgentRun, SkeinAgentsPanel, SkeinAgentStatus } from '../types'
-import { claimedItem, commonGitDir, heavyLock, lockOf, ordinal, queueOf, waitingJobs, worktreeIn, worktrees } from './lanes'
-import type { Files, Worktree } from './lanes'
+import { claimedItem, commonGitDir, heavyLock, lanesListed, lockOf, ordinal, queueOf, waitingJobs, withHandMade, worktreeIn, worktrees } from './lanes'
+import type { Files, Lane } from './lanes'
 import { costOf } from './prices'
 
-const agents = atom({ plugin: 'skein', key: 'agents' } as const, [], { shape: 'agents-1' })
+const agents = atom({ plugin: 'skein', key: 'agents' } as const, [], { shape: 'agents-2' })
 const panel = atom(
   { plugin: 'skein', key: 'agentsPanel' } as const,
   { isCompact: false, isDoneCollapsed: false, isClosedByPerson: false },
@@ -49,10 +49,12 @@ const MAX_RUNS = 200
 // folder of each process at a lock.
 const LOCK_EVERY_MS = 5000
 
-// The repository's git directory, found once when the session starts, and its worktrees, read
-// again as each subagent starts. Not drawn from, so not in `$.state`: a reload finds them again.
+// The repository's git directory, found once when the session starts, and the lanes, read again as
+// each subagent starts: those skein made, from `skein-mcp lane list`, the one reader of their
+// records, and any other worktree git records, made by hand. Not drawn from, so not in `$.state`:
+// a reload finds them again.
 let gitDir: string | null = null
-let known: Worktree[] = []
+let known: Lane[] = []
 
 // `register.tsx` hooks the events every feature may watch, once, and calls these in its order:
 // `onStart` as the session starts, and for each subagent `onSpawn`, `onStep`, `onTurnComplete` and
@@ -80,7 +82,7 @@ export async function onStart($: EngineInterface, e: SessionStartInput): Promise
 
 /** A subagent started: its row, its lane if it has one, and the panel opened unless shut. */
 export async function onSpawn($: EngineInterface, e: AgentSpawnInput, started: Extract<AgentSpawnResult, { deny?: undefined }>): Promise<void> {
-  known = gitDir === null ? [] : await worktrees(files($), gitDir)
+  known = withHandMade(await lanesOf($), gitDir === null ? [] : await worktrees(files($), gitDir))
   const tree = (e.cwd ? worktreeIn(e.cwd, known) : null) ?? worktreeIn(e.prompt, known)
   const at = await $.clock.now()
   const run: SkeinAgentRun = {
@@ -309,13 +311,27 @@ function files($: EngineInterface): Files {
   }
 }
 
-const laneAt = (tree: Worktree, isSeenAtWork: boolean): SkeinAgentLane => ({
+const laneAt = (tree: Lane, isSeenAtWork: boolean): SkeinAgentLane => ({
   worktree: tree.path,
   isSeenAtWork,
   branch: tree.branch,
+  recordedItem: tree.item,
+  phase: tree.phase,
+  isMadeBySkein: tree.isMadeBySkein,
   item: null,
   lock: null,
 })
+
+/** `skein-mcp lane list`, the one implementation the `skein_lane` tool answers from; none on a failure. */
+async function lanesOf($: EngineInterface): Promise<Lane[]> {
+  try {
+    const ran = await $.process.run(['python3', `${$.plugin.root}/bin/skein-mcp`, 'lane', 'list'], { timeoutMs: 10000 })
+
+    return ran.exitCode === 0 ? lanesListed(ran.stdout) : []
+  } catch {
+    return []
+  }
+}
 
 async function learnFrom($: EngineInterface, agentId: string, tool: string, call: string, answer: string | undefined): Promise<void> {
   const list = await read($, agents)
@@ -359,8 +375,14 @@ async function refreshLock($: EngineInterface): Promise<void> {
 }
 
 function laneLines(lane: SkeinAgentLane): string[] {
-  const item = lane.item === null ? 'no tracker item claimed' : `${lane.item.id}${lane.item.title ? ` ${lane.item.title}` : ''}${lane.item.isHeld ? '' : ' (no longer held)'}`
-  const where = `${lane.worktree}${lane.branch ? ` on ${lane.branch}` : ''}`
+  const item =
+    lane.item !== null
+      ? `${lane.item.id}${lane.item.title ? ` ${lane.item.title}` : ''}${lane.item.isHeld ? '' : ' (no longer held)'}`
+      : lane.recordedItem !== null
+        ? `${lane.recordedItem}, not claimed yet`
+        : 'no tracker item claimed'
+  const made = lane.isMadeBySkein ? (lane.phase ? ` · ${lane.phase}` : '') : ' · not made by skein'
+  const where = `${lane.worktree}${lane.branch ? ` on ${lane.branch}` : ''}${made}`
   const q = lane.queue ?? null
   const why = q?.reason ? ` (${q.reason})` : ''
   const lock = q

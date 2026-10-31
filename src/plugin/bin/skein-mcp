@@ -56,6 +56,13 @@
 # `skein-mcp requests` is `skein_requests` on the command line the same way, for the band skein's
 # hooks module draws above the prompt (SKEIN-1362).
 #
+# And one makes and removes this box's lanes (SKEIN-1374):
+#
+#   skein_lane        a worktree, branch and brief per lane, recorded in the box's private
+#                     `~/.local/state/skein/lanes/`, and its removal. `skein-mcp lane
+#                     create|drop|list` is the same function on the command line, which the hooks
+#                     module's agents panel reads. Its rules are written above `lane_root`.
+#
 # Three more rules carry `skein_clean`, each with a test that fails without it:
 #
 # * **It never decides what is cleanable.** skein lists it (`fleet::box_cleanables` and
@@ -1097,6 +1104,310 @@ def ask_person(args):
 
 
 # ------------------------------------------------------------------------------------------------
+# skein_lane
+# ------------------------------------------------------------------------------------------------
+#
+# A lane is a worktree of this box's repository where a subagent does one tracker item's work, on a
+# branch of its own, with its build output inside it (SKEIN-1374). skein records each one in
+# `~/.local/state/skein/lanes/<name>.json` (`lanes_dir`), carrying `"schema": 1`, and this is the
+# one implementation of making, listing and removing them: the `skein_lane` tool and `skein-mcp lane create|drop|list` on
+# the command line both call it, and the hooks module's agents panel reads `lane list`
+# (docs/decisions/skein-is-a-mod.md). skein never merges a lane and drives no merge.
+#
+# Every lane's worktree is `<lane root>/<name>`. The lane root is `/var/tmp/skein-lanes`, because
+# `/var/tmp` is private to each box (the launcher's `vartmp` bind), so no other box sees it;
+# `SKEIN_LANE_ROOT` moves it, for tests. Build output goes to `<worktree>/target`, so it goes when
+# the lane goes (docs/decisions/build-output-stays-in-the-worktree.md). `drop` removes
+# `<lane root>/<name>` and nothing else: a record naming any other worktree is refused, and the
+# removal is `remove_listed`'s, never through a link and never off the lane root's filesystem.
+#
+# A record from a newer skein (a higher `schema`) is never read: `list` leaves it out and says so,
+# and `drop` refuses it, since this skein cannot know what the newer one put in it.
+
+LANE_SCHEMA = 1
+LANE_ROOT = "/var/tmp/skein-lanes"
+LANE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+LANE_PHASE_CREATED = "created"
+
+
+def lane_root():
+    return (os.environ.get("SKEIN_LANE_ROOT") or LANE_ROOT).rstrip("/") or "/"
+
+
+def lanes_dir():
+    """`~/.local/state/skein/lanes`: the box's own private state, which the launcher binds back from
+    the box's home at `$HOME/.local/state` and keeps across restarts (`box-session.sh`, the
+    `state_at` bind). Spelled as `keeper.ts`'s `rulesPath` spells it, from `$HOME` and never from
+    `$XDG_STATE_HOME`, which the bind does not follow. Not `$SKEIN_STATE`: the launcher binds that
+    read-only into a box, and it stays so (SKEIN-1403)."""
+    home = os.environ.get("HOME", "")
+    return os.path.join(home, ".local", "state", "skein", "lanes") if home else None
+
+
+def git(argv, cwd=None):
+    """Run git: (exit code, stdout, stderr), each stripped."""
+    try:
+        done = subprocess.run(["git"] + argv, cwd=cwd, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, "", str(e)
+    return done.returncode, done.stdout.strip(), done.stderr.strip()
+
+
+def read_lane(path):
+    """One lane record, or `{"error": …}`: unreadable, not a record, or from a newer skein."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "unreadable"}
+    schema = rec.get("schema") if isinstance(rec, dict) else None
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema < 1:
+        return {"error": "unreadable"}
+    if schema > LANE_SCHEMA:
+        return {"error": "newer-schema", "schema": schema}
+    return rec
+
+
+def write_lane(d, rec):
+    path = os.path.join(d, rec["name"] + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def lane_brief(rec, rules_text):
+    """The lane's brief: where it works and where its build output goes, then the rules file."""
+    head = [
+        "# Lane %s" % rec["name"],
+        "",
+        "Tracker item: %s." % rec["item"],
+        "Work only in %s, on branch %s, made from %s (%s)."
+        % (rec["worktree"], rec["branch"], rec["base"], rec["base_sha"]),
+        "Build output stays inside the worktree:",
+        "",
+        "    export CARGO_TARGET_DIR=%s" % rec["target"],
+        "",
+        "The rules below are from %s." % rec["rules"],
+        "",
+    ]
+    return "\n".join(head) + "\n" + rules_text.rstrip("\n") + "\n"
+
+
+def lane_list(_args):
+    d = lanes_dir()
+    if d is None:
+        return {"error": "no-home"}
+    try:
+        files = sorted(n for n in os.listdir(d) if n.endswith(".json"))
+    except FileNotFoundError:
+        files = []
+    except OSError:
+        return reply({"error": "unreadable"}, "skein: could not read this box's lane records.")
+    lanes, refused = [], []
+    for n in files:
+        name = n[: -len(".json")]
+        if not LANE_NAME.match(name):
+            continue
+        rec = read_lane(os.path.join(d, n))
+        if "error" in rec:
+            refused.append(dict(rec, name=name))
+        else:
+            lanes.append(rec)
+    out = {"root": lane_root(), "lanes": lanes, "refused": refused}
+    if not refused:
+        return out
+    why = []
+    for r in refused:
+        if r["error"] == "newer-schema":
+            why.append("lane %s, recorded by a newer skein (schema %d; this one reads %d)"
+                       % (r["name"], r["schema"], LANE_SCHEMA))
+        else:
+            why.append("lane %s, whose record cannot be read" % r["name"])
+    return reply(out, "skein: left out %s." % "; ".join(why))
+
+
+def lane_create(args):
+    name, item, base, rules = (args.get(k) for k in ("name", "item", "base", "rules"))
+    if not isinstance(name, str) or not LANE_NAME.match(name):
+        return reply({"error": "bad-name"},
+                     "skein: made no lane. A lane's name is up to 64 letters, digits, '.', '_' and "
+                     "'-', starting with a letter or digit.")
+    branch = args.get("branch") or "lane/%s" % name
+    if not isinstance(item, str) or not LANE_NAME.match(item):
+        return reply({"error": "bad-item"}, "skein: made no lane. Name its tracker item, like SKEIN-12.")
+    if not isinstance(base, str) or not base or base.startswith("-"):
+        return reply({"error": "bad-base"}, "skein: made no lane. Name the commit or branch to start it from.")
+    if not isinstance(branch, str) or branch.startswith("-") or git(["check-ref-format", "--branch", branch])[0]:
+        return reply({"error": "bad-branch"}, "skein: made no lane. %s is not a branch name git allows." % branch)
+    if not isinstance(rules, str) or not os.path.isabs(rules):
+        return reply({"error": "no-rules"}, "skein: made no lane. Give the rules file as a full path.")
+    try:
+        rules_text = read_text(rules)
+    except OSError:
+        return reply({"error": "no-rules"}, "skein: made no lane. Cannot read the rules file %s." % rules)
+    d = lanes_dir()
+    if d is None:
+        return {"error": "no-home"}
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    if not (os.path.isdir(d) and os.access(d, os.W_OK)):
+        return reply({"error": "lanes-not-writable", "dir": d},
+                     "skein: made no lane. This box cannot write its lane records in %s." % d)
+    if os.path.lexists(os.path.join(d, name + ".json")):
+        return reply({"error": "lane-exists", "name": name},
+                     "skein: made no lane. There is already a lane %s; drop it first or choose another name." % name)
+    root = lane_root()
+    worktree = os.path.join(root, name)
+    if os.path.lexists(worktree):
+        return reply({"error": "worktree-exists", "worktree": worktree},
+                     "skein: made no lane. %s already exists, and skein makes a lane's worktree itself." % worktree)
+    repo = args.get("repo") or os.getcwd()
+    rc, git_dir, _ = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo)
+    if rc:
+        return reply({"error": "not-a-repository", "repo": repo},
+                     "skein: made no lane. %s is not in a git repository." % repo)
+    rc, base_sha, _ = git(["rev-parse", "--verify", "--quiet", "--end-of-options", base + "^{commit}"], cwd=repo)
+    if rc:
+        return reply({"error": "bad-base", "base": base},
+                     "skein: made no lane. %s is not a commit in this repository." % base)
+    try:
+        os.makedirs(root, exist_ok=True)
+    except OSError as e:
+        return reply({"error": "no-lane-root", "root": root},
+                     "skein: made no lane. Cannot make %s: %s." % (root, e.strerror or e))
+    rc, _, err = git(["worktree", "add", "-b", branch, worktree, base_sha], cwd=repo)
+    if rc:
+        return reply({"error": "git-refused", "git": err},
+                     "skein: made no lane. git said: %s" % (err.splitlines() or ["nothing"])[-1])
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    rec = {
+        "schema": LANE_SCHEMA,
+        "name": name,
+        "item": item,
+        "worktree": worktree,
+        "branch": branch,
+        "base": base,
+        "base_sha": base_sha,
+        "target": os.path.join(worktree, "target"),
+        "rules": rules,
+        "brief": os.path.join(d, name + ".brief.md"),
+        "git_dir": git_dir,
+        "phase": LANE_PHASE_CREATED,
+        "created": at,
+        "updated": at,
+    }
+    try:
+        with open(rec["brief"], "w", encoding="utf-8") as f:
+            f.write(lane_brief(rec, rules_text))
+        write_lane(d, rec)
+    except OSError as e:
+        # Take back what was made, so a failed create leaves no lane half there.
+        git(["worktree", "remove", "--force", worktree], cwd=repo)
+        git(["branch", "-D", branch], cwd=repo)
+        for p in (rec["brief"], os.path.join(d, name + ".json.tmp")):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        return reply({"error": "not-recorded"},
+                     "skein: made no lane. Cannot write its record: %s." % (e.strerror or e))
+    return reply(rec, "skein: made lane %s in %s on %s from %s. Give its subagent the brief %s."
+                 % (name, worktree, branch, base, rec["brief"]))
+
+
+def lane_drop(args):
+    name = args.get("name")
+    if not isinstance(name, str) or not LANE_NAME.match(name):
+        return reply({"error": "bad-name"}, "skein: removed nothing. That is not a lane's name.")
+    d = lanes_dir()
+    if d is None:
+        return {"error": "no-home"}
+    path = os.path.join(d, name + ".json")
+    if not os.path.lexists(path):
+        return reply({"error": "no-such-lane", "name": name},
+                     "skein: removed nothing. There is no lane %s; skein_lane list shows them." % name)
+    rec = read_lane(path)
+    if rec.get("error") == "newer-schema":
+        return reply({"error": "newer-schema", "name": name, "schema": rec["schema"]},
+                     "skein: removed nothing. Lane %s was recorded by a newer skein (schema %d; this one "
+                     "reads %d)." % (name, rec["schema"], LANE_SCHEMA))
+    if "error" in rec:
+        return reply({"error": "unreadable", "name": name},
+                     "skein: removed nothing. Lane %s's record cannot be read." % name)
+    root = lane_root()
+    worktree = rec.get("worktree")
+    if worktree != os.path.join(root, name):
+        return reply({"error": "outside-lane-root", "worktree": worktree},
+                     "skein: removed nothing. Lane %s's worktree is not %s, so skein left it alone."
+                     % (name, os.path.join(root, name)))
+    if os.path.lexists(worktree):
+        if not os.path.islink(worktree):
+            rc, out, _ = git(["status", "--porcelain", "--untracked-files=normal"], cwd=worktree)
+            # Build output is the lane's own and goes with it; anything else is somebody's work.
+            changed = [ln for ln in out.splitlines() if ln.strip() and ln != "?? target/"]
+            if rc == 0 and changed:
+                return reply({"error": "uncommitted", "name": name, "changes": len(changed)},
+                             "skein: removed nothing. Lane %s has changes not committed: commit or "
+                             "discard them, then drop it again." % name)
+        if not safe_removal_supported():
+            return reply({"error": "unsafe-python"},
+                         "skein: removed nothing. This Python cannot remove without following links.")
+        try:
+            kept = remove_listed(root, worktree)
+        except (Refused, OSError) as e:
+            why = str(e) if isinstance(e, Refused) else (e.strerror or str(e))
+            return reply({"error": "not-removed", "worktree": worktree, "why": why},
+                         "skein: did not drop lane %s: %s." % (name, why))
+        if kept:
+            return reply({"error": "not-removed", "worktree": worktree, "left_alone": kept},
+                         "skein: did not drop lane %s: removed all of it but %s, another filesystem "
+                         "mounted inside it." % (name, ", ".join(os.path.join(root, k) for k in kept)))
+    if isinstance(rec.get("git_dir"), str):
+        git(["--git-dir=" + rec["git_dir"], "worktree", "prune"])
+    for p in (rec.get("brief"), path):
+        if isinstance(p, str) and os.path.dirname(p) == d:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+    return reply({"dropped": name, "worktree": worktree, "branch": rec.get("branch")},
+                 "skein: dropped lane %s and removed %s. Its branch %s is kept."
+                 % (name, worktree, rec.get("branch")))
+
+
+LANE_ACTIONS = {"create": lane_create, "drop": lane_drop, "list": lane_list}
+
+
+def lane(args):
+    handler = LANE_ACTIONS.get(args.get("action"))
+    if handler is None:
+        return {"error": "unknown-action"}
+    return handler(args)
+
+
+def lane_argv(argv):
+    """`lane list`, `lane drop NAME`, `lane create NAME --item I --base B --rules FILE [--branch B]`
+    as the tool's arguments, or None when they do not parse."""
+    if argv == ["list"]:
+        return {"action": "list"}
+    if len(argv) == 2 and argv[0] == "drop":
+        return {"action": "drop", "name": argv[1]}
+    if len(argv) >= 2 and argv[0] == "create" and len(argv) % 2 == 0:
+        args = {"action": "create", "name": argv[1]}
+        for flag, value in zip(argv[2::2], argv[3::2]):
+            key = {"--item": "item", "--base": "base", "--rules": "rules", "--branch": "branch"}.get(flag)
+            if key is None or key in args:
+                return None
+            args[key] = value
+        return args
+    return None
+
+
+# ------------------------------------------------------------------------------------------------
 # The protocol
 # ------------------------------------------------------------------------------------------------
 
@@ -1200,6 +1511,28 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
+    {
+        "name": "skein_lane",
+        "description": "This box's lanes: worktrees where a subagent does one tracker item's work on "
+        "a branch of its own, with its build output inside the worktree. create makes the worktree "
+        "under /var/tmp/skein-lanes, its branch from base, and a brief from the rules file to hand "
+        "the subagent; list shows every lane and its phase; drop removes a lane's worktree and "
+        "build output and keeps its branch. skein never merges a lane.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "drop", "list"]},
+                "name": {"type": "string"},
+                "item": {"type": "string"},
+                "base": {"type": "string"},
+                "rules": {"type": "string"},
+                "branch": {"type": "string"},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
+    },
 ]
 
 HANDLERS = {
@@ -1210,6 +1543,7 @@ HANDLERS = {
     "skein_request_package": request_package,
     "skein_request_write": request_write,
     "skein_ask_person": ask_person,
+    "skein_lane": lane,
 }
 
 
@@ -1260,8 +1594,14 @@ def run_once(argv):
         result = clean({"paths": argv[1:]})
     elif argv == ["requests"]:
         result = requests({})
+    elif argv[:1] == ["lane"] and lane_argv(argv[1:]) is not None:
+        result = lane(lane_argv(argv[1:]))
     else:
-        sys.stderr.write("usage: skein-mcp clean [PATH...] | skein-mcp requests\n")
+        sys.stderr.write(
+            "usage: skein-mcp clean [PATH...] | skein-mcp requests | skein-mcp lane list | "
+            "skein-mcp lane drop NAME | "
+            "skein-mcp lane create NAME --item ITEM --base REF --rules FILE [--branch BRANCH]\n"
+        )
         return 2
     sys.stdout.write(json.dumps({"result": dict(result), "said": getattr(result, "said", "")}) + "\n")
     return 1 if "error" in result else 0

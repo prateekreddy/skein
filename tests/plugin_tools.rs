@@ -684,15 +684,17 @@ fn it_speaks_mcp_over_stdio() {
             "skein_requests",
             "skein_request_package",
             "skein_request_write",
-            "skein_ask_person"
+            "skein_ask_person",
+            "skein_lane"
         ]
     );
-    // The two that only read say so; the three that ask, the one that removes, and
+    // The two that only read say so; the three that ask, the two that remove, and
     // skein_resources, which with `restart` writes the box's restart ask (SKEIN-1372), do not.
     for t in replies[1]["result"]["tools"].as_array().unwrap() {
         let reads = !t["name"].as_str().unwrap().starts_with("skein_request_")
             && t["name"] != "skein_ask_person"
             && t["name"] != "skein_clean"
+            && t["name"] != "skein_lane"
             && t["name"] != "skein_resources";
         assert_eq!(t["annotations"]["readOnlyHint"], reads, "{t}");
     }
@@ -735,9 +737,20 @@ fn it_imports_nothing_that_reaches_the_network() {
     for m in &found {
         assert!(allowed.contains(&m.as_str()), "the server imports {m}");
     }
-    // The two subprocesses are `du`, over the box's own checkout, and the launcher's own filing
-    // entry points, which write into the box's own drop-boxes.
-    assert_eq!(SERVER.matches("subprocess.run(").count(), 2);
+    // The three subprocesses are `du`, over the box's own checkout, the launcher's own filing
+    // entry points, which write into the box's own drop-boxes, and `git`, for the box's own lanes
+    // (SKEIN-1374), which runs no command that reaches a remote.
+    assert_eq!(SERVER.matches("subprocess.run(").count(), 3);
+    assert!(SERVER.contains(r#"subprocess.run(["git"] + argv"#));
+    for remote in [
+        "\"fetch\"",
+        "\"push\"",
+        "\"pull\"",
+        "\"clone\"",
+        "\"ls-remote\"",
+    ] {
+        assert!(!SERVER.contains(remote), "the server runs git {remote}");
+    }
     assert!(SERVER.contains(r#"["du", "-x", "-k", "--max-depth=1", where]"#));
     assert!(SERVER.contains(r#"["bash", launcher()] + argv[:1] + [box] + argv[1:]"#));
 }
