@@ -173,6 +173,16 @@ exit 0
     fs.mkdirSync(path.dirname(f), { recursive: true });
     fs.writeFileSync(f, Buffer.alloc(64 * 1024, 7));
   }
+  // And its tools area on the fleet's disk (SKEIN-1435): an old Rust toolchain nobody has run for
+  // 41 days, and a fresh one, which the card must not name.
+  const tc = path.join(root, "fleet", ".repo-tools", "cachey", "rustup", "toolchains");
+  for (const [v, days] of [["1.80.0", 41], ["1.92.0", 1]]) {
+    const rustc = path.join(tc, `${v}-x86_64-unknown-linux-gnu`, "bin", "rustc");
+    fs.mkdirSync(path.dirname(rustc), { recursive: true });
+    fs.writeFileSync(rustc, Buffer.alloc(256 * 1024, 7), { mode: 0o755 });
+    const then = new Date(Date.now() - days * 86400 * 1000);
+    fs.utimesSync(rustc, then, then);
+  }
   fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
     { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
       check: "", plane_project: "", sync_connection: "" },
@@ -507,6 +517,20 @@ await check("whether skein reads a repo's pull requests on its own is on its car
   if (stored !== true) throw new Error(`Read ahead: On should be what the repo stores, got ${JSON.stringify(stored)}`);
   const master = await page.locator("#set-prai").locator("xpath=ancestor::label[1]").locator(".set-title").textContent();
   if (!/master switch/.test(master)) throw new Error(`the fleet switch is labelled "${master}"`);
+});
+await check("a repo's card shows its tools area and names an unused tool version", async () => {
+  // SKEIN-1435. Fails if the card shows no tools area, if a repo with none is not told so, if the
+  // area's size or the old toolchain's line is missing, or if the fresh toolchain is named.
+  const none = '.rcard[data-card="smoke"] [data-repotools="smoke"] [data-tooluse]';
+  await page.waitForFunction(s => /No tools area yet/.test(document.querySelector(s)?.textContent || ""), none, { timeout: 5000 });
+  await page.click('.rcard[data-card="cachey"] .rhead');
+  const use = '.rcard[data-card="cachey"] [data-repotools="cachey"] [data-tooluse]';
+  await page.waitForFunction(s => /unused 41 days/.test(document.querySelector(s)?.textContent || ""), use, { timeout: 5000 });
+  const said = await text(use);
+  if (!/^\d+(\.\d+)?[MG]\. Unused for 30 days or more: Rust 1\.80\.0 · unused 41 days · \d+ MB\.$/.test(said)) throw new Error(`the tools area reads "${said}"`);
+  if (/1\.92/.test(said)) throw new Error(`a toolchain run yesterday is named: "${said}"`);
+  await page.click('.rcard[data-card="cachey"] .rhead');
+  await settle(200);
 });
 await check("a repo's card says where its boxes' downloads are kept, and cleans the shared cache", async () => {
   // SKEIN-1350. Fails if the card loses the row, if a store kept elsewhere is not told its boxes keep

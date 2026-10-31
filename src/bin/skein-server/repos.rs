@@ -262,13 +262,22 @@ pub(super) async fn api_pull_repo(Path(id): Path<String>) -> Response {
     }
 }
 
-/// A repo's shared download cache, measured, and which of its boxes are running (SKEIN-1350).
-/// Walks the cache, so it is asked for when the repo's card opens and never on the board's tick.
-/// `{"cache": null}` for a repo whose store is kept elsewhere, whose boxes keep their own.
+/// A repo's tools area and its old download cache, measured, and which of its boxes are running
+/// (SKEIN-1350, SKEIN-1435). Walks both, so it is asked for when the repo's card opens and never on
+/// the board's tick. `"tools"` is the area, its size and its unused tool versions
+/// (`fleet::repo_tools`), `null` when the repo has none yet; `"cache"` is the old cache beside the
+/// store, which nothing uses since SKEIN-1431, `null` for a repo whose store is kept elsewhere.
 pub(super) async fn api_repo_cache(Path(id): Path<String>) -> Response {
-    let r = tokio::task::spawn_blocking(move || skein::fleet::repo_cache(&id)).await;
+    let r = tokio::task::spawn_blocking(move || {
+        // The old cache first: it refuses an id that is not a registered repo, before the id names
+        // a directory.
+        skein::fleet::repo_cache(&id).map(|cache| (cache, skein::fleet::repo_tools(&id)))
+    })
+    .await;
     match r {
-        Ok(Ok(cache)) => Json(serde_json::json!({ "cache": cache })).into_response(),
+        Ok(Ok((cache, tools))) => {
+            Json(serde_json::json!({ "cache": cache, "tools": tools })).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
