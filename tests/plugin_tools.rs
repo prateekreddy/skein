@@ -218,6 +218,35 @@ fn top_never_names_a_pid_outside_the_boxs_cgroup() {
     assert_eq!(pids(&top), vec![100, 101], "{top}");
 }
 
+/// **A box whose processes are in its leaf and its jobs' cgroups is still one box to `skein_top`**
+/// (SKEIN-1419): the server runs in the leaf, `skein/<box>/box`, a heavy job's processes in
+/// `skein/<box>/job-<id>`, and the box's own `cgroup.procs` is empty.
+///
+/// What would make it fail: `own_cgroup` accepting only `skein/<box>` (the sabotage that was run:
+/// `not-in-a-box-cgroup`, so a box started by this launcher has no process list), taking the leaf
+/// as the box (the job's build is missing), or walking up out of the box (the neighbour's pids).
+#[test]
+fn top_counts_a_boxs_leaf_and_its_jobs_as_the_box() {
+    let b = Box_::new("skein-tools-it-leaf");
+    b.in_cgroup("/skein/example/box");
+    b.put("root/sys/fs/cgroup/skein/example/cgroup.procs", "");
+    b.put("root/sys/fs/cgroup/skein/example/box/cgroup.procs", "101\n");
+    b.put(
+        "root/sys/fs/cgroup/skein/example/job-j-1/cgroup.procs",
+        "100\n",
+    );
+    b.put(
+        "root/sys/fs/cgroup/skein/neighbour/box/cgroup.procs",
+        "200\n",
+    );
+    b.process(100, 101, 2_000, 50, "cargo build");
+    b.process(101, 1, 1_000, 10, "node server.js");
+    b.process(200, 1, 900_000, 90_000, "the neighbour's build");
+    let top = b.call("example", "skein_top", json!({"by": "memory", "n": 50}));
+    assert_eq!(pids(&top), vec![100, 101], "{top}");
+    assert_eq!(top["processes_in_box"], 2, "{top}");
+}
+
 /// **A process that is not in a box's cgroup gets no process list at all**, never everybody's.
 ///
 /// A box started without cgroup delegation (`uncapped no-cgroup-delegation`) runs in the

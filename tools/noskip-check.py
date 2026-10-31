@@ -163,6 +163,13 @@ ENVIRONMENTAL = [
         "that path read-only — a fact about how this machine mounted it, not about this tree",
     ),
     (
+        "tests/skein_job.rs",
+        "a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_the_end",
+        "makes a cgroup subtree of its own at the top of /sys/fs/cgroup with `sudo -n`, which "
+        "works on a host with passwordless sudo and a cgroup v2 root that hands on cpu and memory, "
+        "and never inside a box, whose user namespace sudo cannot leave",
+    ),
+    (
         "tests/usage.rs",
         "the_reader_reproduces_an_independent_tally_of_the_same_transcripts",
         "compares the reader against an oracle taken from a corpus of REAL transcripts, named by "

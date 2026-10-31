@@ -1685,7 +1685,7 @@ mod tests {
         let (said, dir) = box_cgroup_block("");
         let cg = dir.join("cgroup/skein/demo");
         assert!(
-            cg.join("cgroup.procs").is_file(),
+            cg.join("box/cgroup.procs").is_file(),
             "the box joined no cgroup, so nothing at stop can reach what it started"
         );
         assert!(
@@ -1712,6 +1712,47 @@ mod tests {
         assert_eq!(read("memory.max"), "1G");
         assert_eq!(read("memory.high"), "800M");
         assert_eq!(read("pids.max"), "512");
+        assert_eq!(said, "SKEIN_LIMITS capped max=1G,high=800M,pids=512");
+    }
+
+    /// **The box's own processes join a leaf under its cgroup, not the cgroup itself**, so a heavy
+    /// job can have a cgroup of its own beside them (SKEIN-1419): cgroup v2 hands a controller to a
+    /// cgroup's children only while the cgroup holds no processes. The ceiling stays on the box's
+    /// cgroup, where it bounds the leaf and every job together.
+    ///
+    /// What would make it fail: the shell joining `$cg` rather than the leaf (the sabotage that was
+    /// run: `demo/cgroup.procs` holds the pid and `demo/box/cgroup.procs` does not exist), the
+    /// ceiling written on the leaf, where it would leave the jobs outside it, or the leaf's weight
+    /// or floor not written.
+    #[test]
+    fn the_box_joins_a_leaf_and_its_ceiling_stays_on_the_box() {
+        let (said, dir) = box_cgroup_block("max=1G,high=800M,pids=512");
+        let cg = dir.join("cgroup/skein/demo");
+        let read = |f: &str| {
+            std::fs::read_to_string(cg.join(f))
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        assert!(
+            read("box/cgroup.procs").parse::<u32>().is_ok(),
+            "the session shell is not in the leaf: {:?}",
+            read("box/cgroup.procs")
+        );
+        assert!(
+            !cg.join("cgroup.procs").exists(),
+            "the session shell joined the box's own cgroup, which then cannot have job cgroups"
+        );
+        assert_eq!(read("memory.max"), "1G");
+        assert!(
+            !cg.join("box/memory.max").exists(),
+            "the ceiling went on the leaf"
+        );
+        assert_eq!(read("box/cpu.weight"), "400");
+        assert_eq!(read("box/memory.min"), "max");
+        // The fixture's files are overwritten by each `echo`, so the last controller handed on is
+        // what is left: the point is that the writes went to the box's cgroup.
+        assert_eq!(read("cgroup.subtree_control"), "+memory");
         assert_eq!(said, "SKEIN_LIMITS capped max=1G,high=800M,pids=512");
     }
 }
