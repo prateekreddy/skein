@@ -30,6 +30,13 @@
 #      pid, and its state: `waiting`, then `done` or `cancelled`. Skein frees the cores when this
 #      pid leaves the box's cgroup, so a wrapper killed with -9 frees them too.
 #
+# **It ends with what the job used**, one line on stderr: `asked 4 cores, used 1.3 avg (peak
+# 3.8), 1.4 GB peak, 6m12s`. skein measures it from the job's own cgroup in the tick that sees the
+# job end, and the wrapper waits a few seconds for that tick's view; skein keeps the run, per repo
+# and command, to pick the cores a later run asks for when it names none (SKEIN-1421). A job skein
+# did not measure (no cgroup of its own, or not scheduled at all) is told what this wrapper counted
+# of its children itself, which has no peak.
+#
 # **A nested call never waits.** The child runs with `SKEIN_JOB_ID` set, and a `skein-job` that
 # finds it set runs its command straight away: it already holds its parent's cores, and waiting for
 # more behind itself is a deadlock (SYNAP-517).
@@ -50,6 +57,7 @@
 import fcntl
 import json
 import os
+import resource
 import secrets
 import signal
 import subprocess
@@ -63,8 +71,11 @@ LOCK = os.environ.get("SKEIN_JOB_LOCK") or "/var/tmp/skein-lanes-heavy.lock"
 # takes it that skein is not scheduling and runs on the box's lock alone.
 UNANSWERED_SECONDS = float(os.environ.get("SKEIN_JOB_UNANSWERED_SECONDS") or 30)
 POLL_SECONDS = 1.0
+# How long, once the job has ended, the wrapper waits for skein's measurement of it: two of the
+# queue's 2 s ticks and some.
+END_WAIT_SECONDS = float(os.environ.get("SKEIN_JOB_END_WAIT_SECONDS") or 6)
 # The cores a job that names none is run with when skein is not answering: the queue's own default
-# ask (`default_cores` in src/jobs.rs).
+# ask before its command has any history (`DEFAULT_CORES` in src/jobs.rs).
 FALLBACK_CORES = 2
 # What it says, and exits with, when the owner stopped the job: `STOPPED_BY_OWNER` in src/jobs.rs,
 # and the status of a command killed with SIGKILL, which is what a running one was.
@@ -259,6 +270,59 @@ def wait_for_grant(path, body):
         time.sleep(POLL_SECONDS)
 
 
+def wait_for_end(job_id):
+    """The job as skein's view shows it once skein has seen it end, which is the tick that measured
+    it; None when no view says so within END_WAIT_SECONDS."""
+    deadline = time.monotonic() + END_WAIT_SECONDS
+    while True:
+        view = read_view()
+        if isinstance(view, dict):
+            job = next((j for j in view.get("jobs") or [] if isinstance(j, dict)
+                        and j.get("id") == job_id), None)
+            if job is not None and job.get("state") not in ("waiting", "granted"):
+                return job
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.2)
+
+
+def number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def duration(secs):
+    s = int(round(secs))
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        return "%dm%02ds" % (s // 60, s % 60)
+    return "%dh%02dm" % (s // 3600, s % 3600 // 60)
+
+
+def cores_said(n):
+    return "%d core%s" % (n, "" if n == 1 else "s")
+
+
+def said_used(asked, used, own_cpu, own_secs):
+    """The job's last line: what it asked for and what it used, skein's measurement `used` where
+    there is one, else this wrapper's own count of its children's CPU over `own_secs`."""
+    parts = []
+    if number(asked):
+        parts.append("asked " + cores_said(int(asked)))
+    if isinstance(used, dict) and number(used.get("avg_cores")):
+        peak = used.get("peak_cores")
+        parts.append("used %.1f avg%s" % (used["avg_cores"],
+                                          " (peak %.1f)" % peak if number(peak) else ""))
+        if number(used.get("peak_mem_mib")):
+            parts.append("%.1f GB peak" % (used["peak_mem_mib"] / 1024.0))
+        secs = used.get("secs") if number(used.get("secs")) else own_secs
+    else:
+        parts.append("used %.1f avg" % (own_cpu / max(own_secs, 1.0)))
+        secs = own_secs
+    parts.append(duration(secs))
+    return ", ".join(parts)
+
+
 # ---- running it
 
 # The parallelism each tool reads from its environment, set to the grant.
@@ -416,6 +480,7 @@ def run(args):
         cores = counts.get("cores", FALLBACK_CORES)
     status = 1
     ended = "cancelled"
+    started = time.monotonic()
     try:
         status = run_child(argv, job_id, cores)
         ended = "done"
@@ -432,6 +497,14 @@ def run(args):
                 pass
         if lock is not None:
             os.close(lock)
+    own_secs = time.monotonic() - started
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    asked, used = cores, None
+    if isinstance(granted, dict) and request is not None:
+        asked = granted.get("cores") or cores
+        job = wait_for_end(job_id)
+        used = job.get("used") if isinstance(job, dict) else None
+    say(said_used(asked, used, children.ru_utime + children.ru_stime, own_secs))
     return status if status >= 0 else 128 - status
 
 

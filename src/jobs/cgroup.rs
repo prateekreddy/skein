@@ -28,7 +28,9 @@
 //! **Measured at the end, then removed.** [`finish`] reads `cpu.stat`'s `usage_usec` and
 //! `memory.peak` from the job's cgroup and removes it. A job whose wrapper is gone, killed with `-9`
 //! while its command ran on, has its cgroup killed first: the job has ended, so what it left
-//! running goes with it. [`Rates`] turns two readings of a running job into the cores it is using
+//! running goes with it. A job that ended `done` or `cancelled` with its wrapper still there is
+//! left alone until the wrapper has left the box, and then whatever is still in its cgroup is
+//! killed, measured and the cgroup removed ([`stop_leftovers`], SKEIN-1438). [`Rates`] turns two readings of a running job into the cores it is using
 //! now.
 //!
 //! **Shared between boxes by what they were granted.** A job's weight only splits the CPU its box's
@@ -147,10 +149,11 @@ pub fn cores_between(
 }
 
 /// The live CPU rate of each running job, kept between ticks by whoever ticks: the last reading of
-/// each job's cgroup, and the rate between it and the one before.
+/// each job's cgroup, the rate between it and the one before, and the highest rate seen so far.
 #[derive(Debug, Default, Clone)]
 pub struct Rates {
     last: BTreeMap<(String, String), (u64, DateTime<Utc>)>,
+    peak: BTreeMap<(String, String), f64>,
 }
 
 impl Rates {
@@ -168,19 +171,33 @@ impl Rates {
             self.last.remove(&key);
             return None;
         };
-        let prev = self.last.insert(key, (read.cpu_usec, now));
-        prev.and_then(|(usec, at)| cores_between(usec, at, read.cpu_usec, now))
+        let prev = self.last.insert(key.clone(), (read.cpu_usec, now));
+        let rate = prev.and_then(|(usec, at)| cores_between(usec, at, read.cpu_usec, now))?;
+        let peak = self.peak.entry(key).or_insert(rate);
+        *peak = peak.max(rate);
+        Some(rate)
+    }
+
+    /// The most cores box `box_name`'s job `id` was seen using between two readings: `None` until
+    /// it has been read twice.
+    pub fn peak(&self, box_name: &str, id: &str) -> Option<f64> {
+        self.peak
+            .get(&(box_name.to_string(), id.to_string()))
+            .copied()
     }
 
     /// Stop following a job that ended.
     pub fn forget(&mut self, box_name: &str, id: &str) {
-        self.last.remove(&(box_name.to_string(), id.to_string()));
+        let key = (box_name.to_string(), id.to_string());
+        self.last.remove(&key);
+        self.peak.remove(&key);
     }
 
     /// Stop following every job `running` does not name, so a job that left the queue without
     /// being seen to end is not followed for ever.
     pub fn retain(&mut self, running: &dyn Fn(&str, &str) -> bool) {
         self.last.retain(|(b, id), _| running(b, id));
+        self.peak.retain(|(b, id), _| running(b, id));
     }
 }
 
@@ -429,6 +446,33 @@ pub(crate) fn weigh_boxes_with(fs: &dyn Cgroupfs, cgroups: &Path, granted: &BTre
             let _ = fs.write(&dir.join("cpu.weight"), &want.to_string());
         }
     }
+}
+
+/// How many processes are in box `box_name`'s job `id`'s cgroup, by its `cgroup.procs`: zero when
+/// there is no such cgroup.
+pub fn members(cgroups: &Path, box_name: &str, id: &str) -> u32 {
+    std::fs::read_to_string(job_cgroup(cgroups, box_name, id).join("cgroup.procs"))
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+        .unwrap_or(0)
+}
+
+/// Stop what an ended job left running in its cgroup (SKEIN-1438): every process still in it is
+/// killed, then the cgroup is read and removed, as [`finish`] does for a job whose wrapper is
+/// gone. The caller passes only a job whose wrapper has left the box, so nothing killed here is
+/// the wrapper handing its command's status back. Returns how many processes there were and the
+/// reading, or `None` when the job has no cgroup or nothing is left in it.
+pub fn stop_leftovers(cgroups: &Path, box_name: &str, id: &str) -> Option<(u32, Option<Usage>)> {
+    stop_leftovers_with(&Kernel, cgroups, box_name, id)
+}
+
+pub(crate) fn stop_leftovers_with(
+    fs: &dyn Cgroupfs,
+    cgroups: &Path,
+    box_name: &str,
+    id: &str,
+) -> Option<(u32, Option<Usage>)> {
+    let left = members(cgroups, box_name, id);
+    (left > 0).then(|| (left, finish_with(fs, cgroups, box_name, id, true)))
 }
 
 /// Remove box `box_name`'s job cgroups that name no job in `active` and that the kernel says are
@@ -763,7 +807,7 @@ mod tests {
             oversubscribe: 1.5,
             mem_free_mib: None,
         };
-        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates).unwrap()
+        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates, None).unwrap()
     }
 
     fn job<'a>(q: &'a crate::jobs::Queue, id: &str) -> &'a crate::jobs::Job {
@@ -832,6 +876,7 @@ mod tests {
                 avg_cores: 3.0,
                 peak_mem_mib: Some(1536),
                 secs: 4,
+                peak_cores: None,
             }),
             "{q:#?}"
         );
@@ -986,6 +1031,110 @@ mod tests {
         );
     }
 
+    /// **A done job whose command left a process running is stopped once its wrapper has gone,
+    /// and not while the wrapper is still exiting** (SKEIN-1438).
+    ///
+    /// The job says `done` while its wrapper, 31337, and a daemon its command started, 40001, are
+    /// both in its cgroup. The tick that sees it end and the tick after both leave the cgroup alone:
+    /// the wrapper is still there. Once the wrapper has left the box, the next tick kills the
+    /// cgroup (the fixture's kernel is plain files, so the kill is the `1` in `cgroup.kill`),
+    /// measures it again, and the view says what it stopped.
+    ///
+    /// What would make it fail: no later-tick pass over ended jobs (the sabotage that was run: the
+    /// pass's loop made to skip every job, and `cgroup.kill` is never written), the pass not
+    /// waiting for the wrapper to leave (also run: the `alive` check taken out, and the cgroup is
+    /// killed on the tick the wrapper is still exiting), or the count kept out of the view.
+    #[test]
+    fn a_done_jobs_leftover_processes_are_stopped_once_its_wrapper_has_gone() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n").unwrap();
+        submit(&places, "j-l", 31337, "waiting");
+        tick(&places, 0);
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-l");
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        std::fs::write(cg.join("cgroup.procs"), "31337\n40001\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 2000000\n").unwrap();
+        submit(&places, "j-l", 31337, "done");
+        for secs in [2, 4] {
+            let q = tick(&places, secs);
+            assert_eq!(job(&q, "j-l").state, "done", "{q:#?}");
+            assert!(
+                !cg.join("cgroup.kill").exists(),
+                "a job whose wrapper is still exiting was killed, at {secs}s"
+            );
+        }
+
+        std::fs::write(cg.join("cgroup.procs"), "40001\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 3000000\n").unwrap();
+        let q = tick(&places, 6);
+        assert_eq!(
+            read(&cg.join("cgroup.kill")),
+            "1",
+            "the leftovers were not stopped: {q:#?}"
+        );
+        let l = job(&q, "j-l");
+        assert_eq!(l.leftovers, 1, "{q:#?}");
+        assert_eq!(
+            l.used.map(|u| u.avg_cores),
+            Some(1.5),
+            "not measured again: {q:#?}"
+        );
+        let view = crate::jobs::read_view(&places.states.join("web-main")).expect("no view");
+        assert_eq!(
+            view.jobs[0].reason, "used 1.5 cores on average; stopped 1 leftover process",
+            "{view:#?}"
+        );
+    }
+
+    /// **A job the owner stopped has what survived in its cgroup stopped too, once its wrapper has
+    /// gone** (SKEIN-1422, with SKEIN-1438's pass).
+    ///
+    /// The owner stops a running job, and the fixture's kernel then has a process, 40001, left in
+    /// the job's cgroup, as if the stop's kill had missed it (the kill file is taken away so the
+    /// pass's own kill can be seen). While the wrapper, moved back to the box's leaf, is still
+    /// there, nothing more is done. Once it has left the box, the next tick kills the cgroup and
+    /// counts what it stopped.
+    ///
+    /// What would make it fail: the leftover pass taking only `done` and `cancelled` (the sabotage
+    /// that was run: `"stopped"` taken out of its `matches!`, and `cgroup.kill` is never written
+    /// again), or the pass not waiting for the stopped job's wrapper to leave.
+    #[test]
+    fn a_stopped_jobs_leftover_processes_are_stopped_once_its_wrapper_has_gone() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n").unwrap();
+        submit(&places, "j-p", 31337, "waiting");
+        tick(&places, 0);
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-p");
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        std::fs::write(cg.join("cgroup.procs"), "31337\n40001\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 1000000\n").unwrap();
+        crate::jobs::ask_owner_stop(&places, "web-main", "j-p").unwrap();
+        let q = tick(&places, 2);
+        assert_eq!(job(&q, "j-p").state, "stopped", "{q:#?}");
+        assert_eq!(read(&leaf.join("cgroup.procs")), "31337");
+
+        // The stop's kill missed 40001; the wrapper is still in the leaf.
+        std::fs::remove_file(cg.join("cgroup.kill")).unwrap();
+        std::fs::write(cg.join("cgroup.procs"), "40001\n").unwrap();
+        let q = tick(&places, 4);
+        assert!(
+            !cg.join("cgroup.kill").exists(),
+            "a stopped job whose wrapper is still there was killed again: {q:#?}"
+        );
+
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        let q = tick(&places, 6);
+        assert_eq!(
+            read(&cg.join("cgroup.kill")),
+            "1",
+            "what the stopped job left was not stopped: {q:#?}"
+        );
+        assert_eq!(job(&q, "j-p").leftovers, 1, "{q:#?}");
+        assert_eq!(job(&q, "j-p").state, "stopped", "{q:#?}");
+    }
+
     /// **Measured use reaches admission, through readings kept from one tick to the next.**
     ///
     /// A four-core job runs on a four-core machine allowed half as much again, using half a core.
@@ -1046,6 +1195,107 @@ mod tests {
             "granted",
             "half a core measured did not let it in: {q:#?}"
         );
+    }
+
+    /// **A job's end says the most cores it was seen using, from the readings kept between
+    /// ticks.** A job read at 0, then 3 cores, then 1 core, ends with a peak of 3 and its average.
+    ///
+    /// What would make it fail: the peak read after the job is forgotten (the sabotage that was
+    /// run: `rates.peak` moved below `rates.forget` in the tick, and the peak is `None`), a later
+    /// lower rate replacing the highest, or the peak not passed into the job's usage.
+    #[test]
+    fn a_finished_job_says_the_most_cores_it_was_seen_using() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n").unwrap();
+        let mut rates = Rates::default();
+        submit(&places, "j-p", 31337, "waiting");
+        tick_with(&places, 0, &mut rates);
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-p");
+        for (secs, usec) in [(2, 0u64), (4, 6_000_000), (6, 8_000_000)] {
+            std::fs::write(cg.join("cpu.stat"), format!("usage_usec {usec}\n")).unwrap();
+            tick_with(&places, secs, &mut rates);
+        }
+        assert_eq!(rates.peak("web-main", "j-p"), Some(3.0));
+        submit(&places, "j-p", 31337, "done");
+        let q = tick_with(&places, 8, &mut rates);
+        let used = job(&q, "j-p").used.expect("not measured");
+        assert_eq!(used.peak_cores, Some(3.0), "{q:#?}");
+        assert_eq!(used.avg_cores, 1.0, "{q:#?}");
+        assert_eq!(
+            rates.peak("web-main", "j-p"),
+            None,
+            "an ended job is still followed"
+        );
+    }
+
+    /// **A run that finished teaches the next run of its command the cores to ask for and the
+    /// memory to expect; a cancelled one teaches nothing** (SKEIN-1421).
+    ///
+    /// Two `cargo test` jobs that named no cores are granted the default two and expected at the
+    /// class's 2 GB. One finishes having used 12 CPU-seconds in 4 s (3 cores) and held 4 GB at most;
+    /// the other is cancelled having used 4 cores and 8 GB. A third `cargo test`, naming no cores,
+    /// then asks for 3 and is expected at 4 GB plus a quarter, 5 GB, which 4 GB free does not hold.
+    ///
+    /// What would make it fail: the end path not recording the run (the sabotage that was run: the
+    /// `record` branch made unreachable, and no history file is written), the history not read for
+    /// a waiting job's ask or estimate, the schedule's memory gate ignoring the estimate, or a
+    /// cancelled run recorded (also run: the ask reads 4 and the estimate 10 GB).
+    #[test]
+    fn a_finished_run_sets_the_next_runs_default_cores_and_memory() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n31338\n31339\n").unwrap();
+        submit(&places, "j-1", 31337, "waiting");
+        submit(&places, "j-c", 31338, "waiting");
+        let q = tick(&places, 0);
+        for id in ["j-1", "j-c"] {
+            let j = job(&q, id);
+            assert_eq!(
+                (j.state.as_str(), j.cores, j.memory_need_mib),
+                ("granted", 2, 2048),
+                "before any history the defaults hold: {q:#?}"
+            );
+        }
+        for (id, usec, gib) in [("j-1", 12_000_000u64, 4u64), ("j-c", 16_000_000, 8)] {
+            let cg = job_cgroup(&places.cgroups, "web-main", id);
+            std::fs::write(cg.join("cpu.stat"), format!("usage_usec {usec}\n")).unwrap();
+            std::fs::write(cg.join("memory.peak"), format!("{}\n", gib << 30)).unwrap();
+        }
+        submit(&places, "j-1", 31337, "done");
+        submit(&places, "j-c", 31338, "cancelled");
+        let q = tick(&places, 4);
+        assert_eq!(job(&q, "j-1").state, "done", "{q:#?}");
+        assert_eq!(job(&q, "j-c").state, "cancelled", "{q:#?}");
+        assert!(places.history().is_file(), "no history was written");
+
+        submit(&places, "j-2", 31339, "waiting");
+        let limits = crate::jobs::Limits {
+            cores: 4,
+            max_cores_per_job: crate::jobs::DEFAULT_MAX_CORES_PER_JOB,
+            oversubscribe: 1.5,
+            mem_free_mib: Some(4096),
+        };
+        let at = DateTime::parse_from_rfc3339("2026-10-31T12:00:06Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let q = crate::jobs::tick(
+            &places,
+            limits,
+            &|b: &str| b.to_string(),
+            at,
+            &mut Rates::default(),
+            None,
+        )
+        .unwrap();
+        let next = job(&q, "j-2");
+        assert_eq!(
+            (next.cores, next.memory_need_mib),
+            (3, 5120),
+            "the finished run did not set the next run's ask and estimate: {q:#?}"
+        );
+        assert_eq!(next.state, "waiting", "{q:#?}");
+        assert_eq!(next.reason, "memory: needs ~5 GB, 4 GB free", "{q:#?}");
     }
 
     /// **Boxes share the machine by the cores their running jobs were granted.**

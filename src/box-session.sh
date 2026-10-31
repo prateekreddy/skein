@@ -280,11 +280,11 @@ apply_fleet_ceilings() {
   # wants the machine, a container should have all of it. A weight costs nothing while the machine
   # is quiet and decides who yields when it is not.
   #
-  # **Half a box, and that is a judgement rather than a derivation.** Boxes weigh 100 each; a box is
-  # somebody waiting at a terminal, and a container is work that box started and can wait a little
-  # longer for. It is hard-coded here rather than sent from the host because it is a statement about
-  # what things are worth, not a share of a machine's size — the numbers that scale with the sandbox
-  # arrive in the spec above.
+  # **Half a box, and that is a judgement rather than a derivation.** A box weighs 100 until its
+  # granted heavy jobs add theirs (`jobs::cgroup::box_weight`); a box is somebody waiting at a
+  # terminal, and a container is work that box started and can wait a little longer for. It is
+  # hard-coded here rather than sent from the host because it says what things are worth, not a
+  # share of a machine's size — the numbers that scale with the sandbox arrive in the spec above.
   if [ -d /sys/fs/cgroup/skein/containers ]; then
     sudo -n sh -c 'echo "$1" > "$2"' _ 50 /sys/fs/cgroup/skein/containers/cpu.weight 2>/dev/null || true
   fi
@@ -2072,8 +2072,8 @@ rm -f "$sock"
 # pid afterwards would move one process and leave its existing children outside — a limit that looks
 # applied and holds nothing.
 #
-# Memory only, and on purpose. CPU stays uncapped: cpu.weight is already equal per box, so they
-# fair-share under contention while a lone box still gets every core — and a cap would idle cores
+# Memory only, and on purpose. CPU stays uncapped: cpu.weight follows each box's granted jobs, so
+# they share under contention while a lone box still gets every core — and a cap would idle cores
 # while a box waits, which is the waste this design exists to end. Memory cannot be shared that way:
 # two boxes wanting 20G do not each get 13 slowly, they hit the wall and the kernel starts killing
 # processes — as readily another box's agent as the guilty one.

@@ -51,11 +51,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod cgroup;
+pub mod history;
+pub mod machine;
 
 /// How often the queue is looked at: fast enough that freed cores are taken within a couple of
 /// seconds. Its own loop, apart from the resource signal's minute, because a job waiting a minute
 /// for cores that were free is the waste this queue exists to remove.
 pub const LOOK_EVERY: Duration = Duration::from_secs(2);
+
+/// The cores a job that names none asks for while its command has no history
+/// ([`history::History::cores`]). The wrapper's fallback run, one skein never answered, uses the
+/// same two (`src/plugin/bin/skein-job`).
+pub const DEFAULT_CORES: u32 = 2;
 
 /// The most cores one job may ask for unless the config says otherwise.
 pub const DEFAULT_MAX_CORES_PER_JOB: u32 = 4;
@@ -184,7 +191,8 @@ pub struct Job {
     /// runs, and for a job that never had a cgroup of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Usage>,
-    /// The command in two words, for another box's view: [`short_command`] of its argv.
+    /// The command in two words, for another box's view: [`short_command`] of its argv. Also what
+    /// its runs are kept under in the history ([`history`]).
     #[serde(default)]
     pub short: String,
     /// The cores it is using now, from its own cgroup between the last two ticks. `None` while it
@@ -194,6 +202,15 @@ pub struct Job {
     /// The memory it holds now, in MiB, from its own cgroup's `memory.current`. `None` as `using`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_mib: Option<u64>,
+    /// The memory it is expected to need before it may start, in MiB, set each tick while it
+    /// waits from [`memory_estimate_mib`]. Zero in a queue from before the history, and then the
+    /// class default.
+    #[serde(default)]
+    pub memory_need_mib: u64,
+    /// How many processes skein stopped in its cgroup after it ended: what its command left
+    /// running once its wrapper had gone ([`cgroup::stop_leftovers`]).
+    #[serde(default)]
+    pub leftovers: u32,
 }
 
 /// What a finished job used, from its own cgroup.
@@ -205,17 +222,23 @@ pub struct Usage {
     pub peak_mem_mib: Option<u64>,
     /// The seconds it ran, from its grant to the tick that saw it end, by the host's clock.
     pub secs: i64,
+    /// The most cores it was seen using between two of the queue's readings ([`cgroup::Rates`]).
+    /// `None` for a job that ended before it was read twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_cores: Option<f64>,
 }
 
 impl Usage {
-    /// From what the job's cgroup counted over `secs` seconds of running. A job that ran under a
-    /// second is averaged over one, so its average is its CPU seconds.
-    pub fn from_cgroup(counted: &cgroup::Usage, secs: i64) -> Usage {
+    /// From what the job's cgroup counted over `secs` seconds of running, and the highest rate the
+    /// queue read while it ran. A job that ran under a second is averaged over one, so its average
+    /// is its CPU seconds.
+    pub fn from_cgroup(counted: &cgroup::Usage, secs: i64, peak_cores: Option<f64>) -> Usage {
         let secs = secs.max(0);
         Usage {
             avg_cores: counted.cpu_usec as f64 / 1e6 / secs.max(1) as f64,
             peak_mem_mib: counted.memory_peak.map(|b| b >> 20),
             secs,
+            peak_cores,
         }
     }
 
@@ -266,24 +289,32 @@ impl Job {
     /// ask, which is what every job then ran with.
     fn holds(&self) -> u32 {
         match self.granted_cores {
-            0 => default_cores(self),
+            0 => DEFAULT_CORES,
             n => n,
         }
     }
 }
 
-/// The cores a job asks for when its `skein-job run` named none. Two for now; the history child
-/// of SKEIN-1418 derives it from what that repo's command used before, here and nowhere else.
-/// The wrapper's fallback run, one skein never answered, uses the same two
-/// (`src/plugin/bin/skein-job`).
-pub fn default_cores(_job: &Job) -> u32 {
-    2
+/// The cores a job asks for when its `skein-job run` named none: what its command used before in
+/// its repo, by [`history::History::cores`], held to `cap`; [`DEFAULT_CORES`] before it has run.
+pub fn default_cores(history: &history::History, job: &Job, cap: u32) -> u32 {
+    history
+        .cores(&job.repo, &job.short, cap)
+        .unwrap_or(DEFAULT_CORES)
 }
 
-/// The memory a job is expected to need before it may start, in MiB: a default per class for now,
-/// until the history child of SKEIN-1418 reads that command's past peak, here and nowhere else.
-pub fn memory_estimate_mib(job: &Job) -> u64 {
-    match job.class.as_str() {
+/// The memory a job is expected to need before it may start, in MiB: its command's past peak in
+/// its repo plus a margin, by [`history::History::memory_mib`]; a default per class before it has
+/// been counted.
+pub fn memory_estimate_mib(history: &history::History, job: &Job) -> u64 {
+    history
+        .memory_mib(&job.repo, &job.short)
+        .unwrap_or_else(|| class_memory_mib(&job.class))
+}
+
+/// The memory a job of `class` is expected to need while its command has no history, in MiB.
+fn class_memory_mib(class: &str) -> u64 {
+    match class {
         "webkit" | "train" => 4096,
         // Measured: a CI run with every stage at once peaked at about 7 GB on a peer box, so 3 GB
         // started runs the memory free could not hold.
@@ -459,6 +490,12 @@ pub struct Places {
 }
 
 impl Places {
+    /// What each command used before ([`history`]): beside the queue, on the host, written by the
+    /// tick alone.
+    pub fn history(&self) -> PathBuf {
+        self.queue.with_file_name("history.json")
+    }
+
     pub fn live() -> Places {
         Places {
             requests: PathBuf::from(requests_dir()),
@@ -650,10 +687,9 @@ pub fn merge(
                 short: short_command(&req.argv),
                 ..Job::default()
             };
-            job.cores = match req.cores {
-                Some(n) if n > 0 => n,
-                _ => default_cores(&job),
-            };
+            // No ask is left at zero, and the tick fills it from the command's history before it
+            // is scheduled.
+            job.cores = req.cores.unwrap_or(0);
             queue.jobs.push(job);
         }
     }
@@ -686,6 +722,14 @@ fn cores_word(n: u32) -> String {
     }
 }
 
+/// `stopped 2 leftover processes`.
+fn leftovers_said(n: u32) -> String {
+    match n {
+        1 => "stopped 1 leftover process".into(),
+        n => format!("stopped {n} leftover processes"),
+    }
+}
+
 /// MiB as GB for a person: `3` for 3072, `1.2` for 1228.
 fn gb(mib: u64) -> String {
     let s = format!("{:.1}", mib as f64 / 1024.0);
@@ -708,7 +752,8 @@ fn gb(mib: u64) -> String {
 ///   and two e2e runs beside WebKit once drove the load to 50 and timed WebKit's tests out. The
 ///   reading predates this pass, so what this pass grants is added to it. `None`, unread, gates
 ///   nothing;
-/// * the memory free exceeds [`memory_estimate_mib`], less what this pass already granted against.
+/// * the memory free exceeds the job's `memory_need_mib` ([`memory_estimate_mib`], which the tick
+///   sets), less what this pass already granted against.
 ///
 /// A job with a `min` starts with fewer than it asked, never fewer than `min`, when that is what
 /// fits.
@@ -728,7 +773,7 @@ pub fn schedule(
     let ask_cap = limits.max_cores_per_job.min(limits.cores).max(1);
     for job in queue.jobs.iter_mut().filter(|j| j.state == "waiting") {
         if job.cores == 0 {
-            job.cores = default_cores(job);
+            job.cores = DEFAULT_CORES;
         }
         job.cores = job.cores.clamp(1, ask_cap);
         job.min = match job.min {
@@ -785,7 +830,10 @@ pub fn schedule(
             };
             continue;
         }
-        let need = memory_estimate_mib(job);
+        let need = match job.memory_need_mib {
+            0 => class_memory_mib(&job.class),
+            n => n,
+        };
         if let Some(have) = mem_free.filter(|&have| have <= need) {
             job.reason = format!("memory: needs ~{} GB, {} GB free", gb(need), gb(have));
             continue;
@@ -896,9 +944,12 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
             min: job.min,
             granted_cores: job.granted_cores,
             position: (job.state == "waiting").then(|| place(i)).flatten(),
-            reason: match job.used {
-                Some(u) if !job.is_active() => u.said(),
-                _ => job.reason.clone(),
+            reason: match (job.used, job.leftovers) {
+                _ if job.is_active() => job.reason.clone(),
+                (Some(u), 0) => u.said(),
+                (Some(u), n) => format!("{}; {}", u.said(), leftovers_said(n)),
+                (None, 0) => job.reason.clone(),
+                (None, n) => leftovers_said(n),
             },
             waited_secs: secs_between(&job.queued, waited_until),
             ran_secs: (!job.ended.is_empty() && !job.granted.is_empty())
@@ -948,13 +999,15 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
 ///
 /// `rates` is the last reading of each running job's cgroup, which the tick has no state of its
 /// own to keep: the caller holds it from one tick to the next ([`watch_jobs`]), and what it gives
-/// is what [`schedule`] admits on.
+/// is what [`schedule`] admits on. `machine_busy` is the cores busy on the whole machine since the
+/// caller's last tick ([`machine::MachineBusy`]), or `None` to gate nothing on it.
 pub fn tick(
     places: &Places,
     limits: Limits,
     repo_of: &dyn Fn(&str) -> String,
     now: DateTime<Utc>,
     rates: &mut cgroup::Rates,
+    machine_busy: Option<f64>,
 ) -> Result<Queue, String> {
     let mut queue = read_queue(&places.queue);
     let requests = read_requests(&places.requests);
@@ -972,6 +1025,10 @@ pub fn tick(
     // The owner's stops, read from the host and never from a box's file (SKEIN-1422).
     let stops = read_stops(&stops_dir(places));
     apply_owner_stops(&mut queue, &stops, now);
+    // What each command used before (SKEIN-1421), read only on a tick that needs it: one with a
+    // job that ended or one waiting.
+    let mut history: Option<history::History> = None;
+    let mut recorded = false;
     // A job that ended: what its cgroup counted, then the cgroup gone (SKEIN-1419). A wrapper no
     // longer in its box was killed under its command, which runs on in the job's cgroup holding
     // cores the queue just gave back: the job has ended, so that goes first.
@@ -979,6 +1036,7 @@ pub fn tick(
         if !was_running.contains(&(job.box_name.clone(), job.id.clone())) {
             continue;
         }
+        let peak = rates.peak(&job.box_name, &job.id);
         rates.forget(&job.box_name, &job.id);
         let wrapper_gone = !alive(&job.box_name, job.pid);
         // A running job the owner stopped: its processes are killed before it is measured, and
@@ -988,9 +1046,65 @@ pub fn tick(
                 job.reason = format!("{STOPPED_BY_OWNER}, but {why}");
             }
         }
-        if let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone) {
-            job.used = Some(Usage::from_cgroup(&used, secs_between(&job.granted, now)));
+        if wrapper_gone {
+            job.leftovers = cgroup::members(&places.cgroups, &job.box_name, &job.id);
         }
+        let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone)
+        else {
+            continue;
+        };
+        let used = Usage::from_cgroup(&used, secs_between(&job.granted, now), peak);
+        job.used = Some(used);
+        // Only a run that finished: one cancelled or killed part way used less than the command
+        // does, and would teach the next run to ask for too little.
+        if job.state == "done" {
+            history
+                .get_or_insert_with(|| history::History::read(&places.history()))
+                .record(
+                    &job.repo,
+                    &job.short,
+                    history::Run {
+                        ended: stamp(now),
+                        asked: job.cores,
+                        avg_cores: used.avg_cores,
+                        peak_cores: used.peak_cores,
+                        peak_mem_mib: used.peak_mem_mib,
+                        secs: used.secs,
+                    },
+                );
+            recorded = true;
+        }
+    }
+    // A job that ended on an earlier tick, whose wrapper has since left the box: what its command
+    // left running in its cgroup (a test server, a compiler daemon) is stopped, then measured and
+    // its cgroup removed (SKEIN-1438). A job the owner stopped too: its stop killed its cgroup, and
+    // this takes whatever that missed (SKEIN-1422). Never while the wrapper is still there: it may still be
+    // exiting, and killing it would lose the status it hands back to its caller.
+    for job in queue.jobs.iter_mut() {
+        if !matches!(job.state.as_str(), "done" | "cancelled" | "stopped")
+            || was_running.contains(&(job.box_name.clone(), job.id.clone()))
+            || !cgroup::job_cgroup(&places.cgroups, &job.box_name, &job.id).is_dir()
+            || alive(&job.box_name, job.pid)
+        {
+            continue;
+        }
+        if let Some((n, read)) = cgroup::stop_leftovers(&places.cgroups, &job.box_name, &job.id) {
+            job.leftovers = job.leftovers.max(n);
+            // What it used now counts what it left running too, over the seconds the job ran.
+            if let (Some(read), Some(was)) = (read, job.used) {
+                job.used = Some(Usage::from_cgroup(&read, was.secs, was.peak_cores));
+            }
+        }
+    }
+    // A waiting job's ask, when it named none, and the memory it is expected to need: from what its
+    // command used before, here and nowhere else.
+    let cap = limits.max_cores_per_job.min(limits.cores).max(1);
+    for job in queue.jobs.iter_mut().filter(|j| j.state == "waiting") {
+        let history = history.get_or_insert_with(|| history::History::read(&places.history()));
+        if job.cores == 0 {
+            job.cores = default_cores(history, job, cap);
+        }
+        job.memory_need_mib = memory_estimate_mib(history, job);
     }
     let before = granted(&queue);
     rates.retain(&|b, id| before.contains(&(b.to_string(), id.to_string())));
@@ -1003,13 +1117,12 @@ pub fn tick(
         }
     }
     let states = places.states.clone();
-    // The whole machine's busy CPU is not read yet (SKEIN-1430): `None` gates nothing on it.
     let pool = schedule(
         &mut queue,
         limits,
         &|name| memory_asked(&states, name),
         &|job| live.get(&(job.box_name.clone(), job.id.clone())).copied(),
-        None,
+        machine_busy,
     );
     granted_now(&mut queue, &before, now);
     // A job granted now moves into a cgroup of its own, capped and weighted for the cores it was
@@ -1052,7 +1165,14 @@ pub fn tick(
     }
     prune(&mut queue, now);
     write_json(&places.queue, &queue)?;
+    // After the queue: a queue that failed to write is read again next tick with these jobs still
+    // running, and they would be recorded twice.
     let mut failed = Vec::new();
+    if let (true, Some(h)) = (recorded, &history) {
+        if let Err(e) = write_json(&places.history(), h) {
+            failed.push(format!("the job history: {e}"));
+        }
+    }
     if let Err(e) = write_json(&fleet_view_path(places), &fleet_view(&queue, pool, now)) {
         failed.push(format!("the cockpit's jobs list: {e}"));
     }
@@ -1128,25 +1248,31 @@ pub async fn watch_jobs() {
     let mut tick_every = tokio::time::interval(LOOK_EVERY);
     tick_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = String::new();
-    // Each running job's last cgroup reading, carried from one tick to the next: the tick keeps
-    // no state of its own, and a rate needs two readings.
+    // Each running job's last cgroup reading, and the whole machine's last `/proc/stat`, carried
+    // from one tick to the next: the tick keeps no state of its own, and a rate needs two
+    // readings.
     let mut rates = cgroup::Rates::default();
+    let mut machine = machine::MachineBusy::default();
     loop {
         tick_every.tick().await;
         let ran = tokio::task::spawn_blocking(move || {
+            let limits = limits();
+            let busy = machine.read(Path::new("/proc/stat"), limits.cores);
             let r = tick(
                 &Places::live(),
-                limits(),
+                limits,
                 &repo_of_box,
                 Utc::now(),
                 &mut rates,
+                busy,
             );
-            (rates, r.map(|_| ()))
+            (rates, machine, r.map(|_| ()))
         })
         .await;
         let said = match ran {
-            Ok((kept, r)) => {
+            Ok((kept, read, r)) => {
                 rates = kept;
+                machine = read;
                 match r {
                     Ok(()) => String::new(),
                     Err(e) => format!("skein: the heavy-work queue: {e}"),
@@ -1156,6 +1282,7 @@ pub async fn watch_jobs() {
             // running jobs count at their grants until two readings give them a rate again.
             Err(e) => {
                 rates = cgroup::Rates::default();
+                machine = machine::MachineBusy::default();
                 format!("skein: the heavy-work queue did not run: {e}")
             }
         };
@@ -1478,7 +1605,12 @@ pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
             using: job.using.filter(|_| running),
             mem_mib: match job.mem_mib.filter(|_| running) {
                 Some(m) => m,
-                None => memory_estimate_mib(job),
+                // What the tick worked out from its command's history; the class default for a
+                // job from before that.
+                None => match job.memory_need_mib {
+                    0 => class_memory_mib(&job.class),
+                    n => n,
+                },
             },
             mem_measured: running && job.mem_mib.is_some(),
             position,
@@ -1596,6 +1728,17 @@ mod tests {
         }
 
         fn tick(&self, secs: i64, limits: Limits, repos: &[(&str, &str)]) -> Queue {
+            self.tick_busy(secs, limits, repos, None)
+        }
+
+        /// [`Fleet::tick`] with the whole machine read as `busy` cores busy.
+        fn tick_busy(
+            &self,
+            secs: i64,
+            limits: Limits,
+            repos: &[(&str, &str)],
+            busy: Option<f64>,
+        ) -> Queue {
             let repos: BTreeMap<String, String> = repos
                 .iter()
                 .map(|(b, r)| (b.to_string(), r.to_string()))
@@ -1607,6 +1750,7 @@ mod tests {
                 &repo_of,
                 at(secs),
                 &mut cgroup::Rates::default(),
+                busy,
             )
             .unwrap()
         }
@@ -1835,6 +1979,7 @@ mod tests {
                 &|b: &str| b.to_string(),
                 at(0),
                 &mut cgroup::Rates::default(),
+                None,
             )
             .unwrap()
         });
@@ -2167,6 +2312,27 @@ mod tests {
         assert_eq!(find(&q, "w2").reason, "machine busy: 10 of 11 cores in use");
     }
 
+    /// **The tick hands the whole machine's busy cores to the schedule** (SKEIN-1430). Four cores,
+    /// 3.5 busy outside the queue: a two-core job waits, saying how busy the machine is; with the
+    /// machine unread it starts.
+    ///
+    /// What would make it fail: the tick passing `None` in place of its `machine_busy` (the sabotage
+    /// that was run: the job is granted), or `watch_jobs`' reading not reaching the tick's input.
+    #[test]
+    fn a_tick_holds_a_job_while_the_whole_machine_is_busy() {
+        let f = Fleet::new(&["web-main"]);
+        f.submit("web-main", "j-b", 961, serde_json::json!({"cores": 2}));
+        let q = f.tick_busy(0, machine(4), &[], Some(3.5));
+        assert_eq!(state_of(&q, "j-b"), "waiting", "{q:#?}");
+        assert_eq!(
+            find(&q, "j-b").reason,
+            "machine busy: 3.5 of 4 cores in use",
+            "{q:#?}"
+        );
+        let q = f.tick(2, machine(4), &[]);
+        assert_eq!(state_of(&q, "j-b"), "granted", "{q:#?}");
+    }
+
     /// **A job that needs more memory than is free waits, with how much, and does not hold up a
     /// job that fits.** 3.5 GB free: a `ci` job, expected at 4 GB, waits; the `build` job behind
     /// it (2 GB) starts; a second `build` job then finds the 1.5 GB left and waits too.
@@ -2277,7 +2443,7 @@ mod tests {
     /// two; a box asking for 64 is held to four; a queue file whose granted job has no core fields
     /// reads, and the job counts at the default.
     ///
-    /// What would make it fail: [`default_cores`] other than two (the sabotage that was run:
+    /// What would make it fail: [`DEFAULT_CORES`] other than two (the sabotage that was run:
     /// three, and the old file is granted three), `cores` on [`Job`] without its serde default
     /// (also run: the old queue no longer reads), or the ask not held to
     /// [`Limits::max_cores_per_job`]. (`cores` on [`Request`] is an `Option`, which serde reads as
@@ -2483,7 +2649,12 @@ mod tests {
             ("stopped".to_string(), "waiting".to_string()),
             "{q:#?}"
         );
-        f.submit("web-main", "j-hold", 100, serde_json::json!({"state": "done"}));
+        f.submit(
+            "web-main",
+            "j-hold",
+            100,
+            serde_json::json!({"state": "done"}),
+        );
         let q = f.tick(6, one, &[]);
         assert_eq!(state(&q, "api-main"), "granted", "{q:#?}");
     }
@@ -2553,13 +2724,8 @@ mod tests {
         );
         assert_eq!(list.jobs[1].secs, 6);
         assert!(!list.jobs[1].reason.is_empty(), "{list:#?}");
-        assert_eq!(
-            list.jobs[1].mem_mib,
-            memory_estimate_mib(&Job {
-                class: "test".into(),
-                ..Job::default()
-            })
-        );
+        // No history for the command, so the class default the tick set as its need.
+        assert_eq!(list.jobs[1].mem_mib, class_memory_mib("test"));
     }
 
     /// **Without a job cgroup, the owner's stop kills every process under the wrapper, and not the
