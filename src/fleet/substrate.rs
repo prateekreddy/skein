@@ -2012,7 +2012,7 @@ esac
         );
     }
 
-    /// **A box never sees an agent CLI half-installed** (SKEIN-1413).
+    /// **A box never sees an agent CLI half-installed** (SKEIN-1413, SKEIN-1439).
     ///
     /// `npm install -g` into the live prefix removes the package and writes it back, and a box
     /// starting in that window finds no `claude`. The stub npm here does what npm does, slowly:
@@ -2020,10 +2020,24 @@ esac
     /// [`skein_npm_install`](crate::substrate::PACKAGE_INSTALL_SH) runs it, the live command is
     /// read every 10 ms, the way a box's `command -v claude` would read it.
     ///
+    /// Two installs in a row: the first finds the real directory npm made and converts it, the
+    /// second replaces a link. And each pair twice: once with an `mv` that refuses `--exchange`,
+    /// as coreutils before 9.5 does (CI's Ubuntu 24.04 ships 9.4), and once with this machine's
+    /// own. The first is the case CI run 41211205164 failed on, "missing for 1 of 201 reads", and
+    /// it is forced here so a machine whose mv has `--exchange` still runs it.
+    ///
     /// **What makes it fail:** installing into the live prefix again (`npm install -g "$@"` with
-    /// no staging prefix): the reads see the command missing for the whole two seconds.
+    /// no prefix of its own): missing for the whole two seconds. Or the first cut's fallback, a
+    /// remove and then a rename of the package with the command still going through it: missing
+    /// for the length of the remove, which the `rm` below holds open long enough to be read.
     #[test]
     fn a_box_never_sees_the_agent_cli_missing_while_it_is_installed() {
+        for exchange in [false, true] {
+            installs_never_leave_the_cli_missing(exchange);
+        }
+    }
+
+    fn installs_never_leave_the_cli_missing(exchange: bool) {
         let dir = crate::testutil::tempdir();
         let stubs = dir.join("stubs");
         let live = dir.join("npm-global");
@@ -2042,6 +2056,25 @@ ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
             live = live.display()
         );
         stub(&stubs, "npm", &npm);
+        // An `rm` that returns late, so a window it opens stays open long enough to be read.
+        stub(
+            &stubs,
+            "rm",
+            "PATH=/usr/bin:/bin rm \"$@\"\nrc=$?\nsleep 0.3\nexit $rc",
+        );
+        let refused = dir.join("refused");
+        if !exchange {
+            stub(
+                &stubs,
+                "mv",
+                &format!(
+                    "for a; do [ \"$a\" = --exchange ] && {{ echo \"$*\" >>'{}'; \
+                     echo \"mv: unrecognized option '--exchange'\" >&2; exit 1; }}; done\n\
+                     PATH=/usr/bin:/bin exec mv \"$@\"",
+                    refused.display()
+                ),
+            );
+        }
         let run = |version: &str| {
             std::process::Command::new("bash")
                 .arg("-c")
@@ -2056,10 +2089,12 @@ ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
                 .spawn()
                 .unwrap()
         };
-        // What was there before: the stub's own install, straight into the live prefix.
+        // What was there before: the stub's own install, straight into the live prefix, which
+        // leaves the real directory npm makes.
         assert!(run_to_end(
             std::process::Command::new(stubs.join("npm"))
                 .args(["install", "-g", "@anthropic-ai/claude-code"])
+                .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
                 .env("FAKE_VERSION", "old")
         ));
         let command = live.join("bin/claude");
@@ -2070,45 +2105,73 @@ ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
                 .unwrap_or_default()
         };
         assert_eq!(runs(&command), "old", "the starting install is not there");
+        let mode = if exchange {
+            "with this machine's mv"
+        } else {
+            "with an mv that has no --exchange"
+        };
 
-        let mut child = run("new");
-        let (mut reads, mut missing) = (0, 0);
-        while child.try_wait().unwrap().is_none() {
-            reads += 1;
-            if !std::fs::metadata(&command).is_ok_and(|m| m.is_file()) {
-                missing += 1;
+        for version in ["new", "newer"] {
+            let mut child = run(version);
+            let (mut reads, mut missing) = (0, 0);
+            while child.try_wait().unwrap().is_none() {
+                reads += 1;
+                if !std::fs::metadata(&command).is_ok_and(|m| m.is_file()) {
+                    missing += 1;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            assert!(
+                child.wait().unwrap().success(),
+                "skein_npm_install failed installing {version} {mode}: {}",
+                std::fs::read_to_string(dir.join("log")).unwrap_or_default()
+            );
+            assert!(
+                reads > 100,
+                "the install of {version} was read {reads} times, too few to have seen its window"
+            );
+            assert_eq!(
+                missing, 0,
+                "a box starting during the install of {version} {mode} would have found no \
+                 claude: it was missing for {missing} of {reads} reads"
+            );
+            assert_eq!(
+                runs(&command),
+                version,
+                "the install did not put {version} in place"
+            );
+            assert_eq!(
+                runs(&live.join(pkg).join("bin/claude.exe")),
+                version,
+                "the package's own path does not lead to {version}, so `npm ls -g` and anything \
+                 written through it see another version, or none"
+            );
+            let lib: Vec<_> = std::fs::read_dir(live.join("lib"))
+                .unwrap()
+                .chain(std::fs::read_dir(live.join("lib/node_modules/@anthropic-ai")).unwrap())
+                .chain(std::fs::read_dir(live.join("bin")).unwrap())
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            let prefixes = lib.iter().filter(|n| n.starts_with(".skein-v.")).count();
+            assert_eq!(
+                prefixes, 1,
+                "after installing {version}, an old version's prefix is still there: {lib:?}"
+            );
+            assert!(
+                !lib.iter().any(|n| n.contains(".skein-new")),
+                "a link made to be renamed was left behind: {lib:?}"
+            );
         }
-        assert!(
-            child.wait().unwrap().success(),
-            "skein_npm_install failed: {}",
-            std::fs::read_to_string(dir.join("log")).unwrap_or_default()
-        );
-        assert!(
-            reads > 100,
-            "the install was read {reads} times, too few to have seen its window"
-        );
-        assert_eq!(
-            missing, 0,
-            "a box starting during the install would have found no claude: it was missing for \
-             {missing} of {reads} reads"
-        );
-        assert_eq!(
-            runs(&command),
-            "new",
-            "the install did not put the new version in place"
-        );
-        let left: Vec<_> = std::fs::read_dir(live.join("lib/node_modules"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(".skein-stage"))
-            .collect();
-        assert!(
-            left.is_empty(),
-            "the staging prefix was left behind: {left:?}"
-        );
+        if !exchange {
+            let refusals = std::fs::read_to_string(&refused).unwrap_or_default();
+            assert_eq!(
+                refusals.lines().count(),
+                1,
+                "the conversion of npm's own directory should have asked for --exchange once and \
+                 been refused, so the fallback ran; it asked: {refusals:?}"
+            );
+        }
     }
 
     fn run_to_end(cmd: &mut std::process::Command) -> bool {
