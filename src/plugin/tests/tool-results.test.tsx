@@ -452,6 +452,9 @@ test('while a skein-job call waits the spinner says so, and is the engine’s ag
   await call
 })
 
+// What would make it fail: every running call's wait drawn on every spinner. Watched: with the
+// `agentId` test in `spinnerText` made always true, lane-2's spinner said lane-1's wait and the
+// `message: null` comparison failed.
 test('a subagent’s waiting job shows on its own spinner, not on another’s', async ($, on) => {
   const handed = engine(on)
   mock.clock(on, { now: NOW })
