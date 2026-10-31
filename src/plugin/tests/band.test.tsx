@@ -47,6 +47,14 @@ function signal(ago: number, ask: boolean): string {
   })
 }
 
+/** This box's own spend as skein-server writes it, `ago` seconds old. */
+function usage(ago: number, today: number, week: number, unpriced = false): string {
+  const at = new Date(NOW - ago * 1000).toISOString().replace(/\.\d+Z$/, 'Z')
+  const window = (cost: number) => ({ cost, input: 1, output: 2, cache_read: 3, cache_write: 4 })
+
+  return JSON.stringify({ at, prices_as_of: '2026-10-30', today: window(today), week: window(week), unpriced })
+}
+
 /** What `skein-mcp clean` with no paths prints: the list, as `skein_clean` answers it. */
 const LISTED = {
   result: {
@@ -108,6 +116,8 @@ function requests(waiting: number, questions: readonly Record<string, unknown>[]
 
 type World = {
   signal: string
+  /** `signals/usage.json`; none when absent. */
+  usage?: string
   mail: string
   waiting: number
   /** Questions to the person, as `skein-mcp requests` lists them. */
@@ -140,6 +150,7 @@ function engine(on: On, w: World) {
   })
   on('fs.read', (_, e) => {
     if (e.path === `${STATE}/signals/resources.json`) return { value: w.signal }
+    if (e.path === `${STATE}/signals/usage.json` && w.usage !== undefined) return { value: w.usage }
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: '{"version":"9.8.7"}' }
     throw new Error(`no such file: ${e.path}`)
   })
@@ -384,8 +395,63 @@ test('/skein status says the disk, the ask, the requests and the mail', async ($
       'skein asks this box to free 1.2G of disk: it is over its own allowance.',
       '1 request waiting. /skein requests lists them.',
       '2 unread. The agent reads them at the start of its next turn.',
-      'Spend is not shown: skein does not write it into the box yet.',
+      "skein has not written this box's spend in the last 70 minutes.",
     ].join('\n'),
+  )
+})
+
+// Fails if the line stops saying the dollars are an estimate at API prices, or if `+` is not added
+// where something had no price. Watched: with "estimated at API prices" taken out of `spendLine`,
+// this failed on the band and on /skein status.
+test('the band and /skein status say the spend is an estimate, with + when something had no price', async ($, on) => {
+  const w = world({ usage: usage(60, 1.2, 31.084) })
+  await started(on, w, $)
+  const line = 'Spend, estimated at API prices, as of 11:59 UTC: today ≈$1.20 · 7 days ≈$31.08'
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    const shown = await ui.find({ type: 'Text', text: /Spend/ })
+    expect(shown?.text).toBe(line)
+    expect(shown?.props.dimColor).toBe(true)
+    await ui.unmount()
+  }
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(line)
+
+  w.usage = usage(60, 1.2, 140.5, true)
+  const status = (await $.command.run(TYPED('status'))).text?.split('\n') ?? []
+  expect(status.slice(-2)).toEqual([
+    'Spend, estimated at API prices, as of 11:59 UTC: today ≈$1.20+ · 7 days ≈$141+',
+    '+ means some of it was on a model skein has no price for, so it is left out.',
+  ])
+})
+
+// skein reads the fleet's usage once an hour, and the band trusts the file for 70 minutes. Fails if
+// the file is believed whatever its age, or for the resource signal's five minutes. Watched: with
+// `readSpend` judging age by `STALE_AFTER_MS`, the 69-minute figure was not shown and this failed;
+// with the age check removed, the 71-minute figure was shown and this failed.
+test('spend is shown for 70 minutes after skein read it, and not after', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  const w = world({ usage: usage(69 * 60, 1.2, 8.4) })
+  await started(on, w, $)
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(
+    'Spend, estimated at API prices, as of 10:51 UTC: today ≈$1.20 · 7 days ≈$8.40',
+  )
+
+  w.usage = usage(71 * 60, 1.2, 8.4)
+  await $.command.run(TYPED('status'))
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text' }))?.text).toBe('engine')
+    expect(await ui.find({ type: 'Text', text: /Spend/ })).toBe(undefined)
+    await ui.unmount()
+  }
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(
+    "skein has not written this box's spend in the last 70 minutes.",
   )
 })
 

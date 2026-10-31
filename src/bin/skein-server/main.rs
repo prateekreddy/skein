@@ -358,6 +358,8 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     tokio::spawn(skein::resource_signal::watch_box_resources());
     // The fleet's heavy-work queue (SKEIN-1388): every 2 s, apart from the minute above.
     tokio::spawn(skein::jobs::watch_jobs());
+    // The fleet's usage once an hour, and each box's own spend from it (SKEIN-1384).
+    tokio::spawn(health::warm_usage());
     tokio::spawn(skein::fleet::watch_runtime_updates());
     // The fleet's agent CLI and Rust toolchain versions (SKEIN-1372): new ones fetched and tested
     // on skein's own clock, and boxes behind a rollout restarted onto it once they are idle.

@@ -10,7 +10,10 @@
 //   `skein_clean` MCP tool also runs;
 // * the requests from `skein-mcp requests`, the `skein_requests` tool's own function;
 // * the unread count from `mailbox.sh unread`, which marks nothing: mail is delivered by the
-//   turn-boundary hooks alone.
+//   turn-boundary hooks alone;
+// * the box's own spend today and over 7 days from `$SKEIN_STATE/signals/usage.json`, which
+//   skein-server writes beside the resource signal once an hour (SKEIN-1384). The fleet runs on a
+//   Claude login, so the dollars are an estimate at the API's prices, and say so.
 //
 // The `clean` tool this file registers (`mcp__skein__clean`) is `skein-mcp clean` too, and answers
 // what the MCP tool answers, which `tests/band.test.tsx` holds against `tests/clean-contract.ts`
@@ -28,7 +31,7 @@ import type {
 
 import type { SkeinBand, SkeinCleanRow, SkeinRequestRow, SkeinSharedCache } from '../types'
 
-const band = atom({ plugin: 'skein', key: 'band' } as const, null, { shape: 'band-1' })
+const band = atom({ plugin: 'skein', key: 'band' } as const, null, { shape: 'band-2' })
 const cleanSaid = atom({ plugin: 'skein', key: 'cleanSaid' } as const, null, {
   shape: 'clean-said-1',
 })
@@ -38,6 +41,11 @@ const PANE = 'skein'
 // skein writes the signal file every 60 s, and the plugin's command hooks believe nothing in one
 // older than five minutes (`STALE_AFTER` in `bin/skein-resources`): neither does the band.
 const STALE_AFTER_MS = 300_000
+
+// skein-server reads the fleet's usage once an hour (`USAGE_MAX_AGE` in skein-server's
+// `health.rs`) and writes the box's spend from each reading. The band trusts that file for the hour
+// and ten minutes more, so a reading that takes a while does not blank the line.
+const SPEND_STALE_AFTER_MS = 70 * 60_000
 
 // How often the band reads again. skein lists the box's disk every five minutes and writes the
 // signal file every minute; a request answered shows within a minute.
@@ -134,7 +142,8 @@ export function register(on: On): void {
     const found = await read($, band)
     const said = await read($, cleanSaid)
     const asks = asked(found, e.props.bodyColumns)
-    if (e.props.hasSurvey || (asks.length === 0 && said === null)) return next(e)
+    const spend = found?.spend ?? null
+    if (e.props.hasSurvey || (asks.length === 0 && said === null && spend === null)) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const open = () => void $.ui.open({ id: PANE, title: 'skein', focus: true })
@@ -157,6 +166,7 @@ export function register(on: On): void {
             <Button key="band:said" label="OK" role="dismiss" onPress={() => update($, cleanSaid, () => null)} />
           </Box>
         )}
+        {spend !== null && <Text dimColor>{spendLine(spend)}</Text>}
       </Box>
     )
   })
@@ -229,13 +239,14 @@ export function register(on: On): void {
 
 /** Read everything the band draws, and keep it for the session. */
 async function look($: Engine): Promise<void> {
-  const [disk, clean, requests, mail] = await Promise.all([
+  const [disk, clean, requests, mail, spend] = await Promise.all([
     readDisk($),
     readClean($),
     readRequests($),
     readMail($),
+    readSpend($),
   ])
-  const found: SkeinBand = { disk, clean, requests, mail }
+  const found: SkeinBand = { disk, clean, requests, mail, spend }
   await update($, band, () => found)
 }
 
@@ -258,6 +269,21 @@ async function readDisk($: Engine): Promise<SkeinBand['disk']> {
       ? { amount_mb: numberOr(ask.amount, 0) ?? 0, why: typeof ask.why === 'string' ? ask.why : '' }
       : null,
   }
+}
+
+/** This box's own spend, as skein-server last wrote it; null when it is missing or out of date. */
+async function readSpend($: Engine): Promise<SkeinBand['spend']> {
+  const state = await $.env.get('SKEIN_STATE')
+  if (!state) return null
+  const parsed = await parsedFile($, `${state}/signals/usage.json`)
+  if (!isRecord(parsed) || typeof parsed.at !== 'string') return null
+  const at = Date.parse(parsed.at)
+  if (Number.isNaN(at) || (await $.clock.now()) - at > SPEND_STALE_AFTER_MS) return null
+  const today = isRecord(parsed.today) ? numberOr(parsed.today.cost, null) : null
+  const week = isRecord(parsed.week) ? numberOr(parsed.week.cost, null) : null
+  if (today === null || week === null) return null
+
+  return { at: utcTime(at), today, week, unpriced: parsed.unpriced === true }
 }
 
 async function readClean($: Engine): Promise<SkeinBand['clean']> {
@@ -492,15 +518,37 @@ function status(found: SkeinBand | null): string {
       : `${waiting} ${waiting === 1 ? 'request' : 'requests'} waiting. /skein requests lists them.`,
   )
   lines.push(mailLine(found?.mail ?? null))
-  lines.push("Spend is not shown: skein does not write it into the box yet.")
+  const spend = found?.spend ?? null
+  lines.push(spend === null ? "skein has not written this box's spend in the last 70 minutes." : spendLine(spend))
+  if (spend?.unpriced) lines.push('+ means some of it was on a model skein has no price for, so it is left out.')
 
   // The engine heads the answer with `skein:`, so the first line reads as a sentence after it.
   return lines.join('\n')
 }
 
+/** The box's spend in one line. An estimate: the fleet pays by its login, not by the token. */
+function spendLine(spend: NonNullable<SkeinBand['spend']>): string {
+  const more = spend.unpriced ? '+' : ''
+
+  return `Spend, estimated at API prices, as of ${spend.at} UTC: today ≈${dollars(spend.today)}${more} · 7 days ≈${dollars(spend.week)}${more}`
+}
+
 // ------------------------------------------------------------------------------------------------
 // Numbers
 // ------------------------------------------------------------------------------------------------
+
+/** `14:05`, the UTC time of `ms`. */
+function utcTime(ms: number): string {
+  const d = new Date(ms)
+  const two = (n: number) => String(n).padStart(2, '0')
+
+  return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`
+}
+
+/** `$4.20`, or whole dollars from $100: `$1,234`. */
+function dollars(n: number): string {
+  return n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n).toLocaleString('en-US')}`
+}
 
 /** Bytes as `skein-mcp` prints them: `3.2G`, or `120M` under a gigabyte. */
 function human(n: number): string {

@@ -95,6 +95,10 @@ pub(super) async fn api_health() -> Json<serde_json::Value> {
 /// that decides whether the panel calls a reading old on screen. A cockpit that said "over an hour
 /// old" at forty minutes would still be telling the truth about the reading it is showing, so the
 /// two are free to differ and neither is a copy of the other.
+///
+/// It is also the period of [`warm_usage`], which reads the fleet once an hour with nobody asking,
+/// so each box's own spend is never older than this (SKEIN-1384). The box's band trusts that file
+/// for this hour and ten minutes more: the spend's own window in `src/plugin/hooks/band.tsx`.
 const USAGE_MAX_AGE: Duration = Duration::from_secs(3600);
 
 /// One fleet scan at a time, across every caller.
@@ -115,6 +119,36 @@ const USAGE_MAX_AGE: Duration = Duration::from_secs(3600);
 /// is one rule in one place, and the price is that a plain load arriving during a scan waits for it
 /// and is then answered from the newer reading.
 static USAGE_SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A reading of the fleet's usage, written into every box as that box's own spend before it is
+/// handed on (SKEIN-1384). A box whose file could not be written is said on stderr and does not
+/// cost the caller its reading.
+fn told(
+    taken: Result<skein::usage::UsageReport, String>,
+) -> Result<skein::usage::UsageReport, String> {
+    if let Ok(report) = &taken {
+        if let Err(e) = skein::resource_signal::write_box_spend(report) {
+            eprintln!("skein: box spend: {e}");
+        }
+    }
+    taken
+}
+
+/// The fleet's usage, read once every [`USAGE_MAX_AGE`] behind [`USAGE_SCAN`]: the owner's "once in
+/// a while", so each box's own spend is at most that old with nobody watching (SKEIN-1384). Never
+/// returns.
+pub(super) async fn warm_usage() {
+    let mut tick = tokio::time::interval(USAGE_MAX_AGE);
+    loop {
+        tick.tick().await;
+        let _one_at_a_time = USAGE_SCAN.lock().await;
+        match tokio::task::spawn_blocking(|| told(skein::usage::refresh())).await {
+            Ok(Err(e)) => eprintln!("skein: usage reading: {e}"),
+            Err(e) => eprintln!("skein: usage reading did not run: {e}"),
+            Ok(Ok(_)) => {}
+        }
+    }
+}
 
 /// What the fleet has spent, from the cached reading — re-read only when asked, or when the hour is up.
 ///
@@ -171,9 +205,9 @@ pub(super) async fn api_usage(Query(q): Query<HashMap<String, String>>) -> Respo
     // the occasion it was doubted. `no_window_admits_a_reading_as_old_as_itself` holds the boundary
     // now, and `tests/ui/usage.mjs` watches the press after the press from outside the process.
     let taken = if asked {
-        tokio::task::spawn_blocking(skein::usage::refresh).await
+        tokio::task::spawn_blocking(|| told(skein::usage::refresh())).await
     } else {
-        tokio::task::spawn_blocking(|| skein::usage::report(USAGE_MAX_AGE)).await
+        tokio::task::spawn_blocking(|| told(skein::usage::report(USAGE_MAX_AGE))).await
     };
     match taken {
         Ok(Ok(report)) => Json(report).into_response(),
