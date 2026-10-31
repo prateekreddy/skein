@@ -31,6 +31,10 @@ import type {
 
 import type { SkeinBand, SkeinCleanRow, SkeinDiskAsk, SkeinRequestRow, SkeinSharedCache } from '../types'
 
+import { lanesAtWork } from './agents-panel'
+import { lanesListed, ordinal } from './lanes'
+import { size } from './tool-results'
+
 const band = atom({ plugin: 'skein', key: 'band' } as const, null, { shape: 'band-2' })
 const cleanSaid = atom({ plugin: 'skein', key: 'cleanSaid' } as const, null, {
   shape: 'clean-said-1',
@@ -102,8 +106,9 @@ export async function subcommand($: Engine, args: string): Promise<CommandRunRes
   const sub = args.trim().split(/\s+/)[0]
   if (sub === 'status') {
     await look($)
+    const [jobs, lanes, box, now] = await Promise.all([readJobs($), readLanes($), $.env.get('SKEIN_BOX'), $.clock.now()])
 
-    return { text: status(await read($, band)) }
+    return { text: status(await read($, band), { jobs, lanes, box: box || null, at: utcTime(now) }) }
   }
   if (sub === 'requests') {
     await look($)
@@ -231,6 +236,33 @@ export function register(on: On): void {
       </Box>
     )
   })
+
+  // `/skein status` as rows, what needs the person in amber: drawn from the row's own text, which
+  // is what the transcript keeps, so a row scrolled back to reads as it did when it was said.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    if (e.props.command !== 'skein' || e.props.isErrored || e.props.args.trim().split(/\s+/)[0] !== 'status') return next(e)
+    const rows = statusDrawn(e.props.text)
+    if (rows === null) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+
+    return (
+      <Box flexDirection="column">
+        {rows.map(r =>
+          r.kind === 'row' ? (
+            <Text>
+              <Text bold={r.isLoud ? true : undefined} color={r.isLoud ? 'warning' : undefined}>
+                {r.head}
+              </Text>
+              <Text color={r.isLoud ? 'warning' : undefined}>{r.value}</Text>
+              {r.detail !== '' && <Text dimColor>{r.detail}</Text>}
+            </Text>
+          ) : (
+            <Text dimColor={r.kind === 'dim' ? true : undefined}>{r.text}</Text>
+          ),
+        )}
+      </Box>
+    )
+  })
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -332,6 +364,46 @@ async function readRequests($: Engine): Promise<SkeinBand['requests']> {
 
     return row
   })
+}
+
+// skein rewrites the jobs view at least every 20 s (`VIEW_FRESH` in `src/jobs.rs`), and the wrapper
+// takes 30 s unwritten as skein not scheduling: a view older than that has no row.
+const JOBS_STALE_AFTER_MS = 30_000
+
+/** The box's own jobs, from `$SKEIN_STATE/signals/jobs.json`; null where there is no view to believe. */
+async function readJobs($: Engine): Promise<StatusJobs | null> {
+  const state = await $.env.get('SKEIN_STATE')
+  if (!state) return null
+  const parsed = await parsedFile($, `${state}/signals/jobs.json`)
+  if (!isRecord(parsed) || typeof parsed.at !== 'string' || !Array.isArray(parsed.jobs)) return null
+  const at = Date.parse(parsed.at)
+  if (Number.isNaN(at) || (await $.clock.now()) - at > JOBS_STALE_AFTER_MS) return null
+  const jobs = parsed.jobs.filter(isRecord)
+  const places = jobs
+    .filter(j => j.state === 'waiting')
+    .map(j => numberOr(j.position, null))
+    .filter((p): p is number => p !== null)
+
+  return {
+    running: jobs.filter(j => j.state === 'granted').length,
+    waiting: jobs.filter(j => j.state === 'waiting').length,
+    first: places.length === 0 ? null : Math.min(...places),
+  }
+}
+
+/** The lanes skein made in this box (`skein-mcp lane list`, read as the agents panel reads it), and
+ * how many of the session's subagents are working in a lane now. */
+async function readLanes($: Engine): Promise<StatusLanes> {
+  let made = 0
+  try {
+    const ran = await $.process.run(['python3', `${$.plugin.root}/bin/skein-mcp`, 'lane', 'list'], { timeoutMs: 10_000 })
+    if (ran.exitCode === 0) made = lanesListed(ran.stdout).length
+  } catch {
+    // No lanes said: the row counts only what the session saw.
+  }
+  const running = await lanesAtWork($)
+
+  return { made, running }
 }
 
 async function readMail($: Engine): Promise<number | null> {
@@ -526,22 +598,123 @@ function mailLine(mail: number | null): string {
   return `${mail} unread. The agent reads them at the start of its next turn.`
 }
 
-function status(found: SkeinBand | null): string {
-  const lines = [diskLine(found)]
-  if (found?.disk?.ask) lines.push(askLine(found.disk.ask))
-  const waiting = (found?.requests ?? []).filter(r => r.state === 'waiting').length
-  lines.push(
-    found?.requests === null || found === null
-      ? 'Not in a skein box, so no requests.'
-      : `${waiting} ${waiting === 1 ? 'request' : 'requests'} waiting. /skein requests lists them.`,
-  )
-  lines.push(mailLine(found?.mail ?? null))
-  const spend = found?.spend ?? null
-  lines.push(spend === null ? "skein has not written this box's spend in the last 70 minutes." : spendLine(spend))
-  if (spend?.unpriced) lines.push('+ means some of it was on a model skein has no price for, so it is left out.')
+/** The box's own heavy jobs, as `/skein status` counts them. */
+type StatusJobs = { running: number; waiting: number; first: number | null }
 
-  // The engine heads the answer with `skein:`, so the first line reads as a sentence after it.
-  return lines.join('\n')
+/** The box's lanes, as `/skein status` counts them. */
+type StatusLanes = { made: number; running: number }
+
+/** What `/skein status` reads beside the band. */
+type StatusMore = { jobs: StatusJobs | null; lanes: StatusLanes; box: string | null; at: string }
+
+// A row of `/skein status`: `⚑ ` before what needs the person, two spaces before the rest, the
+// name padded to one column, then the value, then three spaces and a detail. `statusDrawn` reads
+// the same shape back to colour it.
+const MIB = 1024 * 1024
+const LOUD = '⚑ '
+const QUIET = '  '
+const NAME = 10
+const DETAIL = '   '
+
+type Row = { name: string; value: string; detail?: string; isLoud: boolean }
+
+const rowText = (r: Row) =>
+  `${r.isLoud ? LOUD : QUIET}${r.name.padEnd(NAME)}${r.value}${r.detail ? `${DETAIL}${r.detail}` : ''}`
+
+/**
+ * `/skein status`: one row per signal, the ones that need the person first. A row whose figures
+ * skein does not write (no jobs view, no lanes) is left out rather than guessed.
+ */
+function status(found: SkeinBand | null, more: StatusMore): string {
+  const rows: Row[] = []
+  const disk = found?.disk ?? null
+  const ask = disk?.ask ?? null
+  const removable = found?.clean ? `${size(found.clean.removable_now_bytes)} removable` : undefined
+  rows.push(
+    disk === null || disk.mb === null
+      ? { name: 'disk', value: 'not measured lately', isLoud: false }
+      : {
+          name: 'disk',
+          value: disk.limit_mb === null ? size(disk.mb * MIB) : `${size(disk.mb * MIB)} / ${size(disk.limit_mb * MIB)}`,
+          detail: ask ? askLine(ask) : removable,
+          isLoud: ask !== null,
+        },
+  )
+  const requests = found?.requests ?? null
+  const waiting = (requests ?? []).filter(r => r.state === 'waiting').length
+  rows.push(
+    found === null || requests === null
+      ? { name: 'requests', value: 'none: not in a skein box', isLoud: false }
+      : waiting === 0
+        ? { name: 'requests', value: 'none waiting', isLoud: false }
+        : { name: 'requests', value: `${waiting} waiting for the owner`, detail: '/skein requests lists them', isLoud: true },
+  )
+  const mail = found?.mail ?? null
+  rows.push({
+    name: 'mail',
+    value: mail === null ? 'could not be read' : mail === 0 ? 'none unread' : `${mail} unread`,
+    detail: mail !== null && mail > 0 ? "the agent reads them at its next turn" : undefined,
+    isLoud: false,
+  })
+  const jobs = more.jobs
+  if (jobs !== null) {
+    const parts = [
+      jobs.running > 0 ? `${jobs.running} running` : jobs.waiting === 0 ? 'none running' : null,
+      jobs.waiting > 0 ? `${jobs.waiting} waiting${jobs.first === null ? '' : `, ${ordinal(jobs.first)} in the fleet's queue`}` : null,
+    ].filter((p): p is string => p !== null)
+    rows.push({ name: 'jobs', value: parts.join(' · '), isLoud: false })
+  }
+  const lanes = more.lanes
+  if (lanes.made > 0 || lanes.running > 0) {
+    rows.push({ name: 'lanes', value: `${lanes.running} running · ${Math.max(lanes.made, lanes.running)} in all`, isLoud: false })
+  }
+  const spend = found?.spend ?? null
+  if (spend === null) {
+    rows.push({ name: 'spend', value: 'not written in the last 70 minutes', isLoud: false })
+  } else {
+    const more = spend.unpriced ? '+' : ''
+    rows.push({
+      name: 'spend',
+      value: `≈${dollars(spend.today)}${more} today · ≈${dollars(spend.week)}${more} this week`,
+      detail: spend.unpriced
+        ? `estimated at API prices as of ${spend.at} UTC; + leaves out a model skein has no price for`
+        : `estimated at API prices as of ${spend.at} UTC`,
+      isLoud: false,
+    })
+  }
+
+  // The engine heads the answer with `skein:`, so the first line names the box and the time after it.
+  const head = `${more.box ?? 'not in a skein box'} · ${more.at} UTC`
+  const sorted = [...rows.filter(r => r.isLoud), ...rows.filter(r => !r.isLoud)]
+
+  return [head, ...sorted.map(rowText), '/skein clean · /skein requests'].join('\n')
+}
+
+type Drawn =
+  | { kind: 'row'; head: string; value: string; detail: string; isLoud: boolean }
+  | { kind: 'plain' | 'dim'; text: string }
+
+/** The rows of a `/skein status` text, to colour; null when the text is not that shape. */
+function statusDrawn(text: string): Drawn[] | null {
+  const lines = text.split('\n')
+  if (lines.length < 3 || !lines.slice(1, -1).every(l => l.startsWith(LOUD) || l.startsWith(QUIET))) return null
+  const rows: Drawn[] = [{ kind: 'plain', text: lines[0] ?? '' }]
+  for (const l of lines.slice(1, -1)) {
+    const isLoud = l.startsWith(LOUD)
+    const head = l.slice(0, LOUD.length + NAME)
+    const rest = l.slice(head.length)
+    const at = rest.indexOf(DETAIL)
+    rows.push({
+      kind: 'row',
+      head,
+      value: at < 0 ? rest : rest.slice(0, at),
+      detail: at < 0 ? '' : rest.slice(at),
+      isLoud,
+    })
+  }
+  rows.push({ kind: 'dim', text: lines.at(-1) ?? '' })
+
+  return rows
 }
 
 /** The box's spend in one line. An estimate: the fleet pays by its login, not by the token. */

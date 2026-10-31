@@ -175,6 +175,11 @@ export async function onToolCall($: EngineInterface, e: ToolCallInput, answered:
   await learnFrom($, agentId, String(e.tool), JSON.stringify(e), answered.text)
 }
 
+/** How many of the session's subagents are running in a lane now, for `/skein status` (SKEIN-1440). */
+export async function lanesAtWork($: EngineInterface): Promise<number> {
+  return (await read($, agents)).filter(a => a.status === 'running' && a.lane !== null).length
+}
+
 export function register(on: On): void {
   on('command.run', { command: 'agents-info' }, async ($, e) => {
     // `/agents-info open` opens the panel, or brings it forward, without toggling it.

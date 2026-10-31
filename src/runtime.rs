@@ -353,6 +353,11 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     ("hooks/keeper.ts", include_str!("plugin/hooks/keeper.ts")),
     ("hooks/guide.ts", include_str!("plugin/hooks/guide.ts")),
     ("hooks/tracker.ts", include_str!("plugin/hooks/tracker.ts")),
+    // skein's tool results and a waiting `skein-job` drawn for the person (SKEIN-1440).
+    (
+        "hooks/tool-results.tsx",
+        include_str!("plugin/hooks/tool-results.tsx"),
+    ),
     // What `hooks/guide.ts` puts in the system prompt (SKEIN-1365), as the bytes of each one source:
     // the kit's box guide, the trust levels, and the shared-home rules the kit's guide writer holds.
     ("guide/kit-spec.yaml", include_str!("kit/spec.yaml")),
