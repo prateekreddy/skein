@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(rows.len(), 3, "{rows:?}");
         let Some(pairs) = run_bundle(
             &rows,
-            "JSON.stringify(rows.map(r => [panelForHash(new URL(r.url, 'http://h/').hash), \
+            "JSON.stringify(rows.map(r => [panelForHash(r.url.slice(r.url.indexOf('#'))), \
              decisionAction(r).open]))",
         ) else {
             crate::testutil::skip("no node on this machine to run the cockpit bundle");

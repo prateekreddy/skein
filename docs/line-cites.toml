@@ -221,25 +221,25 @@ cited_by = ["docs/recovery-survey.md"]
 line = "skein::stream::Tick::PtyFreed => \"pty-freed\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:150"]
+["src/bin/skein-server/fleet.rs:151"]
 line = "Ok(Err(why)) => ("
 window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:198"]
+["src/bin/skein-server/fleet.rs:199"]
 line = "Err(e) => ("
 window = "Ok(p) => Json(p).into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:299"]
+["src/bin/skein-server/fleet.rs:300"]
 line = "if sandbox.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:337"]
+["src/bin/skein-server/fleet.rs:338"]
 line = "if let Some(why) = skein::fleet::fleet_lifecycle_refusal(\"rebuild\", true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:340"]
+["src/bin/skein-server/fleet.rs:341"]
 line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2051,39 +2051,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:870"]
+["src/web/app/board.js:879"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:921"]
+["src/web/app/board.js:930"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:925"]
+["src/web/app/board.js:934"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:934"]
+["src/web/app/board.js:943"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:972"]
+["src/web/app/board.js:981"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:973"]
+["src/web/app/board.js:982"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1063"]
+["src/web/app/board.js:1072"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1293"]
+["src/web/app/board.js:1302"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1325"]
+["src/web/app/board.js:1334"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
