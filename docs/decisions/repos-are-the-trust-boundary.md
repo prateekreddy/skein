@@ -62,7 +62,7 @@ puts it.
   `share_paths` list comes back.
 - The repo cache: bwrap test `a_repos_boxes_share_its_cache_and_another_repos_box_sees_none_of_it`
   (`tests/isolation_bwrap/repocache.rs`); its bind is `src/box-session.sh:2549` and the tools are
-  pointed at it at `src/box-session.sh:3731`.
+  pointed at it at `src/box-session.sh:3812`.
 - A crossing points the tools where the session does: fleet tests
   `a_crossing_into_a_box_uses_its_repos_download_cache` and
   `a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names`
