@@ -371,7 +371,9 @@ function shapeUrl(row) {
 //
 // **Every card has a way to act on it, and the way is one the page can honour.** A question asked
 // with `skein_ask_person`, a package request and a write request each have a panel that answers
-// them. The agent's own question on its screen has no such panel — only its terminal can take the
+// them. A disk ask has none: its card carries Approve and Deny itself, each sending back the ask the
+// card was drawn from (`row.disk`), because the box can rewrite its ask between the render and the
+// press (SKEIN-1425). The agent's own question on its screen has no such panel — only its terminal can take the
 // answer — so its card says that and opens the terminal, rather than offering a click that would do
 // nothing. A row this file has no action for is not drawn as a card at all: a card with nothing to
 // press reads as a decision the cockpit lost.
@@ -402,6 +404,13 @@ const DECISION_ACTIONS = {
     open: "gitq",
     press: "Decide in Repo write access",
   },
+  "disk": {
+    what: "disk allowance",
+    before: "",
+    after: "",
+    open: "",
+    press: "",
+  },
 };
 
 // The agent's own question, on its screen. Its terminal is the only place it can be answered.
@@ -429,6 +438,8 @@ const decisionEsc = s =>
 function decisionAction(row) {
   if (!row || !row.name) return null;
   if (row.source === "box") return row.blocked === "question" ? DECISION_IN_TERMINAL : null;
+  // A disk card's buttons send back the ask it was drawn from, so one without it has nothing to press.
+  if (row.source === "disk" && !(row.disk && row.disk.id && row.disk.mb)) return null;
   return DECISION_ACTIONS[row.source] || null;
 }
 
@@ -445,6 +456,18 @@ function decisionsHtml(rows, seen, ageText) {
     const secs = r.waiting_secs === null || r.waiting_secs === undefined ? "" : String(r.waiting_secs | 0);
     const age = ageText ? decisionEsc(ageText(secs === "" ? null : Number(secs))) : "";
     const verb = [a.before, `<b>${decisionEsc(r.name)}</b>`, a.after].filter(Boolean).join(" ");
+    if (r.source === "disk") {
+      // `<box> asks for 20 GB disk (now 10 GB, using 12.6 GB): <reason>` — the box's name and reason
+      // are its own words; the figures are skein's.
+      const ref = ` data-box="${decisionEsc(r.name)}" data-id="${decisionEsc(r.disk.id)}" data-mb="${Number(r.disk.mb) || 0}"`;
+      return `<div class="dcard" data-source="disk">`
+        + `<div class="sq-meta">${decisionEsc(a.what)} · its reason in its own words, unverified · `
+        + `<span class="age" data-secs="${secs}" data-seen="${Number(seen) || 0}">${age}</span></div>`
+        + `<div class="aq-body"><b>${decisionEsc(r.name)}</b> ${decisionEsc(r.headline || "")}: ${decisionEsc(r.why || "")}</div>`
+        + `<div class="sq-row"><button type="button" class="kbtn primary" data-disk="approve"${ref}>Approve</button>`
+        + `<button type="button" class="kbtn ghost" data-disk="deny"${ref}>Deny</button></div>`
+        + `</div>`;
+    }
     return `<div class="dcard" data-source="${decisionEsc(r.source)}">`
       + `<div class="sq-meta">${decisionEsc(a.what)} · ${verb} — its own words, unverified · `
       + `<span class="age" data-secs="${secs}" data-seen="${Number(seen) || 0}">${age}</span></div>`

@@ -30,7 +30,7 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 115  (NOT '.route("' — that gives 100, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 116  (NOT '.route("' — that gives 101, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 182 unique, 187 occurrences
 grep -c 'function ' src/web/index.html                          # 537
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner

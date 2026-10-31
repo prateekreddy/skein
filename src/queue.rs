@@ -80,6 +80,9 @@ pub enum Source {
     Package,
     /// A box asking to write to a repository that is not its own (`crate::gitgate`).
     GitWrite,
+    /// A box asking for a bigger disk allowance (`crate::diskask`), approved or denied on the row
+    /// itself: there is no panel for it, and the box-settings field is the same setting.
+    Disk,
 }
 
 /// One thing waiting on you.
@@ -120,6 +123,17 @@ pub struct Row {
     /// never as the cockpit's: nothing checked it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub why: String,
+    /// What a disk ask's Approve and Deny send back: the ask the row was drawn from. Absent on
+    /// every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskRef>,
+}
+
+/// The ask a disk row was drawn from, echoed back by its buttons (`diskask::decide`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiskRef {
+    pub id: String,
+    pub mb: u64,
 }
 
 /// What the board is, as one value.
@@ -218,6 +232,7 @@ pub fn who_needs_you() -> Vec<Row> {
             url: "/#health".into(),
             fix: check.fix.clone(),
             blocked: String::new(),
+            disk: None,
             why: String::new(),
         })
         .collect();
@@ -231,15 +246,17 @@ pub fn who_needs_you() -> Vec<Row> {
     // The decision inbox: every request a box made of you, in the same list and ranked by the same
     // comparator. Each of the three reads its queue through the function its own panel reads, so
     // the inbox and the panel cannot disagree about what is waiting.
-    let (asks, packages, writes) =
+    let (asks, packages, writes, disks) =
         lock_decision_lists().get(Instant::now(), DECISIONS_FRESH, || {
             (
                 crate::asks::fleet_asks(),
                 crate::substrate::fleet_requests(),
                 crate::gitgate::fleet_requests(),
+                crate::diskask::with_figures(crate::diskask::fleet_asks()),
             )
         });
     rows.extend(decisions(asks, packages, writes, &repo_of));
+    rows.extend(disk_decisions(disks, &repo_of));
 
     for repo in crate::repos::load_repos() {
         if !repo.review_queue {
@@ -268,6 +285,7 @@ pub fn who_needs_you() -> Vec<Row> {
                 url: pr.url.clone(),
                 fix: String::new(),
                 blocked: String::new(),
+                disk: None,
                 why: String::new(),
             }
         }));
@@ -297,7 +315,35 @@ type DecisionLists = (
     Vec<crate::asks::Ask>,
     Vec<crate::substrate::Request>,
     Vec<crate::gitgate::Request>,
+    Vec<DiskAsk>,
 );
+
+/// A disk ask with the two figures its row prints (`diskask::with_figures`).
+pub(crate) type DiskAsk = (crate::diskask::Ask, Option<u64>, Option<u64>);
+
+/// One row per disk ask the owner can be asked now: waiting, and above the allowance the box has
+/// ([`crate::diskask::open_above`]). [`Need::You`], for the other requests' reason, and its row
+/// is the whole sentence the owner decides on.
+pub(crate) fn disk_decisions(asks: Vec<DiskAsk>, repo_of: &HashMap<String, String>) -> Vec<Row> {
+    asks.into_iter()
+        .filter(|(a, now, _)| crate::diskask::open_above(a, *now))
+        .map(|(a, now, using)| Row {
+            source: Source::Disk,
+            need: Need::You,
+            repo: repo_of.get(&a.box_name).cloned().unwrap_or_default(),
+            headline: crate::diskask::headline(&a, now.unwrap_or_default(), using),
+            state: "waiting".into(),
+            waiting_secs: seconds_since(&a.asked),
+            // The board, where its card carries the buttons: there is no panel to open.
+            url: "/".into(),
+            fix: String::new(),
+            blocked: String::new(),
+            why: a.why,
+            disk: Some(DiskRef { id: a.id, mb: a.mb }),
+            name: a.box_name,
+        })
+        .collect()
+}
 
 /// One value, read at most once per window.
 ///
@@ -358,6 +404,7 @@ fn box_row(view: &BoxView) -> Row {
         url: format!("/#box={}", view.name),
         fix: String::new(),
         blocked: view.blocked_kind.clone(),
+        disk: None,
         why: String::new(),
     }
 }
@@ -397,6 +444,7 @@ pub(crate) fn decisions(
                 url: "/#askq".into(),
                 fix: String::new(),
                 blocked: String::new(),
+                disk: None,
                 why: String::new(),
                 name: a.box_name,
             }),
@@ -415,6 +463,7 @@ pub(crate) fn decisions(
                 url: "/#subq".into(),
                 fix: String::new(),
                 blocked: String::new(),
+                disk: None,
                 why: r.why,
                 name: r.box_name,
             }),
@@ -429,6 +478,7 @@ pub(crate) fn decisions(
         url: "/#gitq".into(),
         fix: String::new(),
         blocked: String::new(),
+        disk: None,
         why: r.reason,
         name: r.box_name,
     }));
@@ -465,6 +515,7 @@ mod tests {
             url: String::new(),
             fix: String::new(),
             blocked: String::new(),
+            disk: None,
             why: String::new(),
         }
     }
@@ -491,6 +542,7 @@ mod tests {
             url: String::new(),
             fix: String::new(),
             blocked: String::new(),
+            disk: None,
             why: String::new(),
         }
     }
@@ -776,6 +828,62 @@ mod tests {
             ]
         );
         assert!(rows.iter().all(|r| r.need == Need::You), "{rows:?}");
+    }
+
+    /// **A waiting disk ask above the box's allowance is one row, in the owner's words, carrying
+    /// the ask its buttons send back; a decided one, a smaller one, and one from a box allowed the
+    /// whole disk are not rows.**
+    ///
+    /// What would make it fail: `disk_decisions` not filtering through `diskask::open_above`, the
+    /// headline not `diskask::headline`'s, or the row without its `disk` reference.
+    #[test]
+    fn a_disk_ask_is_one_row_with_its_figures_and_its_reference() {
+        let ask = |b: &str, id: &str, mb: u64, state: &str| crate::diskask::Ask {
+            id: id.into(),
+            box_name: b.into(),
+            size: format!("{mb}m"),
+            mb,
+            why: "the index is 14G".into(),
+            asked: "2026-10-31T10:00:00Z".into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let rows = disk_decisions(
+            vec![
+                (
+                    ask("web-main", "d-1", 20 * 1024, "waiting"),
+                    Some(10 * 1024),
+                    Some(12_902),
+                ),
+                (
+                    ask("web-two", "d-2", 20 * 1024, "approved"),
+                    Some(10 * 1024),
+                    None,
+                ),
+                (
+                    ask("web-three", "d-3", 8 * 1024, "waiting"),
+                    Some(10 * 1024),
+                    None,
+                ),
+                (ask("web-four", "d-4", 20 * 1024, "waiting"), None, None),
+            ],
+            &HashMap::new(),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let r = &rows[0];
+        assert_eq!(
+            (r.source, r.need, r.name.as_str()),
+            (Source::Disk, Need::You, "web-main")
+        );
+        assert_eq!(r.headline, "asks for 20 GB disk (now 10 GB, using 12.6 GB)");
+        assert_eq!(r.why, "the index is 14G");
+        assert_eq!(
+            r.disk,
+            Some(DiskRef {
+                id: "d-1".into(),
+                mb: 20 * 1024
+            })
+        );
     }
 
     /// **A box asking on its own screen says so on its row**, so a surface can send the person to

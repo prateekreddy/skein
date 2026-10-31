@@ -61,3 +61,21 @@ test("a hash opens the panel it names, and nothing else", () => {
     assert.equal(panelForHash(h), null, String(h));
   }
 });
+
+// What would make it fail: the disk card opening a panel instead of carrying its own buttons, the
+// buttons not sending back the ask the card was drawn from, a card drawn for a disk row with no
+// ask to send back, or the box's name or reason not escaped.
+test("a disk ask is decided on its card, with the ask it was drawn from", () => {
+  const disk = { id: "d-0000aaaa", mb: 20480 };
+  const html = decisionsHtml([row("disk", {
+    name: "web-main", headline: "asks for 20 GB disk (now 10 GB, using 12.6 GB)",
+    why: "the index is <14G>", disk,
+  })], 0, () => "1m ago");
+  assert.match(html, /<b>web-main<\/b> asks for 20 GB disk \(now 10 GB, using 12\.6 GB\): the index is &lt;14G&gt;/);
+  const buttons = [...html.matchAll(/data-disk="(approve|deny)" data-box="web-main" data-id="d-0000aaaa" data-mb="20480">(\w+)</g)]
+    .map(m => [m[1], m[2]]);
+  assert.deepEqual(buttons, [["approve", "Approve"], ["deny", "Deny"]]);
+  assert.ok(!html.includes("data-open"), html);
+  assert.equal(decisionAction(row("disk")), null, "a disk row with no ask drew a card");
+});
+

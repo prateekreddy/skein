@@ -714,6 +714,7 @@ fn it_speaks_mcp_over_stdio() {
             "skein_request_package",
             "skein_request_write",
             "skein_ask_person",
+            "skein_request_disk",
             "skein_lane"
         ]
     );
@@ -1767,4 +1768,191 @@ fn the_command_line_requests_is_the_same_tool() {
         .map(|r| r["state"].as_str().unwrap())
         .collect();
     assert_eq!(states, vec!["waiting", "granted"], "{tool}");
+}
+
+/// One tool call with `$SKEIN_STATE` at `state`, and the sentence after the result.
+fn said_in(b: &Box_, state: &std::path::Path, tool: &str, args: Value) -> (Value, String) {
+    let replies = b.talk_in(
+        state,
+        "example",
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                 "params":{"name":tool,"arguments":args}})],
+    );
+    let content = &replies[0]["result"]["content"];
+    let json = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+    (json, content[1]["text"].as_str().unwrap_or("").to_string())
+}
+
+/// A box whose state directory is skein's own (`$SKEIN_HOME/boxes/example`), with its package
+/// drop-box made as the launcher makes it and a signal file saying it holds 12.6G of a 10G share.
+fn disk_box(prefix: &str) -> (Box_, std::path::PathBuf) {
+    let b = Box_::new(prefix);
+    fs::create_dir_all(b.at("fleet/.skein/substrate/requests/example")).unwrap();
+    let state = b.at("home/boxes/example");
+    b.put(
+        "home/boxes/example/signals/resources.json",
+        &json!({"at": "2026-10-31T10:00:00Z", "disk": {"mb": 12902, "limit_mb": 10240,
+                "fleet": "under", "fleet_over_by_mb": 0}, "asks": []})
+        .to_string(),
+    );
+    (b, state)
+}
+
+/// **A box asks for a bigger disk allowance, a new ask replaces the old, and the owner's approval
+/// raises the allowance at once and reaches the box** — in `skein_requests`, from the inbox, and
+/// in its signal file, from the host's record.
+///
+/// What would make it fail: the tool writing anywhere but `disk-allowance` in the box's own package
+/// drop-box, or keeping the old id on a new ask; `diskask::decide` not setting the allowance; the
+/// `disk` queue missing from `skein_requests`, or its state read from the file rather than the
+/// inbox; `disk_ask` missing from the signal file.
+#[test]
+fn a_disk_ask_approved_raises_the_allowance_and_the_box_is_told() {
+    let _lock = common::env_lock();
+    let (b, state) = disk_box("skein-tools-it-diskask");
+    let mut env = common::env_pins();
+    env.set("SKEIN_HOME", b.at("home"));
+    env.set("SKEIN_FLEET_ROOT", b.at("fleet"));
+
+    let (first, _) = said_in(
+        &b,
+        &state,
+        "skein_request_disk",
+        json!({"size": "15g", "why": "the index is 14G"}),
+    );
+    let (got, said) = said_in(
+        &b,
+        &state,
+        "skein_request_disk",
+        json!({"size": "20g", "why": "the index is 14G"}),
+    );
+    let id = got["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{got} {said}"))
+        .to_string();
+    assert_ne!(first["id"], got["id"], "a new ask kept the old id");
+    assert_eq!(got["replaces"], first["id"], "{got}");
+    assert_eq!(
+        said,
+        format!(
+            "skein: asked the owner for a 20.0G disk allowance (ask {id}). The answer arrives in \
+             your inbox, and skein_requests shows it. It replaces ask {}.",
+            first["id"].as_str().unwrap()
+        )
+    );
+    let filed: Value = serde_json::from_str(
+        &fs::read_to_string(b.at("fleet/.skein/substrate/requests/example/disk-allowance"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (filed["id"].as_str(), filed["size"].as_str()),
+        (Some(id.as_str()), Some("20g"))
+    );
+
+    let ask = skein::diskask::for_box("example").expect("the box's ask");
+    assert_eq!((ask.mb, ask.state.as_str()), (20 * 1024, "waiting"));
+    let (got, _) = said_in(&b, &state, "skein_requests", json!({}));
+    assert_eq!(got["requests"][0]["queue"], "disk", "{got}");
+    assert_eq!(got["requests"][0]["state"], "waiting", "{got}");
+
+    skein::diskask::decide(&ask, true).expect("approved");
+    assert_eq!(skein::fleet::box_disk_limit("example"), Some(20 * 1024));
+    let (got, _) = said_in(&b, &state, "skein_requests", json!({}));
+    assert_eq!(got["requests"][0]["id"], id.as_str(), "{got}");
+    assert_eq!(got["requests"][0]["state"], "approved", "{got}");
+
+    let reading = skein::resource_signal::Reading {
+        at: chrono::Utc::now(),
+        disk_mb: Some(12902),
+        disk_limit_mb: skein::fleet::box_disk_limit("example"),
+        fleet: skein::resource_signal::FleetDisk::NotAsked { over_by: 0 },
+        cgroup: None,
+        clean: None,
+    };
+    skein::resource_signal::write_box_with(
+        &state,
+        &reading,
+        Vec::new(),
+        skein::diskask::for_box("example").map(Into::into),
+    )
+    .unwrap();
+    let (got, _) = said_in(&b, &state, "skein_resources", json!({}));
+    assert_eq!(got["disk"]["limit_mb"], 20 * 1024, "{got}");
+    assert_eq!(got["disk_ask"]["id"], id.as_str(), "{got}");
+    assert_eq!(got["disk_ask"]["state"], "approved", "{got}");
+}
+
+/// **A denied ask changes nothing and the box is told.**
+///
+/// What would make it fail: a denial that sets the allowance, or one `skein_requests` does not
+/// report as denied.
+#[test]
+fn a_disk_ask_denied_leaves_the_allowance_and_the_box_is_told() {
+    let _lock = common::env_lock();
+    let (b, state) = disk_box("skein-tools-it-diskdeny");
+    let mut env = common::env_pins();
+    env.set("SKEIN_HOME", b.at("home"));
+    env.set("SKEIN_FLEET_ROOT", b.at("fleet"));
+    let (got, said) = said_in(
+        &b,
+        &state,
+        "skein_request_disk",
+        json!({"size": "20g", "why": "the index is 14G"}),
+    );
+    assert_eq!(got["state"], "waiting", "{got} {said}");
+    let ask = skein::diskask::for_box("example").expect("the box's ask");
+    skein::diskask::decide(&ask, false).expect("denied");
+    assert_eq!(skein::fleet::box_disk_limit("example"), Some(10 * 1024));
+    let (got, _) = said_in(&b, &state, "skein_requests", json!({}));
+    assert_eq!(got["requests"][0]["state"], "denied", "{got}");
+}
+
+/// **A size that is not a size, an ask for no more than the box has, and a reason that is not one
+/// short line are refused at the tool, and nothing is filed.**
+///
+/// What would make it fail: the tool not parsing the size (or reading a bare number as GiB),
+/// not comparing it with the signal file's allowance, or not capping the reason.
+#[test]
+fn a_bad_disk_ask_is_refused_at_the_tool() {
+    let (b, state) = disk_box("skein-tools-it-diskbad");
+    let long = "x".repeat(301);
+    for (args, error, says) in [
+        (json!({"size": "plenty", "why": "w"}), "size-is-not-a-size", "skein: \"plenty\" is not a size. Ask with one such as 20g or 20480m."),
+        (json!({"size": "20", "why": "w"}), "size-is-not-a-size", "skein: \"20\" is not a size. Ask with one such as 20g or 20480m."),
+        (json!({"size": "8g", "why": "w"}), "not-more", "skein: this box's allowance is already 10.0G, so 8.0G would not raise it. Ask for more than 10.0G."),
+        (json!({"size": "10g", "why": "w"}), "not-more", "skein: this box's allowance is already 10.0G, so 10.0G would not raise it. Ask for more than 10.0G."),
+        (json!({"size": "20g", "why": long}), "why-must-be-one-line", "skein: say why in one line of at most 300 bytes."),
+        (json!({"size": "20g", "why": "two\nlines"}), "why-must-be-one-line", "skein: say why in one line of at most 300 bytes."),
+    ] {
+        let (got, said) = said_in(&b, &state, "skein_request_disk", args.clone());
+        assert_eq!(got["error"], error, "{args} {got}");
+        assert_eq!(said, says, "{args}");
+    }
+    assert!(
+        !b.at("fleet/.skein/substrate/requests/example/disk-allowance")
+            .exists(),
+        "a refused ask was filed"
+    );
+}
+
+/// **A box's own `state` in its disk ask is never the answer**: `approved` or `denied` written
+/// into the file, with nothing in the inbox, reads as waiting.
+///
+/// What would make it fail: `requests` reading the disk ask's state from its file rather than
+/// from `answer_for` over the inbox.
+#[test]
+fn a_disk_ask_the_box_says_is_decided_still_waits() {
+    let (b, state) = disk_box("skein-tools-it-diskforged");
+    for claimed in ["approved", "denied"] {
+        b.put(
+            "fleet/.skein/substrate/requests/example/disk-allowance",
+            &json!({"id": "d-0000abab", "size": "20g", "why": "w", "state": claimed,
+                    "asked": "2026-10-31T10:00:00Z"})
+            .to_string(),
+        );
+        let (got, _) = said_in(&b, &state, "skein_requests", json!({}));
+        assert_eq!(got["requests"][0]["queue"], "disk", "{got}");
+        assert_eq!(got["requests"][0]["state"], "waiting", "{claimed}: {got}");
+    }
 }

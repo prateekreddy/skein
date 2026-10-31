@@ -160,6 +160,41 @@ pub(super) struct DiskReq {
     limit: Option<String>,
 }
 
+/// Approve or deny one box's ask for a bigger disk allowance, from its row in the decision inbox
+/// (`skein::diskask`, SKEIN-1425). Approve is [`api_set_box_disk`]'s own setting, so it is live
+/// the same way.
+pub(super) async fn api_decide_disk_ask(
+    Path(name): Path<String>,
+    Json(r): Json<DiskAskReq>,
+) -> Response {
+    let rendered = skein::diskask::Ask {
+        id: r.id,
+        box_name: name,
+        mb: r.mb,
+        ..Default::default()
+    };
+    match tokio::task::spawn_blocking(move || skein::diskask::decide(&rendered, r.approve)).await {
+        Ok(Ok(done)) => {
+            skein::queue::forget_decisions();
+            Json(done).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct DiskAskReq {
+    /// **What the row showed**, echoed back: the box can rewrite its ask between the render and
+    /// the press, and what is approved must be what was seen.
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    mb: u64,
+    #[serde(default)]
+    approve: bool,
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct IdentityReq {
     #[serde(default)]

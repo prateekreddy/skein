@@ -222,7 +222,7 @@ pub fn substrate_dir() -> String {
 /// is what makes the one writable directory mean something. Everything else about a request is a
 /// value the box chose, the `box` field included, which is why [`list`] overwrites that field from
 /// the path rather than reading it.
-fn requests_dir() -> String {
+pub(crate) fn requests_dir() -> String {
     format!("{}/requests", substrate_dir())
 }
 
