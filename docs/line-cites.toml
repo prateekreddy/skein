@@ -64,7 +64,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "| publish a port | `sbx ports --publish`; withdraw it with `sbx ports --unpublish` (`sbx ports --help`). An earlier revision of this row said **no unpublish exists**, quoting a nine-verb list recalled from memory — it is false, and the port-burning dance it justified in `ensure_fleet_agent_port` was built on it |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/inventory.md:258"]
+["docs/inventory.md:259"]
 line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
@@ -817,84 +817,84 @@ cited_by = ["docs/threat-model.md"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2193"]
+["src/box-session.sh:2215"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2240"]
+["src/box-session.sh:2262"]
 line = "binds+=(--tmpfs \"$fleet_root_dir\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2283"]
+["src/box-session.sh:2305"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2351"]
+["src/box-session.sh:2373"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2375"]
+["src/box-session.sh:2397"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2400"]
+["src/box-session.sh:2422"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2408"]
+["src/box-session.sh:2430"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2417"]
+["src/box-session.sh:2439"]
 line = "box_shared_home=\"${SKEIN_BOX_STORE%/*}/shared-home\""
 cited_by = ["docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2549"]
+["src/box-session.sh:2571"]
 line = "[ -n \"$repo_cache\" ] && binds+=(--bind \"$repo_cache\" \"$repo_cache\")"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2604"]
+["src/box-session.sh:2626"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2605"]
+["src/box-session.sh:2627"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2668"]
+["src/box-session.sh:2690"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2871"]
+["src/box-session.sh:2893"]
 line = "binds+=(--remount-ro \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2873"]
+["src/box-session.sh:2895"]
 line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3107"]
+["src/box-session.sh:3129"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3235"]
+["src/box-session.sh:3257"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3678"]
+["src/box-session.sh:3700"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3742"]
+["src/box-session.sh:3764"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3785"]
+["src/box-session.sh:3807"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3815"]
+["src/box-session.sh:3837"]
 line = "export CARGO_HOME=\"$repo_cache/cargo\" npm_config_cache=\"$repo_cache/npm\" \\"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
@@ -1818,17 +1818,17 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_STOP_CMD`, the test seam that ran a shell for a box skein had not placed: Stop on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:604"]
+["src/sandbox.rs:606"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:722"]
+["src/sandbox.rs:724"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:752"]
+["src/sandbox.rs:754"]
 line = "// Same as `stop_box`: no placement record means there is no box here to tear down, and the"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1836,16 +1836,16 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_DESTROY_CMD`, the test seam that ran a shell for a box skein had not placed: Destroy on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:989"]
+["src/sandbox.rs:991"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1050"]
+["src/sandbox.rs:1052"]
 line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1159"]
+["src/sandbox.rs:1161"]
 line = "fn refusal_argv(name: &str) -> Vec<String> {"
 cited_by = ["docs/recovery-survey.md"]
 

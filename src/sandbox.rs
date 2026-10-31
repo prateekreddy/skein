@@ -567,11 +567,13 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
 /// used to be a race it could simply lose, because nothing had killed them. It is retried briefly
 /// rather than once: `cgroup.kill` signals, and the members are reaped a moment later. Left behind,
 /// every destroyed box accumulates an empty cgroup, and a box later given the same name inherits the
-/// old one's limits instead of the current settings.
+/// old one's limits instead of the current settings. Its children go first, the leaf the box's own
+/// processes are in and each job's (`jobs::cgroup`), because a cgroup with a child cannot be removed.
 pub(crate) fn destroy_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
     format!(
         "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; {containers}; rm -rf {root}; \
-         for _ in 1 2 3 4 5; do sudo rmdir {cgroup} 2>/dev/null && break; sleep 0.2; done; \
+         for _ in 1 2 3 4 5; do sudo sh -c 'for c in \"$1\"/*/; do [ -d \"$c\" ] && rmdir \"$c\"; done; \
+         rmdir \"$1\"' _ {cgroup} 2>/dev/null && break; sleep 0.2; done; \
          sudo rmdir {containers_cgroup} 2>/dev/null; exit 0",
         look = crate::fleet::namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
         sock = sh_quote(&rec.sock),
@@ -1548,6 +1550,36 @@ mod tests {
             !tree.exists(),
             "the box's tree survived its own destruction"
         );
+    }
+
+    /// **A destroy removes the box's leaf and its job cgroups**, the children that would otherwise
+    /// stop the box's own cgroup being removed at all (SKEIN-1419).
+    ///
+    /// The scratch box cgroup itself keeps the `cgroup.kill` file the kill writes, so it cannot go,
+    /// and that is the earlier test's case; the empty children here can, and must.
+    ///
+    /// What would make it fail: the destroy's `rmdir` given the box's cgroup alone (the sabotage
+    /// that was run: `box` and `job-j-1` are still there).
+    #[test]
+    fn destroying_a_box_removes_its_leaf_and_job_cgroups() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_FLEET_ROOT", dir.join("boxes"));
+        let cg = dir.join("cgroup/skein/thing-x");
+        for child in ["box", "job-j-1"] {
+            fs::create_dir_all(cg.join(child)).unwrap();
+        }
+        let sock = dir.join("session.sock");
+        fs::write(&sock, "").unwrap();
+        let ran = run_as_root(&destroy_script("thing-x", &placed_at(&sock)), &dir);
+        env::remove_var("SKEIN_FLEET_ROOT");
+        assert_eq!(ran, 0);
+        for child in ["box", "job-j-1"] {
+            assert!(
+                !cg.join(child).exists(),
+                "{child} was left under the box's cgroup"
+            );
+        }
     }
 
     /// Run a launcher-side script with the cgroup root pointed at `root` and `sudo` made harmless.

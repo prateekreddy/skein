@@ -50,6 +50,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub mod cgroup;
+
 /// How often the queue is looked at: fast enough that freed cores are taken within a couple of
 /// seconds. Its own loop, apart from the resource signal's minute, because a job waiting a minute
 /// for cores that were free is the waste this queue exists to remove.
@@ -460,17 +462,16 @@ pub fn read_requests(dir: &Path) -> BTreeMap<String, BTreeMap<String, Request>> 
     out
 }
 
-/// Whether `pid` is in box `name`'s cgroup, by the kernel's `cgroup.procs`. A box with no cgroup
-/// to read (no delegation) falls back to the pid existing at all, since boxes share the sandbox's
-/// pid namespace.
+/// Whether `pid` is in box `name`'s cgroup or one under it, by the kernel's `cgroup.procs`: the
+/// box's own processes are in its leaf and a granted job's in a cgroup of its own
+/// ([`cgroup`]). A box with no cgroup to read (no delegation) falls back to the pid existing at all,
+/// since boxes share the sandbox's pid namespace.
 pub fn pid_in_box(cgroups: &Path, name: &str, pid: u32) -> bool {
     if pid <= 1 {
         return false;
     }
-    match std::fs::read_to_string(cgroups.join(name).join("cgroup.procs")) {
-        Ok(procs) => procs.lines().any(|l| l.trim() == pid.to_string()),
-        Err(_) => Path::new("/proc").join(pid.to_string()).exists(),
-    }
+    cgroup::pid_in_subtree(&cgroups.join(name), pid)
+        .unwrap_or_else(|| Path::new("/proc").join(pid.to_string()).exists())
 }
 
 /// Whether skein has asked box `name` to free memory: a `memory` ask in its resource signal,
@@ -850,13 +851,25 @@ pub fn tick(
     let requests = read_requests(&places.requests);
     let cgroups = places.cgroups.clone();
     let alive = move |name: &str, pid: u32| pid_in_box(&cgroups, name, pid);
+    let granted = |q: &Queue| -> BTreeSet<(String, String)> {
+        q.jobs
+            .iter()
+            .filter(|j| j.state == "granted")
+            .map(|j| (j.box_name.clone(), j.id.clone()))
+            .collect()
+    };
+    let was_running = granted(&queue);
     merge(&mut queue, &requests, &alive, repo_of, now);
-    let before: BTreeSet<(String, String)> = queue
-        .jobs
-        .iter()
-        .filter(|j| j.state == "granted")
-        .map(|j| (j.box_name.clone(), j.id.clone()))
-        .collect();
+    // A job that ended: what its cgroup counted, then the cgroup gone (SKEIN-1419).
+    for job in queue.jobs.iter_mut().filter(|j| !j.is_active()) {
+        if !was_running.contains(&(job.box_name.clone(), job.id.clone())) {
+            continue;
+        }
+        if let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id) {
+            job.reason = used_reason(&used, secs_between(&job.granted, now));
+        }
+    }
+    let before = granted(&queue);
     let states = places.states.clone();
     // What each running job uses is not measured yet: every one counts at its grant until the
     // per-job cgroup reader (SKEIN-1419) is passed here. Nor is the whole machine's busy CPU,
@@ -869,6 +882,27 @@ pub fn tick(
         None,
     );
     granted_now(&mut queue, &before, now);
+    // A job granted now moves into a cgroup of its own before its view says `granted`, which is
+    // what the wrapper waits for before it starts the command (SKEIN-1419). No cores yet: the
+    // grant carries none until the queue grants cores (SKEIN-1420).
+    for job in queue.jobs.iter_mut().filter(|j| j.state == "granted") {
+        if before.contains(&(job.box_name.clone(), job.id.clone())) {
+            continue;
+        }
+        if let Err(why) = cgroup::place(&places.cgroups, &job.box_name, &job.id, job.pid, None) {
+            job.reason = format!("runs in its box's cgroup, uncapped and unmeasured: {why}");
+        }
+    }
+    let boxes_with_jobs: BTreeSet<&String> = queue.jobs.iter().map(|j| &j.box_name).collect();
+    for name in boxes_with_jobs {
+        let running = |id: &str| {
+            queue
+                .jobs
+                .iter()
+                .any(|j| &j.box_name == name && j.id == id && j.state == "granted")
+        };
+        cgroup::sweep(&places.cgroups, name, &running);
+    }
     prune(&mut queue, now);
     write_json(&places.queue, &queue)?;
 
@@ -927,6 +961,22 @@ pub fn tick(
     match failed.is_empty() {
         true => Ok(queue),
         false => Err(failed.join("; ")),
+    }
+}
+
+/// What a finished job used, for its view: the cores on average over the time it ran, and the most
+/// memory it held.
+fn used_reason(used: &cgroup::Usage, ran_secs: i64) -> String {
+    let cores = match used.average_cores(ran_secs) {
+        Some(c) => format!("{c:.1} cores on average"),
+        None => format!("{:.1} s of CPU", used.cpu_usec as f64 / 1e6),
+    };
+    match used.memory_peak {
+        Some(b) => format!(
+            "used {cores}, at most {:.1} GiB of memory",
+            b as f64 / (1u64 << 30) as f64
+        ),
+        None => format!("used {cores}"),
     }
 }
 

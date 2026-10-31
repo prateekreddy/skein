@@ -18,7 +18,7 @@ use common::{skip, Scratch};
 use std::fs;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -394,5 +394,231 @@ fn a_granted_job_is_told_its_cores_unless_the_caller_set_fewer() {
             "MAKEFLAGS=-k -j3",
         ],
         "{err}"
+    );
+}
+
+/// A cgroup subtree of the test's own, `/sys/fs/cgroup/skein-jobcg-test-<pid>`, at the top of the
+/// cgroup v2 hierarchy and never under `/sys/fs/cgroup/skein`, where a fleet's boxes are. It stands
+/// in for `skein`: under it is one box, `demo`, laid out as the launcher lays a box out, its own
+/// processes in the leaf `demo/box` and `cpu` and `memory` handed on to its children. Everything in
+/// it is killed and removed on drop.
+///
+/// Made with `sudo -n`, as the launcher and skein-server make theirs; `Err` with the reason where it
+/// cannot be, which is everywhere a test cannot write cgroupfs: inside a box (a user namespace in
+/// which `sudo` cannot work), and on a host without passwordless `sudo`.
+struct OwnCgroups {
+    root: PathBuf,
+}
+
+fn sudo_sh(script: &str, args: &[&str]) -> Result<(), String> {
+    let out = Command::new("sudo")
+        .args(["-n", "sh", "-c", script, "_"])
+        .args(args)
+        .output()
+        .map_err(|e| format!("sudo: {e}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()),
+    }
+}
+
+impl OwnCgroups {
+    fn make() -> Result<OwnCgroups, String> {
+        let top = PathBuf::from("/sys/fs/cgroup");
+        let controllers = fs::read_to_string(top.join("cgroup.subtree_control"))
+            .map_err(|e| format!("no cgroup v2 hierarchy at /sys/fs/cgroup ({e})"))?;
+        for want in ["cpu", "memory"] {
+            if !controllers.split_whitespace().any(|c| c == want) {
+                return Err(format!(
+                    "the cgroup hierarchy's root does not hand on `{want}` ({controllers:?})"
+                ));
+            }
+        }
+        let root = top.join(format!("skein-jobcg-test-{}", std::process::id()));
+        let boxcg = root.join("demo");
+        // Made before the first write, so a make that fails half way is removed on the way out.
+        let made = OwnCgroups { root: root.clone() };
+        sudo_sh(
+            "mkdir -p \"$1/box\" && echo +cpu > \"$2/cgroup.subtree_control\" \
+             && echo +memory > \"$2/cgroup.subtree_control\" \
+             && echo +cpu > \"$1/cgroup.subtree_control\" \
+             && echo +memory > \"$1/cgroup.subtree_control\"",
+            &[&boxcg.to_string_lossy(), &root.to_string_lossy()],
+        )
+        .map_err(|e| format!("cannot make a cgroup of this test's own with `sudo -n`: {e}"))?;
+        Ok(made)
+    }
+
+    fn leaf(&self) -> PathBuf {
+        self.root.join("demo/box")
+    }
+}
+
+impl Drop for OwnCgroups {
+    fn drop(&mut self) {
+        let root = self.root.to_string_lossy().to_string();
+        let _ = sudo_sh("echo 1 > \"$1/cgroup.kill\"", &[&root]);
+        for _ in 0..50 {
+            let _ = sudo_sh(
+                "find \"$1\" -depth -type d -exec rmdir {} + 2>/dev/null",
+                &[&root],
+            );
+            if !self.root.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Wait at most `bound` for `ok`, saying `what` if it never holds.
+fn eventually<T>(bound: Duration, what: &str, mut ok: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + bound;
+    loop {
+        if let Some(v) = ok() {
+            return v;
+        }
+        assert!(Instant::now() < deadline, "{what}, within {bound:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// **A granted job runs in a cgroup of its own under its box's, capped at the cores it is given; a
+/// kill of the box's cgroup still ends it; and once it has ended, what it used is read back and its
+/// cgroup removed** (SKEIN-1419). On real cgroups, through the real scheduler and the shipped
+/// wrapper.
+///
+/// The wrapper starts in the box's leaf, as one a box's shell started does. The job's command
+/// reports its own `/proc/self/cgroup` before it does anything else, so where it says it is is
+/// where the tick put the wrapper **before** the wrapper read `granted`. The cap is then placed on
+/// the running job's cgroup with cores given, as the queue will once it grants cores, and read back
+/// from the kernel. The box's cgroup is killed as `fleet::box_cgroup_kill` kills it, at the box's
+/// level and not the job's, and the job's processes must be gone. The scheduler then sees the
+/// wrapper gone, reads what the job used, and removes its cgroup.
+///
+/// What would make it fail: no placement in the tick's grant path, or one after the view says
+/// `granted` (the command reports the leaf: `/…/demo/box`); `cpu.max` not written for given cores;
+/// a job cgroup made outside the box's (the kill misses it and `sleep` survives); the end path not
+/// reading the job's cgroup or not removing it. **Not run inside a box**, which has no cgroup it
+/// can write: there it skips and says so, and CI's runner, which has `sudo`, is where it runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_the_end() {
+    let cgroups = match OwnCgroups::make() {
+        Ok(c) => c,
+        Err(why) => {
+            return skip(&format!(
+                "{why}, so a job's own cgroup was NOT checked on real cgroups"
+            ))
+        }
+    };
+    let fleet = Fleet::new("skein-job-own-cgroup", "demo", cgroups.root.clone(), 1);
+    let said = fleet.dir.path().join("job-said");
+    let probe = format!(
+        "{{ echo \"pid $$\"; cat /proc/self/cgroup; }} > {}.tmp && mv {0}.tmp {0}; exec sleep 120",
+        said.display()
+    );
+    // The wrapper as `fleet.wrapper()` would run it, started from a shell that first moves itself
+    // into the box's leaf, so the wrapper begins where a box's own process does.
+    let c = fleet.wrapper();
+    let wrapper = c.get_args().next().unwrap().to_owned();
+    let mut into_leaf = Command::new("sh");
+    into_leaf
+        .arg("-c")
+        .arg(
+            "echo $$ | sudo -n tee \"$1/cgroup.procs\" >/dev/null || exit 97; shift; \
+             exec python3 \"$@\"",
+        )
+        .arg("_")
+        .arg(cgroups.leaf())
+        .arg(wrapper)
+        .args(["run", "--class", "test", "--", "sh", "-c", &probe]);
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => into_leaf.env(k, v),
+            None => into_leaf.env_remove(k),
+        };
+    }
+    let mut child = into_leaf
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let wrapper_pid = child.id();
+
+    let report = eventually(Duration::from_secs(20), "the job never ran", || {
+        fs::read_to_string(&said).ok()
+    });
+    let id = fleet
+        .queue()
+        .jobs
+        .iter()
+        .find(|j| j.state == "granted")
+        .map(|j| j.id.clone())
+        .unwrap_or_else(|| panic!("no granted job: {:#?}", fleet.queue()));
+    let job_cg = skein::jobs::cgroup::job_cgroup(&cgroups.root, "demo", &id);
+    let rel = job_cg.strip_prefix("/sys/fs/cgroup").unwrap();
+    assert!(
+        report
+            .lines()
+            .any(|l| l == format!("0::/{}", rel.display())),
+        "the job did not start in a cgroup of its own, {}:\n{report}",
+        job_cg.display()
+    );
+    let job_pid: u32 = report
+        .lines()
+        .find_map(|l| l.strip_prefix("pid "))
+        .and_then(|p| p.parse().ok())
+        .expect("the job said no pid");
+
+    // (a) the cap, for cores given.
+    skein::jobs::cgroup::place(&cgroups.root, "demo", &id, wrapper_pid, Some(1.5))
+        .expect("placing the running job again, with cores");
+    assert_eq!(
+        fs::read_to_string(job_cg.join("cpu.max")).unwrap().trim(),
+        "150000 100000"
+    );
+    let procs = fs::read_to_string(job_cg.join("cgroup.procs")).unwrap();
+    assert!(procs.lines().any(|l| l == job_pid.to_string()), "{procs}");
+    assert!(Path::new(&format!("/proc/{job_pid}")).exists());
+
+    // (b) the box's cgroup killed, as a stop kills it.
+    sudo_sh(
+        "echo 1 > \"$1/cgroup.kill\"",
+        &[&cgroups.root.join("demo").to_string_lossy()],
+    )
+    .unwrap();
+    eventually(
+        Duration::from_secs(5),
+        "the wrapper survived its box's kill",
+        || child.try_wait().unwrap(),
+    );
+    eventually(
+        Duration::from_secs(5),
+        "the job's process survived its box's kill",
+        || (!Path::new(&format!("/proc/{job_pid}")).exists()).then_some(()),
+    );
+
+    // (c) measured, then removed.
+    let ended = eventually(
+        Duration::from_secs(10),
+        "the scheduler never measured the job's end",
+        || {
+            fleet
+                .queue()
+                .jobs
+                .into_iter()
+                .find(|j| j.id == id && j.state == "gone" && j.reason.starts_with("used "))
+        },
+    );
+    assert!(
+        !job_cg.exists(),
+        "the job's cgroup was left behind: {}",
+        ended.reason
     );
 }
