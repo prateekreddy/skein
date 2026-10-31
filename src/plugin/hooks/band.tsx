@@ -1,6 +1,15 @@
-// What skein needs from this box, or offers it, drawn above the prompt: the disk skein asks the box
-// to free, the requests and questions the box is waiting on, and its unread mail. A pane holds the
-// details, with a Clean button on each item of skein's disk list (SKEIN-1362).
+// What skein needs from this box, or offers it, drawn above the prompt (SKEIN-1362, SKEIN-1440):
+//
+// * what waits on the person, first and in amber, each worded as what to do: the disk skein asks
+//   the box to free, the questions and requests waiting for an answer, unread mail, and versions
+//   that wait for a restart. Each new one also raises one toast, since a collapsed band shows
+//   nothing;
+// * one dim line of vitals, always: disk, memory and CPU against the box's limits, and its spend,
+//   each part drawn only while its signal is fresh (`vitals.ts`);
+// * one line for each thing running now: each of the box's granted or waiting heavy jobs, and each
+//   lane a subagent is working in, while it runs.
+//
+// A pane holds the disk details, with a Clean button on each item of skein's disk list.
 //
 // Nothing here is new authority. Every figure is read from what skein already writes or answers,
 // through the entry points the agent itself has:
@@ -13,7 +22,9 @@
 //   turn-boundary hooks alone;
 // * the box's own spend today and over 7 days from `$SKEIN_STATE/signals/usage.json`, which
 //   skein-server writes beside the resource signal once an hour (SKEIN-1384). The fleet runs on a
-//   Claude login, so the dollars are an estimate at the API's prices, and say so.
+//   Claude login, so the dollars are an estimate at the API's prices, and `/skein status` says so;
+// * the jobs from `$SKEIN_STATE/signals/jobs.json`, and the lanes at work from the agents panel's
+//   own record of the session's subagents (`lanesWorking`), which reads `skein-mcp lane list`.
 //
 // The `clean` tool this file registers (`mcp__skein__clean`) is `skein-mcp clean` too, and answers
 // what the MCP tool answers, which `tests/band.test.tsx` holds against `tests/clean-contract.ts`
@@ -29,31 +40,42 @@ import type {
   TurnCompleteInput,
 } from 'claude-code'
 
-import type { SkeinBand, SkeinCleanRow, SkeinDiskAsk, SkeinRequestRow, SkeinSharedCache } from '../types'
+import type { SkeinBand, SkeinCleanRow, SkeinDiskAsk, SkeinRequestRow, SkeinSharedCache, SkeinUpdate } from '../types'
 
-import { lanesAtWork } from './agents-panel'
+import { lanesAtWork, lanesWorking } from './agents-panel'
 import { lanesListed, ordinal } from './lanes'
 import { size } from './tool-results'
+import {
+  cut,
+  isRecord,
+  lanesAtWorkNamed,
+  numberOr,
+  readJobsView,
+  readResources,
+  readSpend,
+  sampled,
+  utcTime,
+  vitalsLine,
+  workLines,
+} from './vitals'
 
-const band = atom({ plugin: 'skein', key: 'band' } as const, null, { shape: 'band-2' })
+const band = atom({ plugin: 'skein', key: 'band' } as const, null, { shape: 'band-3' })
+const bandJobs = atom({ plugin: 'skein', key: 'bandJobs' } as const, null, { shape: 'band-jobs-1' })
+const cpuHistory = atom({ plugin: 'skein', key: 'cpuHistory' } as const, [], { shape: 'cpu-history-1' })
+const toasted = atom({ plugin: 'skein', key: 'bandToasted' } as const, [], { shape: 'band-toasted-1' })
 const cleanSaid = atom({ plugin: 'skein', key: 'cleanSaid' } as const, null, {
   shape: 'clean-said-1',
 })
 
 const PANE = 'skein'
 
-// skein writes the signal file every 60 s, and the plugin's command hooks believe nothing in one
-// older than five minutes (`STALE_AFTER` in `bin/skein-resources`): neither does the band.
-const STALE_AFTER_MS = 300_000
-
-// skein-server reads the fleet's usage once an hour (`USAGE_MAX_AGE` in skein-server's
-// `health.rs`) and writes the box's spend from each reading. The band trusts that file for the hour
-// and ten minutes more, so a reading that takes a while does not blank the line.
-const SPEND_STALE_AFTER_MS = 70 * 60_000
-
 // How often the band reads again. skein lists the box's disk every five minutes and writes the
 // signal file every minute; a request answered shows within a minute.
 const LOOK_EVERY_MS = 60_000
+
+// How often the band reads the jobs view, which skein rewrites at least every 20 s: a job's line
+// comes and goes within ten seconds of skein seeing it start or end. One file read, nothing run.
+const JOBS_EVERY_MS = 10_000
 
 // The disk list's longest rows in the pane; `skein_clean` lists every one.
 const TOP_ROWS = 8
@@ -71,12 +93,15 @@ const CLEAN_DESCRIPTION =
 // The one timer that keeps the band current. A resumed session raises `session.start` again, so a
 // start cancels the timer the last one left before it starts its own: one look per interval.
 let ticker: Timer | null = null
+let jobsTicker: Timer | null = null
 
 /** Setup, called from the one `session.start` hook `register.tsx` owns (SKEIN-1387): the `clean`
  * tool, and, in a session a person watches, the looks that keep the band current. */
 export async function onStart($: Engine, e: SessionStartInput): Promise<void> {
   ticker?.cancel()
   ticker = null
+  jobsTicker?.cancel()
+  jobsTicker = null
   await $.tool.register({
     name: 'clean',
     description: CLEAN_DESCRIPTION,
@@ -90,15 +115,17 @@ export async function onStart($: Engine, e: SessionStartInput): Promise<void> {
   if (!e.isInteractive) return
   // The first look after the session starts rather than inside it: three small processes the
   // first prompt need not wait for.
-  $.clock.after(0, () => void look($))
-  ticker = $.clock.every(LOOK_EVERY_MS, () => void look($))
+  // A look that fails, or outlives the session, draws what the last one found.
+  $.clock.after(0, () => void look($, true).catch(() => {}))
+  ticker = $.clock.every(LOOK_EVERY_MS, () => void look($, true).catch(() => {}))
+  jobsTicker = $.clock.every(JOBS_EVERY_MS, () => void lookAtJobs($).catch(() => {}))
 }
 
 /** After each turn of the main loop (`register.tsx`'s one `turn.complete` hook calls it): the
  * agent may have asked for something or cleaned, so the band looks again, after the turn. */
 export async function onTurnComplete($: Engine, e: TurnCompleteInput): Promise<void> {
   if (e.agentId) return
-  $.clock.after(0, () => void look($))
+  $.clock.after(0, () => void look($, true).catch(() => {}))
 }
 
 /** `/skein <args>`, handed over by `identity.ts`, which owns the command's hook. */
@@ -138,40 +165,72 @@ export function register(on: On): void {
       return mcpAnswer({ error: 'paths-must-be-a-list-of-paths' }, '')
     }
     const ran = await runClean($, paths ?? [])
-    if (ran.result !== null && 'removed' in ran.result) void look($)
+    if (ran.result !== null && 'removed' in ran.result) void look($).catch(() => {})
 
     return mcpAnswer(ran.result ?? { error: 'clean-did-not-answer' }, ran.said)
   }).catch(() => mcpAnswer({ error: 'clean-did-not-answer' }, ''))
 
+  // The vitals line first and always, so the eye learns where it sits; then what waits on the
+  // person, in amber; then a line for each thing running now, and unread mail, dim. Where the band has fewer rows than that, one line: the first thing that
+  // waits on the person, or the vitals, with a count of what is left out.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const found = await read($, band)
+    // Outside a skein box there is nothing of skein's to draw.
+    if (e.props.hasSurvey || found === null || !(await $.env.get('SKEIN_STATE'))) return next(e)
     const said = await read($, cleanSaid)
-    const asks = asked(found, e.props.bodyColumns)
-    const spend = found?.spend ?? null
-    if (e.props.hasSurvey || (asks.length === 0 && said === null && spend === null)) return next(e)
+    const columns = e.props.bodyColumns
+    // `⚑ ` takes two cells before each line that waits on the person.
+    const asks = asked(found, columns - 2)
+    const history = (await read($, cpuHistory)) ?? []
+    const vitals = vitalsLine(
+      {
+        disk: found.disk !== null && found.disk.mb !== null ? { mb: found.disk.mb, limit_mb: found.disk.limit_mb } : null,
+        memory: found.memory,
+        cpu: found.cpu === null ? [] : history,
+        spend: found.spend,
+      },
+      columns,
+    )
+    const work = workLines(await read($, bandJobs), lanesAtWorkNamed(await lanesWorking($)), columns)
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const open = () => void $.ui.open({ id: PANE, title: 'skein', focus: true })
+    const askRow = (ask: Ask, text = ask.text) => (
+      <Box>
+        <Text color="warning">{LOUD}</Text>
+        <Text bold={ask.isLoud} color="warning" wrap="truncate-end">
+          {text}{' '}
+        </Text>
+        {ask.button !== undefined && <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />}
+      </Box>
+    )
+    const mail = mailNote(found.mail ?? 0)
+    const rows = asks.length + 1 + work.length + (mail === null ? 0 : 1) + (said === null ? 0 : 1)
+    if (rows > Math.max(1, e.props.maxRows)) {
+      const first = asks[0]
+      const more = rows - 1
+      const left = `· ${more} more`
+      if (first !== undefined) return askRow(first, `${cut(first.text, columns - 2 - left.length - 1 - (first.button ? first.button.length + 5 : 0))} ${left}`)
+
+      return <Text dimColor>{`${cut(vitals, columns - left.length - 1)} ${left}`}</Text>
+    }
 
     return (
       <Box flexDirection="column">
-        {asks.map(ask => (
-          <Box>
-            <Text bold={ask.isLoud} color={ask.isLoud ? 'warning' : undefined}>
-              {ask.text}{' '}
-            </Text>
-            {ask.button !== undefined && (
-              <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />
-            )}
-          </Box>
+        <Text dimColor wrap="truncate-end">{vitals}</Text>
+        {asks.map(ask => askRow(ask))}
+        {work.map(w => (
+          <Text color={w.isWaiting ? undefined : 'suggestion'} dimColor={w.isWaiting ? true : undefined} wrap="truncate-end">
+            {w.text}
+          </Text>
         ))}
+        {mail !== null && <Text dimColor wrap="truncate-end">{mail}</Text>}
         {said !== null && (
           <Box>
             <Text dimColor>{said} </Text>
             <Button key="band:said" label="OK" role="dismiss" onPress={() => update($, cleanSaid, () => null)} />
           </Box>
         )}
-        {spend !== null && <Text dimColor>{spendLine(spend)}</Text>}
       </Box>
     )
   })
@@ -269,57 +328,53 @@ export function register(on: On): void {
 // Reading
 // ------------------------------------------------------------------------------------------------
 
-/** Read everything the band draws, and keep it for the session. */
-async function look($: Engine): Promise<void> {
-  const [disk, clean, requests, mail, spend] = await Promise.all([
-    readDisk($),
+/**
+ * Read everything the band draws, and keep it for the session: the CPU reading joins its history,
+ * and, where `isWatched` (a look on the band's own timer or after a turn, never `/skein status`'s),
+ * each new thing that waits on the person raises one toast.
+ */
+async function look($: Engine, isWatched = false): Promise<void> {
+  const [resources, clean, requests, mail, spend] = await Promise.all([
+    readResources($),
     readClean($),
     readRequests($),
     readMail($),
     readSpend($),
   ])
-  const found: SkeinBand = { disk, clean, requests, mail, spend }
-  await update($, band, () => found)
-}
-
-async function readDisk($: Engine): Promise<SkeinBand['disk']> {
-  const state = await $.env.get('SKEIN_STATE')
-  if (!state) return null
-  const parsed = await parsedFile($, `${state}/signals/resources.json`)
-  if (!isRecord(parsed) || typeof parsed.at !== 'string') return null
-  const at = Date.parse(parsed.at)
-  if (Number.isNaN(at) || (await $.clock.now()) - at > STALE_AFTER_MS) return null
-  const disk = isRecord(parsed.disk) ? parsed.disk : {}
-  const ask = (Array.isArray(parsed.asks) ? parsed.asks : []).find(
-    a => isRecord(a) && a.kind === 'disk' && typeof a.crossing_id === 'string' && a.crossing_id !== '',
-  )
-
-  return {
-    mb: numberOr(disk.mb, null),
-    limit_mb: numberOr(disk.limit_mb, null),
-    ask: isRecord(ask)
-      ? {
-          amount_mb: numberOr(ask.amount, 0) ?? 0,
-          live_mb: numberOr(ask.live_mb, 0) ?? 0,
-          why: typeof ask.why === 'string' ? ask.why : '',
-        }
-      : null,
+  const found: SkeinBand = {
+    disk: resources?.disk ?? null,
+    clean,
+    requests,
+    mail,
+    spend,
+    memory: resources?.memory ?? null,
+    cpu: resources?.cpu ?? null,
+    updates: resources?.updates ?? [],
   }
+  await update($, band, () => found)
+  if (resources !== null && resources.cpu !== null) {
+    const { at, cpu } = resources
+    await update($, cpuHistory, h => sampled(h ?? [], cpu, at))
+  }
+  await lookAtJobs($)
+  if (isWatched) await raiseToasts($, found)
 }
 
-/** This box's own spend, as skein-server last wrote it; null when it is missing or out of date. */
-async function readSpend($: Engine): Promise<SkeinBand['spend']> {
-  const state = await $.env.get('SKEIN_STATE')
-  if (!state) return null
-  const parsed = await parsedFile($, `${state}/signals/usage.json`)
-  if (!isRecord(parsed) || typeof parsed.at !== 'string') return null
-  const at = Date.parse(parsed.at)
-  if (Number.isNaN(at) || (await $.clock.now()) - at > SPEND_STALE_AFTER_MS) return null
-  const today = isRecord(parsed.today) ? numberOr(parsed.today.cost, null) : null
-  const week = isRecord(parsed.week) ? numberOr(parsed.week.cost, null) : null
-  if (today === null || week === null) return null
+/** The jobs view, kept only when what it says changed, so a rewrite that changes nothing draws nothing. */
+async function lookAtJobs($: Engine): Promise<void> {
+  const jobs = await readJobsView($)
+  const kept = await read($, bandJobs)
+  if (JSON.stringify(kept) !== JSON.stringify(jobs)) await update($, bandJobs, () => jobs)
+}
 
-  return { at: utcTime(at), today, week, unpriced: parsed.unpriced === true }
+/** One toast for each thing that waits on the person and had none yet; one gone is forgotten, so a
+ * thing that comes back is new again. */
+async function raiseToasts($: Engine, found: SkeinBand): Promise<void> {
+  const waiting = waitingThings(found)
+  const before = new Set((await read($, toasted)) ?? [])
+  for (const w of waiting) if (!before.has(w.key)) $.ui.toast(w.toast, { timeoutMs: 8000 })
+  const keys = waiting.map(w => w.key)
+  if (JSON.stringify(keys) !== JSON.stringify([...before])) await update($, toasted, () => keys)
 }
 
 async function readClean($: Engine): Promise<SkeinBand['clean']> {
@@ -366,22 +421,14 @@ async function readRequests($: Engine): Promise<SkeinBand['requests']> {
   })
 }
 
-// skein rewrites the jobs view at least every 20 s (`VIEW_FRESH` in `src/jobs.rs`), and the wrapper
-// takes 30 s unwritten as skein not scheduling: a view older than that has no row.
-const JOBS_STALE_AFTER_MS = 30_000
-
 /** The box's own jobs, from `$SKEIN_STATE/signals/jobs.json`; null where there is no view to believe. */
 async function readJobs($: Engine): Promise<StatusJobs | null> {
-  const state = await $.env.get('SKEIN_STATE')
-  if (!state) return null
-  const parsed = await parsedFile($, `${state}/signals/jobs.json`)
-  if (!isRecord(parsed) || typeof parsed.at !== 'string' || !Array.isArray(parsed.jobs)) return null
-  const at = Date.parse(parsed.at)
-  if (Number.isNaN(at) || (await $.clock.now()) - at > JOBS_STALE_AFTER_MS) return null
-  const jobs = parsed.jobs.filter(isRecord)
+  const view = await readJobsView($)
+  if (view === null) return null
+  const jobs = view.jobs
   const places = jobs
     .filter(j => j.state === 'waiting')
-    .map(j => numberOr(j.position, null))
+    .map(j => j.position)
     .filter((p): p is number => p !== null)
 
   return {
@@ -437,14 +484,6 @@ async function skeinMcp($: Engine, args: readonly string[], timeoutMs: number): 
   }
 }
 
-async function parsedFile($: Engine, path: string): Promise<unknown> {
-  try {
-    return JSON.parse(await $.fs.read(path))
-  } catch {
-    return null
-  }
-}
-
 /** A tool's answer as the MCP tool gives it: the result, then the sentence for the agent. */
 // What skein_clean answers, as a registered tool may: its blocks as the result, or, for an error,
 // a deny carrying the same text, which the model reads as the tool's error. Not MCP's own
@@ -470,7 +509,8 @@ async function cleanFromPane($: Engine, paths: string[]): Promise<void> {
 // Words
 // ------------------------------------------------------------------------------------------------
 
-// A line with no `button` has nothing for the person to press: mail is the agent's to read.
+// A line with no `button` has nothing for the person to press. Mail is not one of these: it is the
+// agent's to read, so it is a dim line of its own, not amber and never toasted (`mailNote`).
 type Ask = { key: string; text: string; button?: string; isLoud: boolean }
 
 /** What the band says, loudest first, in `columns` cells; empty when there is nothing to say. */
@@ -507,13 +547,39 @@ function asked(found: SkeinBand | null, columns: number): Ask[] {
       isLoud: false,
     })
   }
-  const mail = found.mail ?? 0
-  if (mail > 0) {
-    out.push({
-      key: 'mail',
-      text: `${mail} unread ${mail === 1 ? 'message' : 'messages'}, read at the agent's next turn.`,
-      isLoud: false,
-    })
+  const pending = (found.updates ?? []).filter(u => !u.restartRequested)
+  if (pending.length > 0) out.push({ key: 'update', text: updateLine(pending), isLoud: false })
+
+  return out
+}
+
+/** Unread mail, for the person to know of: the agent reads it at its next turn. */
+function mailNote(mail: number): string | null {
+  return mail > 0 ? `✉ ${mail} unread ${mail === 1 ? 'message' : 'messages'}, read at the agent's next turn.` : null
+}
+
+/** The versions a restart would give the box, as the action that takes them. */
+function updateLine(pending: readonly SkeinUpdate[]): string {
+  const names = pending.map(u => (u.new === '' ? `${u.component} (the sandbox's own)` : u.new)).join(', ')
+
+  return `A restart gives this box ${names}. Ask the agent to restart when idle, or skein does once the box is idle.`
+}
+
+/** Each thing that waits on the person, by a key that is new when the thing is: one toast each. */
+function waitingThings(found: SkeinBand): { key: string; toast: string }[] {
+  const out: { key: string; toast: string }[] = []
+  const ask = found.disk?.ask
+  if (ask) out.push({ key: `disk:${ask.id}`, toast: askLine(ask) })
+  for (const r of found.requests ?? []) {
+    if (r.state !== 'waiting') continue
+    out.push(
+      r.queue === 'question'
+        ? { key: `question:${r.id}`, toast: `Waiting for your answer: “${oneLine(r.what, 60)}”` }
+        : { key: `request:${r.queue}:${r.id}`, toast: `A ${r.queue} request waits for an answer: ${r.what}` },
+    )
+  }
+  for (const u of found.updates ?? []) {
+    if (!u.restartRequested) out.push({ key: `update:${u.component}:${u.new}`, toast: updateLine([u]) })
   }
 
   return out
@@ -717,24 +783,9 @@ function statusDrawn(text: string): Drawn[] | null {
   return rows
 }
 
-/** The box's spend in one line. An estimate: the fleet pays by its login, not by the token. */
-function spendLine(spend: NonNullable<SkeinBand['spend']>): string {
-  const more = spend.unpriced ? '+' : ''
-
-  return `Spend, estimated at API prices, as of ${spend.at} UTC: today ≈${dollars(spend.today)}${more} · 7 days ≈${dollars(spend.week)}${more}`
-}
-
 // ------------------------------------------------------------------------------------------------
 // Numbers
 // ------------------------------------------------------------------------------------------------
-
-/** `14:05`, the UTC time of `ms`. */
-function utcTime(ms: number): string {
-  const d = new Date(ms)
-  const two = (n: number) => String(n).padStart(2, '0')
-
-  return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`
-}
 
 /** `$4.20`, or whole dollars from $100: `$1,234`. */
 function dollars(n: number): string {
@@ -751,12 +802,4 @@ function human(n: number): string {
 
 function humanMb(mb: number): string {
   return human(mb * 1024 * 1024)
-}
-
-function numberOr<T>(v: unknown, fallback: T): number | T {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
 }

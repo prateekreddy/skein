@@ -22,14 +22,15 @@ const PIP = '/fleet-root-example/web-main/home/.cache/pip'
 const PAD = '/fleet-root-example/web-main/home/.cache/skein/claude/x'
 const SHARED = '/fleet-root-example/.skein/repos/web/cache'
 
-/** A signal file as skein writes it, `ago` seconds old, with a disk ask or none; `over` replaces
- * fields of the ask. */
-function signal(ago: number, ask: boolean, over: Record<string, unknown> = {}): string {
-  const at = new Date(NOW - ago * 1000).toISOString().replace(/\.\d+Z$/, 'Z')
+/** A signal file as skein writes it, `ago` seconds before `now`, with a disk ask or none; `over`
+ * replaces fields of the ask, and `more` fields of the file. */
+function signal(ago: number, ask: boolean, over: Record<string, unknown> = {}, more: Record<string, unknown> = {}, now = NOW): string {
+  const at = stamp(now - ago * 1000)
 
   return JSON.stringify({
     at,
     disk: { mb: 11468, limit_mb: 10240, fleet: 'under', fleet_over_by_mb: 0 },
+    ...more,
     asks: ask
       ? [
           {
@@ -47,6 +48,18 @@ function signal(ago: number, ask: boolean, over: Record<string, unknown> = {}): 
         ]
       : [],
   })
+}
+
+const stamp = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z')
+
+/** The box's vitals as the signal file writes them, read `ago` seconds before `now`: 2.7 of 10 GB
+ * of disk, 1.1 of 14 GB of memory, and `cores` of CPU. */
+function vitals(cores: number | null, now = NOW, memAgo = 0): Record<string, unknown> {
+  return {
+    disk: { mb: 2765, limit_mb: 10240, fleet: 'under', fleet_over_by_mb: 0 },
+    memory: { anon: 1.1 * G, cache: 0.2 * G, high: 14 * G, max: 16 * G, read_at: stamp(now - memAgo * 1000) },
+    cpu: cores === null ? {} : { cores, usage_usec: 1 },
+  }
 }
 
 /** This box's own spend as skein-server writes it, `ago` seconds old. */
@@ -117,6 +130,8 @@ function requests(waiting: number, questions: readonly Record<string, unknown>[]
 }
 
 type World = {
+  /** The box's environment; a skein box's when absent. */
+  env?: Record<string, string>
   signal: string
   /** `signals/usage.json`; none when absent. */
   usage?: string
@@ -133,10 +148,12 @@ type World = {
   /** Every argv the plugin ran, in order. */
   ran: string[][]
   opened: string[]
+  /** Every toast raised, in order. */
+  toasts: string[]
 }
 
 function world(over: Partial<World> = {}): World {
-  return { signal: signal(30, false), mail: '0', waiting: 0, ran: [], opened: [], ...over }
+  return { signal: signal(30, false), mail: '0', waiting: 0, ran: [], opened: [], toasts: [], ...over }
 }
 
 const out = (stdout: string, exitCode = 0) => ({
@@ -145,8 +162,16 @@ const out = (stdout: string, exitCode = 0) => ({
 
 function engine(on: On, w: World) {
   const clock = mock.clock(on, { now: NOW })
-  mock.env(on, { SKEIN_BOX: 'web-main', SKEIN_STATE: STATE })
+  mock.env(on, w.env ?? { SKEIN_BOX: 'web-main', SKEIN_STATE: STATE })
   on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.toast', (_, e) => {
+    w.toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [] }))
+  on('agent.spawn', (_, e) => ({ model: 'claude-opus-5-5', agentId: `agent-${e.tool_use_id}` }))
+  on('tool.call', () => ({ result: {}, text: '' }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__skein__${e.name}` } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('ui.open', (_, e) => {
@@ -229,14 +254,17 @@ const TYPED = (args: string) =>
 // The band
 // ------------------------------------------------------------------------------------------------
 
-test('the band stays out of the way while skein asks nothing of the box', async ($, on) => {
+// What would make it fail: the band drawn from a session that is not in a skein box, where there
+// is no signal of skein's to draw. Watched: with the `SKEIN_STATE` check taken out of the render
+// hook, the band drew its own lines here and this failed.
+test('outside a skein box the band is the engine\'s', async ($, on) => {
   // What the engine draws when the plugin passes the band on.
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
     return <Text>engine</Text>
   })
-  await started(on, world(), $)
+  await started(on, world({ env: {} }), $)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
@@ -262,7 +290,7 @@ test('the band says loudly that skein asks for disk, and counts requests and mai
       '2 requests are waiting for an answer.',
     )
     expect((await ui.find({ type: 'Text', text: /unread/ }))?.text.trim()).toBe(
-      "3 unread messages, read at the agent's next turn.",
+      "✉ 3 unread messages, read at the agent's next turn.",
     )
 
     // Its button opens the pane with the list, and removes nothing by itself.
@@ -304,18 +332,17 @@ for (const [when, over, line] of LIVE_CASES) {
   })
 }
 
-test('a signal file skein stopped writing asks nothing', async ($, on) => {
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-
-    return <Text>engine</Text>
-  })
+// What would make it fail: a signal file believed whatever its age, so a ten-minute-old ask or
+// figure is drawn as now. Watched: with the age check in `readResources` removed, the ask's line and
+// the disk figure were drawn and this failed.
+test('a signal file skein stopped writing asks nothing, and the vitals line says nothing is measured', async ($, on) => {
   // Ten minutes old: skein is not looking, as the command hooks read it.
-  await started(on, world({ signal: signal(600, true) }), $)
+  await started(on, world({ signal: signal(600, true, {}, vitals(0.5)) }), $)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect((await ui.find({ type: 'Text' }))?.text).toBe('engine')
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['skein  not measured lately'])
+    expect(await ui.find({ type: 'Button' })).toBe(undefined)
     await ui.unmount()
   }
 })
@@ -458,18 +485,17 @@ test('/skein status draws aligned rows, what needs the person first', async ($, 
   ])
 })
 
-// Fails if the line stops saying the dollars are an estimate at API prices, or if `+` is not added
-// where something had no price. Watched: with "estimated at API prices" taken out of `spendLine`,
-// this failed on the band and on /skein status.
-test('the band and /skein status say the spend is an estimate, with + when something had no price', async ($, on) => {
+// Fails if /skein status stops saying the dollars are an estimate at API prices, or if `+` is not
+// added where something had no price, in the band or in /skein status. Watched: with the `+` taken
+// out of `vitalsLine`, the band's second line failed.
+test('the band and /skein status draw the spend, with + when something had no price', async ($, on) => {
   const w = world({ usage: usage(60, 1.2, 31.084) })
   await started(on, w, $)
-  const line = 'Spend, estimated at API prices, as of 11:59 UTC: today ≈$1.20 · 7 days ≈$31.08'
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    const shown = await ui.find({ type: 'Text', text: /Spend/ })
-    expect(shown?.text).toBe(line)
+    const shown = await ui.find({ type: 'Text', text: /today/ })
+    expect(shown?.text).toBe('skein  disk ▮▮▮▮▮▮▮▮▮▮ 11.2/10G  ·  $1.20 today · $31 7d')
     expect(shown?.props.dimColor).toBe(true)
     await ui.unmount()
   }
@@ -479,6 +505,9 @@ test('the band and /skein status say the spend is an estimate, with + when somet
 
   w.usage = usage(60, 1.2, 140.5, true)
   const status = (await $.command.run(TYPED('status'))).text?.split('\n') ?? []
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /today/ }))?.text).toBe('skein  disk ▮▮▮▮▮▮▮▮▮▮ 11.2/10G  ·  $1.20+ today · $141+ 7d')
+  await ui.unmount()
   expect(status.at(-2)).toBe(
     '  spend     ≈$1.20+ today · ≈$141+ this week   estimated at API prices as of 11:59 UTC; + leaves out a model skein has no price for',
   )
@@ -489,11 +518,6 @@ test('the band and /skein status say the spend is an estimate, with + when somet
 // `readSpend` judging age by `STALE_AFTER_MS`, the 69-minute figure was not shown and this failed;
 // with the age check removed, the 71-minute figure was shown and this failed.
 test('spend is shown for 70 minutes after skein read it, and not after', async ($, on) => {
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-
-    return <Text>engine</Text>
-  })
   const w = world({ usage: usage(69 * 60, 1.2, 8.4) })
   await started(on, w, $)
   expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-2)).toBe(
@@ -505,8 +529,8 @@ test('spend is shown for 70 minutes after skein read it, and not after', async (
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect((await ui.find({ type: 'Text' }))?.text).toBe('engine')
-    expect(await ui.find({ type: 'Text', text: /Spend/ })).toBe(undefined)
+    expect((await ui.find({ type: 'Text' }))?.text).toBe('skein  disk ▮▮▮▮▮▮▮▮▮▮ 11.2/10G')
+    expect(await ui.find({ type: 'Text', text: /today/ })).toBe(undefined)
     await ui.unmount()
   }
   expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-2)).toBe('  spend     not written in the last 70 minutes')
@@ -673,14 +697,21 @@ test("the band looks again after the main loop's turn, not after a subagent's", 
   expect(looks(w)).toBe(before + 1)
 })
 
-test('unread mail is said in the band with no button to press', async ($, on) => {
-  await started(on, world({ mail: '2' }), $)
+// What would make it fail: mail drawn in amber as if it waited on the person, or toasted.
+test('unread mail is said in the band, dim, with no button to press and no toast', async ($, on) => {
+  const w = world({ mail: '2' })
+  await started(on, w, $)
+  expect(w.toasts).toEqual([])
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
     expect((await ui.find({ type: 'Text', text: /unread/ }))?.text.trim()).toBe(
-      "2 unread messages, read at the agent's next turn.",
+      "✉ 2 unread messages, read at the agent's next turn.",
     )
+    // Mail is the agent's to read: dim, never amber, never toasted.
+    expect((await ui.find({ type: 'Text', text: /unread/ }))?.props.color).toBe(undefined)
+    expect((await ui.find({ type: 'Text', text: /unread/ }))?.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /⚑/ })).toBe(undefined)
     expect(await ui.find({ type: 'Button' })).toBe(undefined)
     await ui.unmount()
   }
@@ -715,10 +746,10 @@ test('the band shows the oldest waiting question in its own words, cut to one li
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 100 } })
-    // 100 cells less "Waiting for your answer: ", " And 1 more question." and 11 for the
-    // quotes and the button: 43 cells for the question and its `…`, cut after a whole word.
+    // 100 cells less the `⚑ `, "Waiting for your answer: ", " And 1 more question." and 11 for
+    // the quotes and the button: 41 cells for the question and its `…`, cut after a whole word.
     expect((await ui.find({ type: 'Text', text: /Waiting for your answer/ }))?.text.trim()).toBe(
-      'Waiting for your answer: “Should I drop the legacy importer now that…” And 1 more question.',
+      'Waiting for your answer: “Should I drop the legacy importer now…” And 1 more question.',
     )
     expect(await ui.find({ type: 'Button', key: 'band:question' })).not.toBe(undefined)
     // Questions are not counted again among the requests.
@@ -765,4 +796,292 @@ test('a question with more lines than its first shows that line and `…`', asyn
     )
     await ui.unmount()
   }
+})
+
+// ------------------------------------------------------------------------------------------------
+// The band's three states: calm, busy, and waiting on you (SKEIN-1440)
+// ------------------------------------------------------------------------------------------------
+
+/** The band's lines as drawn, top to bottom: each row's text, a button's `[ label ]` left out. */
+async function bandLines(ui: { find: (q: { type: string }) => Promise<{ type: string; children: unknown[] } | undefined> }): Promise<string[]> {
+  const root = await ui.find({ type: 'Box' })
+  if (root === undefined) {
+    const only = await ui.find({ type: 'Text' })
+    return only === undefined ? [] : [shown(only).trimEnd()]
+  }
+
+  return root.children.filter(c => typeof c !== 'string').map(c => shown(c).trimEnd())
+}
+
+/** What an element shows, a Button left out. */
+function shown(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (typeof node !== 'object' || node === null) return ''
+  const el = node as { type?: string; children?: unknown; props?: { children?: unknown } }
+  if (el.type === 'Button') return ''
+  const kids = el.children ?? el.props?.children
+  if (Array.isArray(kids)) return kids.map(shown).join('')
+
+  return shown(kids)
+}
+
+// The CPU a minute at a time, for eight minutes: ▁▂▂▃▂▁▁▂ against one core, the least the line
+// scales to.
+const CPU = [0, 0.15, 0.15, 0.3, 0.15, 0, 0, 0.15]
+
+/** A session eight minutes in, one look a minute, the signal file rewritten before each. */
+async function eightMinutes(on: On, w: World, $: Engine, more: (minute: number) => Partial<World> = () => ({})) {
+  const clock = engine(on, w)
+  for (const [i, cores] of CPU.entries()) {
+    const now = NOW + i * 60_000
+    Object.assign(w, { signal: signal(10, false, {}, vitals(cores, now), now), ...more(i) })
+    if (i === 0) {
+      await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+      await clock.settle()
+    } else {
+      await clock.advance(60_000)
+    }
+  }
+
+  return clock
+}
+
+const CALM = 'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▁▂▂▃▂▁▁▂  ·  $31 today · $515 7d'
+
+// What would make it fail: the vitals line hidden while nothing happens (the owner's decision is
+// that it always shows), a bar or figure from the wrong field, or the sparkline not kept a minute
+// at a time. Watched: with `sampled` keeping only the latest minute, the sparkline was one cell
+// and this failed.
+test('calm: one dim line of vitals, with an eight-minute CPU sparkline', async ($, on) => {
+  const w = world({ usage: usage(60, 31.2, 515.4) })
+  await eightMinutes(on, w, $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect(await bandLines(ui)).toEqual([CALM])
+    expect((await ui.find({ type: 'Text', text: /^skein {2}disk/ }))?.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Button' })).toBe(undefined)
+    await ui.unmount()
+  }
+  expect(w.toasts).toEqual([])
+})
+
+/** A jobs view `ago` seconds old: a test in lane ledger running, and two clippy runs waiting, the
+ * first behind another box's job and another repo's. */
+function busyJobs(ago: number): string {
+  const job = (id: string, command: string, cwd: string, state: string, position: number | null, reason = '') => ({
+    id, class: 'test', command, cwd, state, cores: 4, min: 0,
+    granted_cores: state === 'granted' ? 4 : 0, position, reason, waited_secs: 5,
+  })
+
+  return JSON.stringify({
+    schema: 1, at: stamp(NOW + 7 * 60_000 - ago * 1000), cores: 12, granted: 8, free: 0, running: 2,
+    jobs: [
+      job('j-1', 'cargo test --test fleet_launch', '/w/.worktrees/ledger/src', 'granted', null),
+      job('j-2', 'cargo clippy --all-targets', '/w', 'waiting', 2, 'waiting for 4 cores (0 free)'),
+      job('j-3', 'cargo clippy', '/w', 'waiting', 4),
+      job('j-4', 'cargo build', '/w', 'done', null),
+    ],
+    ahead: [{ box: 'api-main', id: 'x-1', class: 'test', command: 'cargo test', cores: 4 }],
+  })
+}
+
+/** Two lanes at work: ledger, whose job is in the view, and spend, waiting at the heavy-work lock. */
+async function twoLanesAtWork($: Engine) {
+  for (const [id, name] of [['u1', 'ledger'], ['u2', 'spend']] as const) {
+    await $.agent.spawn({
+      tool_use_id: id,
+      prompt: `Worktree: /w/.worktrees/${name}, on its branch.`,
+      description: `fix the ${name}`,
+      subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: true,
+      fork: false,
+    })
+  }
+}
+
+// What would make it fail: a finished job drawn, a job's lane not named, the first waiting job not
+// naming the other box it waits behind, a later one not counting what goes before it, a lane drawn
+// twice (once for its job, once for itself), or a lane with no job left out. Watched: with the
+// `busy` set in `workLines` not consulted, `lane ledger` had a line of its own and this failed;
+// with `ahead` read for every waiting job, the second clippy line named api-main and this failed.
+test('busy: a line for each running job and each lane at work, while it runs', async ($, on) => {
+  const w = world({ lanes: LANES, usage: usage(60, 31.2, 515.4) })
+  const clock = await eightMinutes(on, w, $, i => (i === 7 ? { jobs: busyJobs(5) } : {}))
+  await twoLanesAtWork($)
+  await clock.advance(10_000)
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 120 } })
+  expect(await bandLines(ui)).toEqual([
+    CALM,
+    '● cargo test --test fleet_launch · lane ledger · 4 cores',
+    "◌ cargo clippy --all-targets · #2 in the fleet's queue · behind api-main cargo test · waiting for 4 cores (0 free)",
+    "◌ cargo clippy · #4 in the fleet's queue · 3 ahead",
+    '● lane spend · SKEIN-2 · fix the spend',
+  ])
+  await ui.unmount()
+
+  // The view goes stale: skein is not scheduling, and no job is drawn as running. The lanes stay.
+  w.jobs = busyJobs(45)
+  await clock.advance(10_000)
+  const later = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 120 } })
+  expect(await bandLines(later)).toEqual([CALM, '● lane ledger · SKEIN-1 · fix the ledger', '● lane spend · SKEIN-2 · fix the spend'])
+  await later.unmount()
+})
+
+// What would make it fail: what waits on the person drawn above the vitals, not in amber, or not
+// worded as what to do; a toast missing for one of them, raised again on the next look, or not
+// raised for one that comes later. Watched: with `raiseToasts` toasting whatever it toasted
+// before, the second look raised all three again and this failed; with the update line left out
+// of `asked`, the rows failed.
+test('waiting on you: amber lines under the vitals, each worded as the action, and one toast per new thing', async ($, on) => {
+  const updates = [{ component: 'agent-cli', have: 'claude@2.1.300', new: 'claude@2.1.316', applies: 'restart', restart_requested: false }]
+  const w = world({
+    signal: signal(30, true, {}, { ...vitals(0.15), updates }),
+    usage: usage(60, 31.2, 515.4),
+    questions: [question('q1', '2026-10-30T08:00:00Z', 'Keep the old table?')],
+  })
+  const clock = await started(on, w, $)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 120 } })
+    const lines = await bandLines(ui)
+    expect(lines).toEqual([
+      'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂  ·  $31 today · $515 7d',
+      '⚑ skein asks this box to free 1.2G of disk: it is over its own allowance.',
+      '⚑ Waiting for your answer: “Keep the old table?”',
+      '⚑ A restart gives this box claude@2.1.316. Ask the agent to restart when idle, or skein does once the box is idle.',
+    ])
+    for (const text of [/skein asks/, /Waiting for your answer/, /A restart gives/]) {
+      expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('warning')
+    }
+    // "Free disk" still opens the pane, as it did; the band has no key that cleans.
+    expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['Free disk', 'Read'])
+    await ui.unmount()
+  }
+  expect(w.toasts).toEqual([
+    'skein asks this box to free 1.2G of disk: it is over its own allowance.',
+    'Waiting for your answer: “Keep the old table?”',
+    'A restart gives this box claude@2.1.316. Ask the agent to restart when idle, or skein does once the box is idle.',
+  ])
+
+  // The next look raises nothing again; a new question raises one toast, for it alone.
+  await clock.advance(60_000)
+  expect(w.toasts.length).toBe(3)
+  w.questions = [...(w.questions ?? []), question('q2', '2026-10-30T11:00:00Z', 'Merge now?')]
+  await clock.advance(60_000)
+  expect(w.toasts.slice(3)).toEqual(['Waiting for your answer: “Merge now?”'])
+
+  // A restart the box already asked for waits on nobody.
+  w.signal = signal(30, true, {}, { ...vitals(0.15), updates: [{ ...updates[0], restart_requested: true }] })
+  await clock.advance(60_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 120 } })
+  expect(await ui.find({ type: 'Text', text: /A restart gives/ })).toBe(undefined)
+  await ui.unmount()
+})
+
+// ------------------------------------------------------------------------------------------------
+// Each figure only while its signal is fresh
+// ------------------------------------------------------------------------------------------------
+
+// What would make it fail: a part drawn from a reading skein did not make fresh, which is a figure
+// invented. Watched: with the `read_at` check in `readResources` removed, the memory part was drawn
+// from a ten-minute-old reading and the first case failed; with the CPU drawn from the history when
+// the reading now has none, the second failed.
+const STALE_CASES: Array<[string, Record<string, unknown>, string]> = [
+  ['memory read ten minutes ago', vitals(0.15, NOW, 600), 'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  cpu ▂'],
+  ['no CPU reading', vitals(null), 'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G'],
+  [
+    'no disk figure',
+    { ...vitals(0.15), disk: { mb: null, limit_mb: null, fleet: 'unknown', fleet_over_by_mb: 0 } },
+    'skein  mem ▮▯▯▯▯ 1.1/14G  cpu ▂',
+  ],
+  ['no allowance', { ...vitals(0.15), disk: { mb: 2765, limit_mb: null } }, 'skein  disk 2.7G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂'],
+]
+
+for (const [when, more, line] of STALE_CASES) {
+  test(`the vitals line leaves a part out when it has ${when}`, async ($, on) => {
+    await started(on, world({ signal: signal(30, false, {}, more) }), $)
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await bandLines(ui)).toEqual([line])
+    await ui.unmount()
+  })
+}
+
+// What would make it fail: a minute with no fresh reading filled in, or the line's CPU drawn while
+// the signal file is old. Watched: with `sparkline` drawing nothing for a minute with no reading,
+// the gap closed up and this failed.
+test('a minute skein wrote nothing fresh for is a gap in the sparkline, not a guess', async ($, on) => {
+  const w = world()
+  await eightMinutes(on, w, $, i => (i === 4 ? { signal: signal(600, false, {}, vitals(9, NOW + i * 60_000), NOW + i * 60_000) } : {}))
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await bandLines(ui)).toEqual(['skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▁▂▂▃ ▁▁▂'])
+  await ui.unmount()
+})
+
+// ------------------------------------------------------------------------------------------------
+// The width and the rows it has
+// ------------------------------------------------------------------------------------------------
+
+// What would make it fail: a line wider than the band, which the terminal would wrap into a mess,
+// or details cut before the bars. Watched: with `vitalsLine` returning its first try whatever its
+// width, the 60-cell band's first line was 87 cells and this failed.
+test('a narrow band cuts details, never wraps: bars first, then the week, then the CPU', async ($, on) => {
+  const w = world({ lanes: LANES, usage: usage(60, 31.2, 515.4) })
+  const clock = await eightMinutes(on, w, $, i => (i === 7 ? { jobs: busyJobs(5) } : {}))
+  await twoLanesAtWork($)
+  await clock.advance(10_000)
+
+  const at = async (bodyColumns: number) => {
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns } })
+    const lines = await bandLines(ui)
+    await ui.unmount()
+
+    return lines
+  }
+  const wide = await at(87)
+  expect(wide[0]).toBe(CALM)
+  const narrow = await at(60)
+  expect(narrow).toEqual([
+    'skein  disk 2.7/10G  mem 1.1/14G  cpu ▁▂▂▃▂▁▁▂  ·  $31 today',
+    '● cargo test --test fleet_launch · lane ledger · 4 cores',
+    "◌ cargo clippy · #2 in the fleet's queue · behind api-main",
+    "◌ cargo clippy · #4 in the fleet's queue · 3 ahead",
+    '● lane spend · SKEIN-2 · fix the spend',
+  ])
+  const thin = await at(32)
+  expect(thin).toEqual([
+    'skein  disk 2.7/10G',
+    '● cargo test · lane ledger',
+    '◌ cargo clippy · #2',
+    '◌ cargo clippy · #4',
+    '● lane spend · SKEIN-2',
+  ])
+  for (const line of [...narrow, ...thin.slice(0, 1)]) expect([...line].length).toBeLessThanOrEqual(60)
+  for (const line of thin) expect([...line].length).toBeLessThanOrEqual(32)
+})
+
+// What would make it fail: a band taller than its rows, so the engine scrolls it and the thing that
+// waits on the person may be out of view. Watched: with the row count not compared to `maxRows`, the
+// band drew three rows into two and this failed.
+test('where the band has too few rows, it is one line: what waits on the person first', async ($, on) => {
+  const w = world({ signal: signal(30, true, {}, vitals(0.15)), mail: '2' })
+  await started(on, w, $)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 2 } })
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('').trimEnd()).toBe(
+    '⚑ skein asks this box to free 1.2G of disk: it is over its own allowance. · 2 more',
+  )
+  await ui.unmount()
+
+  w.signal = signal(30, false, {}, vitals(0.15))
+  w.mail = '0'
+  w.jobs = busyJobs(5 + 7 * 60)
+  await $.command.run(TYPED('status'))
+  const calm = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 1 } })
+  expect((await calm.findAll({ type: 'Text' })).map(t => t.text)).toEqual([
+    'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂ · 3 more',
+  ])
+  await calm.unmount()
 })

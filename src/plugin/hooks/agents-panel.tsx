@@ -180,6 +180,11 @@ export async function lanesAtWork($: EngineInterface): Promise<number> {
   return (await read($, agents)).filter(a => a.status === 'running' && a.lane !== null).length
 }
 
+/** The session's subagents working in a lane now, for the band's running-work lines (SKEIN-1440). */
+export async function lanesWorking($: EngineInterface): Promise<SkeinAgentRun[]> {
+  return (await read($, agents)).filter(a => a.status === 'running' && a.lane !== null)
+}
+
 export function register(on: On): void {
   on('command.run', { command: 'agents-info' }, async ($, e) => {
     // `/agents-info open` opens the panel, or brings it forward, without toggling it.

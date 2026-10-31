@@ -147,8 +147,41 @@ export type SkeinRequestRow = {
   what: string
 }
 
-/** skein's disk ask, as the band reads it from the signal file. */
-export type SkeinDiskAsk = { amount_mb: number; live_mb: number; why: string }
+/** skein's disk ask, as the band reads it from the signal file. `id` is the ask's crossing, new at
+ * each one, which the band raises one toast for. */
+export type SkeinDiskAsk = { id: string; amount_mb: number; live_mb: number; why: string }
+
+/** A version rolled out since the box started that a restart would give it (`Update` in
+ * `src/resource_signal.rs`). `restartRequested`: the box has already asked for the restart. */
+export type SkeinUpdate = { component: string; have: string; new: string; restartRequested: boolean }
+
+/** What the band reads of `signals/resources.json` while it is fresh (SKEIN-1440). */
+export type SkeinResources = {
+  disk: {
+    mb: number | null
+    limit_mb: number | null
+    ask: SkeinDiskAsk | null
+  }
+  /** Anonymous memory against `memory.high` (or `memory.max`); null when its reading is old. */
+  memory: { bytes: number; limit: number | null } | null
+  /** Cores in use, averaged since skein's previous reading; null when skein had none. */
+  cpu: number | null
+  /** Versions a restart would give the box. */
+  updates: SkeinUpdate[]
+}
+
+/** One minute of the box's CPU, for the band's sparkline: the minute since the epoch, and cores. */
+export type SkeinCpuSample = { minute: number; cores: number }
+
+/** One of the box's own jobs as the band keeps it: the view's job less what changes every write. */
+export type SkeinBandJob = Omit<SkeinViewJob, 'waited_secs'>
+
+/** The box's jobs view as the band keeps it while it is fresh: its granted and waiting jobs, and
+ * every waiting job of another box that goes before its first waiting one, named with its box. */
+export type SkeinBandJobs = {
+  jobs: SkeinBandJob[]
+  ahead: { box: string; command: string; cores: number }[]
+}
 
 /** What the band and the pane draw from, read on a timer and after a Clean (SKEIN-1362). */
 export type SkeinBand = {
@@ -170,6 +203,10 @@ export type SkeinBand = {
   requests: SkeinRequestRow[] | null
   /** Unread mail; null when the mailbox could not be read. */
   mail: number | null
+  /** Memory, CPU and updates from the signal file; null as `disk` is. */
+  memory: SkeinResources['memory']
+  cpu: number | null
+  updates: SkeinUpdate[]
   /**
    * This box's own spend from `signals/usage.json`, in dollars at the API's prices; null when the
    * file is missing or more than 70 minutes old. `at`: when skein read it, `HH:MM` in UTC.
@@ -320,6 +357,12 @@ declare module 'claude-code' {
       guide: Shaped<SkeinGuide | null>
       attention: Shaped<SkeinAttention | null>
       band: Shaped<SkeinBand | null>
+      /** The box's running and waiting jobs, read every ten seconds while the view is fresh. */
+      bandJobs: Shaped<SkeinBandJobs | null>
+      /** The box's CPU a minute at a time over the last hour, oldest first (SKEIN-1440). */
+      cpuHistory: Shaped<SkeinCpuSample[]>
+      /** What waits on the person that a toast was raised for, by key, while it still waits. */
+      bandToasted: Shaped<string[]>
       /** What the last Clean said, `skein-mcp clean`'s own sentence. */
       cleanSaid: Shaped<string | null>
       agents: Shaped<SkeinAgentRun[]>
