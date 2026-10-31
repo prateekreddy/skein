@@ -61,6 +61,7 @@ pub const WEIGHT_PER_CORE: f64 = 100.0;
 
 /// The most `cpu.weight` a job gets, below [`BOX_LEAF_WEIGHT`].
 pub const JOB_WEIGHT_MAX: u32 = 300;
+const _: () = assert!(JOB_WEIGHT_MAX < BOX_LEAF_WEIGHT);
 
 /// The `cpu.max` period, in microseconds: the kernel's default.
 const PERIOD_USEC: u64 = 100_000;
@@ -565,7 +566,6 @@ mod tests {
         assert_eq!(weight_for(Some(2.0)), 200);
         assert_eq!(weight_for(Some(16.0)), JOB_WEIGHT_MAX);
         assert_eq!(weight_for(Some(0.0)), 1);
-        assert!(JOB_WEIGHT_MAX < BOX_LEAF_WEIGHT);
         assert_eq!(cpu_max_for(4.0), "400000 100000");
         assert_eq!(cpu_max_for(0.0), "1000 100000");
     }
