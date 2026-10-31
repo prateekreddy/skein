@@ -110,6 +110,90 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
     Ok(out)
 }
 
+/// The file cargo holds an exclusive `flock` on for the whole of a build, one per profile
+/// directory: `<target>/debug/.cargo-lock`, `<target>/release/.cargo-lock`.
+pub const CARGO_BUILD_LOCK: &str = ".cargo-lock";
+
+/// Which of `build_dirs` a build is running in now (SKEIN-1391): cargo holds the lock on one of
+/// its profile directories' [`CARGO_BUILD_LOCK`] files, as `/proc/locks` lists it.
+///
+/// **The lock, not the process.** A target directory's mtime, a process's working directory and
+/// its open files all miss the gaps between two rustc runs; cargo's lock is held from the start of
+/// the build to its end. And it is **only read, never taken**: a probe `flock` of the file would
+/// make the box's own cargo print "Blocking waiting for file lock" for as long as skein held it.
+///
+/// `/proc/locks` names a file by its device and inode. Both are matched, since an inode number is
+/// only unique on one filesystem. A directory skein cannot read, or a `/proc/locks` it cannot read,
+/// is a build that is not running: the ask then stays the size it would have been without this.
+///
+/// **`/proc/locks` lists a lock under the pid that took it**, and leaves it out once that pid is
+/// gone or is not visible in the reader's pid namespace. So a lock taken by one process and held
+/// through a descriptor it handed to a child — `flock(1)` running a command — is held and not
+/// listed (measured: its `fdinfo` showed it under pid 0). Cargo takes and holds its lock in its own
+/// process for the whole build, so a running cargo is listed; skein reads from outside every box's
+/// namespace, and a box's own tools from inside it, and both see the box's cargo.
+pub fn live_builds(build_dirs: &[&str]) -> std::collections::BTreeSet<String> {
+    let locks = std::fs::read_to_string("/proc/locks").unwrap_or_default();
+    live_builds_in(&locks, build_dirs)
+}
+
+/// [`live_builds`] against the text of a `/proc/locks`.
+pub(crate) fn live_builds_in(
+    locks: &str,
+    build_dirs: &[&str],
+) -> std::collections::BTreeSet<String> {
+    use std::os::unix::fs::MetadataExt;
+    let held = held_locks(locks);
+    let mut out = std::collections::BTreeSet::new();
+    if held.is_empty() {
+        return out;
+    }
+    for dir in build_dirs {
+        let Ok(profiles) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let running = profiles.flatten().any(|p| {
+            std::fs::symlink_metadata(p.path().join(CARGO_BUILD_LOCK))
+                .is_ok_and(|m| m.is_file() && held.contains(&(dev_pair(m.dev()), m.ino())))
+        });
+        if running {
+            out.insert(dir.to_string());
+        }
+    }
+    out
+}
+
+/// Every file `/proc/locks` lists, as ((major, minor), inode). The kernel writes each lock as
+/// `1: FLOCK  ADVISORY  WRITE 1234 fd:01:5678 0 EOF`, the device's major and minor in hex and the
+/// inode in decimal; a waiter's line is marked `->` and names the same file as the lock it waits on.
+fn held_locks(text: &str) -> std::collections::BTreeSet<((u64, u64), u64)> {
+    text.lines()
+        .flat_map(|l| l.split_whitespace())
+        .filter_map(|word| {
+            let mut parts = word.split(':');
+            let (major, minor, ino) = (parts.next()?, parts.next()?, parts.next()?);
+            if parts.next().is_some() {
+                return None;
+            }
+            Some((
+                (
+                    u64::from_str_radix(major, 16).ok()?,
+                    u64::from_str_radix(minor, 16).ok()?,
+                ),
+                ino.parse::<u64>().ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// A `st_dev` as the kernel's (major, minor), decoded the way glibc's `major` and `minor` do.
+fn dev_pair(dev: u64) -> (u64, u64) {
+    (
+        ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000),
+        (dev & 0xff) | ((dev >> 12) & 0xffff_ff00),
+    )
+}
+
 /// What [`clean_box`] did: what it removed and freed, and what it could not remove and why.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Cleaned {
@@ -1271,5 +1355,141 @@ mod tests {
             .expect_err("not on the list");
         assert!(err.contains("removed nothing"), "{err}");
         assert!(elsewhere.join("keep").exists());
+    }
+
+    /// A process that takes an exclusive `flock` on the file it is given and holds it itself, as cargo
+    /// does. Not `flock(1)` handing its descriptor to a child: `/proc/locks` lists a lock under the pid
+    /// that took it, and hides it once that pid is gone, so a lock `flock(1)` took and then left to
+    /// `sleep` is held and not listed (measured: `fdinfo` showed it under pid 0).
+    const HOLD_A_LOCK: &str = "import fcntl, sys, time\n\
+                               f = open(sys.argv[1], 'w')\n\
+                               fcntl.flock(f, fcntl.LOCK_EX)\n\
+                               time.sleep(60)\n";
+
+    /// A child holding a lock, killed and reaped however the test ends.
+    struct Holder(std::process::Child);
+
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// `path` as `/proc/locks` writes it: `fd:01:5678`.
+    fn as_proc_locks(path: &Path) -> String {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).unwrap();
+        let (major, minor) = dev_pair(m.dev());
+        format!("{major:02x}:{minor:02x}:{}", m.ino())
+    }
+
+    /// Whether `/proc/locks` lists `file`, waiting up to ten seconds for it to read `want`.
+    fn proc_locks_lists(file: &str, want: bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let text = std::fs::read_to_string("/proc/locks").unwrap_or_default();
+            let listed = text.split_whitespace().any(|w| w == file);
+            if listed == want || std::time::Instant::now() > deadline {
+                return listed;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// **A build is live while something holds the `flock` on its profile directory's
+    /// `.cargo-lock`, and not live once that ends** (SKEIN-1391), read from the real `/proc/locks`
+    /// of a real lock: a child process takes an exclusive `flock` on `target/debug/.cargo-lock` and
+    /// holds it, as cargo does ([`HOLD_A_LOCK`]).
+    ///
+    /// The lock is asserted present in `/proc/locks` before `live_builds` is asked, and absent
+    /// after the child is killed before it is asked again: an absence never seen as a presence
+    /// proves nothing. A second target directory with an unlocked `.cargo-lock` is never live.
+    ///
+    /// What would make it fail: looking for the lock in the target directory's root
+    /// (`<target>/.cargo-lock`) rather than one level down in each profile directory; or a
+    /// `live_builds` that answers from anything but the lock (the second tick would still say live).
+    /// Watched: with `p.path().join(CARGO_BUILD_LOCK)` made `Path::new(dir).join(CARGO_BUILD_LOCK)`,
+    /// the first assertion on `live_builds` failed.
+    #[test]
+    fn a_build_is_live_exactly_while_its_cargo_lock_is_held() {
+        let dir = tempdir();
+        let base: &Path = dir.as_ref();
+        let target = base.join("target");
+        let idle = base.join("idle-target");
+        for t in [&target, &idle] {
+            std::fs::create_dir_all(t.join("debug")).unwrap();
+            std::fs::write(t.join(CARGO_TARGET_MARKER), "{}").unwrap();
+            std::fs::write(t.join("debug").join(CARGO_BUILD_LOCK), "").unwrap();
+        }
+        let lock = target.join("debug").join(CARGO_BUILD_LOCK);
+        let named = as_proc_locks(&lock);
+        let dirs = [target.to_str().unwrap(), idle.to_str().unwrap()];
+        assert!(
+            !proc_locks_lists(&named, false),
+            "{named} was locked before the test locked it"
+        );
+
+        let child = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(HOLD_A_LOCK)
+            .arg(&lock)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("python3");
+        let mut holder = Holder(child);
+        assert!(
+            proc_locks_lists(&named, true),
+            "the child's flock on {} never appeared in /proc/locks as {named}",
+            lock.display()
+        );
+        let live = live_builds(&dirs);
+        assert_eq!(
+            live.into_iter().collect::<Vec<_>>(),
+            vec![target.display().to_string()],
+            "a build holding its cargo lock was not live, or an idle one was"
+        );
+
+        let _ = holder.0.kill();
+        let _ = holder.0.wait();
+        assert!(
+            !proc_locks_lists(&named, false),
+            "the lock outlived the child that held it"
+        );
+        assert!(
+            live_builds(&dirs).is_empty(),
+            "a build whose lock was released is still live"
+        );
+    }
+
+    /// **A lock is matched by device and inode together**, so a lock on another filesystem's file
+    /// with the same inode number is not this build's.
+    ///
+    /// What would make it fail: matching the inode alone in `live_builds_in` (the line naming
+    /// device `ff:ff` would make the build live). Watched: with the device dropped from the match
+    /// and from `held_locks`' key, the first assertion failed.
+    #[test]
+    fn a_lock_on_another_device_with_the_same_inode_is_not_this_build() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir();
+        let target = Path::new(dir.as_ref() as &Path).join("target");
+        std::fs::create_dir_all(target.join("release")).unwrap();
+        let lock = target.join("release").join(CARGO_BUILD_LOCK);
+        std::fs::write(&lock, "").unwrap();
+        let ino = std::fs::metadata(&lock).unwrap().ino();
+        let (major, minor) = dev_pair(std::fs::metadata(&lock).unwrap().dev());
+        assert_ne!(
+            (major, minor),
+            (0xff, 0xff),
+            "the fixture's own device is ff:ff"
+        );
+        let dirs = [target.to_str().unwrap()];
+        let other = format!("1: FLOCK  ADVISORY  WRITE 4242 ff:ff:{ino} 0 EOF\n");
+        assert!(
+            live_builds_in(&other, &dirs).is_empty(),
+            "a lock on another device's inode {ino} made this build live"
+        );
+        let this = format!("1: FLOCK  ADVISORY  WRITE 4242 {major:02x}:{minor:02x}:{ino} 0 EOF\n");
+        assert_eq!(live_builds_in(&this, &dirs).len(), 1, "{this}");
     }
 }

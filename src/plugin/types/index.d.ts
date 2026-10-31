@@ -147,14 +147,18 @@ export type SkeinRequestRow = {
   what: string
 }
 
+/** skein's disk ask, as the band reads it from the signal file. */
+export type SkeinDiskAsk = { amount_mb: number; live_mb: number; why: string }
+
 /** What the band and the pane draw from, read on a timer and after a Clean (SKEIN-1362). */
 export type SkeinBand = {
   /** From the signal file; null when there is none to believe. */
   disk: {
     mb: number | null
     limit_mb: number | null
-    /** skein's disk ask of this box, when it stands. */
-    ask: { amount_mb: number; why: string } | null
+    /** skein's disk ask of this box, when it stands: what it can clear now, and what is in a
+     * build running now, which no ask counts (SKEIN-1391). */
+    ask: SkeinDiskAsk | null
   } | null
   /** skein's disk list; null before skein has listed it. */
   clean: {

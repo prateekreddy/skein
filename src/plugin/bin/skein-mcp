@@ -472,6 +472,48 @@ def exists(path):
         return False
 
 
+# cargo's lock on each profile directory of a target (`CARGO_BUILD_LOCK` in `src/fleet/clean.rs`),
+# held exclusively for the whole of a build.
+CARGO_BUILD_LOCK = ".cargo-lock"
+
+
+def held_locks():
+    """Every file `/proc/locks` lists, as (major, minor, inode), or None when it cannot be read.
+
+    Read, never taken: a probe lock would make the box's own cargo wait on skein (SKEIN-1391)."""
+    try:
+        text = read_text(real("/proc/locks"))
+    except OSError:
+        return None
+    out = set()
+    for word in text.split():
+        parts = word.split(":")
+        if len(parts) != 3:
+            continue
+        try:
+            out.add((int(parts[0], 16), int(parts[1], 16), int(parts[2])))
+        except ValueError:
+            continue
+    return out
+
+
+def build_running(path, locks):
+    """Whether cargo holds the lock of a profile directory one level under the build directory
+    `path` now: a build is running in it."""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return False
+    for name in names:
+        try:
+            st = os.lstat(os.path.join(path, name, CARGO_BUILD_LOCK))
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino) in locks:
+            return True
+    return False
+
+
 def clean_rows(sig):
     """Every item on skein's list for this box that is still there, with where the box sees it and
     whether it may be removed now, and why not when it may not."""
@@ -482,6 +524,9 @@ def clean_rows(sig):
     views = box_view(box_root)
     age = age_seconds(clean.get("at"))
     stale = age is None or age > LIST_STALE_SECONDS
+    # Read again now rather than believed from the list, which can be a minute old: a build started
+    # since skein looked is as running as one skein saw. When it cannot be read, skein's word stands.
+    locks = held_locks()
     rows = []
     for it in clean.get("items") or []:
         if not isinstance(it, dict) or not under(it.get("path"), box_root):
@@ -497,6 +542,10 @@ def clean_rows(sig):
             why = "skein has not listed this box's disk lately; try again in a few minutes"
         elif kind not in ANY_TIME:
             why = "a scratchpad may belong to a session still running in this box"
+        elif kind == "build output" and (
+            build_running(path, locks) if locks is not None else it.get("live") is True
+        ):
+            why = "a build is running in it now"
         rows.append({
             "path": path,
             "in_box": in_box(path, views or []),
