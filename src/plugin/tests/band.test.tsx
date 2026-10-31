@@ -256,7 +256,7 @@ const TYPED = (args: string) =>
 
 // What would make it fail: the band drawn from a session that is not in a skein box, where there
 // is no signal of skein's to draw. Watched: with the `SKEIN_STATE` check taken out of the render
-// hook, the band drew `skein  not measured lately` here and this failed.
+// hook, the band drew its own lines here and this failed.
 test('outside a skein box the band is the engine\'s', async ($, on) => {
   // What the engine draws when the plugin passes the band on.
   on('ui.render', ($, e) => {
@@ -843,8 +843,8 @@ const CALM = 'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯�
 
 // What would make it fail: the vitals line hidden while nothing happens (the owner's decision is
 // that it always shows), a bar or figure from the wrong field, or the sparkline not kept a minute
-// at a time. Watched: with `sampled` keeping only the latest minute, the sparkline was `▂` and this
-// failed; with the line drawn only when something waits, the band was the engine's and this failed.
+// at a time. Watched: with `sampled` keeping only the latest minute, the sparkline was one cell
+// and this failed.
 test('calm: one dim line of vitals, with an eight-minute CPU sparkline', async ($, on) => {
   const w = world({ usage: usage(60, 31.2, 515.4) })
   await eightMinutes(on, w, $)
@@ -926,9 +926,9 @@ test('busy: a line for each running job and each lane at work, while it runs', a
 
 // What would make it fail: what waits on the person drawn below the vitals, not in amber, or not
 // worded as what to do; a toast missing for one of them, raised again on the next look, or not
-// raised for one that comes later. Watched: with `raiseToasts` keeping no keys, the second look
-// raised all four again and this failed; with the update line left out of `asked`, the third row
-// failed.
+// raised for one that comes later. Watched: with `raiseToasts` toasting whatever it toasted
+// before, the second look raised all three again and this failed; with the update line left out
+// of `asked`, the rows failed.
 test('waiting on you: amber lines first, each worded as the action, and one toast per new thing', async ($, on) => {
   const updates = [{ component: 'agent-cli', have: 'claude@2.1.300', new: 'claude@2.1.316', applies: 'restart', restart_requested: false }]
   const w = world({
@@ -1004,8 +1004,8 @@ for (const [when, more, line] of STALE_CASES) {
 }
 
 // What would make it fail: a minute with no fresh reading filled in, or the line's CPU drawn while
-// the signal file is old. Watched: with `sparkline` drawing each kept sample side by side, the gap
-// closed up and this failed.
+// the signal file is old. Watched: with `sparkline` drawing nothing for a minute with no reading,
+// the gap closed up and this failed.
 test('a minute skein wrote nothing fresh for is a gap in the sparkline, not a guess', async ($, on) => {
   const w = world()
   await eightMinutes(on, w, $, i => (i === 4 ? { signal: signal(600, false, {}, vitals(9, NOW + i * 60_000), NOW + i * 60_000) } : {}))
@@ -1020,7 +1020,7 @@ test('a minute skein wrote nothing fresh for is a gap in the sparkline, not a gu
 
 // What would make it fail: a line wider than the band, which the terminal would wrap into a mess,
 // or details cut before the bars. Watched: with `vitalsLine` returning its first try whatever its
-// width, the 60-cell line was 84 cells and this failed.
+// width, the 60-cell band's first line was 87 cells and this failed.
 test('a narrow band cuts details, never wraps: bars first, then the week, then the CPU', async ($, on) => {
   const w = world({ lanes: LANES, usage: usage(60, 31.2, 515.4) })
   const clock = await eightMinutes(on, w, $, i => (i === 7 ? { jobs: busyJobs(5) } : {}))
@@ -1058,7 +1058,7 @@ test('a narrow band cuts details, never wraps: bars first, then the week, then t
 
 // What would make it fail: a band taller than its rows, so the engine scrolls it and the thing that
 // waits on the person may be out of view. Watched: with the row count not compared to `maxRows`, the
-// band drew four rows into two and this failed.
+// band drew three rows into two and this failed.
 test('where the band has too few rows, it is one line: what waits on the person first', async ($, on) => {
   const w = world({ signal: signal(30, true, {}, vitals(0.15)), mail: '2' })
   await started(on, w, $)
