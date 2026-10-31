@@ -174,7 +174,14 @@ fn list_script() -> String {
 /// most [`CAP`] waiting per box.
 pub fn list(sandbox: &str) -> Result<Vec<Ask>, String> {
     let out = crate::place::own_sandbox(sandbox).exec(&list_script(), Duration::from_secs(30))?;
-    Ok(capped(decided_over(parse_asks(&out))))
+    Ok(shown(&out))
+}
+
+/// What the list script printed, as the cockpit is shown it: the host's answers over the boxes'
+/// asks, capped. Split from [`list`] so the decision inbox (`queue::decisions`) can be tested
+/// against the same rule without a sandbox.
+pub(crate) fn shown(listed: &str) -> Vec<Ask> {
+    capped(decided_over(parse_asks(listed)))
 }
 
 /// The host's answer wins over the box's copy of it, question by question.

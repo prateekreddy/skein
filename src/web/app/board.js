@@ -727,6 +727,33 @@ function render(snapshot) {
   // one can arrive before the fleet does.
   if (!restored) restoreSessions(); else openPending();
 }
+// ---------- decisions (the decision inbox, SKEIN-1375) ----------
+//
+// Every question waiting on the person, in one strip above the rows. The rows are `/api/queue`'s,
+// in the server's order; `decisionsHtml` (cockpit/src/decisions.mjs) picks the decisions out of
+// them and escapes every word a box wrote. A failed read leaves the last strip up, which is truer
+// than clearing it.
+const decisionsEl = document.getElementById("decisions");
+function loadDecisions() {
+  return fetch("/api/queue", { headers: { accept: "application/json" } })
+    .then(r => r.ok ? r.json() : null)
+    .then(body => {
+      if (!body || !Array.isArray(body.waiting)) return;
+      const html = decisionsHtml(body.waiting, Date.now(), secs => ageNow(secs, 0));
+      decisionsEl.innerHTML = html;
+      decisionsEl.hidden = !html;
+    })
+    .catch(() => {});
+}
+// One listener for every card: the button names where its decision is answered, and the box.
+decisionsEl.addEventListener("click", e => {
+  const b = e.target.closest("button[data-open]");
+  if (!b) return;
+  const open = { askq: openAskq, subq: openSubq, gitq: openGitq }[b.dataset.open];
+  if (open) open();
+  else if (b.dataset.open === "terminal" && b.dataset.box) openTerminal(b.dataset.box);
+});
+
 function refreshRow(name) { const el = rowEls.get(name), b = boxes.find(x => x.name === name); if (el && b) updateRow(el, b, el.dataset.showRepo === "1"); }
 
 // The filter is live: a fleet you are scanning is a fleet you are scanning now, and a search you

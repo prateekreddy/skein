@@ -580,7 +580,7 @@ function decideSubq(key, approve) {
   fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ approve, remember, ...shown }),
-  }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); })
+  }).then(async r => { if (!r.ok) throw await refused(r); loadSubq(); loadDecisions(); })
     .catch(e => notice(`could not record that decision: ${failText(e)}`))
     .finally(() => markSending("subq", key, false));
 }
@@ -685,7 +685,7 @@ function sendAskq(key, body) {
   return fetch("/api/fleet/asks/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ ...shown, ...body }),
-  }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); })
+  }).then(async r => { if (!r.ok) throw await refused(r); askqShown.delete(key); loadAskq(); pollAskq(); loadDecisions(); })
     .catch(e => notice(`could not record that decision: ${failText(e)}`))
     .finally(() => markSending("askq", key, false));
 }
@@ -1157,7 +1157,7 @@ function decideGitq(key, approve) {
 
 function revokeGitq(box, repo) {
   fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
-    .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); })
+    .then(async r => { if (!r.ok) throw await refused(r); loadGitq(); loadDecisions(); })
     .catch(e => notice(`could not revoke that grant: ${failText(e)}`));
 }
 
