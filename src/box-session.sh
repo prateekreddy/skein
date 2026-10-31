@@ -2115,7 +2115,29 @@ if sudo -n mkdir -p "$cgroup_root" 2>/dev/null \
       *) echo "skein: ignoring unknown limit $kv for $box" >&2 ;;
     esac
   done
-  if sudo -n sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null; then
+  # The box's own processes go in a leaf, `box`, so that a granted heavy job can have a cgroup of
+  # its own beside them and skein can cap and measure that one job (SKEIN-1419,
+  # `src/jobs/cgroup.rs`). cgroup v2 hands a controller to a cgroup's children only while it holds
+  # no processes itself, so the box's cgroup holds none: its ceiling, floor, counters and
+  # `cgroup.kill` all still cover the whole box, because each of them covers a cgroup's
+  # descendants. Each controller is handed on alone and best-effort: one the sandbox lacks, or a
+  # box cgroup still holding a process from before, costs the jobs their cgroups (skein then runs
+  # them in this one, uncapped, and says why) and never the box its start.
+  #
+  # The leaf weighs 400 against a job's 100 a core, so the agent and its shells stay responsive
+  # beside the box's own builds (`BOX_LEAF_WEIGHT` says why those numbers). Its `memory.min` is
+  # `max` because the box's floor reaches a child only through the child's own: a leaf at 0 would
+  # leave the box with a floor that protects nothing.
+  box_leaf="$cg"
+  if sudo -n mkdir -p "$cg/box" 2>/dev/null; then
+    box_leaf="$cg/box"
+    for ctl in cpu memory; do
+      sudo -n sh -c 'echo "+$1" > "$2/cgroup.subtree_control"' _ "$ctl" "$cg" 2>/dev/null || true
+    done
+    sudo -n sh -c 'echo "$1" > "$2/cpu.weight"' _ 400 "$box_leaf" 2>/dev/null || true
+    sudo -n sh -c 'echo "$1" > "$2/memory.min"' _ max "$box_leaf" 2>/dev/null || true
+  fi
+  if sudo -n sh -c 'echo $1 > "$2"' _ "$$" "$box_leaf/cgroup.procs" 2>/dev/null; then
     # Two different states, and the difference is what somebody can do about it. In the cgroup
     # WITH a ceiling is the intended one. In the cgroup with NO ceiling means the box is contained
     # — a stop reaches it, the fleet accounts for it — and nothing bounds what it can take, which

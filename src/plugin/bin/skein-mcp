@@ -194,8 +194,11 @@ def resources(args):
 def own_cgroup():
     """This process's cgroup directory, from the kernel, or None when it is not a box's.
 
-    cgroup v2 writes one line, `0::/skein/<box>`. A box's cgroup is a leaf directly under `skein`
-    (`box-session.sh`), and `skein/containers` is Docker's, not a box's.
+    cgroup v2 writes one line, `0::/skein/<box>/box`: a box's cgroup is directly under `skein`, its
+    own processes are in its leaf `box`, and a granted heavy job's are in `job-<id>` beside it
+    (`box-session.sh`, `src/jobs/cgroup.rs`). The box is the one two levels down whichever of those
+    this process is in; a box started before the leaf is `0::/skein/<box>` itself. `skein/containers`
+    is Docker's, not a box's.
     """
     try:
         lines = read_text(real("/proc/self/cgroup")).splitlines()
@@ -207,18 +210,27 @@ def own_cgroup():
             continue
         rel = parts[2].strip()
         bits = rel.strip("/").split("/")
-        if len(bits) == 2 and bits[0] == "skein" and bits[1] != "containers" and BOX_NAME.match(bits[1]):
-            return real("/sys/fs/cgroup" + rel)
+        if len(bits) >= 2 and bits[0] == "skein" and bits[1] != "containers" and BOX_NAME.match(bits[1]):
+            return real("/sys/fs/cgroup/skein/" + bits[1])
     return None
 
 
 def own_pids(cgroup):
-    """The pids in this box's cgroup. None when the file cannot be read: no list, not everybody's."""
+    """The pids in this box's cgroup and every cgroup under it: its leaf and its jobs. None when the
+    box's own file cannot be read: no list, not everybody's."""
     try:
         text = read_text(os.path.join(cgroup, "cgroup.procs"))
     except OSError:
         return None
-    return sorted({int(p) for p in text.split() if p.isdigit()})
+    pids = {int(p) for p in text.split() if p.isdigit()}
+    for dirpath, dirnames, _ in os.walk(cgroup):
+        for d in dirnames:
+            try:
+                pids.update(int(p) for p in read_text(os.path.join(dirpath, d, "cgroup.procs")).split()
+                            if p.isdigit())
+            except OSError:
+                pass
+    return sorted(pids)
 
 
 def clock_ticks():

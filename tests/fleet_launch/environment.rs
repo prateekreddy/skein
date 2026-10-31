@@ -117,7 +117,12 @@ fn a_box_session_inherits_only_its_allow_list() {
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
 
@@ -307,7 +312,12 @@ fn a_crossing_into_a_box_carries_only_its_allow_list() {
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
 
@@ -544,7 +554,12 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
         anchor_gone(anchor);
         if limits.starts_with("capped ") {
             let _ = Command::new("sudo")
-                .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+                .args([
+                    "-n",
+                    "rmdir",
+                    &format!("/sys/fs/cgroup/skein/{name}/box"),
+                    &format!("/sys/fs/cgroup/skein/{name}"),
+                ])
                 .status();
         }
         seen.push((case, session, crossed.map_err(|e| e.to_string())));
@@ -762,7 +777,12 @@ fn gh_in_a_running_box_uses_the_token_placed_now() {
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
 
@@ -909,7 +929,12 @@ fn every_box_finds_the_shared_toolchain_and_none_can_change_it() {
         anchor_gone(anchor);
         if limits.starts_with("capped ") {
             let _ = Command::new("sudo")
-                .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+                .args([
+                    "-n",
+                    "rmdir",
+                    &format!("/sys/fs/cgroup/skein/{name}/box"),
+                    &format!("/sys/fs/cgroup/skein/{name}"),
+                ])
                 .status();
         }
 
@@ -1056,7 +1081,12 @@ fn cargo_install_in_a_box_lands_on_its_path() {
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
 
@@ -1233,7 +1263,12 @@ fn cross_into_a_box_of_a_managed_store(tag: &str, linked: bool) -> CacheCrossing
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
     CacheCrossing {
@@ -1516,7 +1551,12 @@ fn a_crossing_into_a_box_carries_its_sessions_tool_variables() {
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
     let crossed = crossed.unwrap_or_else(|e| panic!("the crossing into the box did not run: {e}"));

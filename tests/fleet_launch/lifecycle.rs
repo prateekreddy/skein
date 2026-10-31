@@ -669,7 +669,12 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // tidy up.
     if state.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{BOX}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{BOX}/box"),
+                &format!("/sys/fs/cgroup/skein/{BOX}"),
+            ])
             .status();
     }
 }

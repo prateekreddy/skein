@@ -36,7 +36,8 @@
 #
 # **It never strands the caller.** With no fleet drop-box (outside a box, or a box started before
 # skein had the queue), or with skein not answering for 30 s, it says so on stderr and runs under
-# the box's own lock alone, which is what the lanes did before.
+# the box's own lock alone, which is what the lanes did before. Its tools are still told a count:
+# the `--cores` it asked for, or FALLBACK_CORES, so a build skein never saw does not take every core.
 #
 # Python 3 standard library only, as `skein-mcp` is: it runs in every box and installs nothing.
 
@@ -56,6 +57,9 @@ LOCK = os.environ.get("SKEIN_JOB_LOCK") or "/var/tmp/skein-lanes-heavy.lock"
 # takes it that skein is not scheduling and runs on the box's lock alone.
 UNANSWERED_SECONDS = float(os.environ.get("SKEIN_JOB_UNANSWERED_SECONDS") or 30)
 POLL_SECONDS = 1.0
+# The cores a job that names none is run with when skein is not answering: the queue's own default
+# ask (`default_cores` in src/jobs.rs).
+FALLBACK_CORES = 2
 
 
 def say(line):
@@ -362,7 +366,12 @@ def run(args):
             return 75
         if granted is False and not os.path.exists(request):
             request = None
-    cores = granted.get("granted_cores") if isinstance(granted, dict) else None
+    if isinstance(granted, dict):
+        cores = granted.get("granted_cores")
+    else:
+        # Not scheduled: no queue to file in, or skein not answering. What it asked for, as if
+        # granted, rather than no limit at all.
+        cores = counts.get("cores", FALLBACK_CORES)
     status = 1
     ended = "cancelled"
     try:

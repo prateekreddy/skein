@@ -195,7 +195,12 @@ fn end(name: &str, anchor: u32) {
     anchor_gone(anchor);
     if limits.starts_with("capped ") {
         let _ = Command::new("sudo")
-            .args(["-n", "rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+            .args([
+                "-n",
+                "rmdir",
+                &format!("/sys/fs/cgroup/skein/{name}/box"),
+                &format!("/sys/fs/cgroup/skein/{name}"),
+            ])
             .status();
     }
 }

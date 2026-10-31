@@ -50,6 +50,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub mod cgroup;
+
 /// How often the queue is looked at: fast enough that freed cores are taken within a couple of
 /// seconds. Its own loop, apart from the resource signal's minute, because a job waiting a minute
 /// for cores that were free is the waste this queue exists to remove.
@@ -177,6 +179,74 @@ pub struct Job {
     /// The cores it was granted: `cores`, or fewer down to `min`. Zero until it is granted.
     #[serde(default)]
     pub granted_cores: u32,
+    /// What it used, read from its own cgroup once it ended ([`cgroup::finish`]). `None` while it
+    /// runs, and for a job that never had a cgroup of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<Usage>,
+    /// The command in two words, for another box's view: [`short_command`] of its argv.
+    #[serde(default)]
+    pub short: String,
+}
+
+/// What a finished job used, from its own cgroup.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    /// Its CPU time over the seconds it ran: the cores it used on average.
+    pub avg_cores: f64,
+    /// The most memory it held at once, in MiB. `None` where the kernel did not count it.
+    pub peak_mem_mib: Option<u64>,
+    /// The seconds it ran, from its grant to the tick that saw it end, by the host's clock.
+    pub secs: i64,
+}
+
+impl Usage {
+    /// From what the job's cgroup counted over `secs` seconds of running. A job that ran under a
+    /// second is averaged over one, so its average is its CPU seconds.
+    pub fn from_cgroup(counted: &cgroup::Usage, secs: i64) -> Usage {
+        let secs = secs.max(0);
+        Usage {
+            avg_cores: counted.cpu_usec as f64 / 1e6 / secs.max(1) as f64,
+            peak_mem_mib: counted.memory_peak.map(|b| b >> 20),
+            secs,
+        }
+    }
+
+    /// For a person: `used 1.5 cores on average, at most 2.0 GB`.
+    pub fn said(&self) -> String {
+        let cores = format!("used {:.1} cores on average", self.avg_cores);
+        match self.peak_mem_mib {
+            Some(mib) => format!("{cores}, at most {:.1} GB", mib as f64 / 1024.0),
+            None => cores,
+        }
+    }
+}
+
+/// A command in at most two words, for showing to another box: its program's name and its first
+/// argument that is not a flag, such as `cargo test`. Never the whole argv, which may hold paths,
+/// tokens or values another box has no business reading. Of each word only what follows its last
+/// `/` is kept, an argument with an `=` is never taken (`KEY=value`, `--flag=value`), and each is
+/// cut to 40 characters.
+pub fn short_command(argv: &[String]) -> String {
+    let word = |w: &str| -> String {
+        w.rsplit('/')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect()
+    };
+    let Some(program) = argv.first().map(|p| word(p)).filter(|p| !p.is_empty()) else {
+        return String::new();
+    };
+    match argv[1..]
+        .iter()
+        .find(|a| !a.starts_with('-') && !a.contains('='))
+        .map(|a| word(a))
+        .filter(|a| !a.is_empty())
+    {
+        Some(first) => format!("{program} {first}"),
+        None => program,
+    }
 }
 
 impl Job {
@@ -196,6 +266,8 @@ impl Job {
 
 /// The cores a job asks for when its `skein-job run` named none. Two for now; the history child
 /// of SKEIN-1418 derives it from what that repo's command used before, here and nowhere else.
+/// The wrapper's fallback run, one skein never answered, uses the same two
+/// (`src/plugin/bin/skein-job`).
 pub fn default_cores(_job: &Job) -> u32 {
     2
 }
@@ -205,7 +277,9 @@ pub fn default_cores(_job: &Job) -> u32 {
 pub fn memory_estimate_mib(job: &Job) -> u64 {
     match job.class.as_str() {
         "webkit" | "train" => 4096,
-        "ci" => 3072,
+        // Measured: a CI run with every stage at once peaked at about 7 GB on a peer box, so 3 GB
+        // started runs the memory free could not hold.
+        "ci" => 4096,
         _ => 2048,
     }
 }
@@ -324,6 +398,9 @@ pub struct Ahead {
     pub box_name: String,
     pub id: String,
     pub class: String,
+    /// Its command in two words, such as `cargo test` ([`short_command`]): never its whole argv.
+    #[serde(default)]
+    pub command: String,
     /// The cores it asks for.
     pub cores: u32,
 }
@@ -354,6 +431,9 @@ pub struct ViewJob {
     /// Seconds it ran, once it has ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_secs: Option<i64>,
+    /// What it used, once it has ended and was measured; `reason` then says it in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<Usage>,
 }
 
 // ───────────────────────────── one tick ─────────────────────────────
@@ -460,17 +540,16 @@ pub fn read_requests(dir: &Path) -> BTreeMap<String, BTreeMap<String, Request>> 
     out
 }
 
-/// Whether `pid` is in box `name`'s cgroup, by the kernel's `cgroup.procs`. A box with no cgroup
-/// to read (no delegation) falls back to the pid existing at all, since boxes share the sandbox's
-/// pid namespace.
+/// Whether `pid` is in box `name`'s cgroup or one under it, by the kernel's `cgroup.procs`: the
+/// box's own processes are in its leaf and a granted job's in a cgroup of its own
+/// ([`cgroup`]). A box with no cgroup to read (no delegation) falls back to the pid existing at all,
+/// since boxes share the sandbox's pid namespace.
 pub fn pid_in_box(cgroups: &Path, name: &str, pid: u32) -> bool {
     if pid <= 1 {
         return false;
     }
-    match std::fs::read_to_string(cgroups.join(name).join("cgroup.procs")) {
-        Ok(procs) => procs.lines().any(|l| l.trim() == pid.to_string()),
-        Err(_) => Path::new("/proc").join(pid.to_string()).exists(),
-    }
+    cgroup::pid_in_subtree(&cgroups.join(name), pid)
+        .unwrap_or_else(|| Path::new("/proc").join(pid.to_string()).exists())
 }
 
 /// Whether skein has asked box `name` to free memory: a `memory` ask in its resource signal,
@@ -560,6 +639,7 @@ pub fn merge(
                 state: "waiting".into(),
                 queued: stamp(now),
                 min: req.min.unwrap_or(0),
+                short: short_command(&req.argv),
                 ..Job::default()
             };
             job.cores = match req.cores {
@@ -765,6 +845,19 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
             box_name: queue.jobs[i].box_name.clone(),
             id: queue.jobs[i].id.clone(),
             class: queue.jobs[i].class.clone(),
+            command: match queue.jobs[i].short.as_str() {
+                // A job queued before the short form was kept: its first two words, which is the
+                // same for any argv without a space inside a word.
+                "" => {
+                    let words: Vec<String> = queue.jobs[i]
+                        .command
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect();
+                    short_command(&words)
+                }
+                s => s.to_string(),
+            },
             cores: queue.jobs[i].cores,
         })
         .collect::<Vec<_>>();
@@ -795,11 +888,15 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
             min: job.min,
             granted_cores: job.granted_cores,
             position: (job.state == "waiting").then(|| place(i)).flatten(),
-            reason: job.reason.clone(),
+            reason: match job.used {
+                Some(u) if !job.is_active() => u.said(),
+                _ => job.reason.clone(),
+            },
             waited_secs: secs_between(&job.queued, waited_until),
             ran_secs: (!job.ended.is_empty() && !job.granted.is_empty())
                 .then(|| parse_stamp(&job.ended).map(|e| secs_between(&job.granted, e)))
                 .flatten(),
+            used: job.used,
         });
     }
     View {
@@ -840,35 +937,90 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
 
 /// One tick: read the requests, bring the queue up to date, grant what can run, write the queue
 /// and every view that changed, and tidy the drop-boxes of what finished long enough ago.
+///
+/// `rates` is the last reading of each running job's cgroup, which the tick has no state of its
+/// own to keep: the caller holds it from one tick to the next ([`watch_jobs`]), and what it gives
+/// is what [`schedule`] admits on.
 pub fn tick(
     places: &Places,
     limits: Limits,
     repo_of: &dyn Fn(&str) -> String,
     now: DateTime<Utc>,
+    rates: &mut cgroup::Rates,
 ) -> Result<Queue, String> {
     let mut queue = read_queue(&places.queue);
     let requests = read_requests(&places.requests);
     let cgroups = places.cgroups.clone();
     let alive = move |name: &str, pid: u32| pid_in_box(&cgroups, name, pid);
+    let granted = |q: &Queue| -> BTreeSet<(String, String)> {
+        q.jobs
+            .iter()
+            .filter(|j| j.state == "granted")
+            .map(|j| (j.box_name.clone(), j.id.clone()))
+            .collect()
+    };
+    let was_running = granted(&queue);
     merge(&mut queue, &requests, &alive, repo_of, now);
-    let before: BTreeSet<(String, String)> = queue
-        .jobs
-        .iter()
-        .filter(|j| j.state == "granted")
-        .map(|j| (j.box_name.clone(), j.id.clone()))
-        .collect();
+    // A job that ended: what its cgroup counted, then the cgroup gone (SKEIN-1419). A wrapper no
+    // longer in its box was killed under its command, which runs on in the job's cgroup holding
+    // cores the queue just gave back: the job has ended, so that goes first.
+    for job in queue.jobs.iter_mut().filter(|j| !j.is_active()) {
+        if !was_running.contains(&(job.box_name.clone(), job.id.clone())) {
+            continue;
+        }
+        rates.forget(&job.box_name, &job.id);
+        let wrapper_gone = !alive(&job.box_name, job.pid);
+        if let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone) {
+            job.used = Some(Usage::from_cgroup(&used, secs_between(&job.granted, now)));
+        }
+    }
+    let before = granted(&queue);
+    rates.retain(&|b, id| before.contains(&(b.to_string(), id.to_string())));
+    // What each running job is using now, from its own cgroup, between this tick's reading and the
+    // last: a job just granted, or with no cgroup of its own, has none and counts at its grant.
+    let mut live: BTreeMap<(String, String), f64> = BTreeMap::new();
+    for (b, id) in &before {
+        if let Some(rate) = rates.observe(&places.cgroups, b, id, now) {
+            live.insert((b.clone(), id.clone()), rate);
+        }
+    }
     let states = places.states.clone();
-    // What each running job uses is not measured yet: every one counts at its grant until the
-    // per-job cgroup reader (SKEIN-1419) is passed here. Nor is the whole machine's busy CPU,
-    // which no reader in the tree measures yet: `None` here gates nothing on it.
+    // The whole machine's busy CPU is not read yet (SKEIN-1430): `None` gates nothing on it.
     let pool = schedule(
         &mut queue,
         limits,
         &|name| memory_asked(&states, name),
-        &|_job| None,
+        &|job| live.get(&(job.box_name.clone(), job.id.clone())).copied(),
         None,
     );
     granted_now(&mut queue, &before, now);
+    // A job granted now moves into a cgroup of its own, capped and weighted for the cores it was
+    // granted, before its view says `granted`, which is what the wrapper waits for before it
+    // starts the command (SKEIN-1419).
+    for job in queue.jobs.iter_mut().filter(|j| j.state == "granted") {
+        if before.contains(&(job.box_name.clone(), job.id.clone())) {
+            continue;
+        }
+        let cores = Some(job.holds() as f64);
+        if let Err(why) = cgroup::place(&places.cgroups, &job.box_name, &job.id, job.pid, cores) {
+            job.reason = format!("runs in its box's cgroup, uncapped and unmeasured: {why}");
+        }
+    }
+    let boxes_with_jobs: BTreeSet<&String> = queue.jobs.iter().map(|j| &j.box_name).collect();
+    for name in boxes_with_jobs {
+        let running = |id: &str| {
+            queue
+                .jobs
+                .iter()
+                .any(|j| &j.box_name == name && j.id == id && j.state == "granted")
+        };
+        cgroup::sweep(&places.cgroups, name, &running);
+    }
+    let mut granted_by_box: BTreeMap<String, u32> = BTreeMap::new();
+    for j in queue.jobs.iter().filter(|j| j.state == "granted") {
+        *granted_by_box.entry(j.box_name.clone()).or_default() += j.holds();
+    }
+    cgroup::weigh_boxes(&places.cgroups, &granted_by_box);
     prune(&mut queue, now);
     write_json(&places.queue, &queue)?;
 
@@ -943,16 +1095,36 @@ pub async fn watch_jobs() {
     let mut tick_every = tokio::time::interval(LOOK_EVERY);
     tick_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = String::new();
+    // Each running job's last cgroup reading, carried from one tick to the next: the tick keeps
+    // no state of its own, and a rate needs two readings.
+    let mut rates = cgroup::Rates::default();
     loop {
         tick_every.tick().await;
-        let ran = tokio::task::spawn_blocking(|| {
-            tick(&Places::live(), limits(), &repo_of_box, Utc::now()).map(|_| ())
+        let ran = tokio::task::spawn_blocking(move || {
+            let r = tick(
+                &Places::live(),
+                limits(),
+                &repo_of_box,
+                Utc::now(),
+                &mut rates,
+            );
+            (rates, r.map(|_| ()))
         })
         .await;
         let said = match ran {
-            Ok(Ok(())) => String::new(),
-            Ok(Err(e)) => format!("skein: the heavy-work queue: {e}"),
-            Err(e) => format!("skein: the heavy-work queue did not run: {e}"),
+            Ok((kept, r)) => {
+                rates = kept;
+                match r {
+                    Ok(()) => String::new(),
+                    Err(e) => format!("skein: the heavy-work queue: {e}"),
+                }
+            }
+            // A tick that panicked took the readings with it: the next starts over, and its
+            // running jobs count at their grants until two readings give them a rate again.
+            Err(e) => {
+                rates = cgroup::Rates::default();
+                format!("skein: the heavy-work queue did not run: {e}")
+            }
         };
         if said != last && !said.is_empty() {
             eprintln!("{said}");
@@ -1036,7 +1208,14 @@ mod tests {
                 .map(|(b, r)| (b.to_string(), r.to_string()))
                 .collect();
             let repo_of = move |b: &str| repos.get(b).cloned().unwrap_or_else(|| b.to_string());
-            tick(&self.places, limits, &repo_of, at(secs)).unwrap()
+            tick(
+                &self.places,
+                limits,
+                &repo_of,
+                at(secs),
+                &mut cgroup::Rates::default(),
+            )
+            .unwrap()
         }
 
         fn view(&self, b: &str) -> View {
@@ -1257,7 +1436,14 @@ mod tests {
         f.submit("web-main", "j-ok", 601, serde_json::json!({}));
         let places = f.places.clone();
         let q = crate::boxfile::within(&fifo, "the jobs tick", move || {
-            tick(&places, machine(2), &|b: &str| b.to_string(), at(0)).unwrap()
+            tick(
+                &places,
+                machine(2),
+                &|b: &str| b.to_string(),
+                at(0),
+                &mut cgroup::Rates::default(),
+            )
+            .unwrap()
         });
         assert_eq!(state_of(&q, "j-ok"), "granted", "{q:#?}");
         assert_eq!(state_of(&q, "j-fifo"), "absent", "{q:#?}");
@@ -1416,7 +1602,14 @@ mod tests {
             );
         }
         f.tick(0, limits, &repos);
-        f.submit("api-1", "j-a1", 990, serde_json::json!({}));
+        // Its argv holds a path and a value no other box should read: the view shows two words.
+        f.submit(
+            "api-1",
+            "j-a1",
+            990,
+            serde_json::json!({"argv": ["/opt/tools/bin/cargo", "--locked", "nextest",
+                                        "run", "--token=abc123", "/srv/private/notes"]}),
+        );
         let q = f.tick(2, limits, &repos);
         assert_eq!(state_of(&q, "j-w5"), "waiting", "{q:#?}");
         assert_eq!(state_of(&q, "j-a1"), "waiting", "{q:#?}");
@@ -1430,6 +1623,7 @@ mod tests {
                 box_name: "api-1".into(),
                 id: "j-a1".into(),
                 class: "test".into(),
+                command: "cargo nextest".into(),
                 cores: 2,
             }],
             "the job ahead is not named with its box"
@@ -1581,12 +1775,13 @@ mod tests {
     }
 
     /// **A job that needs more memory than is free waits, with how much, and does not hold up a
-    /// job that fits.** 2.5 GB free: a `ci` job, expected at 3 GB, waits; the `build` job behind
-    /// it (2 GB) starts; a second `build` job then finds the half gigabyte left and waits too.
+    /// job that fits.** 3.5 GB free: a `ci` job, expected at 4 GB, waits; the `build` job behind
+    /// it (2 GB) starts; a second `build` job then finds the 1.5 GB left and waits too.
     ///
     /// What would make it fail: the memory gate removed from [`schedule`] (the sabotage that was
-    /// run: all three start), or the memory a grant takes not subtracted within the pass (the
-    /// last one starts).
+    /// run: all three start), the memory a grant takes not subtracted within the pass (the last
+    /// one starts), or the `ci` estimate back at 3 GB (the sabotage that was run: the `ci` job
+    /// starts in 3.5 GB, which a CI run measured at about 7 GB at its peak does not fit).
     #[test]
     fn the_memory_gate_refuses_a_job_that_would_not_fit() {
         let mut ci = job("w-ci", "web", 2, "waiting");
@@ -1600,15 +1795,64 @@ mod tests {
             ],
         };
         let limits = Limits {
-            mem_free_mib: Some(2560),
+            mem_free_mib: Some(3584),
             ..machine(16)
         };
         schedule(&mut q, limits, &no_box_asked, &unmeasured, None);
         assert_eq!(state_of(&q, "w-ci"), "waiting", "{q:#?}");
-        assert_eq!(find(&q, "w-ci").reason, "memory: needs ~3 GB, 2.5 GB free");
+        assert_eq!(find(&q, "w-ci").reason, "memory: needs ~4 GB, 3.5 GB free");
         assert_eq!(state_of(&q, "w-b1"), "granted", "{q:#?}");
         assert_eq!(state_of(&q, "w-b2"), "waiting", "{q:#?}");
-        assert_eq!(find(&q, "w-b2").reason, "memory: needs ~2 GB, 0.5 GB free");
+        assert_eq!(find(&q, "w-b2").reason, "memory: needs ~2 GB, 1.5 GB free");
+    }
+
+    /// **Another box is shown a command in two words, never its argv.**
+    ///
+    /// What would make it fail: the whole argv shown (a path, a token), a flag or a `KEY=value`
+    /// taken as the second word, a path kept whole in either word (the sabotage that was run:
+    /// `word` returning `w` itself, and `/usr/bin/cargo` is shown), or a job queued before the
+    /// short form showing nothing.
+    #[test]
+    fn a_short_command_is_the_program_and_its_first_plain_argument() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(short_command(&argv(&["cargo", "test"])), "cargo test");
+        assert_eq!(
+            short_command(&argv(&[
+                "/usr/bin/cargo",
+                "-q",
+                "--x=1",
+                "test",
+                "--",
+                "secret"
+            ])),
+            "cargo test"
+        );
+        assert_eq!(
+            short_command(&argv(&[
+                "env",
+                "TOKEN=abc",
+                "/srv/scripts/run.sh",
+                "--key",
+                "k"
+            ])),
+            "env run.sh"
+        );
+        assert_eq!(short_command(&argv(&["make", "-j8"])), "make");
+        assert_eq!(short_command(&argv(&[])), "");
+        assert_eq!(short_command(&argv(&[&"x".repeat(60)])), "x".repeat(40));
+
+        let mut old = job("j-old", "web", 2, "waiting");
+        old.box_name = "web-old".into();
+        old.command = "/usr/bin/cargo build --release".into();
+        let mut mine = job("j-mine", "api", 2, "waiting");
+        mine.box_name = "api-main".into();
+        let q = Queue {
+            schema: 1,
+            jobs: vec![old, mine],
+        };
+        let v = view_for(&q, "api-main", Pool::default(), at(0));
+        assert_eq!(v.ahead.len(), 1, "{v:#?}");
+        assert_eq!(v.ahead[0].command, "cargo build");
     }
 
     /// **A job with `--min` starts smaller when that is what fits, and never below its min.** Four
