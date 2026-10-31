@@ -43,6 +43,7 @@ not deleted: a reversed decision says what replaced it and why.
 | [tests-never-reach-a-live-fleet.md](tests-never-reach-a-live-fleet.md) | a test that has not pinned its paths refuses to run |
 | [parallel-agents-share-more-than-files.md](parallel-agents-share-more-than-files.md) | what agents working in one checkout share besides their files |
 | [commit-before-the-gates.md](commit-before-the-gates.md) | an agent commits its work before the full gate run, not after |
+| [master-moves-only-to-a-green-commit.md](master-moves-only-to-a-green-commit.md) | a merge is tested on a `ci/` branch, and `master` is fast-forwarded only to a commit CI has passed |
 | [build-output-stays-in-the-worktree.md](build-output-stays-in-the-worktree.md) | an agent's build directory lives inside its own worktree |
 | [tracker-state-lags-the-code.md](tracker-state-lags-the-code.md) | the git log, not the tracker's state, says whether work is done |
 | [shared-home-outside-claude.md](shared-home-outside-claude.md) | a repo's shared working files live beside its store's `.claude`, not inside it |
