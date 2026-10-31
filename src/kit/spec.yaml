@@ -51,8 +51,19 @@ memory: |
 
   ## Installing tools in this box
 
-  `cargo install` puts programs in `~/.local/bin`, which is on your PATH. They last until this box
-  restarts. If every box needs a tool, ask the person who runs the fleet to install it for all of them.
+  Anything you install under `~/.local`, `~/.local/bin` included, is gone when this box restarts:
+  `~/.local` is this box's own copy of the sandbox's, and what you write there is held in memory.
+  Only `~/.local/state` is kept. That covers `cargo install`, which puts programs in `~/.local/bin`
+  (on your PATH), `pip install --user`, and any tarball you unpack there.
+
+  The rest of your home survives a restart, and no other box can see it. Install a tool for this box
+  alone there, for example in `~/opt/node-22.11.0`, and put its `bin` on PATH in your own commands or
+  in the repo's scripts. If every box needs a tool, ask for it with `skein_request_package`: manager
+  `apt` or `npm`. Nothing is installed until the owner approves it, and then every box has it.
+
+  When `$PIP_CACHE_DIR` is set, it, `$CARGO_HOME`, `$npm_config_cache`, `$UV_CACHE_DIR` and pnpm's
+  store (`$npm_config_store_dir`) are this repo's download cache, shared by all of its boxes and kept
+  across restarts, so a reinstall downloads little.
 
   Playwright's browsers are shared by the whole fleet, read-only, and linked into
   `~/.cache/ms-playwright` when this box starts. If Playwright says a browser is missing, ask for it
