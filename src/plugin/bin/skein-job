@@ -34,6 +34,12 @@
 # finds it set runs its command straight away: it already holds its parent's cores, and waiting for
 # more behind itself is a deadlock (SYNAP-517).
 #
+# **The owner can stop it from the cockpit**, waiting or running (SKEIN-1422). skein then marks the
+# job `stopped` in the box's view: a waiting job's wrapper reads that and exits; a running one's
+# command is killed by skein, and the wrapper, which skein leaves alive, reads the same mark. Either
+# way it says it was stopped by the owner, on stderr, and exits with STOPPED_STATUS, so the caller
+# sees who stopped it rather than a bare failure. Only skein writes that mark, from the host.
+#
 # **It never strands the caller.** With no fleet drop-box (outside a box, or a box started before
 # skein had the queue), or with skein not answering for 30 s, it says so on stderr and runs under
 # the box's own lock alone, which is what the lanes did before. Its tools are still told a count:
@@ -60,6 +66,13 @@ POLL_SECONDS = 1.0
 # The cores a job that names none is run with when skein is not answering: the queue's own default
 # ask (`default_cores` in src/jobs.rs).
 FALLBACK_CORES = 2
+# What it says, and exits with, when the owner stopped the job: `STOPPED_BY_OWNER` in src/jobs.rs,
+# and the status of a command killed with SIGKILL, which is what a running one was.
+STOPPED_BY_OWNER = "stopped by you (the owner) from the cockpit"
+STOPPED_STATUS = 137
+# How long, after its command was killed, it looks for skein's mark that the owner did it: skein
+# writes the view in the same tick that killed the command, and a tick runs every two seconds.
+STOPPED_LOOK_SECONDS = 10.0
 
 
 def say(line):
@@ -178,9 +191,31 @@ def view_age(view):
     return (datetime.now(timezone.utc) - at).total_seconds()
 
 
+def view_job(job_id):
+    """This job as the box's view shows it, or None."""
+    view = read_view()
+    if not isinstance(view, dict):
+        return None
+    return next((j for j in view.get("jobs") or [] if isinstance(j, dict)
+                 and j.get("id") == job_id), None)
+
+
+def stopped_by_owner(job_id, look=0.0):
+    """Whether skein marked this job stopped by the owner, looking for up to `look` seconds."""
+    deadline = time.monotonic() + look
+    while True:
+        job = view_job(job_id)
+        if job is not None and job.get("state") == "stopped":
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
 def wait_for_grant(path, body):
     """File the request and wait until skein grants it: the job as the view shows it once granted,
-    False when skein is not answering, None when skein ended it first."""
+    False when skein is not answering, None when skein ended it first, "stopped" when the owner
+    stopped it."""
     try:
         write_request(path, body)
     except OSError as e:
@@ -202,6 +237,9 @@ def wait_for_grant(path, body):
                     "%d core%s" % (cores, "" if cores == 1 else "s") if isinstance(cores, int)
                     else "its cores"))
             return job
+        if job is not None and job.get("state") == "stopped":
+            say("%s; the command did not run" % STOPPED_BY_OWNER)
+            return "stopped"
         if job is not None and job.get("state") not in ("waiting", "granted"):
             say("skein ended this job before it started (%s)" % job.get("state"))
             return None
@@ -364,6 +402,10 @@ def run(args):
             raise
         if granted is None:
             return 75
+        if granted == "stopped":
+            if lock is not None:
+                os.close(lock)
+            return STOPPED_STATUS
         if granted is False and not os.path.exists(request):
             request = None
     if isinstance(granted, dict):
@@ -377,6 +419,11 @@ def run(args):
     try:
         status = run_child(argv, job_id, cores)
         ended = "done"
+        # Killed: by the owner's stop, if skein says so. Only a scheduled job can have been.
+        if status == -signal.SIGKILL and isinstance(granted, dict) and \
+                stopped_by_owner(job_id, STOPPED_LOOK_SECONDS):
+            say("%s; its processes were killed" % STOPPED_BY_OWNER)
+            status = STOPPED_STATUS
     finally:
         if request is not None:
             try:
