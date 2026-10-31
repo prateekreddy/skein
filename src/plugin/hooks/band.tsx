@@ -170,8 +170,8 @@ export function register(on: On): void {
     return mcpAnswer(ran.result ?? { error: 'clean-did-not-answer' }, ran.said)
   }).catch(() => mcpAnswer({ error: 'clean-did-not-answer' }, ''))
 
-  // What waits on the person first, in amber; then the vitals line, always; then a line for each
-  // thing running now. Where the band has fewer rows than that, one line: the first thing that
+  // The vitals line first and always, so the eye learns where it sits; then what waits on the
+  // person, in amber; then a line for each thing running now, and unread mail, dim. Where the band has fewer rows than that, one line: the first thing that
   // waits on the person, or the vitals, with a count of what is left out.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const found = await read($, band)
@@ -204,7 +204,8 @@ export function register(on: On): void {
         {ask.button !== undefined && <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />}
       </Box>
     )
-    const rows = asks.length + 1 + work.length + (said === null ? 0 : 1)
+    const mail = mailNote(found.mail ?? 0)
+    const rows = asks.length + 1 + work.length + (mail === null ? 0 : 1) + (said === null ? 0 : 1)
     if (rows > Math.max(1, e.props.maxRows)) {
       const first = asks[0]
       const more = rows - 1
@@ -216,13 +217,14 @@ export function register(on: On): void {
 
     return (
       <Box flexDirection="column">
-        {asks.map(ask => askRow(ask))}
         <Text dimColor wrap="truncate-end">{vitals}</Text>
+        {asks.map(ask => askRow(ask))}
         {work.map(w => (
           <Text color={w.isWaiting ? undefined : 'suggestion'} dimColor={w.isWaiting ? true : undefined} wrap="truncate-end">
             {w.text}
           </Text>
         ))}
+        {mail !== null && <Text dimColor wrap="truncate-end">{mail}</Text>}
         {said !== null && (
           <Box>
             <Text dimColor>{said} </Text>
@@ -507,7 +509,8 @@ async function cleanFromPane($: Engine, paths: string[]): Promise<void> {
 // Words
 // ------------------------------------------------------------------------------------------------
 
-// A line with no `button` has nothing for the person to press: mail is the agent's to read.
+// A line with no `button` has nothing for the person to press. Mail is not one of these: it is the
+// agent's to read, so it is a dim line of its own, not amber and never toasted (`mailNote`).
 type Ask = { key: string; text: string; button?: string; isLoud: boolean }
 
 /** What the band says, loudest first, in `columns` cells; empty when there is nothing to say. */
@@ -544,18 +547,15 @@ function asked(found: SkeinBand | null, columns: number): Ask[] {
       isLoud: false,
     })
   }
-  const mail = found.mail ?? 0
-  if (mail > 0) {
-    out.push({
-      key: 'mail',
-      text: `${mail} unread ${mail === 1 ? 'message' : 'messages'}, read at the agent's next turn.`,
-      isLoud: false,
-    })
-  }
   const pending = (found.updates ?? []).filter(u => !u.restartRequested)
   if (pending.length > 0) out.push({ key: 'update', text: updateLine(pending), isLoud: false })
 
   return out
+}
+
+/** Unread mail, for the person to know of: the agent reads it at its next turn. */
+function mailNote(mail: number): string | null {
+  return mail > 0 ? `✉ ${mail} unread ${mail === 1 ? 'message' : 'messages'}, read at the agent's next turn.` : null
 }
 
 /** The versions a restart would give the box, as the action that takes them. */
@@ -578,8 +578,6 @@ function waitingThings(found: SkeinBand): { key: string; toast: string }[] {
         : { key: `request:${r.queue}:${r.id}`, toast: `A ${r.queue} request waits for an answer: ${r.what}` },
     )
   }
-  const mail = found.mail ?? 0
-  if (mail > 0) out.push({ key: `mail:${mail}`, toast: `${mail} unread ${mail === 1 ? 'message' : 'messages'}, read at the agent's next turn.` })
   for (const u of found.updates ?? []) {
     if (!u.restartRequested) out.push({ key: `update:${u.component}:${u.new}`, toast: updateLine([u]) })
   }

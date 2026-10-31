@@ -290,7 +290,7 @@ test('the band says loudly that skein asks for disk, and counts requests and mai
       '2 requests are waiting for an answer.',
     )
     expect((await ui.find({ type: 'Text', text: /unread/ }))?.text.trim()).toBe(
-      "3 unread messages, read at the agent's next turn.",
+      "✉ 3 unread messages, read at the agent's next turn.",
     )
 
     // Its button opens the pane with the list, and removes nothing by itself.
@@ -697,14 +697,21 @@ test("the band looks again after the main loop's turn, not after a subagent's", 
   expect(looks(w)).toBe(before + 1)
 })
 
-test('unread mail is said in the band with no button to press', async ($, on) => {
-  await started(on, world({ mail: '2' }), $)
+// What would make it fail: mail drawn in amber as if it waited on the person, or toasted.
+test('unread mail is said in the band, dim, with no button to press and no toast', async ($, on) => {
+  const w = world({ mail: '2' })
+  await started(on, w, $)
+  expect(w.toasts).toEqual([])
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
     expect((await ui.find({ type: 'Text', text: /unread/ }))?.text.trim()).toBe(
-      "2 unread messages, read at the agent's next turn.",
+      "✉ 2 unread messages, read at the agent's next turn.",
     )
+    // Mail is the agent's to read: dim, never amber, never toasted.
+    expect((await ui.find({ type: 'Text', text: /unread/ }))?.props.color).toBe(undefined)
+    expect((await ui.find({ type: 'Text', text: /unread/ }))?.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /⚑/ })).toBe(undefined)
     expect(await ui.find({ type: 'Button' })).toBe(undefined)
     await ui.unmount()
   }
@@ -924,12 +931,12 @@ test('busy: a line for each running job and each lane at work, while it runs', a
   await later.unmount()
 })
 
-// What would make it fail: what waits on the person drawn below the vitals, not in amber, or not
+// What would make it fail: what waits on the person drawn above the vitals, not in amber, or not
 // worded as what to do; a toast missing for one of them, raised again on the next look, or not
 // raised for one that comes later. Watched: with `raiseToasts` toasting whatever it toasted
 // before, the second look raised all three again and this failed; with the update line left out
 // of `asked`, the rows failed.
-test('waiting on you: amber lines first, each worded as the action, and one toast per new thing', async ($, on) => {
+test('waiting on you: amber lines under the vitals, each worded as the action, and one toast per new thing', async ($, on) => {
   const updates = [{ component: 'agent-cli', have: 'claude@2.1.300', new: 'claude@2.1.316', applies: 'restart', restart_requested: false }]
   const w = world({
     signal: signal(30, true, {}, { ...vitals(0.15), updates }),
@@ -942,10 +949,10 @@ test('waiting on you: amber lines first, each worded as the action, and one toas
     const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 120 } })
     const lines = await bandLines(ui)
     expect(lines).toEqual([
+      'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂  ·  $31 today · $515 7d',
       '⚑ skein asks this box to free 1.2G of disk: it is over its own allowance.',
       '⚑ Waiting for your answer: “Keep the old table?”',
       '⚑ A restart gives this box claude@2.1.316. Ask the agent to restart when idle, or skein does once the box is idle.',
-      'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂  ·  $31 today · $515 7d',
     ])
     for (const text of [/skein asks/, /Waiting for your answer/, /A restart gives/]) {
       expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('warning')
