@@ -150,6 +150,57 @@ export async function heavyLock(fs: Files, lock = HEAVY_LOCK): Promise<{ waiting
   return { waiting, holding }
 }
 
+/** One waiting job in the box's jobs view, `$SKEIN_STATE/signals/jobs.json`, which skein writes. */
+export type QueuedJob = { cwd: string; position: number; reason: string }
+
+/**
+ * The box's waiting jobs from the text of its jobs view, in queue order. Empty for a view that is
+ * missing or unreadable, so a box skein does not schedule for keeps the lock's own words.
+ */
+export function waitingJobs(text: string | null): QueuedJob[] | null {
+  if (text === null) return null
+  try {
+    const view: unknown = JSON.parse(text)
+    const jobs = isObject(view) && Array.isArray(view.jobs) ? view.jobs : null
+    if (jobs === null) return null
+    const out: QueuedJob[] = []
+    for (const j of jobs) {
+      if (!isObject(j) || j.state !== 'waiting' || typeof j.position !== 'number') continue
+      out.push({ cwd: typeof j.cwd === 'string' ? j.cwd : '', position: j.position, reason: typeof j.reason === 'string' ? j.reason : '' })
+    }
+
+    return out.sort((a, b) => a.position - b.position)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A lane's place in the fleet's queue: its own waiting job, by the job's folder, or, when it waits
+ * at the box's lock, the box's first waiting job, which holds that lock while it waits for a slot.
+ */
+export function queueOf(
+  worktree: string,
+  lock: 'waiting' | 'holding' | null,
+  jobs: readonly QueuedJob[] | null,
+): { position: number; reason: string; isOwn: boolean } | null {
+  if (jobs === null) return null
+  const own = jobs.find(j => j.cwd === worktree || j.cwd.startsWith(`${worktree}/`))
+  if (own) return { position: own.position, reason: own.reason, isOwn: true }
+  const first = jobs[0]
+  if (lock === 'waiting' && first) return { position: first.position, reason: first.reason, isOwn: false }
+
+  return null
+}
+
+/** `1st`, `2nd`, `3rd`, `4th`, … `11th`, `21st`. */
+export function ordinal(n: number): string {
+  const teen = n % 100 >= 11 && n % 100 <= 13
+  const suffix = teen ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'
+
+  return `${n}${suffix}`
+}
+
 /** Where a lane stands at the heavy lock, from the folders `heavyLock` found. */
 export function lockOf(worktree: string, at: { waiting: readonly string[]; holding: readonly string[] }): 'waiting' | 'holding' | null {
   const isInside = (cwd: string) => cwd === worktree || cwd.startsWith(`${worktree}/`)

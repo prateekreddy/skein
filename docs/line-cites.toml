@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:509"]
+["docs/modules.toml:520"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:648"]
+["src/bin/skein-server/main.rs:650"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:658"]
+["src/bin/skein-server/main.rs:660"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:749"]
+["src/bin/skein-server/main.rs:751"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:755"]
+["src/bin/skein-server/main.rs:757"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -906,11 +906,11 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "#[serde(default = \"default_review_identity\")]"
 cited_by = ["docs/decisions/one-identity.md"]
 
-["src/config.rs:545"]
+["src/config.rs:552"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/config.rs:620"]
+["src/config.rs:627"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1124,25 +1124,25 @@ cited_by = ["docs/decisions/build-output-stays-in-the-worktree.md"]
 line = "// `<fleet root>/.skein` is the one entry in the fleet root that is not a box, and on 2026-09-05 it"
 cited_by = ["docs/decisions/build-output-stays-in-the-worktree.md"]
 
-["src/fleet/disk.rs:307"]
+["src/fleet/disk.rs:309"]
 line = "pub fn substrate_strays() -> Result<Vec<Stray>, String> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:311"]
+["src/fleet/disk.rs:313"]
 line = "return Err(format!("
 window = "if installed.is_empty() {\u000breturn Err(format!(\u000b\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:312"]
+["src/fleet/disk.rs:314"]
 line = "\"skein could not work out which directories under {dir} are its own, so it will not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:319"]
+["src/fleet/disk.rs:321"]
 line = "\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\"
 window = "return Err(format!(\u000b\"skein can see no boxes at all — neither a directory in {root} nor a placement record \\\u000bin {places} — so every directory under {dir} would read as belonging to nobody. \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/disk.rs:398"]
+["src/fleet/disk.rs:401"]
 line = "return Err(format!(\"unusable box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1612,7 +1612,7 @@ cited_by = ["docs/prose-symbols.toml"]
 historical = "`docs/inventory.md` cites `src/lib.rs:35-50` for what the module graph looked like BEFORE SKEIN-576 split it — “was `pub use <mod>::*` over sixteen modules”, past tense, and the point of the paragraph. Lines 61-76 today are `pub mod` declarations, so relocating the citation would move it onto code that does not support the sentence."
 cited_by = ["docs/inventory.md"]
 
-["src/lib.rs:77"]
+["src/lib.rs:78"]
 line = "mod testutil;"
 cited_by = ["docs/modules.toml"]
 
@@ -2336,15 +2336,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "/// is the repository's `dismiss_stale_reviews` setting, not a property of the word. With it"
 cited_by = ["docs/prose-symbols.toml"]
 
-["tests/common/mod.rs:971"]
+["tests/common/mod.rs:973"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1009"]
+["tests/common/mod.rs:1011"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1023"]
+["tests/common/mod.rs:1025"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 

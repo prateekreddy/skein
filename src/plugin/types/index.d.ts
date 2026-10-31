@@ -186,6 +186,22 @@ export type SkeinAgentLane = {
   item: { id: string; title: string; isHeld: boolean } | null
   /** Its place at the shared heavy-work lock: waiting for it, holding it, or neither. */
   lock: 'waiting' | 'holding' | null
+  /**
+   * Its place in the fleet's heavy-work queue (SKEIN-1388), from the box's jobs view: its own
+   * waiting job, or, waiting at the lock, the box's job it waits behind. Absent or null when the
+   * box has no jobs view or nothing of it waits.
+   */
+  queue?: SkeinLaneQueue | null
+}
+
+/** A lane's place in the fleet's heavy-work queue, as skein's jobs view gives it. */
+export type SkeinLaneQueue = {
+  /** Its place among every waiting job in the fleet, from 1. */
+  position: number
+  /** Why it did not start on skein's last look, such as `repo at cap 2/2`; empty when none. */
+  reason: string
+  /** True when the waiting job is the lane's own; false when the lane waits behind the box's. */
+  isOwn: boolean
 }
 
 /** One subagent of this session, as the agents panel draws it (SKEIN-1361). */

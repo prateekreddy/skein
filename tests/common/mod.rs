@@ -358,6 +358,8 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // present since that file was written and never listed here, masked until SKEIN-1150 because
     // this test's own undeclared-binary assertion panicked first every time it ran.
     ("server", &[PYTHON3, TMUX, BWRAP, JQ]),
+    // The heavy-work wrapper is python, and one test wraps it in util-linux `flock` (SKEIN-1388).
+    ("skein_job", &[PYTHON3, FLOCK]),
     ("substrate_request", &[JQ]),
     ("turn_state_probe", &[JQ]),
     ("warden_roundtrip", &[CARGO]),

@@ -37,13 +37,14 @@ type Box = {
   files?: Record<string, string>
   dirs?: Record<string, string[]>
   links?: Record<string, string>
+  env?: Record<string, string>
 }
 
 function engine(on: On, box: Box = {}): { opened: string[]; panes: Set<string> } {
   const opened: string[] = []
   const panes = new Set<string>()
   // `/skein` reads the box's name as the session starts; this file is not about it.
-  mock.env(on, {})
+  mock.env(on, box.env ?? {})
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('ui.open', (_, e) => {
@@ -240,6 +241,55 @@ test('a lane shows the item it claimed, its worktree and branch, and its wait fo
     )
     await ui.unmount()
   }
+})
+
+// The box's jobs view (SKEIN-1388), as skein writes it: one job of this box waiting third in the
+// fleet's queue, from a folder inside `cwd`.
+const jobsView = (cwd: string) => ({
+  env: { SKEIN_STATE: '/state' },
+  files: {
+    ...LANE_BOX.files,
+    '/state/signals/jobs.json': JSON.stringify({
+      schema: 1,
+      at: '2026-10-30T12:00:00Z',
+      fleet_slots: 2,
+      running: 2,
+      repo_cap: 2,
+      jobs: [{ id: 'j-1', class: 'test', command: 'cargo test', cwd, state: 'waiting', position: 3, reason: 'repo at cap 2/2', waited_secs: 40 }],
+    }),
+  },
+})
+
+async function laneLine($: Engine, on: On, box: Box): Promise<string | undefined> {
+  const clock = mock.clock(on, { now: 0 })
+  engine(on, box)
+  await start($)
+  await spawn($, 'u9', 'Worktree: /var/tmp/wt-a, on its branch.')
+  await $.tool.call({ tool: 'Bash', command: 'cd /var/tmp/wt-a && git status', agentId: 'agent-u9' })
+  await clock.advance(5000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const text = (await ui.find({ type: 'Text', text: /\/var\/tmp\/wt-a / }))?.text
+  await ui.unmount()
+
+  return text
+}
+
+// What would make it fail: the lane line rendering the lock's own words while a jobs view says
+// where the job stands (the sabotage that was run), or the position read from anything but the view.
+test("a lane whose job waits in the fleet's queue shows its place and why, not the lock", async ($, on) => {
+  expect(await laneLine($, on, { ...LANE_BOX, ...jobsView('/var/tmp/wt-a/src') })).toBe(
+    "  /var/tmp/wt-a on feat/a · 3rd in the fleet's heavy-work queue (repo at cap 2/2)",
+  )
+})
+
+test("a lane at the box's lock behind the box's queued job shows that job's place", async ($, on) => {
+  expect(await laneLine($, on, { ...LANE_BOX, ...jobsView('/var/tmp/wt-ab') })).toBe(
+    "  /var/tmp/wt-a on feat/a · waiting behind this box's heavy job, 3rd in the fleet's queue (repo at cap 2/2)",
+  )
+})
+
+test('a lane line keeps the lock words where the box has no jobs view', async ($, on) => {
+  expect(await laneLine($, on, { ...LANE_BOX, env: { SKEIN_STATE: '/state' } })).toBe('  /var/tmp/wt-a on feat/a · waiting for the heavy-work lock')
 })
 
 test('a lane that releases its item says it no longer holds it', async ($, on) => {

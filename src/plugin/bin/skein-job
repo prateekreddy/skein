@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+# skein-job: run one piece of heavy work (a build, a test run, CI, a WebKit run) when the fleet has
+# a slot for it (SKEIN-1388, phase 1).
+#
+#   skein-job run [--class build|test|ci|webkit|train] -- <argv>
+#
+# It blocks until it holds a slot, then runs <argv> as its own child, at `nice -n 19`, with the
+# child's output passed through to stdout, and exits with the child's status.
+#
+# **The child runs in this box's cgroup**, under the box's memory ceiling and floor, because it is
+# this process's child and this process is a child of the box's shell: a process cannot leave its
+# parent's cgroup by forking. That is why the wrapper runs the command itself rather than asking
+# skein to: a command skein started by a crossing enters the box's namespaces and not its cgroup.
+#
+# A slot is two locks, taken in this order:
+#
+#   1. this box's own `/var/tmp/skein-lanes-heavy.lock`, the `flock` lanes already take, so a lane
+#      that still runs raw `flock` and one that runs this wait in one line. Skipped when a process
+#      this one descends from already holds it (`flock <lock> skein-job run -- …`), which would
+#      otherwise wait on itself for ever.
+#   2. the fleet's slot: one file in this box's own drop-box,
+#      `$SKEIN_FLEET_ROOT/.skein/jobs/requests/$SKEIN_BOX/<id>.json`, and a wait on the box's view,
+#      `$SKEIN_STATE/signals/jobs.json`, which skein writes and the box can only read, until the job
+#      reads `granted`. Only skein-server writes the queue; this file is the box's ask and nothing
+#      more. It holds the job's id, class, command, folder and this process's pid, and its state:
+#      `waiting`, then `done` or `cancelled`. Skein frees the slot when this pid leaves the box's
+#      cgroup, so a wrapper killed with -9 frees it too.
+#
+# **A nested call never waits.** The child runs with `SKEIN_JOB_ID` set, and a `skein-job` that
+# finds it set runs its command straight away: it already holds its parent's slot, and waiting for a
+# second one behind itself is a deadlock (SYNAP-517).
+#
+# **It never strands the caller.** With no fleet drop-box (outside a box, or a box started before
+# skein had the queue), or with skein not answering for 30 s, it says so on stderr and runs under
+# the box's own lock alone, which is what the lanes did before.
+#
+# Python 3 standard library only, as `skein-mcp` is: it runs in every box and installs nothing.
+
+import fcntl
+import json
+import os
+import secrets
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+CLASSES = ("build", "test", "ci", "webkit", "train")
+LOCK = os.environ.get("SKEIN_JOB_LOCK") or "/var/tmp/skein-lanes-heavy.lock"
+# How long a job may go unmentioned in a fresh view, or a view may go unwritten, before the wrapper
+# takes it that skein is not scheduling and runs on the box's lock alone.
+UNANSWERED_SECONDS = float(os.environ.get("SKEIN_JOB_UNANSWERED_SECONDS") or 30)
+POLL_SECONDS = 1.0
+
+
+def say(line):
+    print("skein-job: " + line, file=sys.stderr, flush=True)
+
+
+def usage():
+    print("usage: skein-job run [--class build|test|ci|webkit|train] -- <command> [args...]",
+          file=sys.stderr)
+    return 2
+
+
+def ordinal(n):
+    if 10 <= n % 100 <= 20:
+        return "%dth" % n
+    return "%d%s" % (n, {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
+# ---- the box's lock
+
+
+def lock_key(path):
+    """The lock file's device and inode as `/proc/locks` writes them: `MAJ:MIN:INODE`, the first
+    two in hex."""
+    st = os.stat(path)
+    return "%02x:%02x:%d" % (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
+
+
+def ancestors():
+    out, pid = set(), os.getppid()
+    while pid > 1 and pid not in out:
+        out.add(pid)
+        try:
+            with open("/proc/%d/status" % pid) as f:
+                pid = next(int(l.split()[1]) for l in f if l.startswith("PPid:"))
+        except (OSError, StopIteration, ValueError):
+            break
+    return out
+
+
+def held_by_an_ancestor(path):
+    """Whether a process this one descends from holds the `flock` on `path`."""
+    try:
+        key = lock_key(path)
+        with open("/proc/locks") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    holders = set()
+    for line in lines:
+        parts = line.split()
+        # `N: FLOCK ADVISORY WRITE <pid> <dev:inode> 0 EOF`; a waiter has `->` after the number.
+        if len(parts) >= 6 and parts[1] == "FLOCK" and parts[5] == key:
+            try:
+                holders.add(int(parts[4]))
+            except ValueError:
+                pass
+    return bool(holders & ancestors())
+
+
+def take_box_lock():
+    """Take the box's own heavy lock, or `None` when an ancestor already holds it. The returned
+    file must stay open for as long as the lock is wanted."""
+    try:
+        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o666)
+    except OSError as e:
+        say("cannot open %s (%s); going on without this box's lock" % (LOCK, e.strerror))
+        return None
+    if held_by_an_ancestor(LOCK):
+        os.close(fd)
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        say("waiting for this box's heavy-work lock, %s" % LOCK)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+# ---- the fleet's slot
+
+
+def drop_box():
+    box = os.environ.get("SKEIN_BOX", "")
+    if not box:
+        return None
+    fleet = os.environ.get("SKEIN_FLEET_ROOT") or "/boxes"
+    d = os.path.join(fleet, ".skein", "jobs", "requests", box)
+    return d if os.path.isdir(d) else None
+
+
+def write_request(path, body):
+    tmp = "%s.%s.tmp" % (path, secrets.token_hex(4))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(fd, "w") as f:
+        json.dump(body, f)
+    os.replace(tmp, path)
+
+
+def read_view():
+    state = os.environ.get("SKEIN_STATE", "")
+    if not state:
+        return None
+    try:
+        with open(os.path.join(state, "signals", "jobs.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def view_age(view):
+    try:
+        at = datetime.fromisoformat(str(view.get("at", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - at).total_seconds()
+
+
+def wait_for_slot(path, body):
+    """File the request and wait until skein grants it. False when skein is not answering."""
+    try:
+        write_request(path, body)
+    except OSError as e:
+        say("could not file the job in this box's drop-box (%s); running under this box's lock "
+            "alone" % e.strerror)
+        return False
+    filed = time.monotonic()
+    last = None
+    while True:
+        view = read_view()
+        job = None
+        if isinstance(view, dict):
+            job = next((j for j in view.get("jobs") or [] if isinstance(j, dict)
+                        and j.get("id") == body["id"]), None)
+        if job is not None and job.get("state") == "granted":
+            if last is not None:
+                say("a slot is free; starting")
+            return True
+        if job is not None and job.get("state") not in ("waiting", "granted"):
+            say("skein ended this job before it started (%s)" % job.get("state"))
+            return None
+        age = view_age(view) if isinstance(view, dict) else None
+        stale = age is None or age > UNANSWERED_SECONDS
+        if (job is None and time.monotonic() - filed > UNANSWERED_SECONDS) or (job is not None and stale):
+            say("skein has not answered for %ds, so the fleet queue is not running; "
+                "running under this box's lock alone" % UNANSWERED_SECONDS)
+            return False
+        if job is not None:
+            now = (job.get("position"), job.get("reason"))
+            if now != last:
+                where = ordinal(int(now[0])) if isinstance(now[0], int) else "waiting"
+                say("%s in the fleet's heavy-work queue%s" % (
+                    where, ": " + now[1] if now[1] else ""))
+                last = now
+        time.sleep(POLL_SECONDS)
+
+
+# ---- running it
+
+
+def run_child(argv, job_id):
+    env = dict(os.environ, SKEIN_JOB_ID=job_id)
+    try:
+        child = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 preexec_fn=lambda: os.nice(19))
+    except OSError as e:
+        say("cannot run %s: %s" % (argv[0], e.strerror))
+        return 127
+
+    def forward(signum, _frame):
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, forward)
+    out = sys.stdout.buffer
+    while True:
+        chunk = child.stdout.read1(65536)
+        if not chunk:
+            break
+        out.write(chunk)
+        out.flush()
+    return child.wait()
+
+
+def run(args):
+    job_class = "build"
+    while args and args[0] != "--":
+        if args[0] == "--class" and len(args) > 1:
+            job_class = args[1]
+            args = args[2:]
+        elif args[0].startswith("--class="):
+            job_class = args[0].split("=", 1)[1]
+            args = args[1:]
+        else:
+            return usage()
+    argv = args[1:]
+    if not argv:
+        return usage()
+    if job_class not in CLASSES:
+        say("unknown class %r; one of %s" % (job_class, ", ".join(CLASSES)))
+        return 2
+
+    # Already inside a job: this one has its parent's slot.
+    if os.environ.get("SKEIN_JOB_ID"):
+        try:
+            os.execvp(argv[0], argv)
+        except OSError as e:
+            say("cannot run %s: %s" % (argv[0], e.strerror))
+            return 127
+
+    job_id = "j-" + secrets.token_hex(4)
+    lock = take_box_lock()
+    request = None
+    drop = drop_box()
+    body = {"id": job_id, "class": job_class, "argv": argv, "cwd": os.getcwd(),
+            "pid": os.getpid(), "state": "waiting"}
+    if drop is not None:
+        request = os.path.join(drop, job_id + ".json")
+        try:
+            granted = wait_for_slot(request, body)
+        except KeyboardInterrupt:
+            try:
+                write_request(request, dict(body, state="cancelled"))
+            except OSError:
+                pass
+            raise
+        if granted is None:
+            return 75
+        if granted is False and not os.path.exists(request):
+            request = None
+    status = 1
+    ended = "cancelled"
+    try:
+        status = run_child(argv, job_id)
+        ended = "done"
+    finally:
+        if request is not None:
+            try:
+                write_request(request, dict(body, state=ended, exit=status))
+            except OSError:
+                pass
+        if lock is not None:
+            os.close(lock)
+    return status if status >= 0 else 128 - status
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] != "run":
+        return usage()
+    try:
+        return run(argv[2:])
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
