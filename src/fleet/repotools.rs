@@ -571,6 +571,13 @@ mod tests {
             true,
             2,
         );
+        // One of its programs run two days ago is use, however long the others have sat unread.
+        put(
+            &rust.join("1.92.0-x86_64-unknown-linux-gnu/bin/rust-gdb"),
+            8,
+            true,
+            90,
+        );
         let fleet = base.join("fleet-toolchain");
         put(&fleet.join("bin/rustc"), 8, true, 90);
         std::os::unix::fs::symlink(&fleet, rust.join("fleet")).unwrap();
@@ -641,8 +648,9 @@ mod tests {
     /// the fleet's own Rust toolchain, a link in rustup's `toolchains`, is never the repo's to list.
     ///
     /// What would make it fail: reading use from any file rather than the executables (the old
-    /// Rust's documentation was read yesterday, so it reads unused 1 day and drops off); reading
-    /// mtime (every version reads 400 days, and the fresh Rust is listed); following the `fleet`
+    /// Rust's documentation was read yesterday, so it reads unused 1 day and drops off); taking the
+    /// oldest executable's access rather than the newest (the fresh Rust, whose `rust-gdb` has sat
+    /// 90 days, is listed); reading mtime (every version reads 400 days, and the fresh Rust is listed); following the `fleet`
     /// link (a third Rust appears); a layout path wrong (that installer's line is missing); the
     /// `0` case not short-cut (the list is not empty); or the threshold compared the wrong way.
     #[test]

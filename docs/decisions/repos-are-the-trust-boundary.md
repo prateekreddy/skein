@@ -76,7 +76,9 @@ puts it.
   `skein_top`, with no budget. The tool versions in it nobody has run for `unused_tool_days` (a
   setting, 0 turns it off) are listed, by the newest access time of their executables, in each
   box's `skein_clean`, its resource signal and the repo's card, and a box's agent may remove one,
-  only while no process on the machine has a file in it open. And each tool's own prune runs once a
+  only while no process on the machine has a file in it open. That is checked, not locked: a box
+  that starts the version in the seconds between the last check and the removal loses it mid-run,
+  and the owner accepted that window (2026-10-31); the removal does not take the area's lock. And each tool's own prune runs once a
   day in each running box: `pnpm store prune` on the box's store, `uv cache prune` on the repo's
   cache from one box of the repo. cargo cleans its own caches (`cache.auto-clean-frequency`, on by
   default since cargo 1.88), and nothing skein writes turns that off.
