@@ -364,3 +364,46 @@ test('a /clear leaves the person at a prompt, and any other end is the end', asy
   expect(box.last().state).toBe('ended')
   expect(box.last().detail).toBe('prompt_input_exit')
 })
+
+// skein's own asks (SKEIN-1402): the tracker's `held` at a start is a query and then a call the
+// module makes itself, and neither is the box's person being asked anything.
+
+const HELD = 'mcp__plugin_sync_sync__held'
+
+test('a permission query, with no call behind it, is not remembered as the ask a dialog names', async ($, on) => {
+  const box = engine(on)
+  on('tool.check', () => ({ decision: 'ask' }))
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+
+  await $.tool.check({ tool: HELD, input: {}, approver: 'person' })
+  await $.classic.Notification(SHOWN)
+
+  expect(box.last().state).toBe('permission')
+  expect(box.last().detail).toBe('')
+})
+
+test("the module's own tool call does not settle a permission wait", async ($, on) => {
+  const box = engine(on)
+  const listed: string[] = []
+  const called: string[] = []
+  on('tool.list', () => ({ value: listed.map(name => ({ name, description: '', mcp: true })) }))
+  on('tool.check', () => ({ decision: 'allow' }))
+  on('tool.call', (_, e) => {
+    called.push(String(e.tool))
+    const text = '{"leases":[]}'
+    return { result: { content: [{ type: 'text', text }] }, text }
+  })
+  await $.session.start(START)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.classic.Notification(SHOWN)
+  expect(box.last().state).toBe('permission')
+
+  // A fresh load of the module (a reload: a second start, here one that writes no signal) finds
+  // the tracker listed and asks it, while the dialog is still open.
+  listed.push(HELD)
+  await $.session.start({ ...START, isInteractive: false })
+
+  expect(called).toEqual([HELD])
+  expect(box.last().state).toBe('permission')
+})

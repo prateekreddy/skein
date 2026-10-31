@@ -2471,9 +2471,13 @@ mod tests {
             kit.json("settings.local.json"),
             serde_json::json!({
                 "subagentPromptCacheTtl": defaults["settings"]["subagentPromptCacheTtl"],
-                // Not defaults: where this box's memory and shared files are (SKEIN-1330).
+                // Not defaults: where this box's memory and shared files are (SKEIN-1330), and
+                // the tracker's two read-only tools, the only ones a box allows (SKEIN-1404).
                 "autoMemoryDirectory": kit.store.join("memory"),
-                "permissions": { "additionalDirectories": [kit.home.join("shared")] },
+                "permissions": {
+                    "additionalDirectories": [kit.home.join("shared")],
+                    "allow": crate::probes::TRACKER_READ_TOOLS,
+                },
             }),
             "the box's local settings override what the repo chose"
         );
@@ -3144,9 +3148,27 @@ mod tests {
                 local["permissions"]["additionalDirectories"], want,
                 "{ships:?}: {local}"
             );
+            // The person's own rule kept, and the tracker's read-only `held` and `why` added once,
+            // after two starts (SKEIN-1404). What would make it fail: the merge leaving `allow`
+            // alone, adding them on every start, or allowing any other tracker tool, a wildcard
+            // over the sync server included.
+            let [held, why] = crate::probes::TRACKER_READ_TOOLS;
             assert_eq!(
                 local["permissions"]["allow"],
-                serde_json::json!(["Bash(ls)"])
+                serde_json::json!(["Bash(ls)", held, why]),
+                "{ships:?}: {local}"
+            );
+            let tracker: Vec<&str> = local["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t.as_str())
+                .filter(|t| t.contains("sync__") || t.contains('*'))
+                .collect();
+            assert_eq!(
+                tracker,
+                ["mcp__plugin_sync_sync__held", "mcp__plugin_sync_sync__why"],
+                "{ships:?}: a box allows a tracker tool other than held and why: {local}"
             );
 
             // A memory directory the person chose is theirs.

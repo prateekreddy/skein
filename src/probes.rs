@@ -215,12 +215,24 @@ const SETTINGS_DEFAULTS_JSON: &str = "settings-defaults.json";
 /// **From here and not from the store's `settings.json`** (SKEIN-1153): every box of the repo can
 /// write the store, so a merge that copied from it carried one box's hook or status line into every
 /// sibling that started after it. The plugin is bound read-only into every box.
+///
+/// `allow` is the tools a box runs without a prompt, added to its `permissions.allow`: the tracker's
+/// two read-only tools and nothing else ([`TRACKER_READ_TOOLS`]).
 pub(crate) fn settings_defaults() -> serde_json::Value {
     serde_json::json!({
         "settings": store_settings(&serde_json::json!({})),
         "storeEraStatusLine": STORE_ERA_STATUSLINE_CMD,
+        "allow": TRACKER_READ_TOOLS,
     })
 }
+
+/// The tracker tools every Claude box allows without a prompt (SKEIN-1404, the owner, 2026-10-30
+/// and 2026-10-31): the sync plugin's read-only `held`, which skein's mod asks once a session so a
+/// claim made before it loaded is known (SKEIN-1400), and its read-only `why`, which names each
+/// such item (SKEIN-1401). No other tracker tool and no wildcard over the server: a claim, a
+/// completion or a release stays a call the box makes where its person can see it asked.
+pub(crate) const TRACKER_READ_TOOLS: [&str; 2] =
+    ["mcp__plugin_sync_sync__held", "mcp__plugin_sync_sync__why"];
 
 /// The scripts installed into each plugin variant's [`PLUGIN_PROBE_DIR`]: every script a turn-state
 /// hook runs, Claude's or Codex's, and every script one of those runs in turn. A script left out of
