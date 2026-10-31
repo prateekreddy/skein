@@ -664,6 +664,15 @@ pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
         }
     }
     out.push((format!("{narrow}/hooks/hooks.json"), pretty(&turn_state)));
+    // The repo's install lock, for every agent and not only Claude's (SKEIN-1436). Claude Code puts
+    // a plugin's `bin` on its PATH, so a Claude session has the full variant's copy; Codex loads no
+    // plugin, so the launcher binds this variant's `bin`, which is installed whatever the switch
+    // says, read-only at `~/.skein-bin` on every box's PATH (`box-session.sh`, `place::box_path`).
+    for (rel, body) in crate::runtime::PLUGIN_FILES {
+        if *rel == "bin/skein-lock" {
+            out.push((format!("{narrow}/{rel}"), body.to_string()));
+        }
+    }
     for dir in [&full, &narrow] {
         for (file, body) in plugin_probe_scripts() {
             out.push((format!("{dir}/{PLUGIN_PROBE_DIR}/{file}"), body.to_string()));

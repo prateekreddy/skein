@@ -40,6 +40,15 @@ fn repo_tools_block() -> String {
     )
 }
 
+/// The launcher's block that binds skein's own commands at `~/.skein-bin` (SKEIN-1436), lifted.
+fn skein_bin_block() -> String {
+    lift(
+        r#"skein_bin_at="${SKEIN_FLEET_ROOT:-/boxes}/.skein/plugin-turn-state/bin""#,
+        "unset skein_bin_at",
+        "skein-bin block",
+    )
+}
+
 /// The session block's exports into the area, lifted: the `if` on `$repo_tools` and its `fi`.
 /// Run inside the box, as production runs them, with `$repo_tools` and `$tree` set as the
 /// launcher hands them across.
@@ -150,6 +159,7 @@ fn in_repo_box_with(
          {iso}\n\
          {cache}\n\
          {tools}\n\
+         {skein_bin}\n\
          exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} {extra} -- \
            /bin/bash -c {inside} skein-probe \"$repo_tools\" {arg}\n",
         name = skein::util::sh_quote(name),
@@ -162,6 +172,7 @@ fn in_repo_box_with(
         iso = isolation_block(),
         cache = repo_cache_block(),
         tools = repo_tools_block(),
+        skein_bin = skein_bin_block(),
         inside = skein::util::sh_quote(&inside),
         arg = q(arg),
     );
@@ -525,5 +536,41 @@ fn a_file_a_box_holds_open_marks_the_version_open_in_its_repos_area_only() {
     assert!(
         !skein::fleet::version_is_open(other, tc),
         "another repo's same toolchain read open: {open:?}"
+    );
+}
+
+/// **Every agent in a box runs `skein-lock` by name, Codex's too, and no box can change it**
+/// (SKEIN-1436). Claude Code puts its plugin's `bin` on its own PATH; a Codex session has only the
+/// box's PATH, which is all this probe runs on.
+///
+/// What would make it fail: the `~/.skein-bin` bind dropped (not found), it left off `box_path`
+/// (not found), the turn-state variant installed without the command (not found), or the bind
+/// read-write (`wrote`).
+#[test]
+fn every_agent_in_a_box_has_skein_lock_and_cannot_change_it() {
+    if !bwrap_works() {
+        skip(
+            "bwrap cannot make a user namespace here, so whether a box has skein-lock is unchecked",
+        );
+        return;
+    }
+    let f = Fleet::make("skeinlock1436");
+    let root = f.fleet_root.to_string_lossy().into_owned();
+    for (path, body) in skein::probes::plugin_install_under(&root) {
+        let p = std::path::Path::new(&path);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let probe = "command -v skein-lock >/dev/null && skein-lock -- echo lock-ran || echo lock-missing\n\
+                 { printf x > \"$HOME/.skein-bin/skein-lock\"; } 2>/dev/null && echo wrote || echo kept";
+    let web_area = f.fleet_root.join(".repo-tools/web");
+    let said = in_repo_box(&f, "web-main", "web", probe, &web_area);
+    assert!(said.contains("lock-ran"), "{said}");
+    assert!(said.contains("kept"), "a box wrote over skein-lock: {said}");
+    assert!(
+        web_area.join(".locks/tools").exists(),
+        "skein-lock did not take the repo's lock"
     );
 }

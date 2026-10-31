@@ -59,7 +59,8 @@ puts it.
   for two processes on one home at once (rustup is not: rust-lang/rustup#988). So the area has one
   lock, `skein-lock [name] -- <command>`, an flock on a file in the area's `.locks`. The fleet's
   rustup shim takes it only while it installs a toolchain the repo pins and the area lacks; a build
-  whose toolchain is there never waits on it.
+  whose toolchain is there never waits on it. Every agent has the command, Codex's too: it is in the
+  turn-state plugin's `bin`, bound read-only at `~/.skein-bin` on every box's PATH (SKEIN-1436).
 - cargo shares its whole `CARGO_HOME`, not only `registry` and `git`. Measured on 2026-10-29 with
   two bwrap namespaces at once: cargo, npm with npx, pip, uv and pnpm each finished every round on
   one shared cache. With only `registry` and `git` shared, cargo's download lock (the file
@@ -69,7 +70,16 @@ puts it.
   `~/.cargo/bin`.
 - The repo's cache counts toward the repo, not toward any box's disk allowance. The old one is
   cleaned from the repo's card, only while none of the repo's boxes runs, because every one of them
-  reads it. Showing and pruning the tools area is SKEIN-1432.
+  can still see it; nothing uses it, so all of it is listed as removable.
+- The area does not grow for ever, and skein removes nothing in it on its own (SKEIN-1432, the
+  owner's decision on SKEIN-1426). Its size is shown per repo, on the repo's card and in each box's
+  `skein_top`, with no budget. The tool versions in it nobody has run for `unused_tool_days` (a
+  setting, 0 turns it off) are listed, by the newest access time of their executables, in each
+  box's `skein_clean`, its resource signal and the repo's card, and a box's agent may remove one,
+  only while no process on the machine has a file in it open. And each tool's own prune runs once a
+  day in each running box: `pnpm store prune` on the box's store, `uv cache prune` on the repo's
+  cache from one box of the repo. cargo cleans its own caches (`cache.auto-clean-frequency`, on by
+  default since cargo 1.88), and nothing skein writes turns that off.
 
 **Rules out.**
 
@@ -100,4 +110,13 @@ puts it.
   `a_managed_store_gets_a_repo_cache_and_a_link_there_is_refused` (`src/kit.rs`).
 - Cleaning: tests `a_repo_cache_is_cleaned_only_with_all_its_boxes_stopped` and
   `no_clean_follows_a_link_into_or_out_of_the_repo_cache` (`src/fleet/clean.rs`).
+- The area's listing and pruning: tests `an_old_version_is_listed_and_a_fresh_one_is_not`,
+  `a_file_open_in_a_version_is_seen_in_that_area_only`,
+  `each_box_prunes_daily_and_one_box_a_repo_prunes_uv` and
+  `the_prune_script_runs_each_tools_own_prune` (`src/fleet/repotools.rs`); bwrap test
+  `a_file_a_box_holds_open_marks_the_version_open_in_its_repos_area_only`
+  (`tests/isolation_bwrap/repocache.rs`); the box's removal,
+  `an_unused_tool_version_is_removed_only_while_nothing_has_it_open` (`tests/plugin_tools.rs`).
+- `skein-lock` for every agent: bwrap test `every_agent_in_a_box_has_skein_lock_and_cannot_change_it`
+  (`tests/isolation_bwrap/repocache.rs`).
 - The other walls of levels 1 and 2 are the rows of [`docs/threat-model.md`](../threat-model.md).
