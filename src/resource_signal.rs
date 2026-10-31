@@ -832,7 +832,8 @@ mod words {
         match ask.map(|a| (a.state.as_str(), a.mb)) {
             Some(("waiting", mb)) => format!("{SHORT}; its ask for {} is with the owner.", gib(mb)),
             Some(("denied", mb)) => format!(
-                "{SHORT}; the owner denied its ask for {}, so clear what it can.",
+                "{SHORT}; the owner denied its ask for {}; clear what it can, or ask again with \
+                 what changed.",
                 gib(mb)
             ),
             _ => format!("{SHORT}; to ask the owner for more, call `skein_request_disk`."),
@@ -2397,7 +2398,7 @@ mod tests {
         assert!(
             disk_ask(&denied)
                 .hold
-                .contains("the owner denied its ask for 20.0G, so clear what it can."),
+                .contains("the owner denied its ask for 20.0G; clear what it can, or ask again with what changed."),
             "{}",
             disk_ask(&denied).hold
         );

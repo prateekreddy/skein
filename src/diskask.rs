@@ -421,6 +421,39 @@ mod tests {
         );
     }
 
+    /// **A box's own `state` is thrown away**: an ask whose file says `approved` or `denied`, with no
+    /// host record, reads as waiting and is a row in the decision inbox.
+    ///
+    /// What would make it fail: `decided_over`'s `None` arm keeping the file's `state` — the ask
+    /// then reads as decided and `open_above` drops it from the inbox.
+    #[test]
+    fn a_box_that_says_its_own_ask_is_decided_still_waits() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let fleet = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        env.set("SKEIN_FLEET_ROOT", &fleet);
+        for claimed in ["approved", "denied"] {
+            let mut body = asked("d-0000abab", "20g");
+            body["state"] = claimed.into();
+            body["decided"] = "2026-10-31T10:01:00Z".into();
+            plant("web-main", body);
+            let ask = for_box("web-main").expect("the box's ask");
+            assert_eq!(
+                (ask.state.as_str(), ask.decided.as_str()),
+                ("waiting", ""),
+                "a box's own {claimed:?} was believed"
+            );
+            let now = crate::fleet::box_disk_limit("web-main");
+            // The inbox's own filter (`queue::disk_decisions`).
+            assert!(
+                open_above(&ask, now),
+                "a box that says {claimed:?} left the inbox"
+            );
+        }
+    }
+
     /// The inbox's figures, as the owner approved the row.
     #[test]
     fn the_headline_reads_in_gigabytes() {

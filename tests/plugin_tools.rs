@@ -1906,3 +1906,24 @@ fn a_bad_disk_ask_is_refused_at_the_tool() {
         "a refused ask was filed"
     );
 }
+
+/// **A box's own `state` in its disk ask is never the answer**: `approved` or `denied` written
+/// into the file, with nothing in the inbox, reads as waiting.
+///
+/// What would make it fail: `requests` reading the disk ask's state from its file rather than
+/// from `answer_for` over the inbox.
+#[test]
+fn a_disk_ask_the_box_says_is_decided_still_waits() {
+    let (b, state) = disk_box("skein-tools-it-diskforged");
+    for claimed in ["approved", "denied"] {
+        b.put(
+            "fleet/.skein/substrate/requests/example/disk-allowance",
+            &json!({"id": "d-0000abab", "size": "20g", "why": "w", "state": claimed,
+                    "asked": "2026-10-31T10:00:00Z"})
+            .to_string(),
+        );
+        let (got, _) = said_in(&b, &state, "skein_requests", json!({}));
+        assert_eq!(got["requests"][0]["queue"], "disk", "{got}");
+        assert_eq!(got["requests"][0]["state"], "waiting", "{claimed}: {got}");
+    }
+}
