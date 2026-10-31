@@ -2029,7 +2029,10 @@ esac
     /// **What makes it fail:** installing into the live prefix again (`npm install -g "$@"` with
     /// no prefix of its own): missing for the whole two seconds. Or the first cut's fallback, a
     /// remove and then a rename of the package with the command still going through it: missing
-    /// for the length of the remove, which the `rm` below holds open long enough to be read.
+    /// for the length of the remove, which the `rm` below holds open long enough to be read. Or
+    /// the packages converted before the commands are moved: the package's path is missing
+    /// between two renames while the old command still goes through it, a window the `mv` below
+    /// holds open.
     #[test]
     fn a_box_never_sees_the_agent_cli_missing_while_it_is_installed() {
         for exchange in [false, true] {
@@ -2062,19 +2065,24 @@ ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
             "rm",
             "PATH=/usr/bin:/bin rm \"$@\"\nrc=$?\nsleep 0.3\nexit $rc",
         );
+        // An `mv` that returns late after every rename it makes, so a window between two steps
+        // stays open long enough to be read, as the `rm` does for a remove. Without --exchange
+        // it also refuses that option, as coreutils before 9.5 does.
         let refused = dir.join("refused");
-        if !exchange {
-            stub(
-                &stubs,
-                "mv",
-                &format!(
-                    "for a; do [ \"$a\" = --exchange ] && {{ echo \"$*\" >>'{}'; \
-                     echo \"mv: unrecognized option '--exchange'\" >&2; exit 1; }}; done\n\
-                     PATH=/usr/bin:/bin exec mv \"$@\"",
-                    refused.display()
-                ),
-            );
-        }
+        let refuse = if exchange {
+            String::new()
+        } else {
+            format!(
+                "for a; do [ \"$a\" = --exchange ] && {{ echo \"$*\" >>'{}'; \
+                 echo \"mv: unrecognized option '--exchange'\" >&2; exit 1; }}; done\n",
+                refused.display()
+            )
+        };
+        stub(
+            &stubs,
+            "mv",
+            &format!("{refuse}PATH=/usr/bin:/bin mv \"$@\" || exit\nsleep 0.3"),
+        );
         let run = |version: &str| {
             std::process::Command::new("bash")
                 .arg("-c")
