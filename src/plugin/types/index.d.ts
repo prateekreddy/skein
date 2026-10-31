@@ -256,6 +256,58 @@ export type SkeinAgentsPanel = {
   isClosedByPerson: boolean
 }
 
+/** One of the box's own jobs in its jobs view, `$SKEIN_STATE/signals/jobs.json` (`ViewJob` in
+ * `src/jobs.rs`), the fields the tool rows draw. */
+export type SkeinViewJob = {
+  id: string
+  /** Its argv joined by spaces, cut at 300 characters. */
+  command: string
+  cwd: string
+  /** `waiting`, `granted`, `done` or `cancelled`. */
+  state: string
+  /** The cores it asks for. */
+  cores: number
+  /** The cores it was granted; zero while it waits. */
+  granted_cores: number
+  /** Its place among every waiting job in the fleet, from 1; null once it is not waiting. */
+  position: number | null
+  /** Why it has not started, or, once it ended, what it used, in skein's words. */
+  reason: string
+  waited_secs: number
+}
+
+/** The box's jobs view as the tool rows read it (`View` in `src/jobs.rs`). */
+export type SkeinJobsView = {
+  /** When skein wrote it, RFC3339. */
+  at: string
+  /** The machine's cores, those granted to running jobs fleet-wide, and those free now. */
+  cores: number
+  granted: number
+  free: number
+  jobs: SkeinViewJob[]
+  /** Every waiting job that goes before the box's first waiting one, named with its box. */
+  ahead: { box: string; command: string; cores: number }[]
+}
+
+/** A Bash call that runs `skein-job run` (SKEIN-1440). */
+export type SkeinJobCall = {
+  /** The call's tool_use_id. */
+  id: string
+  /** The command under `skein-job run --`, as skein's view spells a job's. */
+  command: string
+  /** The job in the view that is this call's, once one is found; null before. */
+  jobId: string | null
+  isRunning: boolean
+}
+
+/** What the tool rows draw a `skein-job` call from: the calls, and the jobs view while one ran. */
+export type SkeinJobWatch = {
+  /** The session's last few `skein-job` calls, oldest first. */
+  calls: SkeinJobCall[]
+  /** The view as last read; null when it was missing, unreadable or out of date. */
+  view: SkeinJobsView | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     skein: {
@@ -271,6 +323,8 @@ declare module 'claude-code' {
       agents: Shaped<SkeinAgentRun[]>
       agentsPanel: Shaped<SkeinAgentsPanel>
       agentsNow: number
+      /** The `skein-job` calls the tool rows draw (SKEIN-1440). */
+      jobWatch: Shaped<SkeinJobWatch | null>
     }
   }
 }

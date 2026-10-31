@@ -124,6 +124,10 @@ type World = {
   waiting: number
   /** Questions to the person, as `skein-mcp requests` lists them. */
   questions?: readonly Record<string, unknown>[]
+  /** `signals/jobs.json`; none when absent. */
+  jobs?: string
+  /** What `skein-mcp lane list` prints; it fails when absent. */
+  lanes?: string
   /** What a `skein-mcp clean <paths>` run prints. */
   removal?: { result: Record<string, unknown>; said: string }
   /** Every argv the plugin ran, in order. */
@@ -153,6 +157,7 @@ function engine(on: On, w: World) {
   on('fs.read', (_, e) => {
     if (e.path === `${STATE}/signals/resources.json`) return { value: w.signal }
     if (e.path === `${STATE}/signals/usage.json` && w.usage !== undefined) return { value: w.usage }
+    if (e.path === `${STATE}/signals/jobs.json` && w.jobs !== undefined) return { value: w.jobs }
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: '{"version":"9.8.7"}' }
     throw new Error(`no such file: ${e.path}`)
   })
@@ -161,6 +166,7 @@ function engine(on: On, w: World) {
     w.ran.push(argv)
     if (argv[1]?.endsWith('/probe/mailbox.sh') && argv[2] === 'unread') return out(`${w.mail}\n`)
     if (argv[1]?.endsWith('/bin/skein-mcp') && argv[2] === 'requests') return out(JSON.stringify(requests(w.waiting, w.questions)))
+    if (argv[1]?.endsWith('/bin/skein-mcp') && argv[2] === 'lane' && w.lanes !== undefined) return out(w.lanes)
     if (argv[1]?.endsWith('/bin/skein-mcp') && argv[2] === 'clean') {
       if (argv.length === 3) return out(JSON.stringify(LISTED))
       const removal = w.removal ?? { result: { error: 'unexpected' }, said: '' }
@@ -423,20 +429,33 @@ test('the clean tool refuses a list of anything but paths as the MCP tool does',
 // /skein
 // ------------------------------------------------------------------------------------------------
 
-test('/skein status says the disk, the ask, the requests and the mail', async ($, on) => {
-  await started(on, world({ signal: signal(30, true), waiting: 1, mail: '2' }), $)
+// What would make it fail: a row out of line with the others, what needs the person not marked or
+// not first, or a row drawn for figures skein did not write (no jobs view and no lanes here, so no
+// row for either). Watched: with the loud rows no longer sorted first, the requests row came after
+// the disk row in the second case and this failed.
+test('/skein status draws aligned rows, what needs the person first', async ($, on) => {
+  const w = world({ signal: signal(30, true), waiting: 1, mail: '2' })
+  await started(on, w, $)
 
-  const ran = await $.command.run(TYPED('status'))
-
-  expect(ran.text).toBe(
+  expect((await $.command.run(TYPED('status'))).text).toBe(
     [
-      'This box holds 11.2G of its 10.0G allowance. 3.7G can be removed now.',
-      'skein asks this box to free 1.2G of disk: it is over its own allowance.',
-      '1 request waiting. /skein requests lists them.',
-      '2 unread. The agent reads them at the start of its next turn.',
-      "skein has not written this box's spend in the last 70 minutes.",
+      'web-main · 12:00 UTC',
+      '⚑ disk      11.2 GB / 10 GB   skein asks this box to free 1.2G of disk: it is over its own allowance.',
+      '⚑ requests  1 waiting for the owner   /skein requests lists them',
+      '  mail      2 unread   the agent reads them at its next turn',
+      '  spend     not written in the last 70 minutes',
+      '/skein clean · /skein requests',
     ].join('\n'),
   )
+
+  // With no ask, the disk is a quiet row, and the request that waits goes above it.
+  w.signal = signal(30, false)
+  w.mail = '0'
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').slice(1, 4)).toEqual([
+    '⚑ requests  1 waiting for the owner   /skein requests lists them',
+    '  disk      11.2 GB / 10 GB   3.69 GB removable',
+    '  mail      none unread',
+  ])
 })
 
 // Fails if the line stops saying the dollars are an estimate at API prices, or if `+` is not added
@@ -454,14 +473,15 @@ test('the band and /skein status say the spend is an estimate, with + when somet
     expect(shown?.props.dimColor).toBe(true)
     await ui.unmount()
   }
-  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(line)
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-2)).toBe(
+    '  spend     ≈$1.20 today · ≈$31.08 this week   estimated at API prices as of 11:59 UTC',
+  )
 
   w.usage = usage(60, 1.2, 140.5, true)
   const status = (await $.command.run(TYPED('status'))).text?.split('\n') ?? []
-  expect(status.slice(-2)).toEqual([
-    'Spend, estimated at API prices, as of 11:59 UTC: today ≈$1.20+ · 7 days ≈$141+',
-    '+ means some of it was on a model skein has no price for, so it is left out.',
-  ])
+  expect(status.at(-2)).toBe(
+    '  spend     ≈$1.20+ today · ≈$141+ this week   estimated at API prices as of 11:59 UTC; + leaves out a model skein has no price for',
+  )
 })
 
 // skein reads the fleet's usage once an hour, and the band trusts the file for 70 minutes. Fails if
@@ -476,8 +496,8 @@ test('spend is shown for 70 minutes after skein read it, and not after', async (
   })
   const w = world({ usage: usage(69 * 60, 1.2, 8.4) })
   await started(on, w, $)
-  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(
-    'Spend, estimated at API prices, as of 10:51 UTC: today ≈$1.20 · 7 days ≈$8.40',
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-2)).toBe(
+    '  spend     ≈$1.20 today · ≈$8.40 this week   estimated at API prices as of 10:51 UTC',
   )
 
   w.usage = usage(71 * 60, 1.2, 8.4)
@@ -489,9 +509,93 @@ test('spend is shown for 70 minutes after skein read it, and not after', async (
     expect(await ui.find({ type: 'Text', text: /Spend/ })).toBe(undefined)
     await ui.unmount()
   }
-  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-1)).toBe(
-    "skein has not written this box's spend in the last 70 minutes.",
-  )
+  expect((await $.command.run(TYPED('status'))).text?.split('\n').at(-2)).toBe('  spend     not written in the last 70 minutes')
+})
+
+/** The box's jobs view (`View` in `src/jobs.rs`), `ago` seconds old: one job running, two waiting. */
+function jobsView(ago: number): string {
+  const at = new Date(NOW - ago * 1000).toISOString().replace(/\.\d+Z$/, 'Z')
+  const job = (id: string, state: string, position: number | null) => ({
+    id, class: 'test', command: 'cargo test', cwd: '/w', state, cores: 4, min: 0,
+    granted_cores: state === 'granted' ? 4 : 0, position, reason: '', waited_secs: 5,
+  })
+
+  return JSON.stringify({
+    schema: 1, at, cores: 12, granted: 8, free: 4, running: 2,
+    jobs: [job('j-1', 'granted', null), job('j-2', 'waiting', 5), job('j-3', 'waiting', 3), job('j-4', 'done', null)],
+    ahead: [],
+  })
+}
+
+/** What `skein-mcp lane list` prints for two lanes skein made. */
+const LANES = JSON.stringify({
+  result: {
+    root: '/w/.worktrees',
+    lanes: [
+      { name: 'ledger', worktree: '/w/.worktrees/ledger', branch: 'fix/ledger', item: 'SKEIN-1', phase: 'created' },
+      { name: 'spend', worktree: '/w/.worktrees/spend', branch: 'fix/spend', item: 'SKEIN-2', phase: 'created' },
+    ],
+    refused: [],
+  },
+  said: '',
+})
+
+// What would make it fail: the jobs row counting another box's jobs or a finished one, its place
+// read from anything but the view, a view skein stopped writing believed, or a lanes row in a box
+// with none. Watched: with the staleness check in `readJobs` removed, the 40-second-old view still
+// drew a jobs row and this failed.
+test('/skein status counts the jobs from the jobs view and the lanes skein made, and leaves out what is not written', async ($, on) => {
+  const w = world({ jobs: jobsView(5), lanes: LANES })
+  await started(on, w, $)
+
+  const rows = (await $.command.run(TYPED('status'))).text?.split('\n') ?? []
+  expect(rows.filter(r => /^ {2}(jobs|lanes) /.test(r))).toEqual([
+    "  jobs      1 running · 2 waiting, 3rd in the fleet's queue",
+    '  lanes     0 running · 2 in all',
+  ])
+
+  // A view 40 s old is skein not scheduling, and a box with no lanes has no lanes row.
+  w.jobs = jobsView(40)
+  w.lanes = undefined
+  const later = (await $.command.run(TYPED('status'))).text?.split('\n') ?? []
+  expect(later.filter(r => /^ {2}(jobs|lanes) /.test(r))).toEqual([])
+})
+
+const STATUS_ROW = (text: string, args = 'status') =>
+  ({
+    plugin: 'skein',
+    component: 'CommandOutput',
+    requestId: 'm1',
+    props: { command: 'skein', args, text, isErrored: false },
+  }) as const
+
+// What would make it fail: the rows drawn without the amber on what needs the person, or a text of
+// another shape drawn as rows. Watched: with `isLoud` read from the wrong prefix, the disk row was
+// drawn plain and this failed.
+test('the drawn /skein status puts what needs the person in amber, and any other text is the engine\'s', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  await started(on, world({ signal: signal(30, true), mail: '2' }), $)
+  const text = (await $.command.run(TYPED('status'))).text ?? ''
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...STATUS_ROW(text), surface })
+    const loud = (await ui.findAll({ type: 'Text', text: /^⚑ disk/ })).at(-1)
+    expect(loud?.props.color).toBe('warning')
+    const quiet = (await ui.findAll({ type: 'Text', text: /^ {2}mail/ })).at(-1)
+    expect(quiet?.props.color).toBe(undefined)
+    expect((await ui.findAll({ type: 'Text', text: /^ {3}the agent reads them/ })).at(-1)?.props.dimColor).toBe(true)
+    await ui.unmount()
+
+    for (const other of [STATUS_ROW('this box has asked for nothing.', 'requests'), STATUS_ROW('one line only')]) {
+      const plain = await $.ui.mount({ ...other, surface })
+      expect((await plain.find({ type: 'Text' }))?.text).toBe('engine')
+      await plain.unmount()
+    }
+  }
 })
 
 test('/skein requests lists each request with its state', async ($, on) => {
@@ -548,7 +652,7 @@ test('a claude -p session runs nothing on a timer, and /skein status still answe
 
   const ran = await $.command.run(TYPED('status'))
   expect(ran.text?.split('\n')[1]).toBe(
-    'skein asks this box to free 1.2G of disk: it is over its own allowance.',
+    '⚑ disk      11.2 GB / 10 GB   skein asks this box to free 1.2G of disk: it is over its own allowance.',
   )
 })
 
