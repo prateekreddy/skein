@@ -407,6 +407,74 @@ test('a skein-job call waiting for cores shows its place, the jobs ahead and the
   await done.ui.unmount()
 })
 
+const SPINNER = (requestId: string) => ({
+  plugin: 'skein',
+  surface: 'terminal' as const,
+  component: 'Spinner' as const,
+  requestId,
+  props: { word: 'Sauteing', message: null, suffix: '…', mode: 'tool-use' as const },
+  viewport: { columns: 86, rows: 40 },
+})
+
+// What would make it fail: the spinner left saying `Sauteing` while the job waits, an estimate
+// shown that no data gives, the box ahead left unnamed, the words kept once the job is granted, or a
+// subagent's wait drawn on another agent's spinner. Watched: with the Spinner hook passing
+// `next(e)` unchanged, the first `handed` comparison read `message: null` and this failed.
+test('while a skein-job call waits the spinner says so, and is the engine’s again once it runs', async ($, on) => {
+  const handed = engine(on)
+  const clock = mock.clock(on, { now: NOW })
+  let view: unknown = { ...F.JOBS_VIEW, jobs: [{ ...F.JOBS_VIEW.jobs[0], cwd: '/workspace/web/.worktrees/ledger' }, F.JOBS_VIEW.jobs[1]] }
+  on('fs.read', () => ({ value: JSON.stringify(view) }))
+  const bash = slowBash(on)
+
+  const before = await $.ui.mount(SPINNER('main'))
+  await before.drawn()
+  expect(handed.at(-1)).toMatchObject({ word: 'Sauteing', message: null, suffix: '…' })
+  await before.unmount()
+
+  const call = $.tool.call({ ...RUN, tool_use_id: 'b1' } as never)
+  await bash.isReached
+  const ui = await $.ui.mount(SPINNER('main'))
+  await ui.drawn()
+  expect(handed.at(-1)).toMatchObject({
+    word: 'Sauteing',
+    message: 'Waiting for a fleet slot · #2 · cargo test, lane ledger · 1 ahead: api-main cargo build',
+    suffix: '',
+  })
+
+  // Granted: the spinner is the engine's again.
+  view = { ...F.JOBS_VIEW, at: new Date(NOW + 2000).toISOString().replace(/\.\d+Z$/, 'Z'), ahead: [], jobs: [{ ...F.JOBS_VIEW.jobs[0], state: 'granted', granted_cores: 4, position: null }] }
+  await clock.advance(2000)
+  await ui.drawn()
+  expect(handed.at(-1)).toMatchObject({ message: null, suffix: '…' })
+  await ui.unmount()
+  bash.release()
+  await call
+})
+
+// What would make it fail: every running call's wait drawn on every spinner. Watched: with the
+// `agentId` test in `spinnerText` made always true, lane-2's spinner said lane-1's wait and the
+// `message: null` comparison failed.
+test('a subagent’s waiting job shows on its own spinner, not on another’s', async ($, on) => {
+  const handed = engine(on)
+  mock.clock(on, { now: NOW })
+  on('fs.read', () => ({ value: JSON.stringify(F.JOBS_VIEW) }))
+  const bash = slowBash(on)
+
+  const call = $.tool.call({ ...RUN, tool_use_id: 'b2', agentId: 'lane-1' } as never)
+  await bash.isReached
+  const other = await $.ui.mount(SPINNER('lane-2'))
+  await other.drawn()
+  expect(handed.at(-1)).toMatchObject({ message: null })
+  await other.unmount()
+  const own = await $.ui.mount(SPINNER('lane-1'))
+  await own.drawn()
+  expect(handed.at(-1)).toMatchObject({ message: 'Waiting for a fleet slot · #2 · cargo test · 1 ahead: api-main cargo build' })
+  await own.unmount()
+  bash.release()
+  await call
+})
+
 test('a job that failed ends with a cross, and one from before this session without its command', async ($, on) => {
   engine(on)
   const ui = await $.ui.mount({

@@ -25,15 +25,21 @@
 //   (`said_used` in `bin/skein-job`);
 // * the box's jobs view, `$SKEIN_STATE/signals/jobs.json` (`View` in `src/jobs.rs`), read every two
 //   seconds while a `skein-job run` call runs, and not otherwise.
+//
+// **The spinner** (step 4). While a call's job waits for cores, the turn's spinner says so in place
+// of its word (`Waiting for a fleet slot · #2 · cargo test, lane ledger · 1 ahead: api-main cargo
+// build`), so a queued job does not look like a hung command; once it is granted or ends, the
+// spinner is the engine's again. It gives no estimate of the wait: the view carries no durations
+// (what each command took is in `history.json`, beside the queue on the host, which no box reads).
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, On, RenderElement, Timer } from 'claude-code'
 
-import type { SkeinJobCall, SkeinJobsView, SkeinViewJob } from '../types'
+import type { SkeinJobCall, SkeinJobWatch, SkeinJobsView, SkeinViewJob } from '../types'
 
 import { ordinal } from './lanes'
 
-const watch = atom({ plugin: 'skein', key: 'jobWatch' } as const, null, { shape: 'job-watch-1' })
+const watch = atom({ plugin: 'skein', key: 'jobWatch' } as const, null, { shape: 'job-watch-2' })
 
 // skein writes the jobs view every two seconds (`LOOK_EVERY` in `src/jobs.rs`); reading it at the
 // same pace shows a change of place within one tick.
@@ -253,12 +259,21 @@ export function register(on: On): void {
     )
   })
 
+  // While a call's job waits, the spinner says what it waits for; the engine draws it.
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    const found = await read($, watch)
+    const text = found === null ? null : spinnerText(found, e.requestId)
+    if (text === null) return next(e)
+
+    return next({ ...e, props: { ...e.props, message: text, suffix: '' } })
+  })
+
   // Watches a `skein-job run` while it runs; the call itself is passed on as it came, and its
   // answer is returned as the engine settled it.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const command = typeof e.command === 'string' ? jobCommand(e.command) : null
     if (command === null) return next(e)
-    await quietly(begin($, e.tool_use_id, command))
+    await quietly(begin($, e.tool_use_id, command, e.agentId ?? null))
     try {
       return await next(e)
     } finally {
@@ -271,8 +286,8 @@ export function register(on: On): void {
 // The jobs view, while a skein-job call runs
 // ------------------------------------------------------------------------------------------------
 
-async function begin($: Engine, id: string, command: string): Promise<void> {
-  const call: SkeinJobCall = { id, command, jobId: null, isRunning: true }
+async function begin($: Engine, id: string, command: string, agentId: string | null): Promise<void> {
+  const call: SkeinJobCall = { id, command, jobId: null, isRunning: true, agentId }
   await update($, watch, w => ({
     calls: [...(w?.calls ?? []).filter(c => c.id !== id), call].slice(-KEEP_CALLS),
     view: w?.view ?? null,
@@ -399,6 +414,44 @@ export function waitLines(view: SkeinJobsView, job: SkeinViewJob, columns: numbe
   out.push(line(seg(`  pool ${view.cores} cores · ${view.granted} granted · ${view.free} free`, 'dim')))
 
   return out
+}
+
+/**
+ * The spinner's words while a running call's job waits for cores; null when none waits. A call of
+ * the main loop shows on any spinner, a subagent's only on that subagent's (`requestId` is the
+ * spinner's agent). Every job ahead is another box's, named with its box (`Ahead` in `src/jobs.rs`:
+ * the owner chose named over counted); the jobs ahead past those named are the box's own.
+ */
+export function spinnerText(w: SkeinJobWatch, requestId: string): string | null {
+  const view = w.view
+  if (view === null) return null
+  const job = w.calls
+    .filter(c => c.isRunning && c.jobId !== null && (c.agentId === null || c.agentId === requestId))
+    .map(c => view.jobs.find(j => j.id === c.jobId))
+    .find(j => j !== undefined && j.state === 'waiting')
+  if (job === undefined) return null
+  const parts = ['Waiting for a fleet slot']
+  if (job.position !== null) parts.push(`#${job.position}`)
+  const lane = laneOf(job.cwd)
+  parts.push(lane === null ? shortCommand(job.command) : `${shortCommand(job.command)}, lane ${lane}`)
+  const ahead = job.position === null ? view.ahead.length : Math.max(job.position - 1, view.ahead.length)
+  const first = view.ahead[0]
+  if (ahead > 0 && first !== undefined) {
+    const named = [first.box, first.command].filter(s => s !== '').join(' ')
+    parts.push(`${ahead} ahead: ${named}${ahead > 1 ? ` and ${ahead - 1} more` : ''}`)
+  } else if (ahead > 0) {
+    parts.push(`${ahead} ahead`)
+  } else {
+    parts.push(`${cores(job.cores)} asked, ${view.free} free`)
+  }
+
+  return parts.join(' · ')
+}
+
+/** The lane a job runs in, by its folder: a worktree under a checkout's `.worktrees/` (the owner's
+ * rule for where worktrees go) or under skein's lane root (`LANE_ROOT` in `bin/skein-mcp`). */
+export function laneOf(cwd: string): string | null {
+  return /\/(?:\.worktrees|skein-lanes)\/([^/]+)/.exec(cwd)?.[1] ?? null
 }
 
 /** What `skein-job` said it used, from its last line (`said_used` in `bin/skein-job`): `asked 4
