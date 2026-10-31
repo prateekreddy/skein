@@ -2992,12 +2992,15 @@ unset SKEIN_NPM_PREFIX
 # installs it (`rustup toolchain install`, which reads the toolchain file's components and targets
 # too). A build whose toolchain is there never touches the lock. A proxy rustup itself started,
 # which it marks with `RUSTUP_TOOLCHAIN_SOURCE`, is skipped: its toolchain was resolved by the
-# rustup that started it, and every `rustc` cargo runs is one. `skein-lock` (`src/plugin/bin`) takes
+# rustup that started it, and every `rustc` cargo runs is one. One that names its own `+toolchain`
+# (a build script running `cargo +nightly fmt`) is not, as rustup resolved nothing for it. `skein-lock` (`src/plugin/bin`) takes
 # the same lock for an agent's own installs.
 #
 # In the area, rustup may change toolchains, so the refusal below is only for `rustup self`. An
 # agent's own change (`toolchain install|uninstall`, `update`, `component` or `target add|remove`)
-# runs under the same lock; a read (`show`, `which`, `run`) never takes it.
+# runs under the same lock, and so does `run --install`; a read (`show`, `which`, `run`) never
+# takes it. rustup itself never installs here (`RUSTUP_AUTO_INSTALL=0`, below), so a proxy that
+# gets past the shim says the toolchain is missing rather than install it unlocked.
 toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
 rust_default="$(box_version rust)" || rust_default=""
 rust_pinned="$(box_version rust-repo)" || rust_pinned=""
@@ -3054,9 +3057,9 @@ if [ -n "$skein_area_tc" ] && [ -n "${SKEIN_REPO_TOOLS-}" ] &&
       ln -- "$RUSTUP_HOME/.settings.$$" "$RUSTUP_HOME/settings.toml" 2>/dev/null
     rm -f -- "$RUSTUP_HOME/.settings.$$"
   fi
-  if [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN_SOURCE-}" ]; then
-    plus=()
-    case "${1-}" in +?*) plus=("$1") ;; esac
+  plus=()
+  case "${1-}" in +?*) plus=("$1") ;; esac
+  if [ "$called" != rustup ] && { [ -z "${RUSTUP_TOOLCHAIN_SOURCE-}" ] || [ "${#plus[@]}" -gt 0 ]; }; then
     have() { RUSTUP_AUTO_INSTALL=0 "$skein_rustup" "${plus[@]}" show active-toolchain >/dev/null 2>&1; }
     if ! have && mkdir -p -- "$SKEIN_REPO_TOOLS/.locks" && exec {lock}>>"$SKEIN_REPO_TOOLS/.locks/tools"; then
       if ! flock -n "$lock"; then
@@ -3101,11 +3104,14 @@ for a in "$@"; do
   if [ -z "$sub" ]; then sub=$a; else arg=$a; break; fi
 done
 if [ -n "$area" ]; then
+  if [ "$sub" = run ]; then
+    for a in "$@"; do [ "$a" = --install ] && arg=--install; done
+  fi
   case "$sub:$arg" in
     self:*)
       echo "skein: rustup itself is the fleet's and is read-only, so it cannot update or remove itself here. This repo's toolchains can still be installed and removed, with rustup toolchain install and uninstall." >&2
       exit 1 ;;
-    install:*|uninstall:*|update:*|upgrade:*|toolchain:install|toolchain:uninstall|toolchain:remove|component:add|component:remove|target:add|target:remove)
+    install:*|uninstall:*|update:*|upgrade:*|toolchain:install|toolchain:uninstall|toolchain:remove|component:add|component:remove|target:add|target:remove|run:--install)
       if mkdir -p -- "$SKEIN_REPO_TOOLS/.locks" && exec {lock}>>"$SKEIN_REPO_TOOLS/.locks/tools"; then
         if ! flock -n "$lock"; then
           echo "skein: another box of this repo is changing its Rust toolchains; rustup waits for it to finish." >&2
@@ -3950,12 +3956,13 @@ exec bwrap \
     # rustup saying it is not installed, where an install attempt failed on a read-only temp root.
     #
     # In a box with a repo tools area and no depot pin, RUSTUP_HOME is the area rustup instead
-    # (SKEIN-1431, "which home wins" at the toolchain block above), and writable, so auto-install is
-    # on: the shim installs a missing toolchain under the repo lock, and rustup only finds one
-    # missing itself when the shim did not ask. CARGO_HOME and CARGO_INSTALL_ROOT are set with the
-    # area below.
+    # (SKEIN-1431, "which home wins" at the toolchain block above), and writable. Auto-install is
+    # still off: the shim installs a missing toolchain itself, under the repo lock, and rustup
+    # installing one on its own would take no lock. What gets past the shim (the fleet toolchain
+    # proxies at their own path, which the box can see) then hears the toolchain is not installed,
+    # and does not install it unlocked. CARGO_HOME and CARGO_INSTALL_ROOT are set with the area below.
     if [ -n "$rustup_home" ] && [ "$rustup_home" = "$repo_tools/rustup" ]; then
-      export RUSTUP_HOME="$rustup_home" RUSTUP_AUTO_INSTALL=1
+      export RUSTUP_HOME="$rustup_home" RUSTUP_AUTO_INSTALL=0
     elif [ -n "$rustup_home" ]; then
       export RUSTUP_HOME="$rustup_home" CARGO_HOME="$HOME/.cargo" CARGO_INSTALL_ROOT="$HOME/.local" \
         RUSTUP_AUTO_INSTALL=0

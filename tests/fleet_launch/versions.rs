@@ -1016,8 +1016,9 @@ fn a_repo_with_no_toolchain_file_builds_with_the_linked_fleet_toolchain() {
 /// `$RUSTUP_HOME/toolchains/<name>` is. `show active-toolchain` answers that; `toolchain install`
 /// takes two seconds and logs its start and end beside `RUSTUP_HOME`, and so does an agent's own
 /// change (`toolchain install <name>`, `component add`, `target remove`, ...), in a log of its own;
-/// anything else is a proxy or a read, which says what it ran, or logs `unlocked` when its
-/// toolchain was missing (rustup's own auto-install, which takes no lock).
+/// anything else is a proxy or a read, which says what it ran. When its toolchain is missing it
+/// does what rustup does: with `RUSTUP_AUTO_INSTALL=0` it says so and fails, and otherwise it
+/// installs the toolchain itself, taking no lock, and logs that as `unlocked`.
 const FAKE_RUSTUP: &str = r#"#!/bin/bash
 log="$RUSTUP_HOME/../skein-test-installs.log"
 plus=""
@@ -1043,7 +1044,9 @@ case "$*" in
     echo "start $$ $*" >>"$changes"; sleep 2; echo "end $$ $*" >>"$changes"; echo "changed" ;;
   *)
     if [ -d "$RUSTUP_HOME/toolchains/$tc" ]; then echo "ran $tc"
-    else echo "unlocked $$" >>"$log"; echo "missing $tc"; exit 1; fi ;;
+    elif [ "${RUSTUP_AUTO_INSTALL-1}" != 0 ]; then
+      echo "unlocked $$" >>"$log"; mkdir -p "$RUSTUP_HOME/toolchains/$tc"; echo "ran $tc"
+    else echo "missing $tc"; exit 1; fi ;;
 esac
 "#;
 
@@ -1055,15 +1058,20 @@ esac
 ///
 /// What would make it fail: the shim installing without the lock (two `start`s before an `end`,
 /// and two installs); taking the lock but not asking again once it holds it (a second install
-/// after the first); not installing at all and leaving it to rustup (`unlocked` in the log). And a
-/// build that waits on the lock when nothing is missing: the third run is made while another
-/// process holds the lock, and must not wait for it.
+/// after the first); not installing at all and leaving it to rustup (the runs say `missing`, or
+/// `unlocked` in the log). And a build that waits on the lock when nothing is missing: the third
+/// run is made while another process holds the lock, and must not wait for it.
 ///
 /// An agent's own changes take the same lock: a `rustup toolchain install` and a `rustup component
 /// add` made at once run one after the other (else two `start`s before an `end` in the changes
 /// log), and while another process holds the lock a `rustup show` and a `rustup which` still answer
 /// at once (a read that took the lock would print `waited`) and a `rustup target add` does not (an
-/// unlocked one would print `changed`).
+/// unlocked one would print `changed`), nor does a `rustup run --install`.
+///
+/// rustup never installs on its own, which only the shim's lock may do: the fleet toolchain's
+/// own `cargo`, run by its path past the shim, says the toolchain is missing (with rustup's
+/// auto-install on it would install it unlocked, and print `ran`). And a `cargo +toolchain` that a
+/// rustup proxy started, which the shim otherwise leaves alone, still installs under the lock.
 #[test]
 fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
     let _env = env_lock();
@@ -1085,16 +1093,22 @@ fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
         "[toolchain]\nchannel = \"1.90.0\"\n",
     )
     .unwrap();
-    let agent = "{ cargo build > /tmp/a.out 2>/tmp/a.err & cargo build > /tmp/b.out 2>/tmp/b.err; wait; \
+    let direct = root.join("boxes/.skein/toolchain/cargo/bin/cargo");
+    let direct = direct.display().to_string();
+    let agent = &"{ cargo build > /tmp/a.out 2>/tmp/a.err & cargo build > /tmp/b.out 2>/tmp/b.err; wait; \
                    printf 'a %s\\n' \"$(cat /tmp/a.out)\"; printf 'b %s\\n' \"$(cat /tmp/b.out)\"; \
                    exec 9>>\"$SKEIN_REPO_TOOLS/.locks/tools\"; flock 9; \
                    printf 'held %s\\n' \"$(timeout 20 cargo build 2>&1 || echo waited)\"; \
                    printf 'show %s\\n' \"$(timeout 20 rustup show 2>&1 || echo waited)\"; \
                    printf 'which %s\\n' \"$(timeout 20 rustup which rustc 2>&1 || echo waited)\"; \
                    printf 'target %s\\n' \"$(timeout 5 rustup target add wasm32-unknown-unknown 2>/dev/null || echo waited)\"; \
+                   printf 'runinstall %s\\n' \"$(timeout 5 rustup run --install 1.94.0 rustc 2>/dev/null || echo waited)\"; \
                    exec 9>&-; \
                    rustup toolchain install 1.91.0 > /tmp/c.out 2>&1 & rustup component add clippy > /tmp/d.out 2>&1; wait; \
-                 } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300";
+                   printf 'direct %s\\n' \"$(@DIRECT@ +1.93.0 build 2>/dev/null)\"; \
+                   printf 'nested %s\\n' \"$(RUSTUP_TOOLCHAIN_SOURCE=env RUSTUP_TOOLCHAIN=1.90.0 cargo +1.92.0 build 2>/dev/null)\"; \
+                 } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300"
+        .replace("@DIRECT@", &direct);
     let (_launched, anchor, report) = start_in_repo("rustlock-main", &prefix, &store, agent, "rs");
     end("rustlock-main", anchor);
     let log = fs::read_to_string(root.join("boxes/.repo-tools/rustlock/skein-test-installs.log"))
@@ -1105,9 +1119,26 @@ fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
         .collect();
     assert_eq!(
         shape,
-        ["start", "end"],
+        ["start", "end", "start", "end"],
         "two cargo runs at once did not install the missing toolchain exactly once, under the \
-         lock:\n{log}\n{report:?}"
+         lock, or a cargo +toolchain a proxy started did not install its own under it, or rustup \
+         installed one itself, unlocked:\n{log}\n{report:?}"
+    );
+    assert_eq!(
+        field(&report, "direct"),
+        "missing 1.93.0",
+        "the fleet toolchain's own cargo, run past the shim, did not refuse a missing toolchain: \
+         {report:?}"
+    );
+    assert_eq!(
+        field(&report, "nested"),
+        "ran 1.92.0",
+        "a cargo +toolchain that a rustup proxy started did not get its toolchain: {report:?}"
+    );
+    assert_eq!(
+        field(&report, "runinstall"),
+        "waited",
+        "rustup run --install ran while another process held the repo's lock: {report:?}"
     );
     for run in ["a", "b"] {
         assert_eq!(
