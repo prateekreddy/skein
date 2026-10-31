@@ -2935,9 +2935,9 @@ unset SKEIN_NPM_PREFIX
 # "cargo: command not found" and grow a private `~/.rustup` of its own. Its `bin` is bound over the
 # box's own `~/.cargo/bin`, which `box_path` carries, so a crossing's PATH is still a function of
 # the box's home alone (`place::box_path`); the session block below points `RUSTUP_HOME` at it; and
-# `CARGO_HOME` is the repo's download cache if the box has one (SKEIN-1350), else `~/.cargo`.
+# `CARGO_HOME` is in the repo's tools area if the box has one (SKEIN-1431), else `~/.cargo`.
 # What a box cannot do is `cargo install` into `~/.cargo/bin`, which is the shared one, so the
-# session block points `CARGO_INSTALL_ROOT` at `~/.local` instead (SKEIN-1349).
+# session block points `CARGO_INSTALL_ROOT` at the area's `tools`, else `~/.local` (SKEIN-1349).
 #
 # Read-only in EVERY box: a covered box already sees `.skein` read-only, but the workshop box and an
 # uncovered one see the fleet root as the sandbox does, and one box changing the toolchain would
