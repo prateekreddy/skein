@@ -21,6 +21,8 @@ const ZERO = '0'.repeat(40)
 const pushedLog = (sha: string) => `${ZERO} ${sha} Box <box@example.com> ${PUSHED_AT} +0000\tupdate by push\n`
 const fetchedLog = (sha: string) => `${ZERO} ${sha} Box <box@example.com> ${PUSHED_AT} +0000\tfetch: fast-forward\n`
 
+const entry = (name: string) => ({ name, kind: 'file' as const, size: 84, mtimeMs: NOW, isLink: false })
+
 type Box = {
   /** Reflog files under `LOGS`, by branch name after `ci/`. */
   logs: Map<string, string>
@@ -49,8 +51,8 @@ function box(on: On, store: Record<string, unknown> = {}): Box {
     return { value: got }
   })
   on('fs.list', (_, e) => {
-    if (e.path === `${CWD}/.git`) return { value: [{ name: 'HEAD', kind: 'file' as const }] }
-    if (e.path === LOGS) return { value: [...b.logs.keys()].map(name => ({ name, kind: 'file' as const })) }
+    if (e.path === `${CWD}/.git`) return { value: [entry('HEAD')] }
+    if (e.path === LOGS) return { value: [...b.logs.keys()].map(entry) }
     throw new Error(`ENOENT: ${e.path}`)
   })
   on('process.run', (_, e) => {
