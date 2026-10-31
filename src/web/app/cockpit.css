@@ -1159,6 +1159,14 @@
   /* a box's question: its own words, as plain text, wrapped where it wraps */
   .aq-body { font-size:12px; color:var(--text); white-space:pre-wrap; word-break:break-word; margin-top:6px; }
   .aq-reply { flex:1; min-width:10em; }
+  /* the decision inbox: every question waiting on the person, above the board (SKEIN-1375) */
+  #decisions { margin:6px 10px 10px; display:flex; flex-direction:column; gap:6px; }
+  #decisions[hidden] { display:none; }
+  #decisions .dhead { display:flex; align-items:baseline; gap:8px; font-size:12px; color:var(--text); }
+  #decisions .dhead .n { font-family:var(--mono); color:var(--attn); }
+  #decisions .dhead .sub { font-size:11px; color:var(--faint); }
+  #decisions .dcard { padding:8px 10px; border:1px solid var(--line); border-left:3px solid var(--attn); border-radius:8px; background:var(--inset); }
+  #decisions .dc-why { font-size:11px; color:var(--dim); white-space:pre-wrap; word-break:break-word; margin-top:4px; }
   /* the badge that says something is waiting on a decision */
   /* Write access too (SKEIN-1298): its count was the one drawn as grey text beside the icon. */
   #subqbtn, #askqbtn, #gitqbtn { position:relative; }

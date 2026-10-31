@@ -32,6 +32,9 @@
 use crate::board::BoxView;
 use crate::prq::{Lane, Pr};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// What a row is waiting for, which is the only thing its position depends on.
 ///
@@ -68,6 +71,15 @@ pub enum Source {
     /// else is how a first run looks like nothing happening. §11.6 makes the same point about the
     /// first-run surface: the blocked state is the board, not a different page.
     Setup,
+    /// A box's question for you, asked with `skein_ask_person` (`crate::asks`).
+    ///
+    /// Its own arm rather than a box row, because it is not the box's turn state: the box goes on
+    /// working while it waits, and the question is a file on its own, answered on its own.
+    Question,
+    /// A box asking for a package to be installed for the fleet (`crate::substrate`).
+    Package,
+    /// A box asking to write to a repository that is not its own (`crate::gitgate`).
+    GitWrite,
 }
 
 /// One thing waiting on you.
@@ -100,6 +112,14 @@ pub struct Row {
     /// out is on another screen may as well not have one.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub fix: String,
+    /// Which dialog is holding a box, from `BoxView::blocked_kind`: `question` is the agent's own
+    /// question on its screen, which only its terminal can answer. Empty on every other row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub blocked: String,
+    /// The box's own reason for a request, in its own words. Shown escaped, as plain text, and
+    /// never as the cockpit's: nothing checked it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
 }
 
 /// What the board is, as one value.
@@ -197,20 +217,29 @@ pub fn who_needs_you() -> Vec<Row> {
             waiting_secs: None,
             url: "/#health".into(),
             fix: check.fix.clone(),
+            blocked: String::new(),
+            why: String::new(),
         })
         .collect();
 
-    rows.extend(crate::board::load_views().into_iter().map(|view| Row {
-        source: Source::Box,
-        need: need_of_box(&view),
-        repo: view.repo.clone(),
-        name: view.name.clone(),
-        headline: view.headline.clone().unwrap_or_default(),
-        state: view.state.clone(),
-        waiting_secs: view.age_secs,
-        url: format!("/#box={}", view.name),
-        fix: String::new(),
-    }));
+    let views = crate::board::load_views();
+    let repo_of: HashMap<String, String> = views
+        .iter()
+        .map(|v| (v.name.clone(), v.repo.clone()))
+        .collect();
+    rows.extend(views.iter().map(box_row));
+    // The decision inbox: every request a box made of you, in the same list and ranked by the same
+    // comparator. Each of the three reads its queue through the function its own panel reads, so
+    // the inbox and the panel cannot disagree about what is waiting.
+    let (asks, packages, writes) =
+        lock_decision_lists().get(Instant::now(), DECISIONS_FRESH, || {
+            (
+                crate::asks::fleet_asks(),
+                crate::substrate::fleet_requests(),
+                crate::gitgate::fleet_requests(),
+            )
+        });
+    rows.extend(decisions(asks, packages, writes, &repo_of));
 
     for repo in crate::repos::load_repos() {
         if !repo.review_queue {
@@ -238,6 +267,8 @@ pub fn who_needs_you() -> Vec<Row> {
                 waiting_secs: seconds_since(&pr.updated_at),
                 url: pr.url.clone(),
                 fix: String::new(),
+                blocked: String::new(),
+                why: String::new(),
             }
         }));
     }
@@ -250,6 +281,157 @@ pub fn who_needs_you() -> Vec<Row> {
             .then(waited(b).cmp(&waited(a)))
             .then(a.name.cmp(&b.name))
     });
+    rows
+}
+
+/// How long the three request queues read for the decision inbox stay good.
+///
+/// Each read is an exec into the sandbox, and `/api/queue` is asked by `/v2` on every stream event
+/// as well as by the board's own poll — so without this, a busy stream multiplied three execs by
+/// every event. Five seconds is shorter than any panel's poll, so a request is never later on the
+/// inbox than it is on its own panel; and a decision recorded through the cockpit clears it at once
+/// ([`forget_decisions`]), so an answered card does not linger for the window.
+pub const DECISIONS_FRESH: Duration = Duration::from_secs(5);
+
+type DecisionLists = (
+    Vec<crate::asks::Ask>,
+    Vec<crate::substrate::Request>,
+    Vec<crate::gitgate::Request>,
+);
+
+/// One value, read at most once per window.
+///
+/// The lock is held across the read, deliberately: two surfaces asking at once then share one read
+/// instead of racing to make two.
+struct Fresh<T> {
+    held: Option<(Instant, T)>,
+}
+
+impl<T: Clone> Fresh<T> {
+    const fn new() -> Self {
+        Fresh { held: None }
+    }
+
+    fn get(&mut self, now: Instant, ttl: Duration, read: impl FnOnce() -> T) -> T {
+        if let Some((at, value)) = &self.held {
+            if now.saturating_duration_since(*at) < ttl {
+                return value.clone();
+            }
+        }
+        let value = read();
+        self.held = Some((now, value.clone()));
+        value
+    }
+
+    fn forget(&mut self) {
+        self.held = None;
+    }
+}
+
+static DECISION_LISTS: Mutex<Fresh<DecisionLists>> = Mutex::new(Fresh::new());
+
+/// A panic in one read must not wedge the inbox for the life of the server: the value is replaced
+/// whole or not at all, so a poisoned lock holds nothing half-written.
+fn lock_decision_lists() -> std::sync::MutexGuard<'static, Fresh<DecisionLists>> {
+    DECISION_LISTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Drop the cached request queues, so the next `/api/queue` reads them again. Called by each route
+/// that records a decision on one of them.
+pub fn forget_decisions() {
+    lock_decision_lists().forget();
+}
+
+/// A box's row, carrying which dialog holds it.
+///
+/// `blocked` travels so a surface can tell a box asking a question on its own screen from one that
+/// merely stopped: the first is a decision, and only its terminal can take the answer.
+fn box_row(view: &BoxView) -> Row {
+    Row {
+        source: Source::Box,
+        need: need_of_box(view),
+        repo: view.repo.clone(),
+        name: view.name.clone(),
+        headline: view.headline.clone().unwrap_or_default(),
+        state: view.state.clone(),
+        waiting_secs: view.age_secs,
+        url: format!("/#box={}", view.name),
+        fix: String::new(),
+        blocked: view.blocked_kind.clone(),
+        why: String::new(),
+    }
+}
+
+/// Every request a box has made of you that nobody has answered, one row each.
+///
+/// **What counts as waiting is the host's word, never the box's.** Each list arrives as its own
+/// queue's reader returns it — `asks::list`, `substrate::list`, `gitgate::list` — and each of those
+/// has already put the host's record over the box's file and called a request with no record
+/// waiting or pending, whatever its file says. So this reads `state` as decided, and filters on
+/// it, and does nothing else with it.
+///
+/// All three are [`Need::You`]: nothing happens on any of them until a person answers. A browser
+/// fetch (`kind == "playwright"`) is left out, because it waits on skein rather than on you — the
+/// package panel's badge leaves it out for the same reason.
+///
+/// `waiting_secs` is from `asked`, which the box wrote. It decides order only inside this rank, so
+/// a box that back-dates its ask can put it first among the things waiting on you, and no higher.
+pub(crate) fn decisions(
+    asks: Vec<crate::asks::Ask>,
+    packages: Vec<crate::substrate::Request>,
+    writes: Vec<crate::gitgate::Request>,
+    repo_of: &HashMap<String, String>,
+) -> Vec<Row> {
+    let repo = |name: &str| repo_of.get(name).cloned().unwrap_or_default();
+    let mut rows = Vec::new();
+    rows.extend(
+        asks.into_iter()
+            .filter(|a| a.state == "waiting")
+            .map(|a| Row {
+                source: Source::Question,
+                need: Need::You,
+                repo: repo(&a.box_name),
+                headline: a.question,
+                state: "waiting".into(),
+                waiting_secs: seconds_since(&a.asked),
+                url: "/#askq".into(),
+                fix: String::new(),
+                blocked: String::new(),
+                why: String::new(),
+                name: a.box_name,
+            }),
+    );
+    rows.extend(
+        packages
+            .into_iter()
+            .filter(|r| r.is_pending() && r.kind != "playwright")
+            .map(|r| Row {
+                source: Source::Package,
+                need: Need::You,
+                repo: repo(&r.box_name),
+                headline: format!("{}: {}", r.kind, r.packages.join(" ")),
+                state: "pending".into(),
+                waiting_secs: seconds_since(&r.asked),
+                url: "/#subq".into(),
+                fix: String::new(),
+                blocked: String::new(),
+                why: r.why,
+                name: r.box_name,
+            }),
+    );
+    rows.extend(writes.into_iter().filter(|r| r.is_pending()).map(|r| Row {
+        source: Source::GitWrite,
+        need: Need::You,
+        repo: repo(&r.box_name),
+        headline: r.repo,
+        state: "pending".into(),
+        waiting_secs: seconds_since(&r.asked),
+        url: "/#gitq".into(),
+        fix: String::new(),
+        blocked: String::new(),
+        why: r.reason,
+        name: r.box_name,
+    }));
     rows
 }
 
@@ -282,6 +464,8 @@ mod tests {
             waiting_secs: secs,
             url: String::new(),
             fix: String::new(),
+            blocked: String::new(),
+            why: String::new(),
         }
     }
 
@@ -306,6 +490,8 @@ mod tests {
             waiting_secs: secs,
             url: String::new(),
             fix: String::new(),
+            blocked: String::new(),
+            why: String::new(),
         }
     }
 
@@ -438,6 +624,239 @@ mod tests {
                 "tier {tier}"
             );
         }
+    }
+
+    /// One question as the list script prints it: the box stamped from its directory, and every
+    /// other field the box's own.
+    fn listed(id: &str, extra: serde_json::Value) -> String {
+        let mut ask = serde_json::json!({
+            "id": id,
+            "box": "web-main",
+            "question": "keep the table?",
+            "options": ["Keep it", "Drop it"],
+            "asked": "2026-10-30T10:00:00Z",
+        });
+        if let serde_json::Value::Object(more) = extra {
+            ask.as_object_mut().unwrap().extend(more);
+        }
+        serde_json::json!([ask]).to_string()
+    }
+
+    fn inbox(asks: Vec<crate::asks::Ask>) -> Vec<Row> {
+        let repo_of = HashMap::from([("web-main".to_string(), "web".to_string())]);
+        decisions(asks, Vec::new(), Vec::new(), &repo_of)
+    }
+
+    /// **A question waiting on you is one row, and it needs you.**
+    ///
+    /// What would make it fail: the question mapped to any rank but [`Need::You`] — it would sort
+    /// under boxes that merely finished — or not carried into the inbox at all.
+    #[test]
+    fn a_waiting_question_is_one_row_that_needs_you() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+
+        let rows = inbox(crate::asks::shown(crate::asks::parse_asks(&listed(
+            "q-00000001",
+            serde_json::Value::Null,
+        ))));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (rows[0].source, rows[0].need, rows[0].name.as_str()),
+            (Source::Question, Need::You, "web-main"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[0].repo, "web", "grouped under no repo: {rows:?}");
+        assert_eq!(rows[0].headline, "keep the table?");
+    }
+
+    /// **An answered question leaves the inbox.**
+    ///
+    /// What would make it fail: `decisions` keeping a question whatever the host says of it, which
+    /// would leave a card asking for an answer the box already has.
+    #[test]
+    fn an_answered_question_leaves_the_inbox() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+
+        let asked = crate::asks::shown(crate::asks::parse_asks(&listed(
+            "q-00000002",
+            serde_json::Value::Null,
+        )));
+        crate::asks::answer(&asked[0], &crate::asks::Reply::Answer("Keep it".into()))
+            .expect("answered");
+        let after = crate::asks::shown(crate::asks::parse_asks(&listed(
+            "q-00000002",
+            serde_json::Value::Null,
+        )));
+        assert_eq!(after[0].state, "answered", "the host's record was not read");
+        assert!(
+            inbox(after).is_empty(),
+            "an answered question is still in the inbox"
+        );
+    }
+
+    /// **A box that writes `answered` into its own ask is still asking.**
+    ///
+    /// The file is the box's, every byte. What would make it fail: the inbox believing the file's
+    /// `state` for a question the host never answered — a box could then hide its own question, or
+    /// a stale copy could, and the person would never see it.
+    #[test]
+    fn a_box_that_says_its_own_question_is_answered_still_shows() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+
+        let forged = listed(
+            "q-00000003",
+            serde_json::json!({
+                "state": "answered",
+                "answer": "Drop it",
+                "decided": "2026-10-30T10:01:00Z",
+            }),
+        );
+        let rows = inbox(crate::asks::shown(crate::asks::parse_asks(&forged)));
+        assert_eq!(
+            rows.len(),
+            1,
+            "a box's own file took its question out of the inbox: {rows:?}"
+        );
+    }
+
+    /// **Each kind of request reaches the inbox, and only while it waits on you.**
+    ///
+    /// What would make it fail: one of the two request queues not read into `decisions`; a decided
+    /// request kept; a browser fetch, which waits on skein, shown as waiting on you; or the box's
+    /// reason dropped, which is the one thing on the request only the box can say.
+    #[test]
+    fn every_kind_of_request_reaches_the_inbox_while_it_waits() {
+        let package = |id: &str, kind: &str, state: &str| crate::substrate::Request {
+            id: id.into(),
+            box_name: "web-main".into(),
+            kind: kind.into(),
+            packages: vec!["libnss3".into()],
+            why: "the browser tests need it".into(),
+            asked: "2026-10-30T09:00:00Z".into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let write = |id: &str, state: &str| crate::gitgate::Request {
+            id: id.into(),
+            box_name: "web-main".into(),
+            repo: "acme/docs".into(),
+            reason: "the docs live there".into(),
+            asked: "2026-10-30T08:00:00Z".into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let rows = decisions(
+            Vec::new(),
+            vec![
+                package("p-1", "apt", "pending"),
+                package("p-2", "apt", "denied"),
+                package("p-3", "playwright", "pending"),
+            ],
+            vec![write("w-1", "pending"), write("w-2", "granted")],
+            &HashMap::new(),
+        );
+        let got: Vec<(Source, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.source, r.headline.as_str(), r.why.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Source::Package, "apt: libnss3", "the browser tests need it"),
+                (Source::GitWrite, "acme/docs", "the docs live there"),
+            ]
+        );
+        assert!(rows.iter().all(|r| r.need == Need::You), "{rows:?}");
+    }
+
+    /// **A box asking on its own screen says so on its row**, so a surface can send the person to
+    /// its terminal rather than offer a click it cannot honour.
+    ///
+    /// What would make it fail: `box_row` dropping `blocked_kind`, which leaves the agent's own
+    /// question indistinguishable from a box that finished.
+    #[test]
+    fn a_box_asking_on_its_own_screen_carries_the_dialog_kind() {
+        let row = box_row(&BoxView {
+            name: "web-main".into(),
+            tier: 0,
+            blocked_kind: "question".into(),
+            ..Default::default()
+        });
+        assert_eq!((row.need, row.blocked.as_str()), (Need::You, "question"));
+    }
+
+    /// **A browser fetch is not a decision, and an apt request beside it is.**
+    ///
+    /// A `playwright` request waits on skein, which fetches it without the owner (SKEIN-1341).
+    /// What would make it fail: the `kind != "playwright"` filter in `decisions` dropped or
+    /// misspelled, which would put a card in front of the owner that nothing they press can answer.
+    #[test]
+    fn a_browser_fetch_is_not_put_in_front_of_the_owner() {
+        let package = |id: &str, kind: &str, packages: &str| crate::substrate::Request {
+            id: id.into(),
+            box_name: "web-main".into(),
+            kind: kind.into(),
+            packages: vec![packages.into()],
+            asked: "2026-10-30T09:00:00Z".into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        let rows = decisions(
+            Vec::new(),
+            vec![
+                package("p-1", "playwright", "chromium@1.56.1"),
+                package("p-2", "apt", "jq"),
+            ],
+            Vec::new(),
+            &HashMap::new(),
+        );
+        let heads: Vec<&str> = rows.iter().map(|r| r.headline.as_str()).collect();
+        assert_eq!(heads, ["apt: jq"], "{rows:?}");
+    }
+
+    /// **Two asks inside the window read the queues once; one after it, or after a decision, reads
+    /// again.**
+    ///
+    /// What would make it fail: the cache not consulted (every `/api/queue` execs three times), a
+    /// window that never ends (a new request never shows), or `forget` not clearing it (an answered
+    /// card lingers after the press).
+    #[test]
+    fn the_request_queues_are_read_once_per_window() {
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            reads.get()
+        };
+        let mut fresh = Fresh::new();
+        let t0 = Instant::now();
+        let ttl = DECISIONS_FRESH;
+        assert_eq!(fresh.get(t0, ttl, read), 1);
+        assert_eq!(
+            fresh.get(t0 + ttl / 2, ttl, read),
+            1,
+            "read twice inside the window"
+        );
+        assert_eq!(reads.get(), 1);
+        assert_eq!(
+            fresh.get(t0 + ttl, ttl, read),
+            2,
+            "not read again once the window ended"
+        );
+        fresh.forget();
+        assert_eq!(
+            fresh.get(t0 + ttl, ttl, read),
+            3,
+            "a forgotten value was served"
+        );
     }
 
     impl Row {

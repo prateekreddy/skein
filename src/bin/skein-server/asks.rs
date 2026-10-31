@@ -47,7 +47,10 @@ pub(super) async fn api_ask_answer(Path(id): Path<String>, Json(r): Json<AnswerR
         ..Default::default()
     };
     match tokio::task::spawn_blocking(move || skein::asks::answer(&rendered, &reply)).await {
-        Ok(Ok(done)) => Json(done).into_response(),
+        Ok(Ok(done)) => {
+            skein::queue::forget_decisions();
+            Json(done).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

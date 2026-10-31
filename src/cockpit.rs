@@ -134,6 +134,8 @@ mod tests {
             waiting_secs: Some(30),
             url: "/box/web-main".into(),
             fix: String::new(),
+            blocked: String::new(),
+            why: String::new(),
         };
         let wire = serde_json::to_string(&row).unwrap();
         for field in [
@@ -299,6 +301,156 @@ mod tests {
         );
     }
 
+    /// Run `call` against the served bundle in node, with `rows` bound to the JSON the server
+    /// sends. `None` where node is absent.
+    fn run_bundle(rows: &[crate::queue::Row], call: &str) -> Option<String> {
+        let json = serde_json::to_string(rows).unwrap();
+        let script = format!("{BUNDLE}\nconst rows = {json};\nprocess.stdout.write({call});");
+        let out = std::process::Command::new("node")
+            .args(["-e", &script])
+            .output()
+            .ok()?;
+        assert!(
+            out.status.success(),
+            "the bundle would not run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(String::from_utf8(out.stdout).unwrap())
+    }
+
+    fn decision_row(source: crate::queue::Source, name: &str, headline: &str) -> crate::queue::Row {
+        crate::queue::Row {
+            source,
+            need: crate::queue::Need::You,
+            repo: "web".into(),
+            name: name.into(),
+            headline: headline.into(),
+            state: "waiting".into(),
+            waiting_secs: Some(60),
+            url: String::new(),
+            fix: String::new(),
+            blocked: String::new(),
+            why: String::new(),
+        }
+    }
+
+    /// **The decision card escapes every word a box wrote**, on the row the server really sends.
+    ///
+    /// The question, the box's name and its reason are the box's own bytes. What would make it
+    /// fail: any of them interpolated into the card without `decisionEsc` — a `<b>` then arrives
+    /// as markup, and so would anything else.
+    #[test]
+    fn a_decision_card_shows_a_boxs_words_as_text() {
+        use crate::queue::Source;
+        let evil = "<b>x</b>";
+        let mut package = decision_row(Source::Package, evil, evil);
+        package.why = evil.into();
+        let mut asking = decision_row(Source::Box, evil, evil);
+        asking.blocked = "question".into();
+        let rows = [decision_row(Source::Question, evil, evil), package, asking];
+        let Some(html) = run_bundle(&rows, "decisionsHtml(rows, 0, null)") else {
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
+            return;
+        };
+        assert_eq!(
+            html.matches("class=\"dcard\"").count(),
+            3,
+            "not every row drew a card: {html}"
+        );
+        assert!(!html.contains(evil), "a box's words became markup: {html}");
+        // Per card the name twice (the sentence and the button's `data-box`) and the headline once,
+        // and the package's reason: ten, every one of them escaped.
+        assert_eq!(html.matches("&lt;b&gt;x&lt;/b&gt;").count(), 10, "{html}");
+    }
+
+    /// **No card is drawn without an action, and every kind of decision the server sends has one.**
+    ///
+    /// Every `Source` arm, spelled the way serde spells it. What would make it fail: a source the
+    /// page has no action for drawn as a card — a setup fault, a pull request, a box that only
+    /// stopped — or a decision source whose tag the page does not know (`git-write` renamed on
+    /// either side), which would silently drop that kind from the inbox.
+    #[test]
+    fn every_decision_the_server_sends_has_an_action_and_nothing_else_does() {
+        use crate::queue::Source;
+        let mut asking = decision_row(Source::Box, "web-main", "which table?");
+        asking.blocked = "question".into();
+        let rows = [
+            decision_row(Source::Question, "web-main", "q"),
+            decision_row(Source::Package, "web-main", "apt: jq"),
+            decision_row(Source::GitWrite, "web-main", "acme/docs"),
+            asking,
+            decision_row(Source::Box, "web-main", "done"),
+            decision_row(Source::PullRequest, "#4", "a pull request"),
+            decision_row(Source::Setup, "login", "signed out"),
+        ];
+        let Some(opens) = run_bundle(
+            &rows,
+            "JSON.stringify(rows.map(r => (decisionAction(r) || {}).open || null))",
+        ) else {
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
+            return;
+        };
+        assert_eq!(
+            opens, r#"["askq","subq","gitq","terminal",null,null,null]"#,
+            "a card without an action, or a decision with none"
+        );
+        let html = run_bundle(&rows, "decisionsHtml(rows, 0, null)").unwrap();
+        assert_eq!(
+            html.matches("class=\"dcard\"").count(),
+            html.matches("<button ").count(),
+            "{html}"
+        );
+        assert_eq!(html.matches("<button ").count(), 4, "{html}");
+    }
+
+    /// **The link on each decision row opens the panel its card opens.**
+    ///
+    /// The rows are built by `queue::decisions`, so the `url` is the server's own; `/v2` opens that
+    /// link, and the board's hash router (`panelForHash`) is what turns it into a panel. What would
+    /// make it fail: a row's `url` and the router disagreeing — `/v2` would then land on the board
+    /// with nothing open — or the card and the link naming different panels.
+    #[test]
+    fn a_decisions_link_opens_the_panel_its_card_opens() {
+        let rows = crate::queue::decisions(
+            vec![crate::asks::Ask {
+                id: "q-1".into(),
+                box_name: "web-main".into(),
+                question: "keep it?".into(),
+                state: "waiting".into(),
+                ..Default::default()
+            }],
+            vec![crate::substrate::Request {
+                id: "p-1".into(),
+                box_name: "web-main".into(),
+                kind: "apt".into(),
+                packages: vec!["jq".into()],
+                state: "pending".into(),
+                ..Default::default()
+            }],
+            vec![crate::gitgate::Request {
+                id: "w-1".into(),
+                box_name: "web-main".into(),
+                repo: "acme/docs".into(),
+                state: "pending".into(),
+                ..Default::default()
+            }],
+            &Default::default(),
+        );
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let Some(pairs) = run_bundle(
+            &rows,
+            "JSON.stringify(rows.map(r => [panelForHash(r.url.slice(r.url.indexOf('#'))), \
+             decisionAction(r).open]))",
+        ) else {
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
+            return;
+        };
+        assert_eq!(
+            pairs,
+            r#"[["askq","askq"],["subq","subq"],["gitq","gitq"]]"#
+        );
+    }
+
     /// **The URL the change view asks for is a URL this router answers** (SKEIN-246).
     ///
     /// The view shipped whole — `shape::of_diff`, two handlers, the page that renders them — and a
@@ -345,6 +497,8 @@ mod tests {
             waiting_secs: None,
             url: String::new(),
             fix: String::new(),
+            blocked: String::new(),
+            why: String::new(),
         };
         let rows = [
             row(Source::PullRequest, format!("#{number}")),

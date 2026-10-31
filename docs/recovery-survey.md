@@ -121,14 +121,14 @@ Ranked by reachability × severity — how easily an ordinary session lands here
 person is when it does.
 
 **1. The terminal reconnect overlay waits for a click, over a sentence it hides.**
-`src/web/app/board.js:945` paints *"session not connected / click to reconnect"* on any box terminal
+`src/web/app/board.js:981` paints *"session not connected / click to reconnect"* on any box terminal
 whose socket drops with a code that is not `CLOSE_CHILD_ENDED`. There was no retry timer
 when this was written: `reconnectSession` had four call sites, and every one of them was a person
 acting — a restart, a tab click, the overlay itself, a file drop. **That is no longer true**
 (re-read 2026-09-23, `grep -n 'reconnectSession(' src/web/app/*.js` prints its definition and
 six calls):
-`src/web/app/board.js:410`, `src/web/app/board.js:843`, `src/web/app/board.js:946`,
-`src/web/app/board.js:1266` (the recovery card's *Try again*), `src/web/app/board.js:1298` and
+`src/web/app/board.js:410`, `src/web/app/board.js:879`, `src/web/app/board.js:982`,
+`src/web/app/board.js:1302` (the recovery card's *Try again*), `src/web/app/board.js:1334` and
 `src/web/app/boot.js:174` — and the fifth is not a person: `retryWaiting` reconnects every pane
 waiting on a condition the moment the board tick or a `pty-freed` event says it cleared. Worse,
 the six failure sentences in `terminal_session`, `login_session` and `pump_pty`
@@ -521,7 +521,7 @@ grep -rn "sandbox.is_empty()\|sandbox\.trim()\.is_empty()\|fleet\.is_empty()" sr
 - `src/update.rs:488` — `settle(sandbox: &str)` takes its argument, so a caller may pass anything.
 - `src/place/record.rs:289` — a filter over *recorded placements*, where an empty sandbox is a real
   recorded value rather than an impossible configuration.
-- `src/bin/skein-server/fleet.rs:299` — **reachable, and the only live member left.** It reads the field
+- `src/bin/skein-server/fleet.rs:300` — **reachable, and the only live member left.** It reads the field
   inside `update_config`'s closure, and `update_config` loads through `read_config()`
   (`src/config.rs:627`) rather than `load_config()` — so the blank-name repair has not run and a
   `config.json` carrying `"fleet_sandbox": ""` present-and-empty reaches it. Not a survey row (it is
@@ -594,7 +594,7 @@ same shape and all of them conform.
 **Already owned: SKEIN-702**, which is decided and blocked only on file ownership. Included so the
 table is complete, and because measuring them changed one thing: the defect is not only that some
 say nothing, it is that *none of the six early returns sends a close code*, so
-`src/web/app/board.js:1036` reads 1006, decides the connection went away, and covers the sentence with
+`src/web/app/board.js:1072` reads 1006, decides the connection went away, and covers the sentence with
 the reconnect card. `CLOSE_CHILD_ENDED` (`src/bin/skein-server.rs:4469`) is only sent at `src/bin/skein-server.rs:4405`,
 which is reached solely when `pump_pty` returned a child's exit code.
 
@@ -631,7 +631,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     (`src/stream.rs:243`); the server forwards that as `pty-freed` (`src/bin/skein-server/events.rs:79`);
 >     and the page reconnects every pane waiting on it (`src/web/app/boot.js:612`), offering no
 >     control, because a control beside a promise to come back is an invitation to press something
->     that was not needed (`src/web/app/board.js:894`). Watched, and it recovers unasked.
+>     that was not needed (`src/web/app/board.js:930`). Watched, and it recovers unasked.
 >   * **The absent box — W → C.** The same shape one token along: the refusal adds
 >     `watching_for_box` (`src/bin/skein-server/terminal.rs:292`) and the board's own ticks drive the
 >     reconnect (`src/web/app/boot.js:587`).
@@ -644,7 +644,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     is met: `skeins_own_fault` says whose failure it is, that nothing will reopen the pane by
 >     itself, and which control to use (`src/bin/skein-server/terminal.rs:320`), and `AFTER_NO_WATCH`
 >     (`src/bin/skein-server/terminal.rs:421`) is what puts that button on the page instead of a spinner
->     (`src/web/app/board.js:898`). Requirement 3 is open, and that is what W is for: three of the four
+>     (`src/web/app/board.js:934`). Requirement 3 is open, and that is what W is for: three of the four
 >     rows below already NAME the condition in their `watchable?` cell — a pty slot freeing, the
 >     program appearing on PATH, fd pressure easing — and the fourth is that same fd pressure one
 >     call later. Each is a poll this tree knows how to write, `openpty` being the cheapest of them
@@ -656,7 +656,7 @@ which is reached solely when `pump_pty` returned a child's exit code.
 >     pump failures now close with `retry` (`src/bin/skein-server/terminal.rs:426`), and the pane
 >     tries again at 3s, 10s, 30s, 60s and 120s through `retryWaiting`, saying when the next try is
 >     and offering no button, then hands over to the button after the fifth
->     (`src/web/app/board.js:907`). `openpty` failing spawns nothing, so a try risks nothing. The
+>     (`src/web/app/board.js:943`). `openpty` failing spawns nothing, so a try risks nothing. The
 >     login modal's copy of the same four stays `no-watch` and keeps its button, for the reason the
 >     cap refusal above gives. `tests/ui/recovery.mjs` drives the whole run on Playwright's clock and
 >     counts the tries off the wire. The row letters below are still the 2026-09-09 measurement.
@@ -732,8 +732,8 @@ does it by reaching for
 | `src/bin/skein-server/boxes.rs:175` | no such act — it may have finished longer ago than the warden keeps them | **R** — poll an act more than `RETENTION` (30 min) after it ended — a sleeping laptop | polling an act that has aged out | partly — names the cause | no — the act is gone | U |
 | `src/bin/skein-server/events.rs:25` | too many live boards open — close one and retry | **R** — open 64 board event streams, then a 65th | opening more boards than `EVENT_LIMIT` | partly — manual | yes — a permit freeing, exactly as §5's two PTY rows | W |
 | `src/bin/skein-server/terminal.rs:663` | unsupported runtime | **R** — open the login websocket with a runtime id skein does not support | opening a login socket for an unknown runtime | n — no list, same omission as `src/bin/skein.rs:1526` | no | N |
-| `src/bin/skein-server/boxes.rs:62`, `src/bin/skein-server/repos.rs:56`, `src/bin/skein-server/fleet.rs:198`, `src/bin/skein-server/fleet.rs:198` | {tokio JoinError}, at 500 | **?** — four `spawn_blocking` sites; `stream::acknowledge` was read and has no panic path, and `moduledocs::status`, `machine::sandboxes` and `fleet::pressure` were not traced. Settled by auditing those three | a panicking blocking task | **cannot tell** how the cockpit renders it; either way it is not a sentence | yes | N |
-| `src/bin/skein-server/review.rs:481`, `src/bin/skein-server/fleet.rs:150` | {why}, at 503, forwarded from below | **R** — `sbx` wedged while the cockpit polls shape or machine sandboxes | the cockpit polling shape or sandboxes while `sbx` is wedged | inherits; the comment at `src/bin/skein-server/review.rs:478` refuses an empty list because the two causes "send a person to different places" | yes — and both are polled, so recovery is automatic | C |
+| `src/bin/skein-server/boxes.rs:62`, `src/bin/skein-server/repos.rs:56`, `src/bin/skein-server/fleet.rs:199`, `src/bin/skein-server/fleet.rs:199` | {tokio JoinError}, at 500 | **?** — four `spawn_blocking` sites; `stream::acknowledge` was read and has no panic path, and `moduledocs::status`, `machine::sandboxes` and `fleet::pressure` were not traced. Settled by auditing those three | a panicking blocking task | **cannot tell** how the cockpit renders it; either way it is not a sentence | yes | N |
+| `src/bin/skein-server/review.rs:481`, `src/bin/skein-server/fleet.rs:151` | {why}, at 503, forwarded from below | **R** — `sbx` wedged while the cockpit polls shape or machine sandboxes | the cockpit polling shape or sandboxes while `sbx` is wedged | inherits; the comment at `src/bin/skein-server/review.rs:478` refuses an empty list because the two causes "send a person to different places" | yes — and both are polled, so recovery is automatic | C |
 | `src/bin/skein-server/boxes.rs:112` | {why}, at 409, from `act::begin` | **R** — double-submit a box create for the same name before the first act ends | starting an act while one is running | y — the comment at `src/bin/skein-server/boxes.rs:110` says the message names which act to watch | yes — the other act finishing | C |
 
 ## 7. The cockpit
@@ -745,7 +745,7 @@ after `REV_STALE_TRIES`. Everything below either copies those or does not.
 
 | where | what a person sees | reach | reachable how | to do? | watchable? | v |
 |---|---|---|---|---|---|---|
-| `src/web/app/board.js:945` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
+| `src/web/app/board.js:981` | session not connected / click to reconnect | **R** — any terminal websocket closing for a reason other than the child ending — a server restart does it | any box terminal whose socket drops with a code that is not `CLOSE_CHILD_ENDED` | partly — a control, but no diagnosis, and it covers the sentence that had one | yes — the page holds `es.readyState`, `lastTickAt` and the box's state on the stream. `reconnectSession` has four call sites, all of them a person acting | W |
 | `src/web/app/board.js:281`, `src/web/app/board.js:413`, `src/web/app/box.js:26`, `src/web/app/box.js:64` | could not continue {box}: {why} · could not restart {agent} in {box}: {why} · could not stop {box}: {why} · could not destroy {box}: {why} | **R** — any of the four resume/restart/stop/destroy POSTs answering non-ok | the row action buttons on the fleet board. **Not** the other pair, at `src/web/app/box.js:78` and `src/web/app/box.js:82`, which is a different surface (SKEIN-891): the header's Continue N (`#contall`) or saying "continue all", one POST to `/api/resume-batch` for several boxes. Its first arm used to be unreachable — `api_resume_batch` answered `ok: true` on every path, so a batch that failed inside the server toasted "continuing 0" as a success. It now answers `ok: false` whenever a box it was asked for was neither continued nor held, with a sentence naming those boxes, each with its reason (`src/bin/skein-server/boxes.rs:753`, SKEIN-1137), and the page says that sentence in a notice that stays until closed (SKEIN-1132, SKEIN-1265); "could not continue those boxes" is the fallback for an answer without one and for the request itself failing | **y** — all four say the server's whole reason in a notice that stays until closed (SKEIN-1265, SKEIN-1313); a second stop or destroy while one is in flight sends nothing, and the row says "stopping…" or "destroying…" until it answers | yes — the box's own state on `/api/events`: a stop that failed leaves the box running | N |
 | `src/web/app/voice.js:126` | send failed | **R** — `POST /api/mailbox` failing | Mailbox → Send with a failing POST | **n** — two words. The typed text survives, and nothing says so | yes — the HTTP status distinguishes a safely re-sendable 5xx from a 4xx | N |
 | `src/web/app/panels.js:1052` | could not run the test | **R** — the git-probe POST failing | Settings → GitHub & keys → test writes | **n** | yes — `health.gitgate` already carries the same fact on the 15s poll | N |
@@ -823,7 +823,7 @@ is a test doc comment at `src/fleet/resize.rs:1214` explaining why it was delete
 stays deleted. The repository now enforces its absence.
 
 **A second finding worth its own line: a well-written family of refusals is currently unreachable.**
-`resize_fleet` has one caller (`src/bin/skein-server/fleet.rs:340`), gated at `src/bin/skein-server/fleet.rs:337` by
+`resize_fleet` has one caller (`src/bin/skein-server/fleet.rs:341`), gated at `src/bin/skein-server/fleet.rs:338` by
 `fleet_lifecycle_refusal`, which since SKEIN-576 always returns `Some` (`src/fleet/create.rs:126`). So
 every refusal inside `resize_fleet_inner` is dead to a person today. Two of them name no next step,
 and would ship as dead ends the moment that gate changes. They are kept below rather than
@@ -869,7 +869,7 @@ their `where` column instead, which is exactly what blinded the misanchor gate t
 | `src/fleet/fleetlogin.rs:281`, `src/fleet/fleetlogin.rs:295`, `src/fleet/fleetlogin.rs:367`, `src/fleet/fleetlogin.rs:387` | could not read the {rel} login out of {sandbox} ({why}) — the host's kept copy is left exactly as it was · … left alone. · could not save the {rel} login out of {sandbox} — the copy that was already there is untouched · could not restore the {rel} login into {sandbox}: {e} | **R** — all four: an in-sandbox exec, read or write failing during a login heal | login sync | partly — all four say what was *not* damaged, which is the right instinct; none says what to do | yes — `login_fingerprint` / `login_written_ms` | N |
 | `src/fleet/start.rs:985` | skein: could not refresh the launcher in {sandbox} ({e}); {name} starts with whichever copy is already there | **R** — `install_launcher`'s write into the sandbox failing | box start | n | yes | N |
 | `src/fleet/start.rs:949`, `src/fleet/start.rs:1022` | {name} has a session nothing can enter — {why} — so it is being ended and {name} started again · {name} had no live session, so it was restarted (its work is untouched) | **R** — the sandbox's tmux server cycling under a running session — the code names it "the common cause" | box reattach | y — **these narrate a recovery that already happened.** The pattern the rest of the module should copy | already recovered | C |
-| `src/fleet/resize.rs:536` | box {name} belongs to no registered repo, so nothing could say where its work came from or put it back — resize aborted with the sandbox untouched | **X** — inside `resize_fleet_inner`, whose body is production-dead: BOTH callers of `resize_fleet` gate on `fleet_lifecycle_refusal` and return first — `src/bin/skein.rs:1714` (`cmd_resize`, whose `?` always fires) and `src/bin/skein-server/fleet.rs:337` (`api_fleet_resize`, whose `if let Some(why) … return` always fires). `tests/resize_rules.rs:279` asserts `cmd_resize` no longer contains `resize_fleet(` at all. **Dequeued by SKEIN-777 — code KEPT**: re-verified 2026-09-11, the body is still production-dead. Deleting it is SKEIN-575's, not this item's | not reachable today | **n** — names no verb; `skein add` is never mentioned | yes — the box gaining a repo | N |
+| `src/fleet/resize.rs:536` | box {name} belongs to no registered repo, so nothing could say where its work came from or put it back — resize aborted with the sandbox untouched | **X** — inside `resize_fleet_inner`, whose body is production-dead: BOTH callers of `resize_fleet` gate on `fleet_lifecycle_refusal` and return first — `src/bin/skein.rs:1714` (`cmd_resize`, whose `?` always fires) and `src/bin/skein-server/fleet.rs:338` (`api_fleet_resize`, whose `if let Some(why) … return` always fires). `tests/resize_rules.rs:279` asserts `cmd_resize` no longer contains `resize_fleet(` at all. **Dequeued by SKEIN-777 — code KEPT**: re-verified 2026-09-11, the body is still production-dead. Deleting it is SKEIN-575's, not this item's | not reachable today | **n** — names no verb; `skein add` is never mentioned | yes — the box gaining a repo | N |
 | `src/fleet/resize.rs:542` | box {name} has no recorded branch to come back on — resize aborted with the sandbox untouched | **X** — same dead body. **Dequeued by SKEIN-777 — code KEPT**; same re-verification, same owner (SKEIN-575) | not reachable today | **n** | yes — a branch being recorded | N |
 | `src/fleet/resize.rs:699` | could not tell whether {sandbox} was destroyed: {detail} — every box's work is copied out to its own state directory as {run}.tar, and those copies are the only thing that survives the sandbox either way | **X** — same dead body. **Dequeued by SKEIN-777 — code KEPT**; same re-verification, same owner (SKEIN-575) | not reachable today | partly, deliberately — the comment at `src/fleet/resize.rs:694` argues "a destroy that may have happened is the one answer no command can be offered for" | yes — `fleet_exists` answering definitively; the uncertainty is exactly a re-askable question | N |
 | `src/fleet/resize.rs:533` | {root} holds N checkout(s) that {dir} has no placement record for, so nothing could carry {them} out: {names} | **R** — **not** dead, and this is why reachability is per call site rather than per function: `census_placed_boxes` has two other live callers, `destroy_costs` (row 146's always-run path) and `save_boxes`. Trigger: an untracked checkout under the fleet root, then `skein save` | gated on the resize path, but `census_placed_boxes` also runs under `destroy_costs` and `save_boxes`, where a person does see it | **n** | yes — a placement record appearing for each named checkout | N |

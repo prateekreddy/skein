@@ -173,7 +173,14 @@ fn queued() -> Vec<Ask> {
 /// most [`CAP`] waiting per box.
 pub fn list(sandbox: &str) -> Result<Vec<Ask>, String> {
     crate::place::standing_in(sandbox)?;
-    Ok(capped(decided_over(queued())))
+    Ok(shown(queued()))
+}
+
+/// The asks as the cockpit is shown them: the host's answers over the boxes' asks, capped. Split
+/// from [`list`] so the decision inbox (`queue::decisions`) can be tested against the same rule
+/// without a sandbox.
+pub(crate) fn shown(asked: Vec<Ask>) -> Vec<Ask> {
+    capped(decided_over(asked))
 }
 
 /// The host's answer wins over the box's copy of it, question by question.

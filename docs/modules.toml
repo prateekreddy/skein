@@ -570,7 +570,12 @@ depends_on = ["config", "gitgate", "github", "repos", "review", "secret", "util"
 # `health` because a failing check belongs in the SAME queue as the work: a fleet whose substrate
 # will not install is not a quiet fleet, and putting that somewhere else is how a first run looks
 # like nothing happening.
-depends_on = ["board", "health", "prq", "repos"]
+# `asks`, `substrate` and `gitgate` for the decision inbox (SKEIN-1375): a box's question, its
+# package request and its write request are each work that stopped and waits on you, so they are
+# rows in the same queue. Each is read through the function its own panel reads (`fleet_asks`,
+# `fleet_requests`), so the inbox and the panel cannot disagree about what is waiting, and none of
+# them is written from here.
+depends_on = ["asks", "board", "gitgate", "health", "prq", "repos", "substrate"]
 
 [current.registry]
 depends_on = ["mailbox", "repos", "sbx", "util"]
