@@ -1259,10 +1259,10 @@ fn proc_locks_when(name: &str, listed: bool) -> String {
 /// `tree/target/debug/.cargo-lock` and holds it ([`HOLD_A_LOCK`]), and the real `/proc/locks`, read while it holds it and asserted
 /// to list it, is what the server reads as the box's (the fake root stands in for `/`).
 ///
-/// What would make it fail: `clean_rows` believing the list's `live` alone and dropping the
-/// recheck of `/proc/locks` (the target is removed under the build), or a recheck that refuses
-/// whatever the lock says (the second call is refused too). Watched: with the `build_running`
-/// branch of `clean_rows` removed, the first call removed the target and this failed.
+/// What would make it fail: skein-mcp's listing believing the list's `live` alone and dropping
+/// its recheck of `/proc/locks` (the target is removed under the build), or a recheck that refuses
+/// whatever the lock says (the second call is refused too). Watched: with the recheck removed from
+/// the listing's build-output branch, the first call removed the target and this failed.
 #[test]
 fn a_build_running_at_the_call_is_refused_though_the_list_says_it_is_not() {
     let b = Box_::new("skein-tools-it-clean-live");
