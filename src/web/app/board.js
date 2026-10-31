@@ -754,8 +754,24 @@ function openPanelFromHash() {
   history.replaceState(null, "", location.pathname + location.search);
 }
 window.addEventListener("hashchange", openPanelFromHash);
-// One listener for every card: the button names where its decision is answered, and the box.
+// One listener for every card: the button names where its decision is answered, and the box. A disk
+// ask is decided on its card: the press sends back the ask the card was drawn from, and the card's
+// buttons stay disabled until the answer is in, so one press is one decision.
 decisionsEl.addEventListener("click", e => {
+  const d = e.target.closest("button[data-disk]");
+  if (d) {
+    const card = d.closest(".dcard");
+    card.querySelectorAll("button").forEach(x => { x.disabled = true; });
+    fetch(`/api/boxes/${encodeURIComponent(d.dataset.box)}/disk-ask`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: d.dataset.id, mb: Number(d.dataset.mb), approve: d.dataset.disk === "approve" }),
+    }).then(async r => {
+      if (!r.ok) throw await refused(r);
+      toast(d.dataset.disk === "approve" ? `${d.dataset.box}'s disk allowance is raised` : `${d.dataset.box}'s disk ask is denied`);
+    }).catch(err => notice(`Could not record that: ${failText(err)}`))
+      .finally(() => loadDecisions());
+    return;
+  }
   const b = e.target.closest("button[data-open]");
   if (!b) return;
   const open = { askq: openAskq, subq: openSubq, gitq: openGitq }[b.dataset.open];

@@ -36,6 +36,7 @@ pub mod config;
 pub mod contracts;
 pub mod diff;
 pub mod digest;
+pub mod diskask;
 pub mod dockerd;
 pub mod doorway;
 pub mod files;

@@ -135,6 +135,7 @@ mod tests {
             url: "/box/web-main".into(),
             fix: String::new(),
             blocked: String::new(),
+            disk: None,
             why: String::new(),
         };
         let wire = serde_json::to_string(&row).unwrap();
@@ -330,6 +331,7 @@ mod tests {
             url: String::new(),
             fix: String::new(),
             blocked: String::new(),
+            disk: None,
             why: String::new(),
         }
     }
@@ -361,6 +363,43 @@ mod tests {
         // Per card the name twice (the sentence and the button's `data-box`) and the headline once,
         // and the package's reason: ten, every one of them escaped.
         assert_eq!(html.matches("&lt;b&gt;x&lt;/b&gt;").count(), 10, "{html}");
+    }
+
+    /// **A disk ask's card sends back the ask the server drew it from**, on the row the server
+    /// really sends (SKEIN-1425): `Source::Disk` spelled `disk`, and `disk.id` and `disk.mb` on
+    /// the wire where the card's buttons read them.
+    ///
+    /// What would make it fail: `Source::Disk` renamed on either side, `Row::disk` or its fields
+    /// renamed, or the card not carrying them on both buttons.
+    #[test]
+    fn a_disk_card_sends_back_the_ask_the_server_drew_it_from() {
+        let mut disk = decision_row(
+            crate::queue::Source::Disk,
+            "web-main",
+            "asks for 20 GB disk (now 10 GB, using 12.6 GB)",
+        );
+        disk.why = "the index is 14G".into();
+        disk.disk = Some(crate::queue::DiskRef {
+            id: "d-0000aaaa".into(),
+            mb: 20480,
+        });
+        let Some(html) = run_bundle(&[disk], "decisionsHtml(rows, 0, null)") else {
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
+            return;
+        };
+        for press in ["approve", "deny"] {
+            assert!(
+                html.contains(&format!(
+                    "data-disk=\"{press}\" data-box=\"web-main\" data-id=\"d-0000aaaa\" \
+                     data-mb=\"20480\""
+                )),
+                "{html}"
+            );
+        }
+        assert!(
+            INDEX.contains("/disk-ask`"),
+            "the page no longer posts a disk decision"
+        );
     }
 
     /// **No card is drawn without an action, and every kind of decision the server sends has one.**
@@ -498,6 +537,7 @@ mod tests {
             url: String::new(),
             fix: String::new(),
             blocked: String::new(),
+            disk: None,
             why: String::new(),
         };
         let rows = [

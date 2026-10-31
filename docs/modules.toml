@@ -328,7 +328,10 @@ depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "flee
 # the reason the disk announcement runs here rather than behind a cockpit connection (SKEIN-1054).
 #
 # `jobs` for one spawn: the heavy-work queue's 2 s loop (SKEIN-1388), for the same reason.
-depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "jobs", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
+#
+# `diskask` for one route: the owner's approve or deny on a box's disk ask, from its row in the
+# decision inbox (SKEIN-1425).
+depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "diskask", "dockerd", "doorway", "files", "fleet", "gitgate", "handoff", "health", "jobs", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "resource_signal", "review", "reviewbox", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
@@ -374,6 +377,15 @@ depends_on = ["answer", "boxfile", "place", "registry", "repos", "sbx", "source"
 [current.digest]
 # `boxfile` for the journal and commit list, both written by the box (SKEIN-1257).
 depends_on = ["boxfile", "diff", "registry", "repos", "sbx", "signals", "util"]
+
+[current.diskask]
+# A box's ask for a bigger disk allowance (SKEIN-1425). `substrate` for where it lives, one file in
+# the box's own package drop-box, and `boxfile` to read it, for `gitgate`'s reason (SKEIN-1406).
+# `fleet` for the allowance itself: approving is `set_box_disk_limit`, the box-settings field's own
+# path, the answer is kept in the box's declared state, and the inbox row prints the allowance and
+# the disk walk's figure. `place` to read the queue in the sandbox, `mailbox` for one call,
+# `send_answer`, the answer in the asking box's read-only inbox. Nothing in the knot depends on it.
+depends_on = ["boxfile", "fleet", "mailbox", "place", "substrate", "util"]
 
 [current.files]
 # `source` for the same reason as `diff`: a listing says whether it was read by entering the box or
@@ -575,7 +587,9 @@ depends_on = ["config", "gitgate", "github", "repos", "review", "secret", "util"
 # rows in the same queue. Each is read through the function its own panel reads (`fleet_asks`,
 # `fleet_requests`), so the inbox and the panel cannot disagree about what is waiting, and none of
 # them is written from here.
-depends_on = ["asks", "board", "gitgate", "health", "prq", "repos", "substrate"]
+# `diskask` for the fourth (SKEIN-1425): a box's ask for a bigger disk allowance, read through
+# `diskask::fleet_asks` and shown only while it waits and is above the box's allowance.
+depends_on = ["asks", "board", "diskask", "gitgate", "health", "prq", "repos", "substrate"]
 
 [current.registry]
 depends_on = ["mailbox", "repos", "sbx", "util"]
@@ -718,7 +732,9 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # allowance and the disk walk's figures. `util` to write the file atomically.
 # `usage` for `box_spend`: each box's own spend, written beside its resource signal from a reading
 # skein-server already took (SKEIN-1384). This module writes the file; usage says what is in it.
-depends_on = ["announce", "fleet", "health", "usage", "util"]
+# `diskask` for the box's ask for a bigger disk allowance and the owner's answer, written into the
+# file so the box sees it, and for when to say it can ask (SKEIN-1425).
+depends_on = ["announce", "diskask", "fleet", "health", "usage", "util"]
 
 [current.runtime]
 # `config` for one read: the fleet's box-plugin switch (SKEIN-1058). `for_box` is where every start

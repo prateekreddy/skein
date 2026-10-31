@@ -541,6 +541,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/boxes/:name/tracking", post(api_set_box_tracking))
         .route("/api/boxes/:name/identity", post(api_set_box_identity))
         .route("/api/boxes/:name/disk", post(api_set_box_disk))
+        .route("/api/boxes/:name/disk-ask", post(api_decide_disk_ask))
         .route("/api/boxes/:name/settings", get(api_box_settings))
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))

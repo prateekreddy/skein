@@ -15,17 +15,20 @@
 #                     checkout's largest directories, and the repo's shared cache on a line of its
 #                     own. It never offers to stop anything: the kernel's limits are the ceiling,
 #                     and this is only how the agent sees what it is holding.
-#   skein_requests    the box's own package and git-write requests and questions, and the owner's
-#                     answers. `skein-mcp requests` answers the same on the command line, which is
+#   skein_requests    the box's own package, git-write and disk requests and questions, and the
+#                     owner's answers. `skein-mcp requests` answers the same on the command line, which is
 #                     how the hooks module's band and compaction keeper read it (SKEIN-1362,
 #                     SKEIN-1364).
 #
-# and three ask (SKEIN-1061), each into the box's own drop-box and nowhere else:
+# and four ask (SKEIN-1061, SKEIN-1425), each into the box's own drop-box and nowhere else:
 #
 #   skein_request_package  `box-session.sh --request-package`, the path the sudo shim takes.
 #   skein_request_write    `box-session.sh --request-write`, the path the git shim takes.
 #   skein_ask_person       one file in `<fleet root>/.skein/asks/requests/<box>/`, a question for the
 #                          fleet's owner, answered from the cockpit into the box's inbox.
+#   skein_request_disk     one file, `disk-allowance`, in the box's own package drop-box: a bigger
+#                          disk allowance and why. One per box, so a new ask replaces the old one;
+#                          the owner approves or denies it in the cockpit (`src/diskask.rs`).
 #
 # Each of the three refuses a box's sixth waiting request in its queue (`CAP`), and a question is at
 # most 2 KB, text and options together (`MAX_ASK_BYTES`). The cap is the tool's courtesy to the
@@ -100,6 +103,11 @@ TOP_MAX = 50
 # The owner's numbers (box-plugin.md answer 2; feature-wording.md, SKEIN-1060).
 CAP = 5
 MAX_ASK_BYTES = 2048
+
+# A disk ask's reason, at most, in bytes: `diskask::MAX_WHY`, which does not show a longer one.
+MAX_DISK_WHY = 300
+# The disk ask's one file in the box's package drop-box: `diskask::ASK_FILE`.
+DISK_ASK_FILE = "disk-allowance"
 
 # Tests only: the directory standing in for `/`, so `/proc` and `/sys` can be a fake tree. It moves
 # nothing a box cannot already read.
@@ -853,6 +861,7 @@ def inbox_answers():
 OUTCOMES = {
     "package": r"granted|denied|installed|not installed: (?P<why>.+)",
     "write": r"granted|denied|revoked",
+    "disk": r"approved|denied",
 }
 
 
@@ -990,8 +999,36 @@ def requests(_args):
                     "run: bash %s/.skein/skein-link-browsers.sh" % fleet
                 )
             out.append(row)
+    disk = own_disk_ask()
+    if disk is not None:
+        rid = str(disk.get("id", ""))
+        row = {"queue": "disk", "id": rid, "asked": str(disk.get("asked", ""))}
+        for field in ("size", "why"):
+            if field in disk:
+                row[field] = disk[field]
+        # The inbox's word, never the file's, as above.
+        answer, decision, _why = answer_for("disk", rid, answers)
+        row["state"] = decision or "waiting"
+        row["answer"] = answer
+        out.append(row)
     out.sort(key=lambda r: r["asked"])
     return {"box": box, "requests": out}
+
+
+def own_disk_ask():
+    """This box's one disk ask as its file says it, or None. A link in its place is not an ask."""
+    d = own_queue("substrate")
+    if d is None:
+        return None
+    path = os.path.join(d, DISK_ASK_FILE)
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        with open(path, encoding="utf-8") as f:
+            r = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return r if isinstance(r, dict) else None
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1080,6 +1117,99 @@ def request_write(args):
     if not isinstance(why, str):
         return {"error": "why-must-be-text"}
     return file_through_launcher("write", "gitgate", ["--request-write", repo] + ([why] if why else []))
+
+
+def parse_mib(value):
+    """A size as MiB, as `fleet::parse_mib` reads it (`20g`, `512m`, `20gi`, a bare byte count), or
+    None. The host reads the box's word again with its own; this is the tool's courtesy."""
+    v = str(value).strip().lower()
+    if v.endswith("i"):
+        v = v[:-1]
+    if re.fullmatch(r"[0-9]+", v):
+        return int(v) // (1024 * 1024)
+    m = re.fullmatch(r"([0-9]+)\s*([gmk])", v)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return {"g": n * 1024, "m": n, "k": n // 1024}[m.group(2)]
+
+
+def gib(mb):
+    """MiB as the signal file's words print it: `20.0G`."""
+    return "%.1fG" % (mb / 1024.0)
+
+
+def request_disk(args):
+    size = args.get("size")
+    why = args.get("why")
+    mb = parse_mib(size) if isinstance(size, str) else None
+    if not mb:
+        return reply(
+            {"error": "size-is-not-a-size"},
+            "skein: %s is not a size. Ask with one such as 20g or 20480m." % json.dumps(size),
+        )
+    if (
+        not isinstance(why, str)
+        or not why.strip()
+        or "\n" in why
+        or "\r" in why
+        or len(why.strip().encode("utf-8")) > MAX_DISK_WHY
+    ):
+        return reply(
+            {"error": "why-must-be-one-line"},
+            "skein: say why in one line of at most %d bytes." % MAX_DISK_WHY,
+        )
+    d = own_queue("substrate")
+    if d is None:
+        return {"error": "no-box-name"}
+    # The allowance skein measures this box against, from the signal file skein wrote. When that
+    # cannot be read the ask is filed, and the cockpit shows the owner the allowance it has.
+    signals = read_signals()
+    disk = signals.get("disk") if isinstance(signals.get("disk"), dict) else None
+    if disk is not None and "limit_mb" in disk:
+        now = disk.get("limit_mb")
+        if now is None:
+            return reply(
+                {"error": "no-allowance"},
+                "skein: this box has no disk allowance; it may already use the whole disk.",
+            )
+        if isinstance(now, int) and mb <= now:
+            return reply(
+                {"error": "not-more", "limit_mb": now},
+                "skein: this box's allowance is already %s, so %s would not raise it. Ask for "
+                "more than %s." % (gib(now), gib(mb), gib(now)),
+            )
+    if not os.access(d, os.W_OK):
+        return {"error": "not-recorded", "queue": d}
+    before = own_disk_ask()
+    rid = "d-" + os.urandom(4).hex()
+    body = {
+        "id": rid,
+        "size": size.strip(),
+        "why": why.strip(),
+        "asked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    tmp = os.path.join(d, ".tmp." + rid)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+        # Named only once complete, as a question is: the cockpit reads this file.
+        os.replace(tmp, os.path.join(d, DISK_ASK_FILE))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return {"error": "not-recorded", "queue": d}
+    said = (
+        "skein: asked the owner for a %s disk allowance (ask %s). The answer arrives in your inbox, "
+        "and skein_requests shows it." % (gib(mb), rid)
+    )
+    result = {"id": rid, "state": "waiting", "mb": mb}
+    if before is not None and before.get("id"):
+        said += " It replaces ask %s." % before.get("id")
+        result["replaces"] = str(before.get("id"))
+    return reply(result, said)
 
 
 def kb(n):
@@ -1507,8 +1637,8 @@ TOOLS = [
     },
     {
         "name": "skein_requests",
-        "description": "This box's own package and repository-write requests and questions, and "
-        "the owner's answer to each, from the inbox only the owner can write. A filled browser "
+        "description": "This box's own package, repository-write and disk requests and questions, "
+        "and the owner's answer to each, from the inbox only the owner can write. A filled browser "
         "request says how to link the browser into this box now.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
@@ -1561,6 +1691,20 @@ TOOLS = [
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
     },
     {
+        "name": "skein_request_disk",
+        "description": "Ask the fleet's owner for a bigger disk allowance for this box: the size you "
+        "need in all (such as 20g) and why. It must be more than the allowance this box has now. "
+        "One ask at a time: a new one replaces the last. The answer arrives in your inbox, and "
+        "skein_requests and skein_resources show it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"size": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["size", "why"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    },
+    {
         "name": "skein_lane",
         "description": "This box's lanes: worktrees where a subagent does one tracker item's work on "
         "a branch of its own, with its build output inside the worktree. create makes the worktree "
@@ -1592,6 +1736,7 @@ HANDLERS = {
     "skein_request_package": request_package,
     "skein_request_write": request_write,
     "skein_ask_person": ask_person,
+    "skein_request_disk": request_disk,
     "skein_lane": lane,
 }
 

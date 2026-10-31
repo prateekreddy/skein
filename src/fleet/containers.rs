@@ -177,7 +177,7 @@ if root:
 ///
 /// `None` rather than a guess when it cannot be read: a mis-parsed ceiling is worse than no ceiling,
 /// because it would silently cap every box at some number nobody chose.
-pub(super) fn parse_mib(value: &str) -> Option<u64> {
+pub(crate) fn parse_mib(value: &str) -> Option<u64> {
     let value = value.trim().to_lowercase();
     // `26gi` and `26g` are the same size, so drop the `i` before looking at the unit — reading it as
     // the unit is exactly the mis-parse this function exists to avoid.

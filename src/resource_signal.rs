@@ -247,6 +247,36 @@ pub struct Signals {
     /// `skein_top` (SKEIN-1356). Absent when skein has not listed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<CleanList>,
+    /// This box's ask for a bigger disk allowance and the owner's answer to it (SKEIN-1425), as
+    /// `diskask::for_box` reads them: the state is the host's record, never the box's file. Absent
+    /// when the box has no ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_ask: Option<DiskAskView>,
+}
+
+/// A box's disk ask as its signal file says it. A contract like [`CleanList`]: fields are only
+/// added.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiskAskView {
+    pub id: String,
+    /// The allowance asked for, in MiB.
+    pub mb: u64,
+    /// `waiting`, `approved` or `denied`.
+    pub state: String,
+    /// RFC3339, when the owner answered. Empty while it waits.
+    #[serde(default)]
+    pub decided: String,
+}
+
+impl From<crate::diskask::Ask> for DiskAskView {
+    fn from(a: crate::diskask::Ask) -> DiskAskView {
+        DiskAskView {
+            id: a.id,
+            mb: a.mb,
+            state: a.state,
+            decided: a.decided,
+        }
+    }
 }
 
 /// One version a restart would move this box onto.
@@ -675,6 +705,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
         cleared: BTreeMap::new(),
         updates: Vec::new(),
         clean: r.clean.clone(),
+        disk_ask: None,
     };
 
     let prev_ask = |kind: &str| prev.and_then(|p| p.asks.iter().find(|a| a.kind == kind));
@@ -736,6 +767,37 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
     out
 }
 
+/// The file with the box's disk ask in it, and, when the box is over its own allowance by more
+/// than it can clear now, the disk ask's words saying it can ask the owner for more (SKEIN-1425).
+///
+/// Only for the allowance's ask: when the fleet's disk is over its line, a bigger allowance frees
+/// nothing. And only when what can be cleared falls short: the ask's `amount` is already
+/// [`shrunk`] to what can be cleared, so it is under the excess exactly then. Pure.
+pub fn with_disk_ask(mut s: Signals, ask: Option<DiskAskView>) -> Signals {
+    let excess = match (s.disk.mb, s.disk.limit_mb) {
+        (Some(mb), Some(limit)) => mb.saturating_sub(limit),
+        _ => 0,
+    };
+    if let Some(a) = s
+        .asks
+        .iter_mut()
+        .find(|a| a.kind == "disk" && a.why == "allowance")
+        .filter(|a| a.amount < excess)
+    {
+        let line = words::ask_for_more(ask.as_ref());
+        a.hold = a
+            .hold
+            .replace(words::HELD, &format!("{line} {}", words::HELD));
+        a.start = a
+            .start
+            .take()
+            .map(|t| t.replace(words::WHERE, &format!("{line} {}", words::WHERE)));
+        a.enter = a.enter.take().map(|t| format!("{t} {line}"));
+    }
+    s.disk_ask = ask;
+    s
+}
+
 // ------------------------------------------------------------------------------------------------
 // The words
 // ------------------------------------------------------------------------------------------------
@@ -760,7 +822,22 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 mod words {
     use super::*;
 
-    const HELD: &str = "This one command was held so you would see this; the next will run.";
+    pub(super) const HELD: &str =
+        "This one command was held so you would see this; the next will run.";
+
+    /// What a box over its own allowance by more than it can clear is told it can do (SKEIN-1425),
+    /// or that it has done.
+    pub(super) fn ask_for_more(ask: Option<&DiskAskView>) -> String {
+        const SHORT: &str = "Clearing will not bring this box under its share";
+        match ask.map(|a| (a.state.as_str(), a.mb)) {
+            Some(("waiting", mb)) => format!("{SHORT}; its ask for {} is with the owner.", gib(mb)),
+            Some(("denied", mb)) => format!(
+                "{SHORT}; the owner denied its ask for {}, so clear what it can.",
+                gib(mb)
+            ),
+            _ => format!("{SHORT}; to ask the owner for more, call `skein_request_disk`."),
+        }
+    }
 
     /// The last sentence of every start line (4), whatever the ask (owner, 2026-09-24).
     pub(super) const WHERE: &str = "`skein_resources` shows where this box stands.";
@@ -1227,13 +1304,18 @@ pub fn read(state: &Path) -> Option<Signals> {
 
 /// Work out and write one box's file from its previous one and a reading.
 pub fn write_box(state: &Path, r: &Reading) -> Result<Signals, String> {
-    write_box_with(state, r, Vec::new())
+    write_box_with(state, r, Vec::new(), None)
 }
 
-/// [`write_box`] with the versions a restart would move the box onto.
-pub fn write_box_with(state: &Path, r: &Reading, updates: Vec<Update>) -> Result<Signals, String> {
+/// [`write_box`] with the versions a restart would move the box onto, and the box's disk ask.
+pub fn write_box_with(
+    state: &Path,
+    r: &Reading,
+    updates: Vec<Update>,
+    disk_ask: Option<DiskAskView>,
+) -> Result<Signals, String> {
     let prev = read(state);
-    let mut signals = next(prev.as_ref(), r);
+    let mut signals = with_disk_ask(next(prev.as_ref(), r), disk_ask);
     signals.updates = updates;
     let path = signal_path(state);
     let dir = path
@@ -1364,7 +1446,8 @@ pub fn write_every_box() -> Result<usize, String> {
                 restart_requested: asked,
             })
             .collect();
-        match write_box_with(&entry.path(), &reading, updates) {
+        let disk_ask = crate::diskask::for_box(&name).map(DiskAskView::from);
+        match write_box_with(&entry.path(), &reading, updates, disk_ask) {
             Ok(_) => written += 1,
             Err(e) => failed.push(format!("{name}: {e}")),
         }
@@ -2253,6 +2336,83 @@ mod tests {
                             and removes them. The biggest is ~/.cache/pip (1.5G); to remove it \
                             now, call `skein_clean` with \
                             {\"paths\":[\"/fleet/web-main/home/.cache/pip\"]}.";
+
+    /// **A box over its own share by more than it can clear is told it can ask the owner for
+    /// more, and then where its ask stands; one that can clear enough is not** (SKEIN-1425). The
+    /// signal file carries the ask and the host's answer.
+    ///
+    /// 2G over a 10G share with a 1.5G pip cache: clearing falls short, so the hold, the start line
+    /// and the entering line name `skein_request_disk`; with the ask waiting they say so, and once
+    /// denied, that. With a 3G cache, clearing is enough and the words are unchanged.
+    ///
+    /// What would make it fail: `with_disk_ask` adding the sentence whatever can be cleared (the
+    /// 3G case), not adding it to the hold, or not writing `disk_ask` into the file.
+    #[test]
+    fn a_box_that_cannot_clear_enough_is_told_it_can_ask_for_more() {
+        let short = || {
+            next(
+                None,
+                &over_with(0, 2048, vec![item("~/.cache/pip", "download cache", 1536)]),
+            )
+        };
+        let told = with_disk_ask(short(), None);
+        let ask = disk_ask(&told);
+        let line = "Clearing will not bring this box under its share; to ask the owner for more, \
+                    call `skein_request_disk`.";
+        assert!(
+            ask.hold
+                .contains(&format!("{line} This one command was held")),
+            "{}",
+            ask.hold
+        );
+        assert!(ask
+            .start
+            .as_deref()
+            .unwrap()
+            .contains(&format!("{line} {}", words::WHERE)));
+        assert!(
+            ask.enter.as_deref().unwrap().ends_with(line),
+            "{:?}",
+            ask.enter
+        );
+        assert_eq!(told.disk_ask, None);
+
+        let view = |state: &str| DiskAskView {
+            id: "d-0000aaaa".into(),
+            mb: 20 * 1024,
+            state: state.into(),
+            decided: String::new(),
+        };
+        let waiting = with_disk_ask(short(), Some(view("waiting")));
+        assert!(
+            disk_ask(&waiting).hold.contains(
+                "Clearing will not bring this box under its share; its ask for 20.0G is with the \
+                 owner."
+            ),
+            "{}",
+            disk_ask(&waiting).hold
+        );
+        assert_eq!(waiting.disk_ask, Some(view("waiting")));
+        let denied = with_disk_ask(short(), Some(view("denied")));
+        assert!(
+            disk_ask(&denied)
+                .hold
+                .contains("the owner denied its ask for 20.0G, so clear what it can."),
+            "{}",
+            disk_ask(&denied).hold
+        );
+
+        let enough = next(
+            None,
+            &over_with(0, 2048, vec![item("~/.cache/pip", "download cache", 3072)]),
+        );
+        let before = disk_ask(&enough);
+        assert_eq!(
+            disk_ask(&with_disk_ask(enough, None)),
+            before,
+            "told to ask when clearing is enough"
+        );
+    }
 
     /// **A build running now is not asked for: the ask shrinks to what can be cleared, and its
     /// words say how much is in the build** (SKEIN-1391).
