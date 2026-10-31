@@ -906,11 +906,11 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "#[serde(default = \"default_review_identity\")]"
 cited_by = ["docs/decisions/one-identity.md"]
 
-["src/config.rs:552"]
+["src/config.rs:562"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/config.rs:627"]
+["src/config.rs:637"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 

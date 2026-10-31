@@ -1,34 +1,38 @@
 #!/usr/bin/env python3
 # skein-job: run one piece of heavy work (a build, a test run, CI, a WebKit run) when the fleet has
-# a slot for it (SKEIN-1388, phase 1).
+# cores for it (SKEIN-1388, SKEIN-1420).
 #
-#   skein-job run [--class build|test|ci|webkit|train] -- <argv>
+#   skein-job run [--class build|test|ci|webkit|train] [--cores N [--min M]] -- <argv>
 #
-# It blocks until it holds a slot, then runs <argv> as its own child, at `nice -n 19`, with the
-# child's output passed through to stdout, and exits with the child's status.
+# It blocks until skein grants it cores, then runs <argv> as its own child, at `nice -n 19`, with
+# the child's output passed through to stdout, and exits with the child's status. `--cores` is how
+# many it asks for (skein holds it to the fleet's per-job cap, and picks for a job that names
+# none); `--min` lets it start with fewer, never below M, rather than wait. The child is told its
+# grant: CARGO_BUILD_JOBS, MAKEFLAGS=-jN, RUST_TEST_THREADS and NEXTEST_TEST_THREADS are set to the
+# granted cores, except where the caller already set one lower.
 #
 # **The child runs in this box's cgroup**, under the box's memory ceiling and floor, because it is
 # this process's child and this process is a child of the box's shell: a process cannot leave its
 # parent's cgroup by forking. That is why the wrapper runs the command itself rather than asking
 # skein to: a command skein started by a crossing enters the box's namespaces and not its cgroup.
 #
-# A slot is two locks, taken in this order:
+# A grant is two locks, taken in this order:
 #
 #   1. this box's own `/var/tmp/skein-lanes-heavy.lock`, the `flock` lanes already take, so a lane
 #      that still runs raw `flock` and one that runs this wait in one line. Skipped when a process
 #      this one descends from already holds it (`flock <lock> skein-job run -- …`), which would
 #      otherwise wait on itself for ever.
-#   2. the fleet's slot: one file in this box's own drop-box,
+#   2. the fleet's cores: one file in this box's own drop-box,
 #      `$SKEIN_FLEET_ROOT/.skein/jobs/requests/$SKEIN_BOX/<id>.json`, and a wait on the box's view,
 #      `$SKEIN_STATE/signals/jobs.json`, which skein writes and the box can only read, until the job
 #      reads `granted`. Only skein-server writes the queue; this file is the box's ask and nothing
-#      more. It holds the job's id, class, command, folder and this process's pid, and its state:
-#      `waiting`, then `done` or `cancelled`. Skein frees the slot when this pid leaves the box's
-#      cgroup, so a wrapper killed with -9 frees it too.
+#      more. It holds the job's id, class, command, folder, the cores it asks for, this process's
+#      pid, and its state: `waiting`, then `done` or `cancelled`. Skein frees the cores when this
+#      pid leaves the box's cgroup, so a wrapper killed with -9 frees them too.
 #
 # **A nested call never waits.** The child runs with `SKEIN_JOB_ID` set, and a `skein-job` that
-# finds it set runs its command straight away: it already holds its parent's slot, and waiting for a
-# second one behind itself is a deadlock (SYNAP-517).
+# finds it set runs its command straight away: it already holds its parent's cores, and waiting for
+# more behind itself is a deadlock (SYNAP-517).
 #
 # **It never strands the caller.** With no fleet drop-box (outside a box, or a box started before
 # skein had the queue), or with skein not answering for 30 s, it says so on stderr and runs under
@@ -59,8 +63,8 @@ def say(line):
 
 
 def usage():
-    print("usage: skein-job run [--class build|test|ci|webkit|train] -- <command> [args...]",
-          file=sys.stderr)
+    print("usage: skein-job run [--class build|test|ci|webkit|train] [--cores N [--min M]] "
+          "-- <command> [args...]", file=sys.stderr)
     return 2
 
 
@@ -131,7 +135,7 @@ def take_box_lock():
     return fd
 
 
-# ---- the fleet's slot
+# ---- the fleet's cores
 
 
 def drop_box():
@@ -170,8 +174,9 @@ def view_age(view):
     return (datetime.now(timezone.utc) - at).total_seconds()
 
 
-def wait_for_slot(path, body):
-    """File the request and wait until skein grants it. False when skein is not answering."""
+def wait_for_grant(path, body):
+    """File the request and wait until skein grants it: the job as the view shows it once granted,
+    False when skein is not answering, None when skein ended it first."""
     try:
         write_request(path, body)
     except OSError as e:
@@ -188,8 +193,11 @@ def wait_for_slot(path, body):
                         and j.get("id") == body["id"]), None)
         if job is not None and job.get("state") == "granted":
             if last is not None:
-                say("a slot is free; starting")
-            return True
+                cores = job.get("granted_cores")
+                say("granted %s; starting" % (
+                    "%d core%s" % (cores, "" if cores == 1 else "s") if isinstance(cores, int)
+                    else "its cores"))
+            return job
         if job is not None and job.get("state") not in ("waiting", "granted"):
             say("skein ended this job before it started (%s)" % job.get("state"))
             return None
@@ -211,9 +219,63 @@ def wait_for_slot(path, body):
 
 # ---- running it
 
+# The parallelism each tool reads from its environment, set to the grant.
+THREAD_VARS = ("CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS")
 
-def run_child(argv, job_id):
-    env = dict(os.environ, SKEIN_JOB_ID=job_id)
+
+def whole(text):
+    """Whether `text` is a plain decimal count: ASCII digits only, so `int` cannot refuse it."""
+    return text.isascii() and text.isdigit()
+
+
+def make_flags(flags, cores):
+    """MAKEFLAGS carrying `-j<cores>`, unless it already asks for as many or fewer. Left alone
+    under a parent make's jobserver, which is what then decides."""
+    words = flags.split()
+    if any(w.startswith(("--jobserver-auth", "--jobserver-fds")) for w in words):
+        return flags
+    kept, jobs, i = [], None, 0
+    while i < len(words):
+        w, n = words[i], None
+        if w in ("-j", "--jobs"):
+            # Bare, it means no limit at all, read here as more than any grant.
+            n = 0
+            if i + 1 < len(words) and whole(words[i + 1]):
+                n = int(words[i + 1])
+                i += 1
+        elif w.startswith("--jobs="):
+            n = int(w[7:]) if whole(w[7:]) else 0
+        elif w.startswith("-j") and whole(w[2:]):
+            n = int(w[2:])
+        if n is None:
+            kept.append(w)
+        else:
+            jobs = n
+        i += 1
+    if jobs is not None and 1 <= jobs <= cores:
+        return flags
+    return " ".join(kept + ["-j%d" % cores])
+
+
+def grant_env(env, job_id, cores):
+    """The child's environment: its job id, and, once skein granted it `cores`, the parallelism of
+    the tools a heavy job runs, each set to the grant unless the caller already set it lower."""
+    env = dict(env, SKEIN_JOB_ID=job_id)
+    if not isinstance(cores, int) or isinstance(cores, bool) or cores < 1:
+        return env
+    for name in THREAD_VARS:
+        try:
+            if 1 <= int(env.get(name, "")) <= cores:
+                continue
+        except ValueError:
+            pass
+        env[name] = str(cores)
+    env["MAKEFLAGS"] = make_flags(env.get("MAKEFLAGS", ""), cores)
+    return env
+
+
+def run_child(argv, job_id, cores=None):
+    env = grant_env(os.environ, job_id, cores)
     try:
         child = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  preexec_fn=lambda: os.nice(19))
@@ -240,24 +302,38 @@ def run_child(argv, job_id):
 
 
 def run(args):
-    job_class = "build"
+    opts = {"--class": "build", "--cores": None, "--min": None}
     while args and args[0] != "--":
-        if args[0] == "--class" and len(args) > 1:
-            job_class = args[1]
-            args = args[2:]
-        elif args[0].startswith("--class="):
-            job_class = args[0].split("=", 1)[1]
+        name, eq, value = args[0].partition("=")
+        if name not in opts:
+            return usage()
+        if eq:
             args = args[1:]
+        elif len(args) > 1:
+            value, args = args[1], args[2:]
         else:
             return usage()
+        opts[name] = value
     argv = args[1:]
     if not argv:
         return usage()
+    job_class = opts["--class"]
     if job_class not in CLASSES:
         say("unknown class %r; one of %s" % (job_class, ", ".join(CLASSES)))
         return 2
+    counts = {}
+    for name in ("--cores", "--min"):
+        if opts[name] is None:
+            continue
+        if not whole(opts[name]) or int(opts[name]) < 1:
+            say("%s takes a whole number of cores, 1 or more, not %r" % (name, opts[name]))
+            return 2
+        counts[name[2:]] = int(opts[name])
+    if "cores" in counts and "min" in counts and counts["min"] > counts["cores"]:
+        say("--min %d is more than --cores %d" % (counts["min"], counts["cores"]))
+        return 2
 
-    # Already inside a job: this one has its parent's slot.
+    # Already inside a job: this one has its parent's cores.
     if os.environ.get("SKEIN_JOB_ID"):
         try:
             os.execvp(argv[0], argv)
@@ -268,13 +344,14 @@ def run(args):
     job_id = "j-" + secrets.token_hex(4)
     lock = take_box_lock()
     request = None
+    granted = False
     drop = drop_box()
-    body = {"id": job_id, "class": job_class, "argv": argv, "cwd": os.getcwd(),
-            "pid": os.getpid(), "state": "waiting"}
+    body = dict({"id": job_id, "class": job_class, "argv": argv, "cwd": os.getcwd(),
+                 "pid": os.getpid(), "state": "waiting"}, **counts)
     if drop is not None:
         request = os.path.join(drop, job_id + ".json")
         try:
-            granted = wait_for_slot(request, body)
+            granted = wait_for_grant(request, body)
         except KeyboardInterrupt:
             try:
                 write_request(request, dict(body, state="cancelled"))
@@ -285,10 +362,11 @@ def run(args):
             return 75
         if granted is False and not os.path.exists(request):
             request = None
+    cores = granted.get("granted_cores") if isinstance(granted, dict) else None
     status = 1
     ended = "cancelled"
     try:
-        status = run_child(argv, job_id)
+        status = run_child(argv, job_id, cores)
         ended = "done"
     finally:
         if request is not None:

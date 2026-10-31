@@ -36,8 +36,9 @@ struct Fleet {
 }
 
 impl Fleet {
-    /// Box `name`, whose cgroups are under `cgroups`, with `slots` fleet slots.
-    fn new(prefix: &str, name: &str, cgroups: PathBuf, slots: usize) -> Fleet {
+    /// Box `name`, whose cgroups are under `cgroups`, on a machine of `cores` cores with no
+    /// oversubscription and memory unread.
+    fn new(prefix: &str, name: &str, cgroups: PathBuf, cores: u32) -> Fleet {
         let dir = Scratch::temp(prefix);
         fs::write(dir.path().join("skein-job"), WRAPPER).unwrap();
         let places = skein::jobs::Places {
@@ -53,8 +54,10 @@ impl Fleet {
             let (places, stop) = (places.clone(), stop.clone());
             std::thread::spawn(move || {
                 let limits = skein::jobs::Limits {
-                    fleet_slots: slots,
-                    repo_cap: 2,
+                    cores,
+                    max_cores_per_job: skein::jobs::DEFAULT_MAX_CORES_PER_JOB,
+                    oversubscribe: 1.0,
+                    mem_free_mib: None,
                 };
                 while !stop.load(Ordering::Relaxed) {
                     let _ =
@@ -193,7 +196,7 @@ fn a_job_runs_in_the_submitting_boxs_cgroup() {
         "skein-job-cgroup",
         name,
         PathBuf::from(format!("/sys/fs/cgroup{parent}")),
-        1,
+        2,
     );
     let probe = format!(
         "echo \"pid $$\"; echo \"ppid $PPID\"; cat /proc/self/cgroup; \
@@ -251,16 +254,16 @@ fn a_job_runs_in_the_submitting_boxs_cgroup() {
 }
 
 /// **A `skein-job` inside a job runs at once.** SYNAP-517 was the deadlock this prevents: the
-/// outer job holds the box's lock and the fleet's one slot, and an inner one that queued for
+/// outer job holds the box's lock and every core of the fleet, and an inner one that queued for
 /// either would wait for ever behind its own parent.
 ///
-/// The fleet here has ONE slot and the scheduler is running, so an inner call that asked for a
-/// slot would be queued behind the outer job and wait the full 30 s before giving up; the bound is
-/// 5 s.
+/// The machine here has two cores, all the outer job's, and the scheduler is running, so an inner
+/// call that asked for cores would be queued behind the outer job and wait the full 30 s before
+/// giving up; the bound is 5 s.
 ///
 /// What would make it fail: the wrapper ignoring `SKEIN_JOB_ID` (the sabotage that was run: the
-/// inner job files a request, reads `fleet full 1/1`, and the run is killed at 5 s), or the child
-/// not being given `SKEIN_JOB_ID`.
+/// inner job files a request, reads that it waits for cores, and the run is killed at 5 s), or
+/// the child not being given `SKEIN_JOB_ID`.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_nested_skein_job_runs_without_waiting() {
@@ -269,7 +272,7 @@ fn a_nested_skein_job_runs_without_waiting() {
         "skein-job-nested",
         "web-main",
         PathBuf::from("/nonexistent-cgroup-root"),
-        1,
+        2,
     );
     let inner = format!(
         "python3 {} run --class test -- echo nested-ran",
@@ -311,7 +314,7 @@ fn a_skein_job_under_a_raw_flock_of_the_same_lock_does_not_wait_on_itself() {
         "skein-job-flock",
         "web-main",
         PathBuf::from("/nonexistent-cgroup-root"),
-        1,
+        2,
     );
     fs::write(fleet.lock(), "").unwrap();
     let c = fleet.wrapper();
@@ -338,4 +341,58 @@ fn a_skein_job_under_a_raw_flock_of_the_same_lock_does_not_wait_on_itself() {
     let (out, err) = finish_within(child, Duration::from_secs(5))
         .unwrap_or_else(|e| panic!("the wrapper waited on the lock its own ancestor holds: {e}"));
     assert!(out.contains("under-flock"), "{out}\n{err}");
+}
+
+/// **A granted job's tools are told its cores, except where the caller asked for fewer.**
+///
+/// The wrapper asks for three cores on a four-core machine and is granted three, and the
+/// command prints what it was given. The caller had set `CARGO_BUILD_JOBS=8` (more than the
+/// grant: replaced), `RUST_TEST_THREADS=1` (fewer: kept), `MAKEFLAGS="-k -j16"` (replaced, its
+/// other flag kept), and no `NEXTEST_TEST_THREADS` (set).
+///
+/// What would make it fail: the wrapper not handing the grant to the child (the sabotage that
+/// was run: the wrapper's environment step returning before its loop, and `CARGO_BUILD_JOBS`
+/// stays 8), or a value the caller set lower overwritten by the grant.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_granted_job_is_told_its_cores_unless_the_caller_set_fewer() {
+    let fleet = Fleet::new(
+        "skein-job-cores",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    let probe = "for v in CARGO_BUILD_JOBS RUST_TEST_THREADS NEXTEST_TEST_THREADS MAKEFLAGS; do \
+                 printf '%s=%s\\n' \"$v\" \"$(printenv \"$v\")\"; done";
+    let child = fleet
+        .wrapper()
+        .env("CARGO_BUILD_JOBS", "8")
+        .env("RUST_TEST_THREADS", "1")
+        .env("MAKEFLAGS", "-k -j16")
+        .env_remove("NEXTEST_TEST_THREADS")
+        .args(["run", "--cores", "3", "--", "sh", "-c", probe])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let (out, err) = finish_within(child, Duration::from_secs(20)).unwrap();
+    assert!(
+        !err.contains("has not answered") && !err.contains("could not file"),
+        "the job ran without the scheduler, so no grant was handed on:\n{err}"
+    );
+    let q = fleet.queue();
+    assert!(
+        q.jobs.iter().any(|j| j.granted_cores == 3),
+        "the job was not granted three cores, so the grant was not what was tested:\n{q:#?}"
+    );
+    let got: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        got,
+        [
+            "CARGO_BUILD_JOBS=3",
+            "RUST_TEST_THREADS=1",
+            "NEXTEST_TEST_THREADS=3",
+            "MAKEFLAGS=-k -j3",
+        ],
+        "{err}"
+    );
 }

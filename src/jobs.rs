@@ -29,12 +29,20 @@
 //! [`Request`], which has no field for a priority, a position or a grant, so whatever a box writes
 //! under those names is never read. The order is the order skein first saw the jobs in.
 //!
-//! **A slot is freed by the kernel's word, not the box's.** A granted job holds its slot while the
-//! wrapper's pid is in the box's `cgroup.procs`; a wrapper killed with `-9` writes no done file,
-//! and leaves the slot on the next tick anyway. Every duration is measured on the host's clock.
+//! **A job is granted cores, not a slot** (SKEIN-1420). It asks for some (`--cores`, at most
+//! [`Limits::max_cores_per_job`]), and [`schedule`] starts it when the cores running jobs are
+//! measured to use plus its ask fit the machine, the cores granted in all stay under
+//! [`Limits::grant_ceiling`], and the memory free exceeds what it is expected to need. The wrapper
+//! hands the grant to the job's tools as `CARGO_BUILD_JOBS`, `MAKEFLAGS=-jN` and the test-thread
+//! counts. A repo alone may use every core; when another repo has a job waiting, that job takes
+//! the next freed cores first. Nothing running is ever stopped by the queue.
 //!
-//! Not in phase 1: bumping, priority asks, the owner reordering from the cockpit, an ETA, MCP
-//! tools.
+//! **A grant is freed by the kernel's word, not the box's.** A granted job holds its cores while
+//! the wrapper's pid is in the box's `cgroup.procs`; a wrapper killed with `-9` writes no done
+//! file, and gives them back on the next tick anyway. Every duration is measured on the host's
+//! clock.
+//!
+//! Not yet: bumping, priority asks, the owner reordering from the cockpit, an ETA, MCP tools.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -42,13 +50,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How often the queue is looked at: fast enough that a freed slot is taken within a couple of
+/// How often the queue is looked at: fast enough that freed cores are taken within a couple of
 /// seconds. Its own loop, apart from the resource signal's minute, because a job waiting a minute
-/// for a slot that was free is the waste this queue exists to remove.
+/// for cores that were free is the waste this queue exists to remove.
 pub const LOOK_EVERY: Duration = Duration::from_secs(2);
 
-/// How many of one repo's jobs may run at once unless the config says otherwise.
-pub const DEFAULT_REPO_CAP: usize = 2;
+/// The most cores one job may ask for unless the config says otherwise.
+pub const DEFAULT_MAX_CORES_PER_JOB: u32 = 4;
+
+/// How far the cores granted may run past the machine's unless the config says otherwise: jobs
+/// rarely use every core they ask for, and admission also counts what they are measured to use.
+pub const DEFAULT_OVERSUBSCRIBE: f64 = 1.5;
 
 /// The kinds of heavy work a job may say it is. Anything else is read as `build`.
 pub const CLASSES: [&str; 5] = ["build", "test", "ci", "webkit", "train"];
@@ -114,12 +126,19 @@ pub struct Request {
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: String,
-    /// The wrapper's pid. Its presence in the box's `cgroup.procs` is what holds a slot.
+    /// The wrapper's pid. Its presence in the box's `cgroup.procs` is what holds a grant.
     #[serde(default)]
     pub pid: u32,
     /// `waiting`, or the box's `cancelled` or `done`. Anything else reads as `waiting`.
     #[serde(default)]
     pub state: String,
+    /// The cores it asks for (`--cores`). Absent in a file from before cores, which then asks for
+    /// [`default_cores`]. An ask, never a grant: [`schedule`] holds it to the per-job cap.
+    #[serde(default)]
+    pub cores: Option<u32>,
+    /// The fewest cores it will start with (`--min`). Absent ⇒ all it asked for.
+    #[serde(default)]
+    pub min: Option<u32>,
 }
 
 /// One job, as the queue holds it. Every field but the box's words (`class`, `command`, `cwd`) is
@@ -145,14 +164,49 @@ pub struct Job {
     pub granted: String,
     #[serde(default)]
     pub ended: String,
-    /// Why a waiting job did not start on the last tick, such as `repo at cap 2/2`.
+    /// Why a waiting job did not start on the last tick, such as `waiting for 2 cores (1 free)`.
     #[serde(default)]
     pub reason: String,
+    /// The cores it asks for, held by [`schedule`] to the per-job cap and the machine. Zero in a
+    /// queue from before cores, read as [`default_cores`].
+    #[serde(default)]
+    pub cores: u32,
+    /// The fewest it will start with, at most `cores`; `0` ⇒ all of `cores`.
+    #[serde(default)]
+    pub min: u32,
+    /// The cores it was granted: `cores`, or fewer down to `min`. Zero until it is granted.
+    #[serde(default)]
+    pub granted_cores: u32,
 }
 
 impl Job {
     fn is_active(&self) -> bool {
         self.state == "waiting" || self.state == "granted"
+    }
+
+    /// The cores a granted job holds. One granted by a skein from before cores holds the default
+    /// ask, which is what every job then ran with.
+    fn holds(&self) -> u32 {
+        match self.granted_cores {
+            0 => default_cores(self),
+            n => n,
+        }
+    }
+}
+
+/// The cores a job asks for when its `skein-job run` named none. Two for now; the history child
+/// of SKEIN-1418 derives it from what that repo's command used before, here and nowhere else.
+pub fn default_cores(_job: &Job) -> u32 {
+    2
+}
+
+/// The memory a job is expected to need before it may start, in MiB: a default per class for now,
+/// until the history child of SKEIN-1418 reads that command's past peak, here and nowhere else.
+pub fn memory_estimate_mib(job: &Job) -> u64 {
+    match job.class.as_str() {
+        "webkit" | "train" => 4096,
+        "ci" => 3072,
+        _ => 2048,
     }
 }
 
@@ -170,25 +224,38 @@ fn schema_one() -> u32 {
     1
 }
 
-/// How many jobs may run, fleet-wide and per repo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What jobs may be granted, and the machine reading it was worked out from.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
-    pub fleet_slots: usize,
-    pub repo_cap: usize,
+    /// The machine's cores.
+    pub cores: u32,
+    /// The most one job may ask for (`jobs_max_cores_per_job`).
+    pub max_cores_per_job: u32,
+    /// How far the cores granted may run past `cores` (`jobs_oversubscribe`).
+    pub oversubscribe: f64,
+    /// The memory free to start a job with, in MiB, or `None` when it could not be read, and then
+    /// no job waits on memory.
+    pub mem_free_mib: Option<u64>,
 }
 
-/// The fleet's slots for a sandbox with `cores` CPUs: one for every four, and never none.
-pub fn fleet_slots_for(cores: u64) -> usize {
-    ((cores / 4) as usize).max(1)
+impl Limits {
+    /// The most cores that may be granted at once: the cores times the oversubscription, rounded
+    /// down. Never below the cores themselves.
+    pub fn grant_ceiling(&self) -> u32 {
+        (self.cores as f64 * self.oversubscribe.max(1.0)).floor() as u32
+    }
 }
 
-/// The limits as configured: `jobs_fleet_slots` and `jobs_repo_cap`, each `0` for the default.
-/// The fleet's cores are the sandbox's `nproc`, from the resource reading
-/// (`fleet::fleet_resources`), or this process's own count when the sandbox did not answer, since
-/// skein-server runs in the sandbox.
+/// The limits as configured, against the machine as last measured. The cores are the sandbox's
+/// `nproc` and the free memory its `MemAvailable`, both from the one resource reading
+/// (`fleet::fleet_resources`, `mem_total - mem_used`); the cores fall back to this process's own
+/// count when the sandbox did not answer, since skein-server runs in the sandbox, and a reading
+/// the sandbox has stopped refreshing gates no job on memory.
 pub fn limits() -> Limits {
     let config = crate::config::load_config();
-    let cores = crate::fleet::fleet_resources()
+    let reading = crate::fleet::fleet_resources();
+    let cores = reading
+        .as_ref()
         .map(|r| r.cpus)
         .filter(|&c| c > 0)
         .unwrap_or_else(|| {
@@ -196,16 +263,31 @@ pub fn limits() -> Limits {
                 .map(|n| n.get() as u64)
                 .unwrap_or(1)
         });
+    let mem_free_mib = reading
+        .filter(|r| r.mem_total > 0 && !r.stale)
+        .map(|r| r.mem_total.saturating_sub(r.mem_used));
     Limits {
-        fleet_slots: match config.jobs_fleet_slots {
-            0 => fleet_slots_for(cores),
-            n => n as usize,
+        cores: u32::try_from(cores).unwrap_or(u32::MAX).max(1),
+        max_cores_per_job: match config.jobs_max_cores_per_job {
+            0 => DEFAULT_MAX_CORES_PER_JOB,
+            n => n,
         },
-        repo_cap: match config.jobs_repo_cap {
-            0 => DEFAULT_REPO_CAP,
-            n => n as usize,
+        oversubscribe: match config.jobs_oversubscribe {
+            x if x.is_finite() && x >= 1.0 => x,
+            _ => DEFAULT_OVERSUBSCRIBE,
         },
+        mem_free_mib,
     }
+}
+
+/// The cores as [`schedule`] left them, for the views.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pool {
+    pub cores: u32,
+    /// Granted to running jobs, fleet-wide.
+    pub granted: u32,
+    /// What a waiting job could start with now.
+    pub free: u32,
 }
 
 /// One box's view of its jobs: what the wrapper waits on and the agents panel shows.
@@ -216,14 +298,34 @@ pub struct View {
     /// RFC3339, when skein wrote it.
     #[serde(default)]
     pub at: String,
+    /// The machine's cores.
     #[serde(default)]
-    pub fleet_slots: usize,
+    pub cores: u32,
+    /// Cores granted to running jobs, fleet-wide.
+    #[serde(default)]
+    pub granted: u32,
+    /// Cores a waiting job could start with now.
+    #[serde(default)]
+    pub free: u32,
     #[serde(default)]
     pub running: usize,
     #[serde(default)]
-    pub repo_cap: usize,
-    #[serde(default)]
     pub jobs: Vec<ViewJob>,
+    /// Every waiting job that goes before this box's first waiting one, in the order they go, each
+    /// named with its box. Empty when nothing of this box waits.
+    #[serde(default)]
+    pub ahead: Vec<Ahead>,
+}
+
+/// A waiting job ahead of the box's own, in its view.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ahead {
+    #[serde(rename = "box")]
+    pub box_name: String,
+    pub id: String,
+    pub class: String,
+    /// The cores it asks for.
+    pub cores: u32,
 }
 
 /// One of the box's own jobs, in its view.
@@ -234,7 +336,17 @@ pub struct ViewJob {
     pub command: String,
     pub cwd: String,
     pub state: String,
-    /// Its place among every waiting job in the fleet, from 1. `None` once it is not waiting.
+    /// The cores it asks for.
+    #[serde(default)]
+    pub cores: u32,
+    /// The fewest it will start with.
+    #[serde(default)]
+    pub min: u32,
+    /// The cores it was granted; zero while it waits.
+    #[serde(default)]
+    pub granted_cores: u32,
+    /// Its place among every waiting job in the fleet, in the order they go, from 1. `None` once
+    /// it is not waiting.
     pub position: Option<usize>,
     pub reason: String,
     /// Seconds it waited, or has waited so far, by the host's clock.
@@ -396,7 +508,7 @@ pub fn merge(
             None => Some("gone"),
             Some("cancelled") => Some("cancelled"),
             Some("done") => Some("done"),
-            // The pid skein first saw, not whatever the file says now: a box cannot keep a slot
+            // The pid skein first saw, not whatever the file says now: a box cannot keep a grant
             // by naming another of its live processes.
             Some(_) if !alive(&job.box_name, job.pid) => Some("gone"),
             Some(_) => None,
@@ -437,7 +549,7 @@ pub fn merge(
                 command.truncate(cut);
                 command.push('…');
             }
-            queue.jobs.push(Job {
+            let mut job = Job {
                 id: id.clone(),
                 box_name: name.clone(),
                 repo: repo_of(name),
@@ -447,41 +559,179 @@ pub fn merge(
                 pid: req.pid,
                 state: "waiting".into(),
                 queued: stamp(now),
+                min: req.min.unwrap_or(0),
                 ..Job::default()
-            });
+            };
+            job.cores = match req.cores {
+                Some(n) if n > 0 => n,
+                _ => default_cores(&job),
+            };
+            queue.jobs.push(job);
         }
     }
 }
 
-/// Grant what can run, first-come.
-///
-/// A waiting job is **skipped and keeps its place** when its repo is at its cap, its box has been
-/// asked to free memory, or the fleet's slots are full; the job behind it is still considered, so
-/// one repo at its cap does not hold up another repo's work. Each skipped job carries the reason.
-pub fn schedule(queue: &mut Queue, limits: Limits, memory_asked: &dyn Fn(&str) -> bool) {
-    let mut running = queue.jobs.iter().filter(|j| j.state == "granted").count();
-    let mut per_repo: BTreeMap<String, usize> = BTreeMap::new();
+/// The cores of every granted job, by repo: what decides whose waiting job goes next.
+fn cores_by_repo(queue: &Queue) -> BTreeMap<String, u32> {
+    let mut per_repo: BTreeMap<String, u32> = BTreeMap::new();
     for j in queue.jobs.iter().filter(|j| j.state == "granted") {
-        *per_repo.entry(j.repo.clone()).or_default() += 1;
+        *per_repo.entry(j.repo.clone()).or_default() += j.holds();
     }
+    per_repo
+}
+
+/// The order waiting jobs go in, as it stands: the job of the repo holding the fewest cores first,
+/// and among equals the one skein saw first. Indices into `queue.jobs`.
+fn waiting_order(queue: &Queue) -> Vec<usize> {
+    let per_repo = cores_by_repo(queue);
+    let mut order: Vec<usize> = (0..queue.jobs.len())
+        .filter(|&i| queue.jobs[i].state == "waiting")
+        .collect();
+    order.sort_by_key(|&i| (per_repo.get(&queue.jobs[i].repo).copied().unwrap_or(0), i));
+    order
+}
+
+fn cores_word(n: u32) -> String {
+    match n {
+        1 => "1 core".into(),
+        n => format!("{n} cores"),
+    }
+}
+
+/// MiB as GB for a person: `3` for 3072, `1.2` for 1228.
+fn gb(mib: u64) -> String {
+    let s = format!("{:.1}", mib as f64 / 1024.0);
+    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+}
+
+/// Grant what can run.
+///
+/// **Which job goes next.** The waiting job of the repo that holds the fewest cores, and among
+/// equals the one skein saw first; the counts move as each grant is made. So a repo alone takes
+/// every core, and another repo's job that arrives goes before the busy repo's queued ones.
+///
+/// **Whether it starts.** All three of:
+///
+/// * the cores running jobs use, by `in_use` (a job it has no reading for counts at its grant),
+///   plus its ask, fit the machine's cores;
+/// * the cores granted in all stay within [`Limits::grant_ceiling`];
+/// * the cores busy on the whole machine, by `machine_busy`, plus its ask, fit the cores: work
+///   outside the queue (an agent's own browser run, another repo's tests) loads the machine too,
+///   and two e2e runs beside WebKit once drove the load to 50 and timed WebKit's tests out. The
+///   reading predates this pass, so what this pass grants is added to it. `None`, unread, gates
+///   nothing;
+/// * the memory free exceeds [`memory_estimate_mib`], less what this pass already granted against.
+///
+/// A job with a `min` starts with fewer than it asked, never fewer than `min`, when that is what
+/// fits.
+///
+/// **What waits behind what.** A job that does not fit for cores holds the cores it waits for:
+/// every job after it waits too, so a big ask is not passed for ever by small ones, and another
+/// repo's job really does get the next freed cores. A job held by memory, or whose box is asked
+/// to free memory, does not hold anything up. Every job left waiting carries its reason. Nothing
+/// running is ever stopped here.
+pub fn schedule(
+    queue: &mut Queue,
+    limits: Limits,
+    memory_asked: &dyn Fn(&str) -> bool,
+    in_use: &dyn Fn(&Job) -> Option<f64>,
+    machine_busy: Option<f64>,
+) -> Pool {
+    let ask_cap = limits.max_cores_per_job.min(limits.cores).max(1);
     for job in queue.jobs.iter_mut().filter(|j| j.state == "waiting") {
-        let of_repo = per_repo.get(&job.repo).copied().unwrap_or(0);
-        if of_repo >= limits.repo_cap {
-            job.reason = format!("repo at cap {of_repo}/{}", limits.repo_cap);
-            continue;
+        if job.cores == 0 {
+            job.cores = default_cores(job);
         }
+        job.cores = job.cores.clamp(1, ask_cap);
+        job.min = match job.min {
+            0 => job.cores,
+            m => m.clamp(1, job.cores),
+        };
+    }
+    let ceiling = limits.grant_ceiling();
+    let mut granted: u32 = 0;
+    let mut used: f64 = 0.0;
+    for j in queue.jobs.iter().filter(|j| j.state == "granted") {
+        let holds = j.holds();
+        granted += holds;
+        used += in_use(j)
+            .filter(|u| u.is_finite() && *u >= 0.0)
+            .unwrap_or(holds as f64);
+    }
+    let free = |granted: u32, used: f64| -> u32 {
+        let by_use = (limits.cores as f64 - used).floor().max(0.0) as u32;
+        by_use.min(ceiling.saturating_sub(granted))
+    };
+    let machine_busy = machine_busy.filter(|b| b.is_finite() && *b >= 0.0);
+    // What the machine has idle once this pass's grants are added to the reading; all of it when
+    // there is no reading.
+    let idle = |given: u32| -> u32 {
+        match machine_busy {
+            Some(busy) => (limits.cores as f64 - busy - given as f64).floor().max(0.0) as u32,
+            None => u32::MAX,
+        }
+    };
+    let mut given: u32 = 0;
+    let mut per_repo = cores_by_repo(queue);
+    let mut mem_free = limits.mem_free_mib;
+    let mut left = waiting_order(queue);
+    // The repo of the first job that did not fit for cores, which holds those cores against
+    // every job after it.
+    let mut held_for: Option<String> = None;
+    while !left.is_empty() {
+        let pick = left
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, &i)| (per_repo.get(&queue.jobs[i].repo).copied().unwrap_or(0), i))
+            .map(|(at, _)| at)
+            .unwrap_or(0);
+        let job = &mut queue.jobs[left.remove(pick)];
         if memory_asked(&job.box_name) {
             job.reason = "this box is asked to free memory".into();
             continue;
         }
-        if running >= limits.fleet_slots {
-            job.reason = format!("fleet full {running}/{}", limits.fleet_slots);
+        if let Some(repo) = &held_for {
+            job.reason = match *repo == job.repo {
+                true => "an earlier job goes first".into(),
+                false => "another repo's job goes first".into(),
+            };
             continue;
         }
+        let need = memory_estimate_mib(job);
+        if let Some(have) = mem_free.filter(|&have| have <= need) {
+            job.reason = format!("memory: needs ~{} GB, {} GB free", gb(need), gb(have));
+            continue;
+        }
+        let fits = free(granted, used);
+        if fits < job.min {
+            job.reason = format!("waiting for {} ({fits} free)", cores_word(job.min));
+            held_for = Some(job.repo.clone());
+            continue;
+        }
+        if idle(given) < job.min {
+            let busy = machine_busy.unwrap_or(0.0) + given as f64;
+            job.reason = format!(
+                "machine busy: {} of {} cores in use",
+                (busy * 10.0).round() / 10.0,
+                limits.cores
+            );
+            held_for = Some(job.repo.clone());
+            continue;
+        }
+        let give = job.cores.min(fits).min(idle(given));
         job.state = "granted".into();
+        job.granted_cores = give;
         job.reason.clear();
-        running += 1;
-        *per_repo.entry(job.repo.clone()).or_default() += 1;
+        granted += give;
+        given += give;
+        used += give as f64;
+        *per_repo.entry(job.repo.clone()).or_default() += give;
+        mem_free = mem_free.map(|m| m.saturating_sub(need));
+    }
+    Pool {
+        cores: limits.cores,
+        granted,
+        free: free(granted, used).min(idle(given)),
     }
 }
 
@@ -501,13 +751,29 @@ fn prune(queue: &mut Queue, now: DateTime<Utc>) {
 }
 
 /// Box `name`'s view of the queue.
-pub fn view_for(queue: &Queue, name: &str, limits: Limits, now: DateTime<Utc>) -> View {
-    let mut position = 0;
+///
+/// Its own jobs, in the order skein saw them, each with its place in the order waiting jobs go
+/// ([`waiting_order`]); and every waiting job ahead of its first, named with its box: the owner
+/// chose named over counted (2026-10-31), so the box can tell whose work it waits behind.
+pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> View {
+    let order = waiting_order(queue);
+    let place = |i: usize| order.iter().position(|&o| o == i).map(|p| p + 1);
+    let ahead = order
+        .iter()
+        .take_while(|&&i| queue.jobs[i].box_name != name)
+        .map(|&i| Ahead {
+            box_name: queue.jobs[i].box_name.clone(),
+            id: queue.jobs[i].id.clone(),
+            class: queue.jobs[i].class.clone(),
+            cores: queue.jobs[i].cores,
+        })
+        .collect::<Vec<_>>();
+    let ahead = match order.iter().any(|&i| queue.jobs[i].box_name == name) {
+        true => ahead,
+        false => Vec::new(),
+    };
     let mut jobs = Vec::new();
-    for job in &queue.jobs {
-        if job.state == "waiting" {
-            position += 1;
-        }
+    for (i, job) in queue.jobs.iter().enumerate() {
         if job.box_name != name {
             continue;
         }
@@ -525,7 +791,10 @@ pub fn view_for(queue: &Queue, name: &str, limits: Limits, now: DateTime<Utc>) -
             command: job.command.clone(),
             cwd: job.cwd.clone(),
             state: job.state.clone(),
-            position: (job.state == "waiting").then_some(position),
+            cores: job.cores,
+            min: job.min,
+            granted_cores: job.granted_cores,
+            position: (job.state == "waiting").then(|| place(i)).flatten(),
             reason: job.reason.clone(),
             waited_secs: secs_between(&job.queued, waited_until),
             ran_secs: (!job.ended.is_empty() && !job.granted.is_empty())
@@ -536,10 +805,12 @@ pub fn view_for(queue: &Queue, name: &str, limits: Limits, now: DateTime<Utc>) -
     View {
         schema: 1,
         at: stamp(now),
-        fleet_slots: limits.fleet_slots,
+        cores: pool.cores,
+        granted: pool.granted,
+        free: pool.free,
         running: queue.jobs.iter().filter(|j| j.state == "granted").count(),
-        repo_cap: limits.repo_cap,
         jobs,
+        ahead,
     }
 }
 
@@ -587,7 +858,16 @@ pub fn tick(
         .map(|j| (j.box_name.clone(), j.id.clone()))
         .collect();
     let states = places.states.clone();
-    schedule(&mut queue, limits, &|name| memory_asked(&states, name));
+    // What each running job uses is not measured yet: every one counts at its grant until the
+    // per-job cgroup reader (SKEIN-1419) is passed here. Nor is the whole machine's busy CPU,
+    // which no reader in the tree measures yet: `None` here gates nothing on it.
+    let pool = schedule(
+        &mut queue,
+        limits,
+        &|name| memory_asked(&states, name),
+        &|_job| None,
+        None,
+    );
     granted_now(&mut queue, &before, now);
     prune(&mut queue, now);
     write_json(&places.queue, &queue)?;
@@ -600,7 +880,7 @@ pub fn tick(
         if !state.is_dir() {
             continue;
         }
-        let view = view_for(&queue, &name, limits, now);
+        let view = view_for(&queue, &name, pool, now);
         let prev = read_view(&state);
         let unchanged = prev.as_ref().is_some_and(|p| {
             View {
@@ -764,6 +1044,16 @@ mod tests {
         }
     }
 
+    /// A machine of `cores` cores, the default per-job cap and oversubscription, and memory unread.
+    fn machine(cores: u32) -> Limits {
+        Limits {
+            cores,
+            max_cores_per_job: DEFAULT_MAX_CORES_PER_JOB,
+            oversubscribe: DEFAULT_OVERSUBSCRIBE,
+            mem_free_mib: None,
+        }
+    }
+
     fn state_of<'a>(q: &'a Queue, id: &str) -> &'a str {
         q.jobs
             .iter()
@@ -774,10 +1064,10 @@ mod tests {
 
     /// **A priority, a position or a grant written in a box's file moves nothing.**
     ///
-    /// The first box files first and is granted the one slot. A second box files a tick later with
-    /// every field a box might use to jump the line: a priority, position 1, a grant, `granted` as
-    /// its state. It is still second, still waiting, and its view puts it first among the waiting
-    /// only because it is the only one waiting.
+    /// The first box files first and is granted the machine's two cores. A second box files a tick
+    /// later, and a third with every field a box might use to jump the line: a priority, position
+    /// 0, a grant, `granted` as its state, a grant of cores. It is still third, still waiting, and
+    /// its view puts it second among the waiting.
     ///
     /// What would make it fail: a `priority` field on [`Request`] that [`schedule`] or [`merge`]
     /// orders by (the sabotage that was run), or a box's `state: granted` read as a grant.
@@ -785,8 +1075,8 @@ mod tests {
     fn a_priority_written_in_a_box_file_moves_nothing() {
         let f = Fleet::new(&["web-main", "api-main", "ops-main"]);
         let limits = Limits {
-            fleet_slots: 1,
-            repo_cap: 2,
+            oversubscribe: 1.0,
+            ..machine(2)
         };
         f.submit("web-main", "j-first", 101, serde_json::json!({}));
         f.tick(0, limits, &[]);
@@ -796,7 +1086,7 @@ mod tests {
             "api-main",
             "j-pushy",
             103,
-            serde_json::json!({"priority": -100, "position": 0, "grant": true,
+            serde_json::json!({"priority": -100, "position": 0, "grant": true, "granted_cores": 2,
                                "granted": "2026-10-30T11:00:00Z", "queued": "2026-01-01T00:00:00Z"}),
         );
         let q = f.tick(4, limits, &[]);
@@ -822,72 +1112,14 @@ mod tests {
         }
         let pushy = f.view("api-main");
         assert_eq!(pushy.jobs[0].position, Some(2), "{pushy:#?}");
-        assert_eq!(pushy.jobs[0].reason, "fleet full 1/1");
+        assert_eq!(pushy.jobs[0].granted_cores, 0, "{pushy:#?}");
+        assert_eq!(pushy.jobs[0].reason, "another repo's job goes first");
     }
 
-    /// **A repo at its cap is skipped, keeps its place, and the next repo's job runs.**
+    /// **A wrapper that dies frees its cores, though it never wrote that it was done.**
     ///
-    /// Two of repo `web`'s jobs run and a third waits; behind it is a job of repo `api`. With three
-    /// fleet slots, the third `web` job is skipped with its reason and the `api` job is granted
-    /// past it. When a `web` job finishes, the waiting `web` job is next, ahead of an `api` job
-    /// that came after it.
-    ///
-    /// What would make it fail: `break` in place of `continue` at the repo cap in [`schedule`]
-    /// (the sabotage that was run: the `api` job waits behind the capped one), or a skipped job
-    /// moved to the back of the line.
-    #[test]
-    fn a_repo_at_cap_is_skipped_and_the_next_repo_runs() {
-        let f = Fleet::new(&["web-1", "web-2", "web-3", "api-1"]);
-        let limits = Limits {
-            fleet_slots: 3,
-            repo_cap: 2,
-        };
-        let repos = [
-            ("web-1", "web"),
-            ("web-2", "web"),
-            ("web-3", "web"),
-            ("api-1", "api"),
-        ];
-        f.submit("web-1", "j-w1", 201, serde_json::json!({}));
-        f.submit("web-2", "j-w2", 202, serde_json::json!({}));
-        f.tick(0, limits, &repos);
-        f.submit("web-3", "j-w3", 203, serde_json::json!({}));
-        f.tick(2, limits, &repos);
-        f.submit("api-1", "j-a1", 204, serde_json::json!({}));
-        let q = f.tick(4, limits, &repos);
-        assert_eq!(state_of(&q, "j-w1"), "granted");
-        assert_eq!(state_of(&q, "j-w2"), "granted");
-        assert_eq!(state_of(&q, "j-w3"), "waiting", "{q:#?}");
-        assert_eq!(
-            state_of(&q, "j-a1"),
-            "granted",
-            "a repo at its cap held up another repo's job:\n{q:#?}"
-        );
-        let w3 = f.view("web-3");
-        assert_eq!(w3.jobs[0].position, Some(1));
-        assert_eq!(w3.jobs[0].reason, "repo at cap 2/2");
-
-        // Its place is kept: a later `api` job does not pass it once `web` has room.
-        f.submit("api-1", "j-a2", 205, serde_json::json!({}));
-        f.tick(6, limits, &repos);
-        std::fs::write(
-            f.places.requests.join("web-1/j-w1.json"),
-            r#"{"id":"j-w1","pid":201,"state":"done"}"#,
-        )
-        .unwrap();
-        let q = f.tick(8, limits, &repos);
-        assert_eq!(state_of(&q, "j-w1"), "done");
-        assert_eq!(state_of(&q, "j-w3"), "granted", "{q:#?}");
-        assert_eq!(state_of(&q, "j-a2"), "waiting", "{q:#?}");
-        assert_eq!(
-            q.jobs.iter().find(|j| j.id == "j-a2").unwrap().reason,
-            "fleet full 3/3"
-        );
-    }
-
-    /// **A wrapper that dies frees its slot, though it never wrote that it was done.**
-    ///
-    /// The slot is the wrapper's pid in its box's `cgroup.procs`, which is the kernel's to write.
+    /// The grant is held by the wrapper's pid in its box's `cgroup.procs`, which is the kernel's
+    /// to write.
     /// The pid is asserted present and the job granted first, so the freeing is a change and not
     /// an absence that was always there. Then the pid leaves the cgroup, with the request file
     /// still saying `waiting`, and the next job is granted on the next tick.
@@ -896,11 +1128,11 @@ mod tests {
     /// liveness arm removed, the sabotage that was run), or checking the pid the file says now
     /// rather than the one first seen.
     #[test]
-    fn a_dead_wrapper_frees_its_slot() {
+    fn a_dead_wrapper_frees_its_cores() {
         let f = Fleet::new(&["web-main", "api-main"]);
         let limits = Limits {
-            fleet_slots: 1,
-            repo_cap: 2,
+            oversubscribe: 1.0,
+            ..machine(2)
         };
         f.submit("web-main", "j-dies", 301, serde_json::json!({}));
         f.tick(0, limits, &[]);
@@ -916,7 +1148,7 @@ mod tests {
         assert_eq!(state_of(&q, "j-next"), "waiting");
 
         // Killed: out of the cgroup, and the file still says waiting. A box naming another live
-        // pid of its own does not keep the slot either.
+        // pid of its own does not keep the grant either.
         f.live("web-main", 301, false);
         f.submit("web-main", "j-dies", 399, serde_json::json!({}));
         let q = f.tick(10, limits, &[]);
@@ -947,10 +1179,7 @@ mod tests {
             memory_asked(&f.places.states, "web-main"),
             "the fixture's ask did not parse"
         );
-        let limits = Limits {
-            fleet_slots: 2,
-            repo_cap: 2,
-        };
+        let limits = machine(4);
         f.submit("web-main", "j-hot", 401, serde_json::json!({}));
         f.submit("api-main", "j-cool", 402, serde_json::json!({}));
         let q = f.tick(0, limits, &[]);
@@ -993,10 +1222,7 @@ mod tests {
         .unwrap();
         f.live("api-main", 501, true);
 
-        let limits = Limits {
-            fleet_slots: 4,
-            repo_cap: 4,
-        };
+        let limits = machine(8);
         let q = f.tick(0, limits, &[]);
         assert_eq!(
             state_of(&q, "j-real"),
@@ -1031,16 +1257,7 @@ mod tests {
         f.submit("web-main", "j-ok", 601, serde_json::json!({}));
         let places = f.places.clone();
         let q = crate::boxfile::within(&fifo, "the jobs tick", move || {
-            tick(
-                &places,
-                Limits {
-                    fleet_slots: 1,
-                    repo_cap: 2,
-                },
-                &|b: &str| b.to_string(),
-                at(0),
-            )
-            .unwrap()
+            tick(&places, machine(2), &|b: &str| b.to_string(), at(0)).unwrap()
         });
         assert_eq!(state_of(&q, "j-ok"), "granted", "{q:#?}");
         assert_eq!(state_of(&q, "j-fifo"), "absent", "{q:#?}");
@@ -1049,19 +1266,20 @@ mod tests {
     /// **One box cannot queue more than [`PER_BOX`] jobs, and another box's job still runs.**
     ///
     /// The queue is shared, and a box writes as many request files as it likes. One box files
-    /// `PER_BOX + 1` jobs, each with a live wrapper; exactly `PER_BOX` are queued. The fleet has
-    /// exactly one slot more than that, so the other box's job, filed a tick later, is granted
-    /// only if the flooding box was held to its share.
+    /// `PER_BOX + 1` jobs, each with a live wrapper; exactly `PER_BOX` are queued. The machine has
+    /// exactly one job's cores more than they take, so the other box's job, filed a tick later,
+    /// is granted only if the flooding box was held to its share.
     ///
     /// What would make it fail: the `active >= PER_BOX` check in [`merge`] removed (the sabotage
-    /// that was run: all `PER_BOX + 1` are queued and granted, and the other box's job waits with
-    /// `fleet full`), or the count taken per tick rather than over the box's active jobs.
+    /// that was run: all `PER_BOX + 1` are queued and granted, and the other box's job waits for
+    /// cores), or the count taken per tick rather than over the box's active jobs.
     #[test]
     fn a_box_cannot_queue_more_than_its_share_of_jobs() {
         let f = Fleet::new(&["web-main", "api-main"]);
+        // Two cores a job, and no oversubscription: room for exactly `PER_BOX + 1` jobs.
         let limits = Limits {
-            fleet_slots: PER_BOX + 1,
-            repo_cap: 100,
+            oversubscribe: 1.0,
+            ..machine(2 * (PER_BOX as u32 + 1))
         };
         for n in 0..=PER_BOX {
             f.submit(
@@ -1095,11 +1313,367 @@ mod tests {
         );
     }
 
+    /// A job of `repo`, in box `<repo>-<id>`, asking for `cores`, in `state` (`granted` holds
+    /// all it asked for).
+    fn job(id: &str, repo: &str, cores: u32, state: &str) -> Job {
+        Job {
+            id: id.into(),
+            box_name: format!("{repo}-{id}"),
+            repo: repo.into(),
+            class: "build".into(),
+            state: state.into(),
+            cores,
+            granted_cores: if state == "granted" { cores } else { 0 },
+            ..Job::default()
+        }
+    }
+
+    fn find<'a>(q: &'a Queue, id: &str) -> &'a Job {
+        q.jobs
+            .iter()
+            .find(|j| j.id == id)
+            .unwrap_or_else(|| panic!("no {id} in {q:#?}"))
+    }
+
+    fn no_box_asked(_: &str) -> bool {
+        false
+    }
+
+    fn unmeasured(_: &Job) -> Option<f64> {
+        None
+    }
+
+    /// **A repo alone fills the whole machine.** Five two-core jobs of one repo on an eight-core
+    /// machine with nothing measured: four start, eight cores granted, and the fifth waits for two
+    /// cores with none free. The box's view says the same in cores.
+    ///
+    /// What would make it fail: any per-repo cap left in [`schedule`], such as the old one of two
+    /// jobs (the sabotage that was run: `if of_repo >= 4 { continue }` on the repo's cores, and
+    /// only two jobs start).
     #[test]
-    fn the_fleet_has_one_slot_for_every_four_cores_and_never_none() {
-        assert_eq!(fleet_slots_for(0), 1);
-        assert_eq!(fleet_slots_for(3), 1);
-        assert_eq!(fleet_slots_for(11), 2);
-        assert_eq!(fleet_slots_for(16), 4);
+    fn a_lone_repo_fills_the_whole_pool() {
+        let f = Fleet::new(&["web-main"]);
+        for n in 1..=5 {
+            f.submit(
+                "web-main",
+                &format!("j-{n}"),
+                800 + n,
+                serde_json::json!({"cores": 2}),
+            );
+        }
+        let limits = Limits {
+            oversubscribe: 1.0,
+            ..machine(8)
+        };
+        let q = f.tick(0, limits, &[("web-main", "web")]);
+        for n in 1..=4 {
+            assert_eq!(state_of(&q, &format!("j-{n}")), "granted", "{q:#?}");
+        }
+        assert_eq!(state_of(&q, "j-5"), "waiting", "{q:#?}");
+        let v = f.view("web-main");
+        assert_eq!((v.cores, v.granted, v.free), (8, 8, 0), "{v:#?}");
+        let last = v.jobs.iter().find(|j| j.id == "j-5").unwrap();
+        assert_eq!(last.reason, "waiting for 2 cores (0 free)");
+        assert!(v.ahead.is_empty(), "nothing waits ahead of j-5: {v:#?}");
+        assert!(v
+            .jobs
+            .iter()
+            .filter(|j| j.state == "granted")
+            .all(|j| j.granted_cores == 2));
+    }
+
+    /// **Another repo's arriving job takes the next freed cores, ahead of the busy repo's queued
+    /// ones.** Repo `web` holds all eight cores and has a job queued; then a job of `api` arrives.
+    /// `api` holds nothing, so its job goes first: it waits for the cores, and `web`'s queued job,
+    /// though seen earlier, is told another repo's job goes first, with that job named by its box
+    /// in its view. When one `web` job ends, its two cores go to `api`, and `web`'s job still
+    /// waits.
+    ///
+    /// What would make it fail: the order ignoring the repo's cores, first-seen alone (the
+    /// sabotage that was run: `web`'s queued job goes first and the reasons swap), or a job that
+    /// does not fit letting the ones after it take what it waits for.
+    #[test]
+    fn another_repos_job_takes_the_next_freed_cores_first() {
+        let f = Fleet::new(&["web-1", "web-2", "web-3", "web-4", "web-5", "api-1"]);
+        let repos = [
+            ("web-1", "web"),
+            ("web-2", "web"),
+            ("web-3", "web"),
+            ("web-4", "web"),
+            ("web-5", "web"),
+            ("api-1", "api"),
+        ];
+        let limits = Limits {
+            oversubscribe: 1.0,
+            ..machine(8)
+        };
+        for n in 1..=5u32 {
+            f.submit(
+                &format!("web-{n}"),
+                &format!("j-w{n}"),
+                900 + n,
+                serde_json::json!({}),
+            );
+        }
+        f.tick(0, limits, &repos);
+        f.submit("api-1", "j-a1", 990, serde_json::json!({}));
+        let q = f.tick(2, limits, &repos);
+        assert_eq!(state_of(&q, "j-w5"), "waiting", "{q:#?}");
+        assert_eq!(state_of(&q, "j-a1"), "waiting", "{q:#?}");
+        assert_eq!(find(&q, "j-a1").reason, "waiting for 2 cores (0 free)");
+        assert_eq!(find(&q, "j-w5").reason, "another repo's job goes first");
+        let w5 = f.view("web-5");
+        assert_eq!(w5.jobs[0].position, Some(2), "{w5:#?}");
+        assert_eq!(
+            w5.ahead,
+            [Ahead {
+                box_name: "api-1".into(),
+                id: "j-a1".into(),
+                class: "test".into(),
+                cores: 2,
+            }],
+            "the job ahead is not named with its box"
+        );
+        assert_eq!(f.view("api-1").jobs[0].position, Some(1));
+
+        std::fs::write(
+            f.places.requests.join("web-1/j-w1.json"),
+            r#"{"id":"j-w1","pid":901,"state":"done"}"#,
+        )
+        .unwrap();
+        let q = f.tick(4, limits, &repos);
+        assert_eq!(state_of(&q, "j-w1"), "done");
+        assert_eq!(
+            state_of(&q, "j-a1"),
+            "granted",
+            "the busy repo's queued job took the freed cores: {q:#?}"
+        );
+        assert_eq!(state_of(&q, "j-w5"), "waiting", "{q:#?}");
+    }
+
+    /// **However little running jobs are measured to use, the cores granted stay within 1.5×.**
+    /// Four cores, so a ceiling of six; three jobs hold two each and are measured at nothing. A
+    /// one-core job would fit by use, and waits, with nothing free.
+    ///
+    /// What would make it fail: the ceiling dropped from what is free (the sabotage that was run:
+    /// `by_use` alone, and the job is granted a seventh core).
+    #[test]
+    fn oversubscription_stays_within_the_ceiling_however_low_the_use() {
+        let limits = machine(4);
+        assert_eq!(limits.grant_ceiling(), 6);
+        let mut q = Queue {
+            schema: 1,
+            jobs: vec![
+                job("r1", "web", 2, "granted"),
+                job("r2", "api", 2, "granted"),
+                job("r3", "ops", 2, "granted"),
+                job("w1", "doc", 1, "waiting"),
+            ],
+        };
+        let pool = schedule(&mut q, limits, &no_box_asked, &|_| Some(0.0), None);
+        assert_eq!(state_of(&q, "w1"), "waiting", "{q:#?}");
+        assert_eq!(find(&q, "w1").reason, "waiting for 1 core (0 free)");
+        assert_eq!(
+            pool,
+            Pool {
+                cores: 4,
+                granted: 6,
+                free: 0
+            }
+        );
+    }
+
+    /// **Measured use lets in a job its grants alone would not.** Four cores; two jobs hold two
+    /// each, so by their grants the machine is full. Measured at half a core each, the waiting
+    /// two-core job starts, and the grants reach six, past the cores and within the ceiling. The
+    /// control: with no reading, the same queue waits.
+    ///
+    /// What would make it fail: `in_use` ignored, every job counted at its grant (the sabotage
+    /// that was run: the job waits with nothing free).
+    #[test]
+    fn measured_use_lets_in_a_job_its_grants_alone_would_not() {
+        let queue = Queue {
+            schema: 1,
+            jobs: vec![
+                job("r1", "web", 2, "granted"),
+                job("r2", "api", 2, "granted"),
+                job("w1", "ops", 2, "waiting"),
+            ],
+        };
+        let mut unread = queue.clone();
+        schedule(&mut unread, machine(4), &no_box_asked, &unmeasured, None);
+        assert_eq!(
+            state_of(&unread, "w1"),
+            "waiting",
+            "the control started it with nothing measured, so this proves nothing"
+        );
+
+        let mut q = queue;
+        let pool = schedule(&mut q, machine(4), &no_box_asked, &|_| Some(0.5), None);
+        assert_eq!(state_of(&q, "w1"), "granted", "{q:#?}");
+        assert_eq!(find(&q, "w1").granted_cores, 2);
+        assert_eq!(pool.granted, 6);
+    }
+
+    /// **A busy machine holds a job that the jobs' own accounting would let in.** Eleven cores,
+    /// one job holding two and measured at one: by the jobs alone, ten cores are free, and a
+    /// four-core job fits. But the machine is 9.5 cores busy with work outside the queue, so it
+    /// waits and says so. The control: the same queue with the machine unread starts it. And what
+    /// a pass grants counts against the reading: at six busy the first job takes four of the five
+    /// idle cores, and the second then finds the machine at ten and waits.
+    ///
+    /// What would make it fail: `machine_busy` ignored in [`schedule`] (the sabotage that was run:
+    /// `idle` always all of it, and the job starts), or the reading taken as the whole truth, with
+    /// what this pass already granted not added to it.
+    #[test]
+    fn a_busy_machine_holds_a_job_the_jobs_alone_would_admit() {
+        let queue = Queue {
+            schema: 1,
+            jobs: vec![
+                job("r1", "web", 2, "granted"),
+                job("w1", "api", 4, "waiting"),
+                job("w2", "ops", 4, "waiting"),
+            ],
+        };
+        let mut unread = queue.clone();
+        schedule(
+            &mut unread,
+            machine(11),
+            &no_box_asked,
+            &|_| Some(1.0),
+            None,
+        );
+        assert_eq!(
+            state_of(&unread, "w1"),
+            "granted",
+            "the control did not start it, so this proves nothing: {unread:#?}"
+        );
+
+        let mut q = queue.clone();
+        let pool = schedule(
+            &mut q,
+            machine(11),
+            &no_box_asked,
+            &|_| Some(1.0),
+            Some(9.5),
+        );
+        assert_eq!(state_of(&q, "w1"), "waiting", "{q:#?}");
+        assert_eq!(
+            find(&q, "w1").reason,
+            "machine busy: 9.5 of 11 cores in use"
+        );
+        assert_eq!(find(&q, "w2").reason, "another repo's job goes first");
+        assert_eq!(pool.free, 1);
+
+        // Six busy: the first takes four of the five idle; the second, asking four, then finds
+        // the machine at ten and waits, though the jobs' own count says six are free.
+        let mut q = queue;
+        schedule(
+            &mut q,
+            machine(11),
+            &no_box_asked,
+            &|_| Some(1.0),
+            Some(6.0),
+        );
+        assert_eq!(find(&q, "w1").granted_cores, 4, "{q:#?}");
+        assert_eq!(state_of(&q, "w2"), "waiting", "{q:#?}");
+        assert_eq!(find(&q, "w2").reason, "machine busy: 10 of 11 cores in use");
+    }
+
+    /// **A job that needs more memory than is free waits, with how much, and does not hold up a
+    /// job that fits.** 2.5 GB free: a `ci` job, expected at 3 GB, waits; the `build` job behind
+    /// it (2 GB) starts; a second `build` job then finds the half gigabyte left and waits too.
+    ///
+    /// What would make it fail: the memory gate removed from [`schedule`] (the sabotage that was
+    /// run: all three start), or the memory a grant takes not subtracted within the pass (the
+    /// last one starts).
+    #[test]
+    fn the_memory_gate_refuses_a_job_that_would_not_fit() {
+        let mut ci = job("w-ci", "web", 2, "waiting");
+        ci.class = "ci".into();
+        let mut q = Queue {
+            schema: 1,
+            jobs: vec![
+                ci,
+                job("w-b1", "api", 2, "waiting"),
+                job("w-b2", "ops", 2, "waiting"),
+            ],
+        };
+        let limits = Limits {
+            mem_free_mib: Some(2560),
+            ..machine(16)
+        };
+        schedule(&mut q, limits, &no_box_asked, &unmeasured, None);
+        assert_eq!(state_of(&q, "w-ci"), "waiting", "{q:#?}");
+        assert_eq!(find(&q, "w-ci").reason, "memory: needs ~3 GB, 2.5 GB free");
+        assert_eq!(state_of(&q, "w-b1"), "granted", "{q:#?}");
+        assert_eq!(state_of(&q, "w-b2"), "waiting", "{q:#?}");
+        assert_eq!(find(&q, "w-b2").reason, "memory: needs ~2 GB, 0.5 GB free");
+    }
+
+    /// **A job with `--min` starts smaller when that is what fits, and never below its min.** Four
+    /// cores, three granted: a job asking four with a min of one starts with one. Behind it, with
+    /// nothing free, a job with a min of two waits for two.
+    ///
+    /// What would make it fail: `min` ignored, a job started only with all it asked (the sabotage
+    /// that was run: the first job waits for four cores), or `give` taken as `min` rather than
+    /// what fits.
+    #[test]
+    fn a_job_with_a_min_starts_with_fewer_cores_when_that_is_what_fits() {
+        let mut flexible = job("w1", "api", 4, "waiting");
+        flexible.min = 1;
+        let mut firm = job("w2", "ops", 3, "waiting");
+        firm.min = 2;
+        let mut q = Queue {
+            schema: 1,
+            jobs: vec![job("r1", "web", 3, "granted"), flexible, firm],
+        };
+        schedule(&mut q, machine(4), &no_box_asked, &unmeasured, None);
+        assert_eq!(state_of(&q, "w1"), "granted", "{q:#?}");
+        assert_eq!(find(&q, "w1").granted_cores, 1, "{q:#?}");
+        assert_eq!(state_of(&q, "w2"), "waiting", "{q:#?}");
+        assert_eq!(find(&q, "w2").reason, "waiting for 2 cores (0 free)");
+    }
+
+    /// **A request file from before cores asks for the default, an ask past the cap is held to it,
+    /// and a queue from before cores still reads.** The old file has no `cores` and is granted
+    /// two; a box asking for 64 is held to four; a queue file whose granted job has no core fields
+    /// reads, and the job counts at the default.
+    ///
+    /// What would make it fail: [`default_cores`] other than two (the sabotage that was run:
+    /// three, and the old file is granted three), `cores` on [`Job`] without its serde default
+    /// (also run: the old queue no longer reads), or the ask not held to
+    /// [`Limits::max_cores_per_job`]. (`cores` on [`Request`] is an `Option`, which serde reads as
+    /// `None` when absent with or without the attribute, so dropping that one fails nothing.)
+    #[test]
+    fn an_old_request_without_cores_asks_for_the_default() {
+        let f = Fleet::new(&["web-main", "api-main"]);
+        std::fs::write(
+            f.places.requests.join("web-main/j-old.json"),
+            r#"{"id":"j-old","class":"build","argv":["make"],"cwd":"/w","pid":951,"state":"waiting"}"#,
+        )
+        .unwrap();
+        f.live("web-main", 951, true);
+        f.submit(
+            "api-main",
+            "j-greedy",
+            952,
+            serde_json::json!({"cores": 64}),
+        );
+        let q = f.tick(0, machine(16), &[]);
+        let old = find(&q, "j-old");
+        assert_eq!(
+            (old.state.as_str(), old.cores, old.granted_cores),
+            ("granted", 2, 2)
+        );
+        let greedy = find(&q, "j-greedy");
+        assert_eq!((greedy.cores, greedy.granted_cores), (4, 4), "{greedy:#?}");
+
+        let before: Queue = serde_json::from_str(
+            r#"{"schema":1,"jobs":[{"id":"j-was","box":"web-main","repo":"web","class":"build",
+                "command":"make","cwd":"/w","pid":1,"state":"granted","queued":"2026-10-30T12:00:00Z"}]}"#,
+        )
+        .expect("a queue from before cores no longer reads");
+        assert_eq!(before.jobs[0].holds(), 2);
     }
 }
