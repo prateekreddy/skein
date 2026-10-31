@@ -36,10 +36,10 @@ export const RESOURCES = {
     at: '2026-10-31T17:47:36Z',
     box_root: ROOT,
     items: [
-      { path: `${ROOT}/home/.cache/ms-playwright`, shown: '~/.cache/ms-playwright', kind: 'download cache', bytes: 1031127040, live: false },
-      { path: `${ROOT}/home/.cargo/registry`, shown: '~/.cargo/registry', kind: 'download cache', bytes: 232701952, live: false },
-      { path: `${ROOT}/home/.cache/skein/claude/s1`, shown: '~/.cache/skein/claude/s1', kind: 'scratchpad', bytes: 226979840, live: false },
-      { path: `${ROOT}/home/.npm/_cacache`, shown: '~/.npm/_cacache', kind: 'download cache', bytes: 194813952, live: false },
+      { path: `${ROOT}/box-home/.cache/ms-playwright`, shown: '~/.cache/ms-playwright', kind: 'download cache', bytes: 1031127040, live: false },
+      { path: `${ROOT}/box-home/.cargo/registry`, shown: '~/.cargo/registry', kind: 'download cache', bytes: 232701952, live: false },
+      { path: `${ROOT}/box-home/.cache/skein/claude/s1`, shown: '~/.cache/skein/claude/s1', kind: 'scratchpad', bytes: 226979840, live: false },
+      { path: `${ROOT}/box-home/.npm/_cacache`, shown: '~/.npm/_cacache', kind: 'download cache', bytes: 194813952, live: false },
       { path: `${ROOT}/tree/tests/ui/node_modules`, shown: 'web-main/tree/tests/ui/node_modules', kind: 'build output', bytes: 19120128, live: false },
       { path: `${ROOT}/tree/target`, shown: 'web-main/tree/target', kind: 'build output', bytes: 3 * G, live: true },
     ],
@@ -128,7 +128,7 @@ export const TOP_DISK = {
 const PAD = 'a scratchpad may belong to a session still running in this box'
 
 const item = (inBox: string, kind: string, bytes: number, why: string | null = null) => ({
-  path: inBox.replace(HOME, `${ROOT}/home`),
+  path: inBox.replace(HOME, `${ROOT}/box-home`),
   in_box: inBox,
   kind,
   bytes,
