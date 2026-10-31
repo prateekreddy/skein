@@ -42,6 +42,7 @@ import { register as band, onStart as bandStart, onTurnComplete as bandTurnCompl
 import { register as guide, onTurnComplete as guideTurnComplete } from './guide'
 import { register as identity, onStart as identityStart } from './identity'
 import { register as keeper, onStart as keeperStart } from './keeper'
+import { onStart as toastsStart, onToolCall as toastsToolCall, onTurnComplete as toastsTurnComplete } from './toasts'
 import { register as toolResults } from './tool-results'
 import { register as tracker, onStart as trackerStart, onTurnComplete as trackerTurnComplete } from './tracker'
 
@@ -63,6 +64,7 @@ export const register: Register = on => {
     await quietly(bandStart($, e))
     await quietly(keeperStart($, e))
     await quietly(trackerStart($, e))
+    await quietly(toastsStart($, e))
 
     return started
   })
@@ -94,6 +96,7 @@ export const register: Register = on => {
     await quietly(bandTurnComplete($, e))
     await quietly(guideTurnComplete($, e))
     await quietly(trackerTurnComplete($, e))
+    await quietly(toastsTurnComplete($, e))
 
     return next(e)
   })
@@ -102,6 +105,7 @@ export const register: Register = on => {
     const answered = await next(e)
     await quietly(agentsPanelToolCall($, e, answered))
     await quietly(attentionToolCall($, e, next.origin))
+    await quietly(toastsToolCall($, e))
 
     return answered
   }).catch(($, e, next) => next(e))

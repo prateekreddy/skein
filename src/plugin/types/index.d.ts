@@ -298,6 +298,8 @@ export type SkeinJobCall = {
   /** The job in the view that is this call's, once one is found; null before. */
   jobId: string | null
   isRunning: boolean
+  /** The subagent whose call it is (`tool.call`'s `agentId`); null on the main loop. */
+  agentId: string | null
 }
 
 /** What the tool rows draw a `skein-job` call from: the calls, and the jobs view while one ran. */
