@@ -747,10 +747,13 @@ function loadDecisions() {
 }
 // A link to a panel by its hash (`/#askq` and the two beside it) opens that panel. The hash is then
 // taken off the address, so a reload does not open it again and the same link still works twice.
+// `/#jobs` and `/#jobs-<box>` open the heavy-jobs list, the second narrowed to that box.
 function openPanelFromHash() {
   const panel = panelForHash(location.hash);
-  if (!panel) return;
-  ({ askq: openAskq, subq: openSubq, gitq: openGitq })[panel]();
+  const jobs = panel ? null : jobsForHash(location.hash);
+  if (!panel && !jobs) return;
+  if (panel) ({ askq: openAskq, subq: openSubq, gitq: openGitq })[panel]();
+  else openJobs(jobs.box);
   history.replaceState(null, "", location.pathname + location.search);
 }
 window.addEventListener("hashchange", openPanelFromHash);

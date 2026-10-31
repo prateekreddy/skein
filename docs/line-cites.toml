@@ -73,7 +73,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/parity.md:157"]
+["docs/parity.md:162"]
 line = "stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -221,25 +221,25 @@ cited_by = ["docs/recovery-survey.md"]
 line = "skein::stream::Tick::PtyFreed => \"pty-freed\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:151"]
+["src/bin/skein-server/fleet.rs:173"]
 line = "Ok(Err(why)) => ("
 window = "Ok(Ok(rows)) => Json(rows).into_response(),\u000bOk(Err(why)) => (\u000bStatusCode::SERVICE_UNAVAILABLE,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:199"]
+["src/bin/skein-server/fleet.rs:221"]
 line = "Err(e) => ("
 window = "Ok(p) => Json(p).into_response(),\u000bErr(e) => (\u000bStatusCode::INTERNAL_SERVER_ERROR,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:300"]
+["src/bin/skein-server/fleet.rs:322"]
 line = "if sandbox.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:338"]
+["src/bin/skein-server/fleet.rs:360"]
 line = "if let Some(why) = skein::fleet::fleet_lifecycle_refusal(\"rebuild\", true) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/fleet.rs:341"]
+["src/bin/skein-server/fleet.rs:363"]
 line = "match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -287,19 +287,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:655"]
+["src/bin/skein-server/main.rs:658"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:665"]
+["src/bin/skein-server/main.rs:668"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:756"]
+["src/bin/skein-server/main.rs:759"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:762"]
+["src/bin/skein-server/main.rs:765"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2055,39 +2055,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(error => notice(`could not restart ${runtimeLabel(runtime)} in ${name}: ${failText(error)}`)).finally(done);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:895"]
+["src/web/app/board.js:898"]
 line = "else if (s.dead) reconnectSession(name, kind); // clicking a disconnected tab reconnects it"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:946"]
+["src/web/app/board.js:949"]
 line = "\"wait-pty\": [\"waiting for a terminal to close\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:950"]
+["src/web/app/board.js:953"]
 line = "\"no-watch\": [\"skein could not open this terminal\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:959"]
+["src/web/app/board.js:962"]
 line = "const RETRY_BACKOFF_MS = [3000, 10000, 30000, 60000, 120000];"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:997"]
+["src/web/app/board.js:1000"]
 line = "disco.innerHTML = `<div class=\"disco-card\"><div class=\"disco-t\">session not connected</div><div class=\"disco-b\">click to reconnect</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:998"]
+["src/web/app/board.js:1001"]
 line = "disco.addEventListener(\"click\", () => reconnectSession(box, kind));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1088"]
+["src/web/app/board.js:1091"]
 line = "ws.onclose = e => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1318"]
+["src/web/app/board.js:1321"]
 line = "retryTries.delete(s.sid); reconnectSession(s.box, s.kind);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/board.js:1350"]
+["src/web/app/board.js:1353"]
 line = "reconnectSession(s.box, s.kind, false);"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2181,11 +2181,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "diffpane.innerHTML = `<div class=\"diff\"><div class=\"note\">could not load the diff — ${esc(failText(e))}</div></div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:567"]
+["src/web/app/panels.js:568"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:1052"]
+["src/web/app/panels.js:1099"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 

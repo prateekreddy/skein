@@ -776,3 +776,149 @@ fn a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_th
         ended.used
     );
 }
+
+// ─────────── the owner's stop (SKEIN-1422) ───────────
+
+/// The job of the given state, once the scheduler shows one.
+fn job_in(fleet: &Fleet, state: &str) -> skein::jobs::Job {
+    eventually(
+        Duration::from_secs(20),
+        &format!("no job read `{state}`"),
+        || fleet.queue().jobs.into_iter().find(|j| j.state == state),
+    )
+}
+
+/// What a finished wrapper said and how it ended.
+fn ended(child: std::process::Child, bound: Duration) -> (Option<i32>, String) {
+    let mut child = child;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if started.elapsed() > bound {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status();
+            let _ = child.wait();
+            panic!("the wrapper was still running after {bound:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut err = String::new();
+    let _ = child.stderr.take().unwrap().read_to_string(&mut err);
+    (status.code(), err)
+}
+
+/// **A waiting job the owner stops leaves the queue, and its wrapper says the owner stopped it and
+/// exits non-zero, without running its command.**
+///
+/// One core. The first wrapper holds it with a `sleep`; the second waits behind it. The owner
+/// stops the second, as the cockpit's press does (`jobs::ask_owner_stop`), and its wrapper must end
+/// within a few ticks, exit 137, and say `stopped by you (the owner) from the cockpit` on stderr.
+/// Its command, which would write a file, never ran.
+///
+/// What would make it fail: the wrapper not reading `stopped` in its view (the sabotage that was
+/// run: its `state == "stopped"` branch removed, and it says "skein ended this job before it
+/// started (stopped)" and exits 75); or the tick not ending the job (it waits on to the bound).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_waiting_job_the_owner_stops_says_so_and_never_runs() {
+    let fleet = Fleet::new(
+        "skein-job-stop-waiting",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        1,
+    );
+    let holder = fleet
+        .wrapper()
+        .args(["run", "--cores", "1", "--", "sleep", "60"])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let first = job_in(&fleet, "granted");
+    let ran = fleet.dir.path().join("it-ran");
+    // A lock of its own: on the box's one lock it would wait behind the first before it ever
+    // reached the queue.
+    let waiter = fleet
+        .wrapper()
+        .env("SKEIN_JOB_LOCK", fleet.dir.path().join("second.lock"))
+        .args(["run", "--cores", "1", "--", "touch"])
+        .arg(&ran)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let second = job_in(&fleet, "waiting");
+    assert_ne!(first.id, second.id);
+
+    skein::jobs::ask_owner_stop(&fleet.places, "web-main", &second.id).unwrap();
+    let (code, err) = ended(waiter, Duration::from_secs(15));
+    assert_eq!(code, Some(137), "{err}");
+    assert!(
+        err.contains("stopped by you (the owner) from the cockpit; the command did not run"),
+        "{err}"
+    );
+    assert!(!ran.exists(), "the stopped job's command ran");
+
+    skein::jobs::ask_owner_stop(&fleet.places, "web-main", &first.id).unwrap();
+    let (code, err) = ended(holder, Duration::from_secs(20));
+    assert_eq!(code, Some(137), "{err}");
+}
+
+/// **A running job the owner stops has its command killed, and its wrapper lives to say the owner
+/// stopped it, and exits non-zero.**
+///
+/// A box with no cgroup of its own (the root does not exist), so the stop takes the path a box
+/// without job cgroups has: every process under the shipped wrapper, which skein confirms is that
+/// box's `skein-job` by its environment and command. The command reports its pid and sleeps; after
+/// the stop that pid is gone, and the wrapper exits 137 saying `stopped by you (the owner) from the
+/// cockpit; its processes were killed`.
+///
+/// What would make it fail: the stop killing nothing (the command sleeps on and the wrapper runs
+/// to the bound), killing the wrapper as well (it exits by a signal and says nothing: the sabotage
+/// that was run was `kill_under` taking the wrapper's pid too, and the code is `None`), or the
+/// wrapper not looking for skein's mark after its command was killed (the sabotage that was run:
+/// the wrapper's look at its view after a SIGKILL removed, and it exits 137 with no line saying
+/// who stopped it).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_running_job_the_owner_stops_is_killed_and_its_wrapper_says_so() {
+    let fleet = Fleet::new(
+        "skein-job-stop-running",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        2,
+    );
+    let said = fleet.dir.path().join("job-said");
+    let probe = format!(
+        "echo $$ > {0}.tmp && mv {0}.tmp {0}; exec sleep 120",
+        said.display()
+    );
+    let wrapper = fleet
+        .wrapper()
+        .args(["run", "--cores", "1", "--", "sh", "-c", &probe])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid: u32 = eventually(Duration::from_secs(20), "the job never ran", || {
+        fs::read_to_string(&said).ok()?.trim().parse().ok()
+    });
+    let job = job_in(&fleet, "granted");
+    assert!(Path::new(&format!("/proc/{pid}")).exists());
+
+    skein::jobs::ask_owner_stop(&fleet.places, "web-main", &job.id).unwrap();
+    let (code, err) = ended(wrapper, Duration::from_secs(20));
+    assert_eq!(code, Some(137), "{err}");
+    assert!(
+        err.contains("stopped by you (the owner) from the cockpit; its processes were killed"),
+        "{err}"
+    );
+    eventually(
+        Duration::from_secs(5),
+        "the job's command survived the stop",
+        || (!Path::new(&format!("/proc/{pid}")).exists()).then_some(()),
+    );
+    let q = fleet.queue();
+    let stopped = q.jobs.iter().find(|j| j.id == job.id).unwrap();
+    assert_eq!(stopped.state, "stopped", "{q:#?}");
+}

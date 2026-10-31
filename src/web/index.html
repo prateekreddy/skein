@@ -1142,8 +1142,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #askq.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #jobs, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #askq.open, #jobs.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
   /* Asking before a working agent is restarted (SKEIN-1262): the same overlay as the others, above them. */
   #rsask { position:fixed; inset:0; z-index:70; display:flex; justify-content:center; align-items:flex-start;
            padding:10vh 8px 8px; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
@@ -1178,6 +1178,10 @@
   /* the badge that says something is waiting on a decision */
   /* Write access too (SKEIN-1298): its count was the one drawn as grey text beside the icon. */
   #subqbtn, #askqbtn, #gitqbtn { position:relative; }
+  #jobs .jb-pool { padding:8px 12px; color:var(--dim); }
+  #jobs .jb-pool b { color:var(--fg); }
+  #jobs .jb-scope { padding:0 12px 8px; color:var(--dim); }
+  #jobs .jb-cmd { font-family:var(--mono); }
   #subqbtn .badge, #askqbtn .badge, #gitqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
     border-radius:7px; background:var(--attn); color:#fff; font-size:9px; line-height:14px; text-align:center; font-family:var(--mono); }
   /* Same shape as the package-request badge above, deliberately: both mean "something is waiting on
@@ -1730,7 +1734,7 @@
                                                       white-space:nowrap; flex:0 1 auto; }
     header { gap:10px; row-gap:8px; margin-bottom:12px; }
     .wrap { padding:14px 12px 40px; }
-    #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #loginterm { padding:8px; }
+    #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #jobs, #loginterm { padding:8px; }
     .nb-card { max-height:calc(100dvh - 16px); }
   }
   /* A finger needs a target near 40px; these were 15–24px (SKEIN-1300). */
@@ -1759,6 +1763,7 @@
             <button type="button" class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast" aria-label="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></button>
             <button type="button" class="kbtn ghost" id="revbtn" onclick="openReview()" title="Review a repo's pull requests" aria-label="Review a repo's pull requests"><svg class="ic" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg></button>
             <button type="button" class="kbtn ghost" id="gitqbtn" onclick="openGitq()" title="Repo write access" aria-label="Repo write access"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
+            <button type="button" class="kbtn ghost" id="jobsbtn" onclick="openJobs()" title="Heavy jobs: what is waiting and running, and stop one" aria-label="Heavy jobs"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></button>
             <button type="button" class="kbtn ghost" id="askqbtn" onclick="openAskq()" title="Questions from boxes" aria-label="Questions from boxes"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>
             <button type="button" class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes" aria-label="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></button>
             <button type="button" class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you" aria-label="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
@@ -1826,6 +1831,13 @@
         <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)" data-keys></textarea>
         <div class="row2"><span class="hint" id="mbx-hint"></span><button class="primary" id="mbx-send">Send</button></div>
       </div>
+    </div>
+  </div>
+
+  <div id="jobs" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Heavy jobs</b><span class="sub">every box's builds and tests, waiting and running</span><button type="button" class="x" aria-label="Close" onclick="closeJobs()">✕</button></div>
+      <div class="mbx-list" id="jobs-list"></div>
     </div>
   </div>
 
@@ -2953,10 +2965,13 @@ function loadDecisions() {
 }
 // A link to a panel by its hash (`/#askq` and the two beside it) opens that panel. The hash is then
 // taken off the address, so a reload does not open it again and the same link still works twice.
+// `/#jobs` and `/#jobs-<box>` open the heavy-jobs list, the second narrowed to that box.
 function openPanelFromHash() {
   const panel = panelForHash(location.hash);
-  if (!panel) return;
-  ({ askq: openAskq, subq: openSubq, gitq: openGitq })[panel]();
+  const jobs = panel ? null : jobsForHash(location.hash);
+  if (!panel && !jobs) return;
+  if (panel) ({ askq: openAskq, subq: openSubq, gitq: openGitq })[panel]();
+  else openJobs(jobs.box);
   history.replaceState(null, "", location.pathname + location.search);
 }
 window.addEventListener("hashchange", openPanelFromHash);
@@ -9818,7 +9833,7 @@ function renderAwayOverlay(items, since) {
 // Every overlay that sits over the page as a dialog. Two things read this list: the terminal's
 // clipboard keys, which leave every chord to the browser while one is open (SKEIN-1246 — a paste
 // into a Settings field landed in the box terminal behind it), and the wiring below.
-const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load", "rsask"];
+const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "jobs", "loginterm", "away", "load", "rsask"];
 function popupOpen() { return POPUP_IDS.some(id => document.getElementById(id)?.classList.contains("open")); }
 // A click on the backdrop closes the popup through the close function its ✕ and Escape use, so a
 // click outside loses exactly what those lose and nothing more. **Both the press and the release
@@ -9974,7 +9989,7 @@ window.addEventListener("keydown", e => {
 for (const [id, close] of [
   ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
-  ["askq", closeAskq], ["loginterm", null],
+  ["askq", closeAskq], ["jobs", closeJobs], ["loginterm", null],
 ]) registerDialog(document.getElementById(id), close);
 
 // ---------- command palette ----------
@@ -10000,6 +10015,7 @@ function commands() {
     { sec:"Actions", label:(voiceOn?"Silence":"Speak")+" boxes that need you", run:()=>document.getElementById("voice").click() },
     { sec:"Actions", label:"Read what needs me", run:sayInbox },
     { sec:"Actions", label:"Load by box — who is using the CPU, memory and disk", run:showLoad },
+    { sec:"Actions", label:"Heavy jobs — what is waiting and running, and stop one", run:() => openJobs() },
     // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
     // recognition on a pause by itself, so this needs no second click to stop it.
     { sec:"Actions", label:"Listen for a command", run:listen, meta:glyph("hold ⌥ right") },
@@ -10282,6 +10298,52 @@ function pollSubq() {
 // What each card was rendered from, keyed by box AND id, for `subqShown`'s reason: the answer is
 // sent back from what was on screen, not looked up again, and an id is the box's to choose.
 const askqShown = new Map();
+// ---------- heavy jobs (every box's builds and tests, SKEIN-1422) ----------
+//
+// The rows are drawn by `jobsHtml` (cockpit/src/jobs.mjs) from `/api/fleet/jobs`, every two seconds
+// while the panel is open, which is how often the queue looks. **Stop is the owner's**: the press
+// goes to `/api/fleet/jobs/<box>/<id>/stop`, which only the cockpit's token can reach, and answers
+// once the queue has stopped the job. The row's controls stay disabled until then, so one press is
+// one stop.
+let jobsBox = "", jobsTimer = null;
+function openJobs(box = "") {
+  jobsBox = box || "";
+  const o = document.getElementById("jobs"); o.classList.add("open"); o.setAttribute("aria-hidden","false");
+  loadJobs();
+  clearInterval(jobsTimer);
+  jobsTimer = setInterval(() => { if (o.classList.contains("open")) loadJobs(); else clearInterval(jobsTimer); }, 2000);
+}
+function closeJobs() {
+  const o = document.getElementById("jobs"); o.classList.remove("open"); o.setAttribute("aria-hidden","true");
+  clearInterval(jobsTimer);
+}
+function loadJobs() {
+  const list = document.getElementById("jobs-list");
+  return fetch("/api/fleet/jobs").then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))).then(v => {
+    list.innerHTML = jobsHtml(v, jobsBox);
+    for (const key of inFlight) {
+      const [panel, card] = key.split("\n");
+      if (panel === "jobs") markSending("jobs", card, true);
+    }
+  }).catch(() => { list.innerHTML = `<div class="note">could not load the jobs</div>`; });
+}
+document.getElementById("jobs-list").addEventListener("click", e => {
+  if (e.target.closest("[data-jobs-all]")) { e.preventDefault(); jobsBox = ""; loadJobs(); return; }
+  const b = e.target.closest("button[data-stop]");
+  if (!b) return;
+  const box = b.dataset.box, id = b.dataset.id, key = `${box}/${id}`;
+  const what = b.closest(".jb-row")?.querySelector(".jb-cmd")?.textContent || id;
+  markSending("jobs", key, true);
+  fetch(`/api/fleet/jobs/${encodeURIComponent(box)}/${encodeURIComponent(id)}/stop`, { method: "POST" })
+    .then(async r => {
+      if (!r.ok) throw await refused(r);
+      const body = await r.json();
+      toast(body.stopped ? `Stopped ${box}'s ${what}` : `Asked to stop ${box}'s ${what}; it stops within a few seconds`);
+    })
+    .catch(err => notice(`Could not stop that job: ${failText(err)}`))
+    .finally(() => { markSending("jobs", key, false); loadJobs(); });
+});
+
 function openAskq() { const o = document.getElementById("askq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadAskq(); }
 function closeAskq() { const o = document.getElementById("askq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
 

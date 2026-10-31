@@ -308,6 +308,7 @@ const POPUPS = [
   ["subq", () => openSubq()],
   ["gitq", () => openGitq()],
   ["askq", () => openAskq()],
+  ["jobs", () => openJobs()],
   ["away", box => renderAwayOverlay([{ kind: "done", name: box, text: "finished" }], "")],
   ["load", () => showLoad()],
 ];

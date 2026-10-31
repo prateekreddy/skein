@@ -357,6 +357,44 @@ pub(crate) fn finish_with(
     used
 }
 
+/// Kill box `box_name`'s running job `id` for the owner's stop, leaving its wrapper `wrapper`
+/// (SKEIN-1422).
+///
+/// The wrapper is in the job's cgroup, where [`place`] put it, so a `cgroup.kill` alone would take
+/// it with its command, and its caller would see a bare `SIGKILL`. It is moved back into the box's
+/// leaf first, and the kill then takes the command and everything it forked, which cannot have
+/// left the cgroup. The kill is written even when the move was refused: the stop is what the owner
+/// asked for, and the error then says the wrapper went too.
+pub fn stop(cgroups: &Path, box_name: &str, id: &str, wrapper: u32) -> Result<(), String> {
+    stop_with(&Kernel, cgroups, box_name, id, wrapper)
+}
+
+pub(crate) fn stop_with(
+    fs: &dyn Cgroupfs,
+    cgroups: &Path,
+    box_name: &str,
+    id: &str,
+    wrapper: u32,
+) -> Result<(), String> {
+    let dir = job_cgroup(cgroups, box_name, id);
+    let moved = fs.write(
+        &cgroups.join(box_name).join(BOX_LEAF).join("cgroup.procs"),
+        &wrapper.to_string(),
+    );
+    fs.write(&dir.join("cgroup.kill"), "1")
+        .map_err(|e| format!("its cgroup could not be killed: {e}"))?;
+    moved
+        .map_err(|e| format!("its wrapper could not be moved out first, so it was killed too: {e}"))
+}
+
+/// The memory a cgroup holds now, in MiB: `memory.current`. `None` where it cannot be read.
+pub fn memory_now(dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(dir.join("memory.current"))
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|b| b >> 20)
+}
+
 // ───────────────────────────── a box's share ─────────────────────────────
 
 /// The `cpu.weight` of a box cgroup whose running jobs were granted `granted` cores in all.
@@ -933,6 +971,66 @@ mod tests {
         assert!(!cg.exists());
     }
 
+    /// **The owner's stop of a running job moves its wrapper back into the box's leaf, then kills
+    /// the job's cgroup, so the command dies and the wrapper lives to say who stopped it**
+    /// (SKEIN-1422).
+    ///
+    /// Through the tick: the job is granted and placed; the fixture's kernel then holds the wrapper
+    /// and its command in the job's cgroup. The owner stops it. The next tick reads it `stopped`,
+    /// has written the wrapper's pid into the leaf, and `1` into the job's `cgroup.kill`. On the
+    /// recording fixture, the move is written before the kill.
+    ///
+    /// What would make it fail: the tick not stopping a running job (the sabotage that was run: the
+    /// `stop_running` call removed from the end path, and no `cgroup.kill` is written), or the kill
+    /// written before the move (the sabotage that was run: the two writes swapped in `stop_with`,
+    /// and the order assertion fails), which on a real kernel kills the wrapper too.
+    #[test]
+    fn the_owners_stop_of_a_running_job_kills_its_cgroup_but_not_its_wrapper() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "4242\n31337\n").unwrap();
+        submit(&places, "j-s", 31337, "waiting");
+        let q = tick(&places, 0);
+        assert_eq!(job(&q, "j-s").state, "granted", "{q:#?}");
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-s");
+        std::fs::write(cg.join("cgroup.procs"), "31337\n40001\n").unwrap();
+        std::fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 1000000\n").unwrap();
+
+        crate::jobs::ask_owner_stop(&places, "web-main", "j-s").unwrap();
+        let q = tick(&places, 2);
+        assert_eq!(job(&q, "j-s").state, "stopped", "{q:#?}");
+        assert_eq!(
+            job(&q, "j-s").reason,
+            crate::jobs::STOPPED_BY_OWNER,
+            "{q:#?}"
+        );
+        assert_eq!(
+            read(&cg.join("cgroup.kill")),
+            "1",
+            "the job's processes were not killed"
+        );
+        assert_eq!(
+            read(&leaf.join("cgroup.procs")),
+            "31337",
+            "the wrapper was not moved out of the job's cgroup before the kill"
+        );
+        assert!(job(&q, "j-s").used.is_some(), "not measured: {q:#?}");
+
+        let fs = Fake::default();
+        let other = place_with(&fs, &places.cgroups, "web-main", "j-o", 9, Some(1.0)).unwrap();
+        fs.wrote.borrow_mut().clear();
+        stop_with(&fs, &places.cgroups, "web-main", "j-o", 9).unwrap();
+        let wrote: Vec<(PathBuf, String)> = fs.wrote.borrow().clone();
+        assert_eq!(
+            wrote,
+            [
+                (leaf.join("cgroup.procs"), "9".to_string()),
+                (other.join("cgroup.kill"), "1".to_string()),
+            ]
+        );
+    }
+
     /// **A done job whose command left a process running is stopped once its wrapper has gone,
     /// and not while the wrapper is still exiting** (SKEIN-1438).
     ///
@@ -987,6 +1085,54 @@ mod tests {
             view.jobs[0].reason, "used 1.5 cores on average; stopped 1 leftover process",
             "{view:#?}"
         );
+    }
+
+    /// **A job the owner stopped has what survived in its cgroup stopped too, once its wrapper has
+    /// gone** (SKEIN-1422, with SKEIN-1438's pass).
+    ///
+    /// The owner stops a running job, and the fixture's kernel then has a process, 40001, left in
+    /// the job's cgroup, as if the stop's kill had missed it (the kill file is taken away so the
+    /// pass's own kill can be seen). While the wrapper, moved back to the box's leaf, is still
+    /// there, nothing more is done. Once it has left the box, the next tick kills the cgroup and
+    /// counts what it stopped.
+    ///
+    /// What would make it fail: the leftover pass taking only `done` and `cancelled` (the sabotage
+    /// that was run: `"stopped"` taken out of its `matches!`, and `cgroup.kill` is never written
+    /// again), or the pass not waiting for the stopped job's wrapper to leave.
+    #[test]
+    fn a_stopped_jobs_leftover_processes_are_stopped_once_its_wrapper_has_gone() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n").unwrap();
+        submit(&places, "j-p", 31337, "waiting");
+        tick(&places, 0);
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-p");
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        std::fs::write(cg.join("cgroup.procs"), "31337\n40001\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 1000000\n").unwrap();
+        crate::jobs::ask_owner_stop(&places, "web-main", "j-p").unwrap();
+        let q = tick(&places, 2);
+        assert_eq!(job(&q, "j-p").state, "stopped", "{q:#?}");
+        assert_eq!(read(&leaf.join("cgroup.procs")), "31337");
+
+        // The stop's kill missed 40001; the wrapper is still in the leaf.
+        std::fs::remove_file(cg.join("cgroup.kill")).unwrap();
+        std::fs::write(cg.join("cgroup.procs"), "40001\n").unwrap();
+        let q = tick(&places, 4);
+        assert!(
+            !cg.join("cgroup.kill").exists(),
+            "a stopped job whose wrapper is still there was killed again: {q:#?}"
+        );
+
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        let q = tick(&places, 6);
+        assert_eq!(
+            read(&cg.join("cgroup.kill")),
+            "1",
+            "what the stopped job left was not stopped: {q:#?}"
+        );
+        assert_eq!(job(&q, "j-p").leftovers, 1, "{q:#?}");
+        assert_eq!(job(&q, "j-p").state, "stopped", "{q:#?}");
     }
 
     /// **Measured use reaches admission, through readings kept from one tick to the next.**
