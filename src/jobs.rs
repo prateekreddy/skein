@@ -2552,7 +2552,7 @@ mod tests {
         )
         .unwrap();
         let start = |box_name: &str, pids: &Path| {
-            let child = std::process::Command::new("sh")
+            let mut child = std::process::Command::new("sh")
                 .arg(&script)
                 .arg(pids)
                 .env("SKEIN_BOX", box_name)
@@ -2569,6 +2569,8 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            let _ = child.kill();
+            let _ = child.wait();
             panic!("the stand-in wrapper never started its sleeps");
         };
         let alive = |p: &u32| {
