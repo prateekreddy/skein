@@ -1882,7 +1882,7 @@ fn a_disk_ask_denied_leaves_the_allowance_and_the_box_is_told() {
 /// **A size that is not a size, an ask for no more than the box has, and a reason that is not one
 /// short line are refused at the tool, and nothing is filed.**
 ///
-/// What would make it fail: `request_disk` not parsing the size (or reading a bare number as GiB),
+/// What would make it fail: the tool not parsing the size (or reading a bare number as GiB),
 /// not comparing it with the signal file's allowance, or not capping the reason.
 #[test]
 fn a_bad_disk_ask_is_refused_at_the_tool() {
