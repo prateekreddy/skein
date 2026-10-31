@@ -30,6 +30,13 @@ function rows(n: RenderNode): string[] {
   if (typeof n === 'string') return [n]
   if (n.type === 'Box') {
     const kids = 'children' in n && Array.isArray(n.children) ? (n.children as RenderNode[]) : []
+    // A row Box: its first child's text beside the rest, the rows under it indented to match.
+    const isRow = 'props' in n && (n.props as Record<string, unknown> | undefined)?.flexDirection === 'row'
+    if (isRow && kids.length === 2 && kids[0] !== undefined && kids[1] !== undefined) {
+      const lead = textOf(kids[0])
+
+      return rows(kids[1]).map((r, i) => `${i === 0 ? lead : ' '.repeat(lead.length)}${r}`)
+    }
 
     return kids.flatMap(rows)
   }
@@ -470,3 +477,170 @@ for (const [command, isDrawn] of COMMANDS) {
     await call
   })
 }
+
+// ------------------------------------------------------------------------------------------------
+// A run of calls the transcript folds into one line
+// ------------------------------------------------------------------------------------------------
+
+type Call = { tool_use_id?: string; tool: string; input: unknown; output?: unknown }
+
+const groupCall = (c: Call) => ({ isRunning: false, isErrored: false, isInterrupted: false, ...c })
+
+async function drawGroup($: Engine, calls: Call[], isExpanded: boolean, id = 'grp') {
+  const ui = await $.ui.mount({
+    plugin: 'skein',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    requestId: id,
+    props: { calls: calls.map(groupCall), isActive: false, isExpanded, isCallsOnly: true },
+    viewport: { columns: 86, rows: 40 },
+  })
+  await ui.drawn()
+  await ui.unmount()
+}
+
+async function drawRow($: Engine, c: Call) {
+  const id = c.tool_use_id ?? 'r1'
+  const ui = await $.ui.mount({
+    plugin: 'skein',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: id,
+    props: { ...groupCall(c), tool_use_id: id, isExpanded: true },
+    viewport: { columns: 86, rows: 40 },
+  })
+  const lines = rows(await ui.drawn())
+  await ui.unmount()
+
+  return lines
+}
+
+const READ = { tool: 'Read', input: { file_path: '/workspace/web/README.md' }, output: { type: 'text' } }
+const JOB_INPUT = { command: 'skein-job run --cores 4 -- cargo test --lib' }
+
+// What would make it fail: the group left folded, so the person sees only the count line; a
+// group's MCP calls matched by a name other than the tool_use block's own; or every group
+// unfolded, so a run of reads draws each file. Watched: with the ToolGroup hook passing `e` on
+// unchanged, the first case was handed `isExpanded: false` and this failed.
+const GROUPS: Array<[string, Call[], boolean]> = [
+  ['a skein tool among reads', [{ ...READ, tool_use_id: 'a1' }, { tool_use_id: 'a2', tool: name('resources'), input: {} }], true],
+  ["the mod's own clean", [{ tool_use_id: 'b1', tool: 'mcp__skein__clean', input: {} }], true],
+  ['a waiting skein-job run', [{ tool_use_id: 'c1', tool: 'Bash', input: JOB_INPUT }], true],
+  ['only reads and a plain shell command', [{ ...READ, tool_use_id: 'd1' }, { tool_use_id: 'd2', tool: 'Bash', input: { command: 'ls' } }], false],
+  ["a skein tool this file does not draw", [{ tool_use_id: 'e1', tool: name('lane'), input: {} }], false],
+  ["another server's tool of the same name", [{ tool_use_id: 'f1', tool: 'mcp__other__skein_resources', input: {} }], false],
+  // A host that names no call's tool_use_id: unfolded, its rows could not be told from ctrl+o's.
+  ['a skein tool with no tool_use_id', [{ tool: name('resources'), input: {} }], false],
+]
+
+for (const [what, calls, isUnfolded] of GROUPS) {
+  test(`a folded group is ${isUnfolded ? 'unfolded' : 'left folded'}: ${what}`, async ($, on) => {
+    const handed = engine(on)
+    await drawGroup($, calls, false)
+    expect((handed.at(-1) as { isExpanded: boolean }).isExpanded).toBe(isUnfolded)
+  })
+}
+
+// What would make it fail: a row this file unfolded drawn as the engine's JSON (the hook treating
+// every `isExpanded` row as ctrl+o's), or skein's lines drawn under the engine's own result rather
+// than in its place. Watched: with the ToolUse hook passing every expanded row on, the row read
+// `engine` alone and this failed.
+test('a row of a group unfolded here draws skein’s lines in place of the JSON', async ($, on) => {
+  const handed = engine(on)
+  const call = { tool_use_id: 'u1', tool: name('resources'), input: {}, output: F.mcp(F.RESOURCES) }
+  await drawGroup($, [READ, call], false)
+  expect(await drawRow($, call)).toEqual([
+    'engine',
+    '  ⎿  as of 17:49 UTC',
+    '     disk     4.95 GB of 10 GB   fleet disk fine',
+    '     cpu      1.3 cores',
+    '     memory   2.31 GB of 13.1 GB   not slowed',
+    '     procs    58 of 8192',
+    '     nothing asked of this box',
+    '     about 1.38 GB could be removed · /skein clean',
+  ])
+  // The engine's row is handed no result to draw, and the rest of its props as they were.
+  const row = handed.at(-1) as Record<string, unknown>
+  expect(row.output).toBe(undefined)
+  expect(row.tool).toBe(name('resources'))
+
+  // A skein-job's row keeps the engine's own output and says what the job used under it.
+  const job = { tool_use_id: 'u2', tool: 'Bash', input: JOB_INPUT, output: F.JOB_BASH_OUTPUT }
+  await drawGroup($, [job], false, 'grp2')
+  expect(await drawRow($, job)).toEqual(['engine', '✓ 3 m 12 s · used 3.4 of 4 cores · peak 2.1 GB'])
+  expect((handed.at(-1) as Record<string, unknown>).output).toEqual(F.JOB_BASH_OUTPUT)
+})
+
+// What would make it fail: the calls this file unfolded remembered for good, so ctrl+o's view of
+// the same call (the engine's own expanded group) draws readable too and the JSON is out of reach;
+// or a row expanded where no group was folded (fullscreen ctrl+o, `--verbose`) drawn readable.
+// Watched: with `markUnfolded(…, false)` left out for the engine's own expanded group, the second
+// row read skein's lines and this failed.
+test('a row ctrl+o or --verbose expanded draws the engine’s raw view', async ($, on) => {
+  const handed = engine(on)
+  const call = { tool_use_id: 'x1', tool: name('resources'), input: {}, output: F.mcp(F.RESOURCES) }
+
+  // Never seen in a folded group.
+  expect(await drawRow($, { ...call, tool_use_id: 'x0' })).toEqual(['engine'])
+
+  // Unfolded here, then drawn again by the engine expanded (the non-fullscreen ctrl+o transcript).
+  await drawGroup($, [call], false)
+  expect((await drawRow($, call)).length > 1).toBe(true)
+  await drawGroup($, [call], true)
+  expect((handed.at(-1) as { isExpanded: boolean }).isExpanded).toBe(true)
+  expect(await drawRow($, call)).toEqual(['engine'])
+  expect((handed.at(-1) as Record<string, unknown>).output).toEqual(F.mcp(F.RESOURCES))
+
+  // Folded again once the person leaves ctrl+o: readable again.
+  await drawGroup($, [call], false)
+  expect((await drawRow($, call))[1]).toBe('  ⎿  as of 17:49 UTC')
+})
+
+// What would make it fail: an errored call, or an answer of a shape this file does not read, drawn
+// as an empty view in an unfolded row instead of by the engine. Watched: with the `isErrored` check
+// removed, the errored row was handed no output and this failed.
+test('an unfolded row the file cannot read is the engine’s, from the props it had', async ($, on) => {
+  const handed = engine(on)
+  const cases: Call[] = [
+    { tool_use_id: 'y1', tool: name('top'), input: {}, output: F.mcp({ by: 'cpu', error: 'not-in-a-box-cgroup' }) },
+    { tool_use_id: 'y2', tool: name('resources'), input: {}, output: F.mcp({ hello: 'world' }) },
+    { ...READ, tool_use_id: 'y3' },
+  ]
+  // An errored call whose output is an answer this file could read: the error is the engine's.
+  const errored = F.mcp(F.RESOURCES)
+  await drawGroup($, [...cases, { tool_use_id: 'y4', tool: name('resources'), input: {}, output: errored }], false)
+  for (const c of cases) {
+    expect(await drawRow($, c)).toEqual(['engine'])
+    expect((handed.at(-1) as Record<string, unknown>).output).toEqual(c.output)
+  }
+  const ui = await $.ui.mount({
+    plugin: 'skein',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'y4',
+    props: { tool_use_id: 'y4', tool: name('resources'), input: {}, isRunning: false, isErrored: true, isInterrupted: false, isExpanded: true, output: errored },
+  })
+  expect(rows(await ui.drawn())).toEqual(['engine'])
+  expect((handed.at(-1) as Record<string, unknown>).output).toEqual(errored)
+  await ui.unmount()
+})
+
+// What would make it fail: unfolding or drawing a group touching what the model reads. Watched:
+// with the Bash `tool.call` hook clearing its result's `stderr`, the skein-job comparison failed.
+test('unfolding a group leaves what the model read as the tool gave it', async ($, on) => {
+  engine(on)
+  mock.clock(on, { now: NOW })
+  on('fs.read', () => ({ value: JSON.stringify(F.JOBS_VIEW) }))
+  const answer = F.mcp(F.RESOURCES)
+  on('tool.call', (_, e) => ({ result: e.tool === 'Bash' ? F.JOB_BASH_OUTPUT : answer }))
+  const ran = await $.tool.call({ tool: name('resources') as `mcp__${string}__${string}`, tool_use_id: 'm1' } as never)
+  const job = await $.tool.call({ tool: 'Bash', command: JOB_INPUT.command, tool_use_id: 'm2' } as never)
+  const calls = [
+    { tool_use_id: 'm1', tool: name('resources'), input: {}, output: ran.result },
+    { tool_use_id: 'm2', tool: 'Bash', input: JOB_INPUT, output: job.result },
+  ]
+  await drawGroup($, calls, false)
+  for (const c of calls) await drawRow($, c)
+  expect(ran.result).toEqual(answer)
+  expect(job.result).toEqual(F.JOB_BASH_OUTPUT)
+})
