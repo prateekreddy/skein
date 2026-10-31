@@ -271,7 +271,7 @@ pub struct Update {
 /// **A contract, read by more than skein.** The plugin's `skein-mcp` reads it today and the mod
 /// skein's plugin is becoming will read it too (SKEIN-1358), so a field here is only ever added,
 /// never renamed or given a new meaning: `clean.at`, `box_root`, each item's `path`, `shown`,
-/// `kind` and `bytes`, and the repo cache's `path`, `bytes`, `items`, `others_running`,
+/// `kind`, `bytes` and `live`, and the repo cache's `path`, `bytes`, `items`, `others_running`,
 /// `others_unknown` and `none_running_at`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CleanList {
@@ -294,6 +294,11 @@ pub struct CleanItem {
     /// `download cache`, `build output` or `scratchpad`.
     pub kind: String,
     pub bytes: u64,
+    /// A build is running in it now: cargo holds its lock (`fleet::live_builds`), read again on
+    /// every tick (SKEIN-1391). It cannot be removed while that is so, and no ask counts it as
+    /// clearable. Absent in a file written before it existed, which reads as not live.
+    #[serde(default)]
+    pub live: bool,
 }
 
 impl From<crate::fleet::Cleanable> for CleanItem {
@@ -303,6 +308,7 @@ impl From<crate::fleet::Cleanable> for CleanItem {
             shown: c.shown,
             kind: c.kind.to_string(),
             bytes: c.bytes,
+            live: false,
         }
     }
 }
@@ -381,9 +387,14 @@ pub struct Ask {
     /// asked for everything), `allowance` (over this box's own). Empty for memory and pids.
     #[serde(default)]
     pub why: String,
-    /// disk: MiB to clear (for `fleet-every-box`, what the box holds). memory: throttles a minute,
-    /// rounded. pids: processes running.
+    /// disk: MiB to clear (for `fleet-every-box`, what the box holds), never more than the box's
+    /// listed items can free now (SKEIN-1391). memory: throttles a minute, rounded. pids:
+    /// processes running.
     pub amount: u64,
+    /// disk: MiB of what the box holds that is in a build running now, which no ask counts as
+    /// clearable (SKEIN-1391). Zero, and absent from the file, when none is.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub live_mb: u64,
     /// RFC3339, when this crossing began.
     pub since: String,
     /// New at each crossing, the same while the band holds. The plugin holds one command per id.
@@ -400,6 +411,10 @@ pub struct Ask {
     /// The monitor's line on entering the band. Every live ask has one.
     #[serde(default)]
     pub enter: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -472,30 +487,78 @@ fn disk_band(r: &Reading) -> Band<DiskAsk> {
     }
 }
 
-/// Whether a disk ask is far enough over to hold a command: what it asks this box to clear is more
-/// than [`DISK_HOLD_OVER_PCT`] of the box's share.
+/// What the box can do about a disk ask now, in MiB, from skein's list of its items (SKEIN-1391).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Room {
+    /// What its agent may remove now: [`removable_now`]'s items, rounded down.
+    clear: u64,
+    /// What is in a build running now, rounded up.
+    live: u64,
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// [`Room`] from the box's list. `None` when skein has not listed it: then nothing is known about
+/// what can be cleared, and the ask is the size it always was.
+fn room(clean: Option<&CleanList>) -> Option<Room> {
+    let clean = clean?;
+    Some(Room {
+        clear: removable_now(Some(clean))
+            .iter()
+            .map(|i| i.bytes)
+            .sum::<u64>()
+            / MIB,
+        live: clean
+            .items
+            .iter()
+            .filter(|i| i.live)
+            .map(|i| i.bytes)
+            .sum::<u64>()
+            .div_ceil(MIB),
+    })
+}
+
+/// What a disk ask asks of this box, in MiB, and what it holds: the fleet's share or the excess
+/// over the allowance, or everything it holds when every box was asked for everything.
+fn asked_of(d: &DiskAsk) -> (u64, u64) {
+    match d {
+        DiskAsk::Share(s) => (s.free, s.holds),
+        DiskAsk::EveryBox(s) => (s.holds, s.holds),
+        DiskAsk::Allowance { excess, holds, .. } => (*excess, *holds),
+    }
+}
+
+/// What the ask comes to once it is no more than the box can clear now (owner, 2026-10-30: the ask
+/// shrinks to what can actually be cleared, and a box is never held over space it cannot free).
+/// The part it cannot meet is not asked of any other box: the fleet's audience is
+/// `announce::cover`'s, and this changes nothing in it.
+fn shrunk(d: &DiskAsk, room: Option<Room>) -> u64 {
+    let (asked, _) = asked_of(d);
+    room.map_or(asked, |r| asked.min(r.clear))
+}
+
+/// Whether a disk ask is far enough over to hold a command: what it asks this box to clear, once
+/// [`shrunk`], is more than [`DISK_HOLD_OVER_PCT`] of the box's share.
 ///
 /// The share is the box's allowance when it has one, for every kind of disk ask, so the fleet's
 /// ask and the allowance's are held by the same rule (owner: "same rules for the fleet-share ask").
 /// A box allowed the whole disk has no allowance to measure against, so its share is what it holds.
-fn disk_holds(d: &DiskAsk, limit: Option<u64>) -> bool {
-    let (asked, holds) = match d {
-        DiskAsk::Share(s) => (s.free, s.holds),
-        DiskAsk::EveryBox(s) => (s.holds, s.holds),
-        DiskAsk::Allowance { excess, holds, .. } => (*excess, *holds),
-    };
+fn disk_holds(d: &DiskAsk, asked: u64, limit: Option<u64>) -> bool {
+    let (_, holds) = asked_of(d);
     let share = limit.unwrap_or(holds);
     asked.saturating_mul(100) > share.saturating_mul(DISK_HOLD_OVER_PCT)
 }
 
 /// The box's own items its agent may remove at any time, biggest first: download caches and build
-/// output (owner, 2026-10-30). Not the repo's shared cache, which counts against no box, and not
-/// scratchpads, which may belong to a session still running in the box.
+/// output (owner, 2026-10-30). Not the repo's shared cache, which counts against no box, not
+/// scratchpads, which may belong to a session still running in the box, and not a build that is
+/// running now (SKEIN-1391).
 fn removable_now(clean: Option<&CleanList>) -> Vec<CleanItem> {
     clean
         .map(|c| {
             c.items
                 .iter()
+                .filter(|i| !i.live)
                 .filter(|i| i.kind == "download cache" || i.kind == "build output")
                 .cloned()
                 .collect()
@@ -629,8 +692,10 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
 
     match disk_band(r) {
         Band::Asked(d) => {
-            let mut ask = words::disk(&d, &removable_now(r.clean.as_ref()));
-            if !disk_holds(&d, r.disk_limit_mb) {
+            let room = room(r.clean.as_ref());
+            let asked = shrunk(&d, room);
+            let mut ask = words::disk(&d, &removable_now(r.clean.as_ref()), asked, room);
+            if !disk_holds(&d, asked, r.disk_limit_mb) {
                 // Told, not held: the plugin holds only an ask with words to hold it with.
                 ask.hold = String::new();
             }
@@ -765,9 +830,25 @@ mod words {
     pub(super) const CLEAN: &str =
         "`skein_clean` lists the caches and build output this box can remove, and removes them.";
 
-    pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem]) -> Ask {
+    /// The disk ask's words for asking `asked` MiB, with `room` what skein's list says the box
+    /// can do about it now (SKEIN-1391). With no build running, the owner's approved words with
+    /// the shrunk figure; with one, the words that say how much of the box is in it; with nothing
+    /// to clear, a line that is told and never held.
+    pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem], asked: u64, room: Option<Room>) -> Ask {
+        let live = room.map_or(0, |r| r.live);
+        if room.is_some() && asked == 0 {
+            return nothing_to_clear(d, live);
+        }
         let hint = clean_hint(biggest);
-        let mut ask = disk_words(d);
+        let mut ask = match live {
+            0 => {
+                let mut ask = disk_words(&with_asked(d, asked));
+                ask.amount = asked;
+                ask
+            }
+            _ => live_words(d, asked, live),
+        };
+        ask.live_mb = live;
         // Before the closing sentence of the hold and the start line, which the owner fixed
         // (`HELD`, `WHERE`); at the end of the entering line.
         ask.hold = ask.hold.replace(HELD, &format!("{hint} {HELD}"));
@@ -776,6 +857,161 @@ mod words {
             .map(|s| s.replace(WHERE, &format!("{hint} {WHERE}")));
         ask.enter = ask.enter.map(|e| format!("{e} {hint}"));
         ask
+    }
+
+    /// `d` asking `asked` MiB: the fleet's share or the excess replaced. An every-box ask's words
+    /// name what the box holds, not an amount, so it is unchanged.
+    fn with_asked(d: &DiskAsk, asked: u64) -> DiskAsk {
+        match d {
+            DiskAsk::Share(s) => DiskAsk::Share(Share {
+                free: asked,
+                ..s.clone()
+            }),
+            DiskAsk::EveryBox(_) => d.clone(),
+            DiskAsk::Allowance { holds, limit, .. } => DiskAsk::Allowance {
+                excess: asked,
+                holds: *holds,
+                limit: *limit,
+            },
+        }
+    }
+
+    /// "This box holds 10.5G against its 10.0G share of the fleet's disk", or for the fleet's
+    /// asks "The fleet's disk is 4.1G over what it can spare and this box holds 9.4G of it", with
+    /// `live` MiB of it in a build running now when that is not zero.
+    fn standing(d: &DiskAsk, live: u64) -> String {
+        match d {
+            DiskAsk::Allowance { holds, limit, .. } => match live {
+                0 => format!(
+                    "this box holds {} against its {} share of the fleet's disk",
+                    gib_up(*holds),
+                    gib(*limit)
+                ),
+                _ => format!(
+                    "this box holds {} against its {} share ({} in a build running now)",
+                    gib_up(*holds),
+                    gib(*limit),
+                    gib_up(live)
+                ),
+            },
+            DiskAsk::Share(s) | DiskAsk::EveryBox(s) => match live {
+                0 => format!(
+                    "the fleet's disk is {} over what it can spare and this box holds {} of it",
+                    gib_up(s.over_by),
+                    gib(s.holds)
+                ),
+                _ => format!(
+                    "the fleet's disk is {} over what it can spare and this box holds {} of it ({} \
+                     in a build running now)",
+                    gib_up(s.over_by),
+                    gib(s.holds),
+                    gib_up(live)
+                ),
+            },
+        }
+    }
+
+    /// Nothing on skein's list can be cleared now (SKEIN-1391): the box is told where it stands
+    /// and is never held. `amount` is zero, so nothing reads it as a figure to clear.
+    fn nothing_to_clear(d: &DiskAsk, live: u64) -> Ask {
+        let end = match live {
+            0 => "nothing skein lists can be cleared now.",
+            _ => "nothing can be cleared until it ends.",
+        };
+        let line = format!("skein: {}; {end}", standing(d, live));
+        Ask {
+            kind: "disk".into(),
+            why: disk_words(d).why,
+            amount: 0,
+            live_mb: live,
+            hold: String::new(),
+            start: Some(format!("{line} {WHERE}")),
+            remind: Some(line.clone()),
+            enter: Some(line),
+            ..Default::default()
+        }
+    }
+
+    /// Some of the box is in a build running now and `asked` MiB can be cleared (SKEIN-1391): the
+    /// approved shape of each ask, saying how much is in the build and that only `asked` can go.
+    fn live_words(d: &DiskAsk, asked: u64, live: u64) -> Ask {
+        let z = gib_up(asked);
+        let y = gib_up(live);
+        let (why, hold, start, remind, enter) = match d {
+            DiskAsk::Allowance { holds, limit, .. } => (
+                "allowance",
+                format!(
+                    "skein: clear {z} of storage you are not using before you continue. This box \
+                     holds {} against its {} share of the fleet's disk ({y} of it in a build \
+                     running now); {z} can be cleared now. {HELD}",
+                    gib_up(*holds),
+                    gib(*limit),
+                ),
+                format!(
+                    "skein: before you start, this box is asked to clear {z} of storage it is not \
+                     using. It holds {} against its {} share of the fleet's disk ({y} of it in a \
+                     build running now); {z} can be cleared now. {WHERE}",
+                    gib_up(*holds),
+                    gib(*limit),
+                ),
+                format!(
+                    "skein: still asked of this box: clear {z} of storage (it holds {}, {y} of it \
+                     in a build running now).",
+                    gib_up(*holds),
+                ),
+                format!(
+                    "skein: this box holds {} against its {} share of the fleet's disk ({y} of it \
+                     in a build running now); clear the {z} that can be cleared now.",
+                    gib_up(*holds),
+                    gib(*limit),
+                ),
+            ),
+            DiskAsk::Share(s) | DiskAsk::EveryBox(s) => (
+                if s.every_box {
+                    "fleet-every-box"
+                } else {
+                    "fleet"
+                },
+                format!(
+                    "skein: clear {z} of storage you are not using before you continue — build \
+                     outputs, caches, and any containers or volumes you started. The fleet's disk \
+                     is {} over what it can spare, and this box holds {} of it ({y} in a build \
+                     running now){}; {z} can be cleared now. {HELD}",
+                    gib_up(s.over_by),
+                    gib(s.holds),
+                    match s.every_box {
+                        true => "; every box has been asked".to_string(),
+                        false => others_asked(s.others),
+                    },
+                ),
+                format!(
+                    "skein: before you start, this box is asked to clear {z} of storage it is not \
+                     using. The fleet's disk is {} over what it can spare and this box holds {} \
+                     ({y} of it in a build running now); {z} can be cleared now. {WHERE}",
+                    gib_up(s.over_by),
+                    gib(s.holds),
+                ),
+                format!(
+                    "skein: still asked of this box: clear {z} of storage (it holds {}, {y} of it \
+                     in a build running now).",
+                    gib(s.holds),
+                ),
+                format!(
+                    "skein: the fleet's disk is over its line; this box is asked to clear the {z} \
+                     it can clear now ({y} of it is in a build running now)."
+                ),
+            ),
+        };
+        Ask {
+            kind: "disk".into(),
+            why: why.into(),
+            amount: asked,
+            hold,
+            start: Some(start),
+            remind: Some(remind),
+            enter: Some(enter),
+            ..Default::default()
+        }
     }
 
     /// The owner's approved words (SKEIN-1055) before [`clean_hint`] is added.
@@ -1044,6 +1280,18 @@ pub(crate) fn clean_list(
             }
         }
     };
+    // Whether a build is running in each build directory, read every tick like the repo's other
+    // boxes below: a build starts and ends between two walks of the items.
+    let builds: Vec<String> = list
+        .items
+        .iter()
+        .filter(|i| i.kind == "build output")
+        .map(|i| i.path.clone())
+        .collect();
+    let live = crate::fleet::live_builds(&builds.iter().map(String::as_str).collect::<Vec<_>>());
+    for item in list.items.iter_mut() {
+        item.live = live.contains(&item.path);
+    }
     if let Some(rc) = list.repo_cache.as_mut() {
         let (running, unknown) = crate::fleet::others_of_box(name, liveness);
         rc.others_running = running.len();
@@ -1684,7 +1932,7 @@ mod tests {
                 limit: 1,
             },
         ] {
-            let a = words::disk(&d, &[]);
+            let a = words::disk(&d, &[], asked_of(&d).0, None);
             texts.extend(
                 [Some(a.hold), a.start, a.remind, a.enter]
                     .into_iter()
@@ -1899,7 +2147,7 @@ mod tests {
                 limit: 10240,
             },
         ] {
-            let a = words::disk(&d, &[]);
+            let a = words::disk(&d, &[], asked_of(&d).0, None);
             if let DiskAsk::Allowance { .. } = d {
                 assert!(
                     a.hold.contains("holds 10.1G against its 10.0G share"),
@@ -1915,6 +2163,368 @@ mod tests {
                 assert!(t.contains(" 0.1G"), "{t}");
             }
         }
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // A disk ask is no bigger than what can be cleared now (SKEIN-1391).
+    // --------------------------------------------------------------------------------------------
+
+    /// skein's list for box `web-main`, written at minute 0.
+    fn listing(items: Vec<CleanItem>) -> CleanList {
+        CleanList {
+            at: stamp(at(0)),
+            box_root: "/fleet/web-main".into(),
+            items,
+            repo_cache: None,
+        }
+    }
+
+    /// `web-main/tree/target`, `mib` big, with a build running in it now.
+    fn running_target(mib: u64) -> CleanItem {
+        CleanItem {
+            live: true,
+            ..item("web-main/tree/target", "build output", mib)
+        }
+    }
+
+    fn disk_ask(s: &Signals) -> Ask {
+        s.asks
+            .iter()
+            .find(|a| a.kind == "disk")
+            .cloned()
+            .expect("a disk ask")
+    }
+
+    /// `excess` MiB over a 10G allowance, with `items` on skein's list.
+    fn over_with(minute: i64, excess: u64, items: Vec<CleanItem>) -> Reading {
+        Reading {
+            clean: Some(listing(items)),
+            ..over_allowance(minute, excess)
+        }
+    }
+
+    const PIP_HINT: &str = "`skein_clean` lists the caches and build output this box can remove, \
+                            and removes them. The biggest is ~/.cache/pip (1.5G); to remove it \
+                            now, call `skein_clean` with \
+                            {\"paths\":[\"/fleet/web-main/home/.cache/pip\"]}.";
+
+    /// **A build running now is not asked for: the ask shrinks to what can be cleared, and its
+    /// words say how much is in the build** (SKEIN-1391).
+    ///
+    /// 2G over a 10G share, with a 3G target a build is running in and a 1.5G pip cache: the box
+    /// is asked for 1.5G, held for it (more than a tenth of its share), and told that 3.0G is in a
+    /// build running now. 0.5G over with a 0.2G pip cache: asked for 0.2G and told so, not held.
+    ///
+    /// What would make it fail: `removable_now` counting a live build as clearable (the 2G case is
+    /// asked for 2.0G and the hint names the target). Watched: with `.filter(|i| !i.live)`
+    /// removed, the amount read 2048 and this failed.
+    #[test]
+    fn a_running_build_is_not_asked_for_and_the_ask_shrinks_to_what_can_be_cleared() {
+        let s = next(
+            None,
+            &over_with(
+                0,
+                2048,
+                vec![
+                    running_target(3072),
+                    item("~/.cache/pip", "download cache", 1536),
+                ],
+            ),
+        );
+        let ask = disk_ask(&s);
+        assert_eq!((ask.amount, ask.live_mb), (1536, 3072), "{ask:?}");
+        assert_eq!(
+            ask.hold,
+            format!(
+                "skein: clear 1.5G of storage you are not using before you continue. This box \
+                 holds 12.0G against its 10.0G share of the fleet's disk (3.0G of it in a build \
+                 running now); 1.5G can be cleared now. {PIP_HINT} This one command was held so \
+                 you would see this; the next will run."
+            )
+        );
+        assert_eq!(
+            ask.start.as_deref(),
+            Some(
+                format!(
+                    "skein: before you start, this box is asked to clear 1.5G of storage it is \
+                     not using. It holds 12.0G against its 10.0G share of the fleet's disk (3.0G \
+                     of it in a build running now); 1.5G can be cleared now. {PIP_HINT} \
+                     `skein_resources` shows where this box stands."
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            ask.remind.as_deref(),
+            Some(
+                "skein: still asked of this box: clear 1.5G of storage (it holds 12.0G, 3.0G of \
+                 it in a build running now)."
+            )
+        );
+        assert_eq!(
+            ask.enter.as_deref(),
+            Some(
+                format!(
+                    "skein: this box holds 12.0G against its 10.0G share of the fleet's disk \
+                     (3.0G of it in a build running now); clear the 1.5G that can be cleared now. \
+                     {PIP_HINT}"
+                )
+                .as_str()
+            )
+        );
+
+        let small = disk_ask(&next(
+            None,
+            &over_with(
+                0,
+                512,
+                vec![
+                    running_target(3072),
+                    item("~/.cache/pip", "download cache", 204),
+                ],
+            ),
+        ));
+        assert_eq!(small.amount, 204, "{small:?}");
+        assert!(
+            small.hold.is_empty(),
+            "0.2G of a 10G share held: {}",
+            small.hold
+        );
+        assert!(
+            small
+                .start
+                .as_deref()
+                .is_some_and(|t| t.contains("0.2G can be cleared now")),
+            "{small:?}"
+        );
+    }
+
+    /// **A box is never held over space it cannot free** (SKEIN-1391): with everything it could
+    /// clear in a running build, or nothing on skein's list at all, it is told where it stands and
+    /// its commands run; and an ask shrunk below a tenth of its share is not held either.
+    ///
+    /// What would make each part fail:
+    /// * *nothing to clear is never held* — two guards keep it told, and it takes both broken:
+    ///   `nothing_to_clear` writing a hold, and `disk_holds` measuring the unshrunk ask. Watched:
+    ///   with `nothing_to_clear`'s `hold` set to its line alone this passed, since an ask of 0
+    ///   never holds; with that and the next sabotage together, the first assertion failed.
+    /// * *the shrunk ask is what is measured* — `disk_holds` given the unshrunk `asked_of(&d).0`
+    ///   (2G over with 0.5G clearable would hold). Watched: with exactly that, the third case
+    ///   held and this failed.
+    #[test]
+    fn a_box_with_nothing_it_can_clear_is_told_and_never_held() {
+        let only_live = disk_ask(&next(None, &over_with(0, 2048, vec![running_target(3072)])));
+        assert!(only_live.hold.is_empty(), "held: {}", only_live.hold);
+        assert_eq!((only_live.amount, only_live.live_mb), (0, 3072));
+        let line = "skein: this box holds 12.0G against its 10.0G share (3.0G in a build running \
+                    now); nothing can be cleared until it ends.";
+        assert_eq!(only_live.enter.as_deref(), Some(line));
+        assert_eq!(only_live.remind.as_deref(), Some(line));
+        assert_eq!(only_live.start, Some(format!("{line} {}", words::WHERE)));
+
+        // A list with nothing its agent may remove now, and nothing running.
+        let none = disk_ask(&next(
+            None,
+            &over_with(
+                0,
+                2048,
+                vec![item("~/.cache/skein/claude/x/old", "scratchpad", 4096)],
+            ),
+        ));
+        assert!(none.hold.is_empty(), "held: {}", none.hold);
+        assert_eq!((none.amount, none.live_mb), (0, 0));
+        assert_eq!(
+            none.enter.as_deref(),
+            Some(
+                "skein: this box holds 12.0G against its 10.0G share of the fleet's disk; nothing \
+                 skein lists can be cleared now."
+            )
+        );
+
+        let shrunk_small = disk_ask(&next(
+            None,
+            &over_with(
+                0,
+                2048,
+                vec![
+                    running_target(3072),
+                    item("~/.cache/pip", "download cache", 512),
+                ],
+            ),
+        ));
+        assert_eq!(shrunk_small.amount, 512);
+        assert!(
+            shrunk_small.hold.is_empty(),
+            "an ask of 0.5G on a 10G share held: {}",
+            shrunk_small.hold
+        );
+        for a in [&only_live, &none, &shrunk_small] {
+            assert!(a.start.is_some() && a.remind.is_some() && a.enter.is_some());
+        }
+    }
+
+    /// **A box skein has not listed yet is asked as it always was**, and a listed box with no
+    /// build running gets the owner's approved words with the shrunk figure (SKEIN-1391).
+    ///
+    /// `clean: None` means skein does not know what can be cleared, not that nothing can: the ask
+    /// is its full size, and holds.
+    ///
+    /// What would make it fail: `room` reading a missing list as an empty one (the unlisted box is
+    /// asked for nothing and never held). Watched: with `let clean = clean?;` made
+    /// `let clean = clean.cloned().unwrap_or_default();` (and its uses borrowed), the first
+    /// assertion read 0 and this failed.
+    #[test]
+    fn a_box_not_listed_yet_is_asked_in_full_and_held() {
+        let unlisted = disk_ask(&next(None, &over_allowance(0, 2048)));
+        assert_eq!((unlisted.amount, unlisted.live_mb), (2048, 0));
+        assert_eq!(
+            unlisted.hold,
+            "skein: clear 2.0G of storage you are not using before you continue. This box holds \
+             12.0G against its 10.0G share of the fleet's disk. `skein_clean` lists the caches \
+             and build output this box can remove, and removes them. This one command was held \
+             so you would see this; the next will run."
+        );
+
+        let listed = disk_ask(&next(
+            None,
+            &over_with(0, 2048, vec![item("~/.cache/pip", "download cache", 1536)]),
+        ));
+        assert_eq!((listed.amount, listed.live_mb), (1536, 0));
+        assert_eq!(
+            listed.hold,
+            format!(
+                "skein: clear 1.5G of storage you are not using before you continue. This box \
+                 holds 12.0G against its 10.0G share of the fleet's disk. {PIP_HINT} This one \
+                 command was held so you would see this; the next will run."
+            )
+        );
+    }
+
+    /// **A build ending is a new crossing**: the told ask becomes a held one under a new id, so
+    /// the plugin holds one command then (SKEIN-1391); the hourly cap in `skein-resources` stands.
+    ///
+    /// What would make it fail: the crossing filter in `next`'s `stamp` matching whatever the
+    /// hold (the id carries over and the plugin, having shown it, never holds). Watched: with
+    /// `.filter(|b| b.hold.is_empty() == fresh.hold.is_empty())` made `.filter(|_| true)`, the
+    /// ids were equal and this failed.
+    #[test]
+    fn a_build_ending_is_a_new_crossing_that_holds() {
+        let ended = CleanItem {
+            live: false,
+            ..running_target(3072)
+        };
+        let files = run(&[
+            over_with(0, 2048, vec![running_target(3072)]),
+            over_with(1, 2048, vec![running_target(3072)]),
+            over_with(2, 2048, vec![ended]),
+        ]);
+        let (a, b, c) = (
+            disk_ask(&files[0]),
+            disk_ask(&files[1]),
+            disk_ask(&files[2]),
+        );
+        assert!(a.hold.is_empty() && b.hold.is_empty());
+        assert_eq!(a.crossing_id, b.crossing_id, "a told band minted a new id");
+        assert_eq!(c.amount, 2048, "{c:?}");
+        assert!(!c.hold.is_empty(), "the build ended and nothing was held");
+        assert_ne!(
+            c.crossing_id, b.crossing_id,
+            "the build ended under the told crossing's id, so it is never held"
+        );
+    }
+
+    /// **A file written before `live` existed still reads**, every item as not running
+    /// (SKEIN-1391), and an ask without `live_mb` reads as none.
+    ///
+    /// What would make it fail: `#[serde(default)]` removed from `CleanItem::live` (the whole file
+    /// fails to parse, and `read` treats it as absent). Watched: with it removed, this failed.
+    #[test]
+    fn a_file_from_before_live_still_reads() {
+        let old = serde_json::json!({
+            "at": "2026-10-30T10:00:00Z",
+            "asks": [{"kind": "disk", "why": "allowance", "amount": 2048,
+                      "since": "2026-10-30T10:00:00Z", "crossing_id": "disk-1", "hold": "h"}],
+            "clean": {"at": "2026-10-30T10:00:00Z", "box_root": "/fleet/web-main",
+                      "items": [{"path": "/fleet/web-main/tree/target", "shown": "t",
+                                 "kind": "build output", "bytes": 4096}]},
+        });
+        let s: Signals = serde_json::from_value(old).expect("an older file did not parse");
+        assert!(!s.clean.unwrap().items[0].live);
+        assert_eq!(s.asks[0].live_mb, 0);
+    }
+
+    /// **The fleet's asks shrink the same way** (SKEIN-1391), and the part the box cannot meet is
+    /// not moved onto any other box: the share stays what `announce::cover` chose.
+    ///
+    /// What would make it fail: `shrunk` applied to the allowance alone, the fleet's share and
+    /// every-box ask keeping their full size (2.3G and 9.4G). Watched: with `shrunk` returning
+    /// `asked` for both fleet kinds, the amounts read 2355 and 9626 and this failed.
+    #[test]
+    fn the_fleets_asks_shrink_to_what_can_be_cleared_too() {
+        let items = vec![
+            running_target(3072),
+            item("~/.cache/pip", "download cache", 1536),
+        ];
+        let fleet = |every_box: bool| Reading {
+            fleet: FleetDisk::Asked(share(2, every_box)),
+            disk_mb: Some(9626),
+            disk_limit_mb: Some(10240),
+            clean: Some(listing(items.clone())),
+            ..reading(0, Some(calm()))
+        };
+        let share_ask = disk_ask(&next(None, &fleet(false)));
+        assert_eq!(share_ask.why, "fleet");
+        assert_eq!((share_ask.amount, share_ask.live_mb), (1536, 3072));
+        assert_eq!(
+            share_ask.hold,
+            format!(
+                "skein: clear 1.5G of storage you are not using before you continue — build \
+                 outputs, caches, and any containers or volumes you started. The fleet's disk is \
+                 4.1G over what it can spare, and this box holds 9.4G of it (3.0G in a build \
+                 running now); 2 other boxes have been asked for the rest; 1.5G can be cleared \
+                 now. {PIP_HINT} This one command was held so you would see this; the next will \
+                 run."
+            )
+        );
+        assert_eq!(
+            share_ask.enter.as_deref(),
+            Some(
+                format!(
+                    "skein: the fleet's disk is over its line; this box is asked to clear the \
+                     1.5G it can clear now (3.0G of it is in a build running now). {PIP_HINT}"
+                )
+                .as_str()
+            )
+        );
+        let every = disk_ask(&next(None, &fleet(true)));
+        assert_eq!(every.why, "fleet-every-box");
+        assert_eq!((every.amount, every.live_mb), (1536, 3072));
+        assert!(
+            every
+                .hold
+                .contains("; every box has been asked; 1.5G can be cleared now."),
+            "{}",
+            every.hold
+        );
+        if let FleetDisk::Asked(s) = &fleet(false).fleet {
+            assert_eq!(s.free, 2355, "the fleet's share itself was changed");
+        }
+
+        let nothing = disk_ask(&next(
+            None,
+            &Reading {
+                clean: Some(listing(vec![running_target(3072)])),
+                ..fleet(false)
+            },
+        ));
+        assert!(nothing.hold.is_empty());
+        assert_eq!(
+            nothing.enter.as_deref(),
+            Some(
+                "skein: the fleet's disk is 4.1G over what it can spare and this box holds 9.4G \
+                 of it (3.0G in a build running now); nothing can be cleared until it ends."
+            )
+        );
     }
 
     // --------------------------------------------------------------------------------------------
@@ -2442,6 +3052,7 @@ mod tests {
             shown: shown.to_string(),
             kind: kind.to_string(),
             bytes: mib * 1024 * 1024,
+            live: false,
         }
     }
 

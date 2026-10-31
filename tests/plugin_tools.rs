@@ -1201,6 +1201,123 @@ fn a_path_not_on_the_list_is_refused_and_nothing_is_removed() {
     );
 }
 
+/// A process that takes an exclusive `flock` on the file it is given and holds it itself, as cargo
+/// does. Not `flock(1)` handing its descriptor to a child: `/proc/locks` lists a lock under the pid
+/// that took it, and hides it once that pid is gone, so a lock `flock(1)` took and then left to
+/// `sleep` is held and not listed (measured: `fdinfo` showed it under pid 0).
+const HOLD_A_LOCK: &str = "import fcntl, sys, time\n\
+                           f = open(sys.argv[1], 'w')\n\
+                           fcntl.flock(f, fcntl.LOCK_EX)\n\
+                           time.sleep(60)\n";
+
+/// A child holding an exclusive `flock` on a file, as cargo holds its `.cargo-lock`, killed and
+/// reaped however the test ends.
+struct Holder(std::process::Child);
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `path` as `/proc/locks` names a file: the device's major and minor in hex, then the inode.
+fn proc_locks_name(path: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let dev = fs::metadata(path).unwrap().dev();
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    format!(
+        "{major:02x}:{minor:02x}:{}",
+        fs::metadata(path).unwrap().ino()
+    )
+}
+
+/// The real `/proc/locks` once it does (or does not) list `name`, within ten seconds.
+fn proc_locks_when(name: &str, listed: bool) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let text = fs::read_to_string("/proc/locks").unwrap_or_default();
+        let has = text.split_whitespace().any(|w| w == name);
+        if has == listed {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "/proc/locks never {} {name}",
+            if listed { "listed" } else { "stopped listing" }
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// **A build directory skein listed as not running is refused when a build holds its cargo lock
+/// at the moment of the call, and removed once the lock is gone** (SKEIN-1391). The list can be a
+/// minute old; a build started since is as running as one skein saw.
+///
+/// The lock is real: a child process takes an exclusive `flock` on
+/// `tree/target/debug/.cargo-lock` and holds it ([`HOLD_A_LOCK`]), and the real `/proc/locks`, read while it holds it and asserted
+/// to list it, is what the server reads as the box's (the fake root stands in for `/`).
+///
+/// What would make it fail: `clean_rows` believing the list's `live` alone and dropping the
+/// recheck of `/proc/locks` (the target is removed under the build), or a recheck that refuses
+/// whatever the lock says (the second call is refused too). Watched: with the `build_running`
+/// branch of `clean_rows` removed, the first call removed the target and this failed.
+#[test]
+fn a_build_running_at_the_call_is_refused_though_the_list_says_it_is_not() {
+    let b = Box_::new("skein-tools-it-clean-live");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let target = c.root.join("tree/target");
+    let lock = target.join("debug/.cargo-lock");
+    b.put("fleet/web-main/tree/target/debug/.cargo-lock", "");
+    let name = proc_locks_name(&lock);
+    let listed = fs::read_to_string(b.at("state/signals/resources.json")).unwrap();
+    assert!(
+        !listed.contains("\"live\":true"),
+        "the list must say the build is not running: {listed}"
+    );
+
+    let mut holder = Holder(
+        Command::new("python3")
+            .arg("-c")
+            .arg(HOLD_A_LOCK)
+            .arg(&lock)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("python3"),
+    );
+    b.put("root/proc/locks", &proc_locks_when(&name, true));
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let row = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "build output")
+        .cloned()
+        .unwrap_or_else(|| panic!("no build output listed: {listing}"));
+    assert_eq!(row["safe_now"], false, "{row}");
+    assert_eq!(row["why_not"], "a build is running in it now", "{row}");
+    assert_eq!(
+        listing["removable_now_bytes"], 12288,
+        "everything listed but the running build and the scratchpad can be removed now: {listing}"
+    );
+    let (got, said) = clean_said(&b, &[target.display().to_string()]);
+    assert_eq!(got["error"], "not-safe-now", "{got}");
+    assert!(said.contains("a build is running in it now"), "{said}");
+    assert!(
+        lock.exists(),
+        "the target was removed under a running build"
+    );
+
+    let _ = holder.0.kill();
+    let _ = holder.0.wait();
+    b.put("root/proc/locks", &proc_locks_when(&name, false));
+    let (got, _) = clean_said(&b, &[target.display().to_string()]);
+    assert_eq!(got["removed"].as_array().map(Vec::len), Some(1), "{got}");
+    assert!(!target.exists(), "the build ended and its target was kept");
+}
+
 /// **The repo's shared cache is refused while another box of the repo runs, while skein cannot
 /// tell, and when skein's word that none runs is stale or missing; and removed when it is fresh**
 /// (SKEIN-1356). The host's rule for its own clean (`fleet::clean_repo_cache`), applied by a box
