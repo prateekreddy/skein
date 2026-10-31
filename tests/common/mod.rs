@@ -331,7 +331,9 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // `gh` because the launcher binds a shim over it, and the test that proves a running box's `gh`
     // reads its replaced token runs the real one behind that shim (SKEIN-1240).
     // `jq` because the browser request pass reads the package queue through it (SKEIN-1341).
-    ("fleet_launch", &[BWRAP, TMUX, GIT, GH, PYTHON3, JQ]),
+    // `flock` because the shim's install lock is one, and the test that serialises two auto-installs
+    // (`versions.rs`, SKEIN-1431) skips without it.
+    ("fleet_launch", &[BWRAP, TMUX, GIT, GH, PYTHON3, JQ, FLOCK]),
     ("fleet_move", &[TMUX, PYTHON3, RUSTUP]),
     // `curl` because the git shim's reachability probe IS a curl call: the two tests that drive the
     // blocked-egress hint guard on it, and without it here a machine with no curl skips them while
