@@ -677,6 +677,8 @@ fn a_repos_rust_toolchain_file_selects_its_toolchain() {
 ///   * `here` and `deeper` in the lacking box: the shim not baking `rust-repo-missing`, not walking
 ///     up from a subdirectory, or its message not naming the entry; and `elsewhere` there: the shim
 ///     refusing outside the tree.
+///   * `own` in both boxes: the shim speaking without asking whether the `RUSTUP_HOME` in force
+///     holds the toolchain (a box whose own home holds it is refused a toolchain it has).
 ///   * the reports: the launcher not reporting `rust-repo` or `rust-repo-missing`, or reporting a
 ///     `rust` it never bound.
 #[test]
@@ -743,13 +745,29 @@ fn a_repos_pinned_toolchain_is_bound_without_a_fleet_default_and_a_missing_one_i
         .unwrap();
     }
 
-    let agent = "{ printf 'here %s\\n' \"$(rustc --version 2>&1)\"; \
-                   printf 'deeper %s\\n' \"$(cd src/deep && cargo --version 2>&1)\"; \
+    // `own`: a rustup home of the box's own, holding the toolchain its repo pins, as a box that
+    // installed it itself has. Made in the box's `/tmp`, run from the tree. `RUSTUP_AUTO_INSTALL=0`
+    // because the fixture toolchain has no component records: with it on, rustup would go to the
+    // network to add the file's wasm32 target, which a real home holding that target would not.
+    let own = |channel: &str| {
+        format!(
+            "o=/tmp/own-rh/toolchains/{channel}-{triple}/bin; mkdir -p \"$o\" /tmp/own-rh/update-hashes; \
+             printf '#!/bin/sh\\necho cargo-from-own\\n' > \"$o/cargo\"; chmod +x \"$o/cargo\"; \
+             printf 'own %s\\n' \"$(RUSTUP_AUTO_INSTALL=0 RUSTUP_HOME=/tmp/own-rh cargo --version 2>&1)\"; "
+        )
+    };
+    let agent = |channel: &str| {
+        format!(
+            "{{ printf 'here %s\\n' \"$(rustc --version 2>&1)\"; \
+                   printf 'deeper %s\\n' \"$(cd src/deep && cargo --version 2>&1)\"; {} \
                    printf 'elsewhere %s\\n' \"$(cd /tmp && rustc --version 2>&1)\"; \
                    touch \"$RUSTUP_HOME/planted\" 2>/dev/null && echo 'write yes' || echo 'write no'; \
-                 } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300";
+                 }} > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300",
+            own(channel)
+        )
+    };
 
-    let (launched, anchor, report) = start("rustwasm-main", false, &prefix, agent, "rs");
+    let (launched, anchor, report) = start("rustwasm-main", false, &prefix, &agent("1.98.1"), "rs");
     end("rustwasm-main", anchor);
     assert_eq!(
         field(&report, "here"),
@@ -762,12 +780,18 @@ fn a_repos_pinned_toolchain_is_bound_without_a_fleet_default_and_a_missing_one_i
         "the wasm box, outside its tree, is not on the bootstrap's toolchain: {report:?}"
     );
     assert_eq!(field(&report, "write"), "no", "{report:?}");
+    assert_eq!(field(&report, "own"), "cargo-from-own", "{report:?}");
     let bound = versions::versions_from_launch(&launched).unwrap_or_default();
     assert_eq!(bound.get("rust-repo"), Some(&wasm), "{launched}");
     assert_eq!(bound.get("rust"), None, "{launched}");
 
-    let (launched, anchor, report) = start("rustlack-main", false, &prefix, agent, "rs");
+    let (launched, anchor, report) = start("rustlack-main", false, &prefix, &agent("1.97.3"), "rs");
     end("rustlack-main", anchor);
+    assert_eq!(
+        field(&report, "own"),
+        "cargo-from-own",
+        "the lacking box was refused the toolchain its own rustup home holds: {report:?}"
+    );
     for key in ["here", "deeper"] {
         let said = field(&report, key);
         assert!(

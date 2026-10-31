@@ -2902,9 +2902,11 @@ unset SKEIN_NPM_PREFIX
 # **A toolchain the repo pins and the fleet lacks is named by the shim** (SKEIN-1415). skein names
 # it as `rust-repo-missing` in `SKEIN_BOX_VERSIONS`, and the shim is what an agent's `cargo` runs,
 # so it is the one place that reaches the agent at the moment it matters. Run as a proxy, in this
-# box's tree or under it, where the nearest toolchain file names that channel, and with no `+…` or
-# `RUSTUP_TOOLCHAIN` choosing another, it says which toolchain is missing and what happens next,
-# where rustup said only "could not create temp file …: Read-only file system". The name is read
+# box's tree or under it, where the nearest toolchain file names that channel, with no `+…` or
+# `RUSTUP_TOOLCHAIN` choosing another, and with no such toolchain in the `RUSTUP_HOME` in force (a
+# box may have its own home that holds it, and then rustup runs it), it says which toolchain is
+# missing and what happens next, where rustup said only "could not create temp file …: Read-only
+# file system". The name is read
 # here only in the shape `box_version` allows, and the shim looks at the file with a fixed-string
 # grep, so nothing in the box's tree is run or parsed as shell.
 toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
@@ -2931,11 +2933,12 @@ if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/nul
     {
       printf '#!/bin/bash\n'
       printf 'skein_rustup=%q\n' "$toolchain/cargo/bin/rustup"
-      printf 'skein_missing=%q skein_channel=%q skein_tree=%q\n' \
-        "$rust_missing" "$rust_missing_channel" "$tree"
+      printf 'skein_missing=%q skein_missing_at=%q skein_channel=%q skein_tree=%q\n' \
+        "$rust_missing" "${rust_missing%%[+@]*}" "$rust_missing_channel" "$tree"
       cat <<'RUSTUPSHIM'
 called="${0##*/}"
-if [ -n "$skein_missing" ] && [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN-}" ]; then
+if [ -n "$skein_missing" ] && [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN-}" ] &&
+  [ ! -d "${RUSTUP_HOME:-$HOME/.rustup}/toolchains/$skein_missing_at" ]; then
   case "${1-}" in
     +*) ;;
     *)
