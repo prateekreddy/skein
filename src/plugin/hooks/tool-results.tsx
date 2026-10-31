@@ -244,10 +244,11 @@ export function jobCommand(bash: string): string | null {
 }
 
 /** The job a call runs: the newest job of the box's that is waiting or running, has the call's
- * command, and is not another call's. */
+ * command, and is not another call's. The command is the whole of it, or, where skein cut one past
+ * 300 characters and marked it `…`, what skein kept. */
 function jobFor(view: SkeinJobsView, command: string, taken: ReadonlySet<string | null>): SkeinViewJob | null {
   const live = view.jobs.filter(j => (j.state === 'waiting' || j.state === 'granted') && !taken.has(j.id))
-  const same = live.filter(j => j.command === command || j.command.startsWith(`${command} `) || command.startsWith(j.command.replace(/…$/, '')))
+  const same = live.filter(j => j.command === command || (j.command.endsWith('…') && command.startsWith(j.command.slice(0, -1))))
 
   return [...same].sort((a, b) => a.waited_secs - b.waited_secs)[0] ?? null
 }

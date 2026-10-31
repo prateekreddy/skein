@@ -442,13 +442,16 @@ test('a Bash call with no skein-job, or a view skein stopped writing, is drawn b
 })
 
 // What would make it fail: the shell's own words (`2>&1 | tail`, `&& …`) or skein-job's options
-// read as the command, so no job in the view ever matches. Watched: with the cut at shell
+// read as the command, so no job in the view ever matches; or a command matched by its first words
+// alone, so a call is tied to another job. Watched: with the cut at shell
 // operators removed, the first case read `cargo test --lib 2>&1 | tail -20` and this failed.
 const COMMANDS: Array<[string, boolean]> = [
   ['cd /w && skein-job run --cores 4 -- cargo test --lib 2>&1 | tail -20', true],
   ["flock /var/tmp/x nice -n 19 skein-job run --class test -- 'cargo' test --lib; echo done", true],
   ['skein-job run -- cargo test --lib > out.txt', true],
   ['skein-job run -- cargo build', false],
+  // A shorter command is another job: `cargo test` is not the view's `cargo test --lib`.
+  ['skein-job run -- cargo test', false],
   ['echo skein-job run is how', false],
 ]
 
