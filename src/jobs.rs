@@ -2468,17 +2468,19 @@ mod tests {
     /// wrapper; and it kills nothing under a pid it cannot confirm is that box's wrapper.**
     ///
     /// Real processes: a stand-in wrapper, a shell script named `skein-job` run with
-    /// `SKEIN_BOX=web-main`, which starts two `sleep`s and waits for them. The box has no cgroup
-    /// (the cgroup root does not exist), so the queue knows the pid only by `/proc`. After the stop
-    /// both `sleep`s are gone and the wrapper ends by itself, with no signal, because its `wait`
-    /// returned. The same shape run with `SKEIN_BOX=api-main`, a pid another box could have named
-    /// as its own, is refused, and its `sleep`s run on.
+    /// `SKEIN_BOX=web-main`, which starts a `sleep` as its child and another as its grandchild,
+    /// under a subshell, each writing its own pid. The box has no cgroup (the cgroup root does not
+    /// exist), so the queue knows the pid only by `/proc`. After the stop both `sleep`s are gone and
+    /// the wrapper ends by itself, with no signal, because its `wait` returned. The same shape run
+    /// with `SKEIN_BOX=api-main`, a pid another box could have named as its own, is refused, and its
+    /// `sleep`s run on. The pids are the script's own word, not [`descendants`]', so a walk that
+    /// misses one cannot also miss it in the assertion.
     ///
     /// What would make it fail: the fallback killing the wrapper too (it ends by a signal), or not
-    /// reaching the grandchildren (the sabotage that was run: `kill_under` killing only the
-    /// wrapper's direct children found in one round, with the `sleep` behind a subshell surviving);
-    /// or the identity check dropped (the sabotage that was run: `|| true` after it, and the other
-    /// box's `sleep`s are killed).
+    /// reaching the grandchild (the sabotage that was run: `descendants` not walking past the
+    /// wrapper's own children, and the subshell's `sleep` is reparented and survives); or the
+    /// identity check dropped (the sabotage that was run: `|| true` after it, and the other box's
+    /// `sleep`s are killed).
     #[cfg(target_os = "linux")]
     #[test]
     fn without_a_job_cgroup_the_owners_stop_kills_what_is_under_the_wrapper() {
@@ -2486,50 +2488,58 @@ mod tests {
         let dir = crate::testutil::tempdir();
         let root: &Path = dir.as_ref();
         let script = root.join("skein-job");
-        std::fs::write(&script, "sleep 300 & ( sleep 300 ) & wait\n").unwrap();
-        let start = |box_name: &str| {
-            std::process::Command::new("sh")
+        // A child and a grandchild, each writing its own pid: the `; :` keeps the subshell from
+        // exec'ing its `sleep`, so the second `sleep` really is a grandchild.
+        std::fs::write(
+            &script,
+            "sleep 300 & echo $! >> \"$1\"; ( sleep 300 & echo $! >> \"$1\"; wait; : ) & wait\n",
+        )
+        .unwrap();
+        let start = |box_name: &str, pids: &Path| {
+            let child = std::process::Command::new("sh")
                 .arg(&script)
+                .arg(pids)
                 .env("SKEIN_BOX", box_name)
                 .spawn()
-                .unwrap()
-        };
-        let under = |pid: u32| {
-            for _ in 0..100 {
-                let d = descendants(Path::new("/proc"), pid);
-                if d.len() >= 2 {
-                    return d;
+                .unwrap();
+            for _ in 0..200 {
+                let got: Vec<u32> = std::fs::read_to_string(pids)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|l| l.trim().parse().ok())
+                    .collect();
+                if got.len() == 2 {
+                    return (child, got);
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             panic!("the stand-in wrapper never started its sleeps");
         };
+        let alive = |p: &u32| {
+            std::fs::read_to_string(format!("/proc/{p}/stat")).is_ok_and(|s| !s.contains(") Z "))
+        };
         let cgroups = root.join("no-cgroups");
 
-        let mut other = start("api-main");
-        let theirs = under(other.id());
+        let (mut other, theirs) = start("api-main", &root.join("theirs"));
         let refused = kill_under(Path::new("/proc"), &cgroups, "web-main", other.id());
-        assert!(refused.is_err(), "{refused:?}");
+        let survived: Vec<bool> = theirs.iter().map(alive).collect();
         for p in &theirs {
-            assert!(Path::new(&format!("/proc/{p}")).exists(), "another box's process was killed");
-        }
-        for p in theirs {
-            kill_pid(p);
+            kill_pid(*p);
         }
         let _ = other.wait();
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(survived, [true, true], "another box's processes were killed");
 
-        let mut wrapper = start("web-main");
-        let kids = under(wrapper.id());
-        kill_under(Path::new("/proc"), &cgroups, "web-main", wrapper.id()).unwrap();
-        let status = wrapper.wait().unwrap();
-        assert_eq!(status.signal(), None, "the wrapper was killed with its command");
-        for p in kids {
-            assert!(
-                !Path::new(&format!("/proc/{p}/stat")).exists()
-                    || std::fs::read_to_string(format!("/proc/{p}/stat"))
-                        .is_ok_and(|s| s.contains(") Z ")),
-                "{p} survived the stop"
-            );
+        let (mut wrapper, kids) = start("web-main", &root.join("ours"));
+        let stopped = kill_under(Path::new("/proc"), &cgroups, "web-main", wrapper.id());
+        std::thread::sleep(Duration::from_millis(100));
+        let survived: Vec<u32> = kids.iter().copied().filter(|p| alive(p)).collect();
+        for p in &kids {
+            kill_pid(*p);
         }
+        let status = wrapper.wait().unwrap();
+        stopped.unwrap();
+        assert_eq!(survived, Vec::<u32>::new(), "these survived the stop");
+        assert_eq!(status.signal(), None, "the wrapper was killed with its command");
     }
 }
