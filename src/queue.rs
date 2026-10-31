@@ -33,6 +33,8 @@ use crate::board::BoxView;
 use crate::prq::{Lane, Pr};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// What a row is waiting for, which is the only thing its position depends on.
 ///
@@ -229,12 +231,15 @@ pub fn who_needs_you() -> Vec<Row> {
     // The decision inbox: every request a box made of you, in the same list and ranked by the same
     // comparator. Each of the three reads its queue through the function its own panel reads, so
     // the inbox and the panel cannot disagree about what is waiting.
-    rows.extend(decisions(
-        crate::asks::fleet_asks(),
-        crate::substrate::fleet_requests(),
-        crate::gitgate::fleet_requests(),
-        &repo_of,
-    ));
+    let (asks, packages, writes) =
+        lock_decision_lists().get(Instant::now(), DECISIONS_FRESH, || {
+            (
+                crate::asks::fleet_asks(),
+                crate::substrate::fleet_requests(),
+                crate::gitgate::fleet_requests(),
+            )
+        });
+    rows.extend(decisions(asks, packages, writes, &repo_of));
 
     for repo in crate::repos::load_repos() {
         if !repo.review_queue {
@@ -279,6 +284,64 @@ pub fn who_needs_you() -> Vec<Row> {
     rows
 }
 
+/// How long the three request queues read for the decision inbox stay good.
+///
+/// Each read is an exec into the sandbox, and `/api/queue` is asked by `/v2` on every stream event
+/// as well as by the board's own poll — so without this, a busy stream multiplied three execs by
+/// every event. Five seconds is shorter than any panel's poll, so a request is never later on the
+/// inbox than it is on its own panel; and a decision recorded through the cockpit clears it at once
+/// ([`forget_decisions`]), so an answered card does not linger for the window.
+pub const DECISIONS_FRESH: Duration = Duration::from_secs(5);
+
+type DecisionLists = (
+    Vec<crate::asks::Ask>,
+    Vec<crate::substrate::Request>,
+    Vec<crate::gitgate::Request>,
+);
+
+/// One value, read at most once per window.
+///
+/// The lock is held across the read, deliberately: two surfaces asking at once then share one read
+/// instead of racing to make two.
+struct Fresh<T> {
+    held: Option<(Instant, T)>,
+}
+
+impl<T: Clone> Fresh<T> {
+    const fn new() -> Self {
+        Fresh { held: None }
+    }
+
+    fn get(&mut self, now: Instant, ttl: Duration, read: impl FnOnce() -> T) -> T {
+        if let Some((at, value)) = &self.held {
+            if now.saturating_duration_since(*at) < ttl {
+                return value.clone();
+            }
+        }
+        let value = read();
+        self.held = Some((now, value.clone()));
+        value
+    }
+
+    fn forget(&mut self) {
+        self.held = None;
+    }
+}
+
+static DECISION_LISTS: Mutex<Fresh<DecisionLists>> = Mutex::new(Fresh::new());
+
+/// A panic in one read must not wedge the inbox for the life of the server: the value is replaced
+/// whole or not at all, so a poisoned lock holds nothing half-written.
+fn lock_decision_lists() -> std::sync::MutexGuard<'static, Fresh<DecisionLists>> {
+    DECISION_LISTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Drop the cached request queues, so the next `/api/queue` reads them again. Called by each route
+/// that records a decision on one of them.
+pub fn forget_decisions() {
+    lock_decision_lists().forget();
+}
+
 /// A box's row, carrying which dialog holds it.
 ///
 /// `blocked` travels so a surface can tell a box asking a question on its own screen from one that
@@ -313,7 +376,7 @@ fn box_row(view: &BoxView) -> Row {
 ///
 /// `waiting_secs` is from `asked`, which the box wrote. It decides order only inside this rank, so
 /// a box that back-dates its ask can put it first among the things waiting on you, and no higher.
-fn decisions(
+pub(crate) fn decisions(
     asks: Vec<crate::asks::Ask>,
     packages: Vec<crate::substrate::Request>,
     writes: Vec<crate::gitgate::Request>,
@@ -723,6 +786,71 @@ mod tests {
             ..Default::default()
         });
         assert_eq!((row.need, row.blocked.as_str()), (Need::You, "question"));
+    }
+
+    /// **A browser fetch is not a decision, and an apt request beside it is.**
+    ///
+    /// A `playwright` request waits on skein, which fetches it without the owner (SKEIN-1341).
+    /// What would make it fail: the `kind != "playwright"` filter in `decisions` dropped or
+    /// misspelled, which would put a card in front of the owner that nothing they press can answer.
+    #[test]
+    fn a_browser_fetch_is_not_put_in_front_of_the_owner() {
+        let package = |id: &str, kind: &str, packages: &str| crate::substrate::Request {
+            id: id.into(),
+            box_name: "web-main".into(),
+            kind: kind.into(),
+            packages: vec![packages.into()],
+            asked: "2026-10-30T09:00:00Z".into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        let rows = decisions(
+            Vec::new(),
+            vec![
+                package("p-1", "playwright", "chromium@1.56.1"),
+                package("p-2", "apt", "jq"),
+            ],
+            Vec::new(),
+            &HashMap::new(),
+        );
+        let heads: Vec<&str> = rows.iter().map(|r| r.headline.as_str()).collect();
+        assert_eq!(heads, ["apt: jq"], "{rows:?}");
+    }
+
+    /// **Two asks inside the window read the queues once; one after it, or after a decision, reads
+    /// again.**
+    ///
+    /// What would make it fail: the cache not consulted (every `/api/queue` execs three times), a
+    /// window that never ends (a new request never shows), or `forget` not clearing it (an answered
+    /// card lingers after the press).
+    #[test]
+    fn the_request_queues_are_read_once_per_window() {
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            reads.get()
+        };
+        let mut fresh = Fresh::new();
+        let t0 = Instant::now();
+        let ttl = DECISIONS_FRESH;
+        assert_eq!(fresh.get(t0, ttl, read), 1);
+        assert_eq!(
+            fresh.get(t0 + ttl / 2, ttl, read),
+            1,
+            "read twice inside the window"
+        );
+        assert_eq!(reads.get(), 1);
+        assert_eq!(
+            fresh.get(t0 + ttl, ttl, read),
+            2,
+            "not read again once the window ended"
+        );
+        fresh.forget();
+        assert_eq!(
+            fresh.get(t0 + ttl, ttl, read),
+            3,
+            "a forgotten value was served"
+        );
     }
 
     impl Row {

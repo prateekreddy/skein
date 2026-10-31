@@ -352,6 +352,7 @@ pub(super) async fn api_git_grant_decide(
     match decided {
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
         Ok(req) => {
+            skein::queue::forget_decisions();
             // The grant is recorded; the token that makes it usable is minted off the request
             // thread, because it is two round trips to GitHub and the answer should not wait on
             // them. The box picks it up the moment it lands.

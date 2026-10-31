@@ -1691,6 +1691,7 @@ if (DEMO) {
   // their cadence rather than the board's, offset from each of them.
   loadDecisions();
   setInterval(loadDecisions, 19000);
+  openPanelFromHash();
   // Slower again by an order of magnitude. The two above wait on a person inside the fleet; this one
   // waits on other people on GitHub, and each tick is three `gh` round trips per enabled repo. A PR
   // that arrives three minutes before you hear about it has cost you nothing.

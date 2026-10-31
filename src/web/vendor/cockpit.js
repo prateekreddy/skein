@@ -413,6 +413,15 @@ const DECISION_IN_TERMINAL = {
   press: "Open its terminal to answer",
 };
 
+// The panels a link can open by its hash — the `url` the server puts on each decision row
+// (`/#askq`, `/#subq`, `/#gitq`). `/v2` has no panel of its own for these, so its click opens that
+// link, and this is what makes it land on the panel that answers the row rather than on the board.
+const DECISION_PANELS = ["askq", "subq", "gitq"];
+function panelForHash(hash) {
+  const h = String(hash || "").replace(/^#/, "");
+  return DECISION_PANELS.includes(h) ? h : null;
+}
+
 const decisionEsc = s =>
   String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
 

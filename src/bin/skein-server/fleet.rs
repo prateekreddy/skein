@@ -77,6 +77,7 @@ pub(super) async fn api_substrate_decide(
     };
     match decided {
         Ok(Ok(req)) => {
+            skein::queue::forget_decisions();
             if r.approve {
                 // Detached deliberately: nothing here reads the result, because the request file is
                 // where the result goes and that is what the cockpit is already watching.

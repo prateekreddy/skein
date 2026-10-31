@@ -745,6 +745,15 @@ function loadDecisions() {
     })
     .catch(() => {});
 }
+// A link to a panel by its hash (`/#askq` and the two beside it) opens that panel. The hash is then
+// taken off the address, so a reload does not open it again and the same link still works twice.
+function openPanelFromHash() {
+  const panel = panelForHash(location.hash);
+  if (!panel) return;
+  ({ askq: openAskq, subq: openSubq, gitq: openGitq })[panel]();
+  history.replaceState(null, "", location.pathname + location.search);
+}
+window.addEventListener("hashchange", openPanelFromHash);
 // One listener for every card: the button names where its decision is answered, and the box.
 decisionsEl.addEventListener("click", e => {
   const b = e.target.closest("button[data-open]");

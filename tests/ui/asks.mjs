@@ -74,9 +74,27 @@ const inbox = () => {
 };
 
 try {
-  await page.goto(`http://127.0.0.1:${door.port}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(800);
-  await page.evaluate(() => openAskq());
+  // By the link `/v2` opens for a question row: the hash names the panel (SKEIN-1375).
+  await page.goto(`http://127.0.0.1:${door.port}/?t=${API_TOKEN}#askq`, { waitUntil: "domcontentloaded" });
+  // **What would make this fail:** the hash router not run at boot, or `#askq` naming no panel.
+  check("a link to /#askq opens the questions panel, and leaves the address clean",
+    { open: await until(() => page.evaluate(() => document.getElementById("askq").classList.contains("open"))),
+      hash: await page.evaluate(() => location.hash) },
+    { open: true, hash: "" });
+
+  // The decision inbox above the board: one card per waiting question, the one whose own file
+  // claims it is answered included, each in the box's words as plain text.
+  const strip = page.locator("#decisions");
+  check("the Decisions strip shows every waiting question, the box's self-answered one too",
+    await until(async () => (await strip.locator(".dcard").count()) === 3), true);
+  check("a decision card shows `<b>` as the characters", {
+    text: await strip.locator(".dcard", { hasText: "fixtures table" }).locator(".aq-body").textContent(),
+    bold: await strip.locator(".aq-body b").count(),
+    buttons: await strip.locator(".dcard button").allTextContents(),
+  }, {
+    text: "Should I <b>drop</b> the old fixtures table?", bold: 0,
+    buttons: ["Answer in Questions", "Answer in Questions", "Answer in Questions"],
+  });
   const marked = card("fixtures table");
   check("the question is drawn, waiting, with its offered answers and Dismiss to press",
     await until(async () => (await marked.locator("button").count()) === 3), true);
@@ -116,6 +134,11 @@ try {
   await until(async () => (await card("still wanted").locator("button").count()) === 0);
   check("a dismissed question says so", (await card("still wanted").locator(".sq-row").textContent()).trim()
     .replace(/\d\d:\d\d$/, "HH:MM"), "dismissed without an answer · HH:MM");
+
+  // **What would make this fail:** the strip not refreshed after an answer, or the queue's cache
+  // serving the answered questions for its window (`queue::forget_decisions` not called).
+  check("once all three are answered the Decisions strip is gone",
+    await until(() => page.evaluate(() => document.getElementById("decisions").hidden), 3000), true);
 
   await until(async () => inbox().length === 3);
   check("each answer reached the box's inbox once, in the approved words", inbox().sort(), [

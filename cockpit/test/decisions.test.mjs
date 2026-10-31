@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decisionAction, decisionRows, decisionsHtml } from "../src/decisions.mjs";
+import { decisionAction, decisionRows, decisionsHtml, panelForHash } from "../src/decisions.mjs";
 
 // Rows spelled the way `queue::Row` serialises them.
 const row = (source, extra = {}) => ({
@@ -52,4 +52,12 @@ test("the server's order is kept", () => {
   const rows = [row("git-write", { name: "a" }), row("setup"), row("question", { name: "b" })];
   assert.deepEqual(decisionRows(rows).map(r => r.name), ["a", "b"]);
   assert.deepEqual(decisionRows(undefined), []);
+});
+
+// What would make it fail: a hash that names no panel opening one, or a decision's panel missing.
+test("a hash opens the panel it names, and nothing else", () => {
+  for (const p of ["askq", "subq", "gitq"]) assert.equal(panelForHash("#" + p), p);
+  for (const h of ["", "#", "#box=web-main", "#health", "#askqx", "#constructor", null, undefined]) {
+    assert.equal(panelForHash(h), null, String(h));
+  }
 });

@@ -403,6 +403,54 @@ mod tests {
         assert_eq!(html.matches("<button ").count(), 4, "{html}");
     }
 
+    /// **The link on each decision row opens the panel its card opens.**
+    ///
+    /// The rows are built by `queue::decisions`, so the `url` is the server's own; `/v2` opens that
+    /// link, and the board's hash router (`panelForHash`) is what turns it into a panel. What would
+    /// make it fail: a row's `url` and the router disagreeing — `/v2` would then land on the board
+    /// with nothing open — or the card and the link naming different panels.
+    #[test]
+    fn a_decisions_link_opens_the_panel_its_card_opens() {
+        let rows = crate::queue::decisions(
+            vec![crate::asks::Ask {
+                id: "q-1".into(),
+                box_name: "web-main".into(),
+                question: "keep it?".into(),
+                state: "waiting".into(),
+                ..Default::default()
+            }],
+            vec![crate::substrate::Request {
+                id: "p-1".into(),
+                box_name: "web-main".into(),
+                kind: "apt".into(),
+                packages: vec!["jq".into()],
+                state: "pending".into(),
+                ..Default::default()
+            }],
+            vec![crate::gitgate::Request {
+                id: "w-1".into(),
+                box_name: "web-main".into(),
+                repo: "acme/docs".into(),
+                state: "pending".into(),
+                ..Default::default()
+            }],
+            &Default::default(),
+        );
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let Some(pairs) = run_bundle(
+            &rows,
+            "JSON.stringify(rows.map(r => [panelForHash(new URL(r.url, 'http://h/').hash), \
+             decisionAction(r).open]))",
+        ) else {
+            crate::testutil::skip("no node on this machine to run the cockpit bundle");
+            return;
+        };
+        assert_eq!(
+            pairs,
+            r#"[["askq","askq"],["subq","subq"],["gitq","gitq"]]"#
+        );
+    }
+
     /// **The URL the change view asks for is a URL this router answers** (SKEIN-246).
     ///
     /// The view shipped whole — `shape::of_diff`, two handlers, the page that renders them — and a
