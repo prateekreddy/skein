@@ -9,6 +9,14 @@
 // same with this file as without it; ctrl+o (`isExpanded`) draws the engine's own view, the JSON
 // whole. A result that is an error, or that this file does not recognise, is drawn by the engine.
 //
+// **The fold.** The transcript folds a run of calls into one count line (`Called plugin:skein:skein,
+// ran 1 shell command`), and a folded call draws no result at all. So a group holding one of
+// skein's calls is unfolded here (its `isExpanded`), and each call in it is then a `ToolUse` row that
+// draws its result inline, with no `ToolResult` of its own: the rows draw skein's lines in place of
+// the engine's. The engine hands those rows `isExpanded: true`, the same as ctrl+o and `--verbose`
+// do, so the calls this file unfolded are remembered (`unfolded`) and only those are drawn readably;
+// a group the engine itself drew expanded (non-fullscreen ctrl+o, `--verbose`) is drawn raw.
+//
 // What it reads, all of it written by skein or by the tool itself:
 //
 // * a tool's answer, the first text block of what `skein-mcp` returned (`call` in `bin/skein-mcp`:
@@ -46,6 +54,26 @@ const RESULT_INDENT = 6
 
 // The one timer that reads the jobs view while a `skein-job` call runs.
 let poller: Timer | null = null
+
+// The calls in a group this file unfolded, by surface and tool_use_id: true while the group was
+// last drawn folded by the engine and unfolded here, false once the engine drew it expanded itself.
+// Read while a row draws, so it is plain module state: the group's hook settles before its rows
+// mount. Kept to the last few hundred calls.
+const unfolded = new Map<string, boolean>()
+const KEEP_UNFOLDED = 500
+const unfoldKey = (surface: string, id: string) => `${surface}\n${id}`
+
+function markUnfolded(surface: string, ids: readonly string[], ours: boolean): void {
+  for (const id of ids) {
+    const k = unfoldKey(surface, id)
+    unfolded.delete(k)
+    unfolded.set(k, ours)
+  }
+  for (const k of unfolded.keys()) {
+    if (unfolded.size <= KEEP_UNFOLDED) break
+    unfolded.delete(k)
+  }
+}
 
 // ------------------------------------------------------------------------------------------------
 // Lines
@@ -105,7 +133,43 @@ export function skeinTool(name: string): 'resources' | 'top' | 'clean' | 'reques
   return (m?.[1] as 'resources' | 'top' | 'clean' | 'requests' | undefined) ?? null
 }
 
+/** Whether a call is one this file draws: one of skein's tools, or a Bash call under `skein-job
+ * run`. A group's `calls[].tool` is the tool_use block's own name, as `ToolUse.tool` is. */
+export function isDrawnCall(tool: string, input: unknown): boolean {
+  if (skeinTool(tool) !== null) return true
+
+  return tool === 'Bash' && isRecord(input) && typeof input.command === 'string' && jobCommand(input.command) !== null
+}
+
+/** A skein tool's answer as lines; null where it is not one this file reads. */
+async function answerLines($: Engine, tool: string, output: unknown, columns: number): Promise<Line[] | null> {
+  const which = skeinTool(tool)
+  if (which === null) return null
+  const result = resultJson(output)
+  if (result === null) return null
+  if (which === 'resources') return resourcesLines(result)
+  if (which === 'top') return topLines(result, columns)
+  if (which === 'requests') return requestsLines(result, columns)
+
+  return cleanLines(result, columns, (await $.env.get('HOME')) ?? '')
+}
+
 export function register(on: On): void {
+  // A group holding one of skein's calls is unfolded, so the person sees its result; every other
+  // group is left as the engine draws it.
+  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
+    const ids = e.props.calls.filter(c => isDrawnCall(c.tool, c.input)).flatMap(c => (c.tool_use_id === undefined ? [] : [c.tool_use_id]))
+    if (ids.length === 0) return next(e)
+    if (e.props.isExpanded) {
+      markUnfolded(e.surface, ids, false)
+
+      return next(e)
+    }
+    markUnfolded(e.surface, ids, true)
+
+    return next({ ...e, props: { ...e.props, isExpanded: true } })
+  })
+
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     if (e.props.isExpanded === true) return next(e)
     const columns = Math.max(40, (e.viewport?.columns ?? 100) - RESULT_INDENT)
@@ -124,25 +188,52 @@ export function register(on: On): void {
         </Box>
       )
     }
-    const tool = skeinTool(e.props.tool)
-    if (tool === null || e.props.isErrored) return next(e)
-    const result = resultJson(e.props.output)
-    if (result === null) return next(e)
-    const home = (await $.env.get('HOME')) ?? ''
-    const lines =
-      tool === 'resources'
-        ? resourcesLines(result)
-        : tool === 'top'
-          ? topLines(result, columns)
-          : tool === 'clean'
-            ? cleanLines(result, columns, home)
-            : requestsLines(result, columns)
+    if (e.props.isErrored) return next(e)
+    const lines = await answerLines($, e.props.tool, e.props.output, columns)
 
     return lines === null ? next(e) : drawLines($, e, lines)
   })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
-    if (e.props.tool !== 'Bash' || !e.props.isRunning || e.props.isExpanded === true) return next(e)
+    // A row of a group unfolded here; any other expanded row is ctrl+o's or `--verbose`'s.
+    const isOurs = e.props.isExpanded === true && unfolded.get(unfoldKey(e.surface, e.props.tool_use_id)) === true
+    if (e.props.isExpanded === true && !isOurs) return next(e)
+    if (isOurs && !e.props.isRunning) {
+      // The row draws its result inline, so the engine's row is handed no result to draw (one
+      // that does not fit the tool's output schema draws nothing) and skein's lines go under it.
+      if (e.props.isInterrupted || e.props.output === undefined) return next(e)
+      const columns = Math.max(40, (e.viewport?.columns ?? 100) - RESULT_INDENT)
+      const { Box, Text } = $.ui.resolve(e)
+      if (e.props.tool === 'Bash') {
+        const out = isRecord(e.props.output) ? e.props.output : null
+        const ended = out === null ? null : jobEnded(`${out.stdout ?? ''}\n${out.stderr ?? ''}`)
+        if (ended === null) return next(e)
+        const call = (await read($, watch))?.calls.find(c => c.id === e.props.tool_use_id) ?? null
+        const own = await next(e)
+
+        return (
+          <Box flexDirection="column">
+            {own}
+            {drawLines($, e, [endLine(ended, call?.command ?? null, e.props.isErrored)])}
+          </Box>
+        )
+      }
+      if (e.props.isErrored) return next(e)
+      const lines = await answerLines($, e.props.tool, e.props.output, columns)
+      if (lines === null) return next(e)
+      const own = await next({ ...e, props: { ...e.props, output: undefined } })
+
+      return (
+        <Box flexDirection="column">
+          {own}
+          <Box flexDirection="row">
+            <Text dimColor>{'  ⎿  '}</Text>
+            {drawLines($, e, lines)}
+          </Box>
+        </Box>
+      )
+    }
+    if (e.props.tool !== 'Bash' || !e.props.isRunning) return next(e)
     const found = await read($, watch)
     const call = found?.calls.find(c => c.id === e.props.tool_use_id)
     if (!found || !call || call.jobId === null || found.view === null) return next(e)
