@@ -1318,6 +1318,42 @@ fn a_build_running_at_the_call_is_refused_though_the_list_says_it_is_not() {
     assert!(!target.exists(), "the build ended and its target was kept");
 }
 
+/// **A lock on another filesystem's file with the target's inode number is not a build in it**
+/// (SKEIN-1391): skein-mcp's recheck at the call matches `/proc/locks` by device and inode
+/// together, so the target is removed.
+///
+/// What would make it fail: the recheck matching the inode alone (the target is refused as
+/// running). Watched: with the match made `any(st.st_ino == l[2] for l in locks)`, the call was
+/// refused and this failed.
+#[test]
+fn a_lock_with_the_targets_inode_on_another_device_does_not_refuse_it() {
+    use std::os::unix::fs::MetadataExt;
+    let b = Box_::new("skein-tools-it-clean-otherdev");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let target = c.root.join("tree/target");
+    let lock = target.join("debug/.cargo-lock");
+    b.put("fleet/web-main/tree/target/debug/.cargo-lock", "");
+    let ino = fs::metadata(&lock).unwrap().ino();
+    let own = proc_locks_name(&lock);
+    let other = format!("ff:ff:{ino}");
+    assert_ne!(own, other, "the fixture's own device is ff:ff");
+    b.put(
+        "root/proc/locks",
+        &format!("1: FLOCK  ADVISORY  WRITE 4242 {other} 0 EOF\n"),
+    );
+    let (got, said) = clean_said(&b, &[target.display().to_string()]);
+    assert_eq!(
+        got["removed"].as_array().map(Vec::len),
+        Some(1),
+        "{got} {said}"
+    );
+    assert!(
+        !target.exists(),
+        "a lock on another device's file kept the target"
+    );
+}
+
 /// **The repo's shared cache is refused while another box of the repo runs, while skein cannot
 /// tell, and when skein's word that none runs is stale or missing; and removed when it is fresh**
 /// (SKEIN-1356). The host's rule for its own clean (`fleet::clean_repo_cache`), applied by a box
