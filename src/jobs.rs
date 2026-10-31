@@ -158,7 +158,8 @@ pub struct Job {
     pub cwd: String,
     pub pid: u32,
     /// `waiting`, `granted`, or one of the ends: `done`, `cancelled`, `gone` (the wrapper left the
-    /// box's cgroup, or its request was removed).
+    /// box's cgroup, or its request was removed), `stopped` (the owner stopped it from the cockpit,
+    /// [`ask_owner_stop`]; never from a box's file).
     pub state: String,
     /// When skein first saw it, by the host's clock.
     pub queued: String,
@@ -186,6 +187,13 @@ pub struct Job {
     /// The command in two words, for another box's view: [`short_command`] of its argv.
     #[serde(default)]
     pub short: String,
+    /// The cores it is using now, from its own cgroup between the last two ticks. `None` while it
+    /// waits, before a second reading, and for a job with no cgroup of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<f64>,
+    /// The memory it holds now, in MiB, from its own cgroup's `memory.current`. `None` as `using`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_mib: Option<u64>,
 }
 
 /// What a finished job used, from its own cgroup.
@@ -961,6 +969,9 @@ pub fn tick(
     };
     let was_running = granted(&queue);
     merge(&mut queue, &requests, &alive, repo_of, now);
+    // The owner's stops, read from the host and never from a box's file (SKEIN-1422).
+    let stops = read_stops(&stops_dir(places));
+    apply_owner_stops(&mut queue, &stops, now);
     // A job that ended: what its cgroup counted, then the cgroup gone (SKEIN-1419). A wrapper no
     // longer in its box was killed under its command, which runs on in the job's cgroup holding
     // cores the queue just gave back: the job has ended, so that goes first.
@@ -970,6 +981,13 @@ pub fn tick(
         }
         rates.forget(&job.box_name, &job.id);
         let wrapper_gone = !alive(&job.box_name, job.pid);
+        // A running job the owner stopped: its processes are killed before it is measured, and
+        // its wrapper is left to tell its caller who stopped it (SKEIN-1422).
+        if job.state == "stopped" && !wrapper_gone {
+            if let Err(why) = stop_running(places, job) {
+                job.reason = format!("{STOPPED_BY_OWNER}, but {why}");
+            }
+        }
         if let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone) {
             job.used = Some(Usage::from_cgroup(&used, secs_between(&job.granted, now)));
         }
@@ -1021,10 +1039,29 @@ pub fn tick(
         *granted_by_box.entry(j.box_name.clone()).or_default() += j.holds();
     }
     cgroup::weigh_boxes(&places.cgroups, &granted_by_box);
+    // What each running job is using now, for the cockpit's jobs list (SKEIN-1422).
+    for job in queue.jobs.iter_mut() {
+        let key = (job.box_name.clone(), job.id.clone());
+        let running = job.state == "granted";
+        job.using = live.get(&key).copied().filter(|_| running);
+        job.mem_mib = running
+            .then(|| {
+                cgroup::memory_now(&cgroup::job_cgroup(
+                    &places.cgroups,
+                    &job.box_name,
+                    &job.id,
+                ))
+            })
+            .flatten();
+    }
     prune(&mut queue, now);
     write_json(&places.queue, &queue)?;
-
     let mut failed = Vec::new();
+    if let Err(e) = write_json(&fleet_view_path(places), &fleet_view(&queue, pool, now)) {
+        failed.push(format!("the cockpit's jobs list: {e}"));
+    }
+    tidy_stops(&stops_dir(places), &stops, &queue);
+
     let mut boxes: BTreeSet<String> = queue.jobs.iter().map(|j| j.box_name.clone()).collect();
     boxes.extend(requests.keys().cloned());
     for name in boxes {
@@ -1131,6 +1168,357 @@ pub async fn watch_jobs() {
         }
         last = said;
     }
+}
+
+// ───────────────────────────── the owner's stop ─────────────────────────────
+//
+// **The owner can stop any job, waiting or running, from the cockpit's jobs list** (SKEIN-1422).
+// A box stops only its own, as it always could: its wrapper writes `cancelled` into its own
+// drop-box, and a file in one box's drop-box names only that box's jobs, because the directory is
+// the identity ([`read_requests`]). So no box can stop another's.
+//
+// **The owner's stop is host state.** The cockpit's press writes one file under [`stops_dir`],
+// beside the queue under `~/.skein`, where no box can write, and the next tick reads it
+// ([`read_stops`]). A box that writes `stopped` into its own request has written a state
+// [`merge`] reads as `waiting`. Only the tick writes the queue, as before: the press asks, the tick
+// stops, so a stop and a grant can never race on the file.
+//
+// **What a stop does.** A waiting job leaves the queue: its view reads `stopped` and its wrapper,
+// which is polling that view, says who stopped it and exits. A running job's processes are killed:
+// with its own cgroup, the wrapper is moved back into its box's leaf and the job's `cgroup.kill`
+// takes everything else ([`cgroup::stop`]); without one, every process under the wrapper is
+// killed ([`kill_under`]). Either way the wrapper is left alive, so it can tell its caller it was
+// stopped by the owner rather than fail with a bare signal.
+
+/// What a job the owner stopped says, in its queue entry and through its wrapper
+/// (`src/plugin/bin/skein-job`, which spells it the same).
+pub const STOPPED_BY_OWNER: &str = "stopped by you (the owner) from the cockpit";
+
+/// Where the owner's stops wait for the next tick: beside the queue, on the host. One file per job,
+/// `<box>/<id>`.
+pub fn stops_dir(places: &Places) -> PathBuf {
+    places.queue.with_file_name("stops")
+}
+
+/// Where the tick writes the cockpit's list of every job: beside the queue, on the host.
+pub fn fleet_view_path(places: &Places) -> PathBuf {
+    places.queue.with_file_name("fleet.json")
+}
+
+/// Ask for box `box_name`'s job `id` to be stopped on the next tick. Refused, in words for the
+/// cockpit, when no such job is waiting or running.
+pub fn ask_owner_stop(places: &Places, box_name: &str, id: &str) -> Result<(), String> {
+    let gone = || format!("{box_name} has no job {id} waiting or running");
+    if !crate::util::valid_name(box_name) || !id_is_nameable(id) {
+        return Err(gone());
+    }
+    let queue = read_queue(&places.queue);
+    if !queue
+        .jobs
+        .iter()
+        .any(|j| j.box_name == box_name && j.id == id && j.is_active())
+    {
+        return Err(gone());
+    }
+    let dir = stops_dir(places).join(box_name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    crate::util::write_atomic(&dir.join(id), &dir, b"")
+}
+
+/// Every stop the owner asked for, as (box, id).
+pub fn read_stops(dir: &Path) -> BTreeSet<(String, String)> {
+    let mut out = BTreeSet::new();
+    for b in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Some(name) = b.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !crate::util::valid_name(&name) {
+            continue;
+        }
+        for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
+            if let Some(id) = f.file_name().to_str().filter(|i| id_is_nameable(i)) {
+                out.insert((name.clone(), id.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// End every waiting or running job in `stops` as `stopped`.
+pub fn apply_owner_stops(queue: &mut Queue, stops: &BTreeSet<(String, String)>, now: DateTime<Utc>) {
+    for job in queue.jobs.iter_mut().filter(|j| j.is_active()) {
+        if stops.contains(&(job.box_name.clone(), job.id.clone())) {
+            job.state = "stopped".into();
+            job.ended = stamp(now);
+            job.reason = STOPPED_BY_OWNER.into();
+        }
+    }
+}
+
+/// Remove each stop whose job is no longer waiting or running: it has been done, or there was
+/// nothing left to do.
+fn tidy_stops(dir: &Path, stops: &BTreeSet<(String, String)>, queue: &Queue) {
+    for (b, id) in stops {
+        let active = queue
+            .jobs
+            .iter()
+            .any(|j| &j.box_name == b && &j.id == id && j.is_active());
+        if !active {
+            let _ = std::fs::remove_file(dir.join(b).join(id));
+            let _ = std::fs::remove_dir(dir.join(b));
+        }
+    }
+}
+
+/// Kill a running job's processes, leaving its wrapper: through its own cgroup when it has one,
+/// else every process under the wrapper.
+fn stop_running(places: &Places, job: &Job) -> Result<(), String> {
+    if cgroup::job_cgroup(&places.cgroups, &job.box_name, &job.id).is_dir() {
+        return cgroup::stop(&places.cgroups, &job.box_name, &job.id, job.pid);
+    }
+    kill_under(Path::new("/proc"), &places.cgroups, &job.box_name, job.pid)
+}
+
+/// Kill every process under box `box_name`'s wrapper `wrapper`, by the parent links in `proc`, and
+/// not the wrapper itself.
+///
+/// **The pid is the box's word**, written in its request, and with no cgroup to read it in, the
+/// queue only knows that some process has it. So it is first confirmed as this box's wrapper: in
+/// the box's cgroup, or, where the box has none, a process whose command is `skein-job` and whose
+/// environment says `SKEIN_BOX=<box>`, which the launcher sets and no other box can set on a
+/// process it did not start. Otherwise nothing is killed: a box must not be able to point the
+/// owner's stop at skein, or at another box's processes.
+///
+/// A process that left the tree (a daemon that double-forked) is not under the wrapper any more,
+/// and is not reached: a job cgroup is what reaches those.
+pub fn kill_under(proc: &Path, cgroups: &Path, box_name: &str, wrapper: u32) -> Result<(), String> {
+    let in_its_cgroup = cgroup::pid_in_subtree(&cgroups.join(box_name), wrapper) == Some(true);
+    if wrapper <= 1 || !(in_its_cgroup || is_the_boxs_wrapper(proc, box_name, wrapper)) {
+        return Err(
+            "its wrapper could not be confirmed as this box's, so nothing was killed".into(),
+        );
+    }
+    // Again until none is left, for a process forked while the last round was killing.
+    for _ in 0..5 {
+        let under = descendants(proc, wrapper);
+        if under.is_empty() {
+            return Ok(());
+        }
+        for pid in under {
+            kill_pid(pid);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    match descendants(proc, wrapper).is_empty() {
+        true => Ok(()),
+        false => Err("some of its processes were still running".into()),
+    }
+}
+
+/// Whether `pid` is a `skein-job` started in box `box_name`.
+fn is_the_boxs_wrapper(proc: &Path, box_name: &str, pid: u32) -> bool {
+    let read = |f: &str| std::fs::read(proc.join(pid.to_string()).join(f)).unwrap_or_default();
+    let words = |b: Vec<u8>| -> Vec<String> {
+        b.split(|&c| c == 0)
+            .map(|w| String::from_utf8_lossy(w).into_owned())
+            .collect()
+    };
+    let env = format!("SKEIN_BOX={box_name}");
+    words(read("environ")).contains(&env)
+        && words(read("cmdline"))
+            .iter()
+            .any(|a| a == "skein-job" || a.ends_with("/skein-job"))
+}
+
+/// Every process under `root`, by the parent pid each one's `stat` names.
+fn descendants(proc: &Path, root: u32) -> Vec<u32> {
+    let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for entry in std::fs::read_dir(proc).into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `pid (comm) state ppid …`, where comm may hold spaces and parentheses: after its last `)`.
+        let ppid = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|p| p.parse::<u32>().ok());
+        if let Some(ppid) = ppid {
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+    let mut out = Vec::new();
+    let mut next = vec![root];
+    while let Some(p) = next.pop() {
+        for &c in children.get(&p).into_iter().flatten() {
+            if c != root && !out.contains(&c) {
+                out.push(c);
+                next.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// SIGKILL `pid`, through `sudo -n` when skein may not signal it itself.
+fn kill_pid(pid: u32) {
+    let Ok(p) = i32::try_from(pid) else {
+        return;
+    };
+    // SAFETY: `kill` has no memory effects; `p` is a positive pid confirmed under the box's wrapper.
+    let refused = unsafe { libc::kill(p, libc::SIGKILL) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if refused {
+        let _ = std::process::Command::new("sudo")
+            .args(["-n", "kill", "-KILL", "--", &pid.to_string()])
+            .output();
+    }
+}
+
+/// The cockpit's stop: ask, then wait up to a few ticks for it to be done. `Ok(true)` once the job
+/// has ended, `Ok(false)` when the queue has not looked yet.
+pub fn stop_from_cockpit(box_name: &str, id: &str) -> Result<bool, String> {
+    let places = Places::live();
+    ask_owner_stop(&places, box_name, id)?;
+    let deadline = std::time::Instant::now() + LOOK_EVERY * 4;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        let ended = read_queue(&places.queue)
+            .jobs
+            .iter()
+            .find(|j| j.box_name == box_name && j.id == id)
+            .is_none_or(|j| !j.is_active());
+        if ended {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// ───────────────────────────── the cockpit's jobs list ─────────────────────────────
+
+/// Every waiting and running job in the fleet, for the owner: the cockpit's jobs list. The owner
+/// chose that other repos' jobs are named (2026-10-31), and the owner sees everything, so each row
+/// carries the whole command beside its two-word form.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetView {
+    /// RFC3339, when the tick that wrote it ran.
+    #[serde(default)]
+    pub at: String,
+    /// The machine's cores, those granted to running jobs, and those a waiting job could start
+    /// with now.
+    #[serde(default)]
+    pub cores: u32,
+    #[serde(default)]
+    pub granted: u32,
+    #[serde(default)]
+    pub free: u32,
+    /// Running jobs first, in the order skein saw them, then waiting ones in the order they go.
+    #[serde(default)]
+    pub jobs: Vec<FleetJob>,
+}
+
+/// One row of the cockpit's jobs list.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetJob {
+    #[serde(rename = "box")]
+    pub box_name: String,
+    pub repo: String,
+    pub id: String,
+    pub class: String,
+    /// Its command in two words, such as `cargo test`.
+    pub short: String,
+    /// Its whole command, as the box wrote it, cut to 300 characters.
+    pub command: String,
+    /// `waiting` or `granted`.
+    pub state: String,
+    /// The cores it asked for, the fewest it will start with, and those it was granted.
+    pub cores: u32,
+    pub min: u32,
+    pub granted_cores: u32,
+    /// The cores it is using now; `None` while it waits or before it was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<f64>,
+    /// The memory it holds now while it runs, or is expected to need while it waits, in MiB.
+    #[serde(default)]
+    pub mem_mib: u64,
+    /// Whether `mem_mib` was measured, rather than the estimate a waiting job is held to.
+    #[serde(default)]
+    pub mem_measured: bool,
+    /// Its place among the waiting, from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<usize>,
+    /// Why a waiting job has not started; why a running one is uncapped, when it is.
+    pub reason: String,
+    /// Seconds it has waited, while it waits, or run, while it runs, at `at`.
+    pub secs: i64,
+}
+
+/// The cockpit's jobs list, from the queue and the pool as one tick left them.
+pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
+    let row = |job: &Job, position: Option<usize>| {
+        let running = job.state == "granted";
+        FleetJob {
+            box_name: job.box_name.clone(),
+            repo: job.repo.clone(),
+            id: job.id.clone(),
+            class: job.class.clone(),
+            short: job.short.clone(),
+            command: job.command.clone(),
+            state: job.state.clone(),
+            cores: job.cores,
+            min: job.min,
+            granted_cores: job.granted_cores,
+            using: job.using.filter(|_| running),
+            mem_mib: match job.mem_mib.filter(|_| running) {
+                Some(m) => m,
+                None => memory_estimate_mib(job),
+            },
+            mem_measured: running && job.mem_mib.is_some(),
+            position,
+            reason: job.reason.clone(),
+            secs: secs_between(
+                match running {
+                    true => &job.granted,
+                    false => &job.queued,
+                },
+                now,
+            ),
+        }
+    };
+    let mut jobs: Vec<FleetJob> = queue
+        .jobs
+        .iter()
+        .filter(|j| j.state == "granted")
+        .map(|j| row(j, None))
+        .collect();
+    jobs.extend(
+        waiting_order(queue)
+            .into_iter()
+            .enumerate()
+            .map(|(at, i)| row(&queue.jobs[i], Some(at + 1))),
+    );
+    FleetView {
+        at: stamp(now),
+        cores: pool.cores,
+        granted: pool.granted,
+        free: pool.free,
+        jobs,
+    }
+}
+
+/// The jobs list as the last tick wrote it, and whether that tick was recent enough that the
+/// queue is still running.
+pub fn read_fleet_view(now: DateTime<Utc>) -> (FleetView, bool) {
+    let path = queue_path().with_file_name("fleet.json");
+    let view: FleetView = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let fresh = parse_stamp(&view.at).is_some_and(|_| secs_between(&view.at, now) < VIEW_FRESH.as_secs() as i64);
+    (view, fresh)
 }
 
 #[cfg(test)]
@@ -1919,5 +2307,229 @@ mod tests {
         )
         .expect("a queue from before cores no longer reads");
         assert_eq!(before.jobs[0].holds(), 2);
+    }
+
+    // ─────────── the owner's stop (SKEIN-1422) ───────────
+
+    /// **The owner's stop takes a waiting job out of the queue, and its view says so.**
+    ///
+    /// One core: `j-run` holds it and `j-wait` waits. The owner stops `j-wait`. On the next tick it
+    /// is `stopped`, its view says `stopped`, which is what its wrapper waits on, and the stop's
+    /// file is gone. Once `j-run` finishes, `j-wait` is still not granted, and the running job was
+    /// never touched.
+    ///
+    /// What would make it fail: the tick not reading the stops (the sabotage that was run: the
+    /// `apply_owner_stops` call removed from `tick`, and `j-wait` reads `waiting`); a stop that
+    /// ends the wrong job; or a stopped job read as waiting again on a later tick.
+    #[test]
+    fn the_owners_stop_takes_a_waiting_job_out_of_the_queue() {
+        let f = Fleet::new(&["web-main"]);
+        let one = Limits {
+            oversubscribe: 1.0,
+            ..machine(1)
+        };
+        f.submit("web-main", "j-run", 101, serde_json::json!({"cores": 1}));
+        f.tick(0, one, &[]);
+        f.submit("web-main", "j-wait", 102, serde_json::json!({"cores": 1}));
+        let q = f.tick(2, one, &[]);
+        assert_eq!(
+            (state_of(&q, "j-run"), state_of(&q, "j-wait")),
+            ("granted", "waiting")
+        );
+
+        ask_owner_stop(&f.places, "web-main", "j-wait").unwrap();
+        assert!(stops_dir(&f.places).join("web-main/j-wait").exists());
+        let q = f.tick(4, one, &[]);
+        assert_eq!(state_of(&q, "j-wait"), "stopped", "{q:#?}");
+        assert_eq!(state_of(&q, "j-run"), "granted", "{q:#?}");
+        let wait = q.jobs.iter().find(|j| j.id == "j-wait").unwrap();
+        assert_eq!(wait.reason, STOPPED_BY_OWNER);
+        let view = f.view("web-main");
+        let seen = view.jobs.iter().find(|j| j.id == "j-wait").unwrap();
+        assert_eq!(seen.state, "stopped", "{view:#?}");
+        assert!(
+            !stops_dir(&f.places).join("web-main/j-wait").exists(),
+            "a stop that was done was left to be done again"
+        );
+
+        f.submit("web-main", "j-run", 101, serde_json::json!({"state": "done"}));
+        let q = f.tick(6, one, &[]);
+        assert_eq!(state_of(&q, "j-wait"), "stopped", "{q:#?}");
+        // And it cannot be stopped twice: it is not waiting or running any more.
+        assert!(ask_owner_stop(&f.places, "web-main", "j-wait").is_err());
+        assert!(ask_owner_stop(&f.places, "web-main", "j-none").is_err());
+        assert!(ask_owner_stop(&f.places, "../etc", "j-wait").is_err());
+    }
+
+    /// **The owner's stop is host state: a box that writes `stopped` into its own file stops
+    /// nothing, and a box cannot stop another box's job by naming it.**
+    ///
+    /// `web-main` has a job waiting; `api-main` files a request with the same id, marked
+    /// `cancelled` and then `stopped`, in its own drop-box; and `web-main`'s own file says
+    /// `stopped`. None of it is the owner's stop: `web-main`'s job is still waiting, and nothing
+    /// reads `stopped`. A box's own `cancelled`, written by the box that filed the job, still ends
+    /// it, as it always did.
+    ///
+    /// What would make it fail: [`merge`] reading a box's `stopped` as an end (the sabotage that was
+    /// run: `Some("stopped") => Some("stopped")` added to its match, and `j-1` reads `stopped`), or
+    /// a request matched by id alone rather than by the drop-box it is in (the sabotage that was
+    /// run: the lookup taking the first box with that id, and `api-main`'s `cancelled` ends
+    /// `web-main`'s job).
+    #[test]
+    fn no_box_can_stop_another_boxs_job_or_stand_in_for_the_owner() {
+        let f = Fleet::new(&["web-main", "api-main"]);
+        let none_free = Limits {
+            oversubscribe: 1.0,
+            ..machine(1)
+        };
+        f.submit("web-main", "j-hold", 99, serde_json::json!({"cores": 1}));
+        f.tick(0, none_free, &[]);
+        f.submit("web-main", "j-1", 101, serde_json::json!({"cores": 1}));
+        f.tick(2, none_free, &[]);
+        f.submit("api-main", "j-1", 201, serde_json::json!({"state": "cancelled"}));
+        let q = f.tick(4, none_free, &[]);
+        let theirs = q
+            .jobs
+            .iter()
+            .find(|j| j.box_name == "web-main" && j.id == "j-1")
+            .unwrap();
+        assert_eq!(theirs.state, "waiting", "{q:#?}");
+
+        f.submit("api-main", "j-1", 201, serde_json::json!({"state": "stopped"}));
+        f.submit("web-main", "j-1", 101, serde_json::json!({"state": "stopped"}));
+        let q = f.tick(6, none_free, &[]);
+        assert!(
+            q.jobs.iter().all(|j| j.state != "stopped"),
+            "a box's file stood in for the owner's stop: {q:#?}"
+        );
+
+        f.submit("web-main", "j-1", 101, serde_json::json!({"state": "cancelled"}));
+        let q = f.tick(8, none_free, &[]);
+        let theirs = q
+            .jobs
+            .iter()
+            .find(|j| j.box_name == "web-main" && j.id == "j-1")
+            .unwrap();
+        assert_eq!(theirs.state, "cancelled", "a box could not stop its own job: {q:#?}");
+    }
+
+    /// **The cockpit's list has every waiting and running job in the fleet, running ones first and
+    /// waiting ones in the order they go, and the cores.**
+    ///
+    /// What would make it fail: a box's jobs left out (the list is the whole fleet's), an ended job
+    /// listed, waiting ones out of their order, or the pool not the one the tick left.
+    #[test]
+    fn the_cockpits_list_has_every_active_job_and_the_pool() {
+        let f = Fleet::new(&["web-main", "api-main"]);
+        let two = Limits {
+            oversubscribe: 1.0,
+            ..machine(2)
+        };
+        f.submit("web-main", "j-a", 101, serde_json::json!({"cores": 2}));
+        f.tick(0, two, &[("web-main", "web"), ("api-main", "api")]);
+        f.submit("web-main", "j-b", 102, serde_json::json!({"cores": 1}));
+        f.tick(2, two, &[("web-main", "web"), ("api-main", "api")]);
+        f.submit("api-main", "j-c", 201, serde_json::json!({"cores": 1}));
+        f.submit("api-main", "j-x", 202, serde_json::json!({"state": "waiting"}));
+        f.tick(4, two, &[("web-main", "web"), ("api-main", "api")]);
+        f.submit("api-main", "j-x", 202, serde_json::json!({"state": "cancelled"}));
+        f.tick(10, two, &[("web-main", "web"), ("api-main", "api")]);
+        let list: FleetView = serde_json::from_str(
+            &std::fs::read_to_string(fleet_view_path(&f.places)).expect("no list written"),
+        )
+        .unwrap();
+        let rows: Vec<(&str, &str, &str, Option<usize>)> = list
+            .jobs
+            .iter()
+            .map(|j| (j.box_name.as_str(), j.id.as_str(), j.state.as_str(), j.position))
+            .collect();
+        // `api` holds no cores, so its job goes before `web`'s second.
+        assert_eq!(
+            rows,
+            [
+                ("web-main", "j-a", "granted", None),
+                ("api-main", "j-c", "waiting", Some(1)),
+                ("web-main", "j-b", "waiting", Some(2)),
+            ],
+            "{list:#?}"
+        );
+        assert_eq!((list.cores, list.granted, list.free), (2, 2, 0));
+        let a = &list.jobs[0];
+        assert_eq!((a.repo.as_str(), a.short.as_str(), a.secs), ("web", "cargo test", 10));
+        assert_eq!(list.jobs[1].secs, 6);
+        assert!(!list.jobs[1].reason.is_empty(), "{list:#?}");
+        assert_eq!(list.jobs[1].mem_mib, memory_estimate_mib(&Job {
+            class: "test".into(),
+            ..Job::default()
+        }));
+    }
+
+    /// **Without a job cgroup, the owner's stop kills every process under the wrapper, and not the
+    /// wrapper; and it kills nothing under a pid it cannot confirm is that box's wrapper.**
+    ///
+    /// Real processes: a stand-in wrapper, a shell script named `skein-job` run with
+    /// `SKEIN_BOX=web-main`, which starts two `sleep`s and waits for them. The box has no cgroup
+    /// (the cgroup root does not exist), so the queue knows the pid only by `/proc`. After the stop
+    /// both `sleep`s are gone and the wrapper ends by itself, with no signal, because its `wait`
+    /// returned. The same shape run with `SKEIN_BOX=api-main`, a pid another box could have named
+    /// as its own, is refused, and its `sleep`s run on.
+    ///
+    /// What would make it fail: the fallback killing the wrapper too (it ends by a signal), or not
+    /// reaching the grandchildren (the sabotage that was run: `kill_under` killing only the
+    /// wrapper's direct children found in one round, with the `sleep` behind a subshell surviving);
+    /// or the identity check dropped (the sabotage that was run: `|| true` after it, and the other
+    /// box's `sleep`s are killed).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_a_job_cgroup_the_owners_stop_kills_what_is_under_the_wrapper() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = crate::testutil::tempdir();
+        let root: &Path = dir.as_ref();
+        let script = root.join("skein-job");
+        std::fs::write(&script, "sleep 300 & ( sleep 300 ) & wait\n").unwrap();
+        let start = |box_name: &str| {
+            std::process::Command::new("sh")
+                .arg(&script)
+                .env("SKEIN_BOX", box_name)
+                .spawn()
+                .unwrap()
+        };
+        let under = |pid: u32| {
+            for _ in 0..100 {
+                let d = descendants(Path::new("/proc"), pid);
+                if d.len() >= 2 {
+                    return d;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("the stand-in wrapper never started its sleeps");
+        };
+        let cgroups = root.join("no-cgroups");
+
+        let mut other = start("api-main");
+        let theirs = under(other.id());
+        let refused = kill_under(Path::new("/proc"), &cgroups, "web-main", other.id());
+        assert!(refused.is_err(), "{refused:?}");
+        for p in &theirs {
+            assert!(Path::new(&format!("/proc/{p}")).exists(), "another box's process was killed");
+        }
+        for p in theirs {
+            kill_pid(p);
+        }
+        let _ = other.wait();
+
+        let mut wrapper = start("web-main");
+        let kids = under(wrapper.id());
+        kill_under(Path::new("/proc"), &cgroups, "web-main", wrapper.id()).unwrap();
+        let status = wrapper.wait().unwrap();
+        assert_eq!(status.signal(), None, "the wrapper was killed with its command");
+        for p in kids {
+            assert!(
+                !Path::new(&format!("/proc/{p}/stat")).exists()
+                    || std::fs::read_to_string(format!("/proc/{p}/stat"))
+                        .is_ok_and(|s| s.contains(") Z ")),
+                "{p} survived the stop"
+            );
+        }
     }
 }
