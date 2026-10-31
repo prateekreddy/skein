@@ -321,9 +321,9 @@ pub fn repo_tools_at(area: &Path, days: u32, now: i64) -> Option<RepoTools> {
 }
 
 /// Every file a process on this machine has open in one of `areas`, as paths relative to the area,
-/// keyed by the area's path as given: what each process runs (`exe`), works in (`cwd`), holds open
-/// (`fd`) or has mapped (`maps`, which is where a running toolchain's shared libraries are).
-/// `None` when `/proc` cannot be listed, so the caller cannot tell and must not offer a removal.
+/// keyed by the area's path as given, or `None` when `/proc` cannot be listed, so the caller cannot
+/// tell and must not offer a removal. Open is what a process runs (`exe`), works in (`cwd`), holds
+/// open (`fd`) or has mapped (`maps`, which is where a running toolchain's shared libraries are).
 ///
 /// A box sees its repo's area at `~/.repo-tools`, so a path a box process has open reads
 /// `<its home>/.repo-tools/<rel>`, and every repo's boxes spell it the same way. Which repo's area

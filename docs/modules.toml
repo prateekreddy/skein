@@ -734,7 +734,9 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # skein-server already took (SKEIN-1384). This module writes the file; usage says what is in it.
 # `diskask` for the box's ask for a bigger disk allowance and the owner's answer, written into the
 # file so the box sees it, and for when to say it can ask (SKEIN-1425).
-depends_on = ["announce", "diskask", "fleet", "health", "usage", "util"]
+# `repos` for `repo_for_box`: which repo's tools area a box's list carries, measured once a tick per
+# repo however many of its boxes are listed (SKEIN-1432). `fleet` already reads the same registry.
+depends_on = ["announce", "diskask", "fleet", "health", "repos", "usage", "util"]
 
 [current.runtime]
 # `config` for one read: the fleet's box-plugin switch (SKEIN-1058). `for_box` is where every start
