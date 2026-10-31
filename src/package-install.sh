@@ -85,14 +85,68 @@ _skein_bounded() {
 # the sandbox's user. Installed as root, a runtime lands where no box looks, and `npm ls -g`,
 # asked as that user, says it is missing at every launch. Unprivileged when the configured
 # prefix is writable, `sudo -n` when it is not, as on a plain image with a root-owned prefix.
+#
+# **A box never sees a package half-installed** (SKEIN-1413). `npm install -g` into the live
+# prefix removes the package and writes it back, and that takes seconds even at the same version.
+# Every box shares the prefix, so a box starting in that window found no `claude` and dropped to
+# bash: on 2026-10-31 three boxes did, while the package was rewritten at the version it already
+# had. So npm installs into a staging prefix inside the live `lib/node_modules`, where nothing
+# runs it, and each package is then swapped in by one rename: `mv --exchange` (renameat2
+# RENAME_EXCHANGE) where mv and the file system have it, else a remove and a rename, which leaves
+# the package missing for the length of an `rm -rf` rather than of an npm install. Each command
+# link is renamed over the old one. The old package goes with the staging directory, as npm's
+# own install removed it. `--globalconfig` keeps the live prefix's npmrc, which npm would
+# otherwise look for under the staging prefix. Under `flock` where there is one, so two launches
+# cannot both find a package missing and both put theirs there.
 skein_npm_install() {
   _skein_log=$1
   shift
   _skein_prefix="$(npm config get prefix 2>/dev/null)"
   case "$_skein_prefix" in undefined | null) _skein_prefix="" ;; esac
-  if [ -n "$_skein_prefix" ] && [ -w "$_skein_prefix" ]; then
-    _skein_bounded 240 npm install -g "$@" >>"$_skein_log" 2>&1
-  else
+  if [ -z "$_skein_prefix" ]; then
     _skein_bounded 240 sudo -n npm install -g "$@" >>"$_skein_log" 2>&1
+    return
   fi
+  _skein_as=""
+  [ -w "$_skein_prefix" ] || _skein_as="sudo -n"
+  if command -v flock >/dev/null 2>&1; then
+    (
+      flock -w 300 9 || true
+      _skein_npm_swap_in "$@"
+    ) 9>>"${TMPDIR:-/tmp}/skein-npm-install.lock"
+  else
+    _skein_npm_swap_in "$@"
+  fi
+}
+
+# _skein_npm_swap_in PACKAGE... — skein_npm_install's staging and swap, with its variables set.
+_skein_npm_swap_in() {
+  _skein_nm="$_skein_prefix/lib/node_modules"
+  $_skein_as mkdir -p "$_skein_nm" "$_skein_prefix/bin" >>"$_skein_log" 2>&1 || return 1
+  _skein_stage="$($_skein_as mktemp -d "$_skein_nm/.skein-stage.XXXXXX" 2>>"$_skein_log")" || return 1
+  _skein_bounded 240 $_skein_as npm install -g --prefix "$_skein_stage" \
+    --globalconfig "$_skein_prefix/etc/npmrc" "$@" >>"$_skein_log" 2>&1
+  _skein_rc=$?
+  if [ "$_skein_rc" -eq 0 ]; then
+    for _skein_pkg in "$_skein_stage"/lib/node_modules/* "$_skein_stage"/lib/node_modules/@*/*; do
+      [ -d "$_skein_pkg" ] || continue
+      case "${_skein_pkg##*/}" in @*) continue ;; esac
+      _skein_name="${_skein_pkg#"$_skein_stage"/lib/node_modules/}"
+      _skein_live="$_skein_nm/$_skein_name"
+      case "$_skein_name" in */*) $_skein_as mkdir -p "${_skein_live%/*}" ;; esac
+      if [ -e "$_skein_live" ] || [ -L "$_skein_live" ]; then
+        $_skein_as mv -T --exchange "$_skein_pkg" "$_skein_live" 2>/dev/null \
+          || { $_skein_as rm -rf "$_skein_live" && $_skein_as mv "$_skein_pkg" "$_skein_live"; } \
+          || _skein_rc=1
+      else
+        $_skein_as mv "$_skein_pkg" "$_skein_live" || _skein_rc=1
+      fi
+    done
+    for _skein_bin in "$_skein_stage"/bin/*; do
+      [ -e "$_skein_bin" ] || [ -L "$_skein_bin" ] || continue
+      $_skein_as mv -f "$_skein_bin" "$_skein_prefix/bin/${_skein_bin##*/}" || _skein_rc=1
+    done
+  fi
+  $_skein_as rm -rf "$_skein_stage"
+  return "$_skein_rc"
 }

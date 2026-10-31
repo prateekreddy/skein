@@ -32,10 +32,15 @@ const SUBSTRATE_SCRIPT: &str = concat!(
          npm="$SKEIN_RUNTIME_PACKAGES";
          command -v bwrap >/dev/null 2>&1 || { echo 'skein: this sandbox image has no bwrap; boxes cannot be isolated in it' >&2; exit 1; };
          log=/tmp/skein-substrate.log;
+         # Asked on the PATH a box gets, not on this script's (SKEIN-1413). This runs on
+         # `FLEET_PATH`, which has no npm-global `bin`, and that is where the runtimes are: so a bare
+         # `command -v claude` answered "missing" at every launch, every box start reinstalled both
+         # runtimes into the prefix every box runs from, and boxes starting beside it found no
+         # `claude`. `skein_runtime_at` is `runtime_lookup`, which `substrate_script` puts in front.
          want=""; for p in $npm; do
            case "$p" in
-             *claude-code) command -v claude >/dev/null 2>&1 || want="$want $p" ;;
-             *codex)       command -v codex  >/dev/null 2>&1 || want="$want $p" ;;
+             *claude-code) [ -n "$(skein_runtime_at claude)" ] || want="$want $p" ;;
+             *codex)       [ -n "$(skein_runtime_at codex)" ]  || want="$want $p" ;;
              *)            want="$want $p" ;;
            esac;
          done;
@@ -819,7 +824,6 @@ const RUNTIME_UPDATE_SCRIPT: &str = concat!(
 /// continuing would give every box the sandbox's own `/tmp` and `$HOME` — the exact collision this
 /// design exists to prevent.
 pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
-    let script = SUBSTRATE_SCRIPT;
     // The packages are named by the caller, not by the script, so a harness can ask for none.
     // Without that seam the integration test — whose `sbx exec` runs on the developer's own machine
     // — npm-installs an agent runtime onto it, which is both a 50s test and software nobody asked
@@ -829,15 +833,25 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
     // Read on the host, because the record of what was approved lives there — see
     // `substrate::manifest_path` for why keeping it in the sandbox would defeat the whole point.
     let (apt, npm) = crate::substrate::approved_packages();
-    let script = format!(
-        "SKEIN_RUNTIME_PACKAGES={}; SKEIN_APPROVED_APT={}; SKEIN_APPROVED_NPM={}; {script}",
-        sh_quote(packages.trim()),
-        sh_quote(&apt.join(" ")),
-        sh_quote(&npm.join(" ")),
-    );
     own_sandbox(sandbox)
-        .exec(&script, Duration::from_secs(900))
+        .exec(
+            &substrate_script(&packages, &apt.join(" "), &npm.join(" ")),
+            Duration::from_secs(900),
+        )
         .map(|_| ())
+}
+
+/// The whole of what [`ensure_substrate`] sends: the packages, the approved lists,
+/// [`runtime_lookup`], then [`SUBSTRATE_SCRIPT`] — so the launch asks whether a runtime is there
+/// where a box would find it, as the update and the version check already did (SKEIN-1413).
+fn substrate_script(packages: &str, apt: &str, npm: &str) -> String {
+    format!(
+        "SKEIN_RUNTIME_PACKAGES={}; SKEIN_APPROVED_APT={}; SKEIN_APPROVED_NPM={}; {}{SUBSTRATE_SCRIPT}",
+        sh_quote(packages.trim()),
+        sh_quote(apt),
+        sh_quote(npm),
+        runtime_lookup(),
+    )
 }
 
 #[cfg(test)]
@@ -1523,12 +1537,16 @@ esac
     #[test]
     fn updating_the_runtimes_asks_for_them_by_name_and_not_by_whether_they_are_installed() {
         assert!(
-            super::SUBSTRATE_SCRIPT.contains("command -v claude")
-                && super::SUBSTRATE_SCRIPT.contains("command -v codex"),
+            super::SUBSTRATE_SCRIPT.contains("skein_runtime_at claude")
+                && super::SUBSTRATE_SCRIPT.contains("skein_runtime_at codex"),
             "the launch path stopped skipping runtimes that are already installed, so every box \
              start now waits on two npm installs"
         );
-        for guard in ["command -v claude", "command -v codex"] {
+        for guard in [
+            "command -v claude",
+            "command -v codex",
+            "skein_runtime_at claude)\" ] ||",
+        ] {
             assert!(
                 !super::RUNTIME_UPDATE_SCRIPT.contains(guard),
                 "the update path consults {guard:?} — so a runtime that is present is skipped, \
@@ -1925,5 +1943,153 @@ esac
              skein_npm_install instead:\n{}",
             copies.join("\n")
         );
+    }
+
+    /// Write `body` as an executable script at `dir/name`.
+    fn stub(dir: &std::path::Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// **A launch does not reinstall a runtime a box already has** (SKEIN-1413).
+    ///
+    /// On 2026-10-31 a restart of skein rewrote the sandbox's claude-code at the version it already
+    /// had, while boxes were starting, and the boxes found no `claude`. The cause: the launch's
+    /// script runs on `FLEET_PATH`, which has no npm-global `bin`, and asked `command -v claude`
+    /// there. So every launch read "missing" and reinstalled. This runs the script the launch sends,
+    /// [`substrate_script`], on that PATH, with the runtimes only where a box finds them (its
+    /// `~/.local/bin`, which `place::box_path` puts first), and with stubs for every tool it could
+    /// install with, so nothing is installed on whoever runs it.
+    ///
+    /// **What makes it fail:** asking `command -v claude` on the script's own PATH again, as it
+    /// did before this — the stub npm is then asked to install both runtimes.
+    #[test]
+    fn a_launch_does_not_reinstall_a_runtime_a_box_already_runs() {
+        let dir = crate::testutil::tempdir();
+        let stubs = dir.join("stubs");
+        let home = dir.join("home");
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&stubs).unwrap();
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let asked = dir.join("asked");
+        for tool in ["npm", "sudo", "apt-get", "dpkg-query"] {
+            stub(&stubs, tool, &format!("echo \"{tool} $*\" >>'{}'", asked.display()));
+        }
+        for tool in ["tmux", "jq", "bwrap"] {
+            stub(&stubs, tool, "exit 0");
+        }
+        stub(&local_bin, "claude", "echo '2.1.316 (Claude Code)'");
+        stub(&local_bin, "codex", "echo 'codex-cli 0.170.0'");
+
+        let script = substrate_script("@anthropic-ai/claude-code @openai/codex", "", "");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", format!("{}:{}", stubs.display(), crate::place::FLEET_PATH))
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        let asked = std::fs::read_to_string(&asked).unwrap_or_default();
+        assert!(
+            out.status.success(),
+            "the launch's script failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !asked.contains("install"),
+            "the launch reinstalled a runtime every box already has, into the prefix those boxes \
+             run from — so a box starting beside it finds no CLI. It asked:\n{asked}"
+        );
+    }
+
+    /// **A box never sees an agent CLI half-installed** (SKEIN-1413).
+    ///
+    /// `npm install -g` into the live prefix removes the package and writes it back, and a box
+    /// starting in that window finds no `claude`. The stub npm here does what npm does, slowly:
+    /// it removes the package and its command, waits two seconds, and writes the new one. While
+    /// [`skein_npm_install`](crate::substrate::PACKAGE_INSTALL_SH) runs it, the live command is
+    /// read every 10 ms, the way a box's `command -v claude` would read it.
+    ///
+    /// **What makes it fail:** installing into the live prefix again (`npm install -g "$@"` with
+    /// no staging prefix): the reads see the command missing for the whole two seconds.
+    #[test]
+    fn a_box_never_sees_the_agent_cli_missing_while_it_is_installed() {
+        let dir = crate::testutil::tempdir();
+        let stubs = dir.join("stubs");
+        let live = dir.join("npm-global");
+        std::fs::create_dir_all(&stubs).unwrap();
+        let pkg = "lib/node_modules/@anthropic-ai/claude-code";
+        let npm = format!(
+            r#"case "$1 $2" in "config get") echo '{live}'; exit 0 ;; esac
+prefix='{live}'
+while [ $# -gt 0 ]; do case "$1" in --prefix) prefix=$2; shift ;; --globalconfig) shift ;; esac; shift; done
+rm -rf "$prefix/{pkg}" "$prefix/bin/claude"
+sleep 2
+mkdir -p "$prefix/{pkg}/bin" "$prefix/bin"
+printf '#!/bin/sh\necho %s\n' "$FAKE_VERSION" >"$prefix/{pkg}/bin/claude.exe"
+chmod +x "$prefix/{pkg}/bin/claude.exe"
+ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
+            live = live.display()
+        );
+        stub(&stubs, "npm", &npm);
+        let run = |version: &str| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "{}\nskein_npm_install \"$TMPDIR/log\" @anthropic-ai/claude-code",
+                    crate::substrate::PACKAGE_INSTALL_SH
+                ))
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
+                .env("TMPDIR", &*dir)
+                .env("FAKE_VERSION", version)
+                .spawn()
+                .unwrap()
+        };
+        // What was there before: the stub's own install, straight into the live prefix.
+        assert!(run_to_end(std::process::Command::new(stubs.join("npm"))
+            .args(["install", "-g", "@anthropic-ai/claude-code"])
+            .env("FAKE_VERSION", "old")));
+        let command = live.join("bin/claude");
+        let runs = |p: &std::path::Path| {
+            std::process::Command::new(p)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(runs(&command), "old", "the starting install is not there");
+
+        let mut child = run("new");
+        let (mut reads, mut missing) = (0, 0);
+        while child.try_wait().unwrap().is_none() {
+            reads += 1;
+            if !std::fs::metadata(&command).is_ok_and(|m| m.is_file()) {
+                missing += 1;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(child.wait().unwrap().success(), "skein_npm_install failed: {}",
+            std::fs::read_to_string(dir.join("log")).unwrap_or_default());
+        assert!(reads > 100, "the install was read {reads} times, too few to have seen its window");
+        assert_eq!(
+            missing, 0,
+            "a box starting during the install would have found no claude: it was missing for \
+             {missing} of {reads} reads"
+        );
+        assert_eq!(runs(&command), "new", "the install did not put the new version in place");
+        let left: Vec<_> = std::fs::read_dir(live.join("lib/node_modules"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".skein-stage"))
+            .collect();
+        assert!(left.is_empty(), "the staging prefix was left behind: {left:?}");
+    }
+
+    fn run_to_end(cmd: &mut std::process::Command) -> bool {
+        cmd.status().is_ok_and(|s| s.success())
     }
 }
