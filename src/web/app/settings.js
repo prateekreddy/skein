@@ -180,6 +180,7 @@ function openSettings(pane = "repos") {
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
     document.getElementById("set-staledays").value = settings.stale_build_days ?? "";
+    document.getElementById("set-tooldays").value = settings.unused_tool_days ?? "";
     document.getElementById("set-pwbudget").value = settings.browser_store_budget || "";
     document.getElementById("set-pwcap").value = settings.browser_fill_cap || "";
     renderBrowserUse();
@@ -554,17 +555,36 @@ function repoTokenRow(r) {
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
 }
-// ---------- a repo's shared download cache (SKEIN-1350) ----------
-// cargo, npm (with npx), pip, uv and pnpm downloads, kept once per repo beside its store and shared
-// by that repo's boxes only. It is measured when the card opens, because that walks the cache, and
-// it is counted toward the repo rather than toward any box's disk allowance. A clean waits until
-// none of the repo's boxes runs, since every one of them reads it.
+// ---------- a repo's tools area, and its old download cache (SKEIN-1435) ----------
+// The tools area, `<fleet root>/.repo-tools/<id>`, holds what the repo's agents install and every
+// download cache since SKEIN-1431, shared by that repo's boxes only. Its size is shown, with no
+// budget, and the tool versions in it nobody has used for the owner's number of days are named;
+// skein removes none of them, a box's agent does with `skein_clean`. The old download cache beside
+// the store, `repos/<id>/store/cache`, is no longer used, so all of it is offered for removal, and
+// a clean of it waits until none of the repo's boxes runs, since every one of them can still see it.
+// Both are measured when the card opens, because that walks them, and both count toward the repo
+// rather than toward any box's disk allowance.
 const repoCacheSeen = new Map();   // repo id -> the last answer, so a re-render need not walk again
 function repoCacheRow(r) {
-  return `<div class="set-field" data-repocache="${esc(r.id)}"><span class="set-title">Download cache</span>`
-    + `<span class="desc">cargo, npm, pip, uv and pnpm downloads, shared by this repo's boxes and by no other repo's. It counts toward this repo, not toward any box's disk allowance</span>`
+  return `<div class="set-field" data-repotools="${esc(r.id)}"><span class="set-title">Tools area</span>`
+    + `<span class="desc">the tools this repo's agents install and every download cache, on the fleet's disk and shared by this repo's boxes alone. It counts toward this repo, not toward any box's disk allowance. skein removes nothing in it; an agent removes a tool version it no longer needs with <code>skein_clean</code></span>`
+    + `<div class="path-row"><span class="desc" data-tooluse></span></div></div>`
+    + `<div class="set-field" data-repocache="${esc(r.id)}"><span class="set-title">Old download cache</span>`
+    + `<span class="desc">cargo, npm, pip, uv and pnpm downloads from before the tools area. Nothing uses it now, so all of it can go; skein does not remove it on its own</span>`
     + `<div class="path-row"><span class="desc" data-cacheuse></span>`
     + `<button type="button" class="kbtn ghost" data-cacheclean hidden></button></div></div>`;
+}
+function showRepoTools(id, t) {
+  const row = document.querySelector(`[data-repotools="${CSS.escape(id)}"] [data-tooluse]`);
+  if (!row) return;
+  if (!t) {
+    row.textContent = "No tools area yet: one is made when a box of this repo starts. A repo whose store is kept elsewhere has none, and its boxes keep their own tools.";
+    return;
+  }
+  const size = `${fmtGb(mbOf(t.bytes))}.`;
+  if (!t.unused_after_days) { row.textContent = `${size} Listing unused tool versions is off in Settings.`; return; }
+  if (!t.unused.length) { row.textContent = `${size} No tool version in it has gone unused for ${t.unused_after_days} days.`; return; }
+  row.textContent = `${size} Unused for ${t.unused_after_days} days or more: ${t.unused.map(v => v.shown).join("; ")}.`;
 }
 function repoCacheParts(id) {
   const row = document.querySelector(`[data-repocache="${CSS.escape(id)}"]`);
@@ -576,9 +596,11 @@ function loadRepoCache(id) {
   if (!p) return;
   p.use.textContent = "measuring…";
   p.btn.hidden = true;
+  const tools = document.querySelector(`[data-repotools="${CSS.escape(id)}"] [data-tooluse]`);
+  if (tools) tools.textContent = "measuring…";
   fetch(`/api/repos/${encodeURIComponent(id)}/cache`)
     .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
-    .then(d => { repoCacheSeen.set(id, d.cache); showRepoCache(id, d.cache); })
+    .then(d => { repoCacheSeen.set(id, d); showRepoTools(id, d.tools); showRepoCache(id, d.cache); })
     .catch(e => { const q = repoCacheParts(id); if (q) q.use.textContent = `could not measure it: ${failText(e)}`; });
 }
 function showRepoCache(id, c, said) {
@@ -586,7 +608,7 @@ function showRepoCache(id, c, said) {
   if (!p) return;
   p.btn.hidden = true;
   if (!c) {
-    p.use.textContent = "This repo's store is kept elsewhere, so each of its boxes keeps its own caches. Clean them in each box's settings.";
+    p.use.textContent = "This repo's store is kept elsewhere, so it has no old cache: each of its boxes keeps its own caches. Clean them in each box's settings.";
     return;
   }
   const all = c.items.reduce((n, i) => n + i.bytes, 0);
@@ -610,7 +632,7 @@ function showRepoCache(id, c, said) {
 function cleanRepoCache(id, c) {
   const all = c.items.reduce((n, i) => n + i.bytes, 0);
   const lines = c.items.map(i => `  ${fmtGb(mbOf(i.bytes))}  ${i.shown}`).join("\n");
-  if (!confirm(`Remove these from ${id}'s download cache? Its boxes download what they need again.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}. Settings and logins kept beside the cache are not touched.`)) return;
+  if (!confirm(`Remove these from ${id}'s old download cache? Nothing uses it now.\n\n${lines}\n\nTotal ${fmtGb(mbOf(all))}. Settings and logins kept beside the cache are not touched.`)) return;
   const p = repoCacheParts(id);
   if (p) { p.use.textContent = "cleaning…"; p.btn.hidden = true; }
   fetch(`/api/repos/${encodeURIComponent(id)}/cache`, {
@@ -622,7 +644,7 @@ function cleanRepoCache(id, c) {
       const said = `Removed ${fmtGb(mbOf(d.freed))}.` + (failed ? ` Could not remove ${failed}.` : "");
       return fetch(`/api/repos/${encodeURIComponent(id)}/cache`)
         .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
-        .then(n => { repoCacheSeen.set(id, n.cache); showRepoCache(id, n.cache, said); });
+        .then(n => { repoCacheSeen.set(id, n); showRepoTools(id, n.tools); showRepoCache(id, n.cache, said); });
     })
     .catch(e => { const q = repoCacheParts(id); if (q) q.use.textContent = failText(e); });
 }
@@ -688,7 +710,11 @@ function renderRepoList() {
     if (openRepos.has(id)) loadRepoCache(id);
   }));
   // A re-render after a save shows what was last measured rather than walking the cache again.
-  for (const id of openRepos) if (repoCacheSeen.has(id)) showRepoCache(id, repoCacheSeen.get(id));
+  for (const id of openRepos) if (repoCacheSeen.has(id)) {
+    const d = repoCacheSeen.get(id);
+    showRepoTools(id, d.tools);
+    showRepoCache(id, d.cache);
+  }
   el.querySelectorAll("[data-remove]").forEach(b => b.addEventListener("click", () => removeRepo(b.dataset.remove)));
   // The token input is excluded by name, not by luck: it carries a `data-id` like its neighbours but
   // no `data-key`, so leaving it in would POST `{undefined: "<the token>"}` to the repo settings
@@ -849,6 +875,8 @@ function settingsPayload() {
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.
     stale_build_days: Math.max(0, parseInt(document.getElementById("set-staledays").value, 10) || 0),
+    // The same: blank and 0 both turn the list of unused tool versions off (SKEIN-1432).
+    unused_tool_days: Math.max(0, parseInt(document.getElementById("set-tooldays").value, 10) || 0),
     // Blank means the default, said the way the placeholder shows it. The server checks the pair.
     browser_store_budget: document.getElementById("set-pwbudget").value.trim() || "6g",
     browser_fill_cap: document.getElementById("set-pwcap").value.trim() || "2g",

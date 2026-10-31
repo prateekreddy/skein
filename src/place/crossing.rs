@@ -52,11 +52,14 @@ const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 /// `~/.repo-tools` in every box of the repo (SKEIN-1431). It is after [`BOX_PATH_HEAD`] because the
 /// agent CLIs are skein's, not the repo's: a `claude` an agent installs into the area must not
 /// shadow the fleet's for every box of the repo. The fourth is the box's `~/.cargo/bin`, where the
-/// launcher binds the fleet's shared Rust toolchain read-only (SKEIN-1337). Both spelled from
-/// `home` like the first, so this stays a function of the placement record alone.
+/// launcher binds the fleet's shared Rust toolchain read-only (SKEIN-1337). The fifth is
+/// `~/.skein-bin`, where it binds skein's own commands read-only for every agent, Codex's too
+/// (SKEIN-1436). All spelled from `home` like the first, so this stays a function of the placement
+/// record alone.
 pub fn box_path(home: &str) -> String {
     format!(
-        "{home}/.local/bin:{BOX_PATH_HEAD}:{home}/.repo-tools/tools/bin:{home}/.cargo/bin:{FLEET_PATH}"
+        "{home}/.local/bin:{BOX_PATH_HEAD}:{home}/.repo-tools/tools/bin:{home}/.cargo/bin:\
+         {home}/.skein-bin:{FLEET_PATH}"
     )
 }
 

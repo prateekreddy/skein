@@ -313,6 +313,18 @@ pub struct Config {
     /// command it prints name the same files.
     #[serde(default = "default_stale_build_days")]
     pub stale_build_days: u32,
+    /// How many whole days a tool version in a repo's tools area may go unused before skein lists
+    /// it for removal, and **0 turns the list off** (SKEIN-1432, the owner's decision on SKEIN-1426:
+    /// "the days figure is a setting, like the compiler-artefact one").
+    ///
+    /// Unused is the newest access time of the version's executables, which the file system
+    /// updates at most once a day (`relatime`), so whole days are as fine as it can be read. The
+    /// list is in each box's `skein_clean` and its resource signal, and on the repo's card; skein
+    /// never removes a version itself, and a box can remove one only while no box of the repo has a
+    /// file in it open (`fleet::repo_tools`). Being wrong costs a download: a version removed too
+    /// early is installed again by the next build that asks for it.
+    #[serde(default = "default_unused_tool_days")]
+    pub unused_tool_days: u32,
     /// The most the fleet's shared Playwright browser store may hold, e.g. "6g" (SKEIN-1357). A
     /// fetch starts only while the store has room for [`Config::browser_fill_cap`] under this, so
     /// the store never passes it. Lowering it below what the store holds already is allowed: it
@@ -411,6 +423,11 @@ fn default_browser_fill_cap() -> String {
 /// Five whole days. See [`Config::stale_build_days`] for why this one is the owner's to change.
 fn default_stale_build_days() -> u32 {
     5
+}
+
+/// Thirty whole days. See [`Config::unused_tool_days`].
+fn default_unused_tool_days() -> u32 {
+    30
 }
 
 /// Off by default, and it must stay that way for a fleet that already exists.
@@ -738,6 +755,7 @@ impl Default for Config {
             fleet_one_disk: default_fleet_one_disk(),
             box_disk_max: default_box_disk_max(),
             stale_build_days: default_stale_build_days(),
+            unused_tool_days: default_unused_tool_days(),
             browser_store_budget: default_browser_store_budget(),
             browser_fill_cap: default_browser_fill_cap(),
             git_name: String::new(),

@@ -364,6 +364,9 @@ def top_disk_all(n):
     shared = listing.get("shared_repo_cache")
     if shared is not None:
         out["shared_repo_cache"] = shared
+    tools = listing.get("repo_tools")
+    if tools is not None:
+        out["repo_tools"] = tools
     return out
 
 
@@ -610,11 +613,128 @@ def clean_rows(sig):
         out["shared_repo_cache"] = {
             "path": rc["path"],
             "bytes": int(rc.get("bytes") or 0),
+            "what": "the repo's old download cache on the host. Nothing uses it since the caches "
+            "moved to the repo's tools area, so all of it can go",
             "shared_with": "every box of this repo",
             "counted_against_this_box": False,
             "safe_to_clean_now": why is None,
             "why_not": why,
         }
+    rt = clean.get("repo_tools")
+    if isinstance(rt, dict) and isinstance(rt.get("path"), str):
+        seen = tools_view(rt["path"])
+        checked = age_seconds(rt.get("open_checked_at"))
+        mine = None
+        for v in rt.get("versions") or []:
+            if not isinstance(v, dict) or not plain_rel(v.get("rel")):
+                continue
+            path = os.path.join(seen or rt["path"], v["rel"])
+            if seen is not None and not exists(path):
+                continue
+            if seen is None:
+                why = "this box does not see its repo's tools area"
+            elif stale:
+                why = "skein has not listed this box's disk lately; try again in a few minutes"
+            elif v.get("open") is True:
+                why = "a box of this repo has a file in it open now"
+            elif checked is None or checked > SIBLINGS_FRESH_SECONDS:
+                why = "skein has not checked in the last few minutes whether a box of this repo has it open"
+            else:
+                if mine is None:
+                    mine = open_here(seen)
+                if mine is False:
+                    why = "this box cannot read its own processes to tell whether one has it open"
+                elif any(p == v["rel"] or p.startswith(v["rel"] + "/") for p in mine):
+                    why = "a process in this box has a file in it open now"
+                else:
+                    why = None
+            rows.append({
+                "path": path,
+                "in_box": path,
+                "kind": "unused tool version",
+                "shown": str(v.get("shown", "")),
+                "bytes": int(v.get("bytes") or 0),
+                "where": "tools",
+                "root": seen,
+                "safe_now": why is None,
+                "why_not": why,
+            })
+        out["repo_tools"] = {
+            "path": seen or rt["path"],
+            "bytes": int(rt.get("bytes") or 0),
+            "unused_after_days": int(rt.get("unused_after_days") or 0),
+            "unused": [str(v.get("shown", "")) for v in rt.get("versions") or [] if isinstance(v, dict)],
+            "shared_with": "every box of this repo",
+            "counted_against_this_box": False,
+        }
+    return out
+
+
+def plain_rel(rel):
+    """A path relative to the tools area with nothing in it that leaves the area."""
+    return (isinstance(rel, str) and rel and not rel.startswith("/")
+            and all(p not in ("", ".", "..") for p in rel.split("/")))
+
+
+def tools_view(fleet_path):
+    """Where this box sees its repo's tools area `fleet_path`: at `~/.repo-tools`, where the
+    launcher binds it, when that is the same directory, else at its own path when the box sees the
+    fleet root whole and it is a real directory there; None when the box sees it nowhere."""
+    home = os.environ.get("HOME", "")
+    if home:
+        bound = os.path.join(home, ".repo-tools")
+        if same_dir(fleet_path, bound) and not os.path.islink(bound):
+            return bound
+    try:
+        st = os.lstat(fleet_path)
+    except OSError:
+        return None
+    return fleet_path if stat.S_ISDIR(st.st_mode) else None
+
+
+def open_here(seen):
+    """The files this box's own processes have open under the tools area `seen`, relative to it:
+    what each runs, works in, holds open or has mapped. False when this box's process table cannot
+    be listed. skein looks at every box of the repo; this covers the minutes since it last did."""
+    proc = real("/proc")
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        return False
+    out = set()
+    prefix = seen.rstrip("/") + "/"
+    for pid in pids:
+        at = os.path.join(proc, pid)
+        paths = []
+        for link in ("exe", "cwd"):
+            try:
+                paths.append(os.readlink(os.path.join(at, link)))
+            except OSError:
+                pass
+        try:
+            fds = os.listdir(os.path.join(at, "fd"))
+        except OSError:
+            fds = []
+        for fd in fds:
+            try:
+                paths.append(os.readlink(os.path.join(at, "fd", fd)))
+            except OSError:
+                pass
+        try:
+            with open(os.path.join(at, "maps"), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    parts = line.split(None, 5)
+                    if len(parts) == 6 and parts[5].startswith("/"):
+                        paths.append(parts[5].rstrip("\n"))
+        except OSError:
+            pass
+        for p in paths:
+            if p.endswith(" (deleted)"):
+                p = p[: -len(" (deleted)")]
+            if p.startswith(prefix):
+                out.add(p[len(prefix):])
+            elif p == seen.rstrip("/"):
+                out.add("")
     return out
 
 
@@ -655,6 +775,10 @@ def open_dir_at(parent, name, dev, seen=None):
     if seen is not None and st.st_ino != seen.st_ino:
         os.close(fd)
         raise Refused("part of this path changed while skein removed it, so skein left the rest alone")
+    # A directory its owner cannot write cannot be emptied: go's module cache, where a fetched
+    # toolchain is, makes every directory read-only. Through the descriptor, so never a link's.
+    if seen is not None and not st.st_mode & stat.S_IWUSR:
+        os.fchmod(fd, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
     return fd
 
 
@@ -771,6 +895,8 @@ def clean(args):
         }
         if "shared_repo_cache" in listing:
             out["shared_repo_cache"] = listing["shared_repo_cache"]
+        if "repo_tools" in listing:
+            out["repo_tools"] = listing["repo_tools"]
         return out
     if not isinstance(paths, list) or not all(isinstance(p, str) and p for p in paths):
         return {"error": "paths-must-be-a-list-of-paths"}
@@ -1636,8 +1762,9 @@ TOOLS = [
     {
         "name": "skein_clean",
         "description": "What in this box can be removed and made again: its download caches, build "
-        "output and scratchpads, and the repo's shared download cache, each with its size and "
-        "whether it is safe to remove now. Call it with no paths to see the list; pass paths from "
+        "output and scratchpads, the repo's old download cache, and the tool versions in the repo's "
+        "tools area nobody has used for a while, each with its size and whether it is safe to remove "
+        "now. Call it with no paths to see the list; pass paths from "
         "that list to remove them. Nothing else is removed, a link is never followed, and config "
         "and logins are never on the list.",
         "inputSchema": {

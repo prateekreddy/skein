@@ -40,6 +40,15 @@ fn repo_tools_block() -> String {
     )
 }
 
+/// The launcher's block that binds skein's own commands at `~/.skein-bin` (SKEIN-1436), lifted.
+fn skein_bin_block() -> String {
+    lift(
+        r#"skein_bin_at="${SKEIN_FLEET_ROOT:-/boxes}/.skein/plugin-turn-state/bin""#,
+        "unset skein_bin_at",
+        "skein-bin block",
+    )
+}
+
 /// The session block's exports into the area, lifted: the `if` on `$repo_tools` and its `fi`.
 /// Run inside the box, as production runs them, with `$repo_tools` and `$tree` set as the
 /// launcher hands them across.
@@ -150,6 +159,7 @@ fn in_repo_box_with(
          {iso}\n\
          {cache}\n\
          {tools}\n\
+         {skein_bin}\n\
          exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} {extra} -- \
            /bin/bash -c {inside} skein-probe \"$repo_tools\" {arg}\n",
         name = skein::util::sh_quote(name),
@@ -162,6 +172,7 @@ fn in_repo_box_with(
         iso = isolation_block(),
         cache = repo_cache_block(),
         tools = repo_tools_block(),
+        skein_bin = skein_bin_block(),
         inside = skein::util::sh_quote(&inside),
         arg = q(arg),
     );
@@ -459,5 +470,107 @@ fn a_claude_installed_into_the_area_does_not_shadow_the_fleets() {
         answer(&said, "ran"),
         "fleet-claude",
         "the repo's own claude in its tools area shadows the fleet's:\n{said}"
+    );
+}
+
+/// **A file held open inside a box, where the box sees its repo's area at `~/.repo-tools`, marks
+/// that version open in that repo's area, and not the same version in another repo's** (SKEIN-1432:
+/// a version is removable only while no running box of the repo has a file in it open).
+///
+/// skein looks from outside every box, at the whole process table; a box process spells the area
+/// `<its home>/.repo-tools`, as every box of every repo does, so which area it is has to be asked of
+/// the process's own root. A box of `web` holds a file of a Rust toolchain open; `other` has the
+/// same toolchain at the same place in its own area.
+///
+/// What would make it fail: matching on the path inside the area without asking which area it is
+/// (`other`'s toolchain reads open); asking the host's view of the path rather than the process's
+/// root (the box's `~/.repo-tools` is not there outside it, and nothing reads open).
+#[test]
+fn a_file_a_box_holds_open_marks_the_version_open_in_its_repos_area_only() {
+    if !bwrap_works() {
+        skip("bwrap cannot make a user namespace here, so whether skein sees a box's open tool is unchecked");
+        return;
+    }
+    let f = Fleet::make("repotoolsopen");
+    let tc = "rustup/toolchains/1.80.0-x86_64-unknown-linux-gnu";
+    let web_area = f.fleet_root.join(".repo-tools/web");
+    let other_area = f.fleet_root.join(".repo-tools/other");
+    for area in [&web_area, &other_area] {
+        fs::create_dir_all(area.join(tc).join("bin")).unwrap();
+        fs::write(area.join(tc).join("bin/rustc"), "x").unwrap();
+    }
+    let ready = f.fleet_root.join("web-main/tree/ready");
+    let done = f.fleet_root.join("web-main/tree/done");
+    let hold = format!(
+        "exec 3<\"$SKEIN_REPO_TOOLS/{tc}/bin/rustc\"\n\
+         : > {ready}\n\
+         for _ in $(seq 1 300); do [ -e {done} ] && break; sleep 0.1; done\n\
+         echo held",
+        ready = skein::util::sh_quote(ready.to_string_lossy().as_ref()),
+        done = skein::util::sh_quote(done.to_string_lossy().as_ref()),
+    );
+    let (said, open) = std::thread::scope(|sc| {
+        let boxed = sc.spawn(|| in_repo_box(&f, "web-main", "web", &hold, &web_area));
+        for _ in 0..300 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let open = ready
+            .exists()
+            .then(|| skein::fleet::open_tool_files(&[web_area.clone(), other_area.clone()]));
+        fs::write(&done, "").unwrap();
+        (boxed.join().unwrap(), open)
+    });
+    let open = open.expect("the box never came up to hold the file");
+    assert_eq!(said.trim(), "held", "{said}");
+    let open = open.expect("the process table can be read");
+    let none = std::collections::BTreeSet::new();
+    let web = open.get(&web_area.display().to_string()).unwrap_or(&none);
+    let other = open.get(&other_area.display().to_string()).unwrap_or(&none);
+    assert!(
+        skein::fleet::version_is_open(web, tc),
+        "a file a box of web holds open in its area was not seen: {open:?}"
+    );
+    assert!(
+        !skein::fleet::version_is_open(other, tc),
+        "another repo's same toolchain read open: {open:?}"
+    );
+}
+
+/// **Every agent in a box runs `skein-lock` by name, Codex's too, and no box can change it**
+/// (SKEIN-1436). Claude Code puts its plugin's `bin` on its own PATH; a Codex session has only the
+/// box's PATH, which is all this probe runs on.
+///
+/// What would make it fail: the `~/.skein-bin` bind dropped (not found), it left off `box_path`
+/// (not found), the turn-state variant installed without the command (not found), or the bind
+/// read-write (`wrote`).
+#[test]
+fn every_agent_in_a_box_has_skein_lock_and_cannot_change_it() {
+    if !bwrap_works() {
+        skip(
+            "bwrap cannot make a user namespace here, so whether a box has skein-lock is unchecked",
+        );
+        return;
+    }
+    let f = Fleet::make("skeinlock1436");
+    let root = f.fleet_root.to_string_lossy().into_owned();
+    for (path, body) in skein::probes::plugin_install_under(&root) {
+        let p = std::path::Path::new(&path);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let probe = "command -v skein-lock >/dev/null && skein-lock -- echo lock-ran || echo lock-missing\n\
+                 { printf x > \"$HOME/.skein-bin/skein-lock\"; } 2>/dev/null && echo wrote || echo kept";
+    let web_area = f.fleet_root.join(".repo-tools/web");
+    let said = in_repo_box(&f, "web-main", "web", probe, &web_area);
+    assert!(said.contains("lock-ran"), "{said}");
+    assert!(said.contains("kept"), "a box wrote over skein-lock: {said}");
+    assert!(
+        web_area.join(".locks/tools").exists(),
+        "skein-lock did not take the repo's lock"
     );
 }

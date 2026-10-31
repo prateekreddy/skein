@@ -124,8 +124,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # what an agent installs there lasts and reaches the repo's other boxes. It is AFTER the fleet's npm
 # prefix because the agent CLIs are skein's, not the repo's: an `npm i -g` of claude into the area
 # must not shadow the fleet's for every box of the repo. The fourth is `~/.cargo/bin`, where the
-# fleet's shared Rust toolchain is bound read-only (SKEIN-1337). Ahead of the fixed six, which end it.
-box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.repo-tools/tools/bin:$HOME/.cargo/bin:$PATH"
+# fleet's shared Rust toolchain is bound read-only (SKEIN-1337). The fifth is `~/.skein-bin`, skein's
+# own commands for every agent, Codex's too, bound read-only below (SKEIN-1436). Ahead of the fixed
+# six, which end it.
+box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.repo-tools/tools/bin:$HOME/.cargo/bin:$HOME/.skein-bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
 #
 # Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
@@ -2624,6 +2626,23 @@ if [ -n "$repo_tools_id" ] &&
   fi
 fi
 unset repo_tools_id repo_tools_at repo_tools_dir repo_tools_fd
+
+# --- skein's own commands, for every agent in the box (SKEIN-1436) --------------------------------
+#
+# `skein-lock`, the repo's install lock above, is a command an agent runs by name. Claude Code puts
+# the plugin's `bin` on its own PATH, and Codex loads no plugin, so a Codex session had none. The
+# turn-state variant of the plugin is installed under the read-only `.skein` whatever the fleet's
+# switch says (`probes::plugin_install`), and its `bin` holds what every agent needs; it is bound
+# read-only at `~/.skein-bin`, which `box_path` names. Read-only, so no box can change what another
+# box runs by that name. A fleet whose install predates it has no such directory, and its boxes go
+# without, as before.
+skein_bin_at="${SKEIN_FLEET_ROOT:-/boxes}/.skein/plugin-turn-state/bin"
+if [ -d "$skein_bin_at" ] && [ ! -L "$skein_bin_at" ] &&
+  { [ -d "$home_at/.skein-bin" ] || mkdir -- "$home_at/.skein-bin" 2>/dev/null; } &&
+  [ ! -L "$home_at/.skein-bin" ]; then
+  binds+=(--ro-bind "$skein_bin_at" "$HOME/.skein-bin")
+fi
+unset skein_bin_at
 
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
 # fleet, and the box has no use for it after this point.

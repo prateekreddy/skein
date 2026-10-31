@@ -1523,6 +1523,153 @@ fn top_by_disk_shows_the_box_and_the_shared_cache_apart() {
     );
 }
 
+/// The repo's tools area under the fixture's fleet root, with four tool versions in it, and
+/// skein's list of them as unused in the signal file: Rust, a Go toolchain whose directories are
+/// read-only as go's module cache makes them, Node, and Python, which skein saw a box of the repo
+/// holding open. `checked_ago` is when skein last looked at the machine's processes.
+fn tools_listed(b: &Box_, c: &Cleanable, checked_ago: i64) -> std::path::PathBuf {
+    let area = b.at("fleet/.repo-tools/web");
+    let rust = "rustup/toolchains/1.80.0-x86_64-unknown-linux-gnu";
+    let go = "go/pkg/mod/golang.org/toolchain@v0.0.1-go1.22.0.linux-amd64";
+    let node = "nvm/versions/node/v20.11.1";
+    let python = "pyenv/versions/3.11.4";
+    for rel in [rust, go, node, python] {
+        b.put(&format!("fleet/.repo-tools/web/{rel}/bin/tool"), "data");
+    }
+    use std::os::unix::fs::PermissionsExt;
+    for d in [area.join(go).join("bin"), area.join(go)] {
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let v = |rel: &str, shown: &str, open: bool| {
+        json!({"path": area.join(rel).display().to_string(), "rel": rel, "installer": "x",
+               "shown": shown, "bytes": 4096, "unused_days": 41, "open": open})
+    };
+    let file = json!({
+        "at": stamp_ago(5),
+        "disk": {"mb": 2048, "limit_mb": 10240, "fleet": "under", "fleet_over_by_mb": 0},
+        "asks": [],
+        "clean": {
+            "at": stamp_ago(30),
+            "box_root": c.root.display().to_string(),
+            "items": [],
+            "repo_cache": null,
+            "repo_tools": {
+                "path": area.display().to_string(),
+                "bytes": 5 * 1024 * 1024 * 1024u64,
+                "unused_after_days": 30,
+                "versions": [
+                    v(rust, "Rust 1.80.0 · unused 41 days · 1.3 GB", false),
+                    v(go, "Go 1.22.0 · unused 41 days · 200 MB", false),
+                    v(node, "Node 20.11.1 · unused 41 days · 90 MB", false),
+                    v(python, "Python 3.11.4 · unused 41 days · 80 MB", true),
+                    // Never followed out of the area, whatever skein's list says.
+                    v("../../../outside/keep", "Escape 1 · unused 41 days · 1 MB", false),
+                ],
+                "open_checked_at": stamp_ago(checked_ago),
+            },
+        },
+    });
+    b.put("state/signals/resources.json", &file.to_string());
+    // A process in this box runs the Node version now, as its own process table says.
+    fs::create_dir_all(b.at("root/proc/4242/fd")).unwrap();
+    let fd = b.at("root/proc/4242/fd/3");
+    if fs::symlink_metadata(&fd).is_err() {
+        std::os::unix::fs::symlink(area.join(node).join("bin/tool"), fd).unwrap();
+    }
+    area
+}
+
+/// **A tool version nobody has used is listed with its line, and removed when asked, but never
+/// while a box of the repo has a file in it open, nor on an old look at who has** (SKEIN-1432,
+/// the owner's rule on SKEIN-1426: removable only while no running box of the repo has it open).
+///
+/// skein looks at every process on the machine and says which versions are open; this box also
+/// looks at its own processes, for the minutes since skein last did. The area's size is on
+/// `skein_top`'s disk line, counted against no box.
+///
+/// What would make it fail: ignoring skein's `open` (Python is removed); not looking at this box's
+/// own processes (Node is removed); trusting an old look (the first Rust removal goes through);
+/// a read-only directory not made writable before it is emptied (Go is reported not removed); a
+/// version's `rel` with `..` in it taken as given (the escape is listed); or the area missing from
+/// `skein_top`.
+#[test]
+fn an_unused_tool_version_is_removed_only_while_nothing_has_it_open() {
+    let b = Box_::new("skein-tools-it-clean-tools");
+    let c = Cleanable::plant(&b);
+    let area = tools_listed(&b, &c, 400);
+    let rust = area.join("rustup/toolchains/1.80.0-x86_64-unknown-linux-gnu");
+    let go = area.join("go/pkg/mod/golang.org/toolchain@v0.0.1-go1.22.0.linux-amd64");
+    let node = area.join("nvm/versions/node/v20.11.1");
+    let python = area.join("pyenv/versions/3.11.4");
+    let s = |p: &std::path::Path| p.display().to_string();
+
+    let (got, said) = clean_said(&b, &[s(&rust)]);
+    assert_eq!(got["error"], "not-safe-now", "{got} {said}");
+    assert!(
+        said.contains("has not checked in the last few minutes"),
+        "{said}"
+    );
+    assert!(rust.exists());
+
+    let area = tools_listed(&b, &c, 20);
+    let listed = b.call("web-main", "skein_clean", json!({}));
+    let rows: Vec<&Value> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "unused tool version")
+        .collect();
+    let shown: Vec<(&str, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["shown"].as_str().unwrap(),
+                r["safe_now"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("Rust 1.80.0 · unused 41 days · 1.3 GB", true),
+            ("Go 1.22.0 · unused 41 days · 200 MB", true),
+            ("Node 20.11.1 · unused 41 days · 90 MB", false),
+            ("Python 3.11.4 · unused 41 days · 80 MB", false),
+        ],
+        "{listed}"
+    );
+    assert_eq!(listed["repo_tools"]["path"], s(&area), "{listed}");
+
+    let (got, said) = clean_said(&b, &[s(&python)]);
+    assert_eq!(got["error"], "not-safe-now", "{got}");
+    assert!(
+        said.contains("a box of this repo has a file in it open now"),
+        "{said}"
+    );
+    let (got, said) = clean_said(&b, &[s(&node)]);
+    assert_eq!(got["error"], "not-safe-now", "{got}");
+    assert!(
+        said.contains("a process in this box has a file in it open now"),
+        "{said}"
+    );
+    assert!(python.exists() && node.exists());
+
+    let (got, said) = clean_said(&b, &[s(&rust), s(&go)]);
+    assert_eq!(
+        got["removed"].as_array().map(Vec::len),
+        Some(2),
+        "{got} {said}"
+    );
+    assert!(!rust.exists() && !go.exists(), "{got}");
+    assert!(area.join("go/pkg/mod/golang.org").exists());
+    assert!(b.at("outside/keep/precious").exists());
+
+    let top = b.call("web-main", "skein_top", json!({"by": "disk"}));
+    let tools = &top["repo_tools"];
+    assert_eq!(tools["bytes"], 5 * 1024 * 1024 * 1024u64, "{top}");
+    assert_eq!(tools["counted_against_this_box"], false, "{top}");
+}
+
 /// **`skein-mcp clean` on the command line is the same `skein_clean`**: one list, one set of
 /// refusals, one removal, for a caller that is not an MCP client (SKEIN-1356, for the mod of
 /// SKEIN-1358).

@@ -317,9 +317,100 @@ pub struct CleanList {
     pub box_root: String,
     /// Biggest first.
     pub items: Vec<CleanItem>,
-    /// The repo's shared download cache, when the repo has one.
+    /// The repo's old download cache on the host, `repos/<id>/store/cache`, when the repo has one.
+    /// Nothing uses it since the caches moved to the repo's tools area (SKEIN-1431), so all of it
+    /// is listed as removable, and nothing removes it on its own.
     #[serde(default)]
     pub repo_cache: Option<RepoCacheList>,
+    /// The repo's tools area, when the repo has one: its size, and the tool versions in it nobody
+    /// has used for the owner's number of days (SKEIN-1432).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_tools: Option<RepoToolsList>,
+}
+
+/// A repo's tools area as one box is told about it, `fleet::repo_tools`. Counted against no box:
+/// it is under the fleet root, outside every box's directory. A contract like [`CleanList`]:
+/// fields are only added.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepoToolsList {
+    /// The area on the fleet's disk. A box sees it at `~/.repo-tools`.
+    pub path: String,
+    /// All of it, caches and tools together.
+    pub bytes: u64,
+    /// `Config::unused_tool_days` when this was listed; 0 lists nothing.
+    pub unused_after_days: u32,
+    /// The versions unused for at least that long, biggest first.
+    pub versions: Vec<ToolVersionItem>,
+    /// RFC3339, the last reading at which skein looked at every process on the machine for a file
+    /// open in this area, read on every tick. Absent when it could not look. The plugin removes a
+    /// version only while this is recent ([`CLEAN_SIBLINGS_FRESH`]) and `open` is false.
+    #[serde(default)]
+    pub open_checked_at: Option<String>,
+}
+
+/// One unused tool version: `fleet::ToolVersion`, owned, and whether a process has a file in it
+/// open.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolVersionItem {
+    pub path: String,
+    /// Relative to the area, so a box finds it under `~/.repo-tools`.
+    pub rel: String,
+    pub installer: String,
+    /// `Rust 1.92.0 · unused 41 days · 1.3 GB`.
+    pub shown: String,
+    pub bytes: u64,
+    pub unused_days: u64,
+    /// A process on this machine has a file in it open, as of `open_checked_at`.
+    #[serde(default)]
+    pub open: bool,
+}
+
+impl From<crate::fleet::ToolVersion> for ToolVersionItem {
+    fn from(v: crate::fleet::ToolVersion) -> ToolVersionItem {
+        ToolVersionItem {
+            path: v.path,
+            rel: v.rel,
+            installer: v.installer.to_string(),
+            shown: v.shown,
+            bytes: v.bytes,
+            unused_days: v.unused_days,
+            open: false,
+        }
+    }
+}
+
+/// Mark each listed version of `list` open or not, by what every process on the machine has open
+/// in its repo's tools area (`fleet::open_tool_files`), and stamp when. The process table is read
+/// once a tick for each area, whichever box asks first: `looked` holds the answers by area, `None`
+/// when skein could not look, which clears the stamp so that no box removes on an old answer. A
+/// list with no versions is not looked for.
+pub(crate) fn mark_open(
+    list: &mut CleanList,
+    looked: &mut BTreeMap<String, Option<std::collections::BTreeSet<String>>>,
+    at: DateTime<Utc>,
+) {
+    let Some(tools) = list.repo_tools.as_mut() else {
+        return;
+    };
+    if tools.versions.is_empty() {
+        return;
+    }
+    let open = looked
+        .entry(tools.path.clone())
+        .or_insert_with(|| {
+            crate::fleet::open_tool_files(&[PathBuf::from(&tools.path)])
+                .map(|mut by_area| by_area.remove(&tools.path).unwrap_or_default())
+        })
+        .clone();
+    match open {
+        Some(files) => {
+            for v in tools.versions.iter_mut() {
+                v.open = crate::fleet::version_is_open(&files, &v.rel);
+            }
+            tools.open_checked_at = Some(stamp(at));
+        }
+        None => tools.open_checked_at = None,
+    }
 }
 
 /// One thing that can be removed: `fleet::Cleanable`, owned.
@@ -1340,6 +1431,7 @@ pub(crate) fn clean_list(
     liveness: &std::collections::HashMap<String, bool>,
     at: DateTime<Utc>,
     repo_caches: &mut BTreeMap<String, Option<crate::fleet::RepoCache>>,
+    repo_tools: &mut BTreeMap<String, Option<crate::fleet::RepoTools>>,
 ) -> Option<CleanList> {
     let fresh = prev.filter(|p| {
         minutes_since(Some(p.at.as_str()), at)
@@ -1366,6 +1458,20 @@ pub(crate) fn clean_list(
                         .and_then(|p| p.repo_cache.as_ref())
                         .and_then(|c| c.none_running_at.clone()),
                 }),
+                repo_tools: crate::repos::repo_for_box(name)
+                    .and_then(|repo| {
+                        repo_tools
+                            .entry(repo.id.clone())
+                            .or_insert_with(|| crate::fleet::repo_tools(&repo.id))
+                            .clone()
+                    })
+                    .map(|t| RepoToolsList {
+                        path: t.path,
+                        bytes: t.bytes,
+                        unused_after_days: t.unused_after_days,
+                        versions: t.unused.into_iter().map(ToolVersionItem::from).collect(),
+                        open_checked_at: None,
+                    }),
             }
         }
     };
@@ -1407,6 +1513,8 @@ pub fn write_every_box() -> Result<usize, String> {
     let usage = crate::fleet::fleet_disk_usage();
     let liveness = crate::fleet::fleet_liveness();
     let mut repo_caches = BTreeMap::new();
+    let mut repo_tools = BTreeMap::new();
+    let mut looked = BTreeMap::new();
     let at = Utc::now();
     let mut written = 0;
     let mut failed = Vec::new();
@@ -1432,7 +1540,12 @@ pub fn write_every_box() -> Result<usize, String> {
                 &liveness,
                 at,
                 &mut repo_caches,
-            ),
+                &mut repo_tools,
+            )
+            .map(|mut list| {
+                mark_open(&mut list, &mut looked, at);
+                list
+            }),
         };
         let asked = crate::fleet::versions::restart_requested(&name);
         let updates = crate::fleet::running_record(&name)
@@ -2306,6 +2419,7 @@ mod tests {
             box_root: "/fleet/web-main".into(),
             items,
             repo_cache: None,
+            repo_tools: None,
         }
     }
 
@@ -3301,6 +3415,7 @@ mod tests {
                 items: vec![item("cargo/registry", "download cache", 20480)],
                 ..Default::default()
             }),
+            repo_tools: None,
         };
         let r = Reading {
             fleet: FleetDisk::Asked(share(2, false)),
@@ -3415,6 +3530,7 @@ mod tests {
             &live(&[("web-main", true), ("web-two", true)]),
             at(0),
             &mut memo,
+            &mut BTreeMap::new(),
         )
         .expect("a box with a directory is listed");
         let shown: Vec<&str> = first.items.iter().map(|i| i.shown.as_str()).collect();
@@ -3432,6 +3548,7 @@ mod tests {
             &live(&[("web-main", true), ("web-two", false)]),
             at(1),
             &mut memo,
+            &mut BTreeMap::new(),
         )
         .unwrap();
         let rc = second.repo_cache.clone().unwrap();
@@ -3446,7 +3563,15 @@ mod tests {
             (2, live(&[("web-main", true), ("web-two", true)])),
             (3, live(&[("web-main", true)])),
         ] {
-            let later = clean_list("web-main", Some(&second), &liveness, at(n), &mut memo).unwrap();
+            let later = clean_list(
+                "web-main",
+                Some(&second),
+                &liveness,
+                at(n),
+                &mut memo,
+                &mut BTreeMap::new(),
+            )
+            .unwrap();
             let rc = later.repo_cache.unwrap();
             assert_eq!(
                 rc.others_running + rc.others_unknown,
@@ -3465,6 +3590,7 @@ mod tests {
             &live(&[("web-two", false)]),
             at(6),
             &mut memo,
+            &mut BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(
@@ -3472,6 +3598,85 @@ mod tests {
             stamp(at(6)),
             "the items were never walked again"
         );
+    }
+
+    /// **A box's list carries its repo's tools area, its size and its unused versions, and each
+    /// tick says whether a process has one open, and when skein looked** (SKEIN-1432).
+    ///
+    /// What would make it fail: the area left out of the list (`repo_tools` is `None`); the
+    /// versions listed whatever their age (the fresh one is there); `open` not read again on the
+    /// tick (the held version still reads closed); or the stamp written when skein could not look.
+    #[test]
+    fn a_boxs_list_carries_its_repos_unused_tools_and_who_has_them_open() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let base: &Path = dir.as_ref();
+        let _pins = repo_fleet(base);
+        let area = base.join("fleet/.repo-tools/web");
+        let old = area.join("rustup/toolchains/1.80.0-x86_64-unknown-linux-gnu/bin/rustc");
+        let fresh = area.join("rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rustc");
+        for (path, days) in [(&old, 60u64), (&fresh, 1)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![7u8; 64 * 1024]).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let then = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_accessed(then))
+                .unwrap();
+        }
+        let liveness: std::collections::HashMap<String, bool> =
+            [("web-main".to_string(), true)].into();
+        let mut list = clean_list(
+            "web-main",
+            None,
+            &liveness,
+            at(0),
+            &mut BTreeMap::new(),
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        let tools = list.repo_tools.clone().expect("web has a tools area");
+        assert_eq!(tools.path, area.display().to_string());
+        assert_eq!(tools.unused_after_days, 30);
+        assert!(tools.bytes >= 128 * 1024, "{tools:?}");
+        let shown: Vec<&str> = tools.versions.iter().map(|v| v.shown.as_str()).collect();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(
+            shown[0].starts_with("Rust 1.80.0 · unused 60 days · "),
+            "{shown:?}"
+        );
+
+        let mut holder = std::process::Command::new("bash")
+            .arg("-c")
+            .arg("exec 3<\"$1\"; exec sleep 30")
+            .arg("holder")
+            .arg(&old)
+            .spawn()
+            .unwrap();
+        let fd = PathBuf::from(format!("/proc/{}/fd/3", holder.id()));
+        for _ in 0..200 {
+            if std::fs::read_link(&fd).is_ok_and(|p| p == old) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        mark_open(&mut list, &mut BTreeMap::new(), at(1));
+        holder.kill().ok();
+        holder.wait().ok();
+        let tools = list.repo_tools.clone().unwrap();
+        assert!(tools.versions[0].open, "{tools:?}");
+        assert_eq!(tools.open_checked_at, Some(stamp(at(1))));
+
+        mark_open(&mut list, &mut BTreeMap::new(), at(2));
+        assert!(!list.repo_tools.as_ref().unwrap().versions[0].open);
+        let mut blind = BTreeMap::new();
+        blind.insert(area.display().to_string(), None);
+        mark_open(&mut list, &mut blind, at(3));
+        assert_eq!(list.repo_tools.unwrap().open_checked_at, None);
     }
 
     /// One assistant turn as the CLI writes it, `input` and `output` tokens on `claude-opus-5`.
