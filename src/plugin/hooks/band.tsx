@@ -26,7 +26,7 @@ import type {
   TurnCompleteInput,
 } from 'claude-code'
 
-import type { SkeinBand, SkeinCleanRow, SkeinRequestRow, SkeinSharedCache } from '../types'
+import type { SkeinBand, SkeinCleanRow, SkeinDiskAsk, SkeinRequestRow, SkeinSharedCache } from '../types'
 
 const band = atom({ plugin: 'skein', key: 'band' } as const, null, { shape: 'band-1' })
 const cleanSaid = atom({ plugin: 'skein', key: 'cleanSaid' } as const, null, {
@@ -255,7 +255,11 @@ async function readDisk($: Engine): Promise<SkeinBand['disk']> {
     mb: numberOr(disk.mb, null),
     limit_mb: numberOr(disk.limit_mb, null),
     ask: isRecord(ask)
-      ? { amount_mb: numberOr(ask.amount, 0) ?? 0, why: typeof ask.why === 'string' ? ask.why : '' }
+      ? {
+          amount_mb: numberOr(ask.amount, 0) ?? 0,
+          live_mb: numberOr(ask.live_mb, 0) ?? 0,
+          why: typeof ask.why === 'string' ? ask.why : '',
+        }
       : null,
   }
 }
@@ -412,7 +416,10 @@ function asked(found: SkeinBand | null, columns: number): Ask[] {
   return out
 }
 
-function askLine(ask: { amount_mb: number; why: string }): string {
+// What skein asks, and, when a build is running, how much of the box is in it: skein asks only for
+// what can be cleared now, so a box whose space is all in a running build is asked for none of it
+// (SKEIN-1391).
+function askLine(ask: SkeinDiskAsk): string {
   const why =
     ask.why === 'allowance'
       ? 'it is over its own allowance'
@@ -420,7 +427,13 @@ function askLine(ask: { amount_mb: number; why: string }): string {
         ? "the fleet's disk is over its line, and every box is asked"
         : "the fleet's disk is over its line"
 
-  return `skein asks this box to free ${humanMb(ask.amount_mb)} of disk: ${why}.`
+  if (ask.amount_mb <= 0) {
+    const live = ask.live_mb > 0 ? ` (${humanMb(ask.live_mb)} in a build running now)` : ''
+    return `skein asks this box to free disk, but none of it can be cleared now: ${why}${live}.`
+  }
+  const live = ask.live_mb > 0 ? ` (${humanMb(ask.live_mb)} more in a build running now)` : ''
+
+  return `skein asks this box to free ${humanMb(ask.amount_mb)} of disk: ${why}${live}.`
 }
 
 function diskLine(found: SkeinBand | null): string {

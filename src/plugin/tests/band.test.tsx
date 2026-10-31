@@ -22,8 +22,9 @@ const PIP = '/fleet-root-example/web-main/home/.cache/pip'
 const PAD = '/fleet-root-example/web-main/home/.cache/skein/claude/x'
 const SHARED = '/fleet-root-example/.skein/repos/web/cache'
 
-/** A signal file as skein writes it, `ago` seconds old, with a disk ask or none. */
-function signal(ago: number, ask: boolean): string {
+/** A signal file as skein writes it, `ago` seconds old, with a disk ask or none; `over` replaces
+ * fields of the ask. */
+function signal(ago: number, ask: boolean, over: Record<string, unknown> = {}): string {
   const at = new Date(NOW - ago * 1000).toISOString().replace(/\.\d+Z$/, 'Z')
 
   return JSON.stringify({
@@ -41,6 +42,7 @@ function signal(ago: number, ask: boolean): string {
             start: 'start',
             remind: 'remind',
             enter: 'enter',
+            ...over,
           },
         ]
       : [],
@@ -254,6 +256,36 @@ test('the band says loudly that skein asks for disk, and counts requests and mai
     await ui.unmount()
   }
 })
+
+// What would make it fail: askLine leaving out `live_mb` (the first line reads as today's), or
+// saying "free 0M" when nothing can be cleared. Watched: with the `live` part of the line dropped,
+// the first expectation failed.
+const LIVE_CASES: Array<[string, Record<string, unknown>, string]> = [
+  [
+    'part of the box is in a running build',
+    { amount: 1228, live_mb: 3072 },
+    'skein asks this box to free 1.2G of disk: it is over its own allowance (3.0G more in a build running now).',
+  ],
+  [
+    'all it could clear is in a running build',
+    { amount: 0, live_mb: 3072 },
+    'skein asks this box to free disk, but none of it can be cleared now: it is over its own allowance (3.0G in a build running now).',
+  ],
+  [
+    'nothing skein lists can be cleared',
+    { amount: 0 },
+    'skein asks this box to free disk, but none of it can be cleared now: it is over its own allowance.',
+  ],
+]
+
+for (const [when, over, line] of LIVE_CASES) {
+  test(`the band says what skein asks when ${when}`, async ($, on) => {
+    await started(on, world({ signal: signal(30, true, over) }), $)
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect((await ui.find({ type: 'Text', text: /skein asks this box/ }))?.text.trim()).toBe(line)
+    await ui.unmount()
+  })
+}
 
 test('a signal file skein stopped writing asks nothing', async ($, on) => {
   on('ui.render', ($, e) => {
