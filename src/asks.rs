@@ -20,9 +20,7 @@
 //! and its options together — is at most [`MAX_BYTES`], and one over that is not shown at all: the
 //! tool never writes one, so only a box going round it can.
 
-use crate::util::sh_quote;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 /// How many questions one box may have waiting at once. The owner's number (box-plugin.md,
 /// answer 2).
@@ -144,10 +142,14 @@ pub fn decision_path(box_name: &str, id: &str) -> Option<std::path::PathBuf> {
 
 // ───────────────────────────── the queue ─────────────────────────────
 
-/// Parse the array the list script prints. A file that is not an ask is dropped, not fatal.
+/// Parse a JSON array of asks. A value that is not an ask is dropped, not fatal.
 pub fn parse_asks(json: &str) -> Vec<Ask> {
-    let mut out: Vec<Ask> = serde_json::from_str::<Vec<serde_json::Value>>(json)
-        .unwrap_or_default()
+    asks_from(serde_json::from_str::<Vec<serde_json::Value>>(json).unwrap_or_default())
+}
+
+/// [`parse_asks`], over values already parsed.
+fn asks_from(values: Vec<serde_json::Value>) -> Vec<Ask> {
+    let mut out: Vec<Ask> = values
         .into_iter()
         .filter_map(|v| serde_json::from_value::<Ask>(v).ok())
         .filter(|a| !a.id.is_empty())
@@ -156,25 +158,22 @@ pub fn parse_asks(json: &str) -> Vec<Ask> {
     out
 }
 
-/// The script that reads the queue, stamping each ask with the box whose directory it is in —
-/// `gitgate`'s `list_script`, over this queue. Only `requests/<box>/*.json`: this queue was per box
-/// from its first day, so there is no flat layout to read.
-fn list_script() -> String {
-    format!(
-        "d={}; set --; for f in \"$d\"/*/*.json; do [ -f \"$f\" ] && set -- \"$@\" \"$f\"; done; \
-         [ $# -gt 0 ] || {{ echo '[]'; exit 0; }}; \
-         jq -n --arg d \"$d\" '[inputs | select(type==\"object\") \
-           | .box = (input_filename | ltrimstr($d + \"/\") | split(\"/\") | if length == 2 then .[0] else \"\" end)]' \
-           \"$@\" 2>/dev/null || echo '[]'",
-        sh_quote(&requests_dir())
-    )
+/// The asks the boxes have filed, each stamped with the box whose directory it is in, read by
+/// `boxfile::drop_box`'s rules: a link, a FIFO or an oversized file in a drop-box is never read
+/// (SKEIN-1406). Only `requests/<box>/*.json`: this queue was per box from its first day, so there
+/// is no flat layout to read.
+fn queued() -> Vec<Ask> {
+    asks_from(crate::boxfile::drop_box_objects(
+        std::path::Path::new(&requests_dir()),
+        false,
+    ))
 }
 
 /// Every question the cockpit shows, oldest first: the host's answers over the boxes' asks, and at
 /// most [`CAP`] waiting per box.
 pub fn list(sandbox: &str) -> Result<Vec<Ask>, String> {
-    let out = crate::place::own_sandbox(sandbox).exec(&list_script(), Duration::from_secs(30))?;
-    Ok(capped(decided_over(parse_asks(&out))))
+    crate::place::standing_in(sandbox)?;
+    Ok(capped(decided_over(queued())))
 }
 
 /// The host's answer wins over the box's copy of it, question by question.

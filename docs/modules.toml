@@ -462,7 +462,12 @@ depends_on = [
 # `mailbox` for one call: `send_answer`, which puts the owner's answer to a write request in the
 # asking box's read-only inbox (SKEIN-1142). The box's own request file cannot carry the answer,
 # because the box can write it; the inbox is the one place in a box that only the host writes.
+#
+# `boxfile` to read the queue (SKEIN-1406): every request is read through a descriptor opened
+# without following a link or waiting on a FIFO, and the courtesy write-back is fed from the same
+# read, so a link a box plants in its drop-box cannot make skein read a file the box cannot.
 depends_on = [
+  "boxfile",
   "config",
   "fleet",
   "github",
@@ -760,13 +765,15 @@ depends_on = ["board", "config", "util"]
 # A box's questions for the fleet's owner (SKEIN-1061), shaped as `gitgate`'s write requests are:
 # `fleet` for where the queue is, `place` to read it in the sandbox, `config` for where the answers
 # are kept on the host, and `mailbox` for one call, `send_question_answer`, the answer in the asking
-# box's read-only inbox.
-depends_on = ["config", "fleet", "mailbox", "place", "util"]
+# box's read-only inbox. `boxfile` to read the queue, for the reason `gitgate` gives for the same
+# edge (SKEIN-1406).
+depends_on = ["boxfile", "config", "fleet", "mailbox", "place", "util"]
 
 [current.substrate]
 # `mailbox` for one call: `send_answer`, the owner's answer to a package request put in the asking
-# box's read-only inbox (SKEIN-1142), for the reason `gitgate` gives for the same edge.
-depends_on = ["config", "fleet", "mailbox", "place", "util"]
+# box's read-only inbox (SKEIN-1142), for the reason `gitgate` gives for the same edge. `boxfile`
+# to read the queue and feed both write-backs, for `gitgate`'s reason too (SKEIN-1406).
+depends_on = ["boxfile", "config", "fleet", "mailbox", "place", "util"]
 
 [current.takeover]
 # `warden_client` for an audit entry and nothing else (§9.5 R6): a takeover hands one agent another

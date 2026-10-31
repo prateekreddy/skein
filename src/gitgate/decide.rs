@@ -117,13 +117,17 @@ pub fn token_file(box_name: &str, slug: &str) -> String {
 
 // ───────────────────────────── the queue ─────────────────────────────
 
-/// Parse the array `jq -s` produces from the queue.
+/// Parse a JSON array of requests, the shape `boxfile::drop_box_objects` reads the queue into.
 ///
 /// Malformed entries are dropped rather than failing the read: one unparseable file — a box writing
 /// a request while this runs — must not blank the cockpit's whole list.
 pub fn parse_requests(json: &str) -> Vec<Request> {
-    let mut out: Vec<Request> = serde_json::from_str::<Vec<serde_json::Value>>(json)
-        .unwrap_or_default()
+    requests_from(serde_json::from_str::<Vec<serde_json::Value>>(json).unwrap_or_default())
+}
+
+/// [`parse_requests`], over values already parsed.
+fn requests_from(values: Vec<serde_json::Value>) -> Vec<Request> {
+    let mut out: Vec<Request> = values
         .into_iter()
         .filter_map(|v| serde_json::from_value::<Request>(v).ok())
         .filter(|r: &Request| !r.id.is_empty())
@@ -132,35 +136,28 @@ pub fn parse_requests(json: &str) -> Vec<Request> {
     out
 }
 
-/// The script that reads the queue, **stamping each request with the box whose directory it is in**.
+/// The requests the boxes have filed, **each stamped with the box whose directory it is in**.
 ///
-/// Split out for the reason [`decision_script`] is, and it carries more: it is the only thing that
-/// decides who a request is from, and on this queue that decides which box a token lands in. The
-/// sibling is [`crate::substrate`]'s, deliberately written the same way — two queues, one shape.
+/// This is the only thing that decides who a request is from, and on this queue that decides which
+/// box a token lands in. The sibling is [`crate::substrate`]'s, deliberately the same — two queues,
+/// one shape — and both read through `boxfile::drop_box`, so a link, a FIFO or an oversized file a
+/// box puts in its drop-box is never read (SKEIN-1406).
 ///
 /// The field is overwritten rather than compared, and a request found directly under the queue root
 /// (from before the split) is stamped with the **empty** name: [`Request::problem`] already refuses
 /// a box name that is not a name, so such a request is shown to its owner and cannot be acted on,
 /// which is the honest answer when nothing can say any more which box wrote it.
-fn list_script() -> String {
-    // `jq -n` with `inputs` rather than `jq -s`: `input_filename` tracks the file each value came
-    // from only while they are pulled one at a time, and that filename is the whole point.
-    // `select(type=="object")` because a box can put a JSON array in its own file, and `.box =` on
-    // an array is a jq error that would blank the panel for every box.
-    format!(
-        "d={}; set --; for f in \"$d\"/*/*.json \"$d\"/*.json; do [ -f \"$f\" ] && set -- \"$@\" \"$f\"; done; \
-         [ $# -gt 0 ] || {{ echo '[]'; exit 0; }}; \
-         jq -n --arg d \"$d\" '[inputs | select(type==\"object\") \
-           | .box = (input_filename | ltrimstr($d + \"/\") | split(\"/\") | if length == 2 then .[0] else \"\" end)]' \
-           \"$@\" 2>/dev/null || echo '[]'",
-        sh_quote(&requests_dir())
-    )
+fn queued() -> Vec<Request> {
+    requests_from(crate::boxfile::drop_box_objects(
+        std::path::Path::new(&requests_dir()),
+        true,
+    ))
 }
 
 /// Every access request the fleet knows about, oldest first.
 pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
-    let out = crate::place::own_sandbox(sandbox).exec(&list_script(), Duration::from_secs(30))?;
-    Ok(decided_over(parse_requests(&out)))
+    crate::place::standing_in(sandbox)?;
+    Ok(decided_over(queued()))
 }
 
 /// The host's answer wins over the box's copy of it, request by request (SKEIN-940).
@@ -230,12 +227,17 @@ fn write_decision(path: &std::path::Path, req: &Request) -> Result<(), String> {
 ///
 /// `box_name` is a path component now that the queue is per box, so it is quoted like the id and,
 /// like the id, refused before it arrives — [`Request::problem`] already required it to be a name.
+///
+/// **It reads the request from its stdin, never from `$f`** (SKEIN-1406). `jq "$f"` follows a link
+/// the box put there, and what it read would be written back into the box's own drop-box. The
+/// caller reads the file with `boxfile::read_in` and feeds it in; the script only names `$f` to
+/// replace it, and `mv` replaces a link rather than writing through it.
 fn decision_script(box_name: &str, id: &str, state: &str) -> String {
     format!(
         "f={}/{}/{}.json; [ -f \"$f\" ] || {{ echo 'no such request' >&2; exit 1; }}; \
          t=$(mktemp \"$(dirname \"$f\")/.tmp.XXXXXX\") || exit 1; \
          jq --arg s {} --arg d \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \
-            '.state=$s | .decided=$d' \"$f\" >\"$t\" \
+            '.state=$s | .decided=$d' >\"$t\" \
            && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
         sh_quote(&requests_dir()),
         sh_quote(box_name),
@@ -347,11 +349,29 @@ pub fn decide(
     // Courtesy only, and it must stay that way: the box reads its own file to learn what happened,
     // and skein never reads that answer back — [`list`] takes the state from the record above.
     // Best-effort, because a box that deletes its request has changed nothing that matters.
-    let _ = crate::place::own_sandbox(sandbox).exec(
-        &decision_script(&rendered.box_name, &rendered.id, state),
-        Duration::from_secs(30),
-    );
+    courtesy(sandbox, &rendered.box_name, &rendered.id, state);
     Ok(done)
+}
+
+/// Write the answer back into the box's own copy of its request: [`decision_script`], with the
+/// request it rewrites on its stdin. Best-effort, like the write itself.
+///
+/// The request is read here, by `boxfile::read_in`'s rules, and the script never opens it by name:
+/// a box that swapped its request for a link after it was listed would otherwise have the link's
+/// target read and written back into its own drop-box (SKEIN-1406). A file that will not read that
+/// way — a link, a FIFO, over the cap, gone — gets no courtesy copy.
+fn courtesy(sandbox: &str, box_name: &str, id: &str, state: &str) {
+    if let Ok(own) = crate::boxfile::read_in(
+        std::path::Path::new(&box_requests_dir(box_name)),
+        &format!("{id}.json"),
+        crate::boxfile::DROP_BOX_CAP,
+    ) {
+        let _ = crate::place::own_sandbox(sandbox).attempt(
+            &decision_script(box_name, id, state),
+            own.as_bytes(),
+            Duration::from_secs(30),
+        );
+    }
 }
 
 /// Every write request the fleet has been asked for, for the cockpit.
@@ -597,7 +617,7 @@ mod tests {
     /// [`refresh_tokens`] writes the minted installation token into the box the grant names. While
     /// the queue was one shared read-write directory, the `box` field was whatever the requester
     /// typed into its own file — so an approval a person read as one box's ask put a live GitHub
-    /// write token in another's. This runs [`list_script`] over a real tree: the first request lies
+    /// write token in another's. This runs [`queued`] over a real tree: the first request lies
     /// in its file and must come back attributed to the directory it was found in.
     ///
     /// The last case is a request from before the split. It comes back with no box, and
@@ -605,15 +625,6 @@ mod tests {
     /// because nothing can say now which box would receive the token.
     #[test]
     fn the_box_a_request_is_from_is_the_directory_it_is_in() {
-        if std::process::Command::new("sh")
-            .args(["-c", "command -v jq >/dev/null"])
-            .status()
-            .map(|s| !s.success())
-            .unwrap_or(true)
-        {
-            crate::testutil::skip("no jq, so the queue cannot be read at all");
-            return;
-        }
         let _g = crate::testutil::env_lock();
         let root = crate::testutil::tempdir();
         std::env::set_var("SKEIN_FLEET_ROOT", &*root);
@@ -640,12 +651,7 @@ mod tests {
         }
         std::fs::write(queue.join("web-main/arr.json"), "[1,2]").unwrap();
 
-        let out = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(list_script())
-            .output()
-            .expect("bash");
-        let got = parse_requests(&String::from_utf8_lossy(&out.stdout));
+        let got = queued();
         let by = |id: &str| {
             got.iter()
                 .find(|r| r.id == id)
@@ -775,6 +781,95 @@ mod tests {
             );
         }
         std::env::remove_var("SKEIN_FLEET_ROOT");
+    }
+
+    /// **The write-back into a box's own request never reads a link the box put there**
+    /// (SKEIN-1406). The decision is recorded on the host first; then the box's copy is rewritten
+    /// as a courtesy, by a script that writes inside the box's drop-box. If that script, or what
+    /// feeds it, read the request by its path, a box that swapped its request for a link after it
+    /// was listed would get the link's target, which skein-server can read and the box cannot,
+    /// written back to it as a regular file.
+    ///
+    /// Two halves, each with its own sabotage, both watched failing:
+    /// * the courtesy as decide runs it, over a link: fails if `O_NOFOLLOW` is dropped from
+    ///   `boxfile::open`, because the target is read, fed in, and written back;
+    /// * the script alone, handed a harmless request on its stdin while a link sits at the path,
+    ///   which is the swap landing after the read: fails if `jq` is given `"$f"` again, because
+    ///   it then reads the link instead of its stdin.
+    #[test]
+    fn the_write_back_into_a_boxs_request_never_reads_a_link_it_planted() {
+        if std::process::Command::new("sh")
+            .args(["-c", "command -v jq >/dev/null"])
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            crate::testutil::skip("no jq, so the write-back script cannot run at all");
+            return;
+        }
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let fleet = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path)
+            .set("SKEIN_FLEET_ROOT", fleet.as_ref() as &std::path::Path);
+        let _real = crate::place::seam::real_crossings();
+        let dir = std::path::PathBuf::from(box_requests_dir("web-main"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = home.join("private.json");
+        std::fs::write(
+            &secret,
+            r#"{"id":"r1","repo":"acme/thing","reason":"skein-test-not-a-secret"}"#,
+        )
+        .unwrap();
+        let file = dir.join("r1.json");
+        let leaked = || {
+            std::fs::read_dir(&dir).unwrap().flatten().any(|e| {
+                std::fs::read_to_string(e.path())
+                    .is_ok_and(|s| s.contains("skein-test-not-a-secret"))
+                    && !std::fs::symlink_metadata(e.path())
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+            })
+        };
+
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+        courtesy(&crate::place::fleet_sandbox(), "web-main", "r1", "granted");
+        assert!(
+            !leaked(),
+            "the courtesy write-back read the link and wrote its target into the box's drop-box"
+        );
+        assert!(
+            std::fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a link the write-back refused is left as the box made it"
+        );
+
+        let ran = crate::place::own_sandbox(&crate::place::fleet_sandbox())
+            .attempt(
+                &decision_script("web-main", "r1", "granted"),
+                br#"{"id":"r1"}"#,
+                Duration::from_secs(30),
+            )
+            .expect("the script ran");
+        assert_eq!(ran.code, 0, "{ran:?}");
+        assert!(
+            !leaked(),
+            "the write-back script read the request by its path, not from its stdin"
+        );
+
+        // The control: a regular request is rewritten, so the two absences above are the script
+        // refusing a link and not a script that writes nothing.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, r#"{"id":"r1"}"#).unwrap();
+        courtesy(&crate::place::fleet_sandbox(), "web-main", "r1", "granted");
+        let back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(back["state"], "granted", "{back}");
+        drop(env);
     }
 
     #[test]
