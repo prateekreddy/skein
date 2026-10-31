@@ -906,6 +906,9 @@ pub(crate) enum OnceCreated {
     Leave,
 }
 
+/// How long [`agent_session_shell`] waits for a missing agent CLI before saying it is missing.
+const AGENT_CLI_WAIT_SECS: u32 = 20;
+
 /// The shell that finds or creates a box's agent session — **one spelling for the attach and for
 /// the reopen**, so a session the Update pane reopens is started exactly as a reconnect would start
 /// it: the same resume command, the same instruction refresh, the same observer and the same tmux
@@ -935,6 +938,17 @@ fn agent_session_shell(
     let tmux = place.tmux();
     let observer = pane_observer_start(tmux_name, place.tmux_sock());
     let configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} "));
+    // **A missing CLI is waited for before it is called missing** (SKEIN-1413). Every box runs the
+    // sandbox's one copy, and an install into it (`skein_npm_install`) can leave it missing for a
+    // moment; on 2026-10-31, before installs were staged, it was missing for seconds while skein
+    // restarted, and three boxes started in that window dropped to bash. Polled once a second, so
+    // a CLI that comes back is used the moment it does, and a box with no CLI at all waits this
+    // long and no longer.
+    let cli_wait = format!(
+        "skein_cli_wait=0; while ! command -v {executable} >/dev/null 2>&1 && [ \"$skein_cli_wait\" -lt {AGENT_CLI_WAIT_SECS} ]; do \
+         [ \"$skein_cli_wait\" = 0 ] && echo 'skein: waiting for {agent}, which may be being installed'; \
+         sleep 1; skein_cli_wait=$((skein_cli_wait + 1)); done; "
+    );
     let (no_cli, last) = match then {
         OnceCreated::Attach => (
             "exec bash -li".to_string(),
@@ -946,7 +960,7 @@ fn agent_session_shell(
         ),
     };
     format!(
-        "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; {no_cli}; fi; \
+        "{setup_wait}{cli_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not on this box after {AGENT_CLI_WAIT_SECS} s. An install of the agent CLI may be in progress: stop and start the box to try again. If this sandbox has no {agent}, create a {agent} box, or install and authenticate the CLI here to take over.'; {no_cli}; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          {setup}; \
          created=0; if ! {tmux} has-session -t {tmux_name} 2>/dev/null; then {instruction}; {tmux} new-session -d -s {tmux_name} {command:?}; created=1; fi; \
@@ -2854,5 +2868,97 @@ mod tests {
         );
 
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// **An agent CLI that is missing for a moment is waited for, and the agent still starts**
+    /// (SKEIN-1413).
+    ///
+    /// On 2026-10-31 boxes that started while the sandbox's claude-code was being reinstalled
+    /// found no `claude`, printed "not installed" and dropped to bash. This runs the real shell
+    /// [`agent_session_shell`] builds, with `claude` absent when it starts and put back three
+    /// seconds later — a fake install's window — and a stub `tmux` that records what it is asked.
+    ///
+    /// **What makes it fail:** setting [`AGENT_CLI_WAIT_SECS`] to 0, or dropping `cli_wait` from
+    /// the shell: it then says the CLI is missing at once, exits 1, and no session is created.
+    #[test]
+    fn an_agent_cli_missing_for_a_few_seconds_is_waited_for_and_the_agent_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &*dir);
+        let root = dir.join("fleet");
+        env::set_var("SKEIN_FLEET_ROOT", &root);
+        let runtime = resolve_runtime("claude");
+        let shell = agent_session_shell(
+            &own_sandbox("thing-x"),
+            "thing-x",
+            runtime,
+            "skein-agent",
+            runtime.interactive_start,
+            false,
+            OnceCreated::Leave,
+        );
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_FLEET_ROOT");
+        assert!(
+            shell.contains("An install of the agent CLI may be in progress")
+                && shell.contains("stop and start the box"),
+            "the refusal no longer says an install may be in progress, or how to retry: {shell}"
+        );
+
+        let bin = dir.join("bin");
+        let home = dir.join("home");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let script = |path: &Path, body: &str| {
+            fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let asked = dir.join("tmux-asked");
+        let made = dir.join("session-made");
+        script(
+            &bin.join("tmux"),
+            &format!(
+                "echo \"$*\" >>'{asked}'\ncase \"$1\" in\n  has-session) [ -e '{made}' ] ;;\n  \
+                 new-session) : >'{made}' ;;\n  *) exit 0 ;;\nesac",
+                asked = asked.display(),
+                made = made.display()
+            ),
+        );
+        // The fake install: no `claude` at first, then one, renamed into place whole.
+        let back = {
+            let bin = bin.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(3));
+                let staged = bin.join(".claude.new");
+                fs::write(&staged, "#!/bin/sh\nexit 0\n").unwrap();
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+                fs::rename(&staged, bin.join("claude")).unwrap();
+            })
+        };
+        let began = std::time::Instant::now();
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&shell)
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", &home)
+            .env("SKEIN_FLEET_ROOT", &root)
+            .current_dir(&home)
+            .output()
+            .unwrap();
+        back.join().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned();
+        let asked = fs::read_to_string(&asked).unwrap_or_default();
+        assert!(
+            out.status.success() && asked.contains("new-session -d -s skein-agent"),
+            "the agent did not start once its CLI came back. It said:\n{said}\n{}\ntmux was \
+             asked:\n{asked}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            began.elapsed() >= Duration::from_secs(3) && said.contains("waiting for claude"),
+            "the shell never saw the CLI missing, so this did not test the wait: {said}"
+        );
     }
 }

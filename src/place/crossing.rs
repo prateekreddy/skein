@@ -9,7 +9,7 @@
 /// (`sudo`, `git`, `jq`, `python3`, `bwrap`, `apt-get`, `npm`, `cc`, `curl`, `nsenter`) lives in
 /// `/usr/bin`, and the two directories a profile would put ahead of it are writable by every box.
 /// See [`Place::shell`](super::Place::shell) for the whole of why.
-pub(super) const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+pub(crate) const FLEET_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// The two user-writable directories a BOX's own PATH carries in front of [`FLEET_PATH`].
 ///

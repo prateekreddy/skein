@@ -1836,16 +1836,16 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "the survey records this message as it read it on 2026-09-09. SKEIN-1200 deleted the line with `$SKEIN_DESTROY_CMD`, the test seam that ran a shell for a box skein had not placed: Destroy on such a name now refuses with `absent_box_reason` and runs nothing, so no exit code is left to report. The row stays as the record of what was there."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:975"]
+["src/sandbox.rs:989"]
 line = "return Err(\"invalid box name\".into());"
 window = "if !valid_name(name) {\u000breturn Err(\"invalid box name\".into());\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1036"]
+["src/sandbox.rs:1050"]
 line = "if branch.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/sandbox.rs:1145"]
+["src/sandbox.rs:1159"]
 line = "fn refusal_argv(name: &str) -> Vec<String> {"
 cited_by = ["docs/recovery-survey.md"]
 
