@@ -10,6 +10,15 @@ box is never restarted. Rust is per repo: a repo whose tree pins a toolchain in 
 or `rust-toolchain` gets that toolchain, fetched once and shared read-only; every other repo gets the
 fleet's default, which is rolled out like a CLI.
 
+**A repo's pin is all of its file, and needs no default** (SKEIN-1415). The depot entry a repo's
+boxes bind holds the channel and every component and target its `rust-toolchain.toml` names, and is
+named for them (`1.98.1-<triple>@wasm32-unknown-unknown`), so two repos pinning one version with
+different targets get two entries. Every name is read from the box's tree as data, in a fixed shape,
+and one bad name pins nothing. The pin is bound whether or not a fleet default is rolled out; with
+none, the box's default stays the bootstrap's toolchain. A pin the depot lacks is named to the box
+by its rustup shim when `cargo` runs in the repo, and the box restarts onto the entry, when idle,
+once skein has fetched it.
+
 **Claude Code is pinned** (SKEIN-1380, the owner's option (a), "skein tests, I click"). The one
 version skein's mod is checked against is written in `src/claude-code.version`, and it is also the
 only claude-code version the fleet fetches and the only one "Roll out" accepts. Moving it is a
@@ -56,8 +65,12 @@ work, and an agent between tasks knows better than a heuristic when it is free.
 
 **Enforced at.** Tests `a_rolled_out_cli_is_read_only_in_every_box`,
 `an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not`,
-`a_repos_rust_toolchain_file_selects_its_toolchain` and `the_clean_refuses_a_version_in_use`
-(`tests/fleet_launch/versions.rs`); `only_an_idle_box_behind_on_a_version_is_restarted` and
+`a_repos_rust_toolchain_file_selects_its_toolchain`,
+`a_repos_pinned_toolchain_is_bound_without_a_fleet_default_and_a_missing_one_is_named` and
+`the_clean_refuses_a_version_in_use` (`tests/fleet_launch/versions.rs`);
+`a_toolchain_entry_is_named_for_everything_it_holds`, `a_hostile_toolchain_file_pins_nothing`,
+`the_fill_installs_what_the_entry_is_named_for` and
+`a_repos_pin_is_handed_over_without_a_fleet_default` (`src/fleet/versions.rs`); `only_an_idle_box_behind_on_a_version_is_restarted` and
 `an_untested_cli_is_not_rolled_out_and_the_last_one_is_kept` (`src/fleet/versions.rs`);
 `idle_is_a_finished_turn_with_nothing_open_and_nothing_running` (`src/fleet/idle.rs`).
 TypeScript: `the_ci_typescript_pin_is_the_fleets_pin`,

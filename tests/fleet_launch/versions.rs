@@ -660,6 +660,136 @@ fn a_repos_rust_toolchain_file_selects_its_toolchain() {
     }
 }
 
+/// **With no fleet default rolled out, a repo that pins a toolchain with a target builds with the
+/// entry holding that target, and outside its tree keeps the bootstrap's toolchain; a repo that
+/// pins one the fleet lacks is told its name by `cargo` and `rustc`** (SKEIN-1415). Through the
+/// real rustup, with the fleet's `cargo/bin` laid out as bootstrap lays it out, and the bootstrap's
+/// own rustup home holding a `stable-<triple>`.
+///
+/// What would make each assertion fail:
+///   * `here` in the wasm box: `wanted_with` reading the repo's file only once a default is rolled
+///     out (the box runs the bootstrap's toolchain), `repo_toolchain` dropping the targets (no entry
+///     of that name is published, so nothing is bound), or the launcher binding the entry at its
+///     own name rather than at the toolchain's (rustup finds no `1.98.1-<triple>`).
+///   * `elsewhere` in the wasm box: a composed home that leaves out the bootstrap's toolchains or
+///     names the repo's as the default.
+///   * `write no`: dropping `--remount-ro` of the composed home.
+///   * `here` and `deeper` in the lacking box: the shim not baking `rust-repo-missing`, not walking
+///     up from a subdirectory, or its message not naming the entry; and `elsewhere` there: the shim
+///     refusing outside the tree.
+///   * the reports: the launcher not reporting `rust-repo` or `rust-repo-missing`, or reporting a
+///     `rust` it never bound.
+#[test]
+fn a_repos_pinned_toolchain_is_bound_without_a_fleet_default_and_a_missing_one_is_named() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so a repo's pinned \
+             toolchain without a default was NOT exercised",
+        );
+    }
+    let rustup = Command::new("sh")
+        .args(["-c", "command -v rustup"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| p.starts_with('/'));
+    let Some(rustup) = rustup else {
+        return skip(
+            "no rustup on this machine's PATH, so a repo's pinned toolchain without a default \
+             was NOT exercised",
+        );
+    };
+    let (root, prefix, _pins) = versions_fleet("rustnodefault");
+    let toolchain = root.join("boxes/.skein/toolchain");
+    let bin = toolchain.join("cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(&rustup, bin.join("rustup")).expect("copy rustup into the fixture toolchain");
+    for proxy in ["rustc", "cargo"] {
+        std::os::unix::fs::symlink("rustup", bin.join(proxy)).unwrap();
+    }
+    let triple = versions::host_triple();
+    let stable = toolchain.join(format!("rustup/toolchains/stable-{triple}/bin"));
+    fs::create_dir_all(&stable).unwrap();
+    fs::write(
+        stable.join("rustc"),
+        "#!/bin/sh\necho rustc-from-bootstrap\n",
+    )
+    .unwrap();
+    fs::set_permissions(stable.join("rustc"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(toolchain.join("rustup/update-hashes")).unwrap();
+    fs::write(
+        toolchain.join("rustup/settings.toml"),
+        format!("version = \"12\"\ndefault_toolchain = \"stable-{triple}\"\nprofile = \"minimal\"\n\n[overrides]\n"),
+    )
+    .unwrap();
+    let wasm = format!("1.98.1-{triple}@wasm32-unknown-unknown");
+    let lacking = format!("1.97.3-{triple}@wasm32-unknown-unknown");
+    publish_toolchain(&root, &wasm);
+    assert!(
+        versions::rollouts().current.is_empty(),
+        "this test is about a fleet with nothing rolled out"
+    );
+    for (name, channel) in [("rustwasm-main", "1.98.1"), ("rustlack-main", "1.97.3")] {
+        let tree = PathBuf::from(box_root(name)).join("tree");
+        fs::create_dir_all(tree.join("src/deep")).unwrap();
+        fs::write(
+            tree.join("rust-toolchain.toml"),
+            format!(
+                "[toolchain]\nchannel = \"{channel}\"\ncomponents = [\"clippy\", \"rustfmt\"]\ntargets = [\"wasm32-unknown-unknown\"]\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let agent = "{ printf 'here %s\\n' \"$(rustc --version 2>&1)\"; \
+                   printf 'deeper %s\\n' \"$(cd src/deep && cargo --version 2>&1)\"; \
+                   printf 'elsewhere %s\\n' \"$(cd /tmp && rustc --version 2>&1)\"; \
+                   touch \"$RUSTUP_HOME/planted\" 2>/dev/null && echo 'write yes' || echo 'write no'; \
+                 } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300";
+
+    let (launched, anchor, report) = start("rustwasm-main", false, &prefix, agent, "rs");
+    end("rustwasm-main", anchor);
+    assert_eq!(
+        field(&report, "here"),
+        format!("rustc-from-{wasm}"),
+        "the wasm box did not build with its repo's entry: {report:?}"
+    );
+    assert_eq!(
+        field(&report, "elsewhere"),
+        "rustc-from-bootstrap",
+        "the wasm box, outside its tree, is not on the bootstrap's toolchain: {report:?}"
+    );
+    assert_eq!(field(&report, "write"), "no", "{report:?}");
+    let bound = versions::versions_from_launch(&launched).unwrap_or_default();
+    assert_eq!(bound.get("rust-repo"), Some(&wasm), "{launched}");
+    assert_eq!(bound.get("rust"), None, "{launched}");
+
+    let (launched, anchor, report) = start("rustlack-main", false, &prefix, agent, "rs");
+    end("rustlack-main", anchor);
+    for key in ["here", "deeper"] {
+        let said = field(&report, key);
+        assert!(
+            said.contains(&format!(
+                "pins the Rust toolchain {lacking}, which the fleet does not have yet"
+            )),
+            "{key}: the lacking box was not told the toolchain's name: {report:?}"
+        );
+    }
+    assert_eq!(
+        field(&report, "elsewhere"),
+        "rustc-from-bootstrap",
+        "the lacking box, outside its tree, was refused or moved: {report:?}"
+    );
+    let bound = versions::versions_from_launch(&launched).unwrap_or_default();
+    assert_eq!(
+        bound,
+        std::collections::BTreeMap::from([("rust-repo-missing".to_string(), lacking.clone())]),
+        "{launched}"
+    );
+}
+
 /// **A version in use is never removed, nor the current one nor the one kept for rollback, and one
 /// nothing keeps is removed whole.**
 ///

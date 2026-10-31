@@ -2898,7 +2898,31 @@ unset SKEIN_NPM_PREFIX
 # and rustup decides which tool to be by the name it was run as. The shim used to `exec` rustup by
 # its own path, so `cargo --version` in a box printed rustup's version instead. It is bash, to keep
 # the name it was called by with `exec -a`, and it refuses only when that name is `rustup`.
+#
+# **A toolchain the repo pins and the fleet lacks is named by the shim** (SKEIN-1415). skein names
+# it as `rust-repo-missing` in `SKEIN_BOX_VERSIONS`, and the shim is what an agent's `cargo` runs,
+# so it is the one place that reaches the agent at the moment it matters. Run as a proxy, in this
+# box's tree or under it, where the nearest toolchain file names that channel, and with no `+…` or
+# `RUSTUP_TOOLCHAIN` choosing another, it says which toolchain is missing and what happens next,
+# where rustup said only "could not create temp file …: Read-only file system". The name is read
+# here only in the shape `box_version` allows, and the shim looks at the file with a fixed-string
+# grep, so nothing in the box's tree is run or parsed as shell.
 toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
+rust_missing="" rust_missing_channel=""
+read -r -a rust_kvs <<<"${SKEIN_BOX_VERSIONS-}"
+for kv in "${rust_kvs[@]}"; do
+  case "$kv" in rust-repo-missing=*) rust_missing="${kv#*=}" ;; esac
+done
+case "$rust_missing" in "" | .* | *..* | */* | *[!A-Za-z0-9._@+-]*) rust_missing="" ;; esac
+if [ -n "$rust_missing" ]; then
+  rust_missing_channel="${rust_missing%%[+@]*}"
+  case "$rust_missing_channel" in
+    nightly-*) rust_missing_channel="${rust_missing_channel:0:18}" ;;
+    beta-*) rust_missing_channel="${rust_missing_channel:0:15}" ;;
+    *) rust_missing_channel="${rust_missing_channel%%-*}" ;;
+  esac
+fi
+unset rust_kvs kv
 if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/null; then
   binds+=(--ro-bind "$toolchain" "$toolchain")
   binds+=(--ro-bind "$toolchain/cargo/bin" "$HOME/.cargo/bin")
@@ -2907,8 +2931,33 @@ if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/nul
     {
       printf '#!/bin/bash\n'
       printf 'skein_rustup=%q\n' "$toolchain/cargo/bin/rustup"
+      printf 'skein_missing=%q skein_channel=%q skein_tree=%q\n' \
+        "$rust_missing" "$rust_missing_channel" "$tree"
       cat <<'RUSTUPSHIM'
 called="${0##*/}"
+if [ -n "$skein_missing" ] && [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN-}" ]; then
+  case "${1-}" in
+    +*) ;;
+    *)
+      d="$PWD"
+      while [ -n "$d" ]; do
+        f=""
+        if [ -f "$d/rust-toolchain.toml" ]; then f="$d/rust-toolchain.toml"
+        elif [ -f "$d/rust-toolchain" ]; then f="$d/rust-toolchain"; fi
+        if [ -n "$f" ]; then
+          case "$d/" in
+            "$skein_tree"/*)
+              if grep -qswF -- "$skein_channel" "$f" 2>/dev/null; then
+                echo "skein: this repo's ${f##*/} pins the Rust toolchain $skein_missing, which the fleet does not have yet, so $called cannot run here. skein fetches it on its own and restarts this box onto it once the box is idle. If it does not arrive, ask the person who runs the fleet: skein tries each fetch once. Meanwhile, \`$called +stable ...\` runs with this box's default toolchain." >&2
+                exit 1
+              fi ;;
+          esac
+          break
+        fi
+        d="${d%/*}"
+      done ;;
+  esac
+fi
 [ "$called" = rustup ] || exec -a "$called" "$skein_rustup" "$@"
 sub=''; arg=''
 for a in "$@"; do
@@ -2924,41 +2973,73 @@ exec "$skein_rustup" "$@"
 RUSTUPSHIM
     } >&"$new_fd" && land_new 755 keep || { drop_new; exit 1; }
     binds+=(--ro-bind-fd "$new_fd" "$HOME/.cargo/bin/rustup")
+    # What the shim was told is reported like a bound entry, so the record says the box knows.
+    [ -z "$rust_missing" ] || versions_bound+=" rust-repo-missing=$rust_missing"
   fi
-  # **Which toolchains, once skein has rolled one out (SKEIN-1372).** Each toolchain is then an
-  # immutable entry of the depot, `.skein/depot/rust-toolchain/<version>-<triple>`, and this box's
-  # rustup home is put together here from what `SKEIN_BOX_VERSIONS` names: a read-only tmpfs at
-  # `~/.rustup` holding the fleet's default toolchain (also under `stable-<triple>`, so a repo that
-  # says `stable` gets it), the box's repo's own toolchain when its `rust-toolchain.toml` pins one
-  # skein has fetched, rustup's `settings.toml` naming the default, and the empty `update-hashes`
-  # rustup insists on. rustup then picks the repo's toolchain by its file, from a home nothing can
-  # write (measured 2026-10-30 with rustup 1.29.0: selection by `rust-toolchain.toml` works from a
-  # read-only home once `update-hashes` exists). The proxies stay the bootstrap's, bound above.
+  # **Which toolchains, once skein has rolled one out or the repo pins one (SKEIN-1372,
+  # SKEIN-1415).** Each toolchain is then an immutable entry of the depot,
+  # `.skein/depot/rust-toolchain/<entry>`, and this box's rustup home is put together here from what
+  # `SKEIN_BOX_VERSIONS` names: a read-only tmpfs at `~/.rustup` holding the default toolchain, the
+  # box's repo's own toolchain when its `rust-toolchain.toml` pins one skein has fetched, rustup's
+  # `settings.toml` naming the default, and the empty `update-hashes` rustup insists on. rustup
+  # then picks the repo's toolchain by its file, from a home nothing can write (measured 2026-10-30
+  # with rustup 1.29.0: selection by `rust-toolchain.toml` works from a read-only home once
+  # `update-hashes` exists). The proxies stay the bootstrap's, bound above.
+  #
+  # An entry's name is its toolchain plus what it holds beyond the baseline,
+  # `1.98.1-<triple>@wasm32-unknown-unknown` (`fleet::versions::toolchain_entry_parts`), and it is
+  # bound at the toolchain's own name, the part before any `+` or `@`, which is the directory
+  # rustup looks for. The repo's entry takes that name when the default has the same toolchain,
+  # since it holds the baseline and more.
+  #
+  # **The default.** With a fleet default rolled out, it is that one, also under `stable-<triple>`
+  # so a repo that says `stable` gets it. With none, it stays what a box had before any of this:
+  # the bootstrap's own toolchains are bound in beside the repo's and `settings.toml` names the
+  # bootstrap's `stable-<triple>`, so only a build inside the pinning repo changes.
+  #
   # `~/.rustup` is made by name only when absent and used only when it is a real directory, so a
   # link the box put there is never followed out of the box.
   rust_default="$(box_version rust)" || rust_default=""
   rust_repo="$(box_version rust-repo)" || rust_repo=""
-  if [ -n "$rust_default" ]; then
+  [ "$rust_repo" != "$rust_default" ] || rust_repo=""
+  rust_repo_at="${rust_repo%%[+@]*}"
+  rust_default_at="${rust_default%%[+@]*}"
+  if [ -z "$rust_default" ] && [ -n "$rust_repo" ]; then
+    for tc in "$toolchain/rustup/toolchains"/stable-*; do
+      [ -d "$tc" ] && [ ! -L "$tc" ] && { rust_default_at="${tc##*/}"; break; }
+    done
+    [ -n "$rust_default_at" ] || rust_default_at="$rust_repo_at"
+  fi
+  if [ -n "$rust_default" ] || [ -n "$rust_repo" ]; then
     [ -e "$home_at/.rustup" ] || [ -L "$home_at/.rustup" ] || mkdir -- "$home_at/.rustup" 2>/dev/null
     if [ -d "$home_at/.rustup" ] && [ ! -L "$home_at/.rustup" ] && open_new "$bin_at" rustup-settings.toml; then
       printf 'version = "12"\ndefault_toolchain = "%s"\nprofile = "minimal"\n\n[overrides]\n' \
-        "$rust_default" >&"$new_fd" && land_new 644 keep || { drop_new; exit 1; }
+        "$rust_default_at" >&"$new_fd" && land_new 644 keep || { drop_new; exit 1; }
       rustup_home="$HOME/.rustup"
       binds+=(--tmpfs "$rustup_home" --dir "$rustup_home/update-hashes" --dir "$rustup_home/toolchains")
-      binds+=(--ro-bind "$depot/rust-toolchain/$rust_default" "$rustup_home/toolchains/$rust_default")
-      case "$rust_default" in
-        1.*) binds+=(--ro-bind "$depot/rust-toolchain/$rust_default" "$rustup_home/toolchains/stable-${rust_default#*-}") ;;
-      esac
-      versions_bound+=" rust=$rust_default"
-      if [ -n "$rust_repo" ] && [ "$rust_repo" != "$rust_default" ]; then
-        binds+=(--ro-bind "$depot/rust-toolchain/$rust_repo" "$rustup_home/toolchains/$rust_repo")
+      if [ -n "$rust_default" ]; then
+        [ "$rust_default_at" = "$rust_repo_at" ] ||
+          binds+=(--ro-bind "$depot/rust-toolchain/$rust_default" "$rustup_home/toolchains/$rust_default_at")
+        case "$rust_default_at" in
+          1.*) binds+=(--ro-bind "$depot/rust-toolchain/$rust_default" "$rustup_home/toolchains/stable-${rust_default_at#*-}") ;;
+        esac
+        versions_bound+=" rust=$rust_default"
+      else
+        for tc in "$toolchain/rustup/toolchains"/*; do
+          [ -d "$tc" ] && [ ! -L "$tc" ] || continue
+          case "${tc##*/}" in "$rust_repo_at" | .* | *[!A-Za-z0-9._-]*) continue ;; esac
+          binds+=(--ro-bind "$tc" "$rustup_home/toolchains/${tc##*/}")
+        done
+      fi
+      if [ -n "$rust_repo" ]; then
+        binds+=(--ro-bind "$depot/rust-toolchain/$rust_repo" "$rustup_home/toolchains/$rust_repo_at")
         versions_bound+=" rust-repo=$rust_repo"
       fi
       binds+=(--ro-bind-fd "$new_fd" "$rustup_home/settings.toml" --remount-ro "$rustup_home")
     fi
   fi
 fi
-unset toolchain rust_default rust_repo
+unset toolchain rust_default rust_repo rust_default_at rust_repo_at rust_missing rust_missing_channel tc
 unset -f box_version
 unset SKEIN_BOX_VERSIONS
 
