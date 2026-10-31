@@ -438,9 +438,11 @@ mod tests {
             .iter()
             .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
+        // The FIRST move, not the last: a pid moved early and again at the end still ran uncapped
+        // in between.
         assert_eq!(
-            order.last().map(String::as_str),
-            Some("cgroup.procs"),
+            order.iter().position(|f| f == "cgroup.procs"),
+            Some(order.len() - 1),
             "the pid was moved before its limits were set: {order:?}"
         );
     }
