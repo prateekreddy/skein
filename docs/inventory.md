@@ -59,7 +59,8 @@ wherever it moves next.
 | **every box start** | create the box's cgroup, enable `+memory +pids +cpu` on the parent | `box-session.sh`, `ensure_container_cgroup` |
 | **every box start** | enable `+memory +pids` on the box's own cgroup root, then write `memory.max`, `memory.high`, `pids.max` | `box-session.sh`, `merge_login` |
 | **every box start** | make the box's leaf, `<box>/box`, hand `+cpu` and `+memory` on from the box's cgroup, write the leaf's `cpu.weight` and `memory.min`, and move the session into the leaf (`cgroup.procs`) | `box-session.sh`, `merge_login` |
-| **every heavy-job grant** | make the job's cgroup, `<box>/job-<id>`, write its `cpu.weight`, `cpu.max` and `memory.min`, and move the wrapper into it; at the job's end read it and `rmdir` it | `jobs/cgroup.rs`, `place`, `finish`, `sweep` |
+| **every heavy-job grant** | make the job's cgroup, `<box>/job-<id>`, write its `cpu.weight`, `cpu.max` and `memory.min`, and move the wrapper into it; at the job's end write its `cgroup.kill` if the wrapper is gone, read it and `rmdir` it | `jobs/cgroup.rs`, `place`, `finish`, `sweep` |
+| **every queue tick** | write each box cgroup's `cpu.weight` from its running jobs' granted cores, when it changed | `jobs/cgroup.rs`, `weigh_boxes` |
 | **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet/limits.rs`, `apply_box_limits` → `box-session.sh`, `apply_fleet_ceilings` |
 | cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet/limits.rs`, `apply_box_limits` |
 | **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet/substrate.rs`, `ensure_substrate` → `substrate::approved_packages` |

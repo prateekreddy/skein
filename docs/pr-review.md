@@ -669,7 +669,8 @@ nothing and one slow review must not block every other repo's first round for as
 
 **CPU is uncapped for every box** by deliberate choice: `box-session.sh` gives boxes an equal
 `cpu.weight` and writes no `cpu.max`, on the argument that *"a `cpu.max` would idle cores while a
-container waits."* A review box inherits that. If CPU is to be bounded, the honest place is the box
+container waits."* (skein raises a box's weight while its heavy jobs hold granted cores,
+`jobs/cgroup.rs`'s `box_weight`, and caps only those jobs.) A review box inherits that. If CPU is to be bounded, the honest place is the box
 mechanism for all boxes, not a special case for reviews — otherwise the fleet has a limit on the
 work nobody is waiting for and none on the work somebody is.
 

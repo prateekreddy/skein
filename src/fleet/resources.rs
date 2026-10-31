@@ -73,9 +73,10 @@ pub struct FleetResources {
 ///
 /// The fleet gauge answers "is the sandbox in trouble", which is the wrong question when the answer
 /// is yes: the next thing you want is *which box*, and nothing could tell you. One box saturating
-/// every core is legitimate here — `cpu.weight` is equal and uncapped on purpose, so a lone box gets
-/// the whole machine and gives it back under contention — but "legitimate" and "what you wanted"
-/// are different, and you cannot judge which without seeing the name.
+/// every core is legitimate here — CPU is uncapped on purpose, and `cpu.weight` is equal but for
+/// what a box's granted heavy jobs add (`jobs::cgroup::box_weight`), so a lone box gets the whole
+/// machine and gives it back under contention — but "legitimate" and "what you wanted" are
+/// different, and you cannot judge which without seeing the name.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct BoxLoad {
     pub name: String,
