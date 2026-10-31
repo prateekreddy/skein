@@ -877,3 +877,233 @@ fn the_launchers_cli_table_is_this_one() {
         .collect();
     assert_eq!(line, format!("skein_clis=({})", want.join(" ")));
 }
+
+/// Start box `name` as [`start`] does, as a box of the repo whose managed store is `store`, so the
+/// launcher gives it the repo's tools area (SKEIN-1431).
+fn start_in_repo(
+    name: &str,
+    prefix: &Path,
+    store: &Path,
+    agent: &str,
+    report: &str,
+) -> (String, u32, String) {
+    let script = with_launch_env(
+        &format!(
+            "SKEIN_NPM_PREFIX={} {}",
+            prefix.display(),
+            session_script(name, "skein-agent", agent)
+        ),
+        "SKEIN_BOX_STORE",
+        &skein::util::sh_quote(store.to_string_lossy().as_ref()),
+    );
+    let launched = own_sandbox(FLEET)
+        .exec(&script, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("start {name}: {e}"));
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
+    let path = PathBuf::from(format!("{}/tmp/{report}.report", box_root(name)));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let said = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::remove_file(&path);
+    (launched, anchor, said)
+}
+
+/// The bootstrap's toolchain in a fixture fleet, as `bootstrap.sh` lays it out: `rustup` in
+/// `cargo/bin` (the file `rustup_bytes`), `cargo` and `rustc` as links to it, and a
+/// `stable-<triple>` whose `rustc` says it is the bootstrap's.
+fn bootstrap_toolchain(root: &Path, rustup_bytes: &[u8]) {
+    let toolchain = root.join("boxes/.skein/toolchain");
+    let bin = toolchain.join("cargo/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("rustup"), rustup_bytes).unwrap();
+    fs::set_permissions(bin.join("rustup"), fs::Permissions::from_mode(0o755)).unwrap();
+    for proxy in ["rustc", "cargo"] {
+        std::os::unix::fs::symlink("rustup", bin.join(proxy)).unwrap();
+    }
+    let triple = versions::host_triple();
+    let stable = toolchain.join(format!("rustup/toolchains/stable-{triple}/bin"));
+    fs::create_dir_all(&stable).unwrap();
+    for tool in ["rustc", "cargo"] {
+        fs::write(
+            stable.join(tool),
+            format!("#!/bin/sh\necho {tool}-from-bootstrap\n"),
+        )
+        .unwrap();
+        fs::set_permissions(stable.join(tool), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// **In a repo with a tools area and no toolchain file, `cargo` and `rustc` run the fleet's own
+/// toolchain, linked as the area's default with no download; once a default is rolled out, the
+/// link moves to it** (SKEIN-1431). Through the real rustup, which is what reads the link.
+///
+/// What would make it fail: the shim not making the `fleet` link, or not writing `settings.toml`
+/// (rustup has no default and says so); the session block leaving `RUSTUP_HOME` at the bootstrap's
+/// home ("home"); a link made once and never remade (the second box still runs the bootstrap's);
+/// the launcher not reporting the default it linked as bound.
+#[test]
+fn a_repo_with_no_toolchain_file_builds_with_the_linked_fleet_toolchain() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux, so the repo tools area's \
+             default toolchain was NOT exercised",
+        );
+    }
+    let rustup = Command::new("sh")
+        .args(["-c", "command -v rustup"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| p.starts_with('/'));
+    let Some(rustup) = rustup else {
+        return skip(
+            "no rustup on this machine's PATH, so the repo tools area's default toolchain was \
+             NOT exercised",
+        );
+    };
+    let (root, prefix, _pins) = versions_fleet("rustarea");
+    bootstrap_toolchain(&root, &fs::read(&rustup).expect("read rustup"));
+    let store = root.join("skein/repos/rustarea/store/data");
+    ensure_store(&store).expect("a managed store");
+    let area = root.join("boxes/.repo-tools/rustarea");
+    let agent = "{ printf 'home %s\\n' \"$RUSTUP_HOME\"; \
+                   printf 'here %s\\n' \"$(rustc --version 2>&1)\"; \
+                   printf 'cargo %s\\n' \"$(cargo --version 2>&1)\"; \
+                   printf 'link %s\\n' \"$(readlink \"$RUSTUP_HOME/toolchains/fleet\")\"; \
+                 } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300";
+
+    let (launched, anchor, report) = start_in_repo("rustarea-main", &prefix, &store, agent, "rs");
+    end("rustarea-main", anchor);
+    assert!(
+        field(&report, "home").ends_with("/.repo-tools/rustup"),
+        "the box's RUSTUP_HOME is not its repo's area: {report:?}"
+    );
+    assert_eq!(
+        (field(&report, "here"), field(&report, "cargo")),
+        ("rustc-from-bootstrap".into(), "cargo-from-bootstrap".into()),
+        "a repo with no toolchain file did not build with the fleet's toolchain: {report:?}"
+    );
+    let triple = versions::host_triple();
+    assert!(
+        fs::read_link(area.join("rustup/toolchains/fleet"))
+            .is_ok_and(|t| t.ends_with(format!("toolchains/stable-{triple}"))),
+        "the area's `fleet` toolchain is not a link to the bootstrap's: {report:?}"
+    );
+    let bound = versions::versions_from_launch(&launched).unwrap_or_default();
+    assert_eq!(bound.get("rust"), None, "{launched}");
+
+    let default = format!("1.98.0-{triple}");
+    publish_toolchain(&root, &default);
+    versions::rollout("rust", &default).expect("roll out the default toolchain");
+    let (launched, anchor, report) = start_in_repo("rustarea-two", &prefix, &store, agent, "rs");
+    end("rustarea-two", anchor);
+    assert_eq!(
+        field(&report, "here"),
+        format!("rustc-from-{default}"),
+        "after a rollout, the area's default is not the rolled-out toolchain: {report:?}"
+    );
+    let bound = versions::versions_from_launch(&launched).unwrap_or_default();
+    assert_eq!(bound.get("rust"), Some(&default), "{launched}");
+}
+
+/// A stand-in for rustup that decides by its arguments, since a script run by `exec -a` cannot see
+/// the name it was run as. The toolchain a call wants is its `+name`, else `RUSTUP_TOOLCHAIN`, else
+/// the nearest `rust-toolchain.toml`'s channel, else `settings.toml`'s default; it is there when
+/// `$RUSTUP_HOME/toolchains/<name>` is. `show active-toolchain` answers that; `toolchain install`
+/// takes two seconds and logs its start and end beside `RUSTUP_HOME`; anything else is a proxy,
+/// which says what it ran, or logs `unlocked` when its toolchain was missing (rustup's own
+/// auto-install, which takes no lock).
+const FAKE_RUSTUP: &str = r#"#!/bin/bash
+log="$RUSTUP_HOME/../skein-test-installs.log"
+plus=""
+case "${1-}" in +?*) plus="${1#+}"; shift ;; esac
+want() {
+  [ -n "$plus" ] && { echo "$plus"; return; }
+  [ -n "${RUSTUP_TOOLCHAIN-}" ] && { echo "$RUSTUP_TOOLCHAIN"; return; }
+  d="$PWD"
+  while [ -n "$d" ]; do
+    [ -f "$d/rust-toolchain.toml" ] && { sed -n 's/^channel = "\(.*\)"$/\1/p' "$d/rust-toolchain.toml"; return; }
+    d="${d%/*}"
+  done
+  sed -n 's/^default_toolchain = "\(.*\)"$/\1/p' "$RUSTUP_HOME/settings.toml" 2>/dev/null
+}
+tc="$(want)"
+case "$*" in
+  "show active-toolchain") [ -n "$tc" ] && [ -d "$RUSTUP_HOME/toolchains/$tc" ] ;;
+  "toolchain install")
+    echo "start $$" >>"$log"; sleep 2
+    mkdir -p "$RUSTUP_HOME/toolchains/$tc"; echo "end $$" >>"$log" ;;
+  *)
+    if [ -d "$RUSTUP_HOME/toolchains/$tc" ]; then echo "ran $tc"
+    else echo "unlocked $$" >>"$log"; echo "missing $tc"; exit 1; fi ;;
+esac
+"#;
+
+/// **Two `cargo` runs at once in a repo whose pinned toolchain is missing install it once, one
+/// after the other, under the repo's lock; a build whose toolchain is there takes no lock**
+/// (SKEIN-1431). rustup is not safe for two processes on one home (rust-lang/rustup#988), and the
+/// area is one home for every box of the repo. The two runs are in one box; the lock is a file in
+/// the area every box of the repo has, so two boxes take it the same way.
+///
+/// What would make it fail: the shim installing without the lock (two `start`s before an `end`,
+/// and two installs); taking the lock but not asking again once it holds it (a second install
+/// after the first); not installing at all and leaving it to rustup (`unlocked` in the log). And a
+/// build that waits on the lock when nothing is missing: the third run is made while another
+/// process holds the lock, and must not wait for it.
+#[test]
+fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") || !have("flock") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux or flock, so the repo's \
+             install lock was NOT exercised",
+        );
+    }
+    let (root, prefix, _pins) = versions_fleet("rustlock");
+    bootstrap_toolchain(&root, FAKE_RUSTUP.as_bytes());
+    let store = root.join("skein/repos/rustlock/store/data");
+    ensure_store(&store).expect("a managed store");
+    let tree = PathBuf::from(box_root("rustlock-main")).join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(
+        tree.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.90.0\"\n",
+    )
+    .unwrap();
+    let agent = "{ cargo build > /tmp/a.out 2>/tmp/a.err & cargo build > /tmp/b.out 2>/tmp/b.err; wait; \
+                   printf 'a %s\\n' \"$(cat /tmp/a.out)\"; printf 'b %s\\n' \"$(cat /tmp/b.out)\"; \
+                   exec 9>>\"$SKEIN_REPO_TOOLS/.locks/tools\"; flock 9; \
+                   printf 'held %s\\n' \"$(timeout 20 cargo build 2>&1 || echo waited)\"; exec 9>&-; \
+                 } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300";
+    let (_launched, anchor, report) = start_in_repo("rustlock-main", &prefix, &store, agent, "rs");
+    end("rustlock-main", anchor);
+    let log = fs::read_to_string(root.join("boxes/.repo-tools/rustlock/skein-test-installs.log"))
+        .unwrap_or_default();
+    let shape: Vec<&str> = log
+        .lines()
+        .map(|l| l.split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        shape,
+        ["start", "end"],
+        "two cargo runs at once did not install the missing toolchain exactly once, under the \
+         lock:\n{log}\n{report:?}"
+    );
+    for run in ["a", "b"] {
+        assert_eq!(
+            field(&report, run),
+            "ran 1.90.0",
+            "run {run} did not build with the toolchain the other installed: {report:?}"
+        );
+    }
+    assert_eq!(
+        field(&report, "held"),
+        "ran 1.90.0",
+        "a build whose toolchain is there waited on the install lock: {report:?}"
+    );
+}

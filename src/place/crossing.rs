@@ -48,11 +48,14 @@ const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 /// check, where the row and the thing it checked were built from different sets, and the row
 /// reported healthy on the one fleet it existed to catch.
 ///
-/// The third entry is the box's `~/.cargo/bin`, where `box-session.sh` binds the fleet's shared
-/// Rust toolchain read-only (SKEIN-1337). Spelled from `home` like the first, so this stays a
-/// function of the placement record alone.
+/// The second entry is the `bin` of the repo's tools area, which `box-session.sh` binds at
+/// `~/.repo-tools` in every box of the repo (SKEIN-1431), and the fourth is the box's
+/// `~/.cargo/bin`, where it binds the fleet's shared Rust toolchain read-only (SKEIN-1337). Both
+/// spelled from `home` like the first, so this stays a function of the placement record alone.
 pub fn box_path(home: &str) -> String {
-    format!("{home}/.local/bin:{BOX_PATH_HEAD}:{home}/.cargo/bin:{FLEET_PATH}")
+    format!(
+        "{home}/.local/bin:{home}/.repo-tools/tools/bin:{BOX_PATH_HEAD}:{home}/.cargo/bin:{FLEET_PATH}"
+    )
 }
 
 /// The launcher, embedded for what this module reads out of it: its `inherited_env` list, its
@@ -227,8 +230,8 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
 }
 
 /// **The names the session points at the repo's download cache** — every `NAME=` the launcher's
-/// session block exports inside its `if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]` (SKEIN-1350),
-/// read out of the launcher's text (SKEIN-1354).
+/// session block exports inside its `if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]` (SKEIN-1350,
+/// SKEIN-1431), read out of the launcher's text (SKEIN-1354).
 ///
 /// A crossing carries these as part of [`session_exports`], which reads every export in the
 /// block; this list is the part of it that names the cache, for what is said about the cache. A
@@ -257,7 +260,7 @@ pub fn session_cache_names() -> &'static [String] {
 }
 
 /// The line that opens the session block's repo-cache exports, as `src/box-session.sh` spells it.
-const CACHE_EXPORTS_OPEN: &str = r#"if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]; then"#;
+const CACHE_EXPORTS_OPEN: &str = r#"if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]; then"#;
 
 fn parse_session_cache_names(script: &str) -> Vec<String> {
     let mut lines = script
@@ -598,7 +601,7 @@ mod tests {
     ///
     /// Pinned by name, for the reason the test below is. What would make it fail: the session
     /// block gaining or losing a tool without this list being read again; a parse that stops at
-    /// the first line's `\\` or reads the `if` line's `$repo_cache`; the launcher moving the
+    /// the first line's `\\` or reads the `if` line's `$repo_tools`; the launcher moving the
     /// exports out of their `if`, which panics here rather than in a crossing. And a name that a
     /// crossing's `env`, `nsenter` or `bash` reads in front of the hop, which the parse refuses.
     #[test]
@@ -609,11 +612,28 @@ mod tests {
             got,
             [
                 "CARGO_HOME",
+                "CARGO_INSTALL_ROOT",
+                "FNM_DIR",
+                "GOBIN",
+                "GOPATH",
+                "MISE_DATA_DIR",
+                "NPM_CONFIG_PREFIX",
+                "NVM_DIR",
+                "PIPX_BIN_DIR",
+                "PIPX_HOME",
                 "PIP_CACHE_DIR",
+                "PNPM_HOME",
+                "PYENV_ROOT",
+                "SKEIN_REPO_TOOLS",
                 "UV_CACHE_DIR",
                 "UV_LINK_MODE",
+                "UV_PYTHON_INSTALL_DIR",
+                "UV_TOOL_BIN_DIR",
+                "UV_TOOL_DIR",
+                "VOLTA_HOME",
                 "npm_config_cache",
                 "npm_config_store_dir",
+                "pnpm_config_global_bin_dir",
                 "pnpm_config_store_dir",
             ],
             "the names a crossing takes from the box's session for the repo cache are not the \
@@ -621,7 +641,7 @@ mod tests {
         );
         for bad in ["PATH", "LD_PRELOAD", "BASH_ENV"] {
             let script =
-                format!("  {CACHE_EXPORTS_OPEN}\n    export {bad}=\"$repo_cache/x\"\n  fi\n");
+                format!("  {CACHE_EXPORTS_OPEN}\n    export {bad}=\"$repo_tools/x\"\n  fi\n");
             assert!(
                 std::panic::catch_unwind(|| parse_session_cache_names(&script)).is_err(),
                 "a session block that points {bad} at the cache would have a crossing take the \
@@ -650,15 +670,31 @@ mod tests {
                 "CARGO_INSTALL_ROOT",
                 "DISABLE_AUTOUPDATER",
                 "DISABLE_UPDATES",
+                "FNM_DIR",
+                "GOBIN",
+                "GOPATH",
+                "MISE_DATA_DIR",
+                "NPM_CONFIG_PREFIX",
+                "NVM_DIR",
+                "PIPX_BIN_DIR",
+                "PIPX_HOME",
                 "PIP_CACHE_DIR",
                 "PLAYWRIGHT_BROWSERS_PATH",
                 "PLAYWRIGHT_SKIP_BROWSER_GC",
+                "PNPM_HOME",
+                "PYENV_ROOT",
                 "RUSTUP_AUTO_INSTALL",
                 "RUSTUP_HOME",
+                "SKEIN_REPO_TOOLS",
                 "UV_CACHE_DIR",
                 "UV_LINK_MODE",
+                "UV_PYTHON_INSTALL_DIR",
+                "UV_TOOL_BIN_DIR",
+                "UV_TOOL_DIR",
+                "VOLTA_HOME",
                 "npm_config_cache",
                 "npm_config_store_dir",
+                "pnpm_config_global_bin_dir",
                 "pnpm_config_store_dir",
             ],
             "the names a crossing takes from the box's session are not the names \

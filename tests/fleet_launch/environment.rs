@@ -1099,8 +1099,10 @@ struct CacheCrossing {
     /// The same lines from a `Place::exec` crossing into that box, then `cargo <rc>` and
     /// `npm <rc or absent>` for a cache write by each tool, run through the same crossing.
     crossed: String,
-    /// `repos/<id>/store/cache` on this side of the box.
+    /// The repo's tools area on this side of the box, `<fleet root>/.repo-tools/<id>`.
     cache: PathBuf,
+    /// Where the box sees the area, `~/.repo-tools` of the sandbox's home.
+    seen_at: String,
     /// Where `cache` links to when the case makes it a link, and otherwise nothing.
     elsewhere: PathBuf,
     /// The fixture both paths are in, kept until the assertions on them are done.
@@ -1109,8 +1111,8 @@ struct CacheCrossing {
 
 /// Start box `<tag>-main` of a repo whose store has the managed shape, `repos/<tag>/store/data`,
 /// cross into it with `Place::exec`, and run a cargo and an npm cache write through that crossing.
-/// With `linked`, the repo's `store/cache` is a link to another directory, which the launcher
-/// refuses, so the box has no repo cache.
+/// With `linked`, the repo's tools area is a link to another directory, which the launcher
+/// refuses, so the box has no area and no repo cache (SKEIN-1431).
 ///
 /// This process's environment stands for skein-server's, as in the tests above, and it carries a
 /// `CARGO_HOME`, `npm_config_cache` and `PIP_CACHE_DIR` of its own: skein-server runs with them on
@@ -1137,15 +1139,11 @@ fn cross_into_a_box_of_a_managed_store(tag: &str, linked: bool) -> CacheCrossing
 
     let store = root.join(format!("skein/repos/{tag}/store/data"));
     ensure_store(&store).expect("a managed store, with its repo cache");
-    let cache = store.parent().unwrap().join("cache");
-    assert!(
-        cache.is_dir() && !cache.is_symlink(),
-        "ensure_store made no repo cache beside a managed store, so nothing below is about one"
-    );
+    let cache = root.join(format!("boxes/.repo-tools/{tag}"));
     let elsewhere = root.join("elsewhere-cache");
     if linked {
         fs::create_dir_all(&elsewhere).unwrap();
-        fs::remove_dir(&cache).unwrap();
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &cache).unwrap();
     }
 
@@ -1240,6 +1238,7 @@ fn cross_into_a_box_of_a_managed_store(tag: &str, linked: bool) -> CacheCrossing
         session,
         crossed: crossed.unwrap_or_else(|e| panic!("the crossing into the box did not run: {e}")),
         cache,
+        seen_at: format!("{}/.repo-tools", sandbox_home.display()),
         elsewhere,
         _root: root,
     }
@@ -1255,10 +1254,12 @@ fn field_of(report: &str, key: &str) -> String {
 }
 
 /// **A crossing into a box of a managed-store repo points cargo, npm, pip, uv and pnpm at the
-/// repo's cache, with its session's values, and a cache write through it lands there**
-/// (SKEIN-1354).
+/// repo's tools area, with its session's values, and a cache write through it lands there**
+/// (SKEIN-1354, SKEIN-1431).
 ///
-/// SKEIN-1350 pointed each tool at `repos/<id>/store/cache` in the box's session only. A command
+/// The cache was `repos/<id>/store/cache` on the host when this was written; it is the repo's
+/// tools area on the fleet's disk now, which the box sees at `~/.repo-tools`, and pnpm's store is
+/// the box's own beside its checkout. SKEIN-1350 pointed each tool at it in the box's session only. A command
 /// skein runs into the box through a crossing (provisioning, a model call, the attach shell) fell
 /// back to the box's own `~/.cargo` and `~/.npm`. This is that crossing, for real, into a real box:
 /// every name the session block exports for the cache is compared between the box's own agent and
@@ -1281,14 +1282,18 @@ fn a_crossing_into_a_box_uses_its_repos_download_cache() {
         );
     }
     let got = cross_into_a_box_of_a_managed_store("crosscache", false);
-    let cache = got.cache.display().to_string();
+    let area = &got.seen_at;
+    let pnpm_store = "/crosscache-main/pnpm-store";
     for name in skein::place::session_cache_names() {
         let key = format!("var {name}");
         let session = field_of(&got.session, &key);
         assert!(
-            session == "copy" || session.starts_with(&format!("{cache}/")),
-            "the box's session does not point {name} at its repo's cache {cache}, so the crossing \
-             below has nothing to agree with: {:?}",
+            session == "copy"
+                || session == *area
+                || session.starts_with(&format!("{area}/"))
+                || session.ends_with(pnpm_store),
+            "the box's session does not point {name} at its repo's tools area {area}, so the \
+             crossing below has nothing to agree with: {:?}",
             got.session
         );
         assert_eq!(
@@ -1305,14 +1310,14 @@ fn a_crossing_into_a_box_uses_its_repos_download_cache() {
         got.crossed
     );
     assert!(
-        got.cache.join("cargo/.package-cache").is_file(),
+        got.cache.join("cache/cargo/.package-cache").is_file(),
         "cargo run through a crossing did not take its download lock in the repo's cache, so it \
          used a CARGO_HOME of its own: {:?}",
         got.crossed
     );
     if field_of(&got.crossed, "npm") != "absent" {
         assert!(
-            got.cache.join("npm/_cacache").is_dir(),
+            got.cache.join("cache/npm/_cacache").is_dir(),
             "npm run through a crossing did not write into the repo's cache: {:?}",
             got.crossed
         );
@@ -1322,18 +1327,18 @@ fn a_crossing_into_a_box_uses_its_repos_download_cache() {
 /// **A crossing into a box the launcher gave no repo cache carries none of the cache names, so the
 /// box keeps its own `~/.cargo` and `~/.npm`** (SKEIN-1354).
 ///
-/// The store has the managed shape and `store/cache` is there, but as a link, which the launcher
-/// refuses (`[ ! -L "$repo_cache_at" ]`). That stands for every box with no repo cache: a store
-/// kept elsewhere with `skein add --store` and a missing cache leave `$repo_cache` empty by the
-/// same line, before anything is exported. skein-server's own `CARGO_HOME`, `npm_config_cache`
+/// The store has the managed shape and the repo's tools area is there, but as a link, which the
+/// launcher refuses (it binds only a descriptor that leads to the area's own path, SKEIN-1431).
+/// That stands for every box with no area: a store kept elsewhere with `skein add --store` names no
+/// repo, and leaves `$repo_tools` empty by the same block, before anything is exported. skein-server's own `CARGO_HOME`, `npm_config_cache`
 /// and `PIP_CACHE_DIR` are set in this environment, so a crossing that let them through is seen.
 ///
 /// What would make it fail: a crossing that keeps the cache names from skein-server's environment
 /// (on `keep_only_listed`'s list) rather than taking them from the session, which carries
 /// `skein-test-server-cargo`; and the cache names put on the launcher's `inherited_env`, the
 /// obvious way to carry them, which hands the session and every crossing skein-server's own
-/// caches. Each was run and failed this test. (Dropping the launcher's link check fails it too,
-/// but earlier: bwrap then cannot start the box at all.)
+/// caches. Each was run and failed this test. (Dropping the launcher's link check fails it too:
+/// the box is then given the area through the link, and its names point into `elsewhere`.)
 #[test]
 fn a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names() {
     let _env = env_lock();
@@ -1347,6 +1352,17 @@ fn a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names() {
     let got = cross_into_a_box_of_a_managed_store("crossnocache", true);
     for name in skein::place::session_cache_names() {
         let key = format!("var {name}");
+        if name == "NPM_CONFIG_PREFIX" {
+            // The sandbox's own, which every box inherits (`inherited_env`) and a box with no area
+            // keeps: the prefix the agent CLIs are in. Never one in an area.
+            let (session, crossed) = (field_of(&got.session, &key), field_of(&got.crossed, &key));
+            assert!(
+                session == crossed && !session.contains("/.repo-tools"),
+                "a box with no area has npm's global prefix in an area, or its crossing disagrees: \
+                 session {session:?}, crossing {crossed:?}"
+            );
+            continue;
+        }
         assert_eq!(
             (
                 field_of(&got.session, &key).as_str(),

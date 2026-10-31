@@ -120,9 +120,12 @@ set -uo pipefail
 # Boxes remain one trust domain for their STATE — §9.2 says so and it is still true — but the
 # domain's membership is no longer writable from inside it (SKEIN-963, SKEIN-968).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# The third entry is `~/.cargo/bin`, where the fleet's shared Rust toolchain is bound read-only
-# (SKEIN-1337, "the fleet's Rust toolchain" below). Ahead of the fixed six, which still end it.
-box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.cargo/bin:$PATH"
+# The second entry is the repo's tools area, bound at `~/.repo-tools` in every box of the repo
+# ("This repo's tools and caches" below, SKEIN-1431): what an agent installs there lasts across
+# restarts and reaches the repo's other boxes. A box with no area has no such directory. The fourth
+# is `~/.cargo/bin`, where the fleet's shared Rust toolchain is bound read-only (SKEIN-1337, "the
+# fleet's Rust toolchain" below). Ahead of the fixed six, which still end it.
+box_path="$HOME/.local/bin:$HOME/.repo-tools/tools/bin:/usr/local/share/npm-global/bin:$HOME/.cargo/bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
 #
 # Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
@@ -2523,20 +2526,14 @@ if [ -n "${SKEIN_BOX_STORE-}" ] && [ -f "$SKEIN_BOX_STORE/shared-paths.txt" ] \
     surfaced_dir surfaced_real
 fi
 
-# --- This repo's download cache, shared by its boxes and by no other repo's (SKEIN-1350) ----------
+# --- This repo's old download cache on the host, still bound so it can be cleaned (SKEIN-1350) ---
 #
-# The owner's decision of 2026-10-29 (`docs/decisions/repos-are-the-trust-boundary.md`): the boxes
-# of one repo are one trust domain and share freely, and a box of another repo cannot see or change
-# anything that domain runs. So cargo's registry and git downloads, npm's cache with `_npx` in it,
-# pip's, uv's and pnpm's store are kept once per repo, at `store/cache` beside `store/data`, which
-# the host makes with the store (`kit::repo_cache_dir`). The session block points each tool at it.
-#
-# Bound back at its own path, after every tmpfs, the way `store/shared-home` is above: a covered box
-# sits under a tmpfs over the whole repos mount, so without the bind it would write into that tmpfs
-# and lose it at its next stop. A box that is not covered sees the path already and the bind changes
-# nothing. Only a store of the managed shape has one, only as a real directory, never a link; a
-# store kept elsewhere by `skein add --store` has no sibling any box can see, so its boxes keep
-# their own caches.
+# Kept once per repo at `store/cache` beside `store/data` (`kit::repo_cache_dir`) until SKEIN-1431
+# moved every cache into the repo's tools area below. No tool is pointed at it any more and nothing
+# here removes it. It is still bound back, at its own path and after every tmpfs, because skein
+# lists it as cleanable and a box's agent removes what skein listed from inside the box
+# (`skein_clean`, SKEIN-1356): a covered box would otherwise find nothing there to remove. Only a
+# store of the managed shape has one, only as a real directory, never a link.
 repo_cache=""
 case "${SKEIN_BOX_STORE-}" in
   */./* | */../* | *//*) ;;
@@ -2547,7 +2544,64 @@ case "${SKEIN_BOX_STORE-}" in
     ;;
 esac
 [ -n "$repo_cache" ] && binds+=(--bind "$repo_cache" "$repo_cache")
-unset repo_cache_at
+unset repo_cache_at repo_cache
+
+# --- This repo's tools and caches, on the fleet's own disk, shared by its boxes alone (SKEIN-1431) -
+#
+# The owner's decision of 2026-10-29 (`docs/decisions/repos-are-the-trust-boundary.md`): the boxes
+# of one repo are one trust domain and share freely, and a box of another repo cannot see or change
+# anything that domain runs. And of 2026-10-31 (SKEIN-1426): each repo gets one durable, writable
+# area for the tools its agents install and for every download cache, on the fleet's own disk.
+# The caches used to be at `repos/<id>/store/cache` on the host's store mount (SKEIN-1350), which
+# is virtiofs; they are no longer used, and nothing here removes them.
+#
+# **Where: `<fleet root>/.repo-tools/<repo id>`.** On the fleet's disk, the file system the box
+# roots and their checkouts are on (measured: one device number), so a toolchain unpacks at local
+# disk speed. Under the fleet root and not under `.skein`: `.skein` is skein's own, read-only in
+# every box but for the three drop-boxes above, and a box-writable directory inside it would be a
+# hole in that rule. A name that begins with a dot, because nothing that lists the fleet root takes
+# one for a box (`util::valid_name` refuses a box named so). A covered box sees none of it, since
+# the fleet root is under a tmpfs above; this one area is bound back. An uncovered box sees the
+# fleet root whole, every repo's area with it, as it already sees every other box.
+#
+# **Seen in the box at `~/.repo-tools`, not at its own path.** Then `box_path` names its `bin`
+# without knowing the repo, and stays one string that `place::box_path` builds as well; and every
+# box of the repo sees its tools at one path, which is what a tool that writes its own absolute
+# path into what it installs (a rustup link, a uv tool's venv, an npm bin's shebang) needs.
+#
+# The repo is the store's: `repos/<id>/store/data`, the shape `store/shared-home` is read from
+# above. A store kept elsewhere by `skein add --store` names no repo id any box shares, so its boxes
+# get no area and keep their own tools and caches. Both directories are made here, at fleet scope,
+# and the area is then held open and checked through the descriptor, as the box's own directories
+# are (SKEIN-1287): a real directory owned by this uid, at exactly the path it is named by. Anything
+# else is refused, with a line saying so, rather than bound.
+repo_tools="" repo_tools_id="" repo_tools_fd=""
+case "${SKEIN_BOX_STORE-}" in
+  */./* | */../* | *//*) ;;
+  /*/repos/*/store/data | /*/repos/*/store/.claude)
+    [ "$(basename "$(dirname "${SKEIN_BOX_STORE%/store/*}")")" = repos ] &&
+      repo_tools_id="$(basename "${SKEIN_BOX_STORE%/store/*}")"
+    ;;
+esac
+case "$repo_tools_id" in "" | .* | -* | *..* | *[!A-Za-z0-9._-]*) repo_tools_id="" ;; esac
+if [ -n "$repo_tools_id" ] &&
+  repo_tools_at="$(cd -P -- "${SKEIN_FLEET_ROOT:-/boxes}" 2>/dev/null && pwd -P)/.repo-tools"; then
+  for repo_tools_dir in "$repo_tools_at" "$repo_tools_at/$repo_tools_id"; do
+    [ -e "$repo_tools_dir" ] || [ -L "$repo_tools_dir" ] || mkdir -m 700 -- "$repo_tools_dir" 2>/dev/null
+  done
+  [ -e "$home_at/.repo-tools" ] || [ -L "$home_at/.repo-tools" ] || mkdir -- "$home_at/.repo-tools" 2>/dev/null
+  if [ -d "$home_at/.repo-tools" ] && [ ! -L "$home_at/.repo-tools" ] &&
+    { exec {repo_tools_fd}<"$repo_tools_at/$repo_tools_id/."; } 2>/dev/null &&
+    [ "$(readlink -- "/proc/$$/fd/$repo_tools_fd")" = "$repo_tools_at/$repo_tools_id" ] &&
+    [ -O "/proc/$$/fd/$repo_tools_fd" ]; then
+    binds+=(--bind-fd "$repo_tools_fd" "$HOME/.repo-tools")
+    repo_tools="$HOME/.repo-tools"
+  else
+    [ -z "$repo_tools_fd" ] || exec {repo_tools_fd}<&-
+    echo "skein: $box gets no repo tools area: $repo_tools_at/$repo_tools_id, or ~/.repo-tools in its home, is not a real directory of skein's own, so its installs and caches stay in this box. Move whichever it is aside and start the box again, and a new one is made." >&2
+  fi
+fi
+unset repo_tools_id repo_tools_at repo_tools_dir repo_tools_fd
 
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
 # fleet, and the box has no use for it after this point.
@@ -2909,7 +2963,52 @@ unset SKEIN_NPM_PREFIX
 # file system". The name is read
 # here only in the shape `box_version` allows, and the shim looks at the file with a fixed-string
 # grep, so nothing in the box's tree is run or parsed as shell.
+#
+# **In a box with a repo tools area, rustup's home is the area's `rustup`** (SKEIN-1431), and it is
+# writable, so a toolchain the repo pins is installed there once and every box of the repo then
+# has it. Which home wins:
+#
+#   1. The read-only `~/.rustup` below, when the repo pins a toolchain the depot holds
+#      (`rust-repo` in `SKEIN_BOX_VERSIONS`, SKEIN-1415): it is there with no download, and SKEIN-1434
+#      retires this path once the area has replaced it.
+#   2. Else the area's, whenever the box has an area, with or without a fleet default rolled out.
+#   3. Else, with no area, what a box had before: `~/.rustup` for a rolled-out default, or the
+#      bootstrap's own home.
+#
+# In the area, the fleet's toolchain is the default, as a toolchain link named `fleet`, so a repo
+# with no toolchain file builds with no download: the rolled-out default when there is one, else
+# the bootstrap's `stable-<triple>`. The shim makes the link, in the box and so with the box's own
+# power, and remakes it when it names another toolchain; `rustup toolchain link` makes exactly
+# this, one symbolic link at `toolchains/fleet` (measured with rustup 1.29.0), and the shim makes it
+# by a rename so two boxes doing it at once cannot leave it half made. It writes `settings.toml`
+# only when there is none, so a default an agent chose stays. rustup refuses `stable` or a version
+# as a link's name, so a toolchain file naming one is installed into the area even when it is the
+# fleet's own.
+#
+# **The install lock.** rustup is not safe for two processes on one home (rust-lang/rustup#988),
+# and every box of the repo shares this one. So a proxy run with no toolchain resolved yet asks
+# rustup whether the toolchain it would use is there (`show active-toolchain` with auto-install off),
+# and only when it is not takes the repo's lock at `.locks/tools` in the area, asks again, and
+# installs it (`rustup toolchain install`, which reads the toolchain file's components and targets
+# too). A build whose toolchain is there never touches the lock. A proxy rustup itself started,
+# which it marks with `RUSTUP_TOOLCHAIN_SOURCE`, is skipped: its toolchain was resolved by the
+# rustup that started it, and every `rustc` cargo runs is one. `skein-lock` (`src/plugin/bin`) takes
+# the same lock for an agent's own installs.
+#
+# In the area, rustup may change toolchains, so the refusal below is only for `rustup self`.
 toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
+rust_default="$(box_version rust)" || rust_default=""
+rust_pinned="$(box_version rust-repo)" || rust_pinned=""
+rust_area_tc=""
+if [ -n "$repo_tools" ] && [ -z "$rust_pinned" ]; then
+  if [ -n "$rust_default" ]; then
+    rust_area_tc="$depot/rust-toolchain/$rust_default"
+  else
+    for tc in "$toolchain/rustup/toolchains"/stable-*; do
+      [ -d "$tc" ] && [ ! -L "$tc" ] && { rust_area_tc="$tc"; break; }
+    done
+  fi
+fi
 rust_missing="" rust_missing_channel=""
 read -r -a rust_kvs <<<"${SKEIN_BOX_VERSIONS-}"
 for kv in "${rust_kvs[@]}"; do
@@ -2935,9 +3034,41 @@ if [ -d "$toolchain/cargo/bin" ] && mkdir -p -- "$home_at/.cargo/bin" 2>/dev/nul
       printf 'skein_rustup=%q\n' "$toolchain/cargo/bin/rustup"
       printf 'skein_missing=%q skein_missing_at=%q skein_channel=%q skein_tree=%q\n' \
         "$rust_missing" "${rust_missing%%[+@]*}" "$rust_missing_channel" "$tree"
+      printf 'skein_area_tc=%q\n' "$rust_area_tc"
       cat <<'RUSTUPSHIM'
 called="${0##*/}"
-if [ -n "$skein_missing" ] && [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN-}" ] &&
+area=""
+if [ -n "$skein_area_tc" ] && [ -n "${SKEIN_REPO_TOOLS-}" ] &&
+  [ "${RUSTUP_HOME-}" = "$SKEIN_REPO_TOOLS/rustup" ]; then
+  area=1
+  tcs="$RUSTUP_HOME/toolchains"
+  if [ "$(readlink -- "$tcs/fleet" 2>/dev/null)" != "$skein_area_tc" ] && mkdir -p -- "$tcs"; then
+    ln -s -- "$skein_area_tc" "$tcs/.fleet.$$" 2>/dev/null && mv -fT -- "$tcs/.fleet.$$" "$tcs/fleet" 2>/dev/null
+    rm -f -- "$tcs/.fleet.$$"
+  fi
+  if [ ! -e "$RUSTUP_HOME/settings.toml" ]; then
+    printf 'version = "12"\ndefault_toolchain = "fleet"\nauto_self_update = "disable"\n\n[overrides]\n' \
+      >"$RUSTUP_HOME/.settings.$$" 2>/dev/null &&
+      ln -- "$RUSTUP_HOME/.settings.$$" "$RUSTUP_HOME/settings.toml" 2>/dev/null
+    rm -f -- "$RUSTUP_HOME/.settings.$$"
+  fi
+  if [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN_SOURCE-}" ]; then
+    plus=()
+    case "${1-}" in +?*) plus=("$1") ;; esac
+    have() { RUSTUP_AUTO_INSTALL=0 "$skein_rustup" "${plus[@]}" show active-toolchain >/dev/null 2>&1; }
+    if ! have && mkdir -p -- "$SKEIN_REPO_TOOLS/.locks" && exec {lock}>>"$SKEIN_REPO_TOOLS/.locks/tools"; then
+      if ! flock -n "$lock"; then
+        echo "skein: another box of this repo is installing a Rust toolchain; $called waits for it to finish." >&2
+        flock "$lock"
+      fi
+      if ! have; then
+        "$skein_rustup" "${plus[@]}" toolchain install >&2 || exit
+      fi
+      exec {lock}>&-
+    fi
+  fi
+fi
+if [ -z "$area" ] && [ -n "$skein_missing" ] && [ "$called" != rustup ] && [ -z "${RUSTUP_TOOLCHAIN-}" ] &&
   [ ! -d "${RUSTUP_HOME:-$HOME/.rustup}/toolchains/$skein_missing_at" ]; then
   case "${1-}" in
     +*) ;;
@@ -2967,6 +3098,13 @@ for a in "$@"; do
   case "$a" in -*|+*) continue ;; esac
   if [ -z "$sub" ]; then sub=$a; else arg=$a; break; fi
 done
+if [ -n "$area" ]; then
+  if [ "$sub" = self ]; then
+    echo "skein: rustup itself is the fleet's and is read-only, so it cannot update or remove itself here. This repo's toolchains can still be installed and removed, with rustup toolchain install and uninstall." >&2
+    exit 1
+  fi
+  exec "$skein_rustup" "$@"
+fi
 case "$sub:$arg" in
   default:?*|install:*|uninstall:*|update:*|upgrade:*|self:*|set:*|toolchain:install|toolchain:uninstall|toolchain:remove|toolchain:link|component:add|component:remove|target:add|target:remove|override:set|override:unset|override:add|override:remove)
     echo "skein: this box's Rust toolchain is shared by the whole fleet and is read-only, so rustup cannot change it. To use a different toolchain, ask the person who runs the fleet." >&2
@@ -3002,8 +3140,10 @@ RUSTUPSHIM
   #
   # `~/.rustup` is made by name only when absent and used only when it is a real directory, so a
   # link the box put there is never followed out of the box.
-  rust_default="$(box_version rust)" || rust_default=""
-  rust_repo="$(box_version rust-repo)" || rust_repo=""
+  #
+  # With a repo tools area and no depot pin, none of this is made: the area's home is the box's,
+  # and the default reaches it as the `fleet` link above, so it is reported as bound all the same.
+  rust_repo="$rust_pinned"
   [ "$rust_repo" != "$rust_default" ] || rust_repo=""
   rust_repo_at="${rust_repo%%[+@]*}"
   rust_default_at="${rust_default%%[+@]*}"
@@ -3013,7 +3153,10 @@ RUSTUPSHIM
     done
     [ -n "$rust_default_at" ] || rust_default_at="$rust_repo_at"
   fi
-  if [ -n "$rust_default" ] || [ -n "$rust_repo" ]; then
+  if [ -n "$rust_area_tc" ]; then
+    rustup_home="$repo_tools/rustup"
+    [ -z "$rust_default" ] || versions_bound+=" rust=$rust_default"
+  elif [ -n "$rust_default" ] || [ -n "$rust_repo" ]; then
     [ -e "$home_at/.rustup" ] || [ -L "$home_at/.rustup" ] || mkdir -- "$home_at/.rustup" 2>/dev/null
     if [ -d "$home_at/.rustup" ] && [ ! -L "$home_at/.rustup" ] && open_new "$bin_at" rustup-settings.toml; then
       printf 'version = "12"\ndefault_toolchain = "%s"\nprofile = "minimal"\n\n[overrides]\n' \
@@ -3042,7 +3185,7 @@ RUSTUPSHIM
     fi
   fi
 fi
-unset toolchain rust_default rust_repo rust_default_at rust_repo_at rust_missing rust_missing_channel tc
+unset toolchain rust_default rust_repo rust_pinned rust_area_tc rust_default_at rust_repo_at rust_missing rust_missing_channel tc
 unset -f box_version
 unset SKEIN_BOX_VERSIONS
 
@@ -3745,7 +3888,7 @@ exec bwrap \
   "${binds[@]}" \
   -- \
   bash -lc '
-    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; repo_cache="$7"
+    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; repo_tools="$7"
     rustup_home="$8"
     shift 8
     # The box own PATH, decided at the top of this file and handed across as a positional.
@@ -3795,26 +3938,58 @@ exec bwrap \
     # Once a toolchain is rolled out (SKEIN-1372), RUSTUP_HOME is the read-only home the launcher put
     # together at ~/.rustup instead, and RUSTUP_AUTO_INSTALL=0 turns a toolchain it lacks into
     # rustup saying it is not installed, where an install attempt failed on a read-only temp root.
-    if [ -n "$rustup_home" ]; then
+    #
+    # In a box with a repo tools area and no depot pin, RUSTUP_HOME is the area rustup instead
+    # (SKEIN-1431, "which home wins" at the toolchain block above), and writable, so auto-install is
+    # on: the shim installs a missing toolchain under the repo lock, and rustup only finds one
+    # missing itself when the shim did not ask. CARGO_HOME and CARGO_INSTALL_ROOT are set with the
+    # area below.
+    if [ -n "$rustup_home" ] && [ "$rustup_home" = "$repo_tools/rustup" ]; then
+      export RUSTUP_HOME="$rustup_home" RUSTUP_AUTO_INSTALL=1
+    elif [ -n "$rustup_home" ]; then
       export RUSTUP_HOME="$rustup_home" CARGO_HOME="$HOME/.cargo" CARGO_INSTALL_ROOT="$HOME/.local" \
         RUSTUP_AUTO_INSTALL=0
     elif [ -d "${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" ]; then
       export RUSTUP_HOME="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain/rustup" CARGO_HOME="$HOME/.cargo" \
         CARGO_INSTALL_ROOT="$HOME/.local"
     fi
-    # This repo download cache, shared by its boxes (SKEIN-1350, bound back at fleet scope above).
-    # Every tool here is pointed at it by a variable, because what was measured on 2026-10-29 in
-    # two bwrap namespaces at once decides it: cargo, npm with npx, pip, uv and pnpm each finished
-    # every round sharing one cache. cargo shares its whole CARGO_HOME and not only registry and
-    # git, because its download lock is the CARGO_HOME file .package-cache: with registry and git
-    # shared and the lock per box, two boxes fetching one git dependency at once failed in two
-    # rounds of three. The toolchain bin stays the read-only ~/.cargo/bin on box_path, and
-    # cargo install still lands in ~/.local. UV_LINK_MODE=copy because the cache is on another
-    # file system from the tree, where uv warns at every install before it copies anyway.
-    if [ -n "$repo_cache" ] && [ -d "$repo_cache" ]; then
-      export CARGO_HOME="$repo_cache/cargo" npm_config_cache="$repo_cache/npm" \
-        PIP_CACHE_DIR="$repo_cache/pip" UV_CACHE_DIR="$repo_cache/uv" UV_LINK_MODE=copy \
-        npm_config_store_dir="$repo_cache/pnpm" pnpm_config_store_dir="$repo_cache/pnpm"
+    # This repo tools area, shared by its boxes (SKEIN-1431, bound at ~/.repo-tools at fleet scope
+    # above): every download cache under cache/, and every tool manager pointed into it, so what an
+    # agent installs lasts across restarts and every box of the repo has it. Its bin, tools/bin, is
+    # second on box_path, and cargo install, uv tool, pipx, go install and npm i -g all put their
+    # commands there.
+    #
+    # The caches are shared because what was measured on 2026-10-29 in two bwrap namespaces at once
+    # decides it (SKEIN-1350): cargo, npm with npx, pip, uv and pnpm each finished every round
+    # sharing one cache. cargo shares its whole CARGO_HOME and not only registry and git, because
+    # its download lock is the CARGO_HOME file .package-cache: with registry and git shared and the
+    # lock per box, two boxes fetching one git dependency at once failed in two rounds of three. The
+    # toolchain bin stays the read-only ~/.cargo/bin on box_path.
+    #
+    # Two things do not follow the caches into the area, because a hard link cannot cross from one
+    # mount to another even on one file system (link(2) answers EXDEV, measured with bwrap 0.11), and
+    # the area and the box checkout are two binds. pnpm builds node_modules by hard links from its
+    # store, and copies every file when it cannot, which made every worktree a full copy
+    # (SKEIN-1429). So its store is this box own, beside the checkout in the box root, which is one
+    # bind with every worktree under tree: hard links again, one copy per box. And uv still copies
+    # from its cache into a venv (UV_LINK_MODE=copy), where it would warn at every install before
+    # copying anyway.
+    #
+    # npm global prefix moves too, and the agent CLIs stay where they are: they are found on
+    # box_path in the fleet prefix, which nothing here changes.
+    if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]; then
+      mkdir -p "$repo_tools/tools/bin" "$repo_tools/cache" 2>/dev/null
+      export SKEIN_REPO_TOOLS="$repo_tools" CARGO_HOME="$repo_tools/cache/cargo" \
+        CARGO_INSTALL_ROOT="$repo_tools/tools" npm_config_cache="$repo_tools/cache/npm" \
+        PIP_CACHE_DIR="$repo_tools/cache/pip" UV_CACHE_DIR="$repo_tools/cache/uv" UV_LINK_MODE=copy \
+        npm_config_store_dir="${tree%/*}/pnpm-store" pnpm_config_store_dir="${tree%/*}/pnpm-store" \
+        NPM_CONFIG_PREFIX="$repo_tools/tools" PNPM_HOME="$repo_tools/pnpm" \
+        pnpm_config_global_bin_dir="$repo_tools/tools/bin" NVM_DIR="$repo_tools/nvm" \
+        FNM_DIR="$repo_tools/fnm" VOLTA_HOME="$repo_tools/volta" \
+        UV_PYTHON_INSTALL_DIR="$repo_tools/uv/python" UV_TOOL_DIR="$repo_tools/uv/tools" \
+        UV_TOOL_BIN_DIR="$repo_tools/tools/bin" PIPX_HOME="$repo_tools/pipx" \
+        PIPX_BIN_DIR="$repo_tools/tools/bin" PYENV_ROOT="$repo_tools/pyenv" GOPATH="$repo_tools/go" \
+        GOBIN="$repo_tools/tools/bin" MISE_DATA_DIR="$repo_tools/mise"
     fi
     # The browsers directory of this box alone, where the kit links the fleet browsers (SKEIN-1341).
     # GC off, or Playwright removes the links to browsers the projects here do not use (measured).
@@ -3847,5 +4022,5 @@ exec bwrap \
     anchor="$("$tmux_bin" -S "$sock" display -p "#{pid}")" || exit 1
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
-  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${repo_cache-}" \
+  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${repo_tools-}" \
     "${rustup_home-}" "${pane_cmd[@]}"
