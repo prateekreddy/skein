@@ -42,6 +42,7 @@ import { register as band, onStart as bandStart, onTurnComplete as bandTurnCompl
 import { register as guide, onTurnComplete as guideTurnComplete } from './guide'
 import { register as identity, onStart as identityStart } from './identity'
 import { register as keeper, onStart as keeperStart } from './keeper'
+import { register as skeinPane } from './pane'
 import { onStart as toastsStart, onToolCall as toastsToolCall, onTurnComplete as toastsTurnComplete } from './toasts'
 import { register as toolResults } from './tool-results'
 import { register as tracker, onStart as trackerStart, onTurnComplete as trackerTurnComplete } from './tracker'
@@ -51,6 +52,7 @@ export const register: Register = on => {
   agentsPanel(on)
   attention(on)
   band(on)
+  skeinPane(on)
   keeper(on)
   guide(on)
   tracker(on)

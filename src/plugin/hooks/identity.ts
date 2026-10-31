@@ -12,7 +12,7 @@ import type { EngineInterface, On, SessionStartInput } from 'claude-code'
 
 import type { SkeinIdentity } from '../types'
 
-import { subcommand as bandSubcommand } from './band'
+import { openSkein, subcommand as bandSubcommand } from './band'
 
 const identity = atom({ plugin: 'skein', key: 'identity' } as const, null, {
   shape: 'identity-1',
@@ -39,6 +39,8 @@ export function register(on: On): void {
   on('command.run', { command: 'skein' }, async ($, e) => {
     if (e.args.trim() !== '') return bandSubcommand($, e.args)
     const found = await read($, identity)
+    // In a skein box `/skein` also opens the skein pane (SKEIN-1440); the answer stays the same.
+    if (await $.env.get('SKEIN_STATE')) await openSkein($, 'board')
 
     return { text: describe(found) }
   })

@@ -185,6 +185,12 @@ export async function lanesWorking($: EngineInterface): Promise<SkeinAgentRun[]>
   return (await read($, agents)).filter(a => a.status === 'running' && a.lane !== null)
 }
 
+/** Every subagent of the session that worked in a lane, running or ended, for the skein pane's
+ * lanes board (SKEIN-1440). */
+export async function laneRuns($: EngineInterface): Promise<SkeinAgentRun[]> {
+  return (await read($, agents)).filter(a => a.lane !== null)
+}
+
 export function register(on: On): void {
   on('command.run', { command: 'agents-info' }, async ($, e) => {
     // `/agents-info open` opens the panel, or brings it forward, without toggling it.
@@ -423,7 +429,7 @@ const STATUS_COLOR: Record<SkeinAgentStatus, string> = { running: 'cyan', done: 
 // Haiku 4.5 and the Claude 3 models have a 200K window; the rest, 1M.
 const windowOf = (model: string): number => (/haiku-4|claude-3/i.test(model) ? 200_000 : 1_000_000)
 
-const modelName = (id: string): string => {
+export const modelName = (id: string): string => {
   const m = /(fable|mythos|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?/i.exec(id)
   const [, family = '', major = '', minor] = m ?? []
   if (!family) return id.replace(/^claude-/, '').replace(/\[.*\]$/, '') || '-'
@@ -440,7 +446,7 @@ const ctxBar = (pct: number, width: number): string => {
 const fmtTokens = (n: number): string => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${Math.round(n)}`)
 
 // `≈$0.42`, with a `+` when a model had no price, so the figure is a floor.
-const fmtCost = (usd: number, isUnpriced: boolean): string => `≈$${usd < 10 ? usd.toFixed(2) : usd.toFixed(1)}${isUnpriced ? '+' : ''}`
+export const fmtCost = (usd: number, isUnpriced: boolean): string => `≈$${usd < 10 ? usd.toFixed(2) : usd.toFixed(1)}${isUnpriced ? '+' : ''}`
 
 const fmtTime = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000))

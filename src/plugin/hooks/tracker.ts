@@ -136,6 +136,15 @@ export async function heldNow($: Engine): Promise<{ items: SkeinLease[]; hasTrac
   }
 }
 
+/** What the session holds now, each with when its lease runs out as best this session can tell
+ * (null where the tracker never said), for the skein pane's holding panel (SKEIN-1440). */
+export async function leasesLeft($: Engine): Promise<{ lease: SkeinLease; endsAt: number | null }[]> {
+  const kept = await read($, leases)
+  const renewed = await lastRenewal($)
+
+  return (kept?.items ?? []).map(lease => ({ lease, endsAt: expiry(lease, renewed) }))
+}
+
 /** One tracker tool's successful answer, folded into the list. */
 async function heard($: Engine, tool: string, input: Record<string, unknown>, text: string): Promise<void> {
   const answer = parse(text)

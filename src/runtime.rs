@@ -381,6 +381,9 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     ),
     ("hooks/lanes.ts", include_str!("plugin/hooks/lanes.ts")),
     ("hooks/prices.ts", include_str!("plugin/hooks/prices.ts")),
+    // The skein pane and its lanes board (SKEIN-1440, step 3).
+    ("hooks/pane.tsx", include_str!("plugin/hooks/pane.tsx")),
+    ("hooks/board.ts", include_str!("plugin/hooks/board.ts")),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {

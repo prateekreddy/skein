@@ -69,6 +69,12 @@ export async function readResources($: Engine): Promise<(SkeinResources & { at: 
       ? null
       : { bytes: anon, limit: numberOr(mem.high, null) ?? numberOr(mem.max, null) }
   const cpu = isRecord(parsed.cpu) ? numberOr(parsed.cpu.cores, null) : null
+  const pids = isRecord(parsed.pids) ? { current: numberOr(parsed.pids.current, null), max: numberOr(parsed.pids.max, null) } : null
+  // What else skein asks of the box than disk, by kind (`memory`, `pids`): the agent's to act on.
+  const asked = (Array.isArray(parsed.asks) ? parsed.asks : [])
+    .filter(isRecord)
+    .map(a => a.kind)
+    .filter((k): k is string => typeof k === 'string' && k !== '' && k !== 'disk')
   const updates: SkeinUpdate[] = (Array.isArray(parsed.updates) ? parsed.updates : [])
     .filter(isRecord)
     .filter(u => typeof u.component === 'string' && typeof u.new === 'string')
@@ -95,6 +101,8 @@ export async function readResources($: Engine): Promise<(SkeinResources & { at: 
     },
     memory,
     cpu,
+    pids,
+    asked,
     updates,
   }
 }
@@ -143,7 +151,10 @@ export async function readJobsView($: Engine): Promise<SkeinBandJobs | null> {
     .filter(a => typeof a.box === 'string' && a.box !== '')
     .map(a => ({ box: String(a.box), command: String(a.command ?? a.class ?? ''), cores: numberOr(a.cores, 0) ?? 0 }))
 
-  return { jobs, ahead }
+  // The fleet's cores, what is granted of them, and how many jobs run, fleet-wide: the queue's slots.
+  const fleet = { cores: numberOr(parsed.cores, 0) ?? 0, granted: numberOr(parsed.granted, 0) ?? 0, running: numberOr(parsed.running, 0) ?? 0 }
+
+  return { jobs, ahead, fleet: fleet.cores > 0 ? fleet : null }
 }
 
 /**
@@ -209,7 +220,7 @@ export function vitalsLine(v: Vitals, columns: number): string {
 
 /** `▮▮▮▯▯▯▯▯▯▯`: `used` of `limit` in `n` segments, every one filled at or over the limit, and one
  * at least for any use, so a box using a little is not drawn as using none. */
-function bar(used: number, limit: number, n: number): string {
+export function bar(used: number, limit: number, n: number): string {
   const filled = limit <= 0 ? n : Math.max(used > 0 ? 1 : 0, Math.min(n, Math.round((used / limit) * n)))
 
   return '▮'.repeat(filled) + '▯'.repeat(n - filled)
@@ -228,14 +239,14 @@ const gib = (n: number) => (n / G).toFixed(1)
 const SPARKS = '▁▂▃▄▅▆▇█'
 
 /**
- * The last `SPARK_CELLS` minutes, from the first one kept: one cell a minute, a minute with no
- * reading left blank rather than filled in, each cell's height against the busiest minute shown (at
- * least one core, so an idle box draws low).
+ * The last `cells` minutes (the band's eight unless asked), from the first one kept: one cell a
+ * minute, a minute with no reading left blank rather than filled in, each cell's height against the
+ * busiest minute shown (at least one core, so an idle box draws low).
  */
-export function sparkline(history: readonly SkeinCpuSample[]): string {
+export function sparkline(history: readonly SkeinCpuSample[], cells = SPARK_CELLS): string {
   const last = history.at(-1)
   if (last === undefined) return ''
-  const first = Math.max(history[0]?.minute ?? last.minute, last.minute - SPARK_CELLS + 1)
+  const first = Math.max(history[0]?.minute ?? last.minute, last.minute - cells + 1)
   const shown = history.filter(s => s.minute >= first)
   const top = Math.max(1, ...shown.map(s => s.cores))
   const byMinute = new Map(shown.map(s => [s.minute, s.cores]))
