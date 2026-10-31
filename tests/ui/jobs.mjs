@@ -27,8 +27,10 @@ function makeFixture() {
   const fleet = path.join(root, "fleet");
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
-  // One job may ask for every core, so `web-main`'s takes the machine and `api-main`'s waits,
-  // whatever the machine running this has.
+  // One job may ask for every core, so `api-main`'s, asking for all of them, waits behind
+  // `web-main`'s single core whatever the machine running this has. The single core is the most a
+  // job can be sure of on a shared host: a job is also held back while work outside the queue
+  // keeps the machine busy (SKEIN-1430), and one asking for every core then never starts.
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ fleet_sandbox: "example", jobs_max_cores_per_job: 4096 }));
   fs.writeFileSync(path.join(home, "repos.json"), "[]");
   fs.writeFileSync(path.join(root, "sandboxes.json"), "{}");
@@ -66,7 +68,7 @@ function job(box, cores, argv) {
 }
 const said = path.join(fx.root, "job-said");
 const ran = path.join(fx.root, "it-ran");
-const running = job("web-main", 4096, ["sh", "-c", `echo $$ > ${said}.tmp && mv ${said}.tmp ${said}; exec sleep 300`]);
+const running = job("web-main", 1, ["sh", "-c", `echo $$ > ${said}.tmp && mv ${said}.tmp ${said}; exec sleep 300`]);
 const jobs = [running];
 
 const { value: check, report } = ledger();
@@ -81,8 +83,8 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch { return
 
 try {
   await until(() => fs.existsSync(said), 20000);
-  // Filed only once the first holds every core, so it cannot be granted first.
-  const waiting = job("api-main", 1, ["touch", ran]);
+  // Filed only once the first holds its core, so it cannot be granted first.
+  const waiting = job("api-main", 4096, ["touch", ran]);
   jobs.push(waiting);
   const pid = Number(fs.readFileSync(said, "utf8").trim());
   await page.goto(`http://127.0.0.1:${door.port}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
@@ -98,13 +100,13 @@ try {
   const runRow = panel.locator('.jb-row[data-state="running"]');
   check("the waiting row names its box and says why it waits", {
     box: (await waitRow.locator(".sq-meta b").first().textContent()).trim(),
-    why: (await waitRow.locator(".jb-why").textContent()).trim(),
+    why: /^waiting for \d+ cores \(\d+ free\)$/.test((await waitRow.locator(".jb-why").textContent()).trim()),
     cmd: (await waitRow.locator(".jb-cmd").textContent()).trim(),
-  }, { box: "api-main", why: "waiting for 1 core (0 free)", cmd: "touch it-ran" });
+  }, { box: "api-main", why: true, cmd: "touch it-ran" });
   check("the running row says its cores and how long it has run",
     /^\d+ cores? · .*running \d+[smh]$/.test((await runRow.locator(".jb-fig").textContent()).trim()), true);
-  check("the pool is shown, every core granted",
-    /^(\d+) cores · \1 granted · 0 free$/.test((await panel.locator(".jb-pool").textContent()).trim()), true);
+  check("the pool is shown, with the running job's one core granted",
+    /^\d+ cores · 1 granted · \d+ free$/.test((await panel.locator(".jb-pool").textContent()).trim()), true);
 
   // **What would make this fail:** the press not reaching the stop route, the queue not reading
   // the owner's stop, or the wrapper not reading `stopped` in its view.
