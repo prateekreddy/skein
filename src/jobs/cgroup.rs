@@ -26,8 +26,14 @@
 //! never runs for a moment in a cgroup of its own with no limit on it.
 //!
 //! **Measured at the end, then removed.** [`finish`] reads `cpu.stat`'s `usage_usec` and
-//! `memory.peak` from the job's cgroup and removes it. [`Rates`] turns two readings of a running job
-//! into the cores it is using now.
+//! `memory.peak` from the job's cgroup and removes it. A job whose wrapper is gone, killed with `-9`
+//! while its command ran on, has its cgroup killed first: the job has ended, so what it left
+//! running goes with it. [`Rates`] turns two readings of a running job into the cores it is using
+//! now.
+//!
+//! **Shared between boxes by what they were granted.** A job's weight only splits the CPU its box's
+//! cgroup gets. Which box gets how much is the box cgroups' own `cpu.weight`, which [`weigh_boxes`]
+//! sets each tick from the cores each box's running jobs were granted ([`box_weight`]).
 //!
 //! **Written as skein-server, through `sudo` where it must.** The box cgroups are root's, made by the
 //! launcher with `sudo`, and skein-server runs in the sandbox where `sudo -n` works, as
@@ -62,6 +68,16 @@ pub const WEIGHT_PER_CORE: f64 = 100.0;
 /// The most `cpu.weight` a job gets, below [`BOX_LEAF_WEIGHT`].
 pub const JOB_WEIGHT_MAX: u32 = 300;
 const _: () = assert!(JOB_WEIGHT_MAX < BOX_LEAF_WEIGHT);
+
+/// A box cgroup's `cpu.weight` before any of its jobs is granted cores: the kernel's default, which
+/// every box has from the launcher. See [`box_weight`].
+pub const BOX_WEIGHT: u32 = 100;
+
+/// What each core granted to one of a box's running jobs adds to the box cgroup's `cpu.weight`.
+pub const BOX_WEIGHT_PER_CORE: u32 = 100;
+
+/// The largest `cpu.weight` the kernel takes.
+pub const CPU_WEIGHT_MAX: u32 = 10_000;
 
 /// The `cpu.max` period, in microseconds: the kernel's default.
 const PERIOD_USEC: u64 = 100_000;
@@ -159,6 +175,12 @@ impl Rates {
     /// Stop following a job that ended.
     pub fn forget(&mut self, box_name: &str, id: &str) {
         self.last.remove(&(box_name.to_string(), id.to_string()));
+    }
+
+    /// Stop following every job `running` does not name, so a job that left the queue without
+    /// being seen to end is not followed for ever.
+    pub fn retain(&mut self, running: &dyn Fn(&str, &str) -> bool) {
+        self.last.retain(|(b, id), _| running(b, id));
     }
 }
 
@@ -287,10 +309,16 @@ pub(crate) fn place_with(
 }
 
 /// Read what box `box_name`'s job `id` used, then remove its cgroup. `None` when the job had no
-/// cgroup of its own. The cgroup is left where the kernel refuses to remove it, which is while a
-/// process is still in it; [`sweep`] tries again once it is empty.
-pub fn finish(cgroups: &Path, box_name: &str, id: &str) -> Option<Usage> {
-    finish_with(&Kernel, cgroups, box_name, id)
+/// cgroup of its own.
+///
+/// With `kill`, every process still in the job's cgroup is killed first (`cgroup.kill`): the
+/// caller passes it when the job's wrapper is gone, so what is left is the command the wrapper
+/// started, running on with no one to wait for it, and holding cores the queue has already given
+/// back. Killed before it is read, so the reading is of a job that has stopped. The cgroup is left
+/// where the kernel refuses to remove it, which is while a process is still in it, as a killed one
+/// is for a moment; [`sweep`] tries again once it is empty.
+pub fn finish(cgroups: &Path, box_name: &str, id: &str, kill: bool) -> Option<Usage> {
+    finish_with(&Kernel, cgroups, box_name, id, kill)
 }
 
 pub(crate) fn finish_with(
@@ -298,14 +326,71 @@ pub(crate) fn finish_with(
     cgroups: &Path,
     box_name: &str,
     id: &str,
+    kill: bool,
 ) -> Option<Usage> {
     let dir = job_cgroup(cgroups, box_name, id);
     if !dir.is_dir() {
         return None;
     }
+    if kill {
+        let _ = fs.write(&dir.join("cgroup.kill"), "1");
+    }
     let used = usage(&dir);
     let _ = fs.rmdir(&dir);
     used
+}
+
+// ───────────────────────────── a box's share ─────────────────────────────
+
+/// The `cpu.weight` of a box cgroup whose running jobs were granted `granted` cores in all.
+///
+/// **[`BOX_WEIGHT`] for the box, [`BOX_WEIGHT_PER_CORE`] more for each core granted, and never
+/// above [`CPU_WEIGHT_MAX`].** Weights only decide anything among siblings, and the box cgroups are
+/// siblings under the fleet's (with the boxes' containers beside them at 50, half a box: the
+/// launcher's `apply_fleet_ceilings`). Without this every box weighs 100, so when the machine is
+/// full a box running a granted four-core job gets the same share as a box whose agent is only
+/// thinking, and the job runs at a fraction of the cores the queue gave it. With it, that box
+/// weighs 500 and the other 100: under contention the CPU splits five to one, as the grants did,
+/// and inside the box [`BOX_LEAF_WEIGHT`] and the job weights split the box's part again. The 100
+/// for the box itself keeps a box with nothing granted at the weight every box had before, so its
+/// person's terminal is never weighed below an equal share of what is not granted. The cap is the
+/// kernel's: 99 cores granted to one box reach it.
+pub fn box_weight(granted: u32) -> u32 {
+    let w = BOX_WEIGHT as u64 + BOX_WEIGHT_PER_CORE as u64 * granted as u64;
+    w.min(CPU_WEIGHT_MAX as u64) as u32
+}
+
+/// Set each box cgroup's `cpu.weight` to [`box_weight`] of `granted`, its running jobs' cores (a
+/// box absent from it has none). The boxes are every cgroup under `cgroups` with the launcher's
+/// [`BOX_LEAF`], so the containers' cgroup beside them is never touched.
+///
+/// Best-effort, as the launcher's writes are: a box whose cgroup has no `cpu.weight` (the `cpu`
+/// controller not handed to it) is left alone, a refused write is not an error, and a weight that
+/// already reads right is not written again, so a quiet fleet costs no `sudo` each tick.
+pub fn weigh_boxes(cgroups: &Path, granted: &BTreeMap<String, u32>) {
+    weigh_boxes_with(&Kernel, cgroups, granted)
+}
+
+pub(crate) fn weigh_boxes_with(fs: &dyn Cgroupfs, cgroups: &Path, granted: &BTreeMap<String, u32>) {
+    let Ok(entries) = std::fs::read_dir(cgroups) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) || !dir.join(BOX_LEAF).is_dir() {
+            continue;
+        }
+        let Ok(now) = std::fs::read_to_string(dir.join("cpu.weight")) else {
+            continue;
+        };
+        let want = box_weight(granted.get(&name).copied().unwrap_or(0));
+        if now.trim() != want.to_string() {
+            let _ = fs.write(&dir.join("cpu.weight"), &want.to_string());
+        }
+    }
 }
 
 /// Remove box `box_name`'s job cgroups that name no job in `active` and that the kernel says are
@@ -506,7 +591,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("memory.peak"), "1073741824\n").unwrap();
-        let used = finish_with(&fs, &cgroups, "web-main", "j-3").expect("no usage read");
+        let used = finish_with(&fs, &cgroups, "web-main", "j-3", false).expect("no usage read");
         assert_eq!(
             used,
             Usage {
@@ -516,7 +601,7 @@ mod tests {
         );
         assert_eq!(used.average_cores(4), Some(1.5));
         assert!(!dir.exists(), "the job's cgroup was not removed");
-        assert_eq!(finish_with(&fs, &cgroups, "web-main", "j-3"), None);
+        assert_eq!(finish_with(&fs, &cgroups, "web-main", "j-3", false), None);
     }
 
     /// The sweep removes an empty job cgroup that names no running job, and nothing else.
@@ -624,6 +709,12 @@ mod tests {
     }
 
     fn tick(places: &crate::jobs::Places, secs: i64) -> crate::jobs::Queue {
+        tick_with(places, secs, &mut Rates::default())
+    }
+
+    /// A tick at `secs` with the readings `rates` kept from the ticks before, as `watch_jobs`
+    /// keeps them.
+    fn tick_with(places: &crate::jobs::Places, secs: i64, rates: &mut Rates) -> crate::jobs::Queue {
         let at = DateTime::parse_from_rfc3339("2026-10-31T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
@@ -631,26 +722,28 @@ mod tests {
         let limits = crate::jobs::Limits {
             cores: 4,
             max_cores_per_job: crate::jobs::DEFAULT_MAX_CORES_PER_JOB,
-            oversubscribe: 1.0,
+            oversubscribe: 1.5,
             mem_free_mib: None,
         };
-        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at).unwrap()
+        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates).unwrap()
     }
 
     fn job<'a>(q: &'a crate::jobs::Queue, id: &str) -> &'a crate::jobs::Job {
         q.jobs.iter().find(|j| j.id == id).expect("no such job")
     }
 
-    /// **The tick that grants a job moves its wrapper into the job's own cgroup, and the job holds
-    /// its slot from there.**
+    /// **The tick that grants a job moves its wrapper into the job's own cgroup, capped and weighted
+    /// for the cores it was granted, and the job holds them from there.**
     ///
     /// The wrapper's pid starts in the box's leaf, as a process the box's shell started does. After
     /// the granting tick it is in `job-<id>/cgroup.procs`, and the fixture then takes it out of the
     /// leaf as the kernel's move would: the next tick must still find it in the box.
     ///
-    /// What would make it fail: no `place` in the tick's grant path (no job cgroup is made), or
-    /// `pid_in_box` reading only the box's own `cgroup.procs` (the sabotage that was run: the job
-    /// reads `gone` on the second tick, because its pid is only in the job's cgroup).
+    /// What would make it fail: no `place` in the tick's grant path (no job cgroup is made); the
+    /// grant's cores not passed to it (the sabotage that was run: `None` in their place, and no
+    /// `cpu.max` is written and the weight is one core's 100); or `pid_in_box` reading only the
+    /// box's own `cgroup.procs` (the job reads `gone` on the second tick, because its pid is only in
+    /// the job's cgroup).
     #[test]
     fn the_granting_tick_moves_the_job_into_its_own_cgroup_and_it_stays_alive_there() {
         let (_d, places) = fleet(true);
@@ -662,11 +755,9 @@ mod tests {
         assert_eq!(job(&q, "j-a").reason, "", "{q:#?}");
         let cg = job_cgroup(&places.cgroups, "web-main", "j-a");
         assert_eq!(read(&cg.join("cgroup.procs")), "31337");
-        assert_eq!(read(&cg.join("cpu.weight")), "100");
-        assert!(
-            !cg.join("cpu.max").exists(),
-            "the tick has no cores to cap at yet"
-        );
+        assert_eq!(job(&q, "j-a").granted_cores, 2, "{q:#?}");
+        assert_eq!(read(&cg.join("cpu.max")), "200000 100000");
+        assert_eq!(read(&cg.join("cpu.weight")), "200");
 
         std::fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
         let q = tick(&places, 2);
@@ -677,10 +768,12 @@ mod tests {
         );
     }
 
-    /// **A job that ends is measured, and its view says what it used.**
+    /// **A job that ends is measured into its `used` field, and its view says what it used.**
     ///
-    /// What would make it fail: no `finish` in the tick's end path (the reason stays empty), or the
-    /// end path looking only at jobs that were waiting rather than running.
+    /// What would make it fail: no `finish` in the tick's end path (`used` stays `None`), the end
+    /// path looking only at jobs that were waiting rather than running, or the view not putting
+    /// `used` into words (the sabotage that was run: `view_for` passing `reason` through, and the
+    /// view's reason is empty).
     #[test]
     fn a_job_that_ends_says_what_it_used() {
         let (_d, places) = fleet(true);
@@ -696,9 +789,220 @@ mod tests {
         let b = job(&q, "j-b");
         assert_eq!(b.state, "done");
         assert_eq!(
-            b.reason, "used 3.0 cores on average, at most 1.5 GiB of memory",
+            b.used,
+            Some(crate::jobs::Usage {
+                avg_cores: 3.0,
+                peak_mem_mib: Some(1536),
+                secs: 4,
+            }),
             "{q:#?}"
         );
+        assert_eq!(
+            b.reason, "",
+            "the usage went into the reason as text: {q:#?}"
+        );
+        let view = crate::jobs::read_view(&places.states.join("web-main")).expect("no view");
+        assert_eq!(
+            view.jobs[0].reason, "used 3.0 cores on average, at most 1.5 GB",
+            "{view:#?}"
+        );
+        assert_eq!(view.jobs[0].used, b.used);
+    }
+
+    /// **A wrapper killed with `-9` while its command runs on: the job's cgroup is killed, then
+    /// measured, then removed. A job whose wrapper is still there is not killed.**
+    ///
+    /// The fixture's kernel is plain files, so the kill is the `1` written into `cgroup.kill`; that
+    /// the write kills every member is the kernel's (`sandbox.rs`'s scratch-cgroup tests). The
+    /// wrapper is gone from the job's `cgroup.procs` and its command's pid is still there.
+    ///
+    /// What would make it fail: the end path never passing `kill` (the sabotage that was run:
+    /// `false` in place of `wrapper_gone`, and no `cgroup.kill` is written), or passing it for a job
+    /// that said `done` while its wrapper still runs, which would kill the wrapper before it could
+    /// hand its command's status back to its caller.
+    #[test]
+    fn a_wrapper_killed_under_its_command_has_its_job_cgroup_killed_then_measured() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(
+            leaf.join("cgroup.procs"),
+            "31337
+31338
+",
+        )
+        .unwrap();
+        submit(&places, "j-k", 31337, "waiting");
+        submit(&places, "j-d", 31338, "waiting");
+        tick(&places, 0);
+        let killed = job_cgroup(&places.cgroups, "web-main", "j-k");
+        let done = job_cgroup(&places.cgroups, "web-main", "j-d");
+        for cg in [&killed, &done] {
+            std::fs::write(
+                cg.join("cpu.stat"),
+                "usage_usec 2000000
+",
+            )
+            .unwrap();
+        }
+        // j-k's wrapper killed: only its command's pid is left. j-d's wrapper says done and is
+        // still there.
+        std::fs::write(
+            killed.join("cgroup.procs"),
+            "40001
+",
+        )
+        .unwrap();
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        submit(&places, "j-d", 31338, "done");
+        let q = tick(&places, 2);
+        assert_eq!(job(&q, "j-k").state, "gone", "{q:#?}");
+        assert_eq!(
+            read(&killed.join("cgroup.kill")),
+            "1",
+            "the leftovers were not killed"
+        );
+        assert!(job(&q, "j-k").used.is_some(), "not measured: {q:#?}");
+        assert_eq!(job(&q, "j-d").state, "done", "{q:#?}");
+        assert!(
+            !done.join("cgroup.kill").exists(),
+            "a job whose wrapper is still running was killed"
+        );
+
+        // And the order, on the fixture that removes a directory with what is in it: the kill is
+        // written while the cgroup is still there, and the reading is still made.
+        let fs = Fake::default();
+        let cg = place_with(&fs, &places.cgroups, "web-main", "j-o", 9, Some(1.0)).unwrap();
+        std::fs::write(
+            cg.join("cpu.stat"),
+            "usage_usec 5
+",
+        )
+        .unwrap();
+        let used = finish_with(&fs, &places.cgroups, "web-main", "j-o", true);
+        assert_eq!(used.map(|u| u.cpu_usec), Some(5));
+        assert!(fs
+            .wrote
+            .borrow()
+            .iter()
+            .any(|(p, v)| p.ends_with("cgroup.kill") && v == "1"));
+        assert!(!cg.exists());
+    }
+
+    /// **Measured use reaches admission, through readings kept from one tick to the next.**
+    ///
+    /// A four-core job runs on a four-core machine allowed half as much again, using half a core.
+    /// A two-core job waits behind it while the first job has only one reading (a rate needs two),
+    /// and starts on the tick after, when its use is measured.
+    ///
+    /// What would make it fail: the tick not reading the running jobs' cgroups, or not handing what
+    /// it read to `schedule` (the sabotage that was run: `in_use` answering `None`, and `j-two`
+    /// still waits on the third tick); or a reading not kept between ticks.
+    #[test]
+    fn measured_use_from_the_jobs_cgroup_lets_another_job_start() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(
+            leaf.join("cgroup.procs"),
+            "31337
+31338
+",
+        )
+        .unwrap();
+        let ask = |id: &str, pid: u32, cores: u32| {
+            let body = serde_json::json!({"id": id, "class": "test", "argv": ["cargo", "test"],
+                                          "cwd": "/w", "pid": pid, "state": "waiting",
+                                          "cores": cores});
+            std::fs::write(
+                places.requests.join("web-main").join(format!("{id}.json")),
+                body.to_string(),
+            )
+            .unwrap();
+        };
+        let mut rates = Rates::default();
+        ask("j-four", 31337, 4);
+        let q = tick_with(&places, 0, &mut rates);
+        assert_eq!(job(&q, "j-four").granted_cores, 4, "{q:#?}");
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-four");
+        std::fs::write(
+            cg.join("cpu.stat"),
+            "usage_usec 0
+",
+        )
+        .unwrap();
+        ask("j-two", 31338, 2);
+        let q = tick_with(&places, 2, &mut rates);
+        assert_eq!(
+            job(&q, "j-two").state,
+            "waiting",
+            "admitted unmeasured: {q:#?}"
+        );
+        std::fs::write(
+            cg.join("cpu.stat"),
+            "usage_usec 1000000
+",
+        )
+        .unwrap();
+        let q = tick_with(&places, 4, &mut rates);
+        assert_eq!(
+            job(&q, "j-two").state,
+            "granted",
+            "half a core measured did not let it in: {q:#?}"
+        );
+    }
+
+    /// **Boxes share the machine by the cores their running jobs were granted.**
+    ///
+    /// Two boxes and the containers' cgroup beside them. The box with a four-core job weighs 500,
+    /// the box with none stays at 100 and is not written, and the containers' 50 is not touched.
+    /// Through the tick: a box whose two-core job is granted weighs 300, and 100 again once it
+    /// ends.
+    ///
+    /// What would make it fail: the tick never weighing the boxes (the sabotage that was run: the
+    /// `weigh_boxes` call taken out of the tick, and the box stays at 100), a weight not following
+    /// the grant, a box with nothing granted left at its old weight, or `containers` counted as a
+    /// box.
+    #[test]
+    fn a_box_cgroup_weighs_what_its_running_jobs_were_granted() {
+        let (_d, cgroups) = tree("cpu memory", true);
+        for (name, leaf, weight) in [("api-main", true, "100"), ("containers", false, "50")] {
+            std::fs::create_dir_all(cgroups.join(name)).unwrap();
+            if leaf {
+                std::fs::create_dir_all(cgroups.join(name).join(BOX_LEAF)).unwrap();
+            }
+            std::fs::write(cgroups.join(name).join("cpu.weight"), weight).unwrap();
+        }
+        std::fs::write(cgroups.join("web-main/cpu.weight"), "100").unwrap();
+        let fs = Fake::default();
+        let granted = BTreeMap::from([("web-main".to_string(), 4)]);
+        weigh_boxes_with(&fs, &cgroups, &granted);
+        assert_eq!(read(&cgroups.join("web-main/cpu.weight")), "500");
+        assert_eq!(read(&cgroups.join("api-main/cpu.weight")), "100");
+        assert_eq!(read(&cgroups.join("containers/cpu.weight")), "50");
+        assert_eq!(fs.wrote.borrow().len(), 1, "{:?}", fs.wrote.borrow());
+        assert_eq!(box_weight(0), 100);
+        assert_eq!(box_weight(99), CPU_WEIGHT_MAX);
+        assert_eq!(box_weight(500), CPU_WEIGHT_MAX);
+
+        let (_d, places) = fleet(true);
+        let boxcg = places.cgroups.join("web-main");
+        std::fs::write(
+            boxcg.join("cpu.weight"),
+            "100
+",
+        )
+        .unwrap();
+        std::fs::write(
+            boxcg.join(BOX_LEAF).join("cgroup.procs"),
+            "31337
+",
+        )
+        .unwrap();
+        submit(&places, "j-w", 31337, "waiting");
+        tick(&places, 0);
+        assert_eq!(read(&boxcg.join("cpu.weight")), "300");
+        submit(&places, "j-w", 31337, "done");
+        tick(&places, 2);
+        assert_eq!(read(&boxcg.join("cpu.weight")), "100");
     }
 
     /// **A box with no cgroup delegation still runs its jobs, uncapped as before, and says so.**

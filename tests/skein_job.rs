@@ -59,9 +59,16 @@ impl Fleet {
                     oversubscribe: 1.0,
                     mem_free_mib: None,
                 };
+                // Held across ticks, as skein-server's loop holds it.
+                let mut rates = skein::jobs::cgroup::Rates::default();
                 while !stop.load(Ordering::Relaxed) {
-                    let _ =
-                        skein::jobs::tick(&places, limits, &|b| b.to_string(), chrono::Utc::now());
+                    let _ = skein::jobs::tick(
+                        &places,
+                        limits,
+                        &|b| b.to_string(),
+                        chrono::Utc::now(),
+                        &mut rates,
+                    );
                     std::thread::sleep(Duration::from_millis(100));
                 }
             })
@@ -91,6 +98,14 @@ impl Fleet {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         c
+    }
+
+    /// Stop the scheduler, as a skein-server that has gone away stops answering.
+    fn stop_ticking(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.ticking.take() {
+            let _ = t.join();
+        }
     }
 
     fn lock(&self) -> PathBuf {
@@ -397,6 +412,81 @@ fn a_granted_job_is_told_its_cores_unless_the_caller_set_fewer() {
     );
 }
 
+/// **A job skein never answered is still told its cores: the `--cores` it asked for, or two.**
+///
+/// Twice, with nothing the caller set: once in a box whose scheduler has stopped, asking for
+/// three, and once with no drop-box at all and no ask, which is run with the queue's default two.
+/// Each run's stderr must say it fell back, so it is the fallback that is tested.
+///
+/// What would make it fail: the fallback run handing the child no count (the sabotage that was
+/// run: `cores = None` in the wrapper's fallback branch, and every variable prints empty), or
+/// the asked `--cores` ignored there.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_job_skein_never_answered_is_still_told_its_cores() {
+    let probe = "for v in CARGO_BUILD_JOBS RUST_TEST_THREADS NEXTEST_TEST_THREADS MAKEFLAGS; do \
+                 printf '%s=%s\\n' \"$v\" \"$(printenv \"$v\")\"; done";
+    let mut fleet = Fleet::new(
+        "skein-job-fallback",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    fleet.stop_ticking();
+    let run = |mut c: Command, args: &[&str]| -> (String, String) {
+        for v in [
+            "CARGO_BUILD_JOBS",
+            "RUST_TEST_THREADS",
+            "NEXTEST_TEST_THREADS",
+            "MAKEFLAGS",
+        ] {
+            c.env_remove(v);
+        }
+        let child = c
+            .env("SKEIN_JOB_UNANSWERED_SECONDS", "1")
+            .args(args)
+            .args(["--", "sh", "-c", probe])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        finish_within(child, Duration::from_secs(20)).unwrap()
+    };
+
+    let (out, err) = run(fleet.wrapper(), &["run", "--cores", "3"]);
+    assert!(
+        err.contains("has not answered"),
+        "it did not fall back:\n{err}"
+    );
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        [
+            "CARGO_BUILD_JOBS=3",
+            "RUST_TEST_THREADS=3",
+            "NEXTEST_TEST_THREADS=3",
+            "MAKEFLAGS=-j3",
+        ],
+        "{err}"
+    );
+
+    let mut no_queue = fleet.wrapper();
+    no_queue.env("SKEIN_FLEET_ROOT", fleet.dir.path().join("no-fleet-here"));
+    let (out, err) = run(no_queue, &["run"]);
+    assert!(
+        !err.contains("granted"),
+        "a run with no drop-box was scheduled:\n{err}"
+    );
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        [
+            "CARGO_BUILD_JOBS=2",
+            "RUST_TEST_THREADS=2",
+            "NEXTEST_TEST_THREADS=2",
+            "MAKEFLAGS=-j2",
+        ],
+        "{err}"
+    );
+}
+
 /// A cgroup subtree of the test's own, `/sys/fs/cgroup/skein-jobcg-test-<pid>`, at the top of the
 /// cgroup v2 hierarchy and never under `/sys/fs/cgroup/skein`, where a fleet's boxes are. It stands
 /// in for `skein`: under it is one box, `demo`, laid out as the launcher lays a box out, its own
@@ -494,14 +584,14 @@ fn eventually<T>(bound: Duration, what: &str, mut ok: impl FnMut() -> Option<T>)
 ///
 /// The wrapper starts in the box's leaf, as one a box's shell started does. The job's command
 /// reports its own `/proc/self/cgroup` before it does anything else, so where it says it is is
-/// where the tick put the wrapper **before** the wrapper read `granted`. The cap is then placed on
-/// the running job's cgroup with cores given, as the queue will once it grants cores, and read back
-/// from the kernel. The box's cgroup is killed as `fleet::box_cgroup_kill` kills it, at the box's
+/// where the tick put the wrapper **before** the wrapper read `granted`. The cap the tick set for
+/// the cores it granted is read back from the kernel. The box's cgroup is killed as `fleet::box_cgroup_kill` kills it, at the box's
 /// level and not the job's, and the job's processes must be gone. The scheduler then sees the
 /// wrapper gone, reads what the job used, and removes its cgroup.
 ///
 /// What would make it fail: no placement in the tick's grant path, or one after the view says
-/// `granted` (the command reports the leaf: `/…/demo/box`); `cpu.max` not written for given cores;
+/// `granted` (the command reports the leaf: `/…/demo/box`); `cpu.max` not written for the granted
+/// cores;
 /// a job cgroup made outside the box's (the kill misses it and `sleep` survives); the end path not
 /// reading the job's cgroup or not removing it. **Not run inside a box**, which has no cgroup it
 /// can write: there it skips and says so, and CI's runner, which has `sudo`, is where it runs.
@@ -549,7 +639,6 @@ fn a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_th
         .process_group(0)
         .spawn()
         .unwrap();
-    let wrapper_pid = child.id();
 
     let report = eventually(Duration::from_secs(20), "the job never ran", || {
         fs::read_to_string(&said).ok()
@@ -576,12 +665,10 @@ fn a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_th
         .and_then(|p| p.parse().ok())
         .expect("the job said no pid");
 
-    // (a) the cap, for cores given.
-    skein::jobs::cgroup::place(&cgroups.root, "demo", &id, wrapper_pid, Some(1.5))
-        .expect("placing the running job again, with cores");
+    // (a) the cap, for the one core the one-core machine granted, as the granting tick set it.
     assert_eq!(
         fs::read_to_string(job_cg.join("cpu.max")).unwrap().trim(),
-        "150000 100000"
+        "100000 100000"
     );
     let procs = fs::read_to_string(job_cg.join("cgroup.procs")).unwrap();
     assert!(procs.lines().any(|l| l == job_pid.to_string()), "{procs}");
@@ -613,12 +700,12 @@ fn a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_th
                 .queue()
                 .jobs
                 .into_iter()
-                .find(|j| j.id == id && j.state == "gone" && j.reason.starts_with("used "))
+                .find(|j| j.id == id && j.state == "gone" && j.used.is_some())
         },
     );
     assert!(
         !job_cg.exists(),
-        "the job's cgroup was left behind: {}",
-        ended.reason
+        "the job's cgroup was left behind: {:?}",
+        ended.used
     );
 }
