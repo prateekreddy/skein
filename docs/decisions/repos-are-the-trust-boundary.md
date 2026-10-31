@@ -87,7 +87,7 @@ puts it.
   `a_tool_installed_into_the_area_survives_a_box_restart`,
   `the_caches_are_on_the_trees_file_system_and_pnpm_hard_links_into_a_worktree` and
   `a_link_where_the_area_should_be_is_refused` (`tests/isolation_bwrap/repocache.rs`); its bind is
-  `src/box-session.sh:2597` and the tools are pointed at it at `src/box-session.sh:3982`. The install
+  `src/box-session.sh:2597` and the tools are pointed at it at `src/box-session.sh:3992`. The install
   lock: fleet test `two_concurrent_auto_installs_are_serialised_by_the_shim`
   (`tests/fleet_launch/versions.rs`).
 - A crossing points the tools where the session does: fleet tests
