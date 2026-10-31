@@ -1383,7 +1383,8 @@ fn a_crossing_into_a_box_with_no_repo_cache_carries_none_of_its_names() {
 /// out the fleet's, its `cargo` a stand-in for rustup's proxy: it refuses without a `RUSTUP_HOME`
 /// that is a directory, and otherwise runs the real `cargo` building this test. Every name
 /// `place::session_exports` reads is compared between the box's own agent and a crossing made with
-/// `Place::exec`, and so is `PATH`, which the crossing builds itself rather than carrying.
+/// `Place::exec`. `PATH` the crossing builds itself rather than carrying, so it is compared with the
+/// PATH the session block exported, which the agent's login profile may add to.
 ///
 /// This process stands for skein-server and carries a `RUSTUP_HOME`, `CARGO_INSTALL_ROOT` and
 /// `PLAYWRIGHT_BROWSERS_PATH` of its own, none of them this box's, so a crossing that kept the
@@ -1495,6 +1496,16 @@ fn a_crossing_into_a_box_carries_its_sessions_tool_variables() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let session = fs::read_to_string(&session_path).unwrap_or_default();
+    // The PATH the launcher's session block exported, read from the tmux server it started: that
+    // process inherits it before anything in the box sources a profile.
+    let launched_path = fs::read(format!("/proc/{anchor}/environ"))
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .find_map(|kv| {
+            kv.strip_prefix(b"PATH=")
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+        })
+        .unwrap_or_default();
     let limits = fs::read_to_string(format!("{}/limits.state", box_root(name))).unwrap_or_default();
     forget_place(name);
     let _ = Command::new("tmux")
@@ -1540,10 +1551,18 @@ fn a_crossing_into_a_box_carries_its_sessions_tool_variables() {
             "a crossing into the box does not carry the session's {tool}: {crossed:?}"
         );
     }
+    // Compared with the PATH the launcher exported, not the agent's: the agent's `bash -lc` sources
+    // the profile again, and a substrate's profile may add to it (Ubuntu's appends `/snap/bin`). A
+    // crossing never takes PATH from the session, so the launcher's export is what it must match.
+    assert!(
+        field_of(&session, "path").contains(&launched_path) && !launched_path.is_empty(),
+        "the box's tmux server holds no PATH, or one its agent does not run on: \
+         {launched_path:?} against {session:?}"
+    );
     assert_eq!(
         field_of(&crossed, "path"),
-        field_of(&session, "path"),
-        "a crossing into the box runs on a PATH other than its session's"
+        launched_path,
+        "a crossing into the box runs on a PATH other than the one its session block exported"
     );
     assert_eq!(
         (
