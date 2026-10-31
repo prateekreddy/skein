@@ -1975,7 +1975,11 @@ esac
         std::fs::create_dir_all(&local_bin).unwrap();
         let asked = dir.join("asked");
         for tool in ["npm", "sudo", "apt-get", "dpkg-query"] {
-            stub(&stubs, tool, &format!("echo \"{tool} $*\" >>'{}'", asked.display()));
+            stub(
+                &stubs,
+                tool,
+                &format!("echo \"{tool} $*\" >>'{}'", asked.display()),
+            );
         }
         for tool in ["tmux", "jq", "bwrap"] {
             stub(&stubs, tool, "exit 0");
@@ -1988,7 +1992,10 @@ esac
             .arg("-c")
             .arg(&script)
             .env_clear()
-            .env("PATH", format!("{}:{}", stubs.display(), crate::place::FLEET_PATH))
+            .env(
+                "PATH",
+                format!("{}:{}", stubs.display(), crate::place::FLEET_PATH),
+            )
             .env("HOME", &home)
             .output()
             .unwrap();
@@ -2050,9 +2057,11 @@ ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
                 .unwrap()
         };
         // What was there before: the stub's own install, straight into the live prefix.
-        assert!(run_to_end(std::process::Command::new(stubs.join("npm"))
-            .args(["install", "-g", "@anthropic-ai/claude-code"])
-            .env("FAKE_VERSION", "old")));
+        assert!(run_to_end(
+            std::process::Command::new(stubs.join("npm"))
+                .args(["install", "-g", "@anthropic-ai/claude-code"])
+                .env("FAKE_VERSION", "old")
+        ));
         let command = live.join("bin/claude");
         let runs = |p: &std::path::Path| {
             std::process::Command::new(p)
@@ -2071,22 +2080,35 @@ ln -s ../{pkg}/bin/claude.exe "$prefix/bin/claude""#,
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(child.wait().unwrap().success(), "skein_npm_install failed: {}",
-            std::fs::read_to_string(dir.join("log")).unwrap_or_default());
-        assert!(reads > 100, "the install was read {reads} times, too few to have seen its window");
+        assert!(
+            child.wait().unwrap().success(),
+            "skein_npm_install failed: {}",
+            std::fs::read_to_string(dir.join("log")).unwrap_or_default()
+        );
+        assert!(
+            reads > 100,
+            "the install was read {reads} times, too few to have seen its window"
+        );
         assert_eq!(
             missing, 0,
             "a box starting during the install would have found no claude: it was missing for \
              {missing} of {reads} reads"
         );
-        assert_eq!(runs(&command), "new", "the install did not put the new version in place");
+        assert_eq!(
+            runs(&command),
+            "new",
+            "the install did not put the new version in place"
+        );
         let left: Vec<_> = std::fs::read_dir(live.join("lib/node_modules"))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(".skein-stage"))
             .collect();
-        assert!(left.is_empty(), "the staging prefix was left behind: {left:?}");
+        assert!(
+            left.is_empty(),
+            "the staging prefix was left behind: {left:?}"
+        );
     }
 
     fn run_to_end(cmd: &mut std::process::Command) -> bool {
