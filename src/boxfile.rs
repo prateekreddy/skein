@@ -214,8 +214,9 @@ fn names(dir: &Dir) -> Vec<String> {
 }
 
 /// The names in the queue `dir` whose own entries say they are directories: the boxes'
-/// drop-boxes. The type is the entry's `d_type`, which is not followed, so a box entry that is
-/// itself a link is skipped here; only the fleet side can make one, and none is a drop-box.
+/// drop-boxes. The type is the one the directory listing reports for the entry, which is not
+/// followed, so a box entry that is itself a link is skipped here; only the fleet side can make
+/// one, and none is a drop-box.
 fn box_dirs(dir: &Dir) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir.path("")) else {
         return Vec::new();
@@ -404,7 +405,7 @@ mod tests {
         let (_dir, root, secret) = queue();
         std::os::unix::fs::symlink(&secret, root.join("web-main/planted.json")).unwrap();
         // And a box entry that is itself a link, which only the fleet side could make, is not
-        // walked into either. Two walls stand here, the entry's own `d_type` in `box_dirs` and
+        // walked into either. Two walls stand here, the entry's own type in `box_dirs` and
         // `Dir::open`'s `O_NOFOLLOW`, so this fails only with both taken away.
         fs::create_dir_all(root.parent().unwrap().join("elsewhere")).unwrap();
         fs::write(root.parent().unwrap().join("elsewhere/x.json"), "{}").unwrap();
