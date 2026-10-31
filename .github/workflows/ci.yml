@@ -403,14 +403,15 @@ jobs:
   # (SKEIN-1380): the fleet rolls out only that same version to its boxes (`fleet::versions`), so a
   # bump is one reviewed commit, and this job checks the mod against the new build before any box
   # can be given it. `fleet::versions`' `the_ci_pin_is_the_fleets_pin` fails if this job stops
-  # reading that file or names a version of its own.
+  # reading that file or names a version of its own. TypeScript is `src/typescript.version` the same
+  # way (SKEIN-1396): the fleet checks every claude version with that one, and
+  # `the_ci_typescript_pin_is_the_fleets_pin` holds the two together.
   plugin:
     runs-on: ubuntu-24.04
-    env:
-      TYPESCRIPT_VERSION: "5.9.3"
     steps:
       - uses: actions/checkout@v7
       - run: echo "CLAUDE_CODE_VERSION=$(tr -d '[:space:]' < src/claude-code.version)" >> "$GITHUB_ENV"
+      - run: echo "TYPESCRIPT_VERSION=$(tr -d '[:space:]' < src/typescript.version)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v7
         with:
           node-version: "22"

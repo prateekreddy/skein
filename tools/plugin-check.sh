@@ -17,12 +17,15 @@
 #      declarations: the types of the build that runs, not of the one the module was written on.
 #
 # Steps 3 and 4 work on a copy, so nothing is written into the checkout. `$CLAUDE_CODE_VERSION`,
-# when set, must be the version `claude --version` reports: CI sets it from the one pin in
-# `.github/workflows/ci.yml`, so the check cannot pass on a CLI other than the one it names.
+# when set, must be the version `claude --version` reports: CI and the fleet set it from the one pin
+# in `src/claude-code.version`, so the check cannot pass on a CLI other than the one it names.
+# `$TSC`, when set, is the `tsc` to run: CI installs `src/typescript.version` on PATH, and the
+# fleet's check of a claude version binds that same version from its depot (`fleet::versions`).
 #
 # Not a gate in `tools/gates.sh`, for the reason gitleaks is not: a contributor's machine need not
 # have Claude Code or TypeScript, and a gate that cannot run everywhere fails for a reason that is
-# not the change. Every skein box has both `claude` and `npx`, so a lane runs it there.
+# not the change. A box has `claude` but no `tsc` of its own: a lane installs the pinned version
+# beside its checkout (`npm install --prefix`) and names it in `$TSC`.
 #
 # Exit 0 when all four pass, 1 when one fails, 2 when a tool it needs is missing.
 

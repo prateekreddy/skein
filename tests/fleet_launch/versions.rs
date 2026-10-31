@@ -5,7 +5,7 @@
 
 use super::*;
 use skein::fleet::depot;
-use skein::fleet::versions::{self, AGENT_CLI, RUST_TOOLCHAIN};
+use skein::fleet::versions::{self, AGENT_CLI, RUST_TOOLCHAIN, TYPESCRIPT};
 use std::os::unix::fs::PermissionsExt;
 
 /// Pin a fixture fleet with the launcher installed, and a fixture npm prefix standing for the
@@ -62,6 +62,17 @@ fn npm_package(prefix: &Path, package: &str, file: &str, command: &str, says: &s
 /// through the real check namespace, and return its entry name. Its binary answers `--version` the
 /// way the real one does: `<version> (Claude Code)`, `codex-cli <version>`.
 fn publish_cli(root: &Path, runtime: &str, version: &str) -> String {
+    let entry = stage_cli(root, runtime, version);
+    let tested = versions::test_cli(FLEET, &entry).expect("the entry is tested");
+    assert!(
+        tested.ok,
+        "the fixture {entry} failed its own test: {tested:?}"
+    );
+    entry
+}
+
+/// Publish a fixture CLI version, as [`publish_cli`] does, without testing it.
+fn stage_cli(root: &Path, runtime: &str, version: &str) -> String {
     let entry = format!("{runtime}@{version}");
     let out = root.join(format!("staged-{entry}"));
     let (package, file, says) = match runtime {
@@ -85,17 +96,31 @@ fn publish_cli(root: &Path, runtime: &str, version: &str) -> String {
     );
     let staged = depot::verify(&out, &AGENT_CLI).expect("a fixture prefix passes the check");
     depot::publish(&out, &depot::kind_dir(&AGENT_CLI), &staged).expect("published");
-    let tested = versions::test_cli(FLEET, &entry).expect("the entry is tested");
-    assert!(
-        tested.ok,
-        "the fixture {entry} failed its own test: {tested:?}"
+    entry
+}
+
+/// Publish a fixture of the pinned TypeScript into the depot the way a fill does after its check:
+/// an npm prefix whose `bin/tsc` answers `--version` as the real one does, `Version <pin>`.
+fn publish_typescript(root: &Path) -> String {
+    let entry = versions::typescript_entry();
+    let pin = versions::TYPESCRIPT_PIN.trim();
+    let out = root.join(format!("staged-{entry}"));
+    npm_package(
+        &out.join(&entry),
+        "typescript",
+        "bin/tsc",
+        "tsc",
+        &format!("echo 'Version {pin}'"),
     );
+    let staged = depot::verify(&out, &TYPESCRIPT).expect("a fixture TypeScript passes the check");
+    depot::publish(&out, &depot::kind_dir(&TYPESCRIPT), &staged).expect("published");
     entry
 }
 
 /// A stand-in for `tools/plugin-check.sh` in skein's source, as the mod's check (SKEIN-1359)
-/// behaves at its door: it refuses a `claude` on `PATH` other than `$CLAUDE_CODE_VERSION`, and says
-/// which one it ran.
+/// behaves at its door: it refuses a `claude` on `PATH` other than `$CLAUDE_CODE_VERSION`, exits 2
+/// as the real one does when `$TSC` names no `tsc` it can run (SKEIN-1396), and says which `claude`
+/// and which `tsc` it ran.
 fn plant_plugin_check(root: &Path) {
     let tools = root.join("boxes/.skein/src/tools");
     fs::create_dir_all(&tools).unwrap();
@@ -106,7 +131,8 @@ fn plant_plugin_check(root: &Path) {
             "have=$(claude --version | awk '{print $1}')\n",
             "[ -n \"$CLAUDE_CODE_VERSION\" ] && [ \"$have\" = \"$CLAUDE_CODE_VERSION\" ] || ",
             "{ echo \"claude is $have, asked for $CLAUDE_CODE_VERSION\"; exit 1; }\n",
-            "echo \"fixture plugin-check ran claude $have from $(command -v claude)\"\n",
+            "ts=$(\"${TSC:-tsc}\" --version 2>/dev/null) || { echo \"no tsc at ${TSC:-tsc}\"; exit 2; }\n",
+            "echo \"fixture plugin-check ran claude $have from $(command -v claude) with $ts\"\n",
         ),
     )
     .unwrap();
@@ -225,10 +251,14 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
     }
     let (root, prefix, _pins) = versions_fleet("clirod");
     let pin = versions::pinned("claude").expect("claude is pinned");
+    let ts = publish_typescript(&root);
     let entry = publish_cli(&root, "claude", pin);
-    // The mod's check ran, against this entry's `claude` and the version under test. What would
-    // make it fail: `checks_for` without the plugin-check row, or without `CLAUDE_CODE_VERSION`.
+    // The mod's check ran, against this entry's `claude` and the version under test, with the
+    // pinned `tsc` from the depot. What would make it fail: `checks_for` without the plugin-check
+    // row, or without `CLAUDE_CODE_VERSION`; `check_script` not emitting the check's binds, or
+    // `TSC` not set (the planted check finds no `tsc` and exits 2).
     let tested = &versions::rollouts().tested[&entry];
+    assert_eq!(tested.typescript.as_ref(), Some(&ts), "{tested:?}");
     let plugin = tested
         .checks
         .iter()
@@ -236,9 +266,10 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
         .expect("the mod's check was not run");
     assert!(
         plugin.ok
-            && plugin
-                .said
-                .contains(&format!("ran claude {pin} from /cli/bin/claude")),
+            && plugin.said.contains(&format!(
+                "ran claude {pin} from /cli/bin/claude with Version {}",
+                versions::TYPESCRIPT_PIN.trim()
+            )),
         "{plugin:?}"
     );
     versions::rollout("claude", &entry).expect("roll out the fixture");
@@ -309,6 +340,71 @@ fn a_rolled_out_cli_is_read_only_in_every_box() {
         fs::read(&exe).unwrap(),
         before,
         "a box changed the rolled-out claude"
+    );
+}
+
+/// **A claude-code entry is not tested before the pinned TypeScript is in the depot, and a record
+/// from before it, the stale failure an entry tested without `tsc` was left with, is tested again
+/// once it is** (SKEIN-1396).
+///
+/// The entry is published with no TypeScript beside it, and its record is the one a test without
+/// `tsc` left: failed, naming no TypeScript. Then the fixture TypeScript is published.
+///
+/// What would make each assertion fail:
+///   * `waits`: dropping the guard in `test_cli` (the check runs, the planted check exits 2, and a
+///     failed record is written over the old one).
+///   * `retested`: keeping the plain `tested.contains_key` skip in `test_pass` (the stale failure is
+///     never tested again, and the entry can never be rolled out).
+///   * `once`: retesting a record that names the current TypeScript (a second pass tests again).
+#[test]
+fn a_claude_entry_waits_for_its_typescript_and_is_retested_when_it_arrives() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() {
+        return skip(
+            "this machine cannot make a bwrap namespace, so a claude entry's wait for its \
+             TypeScript was NOT exercised",
+        );
+    }
+    let (root, _prefix, _pins) = versions_fleet("tswait");
+    let pin = versions::pinned("claude").expect("claude is pinned");
+    let entry = stage_cli(&root, "claude", pin);
+    let stale = serde_json::json!({
+        "tested": { &entry: { "ok": false, "at": 1, "checks": [
+            { "name": "plugin-check", "ok": false, "said": "plugin-check: tsc is not on PATH" }
+        ] } }
+    });
+    let record = root.join("skein/versions.json");
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, stale.to_string()).unwrap();
+
+    let why = versions::test_cli(FLEET, &entry).expect_err("tested with no TypeScript");
+    assert!(why.contains("waits for typescript@"), "{why}");
+    let said = versions::test_pass(FLEET);
+    assert!(
+        said.iter().any(|l| l.contains("waits for typescript@")),
+        "{said:?}"
+    );
+    let waits = &versions::rollouts().tested[&entry];
+    assert_eq!(
+        (waits.at, waits.typescript.clone()),
+        (1, None),
+        "a test with no TypeScript wrote a record: {waits:?}"
+    );
+
+    let ts = publish_typescript(&root);
+    let said = versions::test_pass(FLEET);
+    let retested = versions::rollouts().tested[&entry].clone();
+    assert!(
+        retested.ok && retested.typescript.as_ref() == Some(&ts),
+        "the stale failure was not tested again once {ts} arrived: {retested:?} {said:?}"
+    );
+    assert!(versions::rollout("claude", &entry).is_ok(), "{retested:?}");
+
+    let once = versions::test_pass(FLEET);
+    assert!(
+        once.is_empty(),
+        "an entry tested with the current TypeScript was tested again: {once:?}"
     );
 }
 

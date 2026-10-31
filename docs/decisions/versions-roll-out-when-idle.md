@@ -18,6 +18,13 @@ newer release on npm is shown and nothing more. Codex is not pinned and follows 
 claude-code version is tested by the version check and by the mod's own `tools/plugin-check.sh`,
 run with that entry's `claude` first on `PATH` and `CLAUDE_CODE_VERSION` set to it.
 
+**TypeScript is pinned for that check** (SKEIN-1396, the owner's decisions of 2026-10-30). The
+mod's check type-checks with `tsc`, and the one version is written in `src/typescript.version`,
+which CI's `plugin` job reads too. skein fetches that version into the depot as its own kind,
+`typescript@<version>`, and binds it read-only into the check of each claude-code entry; no box is
+given it, and it is shown in the cockpit and never rolled out. A claude-code entry is not tested
+until it is there, and an entry tested with another TypeScript, or with none, is tested again.
+
 **Date.** 2026-10-30.
 
 **Decided by.** The project owner (SKEIN-1372), with the coordinator's addition of the same day that
@@ -44,12 +51,20 @@ work, and an agent between tasks knows better than a heuristic when it is free.
   behind and idle.
 - Running anything of a package outside the fill namespace; the upstream check reads the npm
   registry's metadata only.
+- Writing the TypeScript pin anywhere but `src/typescript.version`, binding TypeScript into a box,
+  running its package's install scripts, or recording a claude-code test that ran without it.
 
 **Enforced at.** Tests `a_rolled_out_cli_is_read_only_in_every_box`,
 `an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not`,
 `a_repos_rust_toolchain_file_selects_its_toolchain` and `the_clean_refuses_a_version_in_use`
 (`tests/fleet_launch/versions.rs`); `only_an_idle_box_behind_on_a_version_is_restarted` and
 `an_untested_cli_is_not_rolled_out_and_the_last_one_is_kept` (`src/fleet/versions.rs`);
-`idle_is_a_finished_turn_with_nothing_open_and_nothing_running` (`src/fleet/idle.rs`). Retiring
+`idle_is_a_finished_turn_with_nothing_open_and_nothing_running` (`src/fleet/idle.rs`).
+TypeScript: `the_ci_typescript_pin_is_the_fleets_pin`,
+`only_typescript_and_a_plain_version_is_a_typescript_entry` and
+`the_mod_check_is_given_the_pinned_tsc` (`src/fleet/versions.rs`);
+`a_claude_entry_waits_for_its_typescript_and_is_retested_when_it_arrives` and the `tsc` the planted
+check of `a_rolled_out_cli_is_read_only_in_every_box` runs (`tests/fleet_launch/versions.rs`); the
+TypeScript row of `tests/ui/updatepane.mjs`. Retiring
 `skein update-agents` is not done yet: it still exists, and still writes the sandbox's own prefix,
 which a box runs only for a CLI with nothing rolled out.

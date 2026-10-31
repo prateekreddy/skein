@@ -327,6 +327,39 @@ await page.waitForTimeout(600);
   await page.unroute("**/api/update-agents/boxes");
 }
 
+// --- the TypeScript the mod's check runs: shown, and never rolled out (SKEIN-1396) ------------------
+//
+// The real server's `/api/fleet/versions` over the fixture fleet: first with no TypeScript in its
+// depot, then with the pinned one's directory there. What is under test is that the pane shows the
+// pin either way, in the approved words, and offers no control for it.
+//
+// **What would make these fail**: the pane dropping the TypeScript row (both texts are empty); the
+// route no longer sending `typescript`, or `typescript_view` not reading the depot (the second text
+// still says "Not fetched yet"); a Roll out or Remove control on the row (its buttons are not []).
+{
+  const pin = fs.readFileSync(new URL("../../src/typescript.version", import.meta.url), "utf8").trim();
+  const entry = `typescript@${pin}`;
+  const W = {
+    missing: `skein's mod is type-checked with ${entry} before a claude version can be rolled out. Not fetched yet: claude versions are tested once skein has it. Moving it is a change to src/typescript.version, checked in CI first.`,
+    there: `skein's mod is type-checked with ${entry} before a claude version can be rolled out. It is in the fleet's store. Moving it is a change to src/typescript.version, checked in CI first.`,
+  };
+  const row = async () => {
+    await page.evaluate(() => loadVersions());
+    await page.waitForTimeout(300);
+    return page.$$eval("#upd-versions .upd-typescript", els => els.map(e => ({
+      text: e.textContent.replace(/\s+/g, " ").trim(),
+      buttons: e.querySelectorAll("button").length,
+    })));
+  };
+  check("with no TypeScript in the depot, the pane shows the pin and that it is not fetched",
+    await row(), [{ text: `TypeScript · ${W.missing}`, buttons: 0 }]);
+  fs.mkdirSync(path.join(fx.root, "fleet", ".skein", "depot", "typescript", entry), { recursive: true });
+  check("once it is in the depot, the pane says so, and still offers nothing to press",
+    await row(), [{ text: `TypeScript · ${W.there}`, buttons: 0 }]);
+  check("and no Roll out anywhere in the versions view names it",
+    await page.$$eval("#upd-versions button", (els, entry) => els.filter(b => b.dataset.e === entry).length, entry), 0);
+}
+
 // --- and nothing threw ------------------------------------------------------------------------------
 sayBlips();
 check("the pane raised no page errors", errors, []);

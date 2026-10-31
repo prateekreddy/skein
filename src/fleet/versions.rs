@@ -24,6 +24,10 @@
 //! recorded map against the one skein would hand over now, which is the binding table's stale diff
 //! (`docs/design/box-environment.md` §2.1, task A2) for these two rows.
 //!
+//! **And one kind no box is given**: the TypeScript skein's mod is type-checked with ([`TYPESCRIPT`],
+//! SKEIN-1396), pinned in `src/typescript.version`, fetched by [`watch_pass`] and bound only into the
+//! check of a claude-code entry.
+//!
 //! **What is kept.** Every entry a placed box records, the current version of each component and
 //! the one before it, for rollback. Removing the rest is offered ([`clean`]) and never automatic.
 
@@ -62,6 +66,24 @@ pub const RUST_TOOLCHAIN: Kind = Kind {
     fill_cap: 3 << 30,
     budget: 12 << 30,
     deadline: Duration::from_secs(30 * 60),
+};
+
+/// The TypeScript compiler skein's mod is type-checked with (SKEIN-1396): one npm prefix per
+/// version, `typescript@<version>`, holding that one package. Only the claude-code check reads it,
+/// bound read-only at `/tsc` ([`checks_for`]); no box is given it, and it is no rollout component,
+/// so it is not in [`CLIS`].
+pub const TYPESCRIPT: Kind = Kind {
+    name: "typescript",
+    entry_is_nameable: typescript_entry_is_nameable,
+    // npm's `bin/tsc` is a relative link into the package, as an agent CLI's command is.
+    links: Links::Internal,
+    // Measured on the fleet's sandbox, 2026-10-30: typescript 5.9.3 installed with
+    // `--ignore-scripts` into an empty prefix is 23.6 MB (22.5 MiB), two links and no other special
+    // file, in under 3 s. About five times that, for growth.
+    fill_cap: 128 << 20,
+    // The pin and the one before it, many times over.
+    budget: 1 << 30,
+    deadline: Duration::from_secs(5 * 60),
 };
 
 /// One agent CLI skein manages: the runtime's name, the npm package, the command it installs.
@@ -118,6 +140,13 @@ pub fn cli_entry_parts(entry: &str) -> Option<(&'static Cli, &str)> {
 
 fn cli_entry_is_nameable(entry: &str) -> bool {
     cli_entry_parts(entry).is_some()
+}
+
+/// `typescript@<version>`, a plain version, and nothing else.
+fn typescript_entry_is_nameable(entry: &str) -> bool {
+    entry
+        .strip_prefix("typescript@")
+        .is_some_and(version_is_nameable)
 }
 
 /// The host's target triple, as rustup names toolchains for it.
@@ -216,6 +245,10 @@ pub struct Tested {
     pub ok: bool,
     pub at: i64,
     pub checks: Vec<CheckResult>,
+    /// The TypeScript entry the mod's check ran with, for a claude-code entry. A record that names
+    /// another, or none, is from before the pin it would be tested with now, and is tested again.
+    #[serde(default)]
+    pub typescript: Option<String>,
 }
 
 /// skein's record of rollouts and tests: on the host, with skein's other declared state, never in a
@@ -482,30 +515,53 @@ pub fn pending_for(record: &crate::place::PlaceRecord, name: &str) -> Vec<Pendin
 // Fill and test
 // ------------------------------------------------------------------------------------------------
 
-/// The fill for a CLI version: npm, in the depot's namespace, installing one package into an empty
-/// prefix named for the entry. The package's install script runs there (claude-code's places its
-/// native binary), as upstream code, unprivileged, writing only staging.
-pub fn cli_fill(entry: &str) -> Result<depot::Fill, String> {
-    let (cli, version) = cli_entry_parts(entry)
-        .ok_or_else(|| format!("{entry:?} is not a CLI and a version, like claude@2.1.314"))?;
-    Ok(depot::Fill {
-        fetch: vec![
-            "npm".into(),
-            "install".into(),
-            "--global".into(),
-            "--prefix".into(),
-            format!("/stage/out/{entry}"),
-            "--no-fund".into(),
-            "--no-audit".into(),
-            format!("{}@{version}", cli.package),
-        ],
+/// npm, in the depot's namespace, installing `package@version` into an empty prefix named for the
+/// entry. `scripts` says whether the package's install scripts run there.
+fn npm_prefix_fill(entry: &str, package: &str, version: &str, scripts: bool) -> depot::Fill {
+    let mut fetch: Vec<String> = vec![
+        "npm".into(),
+        "install".into(),
+        "--global".into(),
+        "--prefix".into(),
+        format!("/stage/out/{entry}"),
+        "--no-fund".into(),
+        "--no-audit".into(),
+    ];
+    if !scripts {
+        fetch.push("--ignore-scripts".into());
+    }
+    fetch.push(format!("{package}@{version}"));
+    depot::Fill {
+        fetch,
         env: vec![
             ("npm_config_cache".into(), "/stage/npm".into()),
             ("npm_config_update_notifier".into(), "false".into()),
         ],
         read_only: Vec::new(),
         out: "out".into(),
-    })
+    }
+}
+
+/// The fill for a CLI version: one package into an empty prefix named for the entry. The package's
+/// install script runs there (claude-code's places its native binary), as upstream code,
+/// unprivileged, writing only staging.
+pub fn cli_fill(entry: &str) -> Result<depot::Fill, String> {
+    let (cli, version) = cli_entry_parts(entry)
+        .ok_or_else(|| format!("{entry:?} is not a CLI and a version, like claude@2.1.314"))?;
+    Ok(npm_prefix_fill(entry, cli.package, version, true))
+}
+
+/// The fill for a TypeScript version: the same, with `--ignore-scripts`. TypeScript has no install
+/// script, so the tarball npm checks against its integrity is all that lands (trust class A,
+/// `docs/design/box-environment.md` §6.3).
+pub fn typescript_fill(entry: &str) -> Result<depot::Fill, String> {
+    let version = entry
+        .strip_prefix("typescript@")
+        .filter(|v| version_is_nameable(v))
+        .ok_or_else(|| {
+            format!("{entry:?} is not typescript and a version, like typescript@5.9.3")
+        })?;
+    Ok(npm_prefix_fill(entry, "typescript", version, false))
 }
 
 /// The fill for a toolchain: the sandbox's own rustup, bound read-only into the depot's namespace,
@@ -547,6 +603,17 @@ pub fn toolchain_fill(name: &str) -> Result<depot::Fill, String> {
 /// against the new build before any box can be given it.
 pub const CLAUDE_CODE_PIN: &str = include_str!("../claude-code.version");
 
+/// The one TypeScript version skein's mod is type-checked with, by CI and by the fleet's check of a
+/// claude-code entry alike (SKEIN-1396). `src/typescript.version` is the only place it is written:
+/// CI's `plugin` job reads the same file, and `the_ci_typescript_pin_is_the_fleets_pin` fails if
+/// either stops doing so.
+pub const TYPESCRIPT_PIN: &str = include_str!("../typescript.version");
+
+/// The depot entry of the pinned TypeScript, `typescript@<pin>`.
+pub fn typescript_entry() -> String {
+    format!("typescript@{}", TYPESCRIPT_PIN.trim())
+}
+
 /// The version `runtime` is pinned to, when it is: claude-code is; codex follows npm's newest.
 pub fn pinned(runtime: &str) -> Option<&'static str> {
     (runtime == "claude").then(|| CLAUDE_CODE_PIN.trim())
@@ -561,6 +628,8 @@ pub struct CliCheck {
     pub argv: Vec<String>,
     /// Variables set for it.
     pub env: Vec<(String, String)>,
+    /// Paths bound read-only into its namespace besides, `(source in the sandbox, path inside)`.
+    pub binds: Vec<(String, String)>,
 }
 
 /// Every check for `version` of `cli`. First the version check (SKEIN-870's lesson: the version is
@@ -568,26 +637,33 @@ pub struct CliCheck {
 /// mod's own check** (SKEIN-1359): `tools/plugin-check.sh` from skein's source, with the entry's
 /// `claude` first on `PATH` and `CLAUDE_CODE_VERSION` set, so it refuses a build other than the one
 /// under test. It validates and tests `src/plugin` with that build, runs it headless offline, and
-/// type-checks the hooks module against the declarations that build lays. A check the script says
-/// it cannot run (exit 2, a tool missing) is a failure: an untested build is not rolled out.
-pub fn checks_for(cli: &Cli, version: &str) -> Vec<CliCheck> {
+/// type-checks the hooks module against the declarations that build lays, with the pinned
+/// TypeScript at `typescript` bound read-only at `/tsc` and named by `TSC` (SKEIN-1396). A check the
+/// script says it cannot run (exit 2, a tool missing) is a failure: an untested build is not rolled
+/// out.
+pub fn checks_for(cli: &Cli, version: &str, typescript: &Path) -> Vec<CliCheck> {
     let mut all = vec![CliCheck {
         name: "version",
         argv: vec![format!("/cli/bin/{}", cli.command), "--version".into()],
         env: Vec::new(),
+        binds: Vec::new(),
     }];
     if cli.runtime == "claude" {
         all.push(CliCheck {
             name: "plugin-check",
             argv: vec!["bash".into(), "/skein-src/tools/plugin-check.sh".into()],
-            env: vec![("CLAUDE_CODE_VERSION".into(), version.to_string())],
+            env: vec![
+                ("CLAUDE_CODE_VERSION".into(), version.to_string()),
+                ("TSC".into(), "/tsc/bin/tsc".into()),
+            ],
+            binds: vec![(typescript.display().to_string(), "/tsc".into())],
         });
     }
     all
 }
 
 /// The namespace a check runs in: the entry read-only at `/cli`, skein's source read-only at
-/// `/skein-src`, `/usr` and `/etc` read-only, a private `/tmp` as `HOME` and `TMPDIR`, **no
+/// `/skein-src`, the check's own binds, `/usr` and `/etc`, all read-only, a private `/tmp` as `HOME` and `TMPDIR`, **no
 /// network**, a cleared environment, its own PID namespace, ended with its parent.
 fn check_script(entry_dir: &str, source: &str, check: &CliCheck) -> String {
     let argv = check
@@ -601,11 +677,16 @@ fn check_script(entry_dir: &str, source: &str, check: &CliCheck) -> String {
         .iter()
         .map(|(k, v)| format!(" --setenv {} {}", sh_quote(k), sh_quote(v)))
         .collect();
+    let binds: String = check
+        .binds
+        .iter()
+        .map(|(from, to)| format!(" --ro-bind {} {}", sh_quote(from), sh_quote(to)))
+        .collect();
     format!(
         "timeout -k 5 600 bwrap --unshare-all --unshare-pid --die-with-parent --new-session \
          --clearenv --ro-bind /usr /usr --ro-bind-try /bin /bin --ro-bind-try /lib /lib \
          --ro-bind-try /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp \
-         --ro-bind {entry} /cli --ro-bind-try {source} /skein-src --chdir /tmp \
+         --ro-bind {entry} /cli --ro-bind-try {source} /skein-src{binds} --chdir /tmp \
          --setenv HOME /tmp --setenv TMPDIR /tmp --setenv PATH /cli/bin:/usr/local/bin:/usr/bin:/bin \
          --setenv DISABLE_AUTOUPDATER 1{env} -- {argv} 2>&1",
         entry = sh_quote(entry_dir),
@@ -637,19 +718,41 @@ fn cli_entry_shape(entry_dir: &Path, cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
+/// The TypeScript entry a test of `cli` is run with: the pinned one for Claude Code, whose mod's
+/// check type-checks with it, and none for any other CLI.
+fn typescript_for(cli: &Cli) -> Option<String> {
+    (cli.runtime == "claude").then(typescript_entry)
+}
+
 /// Run every check for a published CLI entry, and record the outcome. A check passes when it exits
 /// 0; the version check also needs the entry's version in what the binary said.
+///
+/// A claude-code entry is not tested at all until the pinned TypeScript is published: its mod's
+/// check would only say a tool is missing, and that is no verdict on the build, so nothing is
+/// recorded and the next pass tries again.
 pub fn test_cli(sandbox: &str, entry: &str) -> Result<Tested, String> {
     let (cli, version) =
         cli_entry_parts(entry).ok_or_else(|| format!("{entry:?} is not a CLI and a version"))?;
     if !depot::is_published(&AGENT_CLI, entry) {
         return Err(format!("{entry} is not in the fleet's agent-cli store"));
     }
+    let typescript = typescript_for(cli);
+    if let Some(ts) = typescript
+        .as_deref()
+        .filter(|ts| !depot::is_published(&TYPESCRIPT, ts))
+    {
+        return Err(format!(
+            "{entry} waits for {ts}, which its mod's check needs and the fleet's store does not \
+             have yet"
+        ));
+    }
+    let ts_dir = depot::kind_dir(&TYPESCRIPT).join(typescript.as_deref().unwrap_or_default());
     let dir = depot::kind_dir(&AGENT_CLI).join(entry);
     let mut tested = Tested {
         ok: true,
         at: chrono::Utc::now().timestamp(),
         checks: Vec::new(),
+        typescript,
     };
     if let Err(why) = cli_entry_shape(&dir, cli) {
         tested.ok = false;
@@ -660,7 +763,7 @@ pub fn test_cli(sandbox: &str, entry: &str) -> Result<Tested, String> {
         });
     } else {
         let source = skein_source_path();
-        for check in checks_for(cli, version) {
+        for check in checks_for(cli, version, &ts_dir) {
             let ran = crate::place::own_sandbox(sandbox).attempt(
                 &check_script(&dir.display().to_string(), &source, &check),
                 &[],
@@ -746,12 +849,14 @@ fn upstream_versions(sandbox: &str) -> BTreeMap<String, String> {
 }
 
 /// **The automatic half of a CLI update** (the owner's decision 1): ask the registry, fill every
-/// newest version the depot lacks, and test every entry not yet tested. Rolls nothing out.
+/// newest version the depot lacks and the pinned TypeScript if it lacks that, and test every entry
+/// not yet tested ([`test_pass`]). Rolls nothing out.
 /// Returns a line for each thing it did, for the server's log.
 pub fn watch_pass(sandbox: &str) -> Vec<String> {
     let mut said = Vec::new();
     depot::sweep_staging(&AGENT_CLI);
     depot::sweep_staging(&RUST_TOOLCHAIN);
+    depot::sweep_staging(&TYPESCRIPT);
     let upstream = upstream_versions(sandbox);
     let _ = update_rollouts(|r| {
         r.upstream.extend(upstream.clone());
@@ -778,9 +883,35 @@ pub fn watch_pass(sandbox: &str) -> Vec<String> {
             )),
         }
     }
+    // The TypeScript claude-code's mod is type-checked with (SKEIN-1396), before anything is
+    // tested with it.
+    let ts = typescript_entry();
+    if !depot::is_published(&TYPESCRIPT, &ts) {
+        match typescript_fill(&ts).and_then(|f| fill_entry(sandbox, &TYPESCRIPT, &ts, &f)) {
+            Ok(()) => said.push(format!("fetched {ts} for the mod's check")),
+            Err(e) => said.push(format!(
+                "could not fetch {ts}: {}",
+                e.lines().last().unwrap_or("")
+            )),
+        }
+    }
+    said.extend(test_pass(sandbox));
+    said
+}
+
+/// Test every published CLI entry that has no test record, or whose record is from a TypeScript
+/// other than the one it would be tested with now. Returns a line for each.
+pub fn test_pass(sandbox: &str) -> Vec<String> {
+    let mut said = Vec::new();
     let tested = rollouts().tested;
     for entry in depot::published(&AGENT_CLI) {
-        if tested.contains_key(&entry) {
+        let Some((cli, _)) = cli_entry_parts(&entry) else {
+            continue;
+        };
+        if tested
+            .get(&entry)
+            .is_some_and(|t| t.typescript == typescript_for(cli))
+        {
             continue;
         }
         match test_cli(sandbox, &entry) {
@@ -983,6 +1114,25 @@ pub fn view() -> Vec<ComponentView> {
         });
     }
     out
+}
+
+/// The TypeScript skein's mod is type-checked with, for the cockpit: read-only, since it is moved
+/// only by a reviewed change to `src/typescript.version`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TypeScriptView {
+    /// `typescript@<pin>`.
+    pub entry: String,
+    /// Whether the fleet's store has it yet.
+    pub published: bool,
+}
+
+/// The pinned TypeScript, and whether the depot has it.
+pub fn typescript_view() -> TypeScriptView {
+    let entry = typescript_entry();
+    TypeScriptView {
+        published: depot::is_published(&TYPESCRIPT, &entry),
+        entry,
+    }
 }
 
 /// Remove entries the person confirmed, each only if nothing keeps it at the moment of removal.
@@ -1374,6 +1524,133 @@ mod tests {
             !ci.contains(pin),
             "the workflow writes the pin's number {pin} itself, beside the file it should read"
         );
+    }
+
+    /// **CI type-checks the mod with the TypeScript the fleet checks every claude version with:
+    /// both read `src/typescript.version`, and nothing writes the number a second time**
+    /// (SKEIN-1396).
+    ///
+    /// What would make it fail: the `plugin` job's `TYPESCRIPT_VERSION:` literal coming back, or the
+    /// pin's number anywhere in the workflow; the job no longer reading the file into
+    /// `TYPESCRIPT_VERSION` through `GITHUB_ENV`; a pin file that is not one plain version.
+    #[test]
+    fn the_ci_typescript_pin_is_the_fleets_pin() {
+        let pin = TYPESCRIPT_PIN.trim();
+        assert!(
+            version_is_nameable(pin),
+            "src/typescript.version is {pin:?}"
+        );
+        assert_eq!(typescript_entry(), format!("typescript@{pin}"));
+        let ci = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml"),
+        )
+        .expect("the CI workflow");
+        let job = ci
+            .split("\n  plugin:\n")
+            .nth(1)
+            .expect("the CI workflow has no `plugin` job");
+        let job = job.split("\n\n").next().unwrap_or(job);
+        assert!(
+            job.lines().any(|l| l.contains("src/typescript.version")
+                && l.contains("TYPESCRIPT_VERSION=")
+                && l.contains("GITHUB_ENV")),
+            "the plugin job does not read TYPESCRIPT_VERSION from src/typescript.version:\n{job}"
+        );
+        assert!(
+            job.contains("typescript@$TYPESCRIPT_VERSION"),
+            "the plugin job does not install the TypeScript it read:\n{job}"
+        );
+        assert!(
+            !ci.contains("TYPESCRIPT_VERSION:"),
+            "the workflow sets TYPESCRIPT_VERSION to a value of its own"
+        );
+        assert!(
+            !ci.contains(pin),
+            "the workflow writes the TypeScript pin's number {pin} itself, beside the file it \
+             should read"
+        );
+    }
+
+    /// **Only `typescript@` and a plain version is a TypeScript entry.**
+    ///
+    /// What would make it fail: `TYPESCRIPT` naming its entries with `cli_entry_is_nameable` (the
+    /// TypeScript entry is refused and `claude@2.1.314` accepted), or a check that takes any
+    /// version (`latest` and a pre-release accepted).
+    #[test]
+    fn only_typescript_and_a_plain_version_is_a_typescript_entry() {
+        let named = TYPESCRIPT.entry_is_nameable;
+        assert!(named("typescript@5.9.3"), "typescript@5.9.3");
+        assert!(named(&typescript_entry()), "the pin's own entry");
+        for bad in [
+            "typescript@latest",
+            concat!("typescript@5.9.3-", "beta"),
+            "typescript@5.9",
+            "typescript@",
+            "typescript",
+            "claude@2.1.314",
+            "codex@0.170.0",
+            "typescript@5.9.3/..",
+        ] {
+            assert!(!named(bad), "{bad:?}");
+        }
+        assert!(typescript_fill("typescript@latest").is_err());
+        let fill = typescript_fill("typescript@5.9.3").expect("a TypeScript fill");
+        assert!(
+            fill.fetch.iter().any(|w| w == "--ignore-scripts")
+                && fill.fetch.last().map(String::as_str) == Some("typescript@5.9.3"),
+            "{:?}",
+            fill.fetch
+        );
+    }
+
+    /// **The mod's check is given the pinned `tsc`, read-only at `/tsc` and named by `TSC`, and
+    /// no other check is.**
+    ///
+    /// What would make it fail: dropping the `TSC` variable or the `/tsc` bind from the
+    /// plugin-check row; giving them to codex's or the version check; `check_script` not emitting
+    /// a check's binds as `--ro-bind`.
+    #[test]
+    fn the_mod_check_is_given_the_pinned_tsc() {
+        let ts = Path::new("/depot/typescript").join(typescript_entry());
+        let claude = cli("claude").unwrap();
+        let checks = checks_for(claude, "2.1.314", &ts);
+        let plugin = checks
+            .iter()
+            .find(|c| c.name == "plugin-check")
+            .expect("claude's checks have the mod's check");
+        assert_eq!(
+            plugin.binds,
+            [(ts.display().to_string(), "/tsc".to_string())]
+        );
+        assert!(
+            plugin
+                .env
+                .contains(&("TSC".to_string(), "/tsc/bin/tsc".to_string())),
+            "{:?}",
+            plugin.env
+        );
+        let script = check_script("/depot/agent-cli/claude@2.1.314", "/src", plugin);
+        assert!(
+            script.contains(&format!(
+                " --ro-bind {} {} ",
+                sh_quote(&ts.display().to_string()),
+                sh_quote("/tsc")
+            )),
+            "{script}"
+        );
+        let codex = checks_for(cli("codex").unwrap(), "0.170.0", &ts);
+        let others: Vec<&CliCheck> = checks
+            .iter()
+            .filter(|c| c.name != "plugin-check")
+            .chain(codex.iter())
+            .collect();
+        for c in others {
+            assert!(
+                c.binds.is_empty() && !c.env.iter().any(|(k, _)| k == "TSC"),
+                "{c:?}"
+            );
+            assert!(!check_script("/e", "/src", c).contains("/tsc"), "{c:?}");
+        }
     }
 
     /// **The restart rule: an idle box that is behind is restarted; a working one, one waiting on a
