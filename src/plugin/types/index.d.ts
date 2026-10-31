@@ -166,6 +166,10 @@ export type SkeinResources = {
   memory: { bytes: number; limit: number | null } | null
   /** Cores in use, averaged since skein's previous reading; null when skein had none. */
   cpu: number | null
+  /** Processes in the box against its limit (`PidsLevel`); null when the file has none. */
+  pids: { current: number | null; max: number | null } | null
+  /** What else skein asks of the box than disk, by kind (`memory`, `pids`); empty for none. */
+  asked: string[]
   /** Versions a restart would give the box. */
   updates: SkeinUpdate[]
 }
@@ -181,6 +185,9 @@ export type SkeinBandJob = Omit<SkeinViewJob, 'waited_secs'>
 export type SkeinBandJobs = {
   jobs: SkeinBandJob[]
   ahead: { box: string; command: string; cores: number }[]
+  /** The fleet's cores, those granted fleet-wide, and the jobs running fleet-wide; null when the
+   * view says no cores. */
+  fleet: { cores: number; granted: number; running: number } | null
 }
 
 /** What the band and the pane draw from, read on a timer and after a Clean (SKEIN-1362). */
@@ -206,6 +213,8 @@ export type SkeinBand = {
   /** Memory, CPU and updates from the signal file; null as `disk` is. */
   memory: SkeinResources['memory']
   cpu: number | null
+  pids: SkeinResources['pids']
+  asked: string[]
   updates: SkeinUpdate[]
   /**
    * This box's own spend from `signals/usage.json`, in dollars at the API's prices; null when the
@@ -213,6 +222,39 @@ export type SkeinBand = {
    * `unpriced`: a model in the week has no price.
    */
   spend: { at: string; today: number; week: number; unpriced: boolean } | null
+}
+
+/** What the skein pane shows: its panels, the clean list first, or one lane opened (`lane`, its
+ * worktree). */
+export type SkeinPaneView = { view: 'board' | 'clean' | 'lane'; lane: string | null }
+
+/** A lane skein made, as `skein-mcp lane list` reports it (`Lane` in `hooks/lanes.ts`). */
+export type SkeinLaneRecord = {
+  name: string
+  path: string
+  branch: string | null
+  item: string | null
+  phase: string | null
+  isMadeBySkein: boolean
+}
+
+/** One line of the pane's log: when, whose, and what changed. */
+export type SkeinPaneLogEntry = { at: string; who: string; what: string }
+
+/** The skein pane's own record for the session (SKEIN-1440). */
+export type SkeinPane = {
+  /**
+   * What waited on the person at the last look, by key; null before the first look. The pane opens
+   * by itself on the first look and for a key not in this list, so what already waited when the
+   * person closed it never opens it again.
+   */
+  seen: string[] | null
+  /** The lanes skein made in this box, read at each look. */
+  lanes: SkeinLaneRecord[]
+  /** The last few changes the pane saw, oldest first. */
+  log: SkeinPaneLogEntry[]
+  /** What each thing the log follows was at the last look, by key, so a change is seen once. */
+  marks: Record<string, string>
 }
 
 /** Where a subagent's run stands: working, answered, ended on an error or refusal, or interrupted. */
@@ -365,6 +407,10 @@ declare module 'claude-code' {
       bandToasted: Shaped<string[]>
       /** What the last Clean said, `skein-mcp clean`'s own sentence. */
       cleanSaid: Shaped<string | null>
+      /** What the skein pane shows now (SKEIN-1440). */
+      paneView: Shaped<SkeinPaneView>
+      /** The skein pane's record: whether the person closed it, what it opened for, its log. */
+      pane: Shaped<SkeinPane>
       agents: Shaped<SkeinAgentRun[]>
       agentsPanel: Shaped<SkeinAgentsPanel>
       agentsNow: number

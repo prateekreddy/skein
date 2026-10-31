@@ -630,15 +630,21 @@ test('/skein requests lists each request with its state', async ($, on) => {
   expect(ran.text).toBe(['this box asked for:', '  write acme/site: granted', '  package apt jq: waiting'].join('\n'))
 })
 
+// What would make it fail: the pane not opening as the session starts, or `/skein` alone not
+// opening it (SKEIN-1440). Watched: with identity.ts's open taken out, the last expectation failed.
 test('/skein clean opens the list, and /skein alone still names the box', async ($, on) => {
   const w = world()
   await started(on, w, $)
+  // The pane opened by itself as the session started (SKEIN-1440).
+  expect(w.opened).toEqual(['skein'])
 
   const clean = await $.command.run(TYPED('clean'))
   expect(clean.text).toBe('the list of what this box can remove is open.')
-  expect(w.opened).toEqual(['skein'])
+  expect(w.opened).toEqual(['skein', 'skein'])
 
+  // `/skein` alone opens the pane too, and its answer is unchanged.
   expect((await $.command.run(TYPED(''))).text).toBe('version 9.8.7, in box web-main')
+  expect(w.opened).toEqual(['skein', 'skein', 'skein'])
   expect((await $.command.run(TYPED('bogus'))).text).toBe(
     'there is no /skein bogus. Try /skein status, /skein clean or /skein requests.',
   )
@@ -756,9 +762,13 @@ test('the band shows the oldest waiting question in its own words, cut to one li
     expect(await ui.find({ type: 'Text', text: /requests? (is|are) waiting/ })).toBe(undefined)
     await ui.unmount()
 
-    // The pane keeps every question whole.
+    // The pane keeps every question whole, worded as what to do, wrapped in its panel.
     const pane = await $.ui.mount({ ...PANE, surface })
-    expect((await pane.find({ type: 'Text', text: /legacy importer/ }))?.text).toBe(`question ${LONG}: waiting`)
+    const waiting = (await pane.findAll({ type: 'Box' }))
+      .filter(b => /^row:waiting:\d+$/.test(b.key ?? ''))
+      .map(b => b.text.replace(/^│ /, '').replace(/\s*│$/, '').trim())
+      .join(' ')
+    expect(waiting).toContain(`⚑ Answer in the cockpit: “${LONG.replace(/\s+/g, ' ')}”`)
     await pane.unmount()
   }
 })
