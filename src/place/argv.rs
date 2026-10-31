@@ -793,7 +793,7 @@ mod tests {
             argv.last().unwrap(),
             &format!(
                 "export HOME='{box_home}' SKEIN_BOX='web-main' PATH='{box_home}/.local/bin:\
-                 {box_home}/.repo-tools/tools/bin:/usr/local/share/npm-global/bin:\
+                 /usr/local/share/npm-global/bin:{box_home}/.repo-tools/tools/bin:\
                  {box_home}/.cargo/bin:/usr/local/sbin:\
                  /usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' && cd '/boxes/web-main/tree' && \
                  git status"

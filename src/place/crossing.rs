@@ -48,13 +48,15 @@ const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 /// check, where the row and the thing it checked were built from different sets, and the row
 /// reported healthy on the one fleet it existed to catch.
 ///
-/// The second entry is the `bin` of the repo's tools area, which `box-session.sh` binds at
-/// `~/.repo-tools` in every box of the repo (SKEIN-1431), and the fourth is the box's
-/// `~/.cargo/bin`, where it binds the fleet's shared Rust toolchain read-only (SKEIN-1337). Both
-/// spelled from `home` like the first, so this stays a function of the placement record alone.
+/// The third entry is the `bin` of the repo's tools area, which `box-session.sh` binds at
+/// `~/.repo-tools` in every box of the repo (SKEIN-1431). It is after [`BOX_PATH_HEAD`] because the
+/// agent CLIs are skein's, not the repo's: a `claude` an agent installs into the area must not
+/// shadow the fleet's for every box of the repo. The fourth is the box's `~/.cargo/bin`, where the
+/// launcher binds the fleet's shared Rust toolchain read-only (SKEIN-1337). Both spelled from
+/// `home` like the first, so this stays a function of the placement record alone.
 pub fn box_path(home: &str) -> String {
     format!(
-        "{home}/.local/bin:{home}/.repo-tools/tools/bin:{BOX_PATH_HEAD}:{home}/.cargo/bin:{FLEET_PATH}"
+        "{home}/.local/bin:{BOX_PATH_HEAD}:{home}/.repo-tools/tools/bin:{home}/.cargo/bin:{FLEET_PATH}"
     )
 }
 

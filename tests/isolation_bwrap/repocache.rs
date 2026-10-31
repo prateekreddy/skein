@@ -109,6 +109,18 @@ const PLACES: [&str; 6] = ["npx", "cargo", "pip", "uv", "rustup", "npmglobal"];
 /// production's order. `$2` is `arg`. The box's `$HOME` is its own `home`, which is where the
 /// launcher binds its home from.
 fn in_repo_box(f: &Fleet, name: &str, repo: &str, probe: &str, arg: &Path) -> String {
+    in_repo_box_with(f, name, repo, probe, arg, "")
+}
+
+/// [`in_repo_box`], with `extra` appended to the bwrap arguments after the launcher's.
+fn in_repo_box_with(
+    f: &Fleet,
+    name: &str,
+    repo: &str,
+    probe: &str,
+    arg: &Path,
+    extra: &str,
+) -> String {
     let root = f.fleet_root.join(name);
     for p in [
         root.join("tree"),
@@ -138,7 +150,7 @@ fn in_repo_box(f: &Fleet, name: &str, repo: &str, probe: &str, arg: &Path) -> St
          {iso}\n\
          {cache}\n\
          {tools}\n\
-         exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} -- \
+         exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} {extra} -- \
            /bin/bash -c {inside} skein-probe \"$repo_tools\" {arg}\n",
         name = skein::util::sh_quote(name),
         root = q(&root),
@@ -405,5 +417,47 @@ fn a_link_where_the_area_should_be_is_refused() {
     assert!(
         fs::read_dir(&other_area).unwrap().next().is_none(),
         "a box wrote into another repo's area through a link at its own"
+    );
+}
+
+/// **A `claude` an agent installs into the area does not win over the fleet's** (SKEIN-1431). The
+/// agent CLIs are skein's, not the repo's, so the fleet's npm prefix is ahead of the area's `bin` on
+/// `box_path`: an `npm i -g @anthropic-ai/claude-code` into the area, which lands in its `tools/bin`,
+/// must not change the agent every box of the repo runs. The fleet's prefix here is a fixture bound
+/// at `/usr/local/share/npm-global/bin` inside the box, over a tmpfs, so the test needs no real one.
+///
+/// What would make it fail: the area's `bin` ahead of the fleet's prefix on `box_path`, the order
+/// this shipped with first ("the repo's own claude").
+#[test]
+fn a_claude_installed_into_the_area_does_not_shadow_the_fleets() {
+    use std::os::unix::fs::PermissionsExt;
+    if !bwrap_works() || !Path::new("/usr/local/share").is_dir() {
+        skip("bwrap cannot make a user namespace here, or there is no /usr/local/share to cover, so which claude a repo's box runs is unchecked");
+        return;
+    }
+    let f = Fleet::make("repotoolsclaude");
+    let fleet_bin = f.dir.join("fleet-npm-bin");
+    fs::create_dir_all(&fleet_bin).unwrap();
+    fs::write(fleet_bin.join("claude"), "#!/bin/sh\necho fleet-claude\n").unwrap();
+    fs::set_permissions(fleet_bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    let web_area = f.fleet_root.join(".repo-tools/web");
+    let probe = "mkdir -p \"$NPM_CONFIG_PREFIX/bin\" && \
+                 printf '#!/bin/sh\\necho repo-claude\\n' > \"$NPM_CONFIG_PREFIX/bin/claude\" && \
+                 chmod +x \"$NPM_CONFIG_PREFIX/bin/claude\"; \
+                 printf 'planted %s\\n' \"$NPM_CONFIG_PREFIX/bin/claude\"; \
+                 printf 'ran %s\\n' \"$(claude)\"";
+    let extra = format!(
+        "--tmpfs /usr/local/share --bind {} /usr/local/share/npm-global/bin",
+        skein::util::sh_quote(fleet_bin.to_string_lossy().as_ref())
+    );
+    let said = in_repo_box_with(&f, "web-main", "web", probe, &web_area, &extra);
+    assert!(
+        web_area.join("tools/bin/claude").is_file(),
+        "the probe did not plant a claude in the area's bin, so nothing below is about one:\n{said}"
+    );
+    assert_eq!(
+        answer(&said, "ran"),
+        "fleet-claude",
+        "the repo's own claude in its tools area shadows the fleet's:\n{said}"
     );
 }

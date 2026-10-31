@@ -120,12 +120,12 @@ set -uo pipefail
 # Boxes remain one trust domain for their STATE — §9.2 says so and it is still true — but the
 # domain's membership is no longer writable from inside it (SKEIN-963, SKEIN-968).
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# The second entry is the repo's tools area, bound at `~/.repo-tools` in every box of the repo
-# ("This repo's tools and caches" below, SKEIN-1431): what an agent installs there lasts across
-# restarts and reaches the repo's other boxes. A box with no area has no such directory. The fourth
-# is `~/.cargo/bin`, where the fleet's shared Rust toolchain is bound read-only (SKEIN-1337, "the
-# fleet's Rust toolchain" below). Ahead of the fixed six, which still end it.
-box_path="$HOME/.local/bin:$HOME/.repo-tools/tools/bin:/usr/local/share/npm-global/bin:$HOME/.cargo/bin:$PATH"
+# The third entry is the repo's tools area, bound at `~/.repo-tools` in every box of the repo (SKEIN-1431):
+# what an agent installs there lasts and reaches the repo's other boxes. It is AFTER the fleet's npm
+# prefix because the agent CLIs are skein's, not the repo's: an `npm i -g` of claude into the area
+# must not shadow the fleet's for every box of the repo. The fourth is `~/.cargo/bin`, where the
+# fleet's shared Rust toolchain is bound read-only (SKEIN-1337). Ahead of the fixed six, which end it.
+box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.repo-tools/tools/bin:$HOME/.cargo/bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
 #
 # Nobody is watching when this runs. skein spawns it through `util::run_bounded`, which hands every
@@ -2995,7 +2995,9 @@ unset SKEIN_NPM_PREFIX
 # rustup that started it, and every `rustc` cargo runs is one. `skein-lock` (`src/plugin/bin`) takes
 # the same lock for an agent's own installs.
 #
-# In the area, rustup may change toolchains, so the refusal below is only for `rustup self`.
+# In the area, rustup may change toolchains, so the refusal below is only for `rustup self`. An
+# agent's own change (`toolchain install|uninstall`, `update`, `component` or `target add|remove`)
+# runs under the same lock; a read (`show`, `which`, `run`) never takes it.
 toolchain="${SKEIN_FLEET_ROOT:-/boxes}/.skein/toolchain"
 rust_default="$(box_version rust)" || rust_default=""
 rust_pinned="$(box_version rust-repo)" || rust_pinned=""
@@ -3099,10 +3101,18 @@ for a in "$@"; do
   if [ -z "$sub" ]; then sub=$a; else arg=$a; break; fi
 done
 if [ -n "$area" ]; then
-  if [ "$sub" = self ]; then
-    echo "skein: rustup itself is the fleet's and is read-only, so it cannot update or remove itself here. This repo's toolchains can still be installed and removed, with rustup toolchain install and uninstall." >&2
-    exit 1
-  fi
+  case "$sub:$arg" in
+    self:*)
+      echo "skein: rustup itself is the fleet's and is read-only, so it cannot update or remove itself here. This repo's toolchains can still be installed and removed, with rustup toolchain install and uninstall." >&2
+      exit 1 ;;
+    install:*|uninstall:*|update:*|upgrade:*|toolchain:install|toolchain:uninstall|toolchain:remove|component:add|component:remove|target:add|target:remove)
+      if mkdir -p -- "$SKEIN_REPO_TOOLS/.locks" && exec {lock}>>"$SKEIN_REPO_TOOLS/.locks/tools"; then
+        if ! flock -n "$lock"; then
+          echo "skein: another box of this repo is changing its Rust toolchains; rustup waits for it to finish." >&2
+          flock "$lock"
+        fi
+      fi ;;
+  esac
   exec "$skein_rustup" "$@"
 fi
 case "$sub:$arg" in
@@ -3956,8 +3966,8 @@ exec bwrap \
     # This repo tools area, shared by its boxes (SKEIN-1431, bound at ~/.repo-tools at fleet scope
     # above): every download cache under cache/, and every tool manager pointed into it, so what an
     # agent installs lasts across restarts and every box of the repo has it. Its bin, tools/bin, is
-    # second on box_path, and cargo install, uv tool, pipx, go install and npm i -g all put their
-    # commands there.
+    # on box_path after the fleet npm prefix, and cargo install, uv tool, pipx, go install and
+    # npm i -g all put their commands there.
     #
     # The caches are shared because what was measured on 2026-10-29 in two bwrap namespaces at once
     # decides it (SKEIN-1350): cargo, npm with npx, pip, uv and pnpm each finished every round

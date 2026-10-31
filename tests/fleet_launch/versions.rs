@@ -1014,9 +1014,10 @@ fn a_repo_with_no_toolchain_file_builds_with_the_linked_fleet_toolchain() {
 /// the name it was run as. The toolchain a call wants is its `+name`, else `RUSTUP_TOOLCHAIN`, else
 /// the nearest `rust-toolchain.toml`'s channel, else `settings.toml`'s default; it is there when
 /// `$RUSTUP_HOME/toolchains/<name>` is. `show active-toolchain` answers that; `toolchain install`
-/// takes two seconds and logs its start and end beside `RUSTUP_HOME`; anything else is a proxy,
-/// which says what it ran, or logs `unlocked` when its toolchain was missing (rustup's own
-/// auto-install, which takes no lock).
+/// takes two seconds and logs its start and end beside `RUSTUP_HOME`, and so does an agent's own
+/// change (`toolchain install <name>`, `component add`, `target remove`, ...), in a log of its own;
+/// anything else is a proxy or a read, which says what it ran, or logs `unlocked` when its
+/// toolchain was missing (rustup's own auto-install, which takes no lock).
 const FAKE_RUSTUP: &str = r#"#!/bin/bash
 log="$RUSTUP_HOME/../skein-test-installs.log"
 plus=""
@@ -1037,6 +1038,9 @@ case "$*" in
   "toolchain install")
     echo "start $$" >>"$log"; sleep 2
     mkdir -p "$RUSTUP_HOME/toolchains/$tc"; echo "end $$" >>"$log" ;;
+  "toolchain install "*|"toolchain uninstall "*|"component "*|"target "*)
+    changes="$RUSTUP_HOME/../skein-test-changes.log"
+    echo "start $$ $*" >>"$changes"; sleep 2; echo "end $$ $*" >>"$changes"; echo "changed" ;;
   *)
     if [ -d "$RUSTUP_HOME/toolchains/$tc" ]; then echo "ran $tc"
     else echo "unlocked $$" >>"$log"; echo "missing $tc"; exit 1; fi ;;
@@ -1054,6 +1058,12 @@ esac
 /// after the first); not installing at all and leaving it to rustup (`unlocked` in the log). And a
 /// build that waits on the lock when nothing is missing: the third run is made while another
 /// process holds the lock, and must not wait for it.
+///
+/// An agent's own changes take the same lock: a `rustup toolchain install` and a `rustup component
+/// add` made at once run one after the other (else two `start`s before an `end` in the changes
+/// log), and while another process holds the lock a `rustup show` and a `rustup which` still answer
+/// at once (a read that took the lock would print `waited`) and a `rustup target add` does not (an
+/// unlocked one would print `changed`).
 #[test]
 fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
     let _env = env_lock();
@@ -1078,7 +1088,12 @@ fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
     let agent = "{ cargo build > /tmp/a.out 2>/tmp/a.err & cargo build > /tmp/b.out 2>/tmp/b.err; wait; \
                    printf 'a %s\\n' \"$(cat /tmp/a.out)\"; printf 'b %s\\n' \"$(cat /tmp/b.out)\"; \
                    exec 9>>\"$SKEIN_REPO_TOOLS/.locks/tools\"; flock 9; \
-                   printf 'held %s\\n' \"$(timeout 20 cargo build 2>&1 || echo waited)\"; exec 9>&-; \
+                   printf 'held %s\\n' \"$(timeout 20 cargo build 2>&1 || echo waited)\"; \
+                   printf 'show %s\\n' \"$(timeout 20 rustup show 2>&1 || echo waited)\"; \
+                   printf 'which %s\\n' \"$(timeout 20 rustup which rustc 2>&1 || echo waited)\"; \
+                   printf 'target %s\\n' \"$(timeout 5 rustup target add wasm32-unknown-unknown 2>/dev/null || echo waited)\"; \
+                   exec 9>&-; \
+                   rustup toolchain install 1.91.0 > /tmp/c.out 2>&1 & rustup component add clippy > /tmp/d.out 2>&1; wait; \
                  } > /tmp/rs.tmp && mv /tmp/rs.tmp /tmp/rs.report; exec sleep 300";
     let (_launched, anchor, report) = start_in_repo("rustlock-main", &prefix, &store, agent, "rs");
     end("rustlock-main", anchor);
@@ -1105,5 +1120,30 @@ fn two_concurrent_auto_installs_are_serialised_by_the_shim() {
         field(&report, "held"),
         "ran 1.90.0",
         "a build whose toolchain is there waited on the install lock: {report:?}"
+    );
+    for read in ["show", "which"] {
+        assert_eq!(
+            field(&report, read),
+            "ran 1.90.0",
+            "rustup {read}, a read, waited on the lock or did not run: {report:?}"
+        );
+    }
+    assert_eq!(
+        field(&report, "target"),
+        "waited",
+        "rustup target add ran while another process held the repo's lock: {report:?}"
+    );
+    let changes =
+        fs::read_to_string(root.join("boxes/.repo-tools/rustlock/skein-test-changes.log"))
+            .unwrap_or_default();
+    let shape: Vec<&str> = changes
+        .lines()
+        .map(|l| l.split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        shape,
+        ["start", "end", "start", "end"],
+        "an agent's rustup toolchain install and component add, made at once, were not run one \
+         after the other under the repo's lock:\n{changes}\n{report:?}"
     );
 }

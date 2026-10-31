@@ -36,7 +36,8 @@ puts it.
   holds every download cache under `cache/`: cargo's whole `CARGO_HOME`, npm's cache with `_npx` in
   it, pip's and uv's caches. And it holds what the tool managers install: rustup's home, `cargo
   install`, npm's global prefix, uv's pythons and tools, pipx, pyenv, nvm, fnm, volta, mise and
-  `GOPATH`, with `tools/bin` on every box's `PATH` right after `~/.local/bin`. The launcher makes
+  `GOPATH`, with `tools/bin` on every box's `PATH` after the fleet's npm prefix, so a `claude` installed
+  there never shadows the fleet's. The launcher makes
   it, binds it into the repo's boxes and no other repo's, and points each tool at it. A command skein
   runs into a box by a crossing, rather than in its session, takes the same values from the box's
   session (SKEIN-1354), so a crossing's cargo and npm use the area too, and a box the launcher gave
