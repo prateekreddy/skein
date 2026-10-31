@@ -28,7 +28,9 @@
 //! **Measured at the end, then removed.** [`finish`] reads `cpu.stat`'s `usage_usec` and
 //! `memory.peak` from the job's cgroup and removes it. A job whose wrapper is gone, killed with `-9`
 //! while its command ran on, has its cgroup killed first: the job has ended, so what it left
-//! running goes with it. [`Rates`] turns two readings of a running job into the cores it is using
+//! running goes with it. A job that ended `done` or `cancelled` with its wrapper still there is
+//! left alone until the wrapper has left the box, and then whatever is still in its cgroup is
+//! killed, measured and the cgroup removed ([`stop_leftovers`], SKEIN-1438). [`Rates`] turns two readings of a running job into the cores it is using
 //! now.
 //!
 //! **Shared between boxes by what they were granted.** A job's weight only splits the CPU its box's
@@ -406,6 +408,33 @@ pub(crate) fn weigh_boxes_with(fs: &dyn Cgroupfs, cgroups: &Path, granted: &BTre
             let _ = fs.write(&dir.join("cpu.weight"), &want.to_string());
         }
     }
+}
+
+/// How many processes are in box `box_name`'s job `id`'s cgroup, by its `cgroup.procs`: zero when
+/// there is no such cgroup.
+pub fn members(cgroups: &Path, box_name: &str, id: &str) -> u32 {
+    std::fs::read_to_string(job_cgroup(cgroups, box_name, id).join("cgroup.procs"))
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+        .unwrap_or(0)
+}
+
+/// Stop what an ended job left running in its cgroup (SKEIN-1438): every process still in it is
+/// killed, then the cgroup is read and removed, as [`finish`] does for a job whose wrapper is
+/// gone. The caller passes only a job whose wrapper has left the box, so nothing killed here is
+/// the wrapper handing its command's status back. Returns how many processes there were and the
+/// reading, or `None` when the job has no cgroup or nothing is left in it.
+pub fn stop_leftovers(cgroups: &Path, box_name: &str, id: &str) -> Option<(u32, Option<Usage>)> {
+    stop_leftovers_with(&Kernel, cgroups, box_name, id)
+}
+
+pub(crate) fn stop_leftovers_with(
+    fs: &dyn Cgroupfs,
+    cgroups: &Path,
+    box_name: &str,
+    id: &str,
+) -> Option<(u32, Option<Usage>)> {
+    let left = members(cgroups, box_name, id);
+    (left > 0).then(|| (left, finish_with(fs, cgroups, box_name, id, true)))
 }
 
 /// Remove box `box_name`'s job cgroups that name no job in `active` and that the kernel says are
@@ -902,6 +931,62 @@ mod tests {
             .iter()
             .any(|(p, v)| p.ends_with("cgroup.kill") && v == "1"));
         assert!(!cg.exists());
+    }
+
+    /// **A done job whose command left a process running is stopped once its wrapper has gone,
+    /// and not while the wrapper is still exiting** (SKEIN-1438).
+    ///
+    /// The job says `done` while its wrapper, 31337, and a daemon its command started, 40001, are
+    /// both in its cgroup. The tick that sees it end and the tick after both leave the cgroup alone:
+    /// the wrapper is still there. Once the wrapper has left the box, the next tick kills the
+    /// cgroup (the fixture's kernel is plain files, so the kill is the `1` in `cgroup.kill`),
+    /// measures it again, and the view says what it stopped.
+    ///
+    /// What would make it fail: no later-tick pass over ended jobs (the sabotage that was run: the
+    /// pass's loop made to skip every job, and `cgroup.kill` is never written), the pass not
+    /// waiting for the wrapper to leave (also run: the `alive` check taken out, and the cgroup is
+    /// killed on the tick the wrapper is still exiting), or the count kept out of the view.
+    #[test]
+    fn a_done_jobs_leftover_processes_are_stopped_once_its_wrapper_has_gone() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n").unwrap();
+        submit(&places, "j-l", 31337, "waiting");
+        tick(&places, 0);
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-l");
+        std::fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        std::fs::write(cg.join("cgroup.procs"), "31337\n40001\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 2000000\n").unwrap();
+        submit(&places, "j-l", 31337, "done");
+        for secs in [2, 4] {
+            let q = tick(&places, secs);
+            assert_eq!(job(&q, "j-l").state, "done", "{q:#?}");
+            assert!(
+                !cg.join("cgroup.kill").exists(),
+                "a job whose wrapper is still exiting was killed, at {secs}s"
+            );
+        }
+
+        std::fs::write(cg.join("cgroup.procs"), "40001\n").unwrap();
+        std::fs::write(cg.join("cpu.stat"), "usage_usec 3000000\n").unwrap();
+        let q = tick(&places, 6);
+        assert_eq!(
+            read(&cg.join("cgroup.kill")),
+            "1",
+            "the leftovers were not stopped: {q:#?}"
+        );
+        let l = job(&q, "j-l");
+        assert_eq!(l.leftovers, 1, "{q:#?}");
+        assert_eq!(
+            l.used.map(|u| u.avg_cores),
+            Some(1.5),
+            "not measured again: {q:#?}"
+        );
+        let view = crate::jobs::read_view(&places.states.join("web-main")).expect("no view");
+        assert_eq!(
+            view.jobs[0].reason, "used 1.5 cores on average; stopped 1 leftover process",
+            "{view:#?}"
+        );
     }
 
     /// **Measured use reaches admission, through readings kept from one tick to the next.**

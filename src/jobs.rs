@@ -198,6 +198,10 @@ pub struct Job {
     /// class default.
     #[serde(default)]
     pub memory_need_mib: u64,
+    /// How many processes skein stopped in its cgroup after it ended: what its command left
+    /// running once its wrapper had gone ([`cgroup::stop_leftovers`]).
+    #[serde(default)]
+    pub leftovers: u32,
 }
 
 /// What a finished job used, from its own cgroup.
@@ -709,6 +713,14 @@ fn cores_word(n: u32) -> String {
     }
 }
 
+/// `stopped 2 leftover processes`.
+fn leftovers_said(n: u32) -> String {
+    match n {
+        1 => "stopped 1 leftover process".into(),
+        n => format!("stopped {n} leftover processes"),
+    }
+}
+
 /// MiB as GB for a person: `3` for 3072, `1.2` for 1228.
 fn gb(mib: u64) -> String {
     let s = format!("{:.1}", mib as f64 / 1024.0);
@@ -923,9 +935,12 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
             min: job.min,
             granted_cores: job.granted_cores,
             position: (job.state == "waiting").then(|| place(i)).flatten(),
-            reason: match job.used {
-                Some(u) if !job.is_active() => u.said(),
-                _ => job.reason.clone(),
+            reason: match (job.used, job.leftovers) {
+                _ if job.is_active() => job.reason.clone(),
+                (Some(u), 0) => u.said(),
+                (Some(u), n) => format!("{}; {}", u.said(), leftovers_said(n)),
+                (None, 0) => job.reason.clone(),
+                (None, n) => leftovers_said(n),
             },
             waited_secs: secs_between(&job.queued, waited_until),
             ran_secs: (!job.ended.is_empty() && !job.granted.is_empty())
@@ -1010,6 +1025,9 @@ pub fn tick(
         let peak = rates.peak(&job.box_name, &job.id);
         rates.forget(&job.box_name, &job.id);
         let wrapper_gone = !alive(&job.box_name, job.pid);
+        if wrapper_gone {
+            job.leftovers = cgroup::members(&places.cgroups, &job.box_name, &job.id);
+        }
         let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone)
         else {
             continue;
@@ -1034,6 +1052,26 @@ pub fn tick(
                     },
                 );
             recorded = true;
+        }
+    }
+    // A job that ended on an earlier tick, whose wrapper has since left the box: what its command
+    // left running in its cgroup (a test server, a compiler daemon) is stopped, then measured and
+    // its cgroup removed (SKEIN-1438). Never while the wrapper is still there: it may still be
+    // exiting, and killing it would lose the status it hands back to its caller.
+    for job in queue.jobs.iter_mut() {
+        if !matches!(job.state.as_str(), "done" | "cancelled")
+            || was_running.contains(&(job.box_name.clone(), job.id.clone()))
+            || !cgroup::job_cgroup(&places.cgroups, &job.box_name, &job.id).is_dir()
+            || alive(&job.box_name, job.pid)
+        {
+            continue;
+        }
+        if let Some((n, read)) = cgroup::stop_leftovers(&places.cgroups, &job.box_name, &job.id) {
+            job.leftovers = job.leftovers.max(n);
+            // What it used now counts what it left running too, over the seconds the job ran.
+            if let (Some(read), Some(was)) = (read, job.used) {
+                job.used = Some(Usage::from_cgroup(&read, was.secs, was.peak_cores));
+            }
         }
     }
     // A waiting job's ask, when it named none, and the memory it is expected to need: from what its
