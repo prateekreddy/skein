@@ -1134,8 +1134,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #askq.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #jobs, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #askq.open, #jobs.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
   /* Asking before a working agent is restarted (SKEIN-1262): the same overlay as the others, above them. */
   #rsask { position:fixed; inset:0; z-index:70; display:flex; justify-content:center; align-items:flex-start;
            padding:10vh 8px 8px; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
@@ -1170,6 +1170,10 @@
   /* the badge that says something is waiting on a decision */
   /* Write access too (SKEIN-1298): its count was the one drawn as grey text beside the icon. */
   #subqbtn, #askqbtn, #gitqbtn { position:relative; }
+  #jobs .jb-pool { padding:8px 12px; color:var(--dim); }
+  #jobs .jb-pool b { color:var(--fg); }
+  #jobs .jb-scope { padding:0 12px 8px; color:var(--dim); }
+  #jobs .jb-cmd { font-family:var(--mono); }
   #subqbtn .badge, #askqbtn .badge, #gitqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
     border-radius:7px; background:var(--attn); color:#fff; font-size:9px; line-height:14px; text-align:center; font-family:var(--mono); }
   /* Same shape as the package-request badge above, deliberately: both mean "something is waiting on
@@ -1722,7 +1726,7 @@
                                                       white-space:nowrap; flex:0 1 auto; }
     header { gap:10px; row-gap:8px; margin-bottom:12px; }
     .wrap { padding:14px 12px 40px; }
-    #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #loginterm { padding:8px; }
+    #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #askq, #jobs, #loginterm { padding:8px; }
     .nb-card { max-height:calc(100dvh - 16px); }
   }
   /* A finger needs a target near 40px; these were 15–24px (SKEIN-1300). */

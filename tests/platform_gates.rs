@@ -143,6 +143,10 @@ const GATED: &[(&str, &str)] = &[
         "runs all eleven scripts skein installs into a box, mailbox.sh and sandbox-bootstrap.sh \
          included — `flock` and `date -u -d` are GNU, and a box is Linux by construction",
     ),
+    (
+        "without_a_job_cgroup_the_owners_stop_kills_what_is_under_the_wrapper",
+        "walks `/proc/<pid>/stat` for parent links and reads `/proc/<pid>/environ`, which only Linux has",
+    ),
 ];
 
 /// Every `.rs` file under `dir`, at any depth, sorted.

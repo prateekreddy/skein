@@ -139,6 +139,28 @@ pub(super) async fn api_fleet_load() -> Json<Vec<skein::fleet::BoxLoad>> {
     )
 }
 
+/// Every heavy job waiting or running in the fleet, and the cores, for the cockpit's jobs list
+/// (SKEIN-1422): what the queue's last tick wrote, with `running: false` when that tick is old.
+pub(super) async fn api_fleet_jobs() -> Response {
+    let (view, fresh) = skein::jobs::read_fleet_view(chrono::Utc::now());
+    let mut body = serde_json::to_value(view).unwrap_or_default();
+    if let Some(map) = body.as_object_mut() {
+        map.insert("running".into(), fresh.into());
+    }
+    Json(body).into_response()
+}
+
+/// Stop one job, waiting or running, as the owner (SKEIN-1422). The token gate is what makes this
+/// the owner's: a box reaching this port has no token. Answers once the queue has stopped it, or
+/// with `stopped: false` when the queue has not looked within a few ticks.
+pub(super) async fn api_fleet_job_stop(Path((name, id)): Path<(String, String)>) -> Response {
+    match tokio::task::spawn_blocking(move || skein::jobs::stop_from_cockpit(&name, &id)).await {
+        Ok(Ok(stopped)) => Json(serde_json::json!({ "stopped": stopped })).into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 /// Every sandbox on this machine — asked, not pushed.
 ///
 /// It is the one thing that costs a subprocess and nothing waits on it, so it left the two-second

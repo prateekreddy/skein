@@ -495,6 +495,9 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
         .route("/api/fleet/load", get(api_fleet_load))
+        // The fleet's heavy jobs, and the owner's stop of one (SKEIN-1422).
+        .route("/api/fleet/jobs", get(api_fleet_jobs))
+        .route("/api/fleet/jobs/:name/:id/stop", post(api_fleet_job_stop))
         // What else is on this machine — a question about the MACHINE, asked by a person. Not
         // "foreign boxes": `docs/parity.md` §7 removes that, and what survives is somebody running
         // more than one fleet needing to see them.

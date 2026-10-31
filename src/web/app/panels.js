@@ -171,7 +171,7 @@ function renderAwayOverlay(items, since) {
 // Every overlay that sits over the page as a dialog. Two things read this list: the terminal's
 // clipboard keys, which leave every chord to the browser while one is open (SKEIN-1246 — a paste
 // into a Settings field landed in the box terminal behind it), and the wiring below.
-const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "loginterm", "away", "load", "rsask"];
+const POPUP_IDS = ["pal", "mbx", "newbox", "settings", "addrepo", "boxset", "subq", "gitq", "askq", "jobs", "loginterm", "away", "load", "rsask"];
 function popupOpen() { return POPUP_IDS.some(id => document.getElementById(id)?.classList.contains("open")); }
 // A click on the backdrop closes the popup through the close function its ✕ and Escape use, so a
 // click outside loses exactly what those lose and nothing more. **Both the press and the release
@@ -327,7 +327,7 @@ window.addEventListener("keydown", e => {
 for (const [id, close] of [
   ["pal", closePalette], ["mbx", closeMailbox], ["newbox", closeNewBox], ["settings", leaveSettings],
   ["addrepo", closeAddRepo], ["boxset", closeBoxSettings], ["subq", closeSubq], ["gitq", closeGitq],
-  ["askq", closeAskq], ["loginterm", null],
+  ["askq", closeAskq], ["jobs", closeJobs], ["loginterm", null],
 ]) registerDialog(document.getElementById(id), close);
 
 // ---------- command palette ----------
@@ -353,6 +353,7 @@ function commands() {
     { sec:"Actions", label:(voiceOn?"Silence":"Speak")+" boxes that need you", run:()=>document.getElementById("voice").click() },
     { sec:"Actions", label:"Read what needs me", run:sayInbox },
     { sec:"Actions", label:"Load by box — who is using the CPU, memory and disk", run:showLoad },
+    { sec:"Actions", label:"Heavy jobs — what is waiting and running, and stop one", run:() => openJobs() },
     // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
     // recognition on a pause by itself, so this needs no second click to stop it.
     { sec:"Actions", label:"Listen for a command", run:listen, meta:glyph("hold ⌥ right") },
@@ -635,6 +636,52 @@ function pollSubq() {
 // What each card was rendered from, keyed by box AND id, for `subqShown`'s reason: the answer is
 // sent back from what was on screen, not looked up again, and an id is the box's to choose.
 const askqShown = new Map();
+// ---------- heavy jobs (every box's builds and tests, SKEIN-1422) ----------
+//
+// The rows are drawn by `jobsHtml` (cockpit/src/jobs.mjs) from `/api/fleet/jobs`, every two seconds
+// while the panel is open, which is how often the queue looks. **Stop is the owner's**: the press
+// goes to `/api/fleet/jobs/<box>/<id>/stop`, which only the cockpit's token can reach, and answers
+// once the queue has stopped the job. The row's controls stay disabled until then, so one press is
+// one stop.
+let jobsBox = "", jobsTimer = null;
+function openJobs(box = "") {
+  jobsBox = box || "";
+  const o = document.getElementById("jobs"); o.classList.add("open"); o.setAttribute("aria-hidden","false");
+  loadJobs();
+  clearInterval(jobsTimer);
+  jobsTimer = setInterval(() => { if (o.classList.contains("open")) loadJobs(); else clearInterval(jobsTimer); }, 2000);
+}
+function closeJobs() {
+  const o = document.getElementById("jobs"); o.classList.remove("open"); o.setAttribute("aria-hidden","true");
+  clearInterval(jobsTimer);
+}
+function loadJobs() {
+  const list = document.getElementById("jobs-list");
+  return fetch("/api/fleet/jobs").then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))).then(v => {
+    list.innerHTML = jobsHtml(v, jobsBox);
+    for (const key of inFlight) {
+      const [panel, card] = key.split("\n");
+      if (panel === "jobs") markSending("jobs", card, true);
+    }
+  }).catch(() => { list.innerHTML = `<div class="note">could not load the jobs</div>`; });
+}
+document.getElementById("jobs-list").addEventListener("click", e => {
+  if (e.target.closest("[data-jobs-all]")) { e.preventDefault(); jobsBox = ""; loadJobs(); return; }
+  const b = e.target.closest("button[data-stop]");
+  if (!b) return;
+  const box = b.dataset.box, id = b.dataset.id, key = `${box}/${id}`;
+  const what = b.closest(".jb-row")?.querySelector(".jb-cmd")?.textContent || id;
+  markSending("jobs", key, true);
+  fetch(`/api/fleet/jobs/${encodeURIComponent(box)}/${encodeURIComponent(id)}/stop`, { method: "POST" })
+    .then(async r => {
+      if (!r.ok) throw await refused(r);
+      const body = await r.json();
+      toast(body.stopped ? `Stopped ${box}'s ${what}` : `Asked to stop ${box}'s ${what}; it stops within a few seconds`);
+    })
+    .catch(err => notice(`Could not stop that job: ${failText(err)}`))
+    .finally(() => { markSending("jobs", key, false); loadJobs(); });
+});
+
 function openAskq() { const o = document.getElementById("askq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadAskq(); }
 function closeAskq() { const o = document.getElementById("askq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
 
