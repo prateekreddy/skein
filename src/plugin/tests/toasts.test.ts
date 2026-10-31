@@ -85,8 +85,8 @@ const listed = (b: Box) => b.gh.filter(a => a[2] === 'list').map(a => a[a.indexO
 
 // What would make it fail: a branch another box pushed (its reflog says `fetch`) watched as this
 // box's; GitHub asked again once the verdict is in, or toasted twice; or the verdict forgotten by
-// a reload. Watched: with the two `remember` calls in `check` removed, the second session toasted
-// `✓ CI passed` again and the last `toasts` comparison failed.
+// a reload. Watched: with `remember` writing nothing to `$.store`, the next tick asked GitHub again
+// and the `b.gh.length` comparison failed (3 asked, 2 expected).
 test('CI passing on a ci/ branch this box pushed is toasted once, and not again after a reload', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const store: Record<string, unknown> = {}
@@ -115,6 +115,25 @@ test('CI passing on a ci/ branch this box pushed is toasted once, and not again 
   await $.session.start(START)
   await clock.advance(60_000)
   expect(b.toasts).toEqual(['✓ CI passed on ci/33d5db0f · master can move'])
+})
+
+// What would make it fail: a verdict toasted again because the session that toasted it ended
+// before it marked the push done, or a re-run (a new attempt of the same run) taken for the verdict
+// already toasted. Watched: with the `includes(key)` test in `check` made always false, the first
+// `toasts` comparison read the pass toasted again and this failed.
+test('a verdict an earlier session toasted is not toasted again; a re-run is a verdict of its own', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const b = box(on, { 'ci.toasted': ['901.1'] })
+  b.logs.set('33d5db0f', pushedLog(SHA))
+  b.runs.set('ci/33d5db0f', [run(901, SHA, 'completed', 'success')])
+
+  await $.session.start(START)
+  expect(b.toasts).toEqual([])
+
+  b.logs.set('53a7bca7', pushedLog(RED))
+  b.runs.set('ci/53a7bca7', [{ ...run(901, RED, 'completed', 'success'), attempt: 2 }])
+  await $.session.start(START)
+  expect(b.toasts).toEqual(['✓ CI passed on ci/53a7bca7 · master can move'])
 })
 
 // What would make it fail: a failure toasted as a pass, or the jobs that passed named beside the
