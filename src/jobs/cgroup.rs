@@ -147,10 +147,11 @@ pub fn cores_between(
 }
 
 /// The live CPU rate of each running job, kept between ticks by whoever ticks: the last reading of
-/// each job's cgroup, and the rate between it and the one before.
+/// each job's cgroup, the rate between it and the one before, and the highest rate seen so far.
 #[derive(Debug, Default, Clone)]
 pub struct Rates {
     last: BTreeMap<(String, String), (u64, DateTime<Utc>)>,
+    peak: BTreeMap<(String, String), f64>,
 }
 
 impl Rates {
@@ -168,19 +169,33 @@ impl Rates {
             self.last.remove(&key);
             return None;
         };
-        let prev = self.last.insert(key, (read.cpu_usec, now));
-        prev.and_then(|(usec, at)| cores_between(usec, at, read.cpu_usec, now))
+        let prev = self.last.insert(key.clone(), (read.cpu_usec, now));
+        let rate = prev.and_then(|(usec, at)| cores_between(usec, at, read.cpu_usec, now))?;
+        let peak = self.peak.entry(key).or_insert(rate);
+        *peak = peak.max(rate);
+        Some(rate)
+    }
+
+    /// The most cores box `box_name`'s job `id` was seen using between two readings: `None` until
+    /// it has been read twice.
+    pub fn peak(&self, box_name: &str, id: &str) -> Option<f64> {
+        self.peak
+            .get(&(box_name.to_string(), id.to_string()))
+            .copied()
     }
 
     /// Stop following a job that ended.
     pub fn forget(&mut self, box_name: &str, id: &str) {
-        self.last.remove(&(box_name.to_string(), id.to_string()));
+        let key = (box_name.to_string(), id.to_string());
+        self.last.remove(&key);
+        self.peak.remove(&key);
     }
 
     /// Stop following every job `running` does not name, so a job that left the queue without
     /// being seen to end is not followed for ever.
     pub fn retain(&mut self, running: &dyn Fn(&str, &str) -> bool) {
         self.last.retain(|(b, id), _| running(b, id));
+        self.peak.retain(|(b, id), _| running(b, id));
     }
 }
 
@@ -794,6 +809,7 @@ mod tests {
                 avg_cores: 3.0,
                 peak_mem_mib: Some(1536),
                 secs: 4,
+                peak_cores: None,
             }),
             "{q:#?}"
         );
@@ -948,6 +964,106 @@ mod tests {
             "granted",
             "half a core measured did not let it in: {q:#?}"
         );
+    }
+
+    /// **A job's end says the most cores it was seen using, from the readings kept between
+    /// ticks.** A job read at 0, then 3 cores, then 1 core, ends with a peak of 3 and its average.
+    ///
+    /// What would make it fail: the peak read after the job is forgotten (the sabotage that was
+    /// run: `rates.peak` moved below `rates.forget` in the tick, and the peak is `None`), a later
+    /// lower rate replacing the highest, or the peak not passed into the job's usage.
+    #[test]
+    fn a_finished_job_says_the_most_cores_it_was_seen_using() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n").unwrap();
+        let mut rates = Rates::default();
+        submit(&places, "j-p", 31337, "waiting");
+        tick_with(&places, 0, &mut rates);
+        let cg = job_cgroup(&places.cgroups, "web-main", "j-p");
+        for (secs, usec) in [(2, 0u64), (4, 6_000_000), (6, 8_000_000)] {
+            std::fs::write(cg.join("cpu.stat"), format!("usage_usec {usec}\n")).unwrap();
+            tick_with(&places, secs, &mut rates);
+        }
+        assert_eq!(rates.peak("web-main", "j-p"), Some(3.0));
+        submit(&places, "j-p", 31337, "done");
+        let q = tick_with(&places, 8, &mut rates);
+        let used = job(&q, "j-p").used.expect("not measured");
+        assert_eq!(used.peak_cores, Some(3.0), "{q:#?}");
+        assert_eq!(used.avg_cores, 1.0, "{q:#?}");
+        assert_eq!(
+            rates.peak("web-main", "j-p"),
+            None,
+            "an ended job is still followed"
+        );
+    }
+
+    /// **A run that finished teaches the next run of its command the cores to ask for and the
+    /// memory to expect; a cancelled one teaches nothing** (SKEIN-1421).
+    ///
+    /// Two `cargo test` jobs that named no cores are granted the default two and expected at the
+    /// class's 2 GB. One finishes having used 12 CPU-seconds in 4 s (3 cores) and held 4 GB at most;
+    /// the other is cancelled having used 4 cores and 8 GB. A third `cargo test`, naming no cores,
+    /// then asks for 3 and is expected at 4 GB plus a quarter, 5 GB, which 4 GB free does not hold.
+    ///
+    /// What would make it fail: the end path not recording the run (the sabotage that was run: the
+    /// `record` branch made unreachable, and no history file is written), the history not read for
+    /// a waiting job's ask or estimate, the schedule's memory gate ignoring the estimate, or a
+    /// cancelled run recorded (also run: the ask reads 4 and the estimate 10 GB).
+    #[test]
+    fn a_finished_run_sets_the_next_runs_default_cores_and_memory() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "31337\n31338\n31339\n").unwrap();
+        submit(&places, "j-1", 31337, "waiting");
+        submit(&places, "j-c", 31338, "waiting");
+        let q = tick(&places, 0);
+        for id in ["j-1", "j-c"] {
+            let j = job(&q, id);
+            assert_eq!(
+                (j.state.as_str(), j.cores, j.memory_need_mib),
+                ("granted", 2, 2048),
+                "before any history the defaults hold: {q:#?}"
+            );
+        }
+        for (id, usec, gib) in [("j-1", 12_000_000u64, 4u64), ("j-c", 16_000_000, 8)] {
+            let cg = job_cgroup(&places.cgroups, "web-main", id);
+            std::fs::write(cg.join("cpu.stat"), format!("usage_usec {usec}\n")).unwrap();
+            std::fs::write(cg.join("memory.peak"), format!("{}\n", gib << 30)).unwrap();
+        }
+        submit(&places, "j-1", 31337, "done");
+        submit(&places, "j-c", 31338, "cancelled");
+        let q = tick(&places, 4);
+        assert_eq!(job(&q, "j-1").state, "done", "{q:#?}");
+        assert_eq!(job(&q, "j-c").state, "cancelled", "{q:#?}");
+        assert!(places.history().is_file(), "no history was written");
+
+        submit(&places, "j-2", 31339, "waiting");
+        let limits = crate::jobs::Limits {
+            cores: 4,
+            max_cores_per_job: crate::jobs::DEFAULT_MAX_CORES_PER_JOB,
+            oversubscribe: 1.5,
+            mem_free_mib: Some(4096),
+        };
+        let at = DateTime::parse_from_rfc3339("2026-10-31T12:00:06Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let q = crate::jobs::tick(
+            &places,
+            limits,
+            &|b: &str| b.to_string(),
+            at,
+            &mut Rates::default(),
+        )
+        .unwrap();
+        let next = job(&q, "j-2");
+        assert_eq!(
+            (next.cores, next.memory_need_mib),
+            (3, 5120),
+            "the finished run did not set the next run's ask and estimate: {q:#?}"
+        );
+        assert_eq!(next.state, "waiting", "{q:#?}");
+        assert_eq!(next.reason, "memory: needs ~5 GB, 4 GB free", "{q:#?}");
     }
 
     /// **Boxes share the machine by the cores their running jobs were granted.**

@@ -51,11 +51,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod cgroup;
+pub mod history;
 
 /// How often the queue is looked at: fast enough that freed cores are taken within a couple of
 /// seconds. Its own loop, apart from the resource signal's minute, because a job waiting a minute
 /// for cores that were free is the waste this queue exists to remove.
 pub const LOOK_EVERY: Duration = Duration::from_secs(2);
+
+/// The cores a job that names none asks for while its command has no history
+/// ([`history::History::cores`]). The wrapper's fallback run, one skein never answered, uses the
+/// same two (`src/plugin/bin/skein-job`).
+pub const DEFAULT_CORES: u32 = 2;
 
 /// The most cores one job may ask for unless the config says otherwise.
 pub const DEFAULT_MAX_CORES_PER_JOB: u32 = 4;
@@ -183,9 +189,15 @@ pub struct Job {
     /// runs, and for a job that never had a cgroup of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Usage>,
-    /// The command in two words, for another box's view: [`short_command`] of its argv.
+    /// The command in two words, for another box's view: [`short_command`] of its argv. Also what
+    /// its runs are kept under in the history ([`history`]).
     #[serde(default)]
     pub short: String,
+    /// The memory it is expected to need before it may start, in MiB, set each tick while it
+    /// waits from [`memory_estimate_mib`]. Zero in a queue from before the history, and then the
+    /// class default.
+    #[serde(default)]
+    pub memory_need_mib: u64,
 }
 
 /// What a finished job used, from its own cgroup.
@@ -197,17 +209,23 @@ pub struct Usage {
     pub peak_mem_mib: Option<u64>,
     /// The seconds it ran, from its grant to the tick that saw it end, by the host's clock.
     pub secs: i64,
+    /// The most cores it was seen using between two of the queue's readings ([`cgroup::Rates`]).
+    /// `None` for a job that ended before it was read twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_cores: Option<f64>,
 }
 
 impl Usage {
-    /// From what the job's cgroup counted over `secs` seconds of running. A job that ran under a
-    /// second is averaged over one, so its average is its CPU seconds.
-    pub fn from_cgroup(counted: &cgroup::Usage, secs: i64) -> Usage {
+    /// From what the job's cgroup counted over `secs` seconds of running, and the highest rate the
+    /// queue read while it ran. A job that ran under a second is averaged over one, so its average
+    /// is its CPU seconds.
+    pub fn from_cgroup(counted: &cgroup::Usage, secs: i64, peak_cores: Option<f64>) -> Usage {
         let secs = secs.max(0);
         Usage {
             avg_cores: counted.cpu_usec as f64 / 1e6 / secs.max(1) as f64,
             peak_mem_mib: counted.memory_peak.map(|b| b >> 20),
             secs,
+            peak_cores,
         }
     }
 
@@ -258,24 +276,32 @@ impl Job {
     /// ask, which is what every job then ran with.
     fn holds(&self) -> u32 {
         match self.granted_cores {
-            0 => default_cores(self),
+            0 => DEFAULT_CORES,
             n => n,
         }
     }
 }
 
-/// The cores a job asks for when its `skein-job run` named none. Two for now; the history child
-/// of SKEIN-1418 derives it from what that repo's command used before, here and nowhere else.
-/// The wrapper's fallback run, one skein never answered, uses the same two
-/// (`src/plugin/bin/skein-job`).
-pub fn default_cores(_job: &Job) -> u32 {
-    2
+/// The cores a job asks for when its `skein-job run` named none: what its command used before in
+/// its repo, by [`history::History::cores`], held to `cap`; [`DEFAULT_CORES`] before it has run.
+pub fn default_cores(history: &history::History, job: &Job, cap: u32) -> u32 {
+    history
+        .cores(&job.repo, &job.short, cap)
+        .unwrap_or(DEFAULT_CORES)
 }
 
-/// The memory a job is expected to need before it may start, in MiB: a default per class for now,
-/// until the history child of SKEIN-1418 reads that command's past peak, here and nowhere else.
-pub fn memory_estimate_mib(job: &Job) -> u64 {
-    match job.class.as_str() {
+/// The memory a job is expected to need before it may start, in MiB: its command's past peak in
+/// its repo plus a margin, by [`history::History::memory_mib`]; a default per class before it has
+/// been counted.
+pub fn memory_estimate_mib(history: &history::History, job: &Job) -> u64 {
+    history
+        .memory_mib(&job.repo, &job.short)
+        .unwrap_or_else(|| class_memory_mib(&job.class))
+}
+
+/// The memory a job of `class` is expected to need while its command has no history, in MiB.
+fn class_memory_mib(class: &str) -> u64 {
+    match class {
         "webkit" | "train" => 4096,
         // Measured: a CI run with every stage at once peaked at about 7 GB on a peer box, so 3 GB
         // started runs the memory free could not hold.
@@ -451,6 +477,12 @@ pub struct Places {
 }
 
 impl Places {
+    /// What each command used before ([`history`]): beside the queue, on the host, written by the
+    /// tick alone.
+    pub fn history(&self) -> PathBuf {
+        self.queue.with_file_name("history.json")
+    }
+
     pub fn live() -> Places {
         Places {
             requests: PathBuf::from(requests_dir()),
@@ -642,10 +674,9 @@ pub fn merge(
                 short: short_command(&req.argv),
                 ..Job::default()
             };
-            job.cores = match req.cores {
-                Some(n) if n > 0 => n,
-                _ => default_cores(&job),
-            };
+            // No ask is left at zero, and the tick fills it from the command's history before it
+            // is scheduled.
+            job.cores = req.cores.unwrap_or(0);
             queue.jobs.push(job);
         }
     }
@@ -700,7 +731,8 @@ fn gb(mib: u64) -> String {
 ///   and two e2e runs beside WebKit once drove the load to 50 and timed WebKit's tests out. The
 ///   reading predates this pass, so what this pass grants is added to it. `None`, unread, gates
 ///   nothing;
-/// * the memory free exceeds [`memory_estimate_mib`], less what this pass already granted against.
+/// * the memory free exceeds the job's `memory_need_mib` ([`memory_estimate_mib`], which the tick
+///   sets), less what this pass already granted against.
 ///
 /// A job with a `min` starts with fewer than it asked, never fewer than `min`, when that is what
 /// fits.
@@ -720,7 +752,7 @@ pub fn schedule(
     let ask_cap = limits.max_cores_per_job.min(limits.cores).max(1);
     for job in queue.jobs.iter_mut().filter(|j| j.state == "waiting") {
         if job.cores == 0 {
-            job.cores = default_cores(job);
+            job.cores = DEFAULT_CORES;
         }
         job.cores = job.cores.clamp(1, ask_cap);
         job.min = match job.min {
@@ -777,7 +809,10 @@ pub fn schedule(
             };
             continue;
         }
-        let need = memory_estimate_mib(job);
+        let need = match job.memory_need_mib {
+            0 => class_memory_mib(&job.class),
+            n => n,
+        };
         if let Some(have) = mem_free.filter(|&have| have <= need) {
             job.reason = format!("memory: needs ~{} GB, {} GB free", gb(need), gb(have));
             continue;
@@ -961,6 +996,10 @@ pub fn tick(
     };
     let was_running = granted(&queue);
     merge(&mut queue, &requests, &alive, repo_of, now);
+    // What each command used before (SKEIN-1421), read only on a tick that needs it: one with a
+    // job that ended or one waiting.
+    let mut history: Option<history::History> = None;
+    let mut recorded = false;
     // A job that ended: what its cgroup counted, then the cgroup gone (SKEIN-1419). A wrapper no
     // longer in its box was killed under its command, which runs on in the job's cgroup holding
     // cores the queue just gave back: the job has ended, so that goes first.
@@ -968,11 +1007,44 @@ pub fn tick(
         if !was_running.contains(&(job.box_name.clone(), job.id.clone())) {
             continue;
         }
+        let peak = rates.peak(&job.box_name, &job.id);
         rates.forget(&job.box_name, &job.id);
         let wrapper_gone = !alive(&job.box_name, job.pid);
-        if let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone) {
-            job.used = Some(Usage::from_cgroup(&used, secs_between(&job.granted, now)));
+        let Some(used) = cgroup::finish(&places.cgroups, &job.box_name, &job.id, wrapper_gone)
+        else {
+            continue;
+        };
+        let used = Usage::from_cgroup(&used, secs_between(&job.granted, now), peak);
+        job.used = Some(used);
+        // Only a run that finished: one cancelled or killed part way used less than the command
+        // does, and would teach the next run to ask for too little.
+        if job.state == "done" {
+            history
+                .get_or_insert_with(|| history::History::read(&places.history()))
+                .record(
+                    &job.repo,
+                    &job.short,
+                    history::Run {
+                        ended: stamp(now),
+                        asked: job.cores,
+                        avg_cores: used.avg_cores,
+                        peak_cores: used.peak_cores,
+                        peak_mem_mib: used.peak_mem_mib,
+                        secs: used.secs,
+                    },
+                );
+            recorded = true;
         }
+    }
+    // A waiting job's ask, when it named none, and the memory it is expected to need: from what its
+    // command used before, here and nowhere else.
+    let cap = limits.max_cores_per_job.min(limits.cores).max(1);
+    for job in queue.jobs.iter_mut().filter(|j| j.state == "waiting") {
+        let history = history.get_or_insert_with(|| history::History::read(&places.history()));
+        if job.cores == 0 {
+            job.cores = default_cores(history, job, cap);
+        }
+        job.memory_need_mib = memory_estimate_mib(history, job);
     }
     let before = granted(&queue);
     rates.retain(&|b, id| before.contains(&(b.to_string(), id.to_string())));
@@ -1023,8 +1095,15 @@ pub fn tick(
     cgroup::weigh_boxes(&places.cgroups, &granted_by_box);
     prune(&mut queue, now);
     write_json(&places.queue, &queue)?;
-
+    // After the queue: a queue that failed to write is read again next tick with these jobs still
+    // running, and they would be recorded twice.
     let mut failed = Vec::new();
+    if let (true, Some(h)) = (recorded, &history) {
+        if let Err(e) = write_json(&places.history(), h) {
+            failed.push(format!("the job history: {e}"));
+        }
+    }
+
     let mut boxes: BTreeSet<String> = queue.jobs.iter().map(|j| j.box_name.clone()).collect();
     boxes.extend(requests.keys().cloned());
     for name in boxes {
@@ -1884,7 +1963,7 @@ mod tests {
     /// two; a box asking for 64 is held to four; a queue file whose granted job has no core fields
     /// reads, and the job counts at the default.
     ///
-    /// What would make it fail: [`default_cores`] other than two (the sabotage that was run:
+    /// What would make it fail: [`DEFAULT_CORES`] other than two (the sabotage that was run:
     /// three, and the old file is granted three), `cores` on [`Job`] without its serde default
     /// (also run: the old queue no longer reads), or the ask not held to
     /// [`Limits::max_cores_per_job`]. (`cores` on [`Request`] is an `Option`, which serde reads as
