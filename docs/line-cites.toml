@@ -64,7 +64,7 @@ cited_by = ["docs/prose-symbols.toml"]
 line = "| publish a port | `sbx ports --publish`; withdraw it with `sbx ports --unpublish` (`sbx ports --help`). An earlier revision of this row said **no unpublish exists**, quoting a nine-verb list recalled from memory — it is false, and the port-burning dance it justified in `ensure_fleet_agent_port` was built on it |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/inventory.md:259"]
+["docs/inventory.md:260"]
 line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
@@ -1317,11 +1317,11 @@ line = "let body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resources.rs:223"]
+["src/fleet/resources.rs:224"]
 line = "let mut resources = measured()?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resources.rs:326"]
+["src/fleet/resources.rs:327"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 

@@ -266,7 +266,8 @@ impl Job {
 
 /// The cores a job asks for when its `skein-job run` named none. Two for now; the history child
 /// of SKEIN-1418 derives it from what that repo's command used before, here and nowhere else.
-/// The wrapper's `FALLBACK_CORES` is the same two, for a run skein never answered.
+/// The wrapper's fallback run, one skein never answered, uses the same two
+/// (`src/plugin/bin/skein-job`).
 pub fn default_cores(_job: &Job) -> u32 {
     2
 }
@@ -1606,8 +1607,8 @@ mod tests {
             "api-1",
             "j-a1",
             990,
-            serde_json::json!({"argv": ["/home/someone/.cargo/bin/cargo", "--locked", "nextest",
-                                        "run", "--token=abc123", "/home/someone/secret"]}),
+            serde_json::json!({"argv": ["/opt/tools/bin/cargo", "--locked", "nextest",
+                                        "run", "--token=abc123", "/srv/private/notes"]}),
         );
         let q = f.tick(2, limits, &repos);
         assert_eq!(state_of(&q, "j-w5"), "waiting", "{q:#?}");
@@ -1827,7 +1828,13 @@ mod tests {
             "cargo test"
         );
         assert_eq!(
-            short_command(&argv(&["env", "TOKEN=abc", "/home/u/run.sh", "--key", "k"])),
+            short_command(&argv(&[
+                "env",
+                "TOKEN=abc",
+                "/srv/scripts/run.sh",
+                "--key",
+                "k"
+            ])),
             "env run.sh"
         );
         assert_eq!(short_command(&argv(&["make", "-j8"])), "make");

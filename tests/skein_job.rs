@@ -469,7 +469,9 @@ fn a_job_skein_never_answered_is_still_told_its_cores() {
     );
 
     let mut no_queue = fleet.wrapper();
-    no_queue.env("SKEIN_FLEET_ROOT", fleet.dir.path().join("no-fleet-here"));
+    no_queue
+        .env("SKEIN_FLEET_ROOT", fleet.dir.path().join("no-fleet-here"))
+        .env("SKEIN_HOME", fleet.dir.path().join("home"));
     let (out, err) = run(no_queue, &["run"]);
     assert!(
         !err.contains("granted"),
