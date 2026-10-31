@@ -769,7 +769,7 @@ mod tests {
             oversubscribe: 1.5,
             mem_free_mib: None,
         };
-        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates).unwrap()
+        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates, None).unwrap()
     }
 
     fn job<'a>(q: &'a crate::jobs::Queue, id: &str) -> &'a crate::jobs::Job {
@@ -1139,6 +1139,7 @@ mod tests {
             &|b: &str| b.to_string(),
             at,
             &mut Rates::default(),
+            None,
         )
         .unwrap();
         let next = job(&q, "j-2");

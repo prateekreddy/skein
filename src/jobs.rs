@@ -52,6 +52,7 @@ use std::time::Duration;
 
 pub mod cgroup;
 pub mod history;
+pub mod machine;
 
 /// How often the queue is looked at: fast enough that freed cores are taken within a couple of
 /// seconds. Its own loop, apart from the resource signal's minute, because a job waiting a minute
@@ -990,13 +991,15 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
 ///
 /// `rates` is the last reading of each running job's cgroup, which the tick has no state of its
 /// own to keep: the caller holds it from one tick to the next ([`watch_jobs`]), and what it gives
-/// is what [`schedule`] admits on.
+/// is what [`schedule`] admits on. `machine_busy` is the cores busy on the whole machine since the
+/// caller's last tick ([`machine::MachineBusy`]), or `None` to gate nothing on it.
 pub fn tick(
     places: &Places,
     limits: Limits,
     repo_of: &dyn Fn(&str) -> String,
     now: DateTime<Utc>,
     rates: &mut cgroup::Rates,
+    machine_busy: Option<f64>,
 ) -> Result<Queue, String> {
     let mut queue = read_queue(&places.queue);
     let requests = read_requests(&places.requests);
@@ -1095,13 +1098,12 @@ pub fn tick(
         }
     }
     let states = places.states.clone();
-    // The whole machine's busy CPU is not read yet (SKEIN-1430): `None` gates nothing on it.
     let pool = schedule(
         &mut queue,
         limits,
         &|name| memory_asked(&states, name),
         &|job| live.get(&(job.box_name.clone(), job.id.clone())).copied(),
-        None,
+        machine_busy,
     );
     granted_now(&mut queue, &before, now);
     // A job granted now moves into a cgroup of its own, capped and weighted for the cores it was
@@ -1212,25 +1214,31 @@ pub async fn watch_jobs() {
     let mut tick_every = tokio::time::interval(LOOK_EVERY);
     tick_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = String::new();
-    // Each running job's last cgroup reading, carried from one tick to the next: the tick keeps
-    // no state of its own, and a rate needs two readings.
+    // Each running job's last cgroup reading, and the whole machine's last `/proc/stat`, carried
+    // from one tick to the next: the tick keeps no state of its own, and a rate needs two
+    // readings.
     let mut rates = cgroup::Rates::default();
+    let mut machine = machine::MachineBusy::default();
     loop {
         tick_every.tick().await;
         let ran = tokio::task::spawn_blocking(move || {
+            let limits = limits();
+            let busy = machine.read(Path::new("/proc/stat"), limits.cores);
             let r = tick(
                 &Places::live(),
-                limits(),
+                limits,
                 &repo_of_box,
                 Utc::now(),
                 &mut rates,
+                busy,
             );
-            (rates, r.map(|_| ()))
+            (rates, machine, r.map(|_| ()))
         })
         .await;
         let said = match ran {
-            Ok((kept, r)) => {
+            Ok((kept, read, r)) => {
                 rates = kept;
+                machine = read;
                 match r {
                     Ok(()) => String::new(),
                     Err(e) => format!("skein: the heavy-work queue: {e}"),
@@ -1240,6 +1248,7 @@ pub async fn watch_jobs() {
             // running jobs count at their grants until two readings give them a rate again.
             Err(e) => {
                 rates = cgroup::Rates::default();
+                machine = machine::MachineBusy::default();
                 format!("skein: the heavy-work queue did not run: {e}")
             }
         };
@@ -1320,6 +1329,17 @@ mod tests {
         }
 
         fn tick(&self, secs: i64, limits: Limits, repos: &[(&str, &str)]) -> Queue {
+            self.tick_busy(secs, limits, repos, None)
+        }
+
+        /// [`Fleet::tick`] with the whole machine read as `busy` cores busy.
+        fn tick_busy(
+            &self,
+            secs: i64,
+            limits: Limits,
+            repos: &[(&str, &str)],
+            busy: Option<f64>,
+        ) -> Queue {
             let repos: BTreeMap<String, String> = repos
                 .iter()
                 .map(|(b, r)| (b.to_string(), r.to_string()))
@@ -1331,6 +1351,7 @@ mod tests {
                 &repo_of,
                 at(secs),
                 &mut cgroup::Rates::default(),
+                busy,
             )
             .unwrap()
         }
@@ -1559,6 +1580,7 @@ mod tests {
                 &|b: &str| b.to_string(),
                 at(0),
                 &mut cgroup::Rates::default(),
+                None,
             )
             .unwrap()
         });
@@ -1889,6 +1911,27 @@ mod tests {
         assert_eq!(find(&q, "w1").granted_cores, 4, "{q:#?}");
         assert_eq!(state_of(&q, "w2"), "waiting", "{q:#?}");
         assert_eq!(find(&q, "w2").reason, "machine busy: 10 of 11 cores in use");
+    }
+
+    /// **The tick hands the whole machine's busy cores to the schedule** (SKEIN-1430). Four cores,
+    /// 3.5 busy outside the queue: a two-core job waits, saying how busy the machine is; with the
+    /// machine unread it starts.
+    ///
+    /// What would make it fail: the tick passing `None` in place of its `machine_busy` (the sabotage
+    /// that was run: the job is granted), or `watch_jobs`' reading not reaching the tick's input.
+    #[test]
+    fn a_tick_holds_a_job_while_the_whole_machine_is_busy() {
+        let f = Fleet::new(&["web-main"]);
+        f.submit("web-main", "j-b", 961, serde_json::json!({"cores": 2}));
+        let q = f.tick_busy(0, machine(4), &[], Some(3.5));
+        assert_eq!(state_of(&q, "j-b"), "waiting", "{q:#?}");
+        assert_eq!(
+            find(&q, "j-b").reason,
+            "machine busy: 3.5 of 4 cores in use",
+            "{q:#?}"
+        );
+        let q = f.tick(2, machine(4), &[]);
+        assert_eq!(state_of(&q, "j-b"), "granted", "{q:#?}");
     }
 
     /// **A job that needs more memory than is free waits, with how much, and does not hold up a

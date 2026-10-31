@@ -37,6 +37,10 @@ use std::path::Path;
 /// are deciding whether a green run on their machine means what they want it to mean.
 const GATED: &[(&str, &str)] = &[
     (
+        "this_machines_proc_stat_reads_as_a_busy_count",
+        "reads the kernel's own /proc/stat, which only Linux has",
+    ),
+    (
         "a_box_that_cannot_be_entered_says_which_proof_failed",
         "runs the crossing guard, whose subject is /proc/<pid>/stat and the kernel's boot id",
     ),
