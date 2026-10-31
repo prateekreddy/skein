@@ -130,13 +130,13 @@ export function register(on: On): void {
     // The MCP tool's own refusal, word for word: a list of anything but paths never reaches the
     // command line, which can only carry strings.
     if (paths !== undefined && !(Array.isArray(paths) && paths.every(p => typeof p === 'string' && p !== ''))) {
-      return { result: mcpAnswer({ error: 'paths-must-be-a-list-of-paths' }, '') }
+      return mcpAnswer({ error: 'paths-must-be-a-list-of-paths' }, '')
     }
     const ran = await runClean($, paths ?? [])
     if (ran.result !== null && 'removed' in ran.result) void look($)
 
-    return { result: mcpAnswer(ran.result ?? { error: 'clean-did-not-answer' }, ran.said) }
-  }).catch(() => ({ result: mcpAnswer({ error: 'clean-did-not-answer' }, '') }))
+    return mcpAnswer(ran.result ?? { error: 'clean-did-not-answer' }, ran.said)
+  }).catch(() => mcpAnswer({ error: 'clean-did-not-answer' }, ''))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const found = await read($, band)
@@ -374,11 +374,16 @@ async function parsedFile($: Engine, path: string): Promise<unknown> {
 }
 
 /** A tool's answer as the MCP tool gives it: the result, then the sentence for the agent. */
+// What skein_clean answers, as a registered tool may: its blocks as the result, or, for an error,
+// a deny carrying the same text, which the model reads as the tool's error. Not MCP's own
+// `{ content, isError }`: core holds a registered tool's result to a string or a list of blocks,
+// and refuses anything else in a live session, which `claude plugin test` does not (SKEIN-1409).
 function mcpAnswer(result: Record<string, unknown>, said: string) {
   const content = [{ type: 'text' as const, text: JSON.stringify(result, null, 1) }]
   if (said !== '') content.push({ type: 'text' as const, text: said })
+  if ('error' in result) return { deny: content.map(b => b.text).join('\n') }
 
-  return { content, isError: 'error' in result }
+  return { result: content }
 }
 
 async function cleanFromPane($: Engine, paths: string[]): Promise<void> {

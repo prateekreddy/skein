@@ -390,11 +390,20 @@ test('the clean tool answers what the skein_clean MCP tool answers, case by case
     const ran = await $.tool.call({ tool: 'mcp__skein__clean', paths: c.paths })
 
     expect(w.ran[before]?.slice(2)).toEqual(['clean', ...c.paths])
-    const answer = ran.result as { content: { type: string; text: string }[]; isError: boolean }
-    expect(answer.content.map(b => b.type)).toEqual(['text', 'text'])
-    expect(JSON.parse(answer.content[0]?.text ?? '')).toEqual(c.result)
-    expect(answer.content[1]?.text).toBe(c.said)
-    expect(answer.isError).toBe('error' in c.result)
+    const json = JSON.stringify(c.result, null, 1)
+    if ('error' in c.result) {
+      // An error is a deny, which the model reads as the tool's error result.
+      expect(ran.deny).toBe(c.said === '' ? json : `${json}\n${c.said}`)
+      continue
+    }
+    // Core holds a registered tool's result to a string or a list of blocks, and refuses any other
+    // shape in a live session though this harness does not: MCP's `{ content, isError }` was refused
+    // there on every call (SKEIN-1409).
+    expect(Array.isArray(ran.result)).toBe(true)
+    const blocks = ran.result as { type: string; text: string }[]
+    expect(blocks.map(b => b.type)).toEqual(['text', 'text'])
+    expect(JSON.parse(blocks[0]?.text ?? '')).toEqual(c.result)
+    expect(blocks[1]?.text).toBe(c.said)
   }
 })
 
@@ -405,10 +414,8 @@ test('the clean tool refuses a list of anything but paths as the MCP tool does',
 
   const ran = await $.tool.call({ tool: 'mcp__skein__clean', paths: [3] })
 
-  const answer = ran.result as { content: { text: string }[]; isError: boolean }
-  expect(JSON.parse(answer.content[0]?.text ?? '')).toEqual({ error: 'paths-must-be-a-list-of-paths' })
-  expect(answer.content.length).toBe(1)
-  expect(answer.isError).toBe(true)
+  expect(ran.result).toBeUndefined()
+  expect(JSON.parse(ran.deny ?? '')).toEqual({ error: 'paths-must-be-a-list-of-paths' })
   expect(w.ran.length).toBe(before)
 })
 
