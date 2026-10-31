@@ -1002,10 +1002,11 @@ depends_on = ["config", "health", "mailbox", "util"]
 depends_on = ["ai", "boxfile", "config", "fleet"]
 
 [current.jobs]
-# The heavy-work queue (SKEIN-1388). `config` for the two limits, `jobs_fleet_slots` and
-# `jobs_repo_cap`, and skein's home, where the queue file is. `fleet` for the fleet root the
-# drop-boxes are under, the box state root the views go into, and the sandbox's cores the slots
-# are counted from. `repos` for the repo a box belongs to, which the per-repo cap counts by.
+# The heavy-work queue (SKEIN-1388, cores since SKEIN-1420). `config` for the per-job cap on cores
+# and the oversubscription, and skein's home, where the queue file is. `fleet` for the fleet root
+# the drop-boxes are under, the box state root the views go into, and the sandbox's cores and free
+# memory the grants are judged against. `repos` for the repo a box belongs to, which decides whose
+# waiting job goes next.
 # `util` for the atomic write every view and the queue go through, and the box-name whitelist.
 # `boxfile` for reading each request: the box writes its drop-box and skein-server can read what
 # no box may, so a request is opened without following a link or waiting on a FIFO, and only what

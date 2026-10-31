@@ -358,13 +358,23 @@ pub struct Config {
     /// between the two is the difference between a slow box and a lost turn.
     #[serde(default)]
     pub box_memory_high: String,
-    /// How many heavy jobs may run at once across the fleet (`skein-job`, SKEIN-1388). `0` ⇒ one
-    /// for every four of the sandbox's cores, and never none (`jobs::fleet_slots_for`).
+    /// Retired (SKEIN-1420): the heavy-work queue grants cores now, not slots, so a count of jobs
+    /// has nothing left to limit. Kept so a `config.json` that set it still parses; not read.
     #[serde(default)]
     pub jobs_fleet_slots: u32,
-    /// How many of one repo's heavy jobs may run at once. `0` ⇒ `jobs::DEFAULT_REPO_CAP`, 2.
+    /// Retired (SKEIN-1420): a repo alone may now use every core, and another repo's waiting job
+    /// goes first instead of a fixed cap. Kept so a `config.json` that set it still parses; not
+    /// read.
     #[serde(default)]
     pub jobs_repo_cap: u32,
+    /// The most cores one heavy job may ask for (`skein-job run --cores`). `0` ⇒
+    /// `jobs::DEFAULT_MAX_CORES_PER_JOB`, 4.
+    #[serde(default)]
+    pub jobs_max_cores_per_job: u32,
+    /// How far the cores granted to jobs may run past the machine's cores, since jobs rarely use
+    /// all they ask for. `0` ⇒ `jobs::DEFAULT_OVERSUBSCRIBE`, 1.5.
+    #[serde(default)]
+    pub jobs_oversubscribe: f64,
     /// Superseded by named `SyncConnection`s, which pair a gateway with the token that mints at it.
     /// Read once by the migration and then cleared; kept so a pre-connections `config.json` still
     /// parses. A credential was never here and never will be — this file is written 0644 and
@@ -736,6 +746,8 @@ impl Default for Config {
             box_memory_high: String::new(),
             jobs_fleet_slots: 0,
             jobs_repo_cap: 0,
+            jobs_max_cores_per_job: 0,
+            jobs_oversubscribe: 0.0,
             sync_gateway_url: String::new(),
         }
     }
