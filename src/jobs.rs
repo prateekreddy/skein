@@ -1046,11 +1046,7 @@ pub fn tick(
         job.using = live.get(&key).copied().filter(|_| running);
         job.mem_mib = running
             .then(|| {
-                cgroup::memory_now(&cgroup::job_cgroup(
-                    &places.cgroups,
-                    &job.box_name,
-                    &job.id,
-                ))
+                cgroup::memory_now(&cgroup::job_cgroup(&places.cgroups, &job.box_name, &job.id))
             })
             .flatten();
     }
@@ -1245,7 +1241,11 @@ pub fn read_stops(dir: &Path) -> BTreeSet<(String, String)> {
 }
 
 /// End every waiting or running job in `stops` as `stopped`.
-pub fn apply_owner_stops(queue: &mut Queue, stops: &BTreeSet<(String, String)>, now: DateTime<Utc>) {
+pub fn apply_owner_stops(
+    queue: &mut Queue,
+    stops: &BTreeSet<(String, String)>,
+    now: DateTime<Utc>,
+) {
     for job in queue.jobs.iter_mut().filter(|j| j.is_active()) {
         if stops.contains(&(job.box_name.clone(), job.id.clone())) {
             job.state = "stopped".into();
@@ -1334,7 +1334,11 @@ fn is_the_boxs_wrapper(proc: &Path, box_name: &str, pid: u32) -> bool {
 fn descendants(proc: &Path, root: u32) -> Vec<u32> {
     let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for entry in std::fs::read_dir(proc).into_iter().flatten().flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
             continue;
         };
         let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
@@ -1517,7 +1521,8 @@ pub fn read_fleet_view(now: DateTime<Utc>) -> (FleetView, bool) {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    let fresh = parse_stamp(&view.at).is_some_and(|_| secs_between(&view.at, now) < VIEW_FRESH.as_secs() as i64);
+    let fresh = parse_stamp(&view.at)
+        .is_some_and(|_| secs_between(&view.at, now) < VIEW_FRESH.as_secs() as i64);
     (view, fresh)
 }
 
@@ -2352,7 +2357,12 @@ mod tests {
             "a stop that was done was left to be done again"
         );
 
-        f.submit("web-main", "j-run", 101, serde_json::json!({"state": "done"}));
+        f.submit(
+            "web-main",
+            "j-run",
+            101,
+            serde_json::json!({"state": "done"}),
+        );
         let q = f.tick(6, one, &[]);
         assert_eq!(state_of(&q, "j-wait"), "stopped", "{q:#?}");
         // And it cannot be stopped twice: it is not waiting or running any more.
@@ -2386,7 +2396,12 @@ mod tests {
         f.tick(0, none_free, &[]);
         f.submit("web-main", "j-1", 101, serde_json::json!({"cores": 1}));
         f.tick(2, none_free, &[]);
-        f.submit("api-main", "j-1", 201, serde_json::json!({"state": "cancelled"}));
+        f.submit(
+            "api-main",
+            "j-1",
+            201,
+            serde_json::json!({"state": "cancelled"}),
+        );
         let q = f.tick(4, none_free, &[]);
         let theirs = q
             .jobs
@@ -2395,22 +2410,40 @@ mod tests {
             .unwrap();
         assert_eq!(theirs.state, "waiting", "{q:#?}");
 
-        f.submit("api-main", "j-1", 201, serde_json::json!({"state": "stopped"}));
-        f.submit("web-main", "j-1", 101, serde_json::json!({"state": "stopped"}));
+        f.submit(
+            "api-main",
+            "j-1",
+            201,
+            serde_json::json!({"state": "stopped"}),
+        );
+        f.submit(
+            "web-main",
+            "j-1",
+            101,
+            serde_json::json!({"state": "stopped"}),
+        );
         let q = f.tick(6, none_free, &[]);
         assert!(
             q.jobs.iter().all(|j| j.state != "stopped"),
             "a box's file stood in for the owner's stop: {q:#?}"
         );
 
-        f.submit("web-main", "j-1", 101, serde_json::json!({"state": "cancelled"}));
+        f.submit(
+            "web-main",
+            "j-1",
+            101,
+            serde_json::json!({"state": "cancelled"}),
+        );
         let q = f.tick(8, none_free, &[]);
         let theirs = q
             .jobs
             .iter()
             .find(|j| j.box_name == "web-main" && j.id == "j-1")
             .unwrap();
-        assert_eq!(theirs.state, "cancelled", "a box could not stop its own job: {q:#?}");
+        assert_eq!(
+            theirs.state, "cancelled",
+            "a box could not stop its own job: {q:#?}"
+        );
     }
 
     /// **The cockpit's list has every waiting and running job in the fleet, running ones first and
@@ -2430,9 +2463,19 @@ mod tests {
         f.submit("web-main", "j-b", 102, serde_json::json!({"cores": 1}));
         f.tick(2, two, &[("web-main", "web"), ("api-main", "api")]);
         f.submit("api-main", "j-c", 201, serde_json::json!({"cores": 1}));
-        f.submit("api-main", "j-x", 202, serde_json::json!({"state": "waiting"}));
+        f.submit(
+            "api-main",
+            "j-x",
+            202,
+            serde_json::json!({"state": "waiting"}),
+        );
         f.tick(4, two, &[("web-main", "web"), ("api-main", "api")]);
-        f.submit("api-main", "j-x", 202, serde_json::json!({"state": "cancelled"}));
+        f.submit(
+            "api-main",
+            "j-x",
+            202,
+            serde_json::json!({"state": "cancelled"}),
+        );
         f.tick(10, two, &[("web-main", "web"), ("api-main", "api")]);
         let list: FleetView = serde_json::from_str(
             &std::fs::read_to_string(fleet_view_path(&f.places)).expect("no list written"),
@@ -2441,7 +2484,14 @@ mod tests {
         let rows: Vec<(&str, &str, &str, Option<usize>)> = list
             .jobs
             .iter()
-            .map(|j| (j.box_name.as_str(), j.id.as_str(), j.state.as_str(), j.position))
+            .map(|j| {
+                (
+                    j.box_name.as_str(),
+                    j.id.as_str(),
+                    j.state.as_str(),
+                    j.position,
+                )
+            })
             .collect();
         // `api` holds no cores, so its job goes before `web`'s second.
         assert_eq!(
@@ -2455,13 +2505,19 @@ mod tests {
         );
         assert_eq!((list.cores, list.granted, list.free), (2, 2, 0));
         let a = &list.jobs[0];
-        assert_eq!((a.repo.as_str(), a.short.as_str(), a.secs), ("web", "cargo test", 10));
+        assert_eq!(
+            (a.repo.as_str(), a.short.as_str(), a.secs),
+            ("web", "cargo test", 10)
+        );
         assert_eq!(list.jobs[1].secs, 6);
         assert!(!list.jobs[1].reason.is_empty(), "{list:#?}");
-        assert_eq!(list.jobs[1].mem_mib, memory_estimate_mib(&Job {
-            class: "test".into(),
-            ..Job::default()
-        }));
+        assert_eq!(
+            list.jobs[1].mem_mib,
+            memory_estimate_mib(&Job {
+                class: "test".into(),
+                ..Job::default()
+            })
+        );
     }
 
     /// **Without a job cgroup, the owner's stop kills every process under the wrapper, and not the
@@ -2528,7 +2584,11 @@ mod tests {
         }
         let _ = other.wait();
         assert!(refused.is_err(), "{refused:?}");
-        assert_eq!(survived, [true, true], "another box's processes were killed");
+        assert_eq!(
+            survived,
+            [true, true],
+            "another box's processes were killed"
+        );
 
         let (mut wrapper, kids) = start("web-main", &root.join("ours"));
         let stopped = kill_under(Path::new("/proc"), &cgroups, "web-main", wrapper.id());
@@ -2540,6 +2600,10 @@ mod tests {
         let status = wrapper.wait().unwrap();
         stopped.unwrap();
         assert_eq!(survived, Vec::<u32>::new(), "these survived the stop");
-        assert_eq!(status.signal(), None, "the wrapper was killed with its command");
+        assert_eq!(
+            status.signal(),
+            None,
+            "the wrapper was killed with its command"
+        );
     }
 }

@@ -813,7 +813,8 @@ fn a_waiting_job_the_owner_stops_says_so_and_never_runs() {
 /// to the bound), killing the wrapper as well (it exits by a signal and says nothing: the sabotage
 /// that was run was `kill_under` taking the wrapper's pid too, and the code is `None`), or the
 /// wrapper not looking for skein's mark after its command was killed (the sabotage that was run:
-/// its `stopped_by_owner` check removed, and it exits 137 with no line saying who stopped it).
+/// the wrapper's look at its view after a SIGKILL removed, and it exits 137 with no line saying
+/// who stopped it).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_running_job_the_owner_stops_is_killed_and_its_wrapper_says_so() {
@@ -847,9 +848,11 @@ fn a_running_job_the_owner_stops_is_killed_and_its_wrapper_says_so() {
         err.contains("stopped by you (the owner) from the cockpit; its processes were killed"),
         "{err}"
     );
-    eventually(Duration::from_secs(5), "the job's command survived the stop", || {
-        (!Path::new(&format!("/proc/{pid}")).exists()).then_some(())
-    });
+    eventually(
+        Duration::from_secs(5),
+        "the job's command survived the stop",
+        || (!Path::new(&format!("/proc/{pid}")).exists()).then_some(()),
+    );
     let q = fleet.queue();
     let stopped = q.jobs.iter().find(|j| j.id == job.id).unwrap();
     assert_eq!(stopped.state, "stopped", "{q:#?}");

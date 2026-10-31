@@ -366,7 +366,8 @@ pub(crate) fn stop_with(
     );
     fs.write(&dir.join("cgroup.kill"), "1")
         .map_err(|e| format!("its cgroup could not be killed: {e}"))?;
-    moved.map_err(|e| format!("its wrapper could not be moved out first, so it was killed too: {e}"))
+    moved
+        .map_err(|e| format!("its wrapper could not be moved out first, so it was killed too: {e}"))
 }
 
 /// The memory a cgroup holds now, in MiB: `memory.current`. `None` where it cannot be read.
@@ -954,8 +955,16 @@ mod tests {
         crate::jobs::ask_owner_stop(&places, "web-main", "j-s").unwrap();
         let q = tick(&places, 2);
         assert_eq!(job(&q, "j-s").state, "stopped", "{q:#?}");
-        assert_eq!(job(&q, "j-s").reason, crate::jobs::STOPPED_BY_OWNER, "{q:#?}");
-        assert_eq!(read(&cg.join("cgroup.kill")), "1", "the job's processes were not killed");
+        assert_eq!(
+            job(&q, "j-s").reason,
+            crate::jobs::STOPPED_BY_OWNER,
+            "{q:#?}"
+        );
+        assert_eq!(
+            read(&cg.join("cgroup.kill")),
+            "1",
+            "the job's processes were not killed"
+        );
         assert_eq!(
             read(&leaf.join("cgroup.procs")),
             "31337",
