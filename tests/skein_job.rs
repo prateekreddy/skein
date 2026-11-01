@@ -571,6 +571,7 @@ fn each_way_a_job_skips_the_queue_says_its_own_reason() {
         4,
     );
     let nowhere = fleet.dir.path().join("no-fleet-here");
+    let home = fleet.dir.path().join("home");
     let cases: [(&str, Box<dyn FnOnce(&mut Command)>); 3] = [
         (
             "SKEIN_BOX is not set, so skein cannot tell which box this is",
@@ -581,7 +582,7 @@ fn each_way_a_job_skips_the_queue_says_its_own_reason() {
         (
             &format!("there is no skein fleet at {}", nowhere.display()),
             Box::new(|c| {
-                c.env("SKEIN_FLEET_ROOT", &nowhere);
+                c.env("SKEIN_FLEET_ROOT", &nowhere).env("SKEIN_HOME", &home);
             }),
         ),
         (
