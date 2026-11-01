@@ -1361,6 +1361,57 @@ fn a_build_running_at_the_call_is_refused_though_the_list_says_it_is_not() {
     assert!(!target.exists(), "the build ended and its target was kept");
 }
 
+/// **What skein's list marks live is refused, whatever its kind, though no cargo lock is held**
+/// (SKEIN-1461). skein marks an item live when one of the box's processes runs from it, works in
+/// it or holds a file in it open: a test binary in a target, a browser in `~/.cache/ms-playwright`.
+/// None of them holds a lock, so the recheck of `/proc/locks` at the call must not overrule it.
+///
+/// What would make it fail: the listing believing the lock over the list for build output (the
+/// target is removed), or reading `live` for build output only (the cache is removed). Watched:
+/// with the `elif it.get("live") is True` branch removed, the listing called the target safe now
+/// and this failed.
+#[test]
+fn what_skein_marks_in_use_is_refused_with_no_lock_held() {
+    let b = Box_::new("skein-tools-it-clean-inuse");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let mut file: Value =
+        serde_json::from_str(&fs::read_to_string(b.at("state/signals/resources.json")).unwrap())
+            .unwrap();
+    for it in file["clean"]["items"].as_array_mut().unwrap() {
+        it["live"] = json!(true);
+    }
+    b.put("state/signals/resources.json", &file.to_string());
+    b.put("root/proc/locks", "");
+    let target = c.root.join("tree/target");
+    let pip = c.root.join("home/.cache/pip");
+
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    for kind in ["build output", "download cache"] {
+        let row = listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind} listed: {listing}"));
+        assert_eq!(row["safe_now"], false, "{row}");
+        assert_eq!(
+            row["why_not"], "a process in this box is using it now",
+            "{row}"
+        );
+    }
+    for path in [&target, &pip] {
+        let (got, said) = clean_said(&b, &[path.display().to_string()]);
+        assert_eq!(got["error"], "not-safe-now", "{path:?}: {got}");
+        assert!(
+            said.contains("a process in this box is using it now"),
+            "{said}"
+        );
+        assert!(path.exists(), "{path:?} was removed while in use");
+    }
+}
+
 /// **A lock on another filesystem's file with the target's inode number is not a build in it**
 /// (SKEIN-1391): skein-mcp's recheck at the call matches `/proc/locks` by device and inode
 /// together, so the target is removed.

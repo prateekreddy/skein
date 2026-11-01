@@ -364,33 +364,7 @@ pub(crate) fn open_tool_files_under(
             continue;
         };
         let at = proc_root.join(&pid);
-        let mut paths: Vec<String> = Vec::new();
-        for link in ["exe", "cwd"] {
-            if let Ok(p) = std::fs::read_link(at.join(link)) {
-                paths.push(p.to_string_lossy().into_owned());
-            }
-        }
-        if let Ok(fds) = std::fs::read_dir(at.join("fd")) {
-            for fd in fds.flatten() {
-                if let Ok(p) = std::fs::read_link(fd.path()) {
-                    paths.push(p.to_string_lossy().into_owned());
-                }
-            }
-        }
-        if let Ok(maps) = std::fs::read_to_string(at.join("maps")) {
-            for line in maps.lines() {
-                // address perms offset dev inode path: the path is what follows the fifth field.
-                let mut rest = line;
-                for _ in 0..5 {
-                    rest = rest.trim_start();
-                    rest = rest.find(char::is_whitespace).map_or("", |i| &rest[i..]);
-                }
-                let path = rest.trim_start();
-                if path.starts_with('/') {
-                    paths.push(path.to_string());
-                }
-            }
-        }
+        let paths = process_paths(&at);
         let mut asked: HashMap<String, Option<(u64, u64)>> = HashMap::new();
         let mut identify = |dir: String| -> Option<String> {
             let key = asked.entry(dir.clone()).or_insert_with(|| {
@@ -419,6 +393,40 @@ pub(crate) fn open_tool_files_under(
         }
     }
     Some(out)
+}
+
+/// Every path the process at `at` (`/proc/<pid>`) runs (`exe`), works in (`cwd`), holds open
+/// (`fd`) or has mapped (`maps`), as the process spells it, in its own mount namespace. What cannot
+/// be read is left out: a process that ended, or one this reader may not look into.
+pub(crate) fn process_paths(at: &Path) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for link in ["exe", "cwd"] {
+        if let Ok(p) = std::fs::read_link(at.join(link)) {
+            paths.push(p.to_string_lossy().into_owned());
+        }
+    }
+    if let Ok(fds) = std::fs::read_dir(at.join("fd")) {
+        for fd in fds.flatten() {
+            if let Ok(p) = std::fs::read_link(fd.path()) {
+                paths.push(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if let Ok(maps) = std::fs::read_to_string(at.join("maps")) {
+        for line in maps.lines() {
+            // address perms offset dev inode path: the path is what follows the fifth field.
+            let mut rest = line;
+            for _ in 0..5 {
+                rest = rest.trim_start();
+                rest = rest.find(char::is_whitespace).map_or("", |i| &rest[i..]);
+            }
+            let path = rest.trim_start();
+            if path.starts_with('/') {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths
 }
 
 /// Whether any of `open`, paths relative to an area, is the version `rel` or inside it.

@@ -565,10 +565,14 @@ def clean_rows(sig):
             why = "skein has not listed this box's disk lately; try again in a few minutes"
         elif kind not in ANY_TIME:
             why = "a scratchpad may belong to a session still running in this box"
-        elif kind == "build output" and (
-            build_running(path, locks) if locks is not None else it.get("live") is True
-        ):
+        elif kind == "build output" and locks is not None and build_running(path, locks):
             why = "a build is running in it now"
+        elif it.get("live") is True:
+            # skein's word, from its last tick: a build was running in it, or a process of this
+            # box ran from it, worked in it or held a file in it open (SKEIN-1461). Whatever its
+            # kind, and kept even when the lock above reads free, since a test binary or a browser
+            # holds no cargo lock.
+            why = "a process in this box is using it now"
         rows.append({
             "path": path,
             "in_box": in_box(path, views or []),
