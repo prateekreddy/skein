@@ -35,7 +35,8 @@
 # job end, and the wrapper waits a few seconds for that tick's view; skein keeps the run, per repo
 # and command, to pick the cores a later run asks for when it names none (SKEIN-1421). A job skein
 # did not measure (no cgroup of its own, or not scheduled at all) is told what this wrapper counted
-# of its children itself, which has no peak.
+# of its children itself, which has no peak. A job the queue never granted leaves out `asked`, so
+# the line cannot read as a grant: `used 1.3 avg, 6m12s`.
 #
 # **A nested call never waits.** The child runs with `SKEIN_JOB_ID` set, and a `skein-job` that
 # finds it set runs its command straight away: it already holds its parent's cores, and waiting for
@@ -48,8 +49,9 @@
 # sees who stopped it rather than a bare failure. Only skein writes that mark, from the host.
 #
 # **It never strands the caller.** With no fleet drop-box (outside a box, or a box started before
-# skein had the queue), or with skein not answering for 30 s, it says so on stderr and runs under
-# the box's own lock alone, which is what the lanes did before. Its tools are still told a count:
+# skein had the queue), no `SKEIN_STATE` to read skein's answer from, or skein not answering for
+# 30 s, it says so and why on stderr, before the command runs, and runs under the box's own lock
+# alone, which is what the lanes did before. Its tools are still told a count:
 # the `--cores` it asked for, or FALLBACK_CORES, so a build skein never saw does not take every core.
 #
 # Python 3 standard library only, as `skein-mcp` is: it runs in every box and installs nothing.
@@ -167,12 +169,23 @@ def take_box_lock():
 
 
 def drop_box():
+    """This box's drop-box and None, or None and why the job cannot be filed in the fleet's queue:
+    each reason is one way the queue is skipped, said once before the job runs (SKEIN-1459)."""
     box = os.environ.get("SKEIN_BOX", "")
     if not box:
-        return None
+        return None, "SKEIN_BOX is not set, so skein cannot tell which box this is"
     fleet = os.environ.get("SKEIN_FLEET_ROOT") or "/boxes"
+    if not os.path.isdir(os.path.join(fleet, ".skein")):
+        return None, "there is no skein fleet at %s" % fleet
     d = os.path.join(fleet, ".skein", "jobs", "requests", box)
-    return d if os.path.isdir(d) else None
+    if not os.path.isdir(d):
+        # The launcher makes it when the box starts, so a box started before the queue has none.
+        return None, ("this box has no job drop-box, because it started before skein's job "
+                      "queue; restarting the box fixes that")
+    if not os.environ.get("SKEIN_STATE"):
+        # Without it the box's view cannot be found, and a grant could never be read.
+        return None, "SKEIN_STATE is not set, so skein's answer could not be read"
+    return d, None
 
 
 def write_request(path, body):
@@ -451,9 +464,11 @@ def run(args):
     lock = take_box_lock()
     request = None
     granted = False
-    drop = drop_box()
+    drop, unqueued = drop_box()
     body = dict({"id": job_id, "class": job_class, "argv": argv, "cwd": os.getcwd(),
                  "pid": os.getpid(), "state": "waiting"}, **counts)
+    if unqueued is not None:
+        say("not waiting for a fleet slot: " + unqueued)
     if drop is not None:
         request = os.path.join(drop, job_id + ".json")
         try:
@@ -499,7 +514,9 @@ def run(args):
             os.close(lock)
     own_secs = time.monotonic() - started
     children = resource.getrusage(resource.RUSAGE_CHILDREN)
-    asked, used = cores, None
+    # Only a job the queue granted says what it asked for: on any other run "asked 2 cores" reads as
+    # cores the fleet gave it, and the line before the run already said why it was not queued.
+    asked, used = None, None
     if isinstance(granted, dict) and request is not None:
         asked = granted.get("cores") or cores
         job = wait_for_end(job_id)
