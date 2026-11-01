@@ -454,9 +454,11 @@ pub struct CleanItem {
     /// `download cache`, `build output` or `scratchpad`.
     pub kind: String,
     pub bytes: u64,
-    /// A build is running in it now: cargo holds its lock (`fleet::live_builds`), read again on
-    /// every tick (SKEIN-1391). It cannot be removed while that is so, and no ask counts it as
-    /// clearable. Absent in a file written before it existed, which reads as not live.
+    /// It is in use now: a build is running in it, cargo holding its lock (`fleet::live_builds`,
+    /// SKEIN-1391), or one of the box's own processes runs from it, works in it or holds a file in
+    /// it open (`fleet::BoxProcesses::in_use`, SKEIN-1461); read again on every tick. It cannot be
+    /// removed while that is so, and no ask counts it as clearable. Absent in a file written
+    /// before it existed, which reads as not live.
     #[serde(default)]
     pub live: bool,
 }
@@ -652,7 +654,7 @@ fn disk_band(r: &Reading) -> Band<DiskAsk> {
 struct Room {
     /// What its agent may remove now: [`removable_now`]'s items, rounded down.
     clear: u64,
-    /// What is in a build running now, rounded up.
+    /// What is in use now (`CleanItem::live`), rounded up.
     live: u64,
 }
 
@@ -1536,7 +1538,8 @@ pub fn write_box_with(
 /// boxes read again every tick, since that is what the plugin's refusal turns on.
 ///
 /// `repo_caches` measures each repo's shared cache once per tick, however many of its boxes are
-/// listed in it. `None` when the box has no directory in the fleet.
+/// listed in it, and `procs` is the process table, read by the first box of the tick that has
+/// something listed and shared by the rest. `None` when the box has no directory in the fleet.
 pub(crate) fn clean_list(
     name: &str,
     prev: Option<&CleanList>,
@@ -1544,6 +1547,7 @@ pub(crate) fn clean_list(
     at: DateTime<Utc>,
     repo_caches: &mut BTreeMap<String, Option<crate::fleet::RepoCache>>,
     repo_tools: &mut BTreeMap<String, Option<crate::fleet::RepoTools>>,
+    procs: &mut Option<crate::fleet::BoxProcesses>,
 ) -> Option<CleanList> {
     let fresh = prev.filter(|p| {
         minutes_since(Some(p.at.as_str()), at)
@@ -1587,18 +1591,7 @@ pub(crate) fn clean_list(
             }
         }
     };
-    // Whether a build is running in each build directory, read every tick like the repo's other
-    // boxes below: a build starts and ends between two walks of the items.
-    let builds: Vec<String> = list
-        .items
-        .iter()
-        .filter(|i| i.kind == "build output")
-        .map(|i| i.path.clone())
-        .collect();
-    let live = crate::fleet::live_builds(&builds.iter().map(String::as_str).collect::<Vec<_>>());
-    for item in list.items.iter_mut() {
-        item.live = live.contains(&item.path);
-    }
+    mark_live(&mut list, name, procs);
     if let Some(rc) = list.repo_cache.as_mut() {
         let (running, unknown) = crate::fleet::others_of_box(name, liveness);
         rc.others_running = running.len();
@@ -1608,6 +1601,32 @@ pub(crate) fn clean_list(
         }
     }
     Some(list)
+}
+
+/// Mark each of box `name`'s items live or not, read every tick like the repo's other boxes in
+/// [`clean_list`]: a build starts and ends, and a process starts using a directory, between two
+/// walks of the items. Live is a build running in it (`fleet::live_builds`, its cargo lock, which
+/// spans the gaps between rustc runs) or one of the box's own processes running from it, working
+/// in it or holding a file in it open (`fleet::BoxProcesses::in_use`, SKEIN-1461), whatever its
+/// kind. `procs` is read from `/proc` here when the tick has not read it yet.
+fn mark_live(list: &mut CleanList, name: &str, procs: &mut Option<crate::fleet::BoxProcesses>) {
+    if list.items.is_empty() {
+        return;
+    }
+    let builds: Vec<&str> = list
+        .items
+        .iter()
+        .filter(|i| i.kind == "build output")
+        .map(|i| i.path.as_str())
+        .collect();
+    let built = crate::fleet::live_builds(&builds);
+    let paths: Vec<&str> = list.items.iter().map(|i| i.path.as_str()).collect();
+    let used = procs
+        .get_or_insert_with(crate::fleet::box_processes)
+        .in_use(name, &paths);
+    for item in list.items.iter_mut() {
+        item.live = built.contains(&item.path) || used.contains(&item.path);
+    }
 }
 
 /// One tick over the whole fleet: a file for every box that has a state directory.
@@ -1627,6 +1646,7 @@ pub fn write_every_box() -> Result<usize, String> {
     let mut repo_caches = BTreeMap::new();
     let mut repo_tools = BTreeMap::new();
     let mut looked = BTreeMap::new();
+    let mut procs = None;
     let at = Utc::now();
     let mut written = 0;
     let mut failed = Vec::new();
@@ -1653,6 +1673,7 @@ pub fn write_every_box() -> Result<usize, String> {
                 at,
                 &mut repo_caches,
                 &mut repo_tools,
+                &mut procs,
             )
             .map(|mut list| {
                 mark_open(&mut list, &mut looked, at);
@@ -2647,6 +2668,82 @@ mod tests {
             before,
             "told to ask when clearing is enough"
         );
+    }
+
+    /// **What a box's own process is using shrinks the ask, and once clearing falls short the
+    /// box is told to ask the owner for more** (SKEIN-1461): synapse-master on 2026-11-01, 13.7G
+    /// against a 10G share, with a 4.5G CI target a test binary runs from (no cargo, so no lock),
+    /// and 2.4G in `node_modules` and `~/.cache/ms-playwright` that nothing uses.
+    ///
+    /// Read the way a tick reads it: the list's items marked by [`mark_live`] against a process
+    /// table (`fleet::FakeProc`), then the ask from [`next`] and [`with_disk_ask`]. Unmarked, the
+    /// box is asked for the whole 3.7G excess and never told it can ask; marked, it is asked for
+    /// the 2.4G it can clear, told 4.5G is in use, and told to call `skein_request_disk`.
+    ///
+    /// What would make it fail: `mark_live` reading the lock alone (the target stays clearable,
+    /// the ask stays 3.7G with no `ask_for_more`). Watched: with `|| used.contains(&item.path)`
+    /// dropped from `mark_live`, the marked ask was 3789 MiB and this failed.
+    #[test]
+    fn an_item_a_box_process_uses_shrinks_the_ask_until_it_asks_for_more() {
+        let f = crate::fleet::FakeProc::new();
+        let target = f.item("home/.cache/synapse-target-ci");
+        let modules = f.item("tree/fts-370/node_modules");
+        let browsers = f.item("home/.cache/ms-playwright");
+        f.process(
+            4242,
+            "/skein/web-main/box",
+            "/home/agent/.cache/synapse-target-ci/debug/deps/enclave-1f2e3d",
+            "/home/agent/synapse",
+            &[],
+        );
+        let item = |path: &str, kind: &str, mib: u64| CleanItem {
+            path: path.to_string(),
+            shown: path.to_string(),
+            kind: kind.to_string(),
+            bytes: mib * MIB,
+            live: false,
+        };
+        let mut list = CleanList {
+            at: stamp(at(0)),
+            box_root: f.box_dir.display().to_string(),
+            items: vec![
+                item(&target, "build output", 4608),
+                item(&modules, "build output", 1229),
+                item(&browsers, "download cache", 1229),
+            ],
+            repo_cache: None,
+            repo_tools: None,
+        };
+        let ask_of = |list: &CleanList| {
+            let r = Reading {
+                disk_mb: Some(14029),
+                disk_limit_mb: Some(10240),
+                clean: Some(list.clone()),
+                ..reading(0, Some(calm()))
+            };
+            disk_ask(&with_disk_ask(next(None, &r), None))
+        };
+        let more = words::ask_for_more(None);
+
+        let unmarked = ask_of(&list);
+        assert_eq!(unmarked.amount, 3789, "{unmarked:?}");
+        assert!(!unmarked.hold.contains(&more), "{}", unmarked.hold);
+
+        let mut procs = Some(crate::fleet::box_processes_under(&f.proc));
+        mark_live(&mut list, "web-main", &mut procs);
+        let marked = ask_of(&list);
+        assert_eq!(marked.amount, 2458, "{marked:?}");
+        assert_eq!(marked.live_mb, 4608);
+        assert!(marked.hold.contains(&more), "{}", marked.hold);
+        assert!(marked.start.as_deref().unwrap().contains(&more));
+        assert!(marked.enter.as_deref().unwrap().ends_with(&more));
+        let live: Vec<&str> = list
+            .items
+            .iter()
+            .filter(|i| i.live)
+            .map(|i| i.path.as_str())
+            .collect();
+        assert_eq!(live, vec![target.as_str()]);
     }
 
     /// **A build running now is not asked for: the ask shrinks to what can be cleared, and its
@@ -3651,6 +3748,7 @@ mod tests {
             at(0),
             &mut memo,
             &mut BTreeMap::new(),
+            &mut Some(crate::fleet::BoxProcesses::default()),
         )
         .expect("a box with a directory is listed");
         let shown: Vec<&str> = first.items.iter().map(|i| i.shown.as_str()).collect();
@@ -3669,6 +3767,7 @@ mod tests {
             at(1),
             &mut memo,
             &mut BTreeMap::new(),
+            &mut Some(crate::fleet::BoxProcesses::default()),
         )
         .unwrap();
         let rc = second.repo_cache.clone().unwrap();
@@ -3690,6 +3789,7 @@ mod tests {
                 at(n),
                 &mut memo,
                 &mut BTreeMap::new(),
+                &mut Some(crate::fleet::BoxProcesses::default()),
             )
             .unwrap();
             let rc = later.repo_cache.unwrap();
@@ -3711,6 +3811,7 @@ mod tests {
             at(6),
             &mut memo,
             &mut BTreeMap::new(),
+            &mut Some(crate::fleet::BoxProcesses::default()),
         )
         .unwrap();
         assert_eq!(
@@ -3757,6 +3858,7 @@ mod tests {
             at(0),
             &mut BTreeMap::new(),
             &mut BTreeMap::new(),
+            &mut Some(crate::fleet::BoxProcesses::default()),
         )
         .unwrap();
         let tools = list.repo_tools.clone().expect("web has a tools area");

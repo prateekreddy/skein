@@ -132,6 +132,15 @@ pub const CARGO_BUILD_LOCK: &str = ".cargo-lock";
 /// listed (measured: its `fdinfo` showed it under pid 0). Cargo takes and holds its lock in its own
 /// process for the whole build, so a running cargo is listed; skein reads from outside every box's
 /// namespace, and a box's own tools from inside it, and both see the box's cargo.
+///
+/// **The process, as well as the lock** (SKEIN-1461). The lock is the rule for a cargo build, and
+/// it stays the rule: process state alone misses the gaps between rustc runs. But it sees nothing
+/// else. On synapse-master a CI run executed test binaries from its target directory with no cargo
+/// running, node had `node_modules` open and Chromium ran out of `~/.cache/ms-playwright`, and all
+/// three read as not live, so the box was asked day after day to clear 6.9G it could not. So an
+/// item is also live while one of its own box's processes runs from it, works in it or holds a
+/// file in it open ([`BoxProcesses::in_use`]), for every kind on the list; the two are joined in
+/// `resource_signal::clean_list`.
 pub fn live_builds(build_dirs: &[&str]) -> std::collections::BTreeSet<String> {
     let locks = std::fs::read_to_string("/proc/locks").unwrap_or_default();
     live_builds_in(&locks, build_dirs)
@@ -192,6 +201,164 @@ fn dev_pair(dev: u64) -> (u64, u64) {
         ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000),
         (dev & 0xff) | ((dev >> 12) & 0xffff_ff00),
     )
+}
+
+/// Which box every process on the machine is in, read from `/proc` once a tick and shared by
+/// every box's list (SKEIN-1461). A box's processes' paths ([`process_paths`]) are read only when
+/// that box asks ([`BoxProcesses::in_use`]), which it does once a tick, so nothing is read for a
+/// box with nothing listed or for a process in no box.
+///
+/// **Whose a process is, is its cgroup.** The launcher puts a box's session in `box_cgroup(<box>)`
+/// before it starts anything, and a process cannot leave its cgroup by forking, so
+/// `/proc/<pid>/cgroup` names the box of everything the box runs: its own processes under
+/// `/skein/<box>/box`, a granted job's under `/skein/<box>/job-<id>`, and a container the shim put
+/// in `box_container_cgroup(<box>)`. A process in no box's cgroup — skein, the sandbox's own, a
+/// container dockerd put in `CONTAINER_CGROUP/<container id>`, which names no box — makes nothing
+/// live. Boxes share the sandbox's pid namespace, so skein sees every box's pids.
+///
+/// **What cannot be read is skipped**: a process that ended between the listing and the read, or
+/// one this reader may not look into, is a process that holds nothing.
+#[derive(Debug, Clone, Default)]
+pub struct BoxProcesses {
+    proc_root: std::path::PathBuf,
+    /// Each box's pids.
+    by_box: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// [`BoxProcesses`] read from this machine's `/proc`.
+pub fn box_processes() -> BoxProcesses {
+    box_processes_under(Path::new("/proc"))
+}
+
+/// [`BoxProcesses`] over the process table at `proc_root`.
+pub(crate) fn box_processes_under(proc_root: &Path) -> BoxProcesses {
+    let mut by_box: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for entry in std::fs::read_dir(proc_root).into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(name) = std::fs::read_to_string(proc_root.join(&pid).join("cgroup"))
+            .ok()
+            .and_then(|t| box_of_cgroup(&t))
+        else {
+            continue;
+        };
+        by_box.entry(name).or_default().push(pid);
+    }
+    BoxProcesses {
+        proc_root: proc_root.to_path_buf(),
+        by_box,
+    }
+}
+
+/// The box a `/proc/<pid>/cgroup` puts its process in, by its cgroup v2 line (`0::<path>`), or
+/// `None` for a process in no box's cgroup. The paths are [`box_cgroup`]'s and
+/// [`box_container_cgroup`]'s, below the cgroup file system's mount.
+fn box_of_cgroup(text: &str) -> Option<String> {
+    const MOUNT: &str = "/sys/fs/cgroup";
+    let path = text.lines().find_map(|l| l.strip_prefix("0::"))?.trim();
+    let first = |rest: &str| -> Option<String> {
+        let name = rest.split('/').next()?;
+        crate::util::valid_name(name).then(|| name.to_string())
+    };
+    let containers = box_container_cgroup("");
+    if let Some(rest) = containers
+        .strip_prefix(MOUNT)
+        .and_then(|c| path.strip_prefix(c))
+    {
+        return first(rest);
+    }
+    let boxes = box_cgroup("");
+    let rest = path.strip_prefix(boxes.strip_prefix(MOUNT)?)?;
+    let parent = containers.strip_prefix(&boxes)?.trim_end_matches('/');
+    first(rest).filter(|name| name != parent)
+}
+
+/// Items by their last name, each with its (device, inode): what [`BoxProcesses::in_use`] looks
+/// an ancestor up in.
+type ByLastName<'a> = std::collections::HashMap<std::ffi::OsString, Vec<((u64, u64), &'a str)>>;
+
+impl BoxProcesses {
+    /// Which of `items`, directories in box `name` as the fleet sees them, one of that box's own
+    /// processes runs from, works in, holds open or has mapped now.
+    ///
+    /// **A box's process spells a path its own way** — `/home/agent/.cache/ms-playwright` for the
+    /// fleet's `<box>/home/.cache/ms-playwright`, `/var/tmp/…` for `<box>/vartmp/…` — and skein
+    /// reads it from outside every box. So nothing is translated by prefix: an ancestor of each
+    /// path the process names is looked up through the process's own root,
+    /// `/proc/<pid>/root/<ancestor>`, and it is the item exactly when it is the same directory, by
+    /// device and inode. The mounts that make the spelling differ are the box's binds, and a bind
+    /// shows the one directory at both names.
+    ///
+    /// **Cheap, and never a walk of an item.** Only an ancestor whose last name is an item's last
+    /// name is looked up, since a directory keeps its name inside the binds above it, and each
+    /// (mount namespace, ancestor) once. An item that is itself a mount point at another name in
+    /// the box would be missed; the launcher makes none.
+    pub fn in_use(&self, name: &str, items: &[&str]) -> std::collections::BTreeSet<String> {
+        use std::os::unix::fs::MetadataExt;
+        let mut out = std::collections::BTreeSet::new();
+        let Some(pids) = self.by_box.get(name) else {
+            return out;
+        };
+        let mut wanted: ByLastName = Default::default();
+        for item in items {
+            let path = Path::new(item);
+            let (Some(last), Ok(m)) = (path.file_name(), std::fs::symlink_metadata(path)) else {
+                continue;
+            };
+            if m.is_dir() {
+                wanted
+                    .entry(last.to_os_string())
+                    .or_default()
+                    .push(((m.dev(), m.ino()), item));
+            }
+        }
+        if wanted.is_empty() {
+            return out;
+        }
+        let mut seen: std::collections::HashMap<(String, String), (u64, u64)> = Default::default();
+        for pid in pids {
+            let at = self.proc_root.join(pid);
+            // Processes in one mount namespace see every path the same way; one whose namespace
+            // cannot be read is asked about on its own.
+            let mnt = std::fs::read_link(at.join("ns/mnt"))
+                .map(|l| l.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| format!("pid {pid}"));
+            let root = at.join("root");
+            for raw in &process_paths(&at) {
+                let spelled = raw.strip_suffix(" (deleted)").unwrap_or(raw);
+                for dir in Path::new(spelled).ancestors() {
+                    let Some(candidates) = dir.file_name().and_then(|n| wanted.get(n)) else {
+                        continue;
+                    };
+                    let key = (mnt.clone(), dir.display().to_string());
+                    let id = match seen.get(&key) {
+                        Some(id) => *id,
+                        None => {
+                            let rel = dir.strip_prefix("/").unwrap_or(dir);
+                            // Not remembered when it fails: another process in the namespace may
+                            // still be there to look through.
+                            let Ok(m) = std::fs::metadata(root.join(rel)) else {
+                                continue;
+                            };
+                            seen.insert(key, (m.dev(), m.ino()));
+                            (m.dev(), m.ino())
+                        }
+                    };
+                    if let Some((_, item)) = candidates.iter().find(|(k, _)| *k == id) {
+                        out.insert(item.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// What [`clean_box`] did: what it removed and freed, and what it could not remove and why.
@@ -890,11 +1057,217 @@ fn shown(box_dir: &std::path::Path, path: &std::path::Path) -> String {
     }
 }
 
+/// A process table and a box written as plain files (SKEIN-1461), so [`BoxProcesses`] can be
+/// tested on a machine with no fleet: `fleet/web-main` is the box's directory as skein sees it,
+/// `view` is the box as its processes see it — its `home` at `/home/agent`, its `vartmp` at
+/// `/var/tmp` and the box directory at its own path, each a link where the launcher has a bind —
+/// and `proc/<pid>` is a process, whose `root` is `view`.
+#[cfg(test)]
+pub(crate) struct FakeProc {
+    _dir: crate::testutil::TempDir,
+    /// `fleet/web-main`.
+    pub box_dir: std::path::PathBuf,
+    pub proc: std::path::PathBuf,
+    view: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl FakeProc {
+    pub fn new() -> FakeProc {
+        let dir = crate::testutil::tempdir();
+        let box_dir = dir.join("fleet/web-main");
+        let view = dir.join("view");
+        for d in ["home", "tree", "vartmp"] {
+            std::fs::create_dir_all(box_dir.join(d)).unwrap();
+        }
+        let bind = |seen: &Path, real: &Path| {
+            let at = view.join(seen.strip_prefix("/").unwrap());
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(real, at).unwrap();
+        };
+        bind(Path::new("/home/agent"), &box_dir.join("home"));
+        bind(Path::new("/var/tmp"), &box_dir.join("vartmp"));
+        bind(&box_dir, &box_dir);
+        let proc = dir.join("proc");
+        std::fs::create_dir_all(&proc).unwrap();
+        FakeProc {
+            _dir: dir,
+            box_dir,
+            proc,
+            view,
+        }
+    }
+
+    /// A directory `rel` under the box, as skein lists it.
+    pub fn item(&self, rel: &str) -> String {
+        let p = self.box_dir.join(rel);
+        std::fs::create_dir_all(&p).unwrap();
+        p.display().to_string()
+    }
+
+    /// Process `pid` in cgroup `cgroup` (`/skein/web-main/box`), running `exe`, working in `cwd`
+    /// and holding `fds` open, each spelled as the process would: links whose targets are those
+    /// strings, as the kernel's are. Its root is the box's view.
+    pub fn process(&self, pid: u32, cgroup: &str, exe: &str, cwd: &str, fds: &[&str]) {
+        let at = self.proc.join(pid.to_string());
+        std::fs::create_dir_all(at.join("fd")).unwrap();
+        std::fs::create_dir_all(at.join("ns")).unwrap();
+        std::fs::write(at.join("cgroup"), format!("0::{cgroup}\n")).unwrap();
+        let link = |to: &str, at: std::path::PathBuf| std::os::unix::fs::symlink(to, at).unwrap();
+        link("mnt:[4026532001]", at.join("ns/mnt"));
+        link(&self.view.display().to_string(), at.join("root"));
+        link(exe, at.join("exe"));
+        link(cwd, at.join("cwd"));
+        for (n, fd) in fds.iter().enumerate() {
+            link(fd, at.join("fd").join(n.to_string()));
+        }
+    }
+
+    /// Which of `items` box `web-main`'s processes have in use, read from this process table.
+    pub fn in_use(&self, items: &[&str]) -> Vec<String> {
+        box_processes_under(&self.proc)
+            .in_use("web-main", items)
+            .into_iter()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::*;
     use std::path::{Path, PathBuf};
+
+    // --------------------------------------------------------------------------------------------
+    // An item is live while one of its own box's processes uses it (SKEIN-1461).
+    // --------------------------------------------------------------------------------------------
+
+    const IN_BOX: &str = "/skein/web-main/box";
+
+    /// **A build directory a box's process runs from is live with no cargo lock held**: the
+    /// synapse-master CI run, an `enclave` test binary executed from `~/.cache/synapse-target-ci`.
+    /// The process spells it `/home/agent/…`, as it sees it, and skein lists it as
+    /// `<fleet>/web-main/home/…`; the two are one directory only through the process's root.
+    ///
+    /// What would make it fail: dropping `exe` from `process_paths` (nothing else names the
+    /// target), or matching the process's spelling against the fleet's path as a string (they
+    /// never agree). Watched: with `exe` dropped from the links read, this failed with `[]`.
+    #[test]
+    fn a_build_a_box_process_runs_from_is_live_without_a_lock() {
+        let f = FakeProc::new();
+        let target = f.item("home/.cache/synapse-target-ci");
+        let other = f.item("tree/target");
+        f.process(
+            4242,
+            IN_BOX,
+            "/home/agent/.cache/synapse-target-ci/debug/deps/enclave-1f2e3d",
+            "/home/agent",
+            &["/dev/null"],
+        );
+        let dirs = [target.as_str(), other.as_str()];
+        assert!(
+            live_builds_in("", &dirs).is_empty(),
+            "no lock is held: what is live here is the process alone"
+        );
+        assert_eq!(f.in_use(&dirs), vec![target.clone()]);
+    }
+
+    /// **`node_modules` a box's process works in is live**: node's working directory, in a
+    /// checkout the launcher binds at its own path.
+    ///
+    /// What would make it fail: dropping `cwd` from `process_paths`. Watched: with `cwd` dropped
+    /// from the links read, this failed with `[]`.
+    #[test]
+    fn node_modules_a_box_process_works_in_is_live() {
+        let f = FakeProc::new();
+        let modules = f.item("tree/fts-370/node_modules");
+        f.process(
+            4243,
+            IN_BOX,
+            "/usr/bin/node",
+            &format!("{modules}/.bin"),
+            &["/dev/null"],
+        );
+        assert_eq!(f.in_use(&[modules.as_str()]), vec![modules.clone()]);
+    }
+
+    /// **A download cache a box's process holds a file in open is live**: an open Chromium's
+    /// `icudtl.dat` in `~/.cache/ms-playwright`, and `/var/tmp` spelled the box's way too.
+    ///
+    /// What would make it fail: not reading `/proc/<pid>/fd`. Watched: with the `fd` loop in
+    /// `process_paths` skipped, this failed with `[]`.
+    #[test]
+    fn a_cache_a_box_process_holds_open_is_live() {
+        let f = FakeProc::new();
+        let browsers = f.item("home/.cache/ms-playwright");
+        let scratch = f.item("vartmp/wt/target");
+        f.process(
+            4244,
+            IN_BOX,
+            "/usr/bin/bash",
+            "/home/agent",
+            &[
+                "socket:[991]",
+                "/home/agent/.cache/ms-playwright/chromium-1140/chrome-linux/icudtl.dat",
+                "/var/tmp/wt/target/debug/.fingerprint/x (deleted)",
+            ],
+        );
+        assert_eq!(
+            f.in_use(&[browsers.as_str(), scratch.as_str()]),
+            vec![browsers.clone(), scratch.clone()]
+        );
+    }
+
+    /// **Another box's process at the same path does not make this box's item live, and neither
+    /// does a process in no box.** Both run from the very spelling of `web-main`'s target and see it
+    /// through the same root, the worst case: only the cgroup tells them apart. One of the box's
+    /// containers, under `CONTAINER_CGROUP/web-main`, is the box's.
+    ///
+    /// What would make it fail: taking every process on the machine rather than the box's
+    /// (`in_use` reading all of `by_box`), or not knowing a container's cgroup for its box's (the
+    /// second assertion). Watched: with `in_use` taking every box's processes, the first assertion
+    /// failed with the target live.
+    #[test]
+    fn another_boxs_process_at_the_same_path_is_not_this_box() {
+        let f = FakeProc::new();
+        let target = f.item("home/.cache/synapse-target-ci");
+        let exe = "/home/agent/.cache/synapse-target-ci/debug/deps/enclave-1f2e3d";
+        f.process(5001, "/skein/web-two/box", exe, "/", &[]);
+        f.process(5002, "/skein/web-two/job-7", exe, "/", &[]);
+        f.process(5003, "/user.slice/user-1000.slice", exe, "/", &[]);
+        f.process(5004, "/skein/containers/web-two/abc", exe, "/", &[]);
+        assert_eq!(f.in_use(&[target.as_str()]), Vec::<String>::new());
+
+        f.process(5005, "/skein/containers/web-main/abc", exe, "/", &[]);
+        assert_eq!(f.in_use(&[target.as_str()]), vec![target.clone()]);
+    }
+
+    /// **Nothing in use leaves every item not live**, a directory of the same name elsewhere in the
+    /// box included: it is the directory, by device and inode, not its name.
+    ///
+    /// What would make it fail: matching an ancestor by its last name alone. Watched: with the
+    /// device and inode comparison made `true`, this failed with `node_modules` live.
+    #[test]
+    fn nothing_in_use_is_not_live() {
+        let f = FakeProc::new();
+        let modules = f.item("tree/web/node_modules");
+        let browsers = f.item("home/.cache/ms-playwright");
+        f.item("home/elsewhere/node_modules");
+        f.process(
+            4245,
+            IN_BOX,
+            "/usr/bin/node",
+            "/home/agent/elsewhere/node_modules",
+            &[
+                "/home/agent/.cache/pip/x",
+                "/home/agent/ms-playwright-notes.txt",
+            ],
+        );
+        assert_eq!(
+            f.in_use(&[modules.as_str(), browsers.as_str()]),
+            Vec::<String>::new()
+        );
+    }
 
     fn put(path: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
