@@ -4,13 +4,16 @@
 // record of the session's subagents, and the jobs view.
 //
 // A lane record says only `created` today (SKEIN-1454), so a lane's later phases (handed back,
-// verified, CI, merged) are not drawn: the board goes as far as the session can see, which is the
-// subagent working in the lane, its heavy work in the fleet's queue, and the subagent's answer.
+// verified, CI) are not drawn: the board goes as far as the session can see, which is the subagent
+// working in the lane, its heavy work in the fleet's queue, the subagent's answer, and whether its
+// work then landed, which the agents panel looks at once a minute: the worktree gone, and its
+// branch deleted or on master (SKEIN-1456). A landed lane is drawn merged for an hour after that is
+// seen, then `laneRuns` leaves it out, and the board with it.
 
 import type { SkeinAgentRun, SkeinBandJob, SkeinBandJobs, SkeinLaneRecord } from '../types'
 
 /** Where a lane stands, as far as the session sees it. */
-export type Stage = 'made' | 'work' | 'queued' | 'heavy' | 'done' | 'failed' | 'stopped'
+export type Stage = 'made' | 'work' | 'queued' | 'heavy' | 'done' | 'failed' | 'stopped' | 'merged'
 
 /** One lane on the board. */
 export type BoardLane = {
@@ -35,11 +38,11 @@ export type BoardLane = {
 }
 
 /** The stages the board draws along, in order, and how far each one is along it. */
-export const STAGES = ['made', 'at work', 'heavy work', 'agent done'] as const
+export const STAGES = ['made', 'at work', 'heavy work', 'agent done', 'merged'] as const
 
-const REACH: Record<Stage, number> = { made: 1, work: 2, queued: 3, heavy: 3, done: 4, failed: 4, stopped: 4 }
+const REACH: Record<Stage, number> = { made: 1, work: 2, queued: 3, heavy: 3, done: 4, failed: 4, stopped: 4, merged: 5 }
 
-export const GLYPH: Record<Stage, string> = { made: '○', work: '●', queued: '◌', heavy: '◐', done: '✓', failed: '✗', stopped: '■' }
+export const GLYPH: Record<Stage, string> = { made: '○', work: '●', queued: '◌', heavy: '◐', done: '✓', failed: '✗', stopped: '■', merged: '◆' }
 
 /**
  * The board: every lane skein made, then each worktree a subagent of this session worked in that
@@ -86,6 +89,8 @@ export function boardLanes(records: readonly SkeinLaneRecord[], runs: readonly S
 }
 
 function stageOf(run: SkeinAgentRun | null, job: SkeinBandJob | null): Stage {
+  // Landed however its subagent ended: the merge is the coordinator's, after the answer.
+  if (run !== null && run.status !== 'running' && typeof run.lane?.landedAt === 'number') return 'merged'
   if (run !== null && run.status !== 'running') return run.status
   if (job !== null) return job.state === 'granted' ? 'heavy' : 'queued'
   if (run === null) return 'made'
@@ -112,6 +117,8 @@ export function stageWords(l: BoardLane): string {
       return 'agent failed'
     case 'stopped':
       return 'agent stopped'
+    case 'merged':
+      return 'merged'
   }
 }
 

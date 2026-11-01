@@ -287,6 +287,11 @@ export type SkeinAgentLane = {
    * box has no jobs view or nothing of it waits.
    */
   queue?: SkeinLaneQueue | null
+  /**
+   * When the session first saw the lane's work landed (SKEIN-1456): its worktree gone, and its
+   * branch deleted or already on master (`hasLanded` in `lanes.ts`). Absent or null until then.
+   */
+  landedAt?: number | null
 }
 
 /** A lane's place in the fleet's heavy-work queue, as skein's jobs view gives it. */

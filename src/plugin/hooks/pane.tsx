@@ -6,7 +6,7 @@
 // * WAITING ON YOU, amber, with a count: each thing worded as what to do. While skein asks for
 //   disk, the disk list follows it, a Clean button on each item that can go now;
 // * the lanes: every lane skein made in the box, and each worktree a subagent worked in, along the
-//   way from made to done, as far as the session sees (`board.ts`). A number key opens one;
+//   way from made to merged, as far as the session sees (`board.ts`). A number key opens one;
 // * the queue: the fleet's cores, one cell each, and the box's own jobs, another box's named with
 //   it. A box has no address of its own to link to, so none is linked;
 // * the spend, today and over 7 days, as skein-server wrote it;
@@ -271,7 +271,15 @@ function lanesPanel(f: Facts, width: number): Line[] {
     const words = `${l.name.padEnd(nameW)} ${(l.item ?? '').padEnd(10)} ${pipeline(l.stage, 8)} ${stageWords(l)}`
     out.push(laneLine(l, i, words, width))
   })
-  out.push({ key: 'stages', spans: [{ text: cut(`    ${STAGES.join(' › ')}`, width), tone: 'dim' }] })
+  // The legend, broken before a `›` where the pane is too narrow for it whole, so no stage is cut.
+  const legend: string[] = []
+  for (const [i, stage] of STAGES.entries()) {
+    const last = legend.at(-1)
+    const next = i === 0 ? `    ${stage}` : `${last} › ${stage}`
+    if (last === undefined || cells(next) <= width) legend[Math.max(0, legend.length - 1)] = next
+    else legend.push(`    › ${stage}`)
+  }
+  legend.forEach((text, i) => out.push({ key: `stages:${i}`, spans: [{ text: cut(text, width), tone: 'dim' }] }))
 
   return out
 }
@@ -437,7 +445,7 @@ function laneLine(l: BoardLane, i: number, words: string, width: number): Line {
 }
 
 function stageTone(s: Stage): Tone | undefined {
-  return s === 'done' ? 'success' : s === 'failed' ? 'error' : s === 'queued' || s === 'made' || s === 'stopped' ? 'dim' : undefined
+  return s === 'done' ? 'success' : s === 'failed' ? 'error' : s === 'queued' || s === 'made' || s === 'stopped' || s === 'merged' ? 'dim' : undefined
 }
 
 /** A panel in a frame of `tone`: its title in the top edge, a count at its end, each row padded. */
