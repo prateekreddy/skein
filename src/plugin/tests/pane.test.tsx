@@ -507,7 +507,8 @@ const BAND = {
 // yet removed, read merged too; with the running checks taken out of `refreshLanded` and
 // `stageOf`, busy read merged while at work; with `laneRuns`'s hour taken out, gone was still on
 // the board an hour on.
-test('a lane whose work landed is drawn merged, then leaves the board an hour on; the others stay as they were', async ($, on) => {
+// Sixty one-minute ticks take about 4 s on a quiet box and passed 5 s on CI, so this one gets 30.
+test('a lane whose work landed is drawn merged, then leaves the board an hour on; the others stay as they were', { timeoutMs: 30_000 }, async ($, on) => {
   // kept is merged too, but its worktree is not removed yet: the coordinator is not done with it.
   const { b, clock } = await mergedBox($, on, [`${'c'.repeat(40)}>${'a'.repeat(40)}`])
   const git = b.git
