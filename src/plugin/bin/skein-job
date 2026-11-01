@@ -48,8 +48,8 @@
 # way it says it was stopped by the owner, on stderr, and exits with STOPPED_STATUS, so the caller
 # sees who stopped it rather than a bare failure. Only skein writes that mark, from the host.
 #
-# **It never strands the caller.** With no fleet drop-box (outside a box, or a box started before
-# skein had the queue), no `SKEIN_STATE` to read skein's answer from, or skein not answering for
+# **It never strands the caller.** With no fleet drop-box (outside a box, a box started before
+# skein had the queue, or a workshop box started by a launcher that gave it none), no `SKEIN_STATE` to read skein's answer from, or skein not answering for
 # 30 s, it says so and why on stderr, before the command runs, and runs under the box's own lock
 # alone, which is what the lanes did before. Its tools are still told a count:
 # the `--cores` it asked for, or FALLBACK_CORES, so a build skein never saw does not take every core.
@@ -180,6 +180,13 @@ def drop_box():
     d = os.path.join(fleet, ".skein", "jobs", "requests", box)
     if not os.path.isdir(d):
         # The launcher makes it when the box starts, so a box started before the queue has none.
+        # The workshop box had none however recently it started, until the launcher made every
+        # box's drop-boxes rather than only covered ones' (SKEIN-1463); a box start installs the
+        # launcher of the skein that starts it, so updating skein first is what fixes it.
+        if os.environ.get("SKEIN_BOX_PRIVILEGED") == "1":
+            return None, ("this is the workshop box, and the launcher that started it made job "
+                          "drop-boxes only for the other boxes; restarting the box after updating "
+                          "skein fixes that")
         return None, ("this box has no job drop-box, because it started before skein's job "
                       "queue; restarting the box fixes that")
     if not os.environ.get("SKEIN_STATE"):

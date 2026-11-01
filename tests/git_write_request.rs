@@ -1297,14 +1297,21 @@ fn isolation_binds_with(
 ) -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
+    // From the drop-box loop, which makes every box's `requests/<box>/` before the cover binds
+    // them (SKEIN-1463), to the cover's own `fi`.
     let from = lines
         .iter()
-        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then"#))
-        .expect("the isolation block moved");
-    let to = lines[from..]
+        .position(|l| *l == "drop_boxes=()")
+        .expect("the drop-box loop moved");
+    let cover = from
+        + lines[from..]
+            .iter()
+            .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then"#))
+            .expect("the isolation block moved");
+    let to = lines[cover..]
         .iter()
         .position(|l| *l == "fi")
-        .map(|i| from + i)
+        .map(|i| cover + i)
         .expect("the isolation block has no end");
     let block = lines[from..=to].join("\n");
 

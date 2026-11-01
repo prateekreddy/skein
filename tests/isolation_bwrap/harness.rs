@@ -7,17 +7,27 @@ use super::*;
 ///
 /// Read from `box-session.sh` rather than copied, so a change to the launcher is a change to what
 /// this test runs — a copy would keep passing against the version it was written from.
+///
+/// **From the drop-box loop, which runs before the cover and for every box** (SKEIN-1463), to the
+/// cover's own `fi`. The loop makes each box's `requests/<box>/` and the cover binds what it made,
+/// so a lift starting at the `if` would run the binds over directories nothing made, and could not
+/// see whether the workshop box gets its drop-boxes at all.
 pub(super) fn isolation_block() -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
     let from = lines
         .iter()
-        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then"#))
-        .expect("the isolation block moved");
-    let to = lines[from..]
+        .position(|l| *l == "drop_boxes=()")
+        .expect("the drop-box loop moved");
+    let cover = from
+        + lines[from..]
+            .iter()
+            .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then"#))
+            .expect("the isolation block moved");
+    let to = lines[cover..]
         .iter()
         .position(|l| *l == "fi")
-        .map(|i| from + i)
+        .map(|i| cover + i)
         .expect("the isolation block has no end");
     lines[from..=to].join("\n")
 }

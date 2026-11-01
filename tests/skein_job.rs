@@ -96,6 +96,9 @@ impl Fleet {
             // Long enough that a fallback cannot pass for a grant inside any bound asserted here.
             .env("SKEIN_JOB_UNANSWERED_SECONDS", "30")
             .env_remove("SKEIN_JOB_ID")
+            // A covered box unless a test says otherwise: run from the workshop box, this suite
+            // would inherit its `SKEIN_BOX_PRIVILEGED=1` and hear the workshop box's reason.
+            .env_remove("SKEIN_BOX_PRIVILEGED")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         c
@@ -552,6 +555,43 @@ fn a_box_with_no_drop_box_says_its_job_is_not_queued_and_why() {
         !err.contains("asked"),
         "a job nothing was asked of says it asked:\n{err}"
     );
+}
+
+/// **The workshop box with no job drop-box says why in its own words, not a covered box's.** The
+/// launcher makes every box's drop-boxes now (SKEIN-1463), so a workshop box without one was
+/// started by a launcher from before that, and "it started before skein's job queue" is not true
+/// of it: it can have started a minute ago.
+///
+/// What would make it fail: the `SKEIN_BOX_PRIVILEGED` branch taken out of `drop_box()`, so the
+/// workshop box hears the covered box's reason (the sabotage that was run).
+#[cfg(target_os = "linux")]
+#[test]
+fn the_workshop_box_with_no_drop_box_says_its_own_reason() {
+    let fleet = Fleet::new(
+        "skein-job-no-drop-workshop",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    fs::remove_dir(fleet.places.requests.join("web-main")).unwrap();
+    let (out, err) = ran_with(&fleet, |c| {
+        c.env("SKEIN_BOX_PRIVILEGED", "1");
+    });
+    assert_eq!(out.trim(), "ran", "{err}");
+    assert!(
+        err.lines().any(|l| l
+            == format!(
+                "{UNQUEUED}this is the workshop box, and the launcher that started it made job \
+                 drop-boxes only for the other boxes; restarting the box after updating skein \
+                 fixes that"
+            )),
+        "the workshop box did not say its own reason:\n{err}"
+    );
+    assert!(
+        !err.contains("started before skein's job queue"),
+        "the workshop box was told it started before the queue:\n{err}"
+    );
+    assert_eq!(err.matches(UNQUEUED).count(), 1, "not one reason:\n{err}");
 }
 
 /// One way to take something away from the wrapper's environment.
