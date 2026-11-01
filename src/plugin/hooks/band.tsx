@@ -1,17 +1,20 @@
 // What skein needs from this box, or offers it, drawn above the prompt (SKEIN-1362, SKEIN-1440):
 //
-// * what waits on the person, first and in amber, each worded as what to do: the disk skein asks
-//   the box to free, the questions and requests waiting for an answer, unread mail, and versions
-//   that wait for a restart. Each new one also raises one toast, since a collapsed band shows
-//   nothing;
+// * what waits on the person, in amber, each worded as what to do: the questions and requests
+//   waiting for an answer, and versions that wait for a restart. Each new one also raises one
+//   toast, since a collapsed band shows nothing;
+// * the disk skein asks the box to free, dim: clearing it is the agent's, and `/skein clean` is the
+//   person's override (SKEIN-1460), so it is not counted as waiting, toasted, or a reason to open
+//   the pane. A request for more allowance, `skein_request_disk`, is the person's to answer, and
+//   waits with the other requests;
 // * one dim line of vitals, always: disk, memory and CPU against the box's limits, and its spend,
 //   each part drawn only while its signal is fresh (`vitals.ts`);
 // * one line for each thing running now: each of the box's granted or waiting heavy jobs, and each
 //   lane a subagent is working in, while it runs.
 //
 // The skein pane (`pane.tsx` draws it) holds the box, what waits on the person, the lanes, the
-// queue, the spend, the items held and a short log, and the disk list with a Clean button on each
-// item. This file reads what it draws and decides when it opens: as the session starts, on `/skein`
+// queue, the spend, the items held and a short log; `/skein clean` opens it on the disk list, with a
+// Clean button on each item. This file reads what it draws and decides when it opens: as the session starts, on `/skein`
 // and `/skein clean`, and whenever something new waits on the person, but not again for what
 // already waited when the person closed it.
 //
@@ -237,8 +240,10 @@ export function register(on: On): void {
   }).catch(() => mcpAnswer({ error: 'clean-did-not-answer' }, ''))
 
   // The vitals line first and always, so the eye learns where it sits; then what waits on the
-  // person, in amber; then a line for each thing running now, and unread mail, dim. Where the band has fewer rows than that, one line: the first thing that
-  // waits on the person, or the vitals, with a count of what is left out.
+  // person, in amber; then a line for each thing running now, the disk skein asks for, and unread
+  // mail, dim. Where the band has fewer rows than that, one line: the first thing that waits on the
+  // person, or the vitals, with a count of what is left out. The disk ask never takes that line:
+  // it is the agent's to clear.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const found = await read($, band)
     // Outside a skein box there is nothing of skein's to draw.
@@ -260,21 +265,22 @@ export function register(on: On): void {
     const work = workLines(await read($, bandJobs), lanesAtWorkNamed(await lanesWorking($)), columns)
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    // Free disk opens the pane on the disk list; Read and Requests on what waits.
-    const open = (ask: Ask) => () => void openSkein($, ask.key === 'disk' ? 'clean' : 'board')
+    // Read and Requests open the pane on what waits.
+    const open = () => void openSkein($, 'board')
     const askRow = (ask: Ask, text = ask.text) => (
       <Box>
         <Text color="warning">{LOUD}</Text>
-        <Text bold={ask.isLoud} color="warning" wrap="truncate-end">
+        <Text color="warning" wrap="truncate-end">
           {text}{' '}
         </Text>
-        {ask.button !== undefined && <Button key={`band:${ask.key}`} label={ask.button} onPress={open(ask)} />}
+        {ask.button !== undefined && <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />}
       </Box>
     )
+    const disk = found.disk?.ask ? quietAskLine(found.disk.ask) : null
     const mail = mailNote(found.mail ?? 0)
     // The pane opened by itself but this terminal could not place it: the band says where it is.
     const unplaced = (await paneWaitsUnplaced($)) ? UNPLACED : null
-    const rows = asks.length + 1 + work.length + (mail === null ? 0 : 1) + (said === null ? 0 : 1) + (unplaced === null ? 0 : 1)
+    const rows = asks.length + 1 + work.length + (disk === null ? 0 : 1) + (mail === null ? 0 : 1) + (said === null ? 0 : 1) + (unplaced === null ? 0 : 1)
     if (rows > Math.max(1, e.props.maxRows)) {
       const first = asks[0]
       const more = rows - 1
@@ -293,6 +299,7 @@ export function register(on: On): void {
             {w.text}
           </Text>
         ))}
+        {disk !== null && <Text dimColor wrap="truncate-end">{disk}</Text>}
         {mail !== null && <Text dimColor wrap="truncate-end">{mail}</Text>}
         {unplaced !== null && <Text dimColor wrap="truncate-end">{unplaced}</Text>}
         {said !== null && (
@@ -498,7 +505,8 @@ async function readRequests($: Engine): Promise<SkeinBand['requests']> {
   if (ran.result === null || !Array.isArray(ran.result.requests) || 'error' in ran.result) return null
 
   return ran.result.requests.filter(isRecord).map(r => {
-    const queue = r.queue === 'write' || r.queue === 'question' ? r.queue : 'package'
+    // `disk` is a request for more allowance (`skein_request_disk`), the owner's to answer.
+    const queue = r.queue === 'write' || r.queue === 'question' || r.queue === 'disk' ? r.queue : 'package'
     const row: SkeinRequestRow = {
       queue,
       id: String(r.id ?? ''),
@@ -606,16 +614,15 @@ export async function cleanFromPane($: Engine, paths: string[]): Promise<void> {
 // Words
 // ------------------------------------------------------------------------------------------------
 
-// A line with no `button` has nothing for the person to press. Mail is not one of these: it is the
-// agent's to read, so it is a dim line of its own, not amber and never toasted (`mailNote`).
-type Ask = { key: string; text: string; button?: string; isLoud: boolean }
+// A line with no `button` has nothing for the person to press. Mail and the disk ask are not
+// among these: they are the agent's, so each is a dim line of its own, not amber and never toasted
+// (`mailNote`, `quietAskLine`).
+type Ask = { key: string; text: string; button?: string }
 
 /** What the band says, loudest first, in `columns` cells; empty when there is nothing to say. */
 function asked(found: SkeinBand | null, columns: number): Ask[] {
   if (found === null) return []
   const out: Ask[] = []
-  const ask = found.disk?.ask
-  if (ask) out.push({ key: 'disk', text: askLine(ask), button: 'Free disk', isLoud: true })
   // The oldest waiting question in its own words, since it has waited longest for the person; the
   // rest are counted. The pane has every question whole.
   const questions = (found.requests ?? [])
@@ -632,7 +639,6 @@ function asked(found: SkeinBand | null, columns: number): Ask[] {
       key: 'question',
       text: `${before}“${oneLine(oldest.what, room)}”${after}`,
       button: 'Read',
-      isLoud: false,
     })
   }
   const waiting = (found.requests ?? []).filter(r => r.state === 'waiting' && r.queue !== 'question').length
@@ -641,11 +647,10 @@ function asked(found: SkeinBand | null, columns: number): Ask[] {
       key: 'requests',
       text: `${waiting} ${waiting === 1 ? 'request is' : 'requests are'} waiting for an answer.`,
       button: 'Requests',
-      isLoud: false,
     })
   }
   const pending = (found.updates ?? []).filter(u => !u.restartRequested)
-  if (pending.length > 0) out.push({ key: 'update', text: updateLine(pending), isLoud: false })
+  if (pending.length > 0) out.push({ key: 'update', text: updateLine(pending) })
 
   return out
 }
@@ -666,18 +671,10 @@ export function updateLine(pending: readonly SkeinUpdate[]): string {
  * toast's words, a few words for a short line, and the pane's line, worded as what to do. */
 export type Waiting = { key: string; toast: string; short: string; action: string }
 
-/** Each thing that waits on the person, loudest first. */
+/** Each thing that waits on the person, loudest first. The disk skein asks the box to free is not
+ * one: the agent clears it (`quietAskLine`). A request for more allowance is, as a request. */
 export function waitingThings(found: SkeinBand): Waiting[] {
   const out: Waiting[] = []
-  const ask = found.disk?.ask
-  if (ask) {
-    out.push({
-      key: `disk:${ask.id}`,
-      toast: askLine(ask),
-      short: ask.amount_mb > 0 ? `free ${humanMb(ask.amount_mb)}` : 'free disk',
-      action: askLine(ask),
-    })
-  }
   for (const r of found.requests ?? []) {
     if (r.state !== 'waiting') continue
     out.push(
@@ -725,6 +722,14 @@ export function askLine(ask: SkeinDiskAsk): string {
   return `skein asks this box to free ${humanMb(ask.amount_mb)} of disk: ${why}${live}.`
 }
 
+/** The disk ask as the band and the pane's BOX say it, dim: the agent's to clear, and the person's
+ * to override. `/skein clean` has the whole of it, in `askLine`'s words. */
+export function quietAskLine(ask: SkeinDiskAsk): string {
+  return ask.amount_mb > 0
+    ? `skein asks this box to free ${humanMb(ask.amount_mb)} · the agent clears it · /skein clean to do it yourself`
+    : 'skein asks this box to free disk, but none of it can be cleared now · /skein clean lists it'
+}
+
 export function diskLine(found: SkeinBand | null): string {
   const disk = found?.disk
   if (!disk || disk.mb === null) return 'skein has not measured this box lately.'
@@ -743,6 +748,11 @@ function whatWasAsked(queue: SkeinRequestRow['queue'], r: Record<string, unknown
     return [typeof r.kind === 'string' ? r.kind : '', packages].filter(s => s !== '').join(' ')
   }
   if (queue === 'write') return String(r.repo ?? '')
+  if (queue === 'disk') {
+    const why = typeof r.why === 'string' && r.why.trim() !== '' ? ` (${r.why.trim()})` : ''
+
+    return `${String(r.size ?? '').trim()}${why}`
+  }
   // Whole: the pane and `/skein requests` show it as asked, and the band cuts its own copy.
   return String(r.question ?? '')
 }

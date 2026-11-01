@@ -2,9 +2,10 @@
 // nothing to say.
 //
 // * BOX: disk, memory and CPU against the box's limits, with the CPU's last minutes as a sparkline,
-//   its processes, what skein asks of it, and unread mail, dim: mail is the agent's to read;
-// * WAITING ON YOU, amber, with a count: each thing worded as what to do. While skein asks for
-//   disk, the disk list follows it, a Clean button on each item that can go now;
+//   its processes, what skein asks of it, the disk skein asks it to free and unread mail, dim: the
+//   agent clears the disk and reads the mail, and `/skein clean` is the person's override
+//   (SKEIN-1460);
+// * WAITING ON YOU, amber, with a count: each thing worded as what to do;
 // * the lanes: every lane skein made in the box, and each worktree a subagent worked in, along the
 //   way from made to merged, as far as the session sees (`board.ts`). A number key opens one;
 // * the queue: the fleet's cores, one cell each, and the box's own jobs, another box's named with
@@ -13,7 +14,8 @@
 // * the tracker items the session holds, with the lease time left;
 // * a short log of what changed, as the looks saw it.
 //
-// Docked it draws in full; inline above the prompt, or in a body under 44 cells, it is the narrow
+// `/skein clean` draws the disk list instead, a Clean button on each item that can go now. Docked
+// it draws in full; inline above the prompt, or in a body under 44 cells, it is the narrow
 // summary, a line each and eight at most. When the pane opens and on what view is `band.tsx`'s,
 // which reads everything drawn here; nothing here reads a file or runs a process but the lease
 // file's time (`tracker.ts`).
@@ -23,7 +25,7 @@ import type { EngineInterface as Engine, On } from 'claude-code'
 import type { SkeinBand, SkeinBandJobs, SkeinCleanRow, SkeinPane, SkeinSharedCache } from '../types'
 
 import { fmtCost, laneRuns, modelName } from './agents-panel'
-import { PANE, askLine, cleanFromPane, diskLine, human, paneData, showInPane, waitingThings } from './band'
+import { PANE, askLine, cleanFromPane, diskLine, human, paneData, quietAskLine, showInPane, waitingThings } from './band'
 import type { Waiting } from './band'
 import { boardLanes, GLYPH, pipeline, STAGES, stageWords } from './board'
 import type { BoardLane, Stage } from './board'
@@ -43,8 +45,8 @@ const NARROW_UNDER = 44
 const NARROW_LANES = 3
 const LOG_LINES = 4
 
-/** How a span is coloured: skein's own, amber (loud is bold too), dim, done or failed. */
-type Tone = 'skein' | 'loud' | 'warning' | 'dim' | 'success' | 'error'
+/** How a span is coloured: skein's own, amber, dim, done or failed. */
+type Tone = 'skein' | 'warning' | 'dim' | 'success' | 'error'
 type Span = { text: string; tone?: Tone; bold?: boolean }
 
 /** One row of the pane: spans, and where a row opens a lane, the Button between them. */
@@ -71,9 +73,9 @@ export function register(on: On): void {
     const facts: Facts = { found, jobs, history, kept, lanes, waiting, held, now, box: box || null }
 
     const tone = (s: Span) => ({
-      color: s.tone === 'skein' ? 'suggestion' : s.tone === 'loud' || s.tone === 'warning' ? 'warning' : s.tone === 'success' ? 'success' : s.tone === 'error' ? 'error' : undefined,
+      color: s.tone === 'skein' ? 'suggestion' : s.tone === 'warning' ? 'warning' : s.tone === 'success' ? 'success' : s.tone === 'error' ? 'error' : undefined,
       dimColor: s.tone === 'dim' ? true : undefined,
-      bold: s.bold || s.tone === 'loud' ? true : undefined,
+      bold: s.bold ? true : undefined,
     })
     const spans = (list: readonly Span[]) => list.map(s => <Text {...tone(s)}>{s.text}</Text>)
     const drawn = (lines: readonly Line[]) =>
@@ -162,8 +164,6 @@ export function register(on: On): void {
     }
     if (isNarrow) return <Box flexDirection="column">{drawn(narrow(facts, width))}</Box>
 
-    // While skein asks for disk, its list follows what waits on the person.
-    const isAsked = Boolean(found?.disk?.ask)
     const top = [header(facts, width), ...boxPanel(facts, width), ...waitingPanel(facts, width)]
     const rest = [...lanesPanel(facts, width), ...queuePanel(facts, width), ...spendPanel(facts, width), ...holdingPanel(facts, width), ...logPanel(facts, width)]
     const isEmpty = top.length === 1 && rest.length === 0
@@ -171,7 +171,6 @@ export function register(on: On): void {
     return (
       <Box flexDirection="column">
         {drawn(top)}
-        {isAsked && cleanList}
         {drawn(rest)}
         {isEmpty && <Text dimColor>Nothing from skein to show yet.</Text>}
       </Box>
@@ -224,14 +223,18 @@ function boxPanel(f: Facts, width: number): Line[] {
     const spark = sparkline(f.history, n)
     rows.push([{ text: `cpu  ${spark}  ${found.cpu.toFixed(1)} cores · ${cells(spark)}m` }])
   }
-  const kinds = [...(found.disk?.ask ? ['disk'] : []), ...found.asked].map(k => (k === 'pids' ? 'processes' : k))
+  const ask = found.disk?.ask ?? null
+  const kinds = [...(ask ? ['disk'] : []), ...found.asked].map(k => (k === 'pids' ? 'processes' : k))
   const asked = kinds.length === 0 ? 'nothing asked' : `skein asks about ${kinds.join(', ')}`
+  // Amber only for what the agent cannot clear by itself; the disk alone is dim.
+  const askTone: Tone | undefined = found.asked.length > 0 ? 'warning' : kinds.length > 0 ? 'dim' : undefined
   const pids = found.pids
   if (pids !== null && pids.current !== null) {
-    rows.push([{ text: `processes ${pids.current}${pids.max === null ? '' : ` / ${pids.max}`} · ` }, { text: asked, tone: kinds.length === 0 ? undefined : 'warning' }])
+    rows.push([{ text: `processes ${pids.current}${pids.max === null ? '' : ` / ${pids.max}`} · ` }, { text: asked, tone: askTone }])
   } else if (rows.length > 0) {
-    rows.push([{ text: asked, tone: kinds.length === 0 ? undefined : 'warning' }])
+    rows.push([{ text: asked, tone: askTone }])
   }
+  if (ask) for (const part of wrap(quietAskLine(ask), inner)) rows.push([{ text: part, tone: 'dim' }])
   const mail = found.mail ?? 0
   // Mail is the agent's to read: a dim line, never amber.
   if (mail > 0) rows.push([{ text: `✉ ${mail} unread, for the agent's next turn`, tone: 'dim' }])
@@ -245,10 +248,7 @@ function waitingPanel(f: Facts, width: number): Line[] {
   const inner = width - 4
   const rows: Span[][] = []
   for (const w of f.waiting) {
-    const isDisk = w.key.startsWith('disk:')
-    const tone: Tone = isDisk ? 'loud' : 'warning'
-    wrap(w.action, inner - 2).forEach((part, i) => rows.push([{ text: `${i === 0 ? '⚑ ' : '  '}${part}`, tone }]))
-    if (isDisk) rows.push([{ text: '  Clean what can go in the list below.', tone: 'dim' }])
+    wrap(w.action, inner - 2).forEach((part, i) => rows.push([{ text: `${i === 0 ? '⚑ ' : '  '}${part}`, tone: 'warning' }]))
   }
 
   return framed('waiting', 'WAITING ON YOU', String(f.waiting.length), rows, width, 'warning')

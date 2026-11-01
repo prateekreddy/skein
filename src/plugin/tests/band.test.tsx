@@ -274,32 +274,41 @@ test('outside a skein box the band is the engine\'s', async ($, on) => {
   }
 })
 
-test('the band says loudly that skein asks for disk, and counts requests and mail', async ($, on) => {
+// What would make it fail: the disk ask drawn as something that waits on the person, amber with a
+// button, as it was before SKEIN-1460. Watched: with `asked` pushing the disk ask again (amber,
+// `Free disk`), the disk line's colour and the buttons failed.
+test('the band says the disk ask in one dim line with nothing to press, and counts requests and mail', async ($, on) => {
   const w = world({ signal: signal(30, true), waiting: 2, mail: '3' })
   await started(on, w, $)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    const disk = await ui.find({ type: 'Text', text: /skein asks this box/ })
-    expect(disk?.text.trim()).toBe(
-      'skein asks this box to free 1.2G of disk: it is over its own allowance.',
-    )
-    expect(disk?.props.bold).toBe(true)
-    expect(disk?.props.color).toBe('warning')
+    const disk = await ui.findAll({ type: 'Text', text: /skein asks this box/ })
+    expect(disk.map(t => t.text.trim())).toEqual([
+      'skein asks this box to free 1.2G · the agent clears it · /skein clean to do it yourself',
+    ])
+    expect(disk[0]?.props.dimColor).toBe(true)
+    expect(disk[0]?.props.color).toBe(undefined)
+    expect(disk[0]?.props.bold).toBe(undefined)
     expect((await ui.find({ type: 'Text', text: /waiting/ }))?.text.trim()).toBe(
       '2 requests are waiting for an answer.',
     )
     expect((await ui.find({ type: 'Text', text: /unread/ }))?.text.trim()).toBe(
       "✉ 3 unread messages, read at the agent's next turn.",
     )
-
-    // Its button opens the pane with the list, and removes nothing by itself.
-    const before = w.ran.length
-    await ui.press({ key: 'band:disk' })
-    expect(w.opened.at(-1)).toBe('skein')
-    expect(w.ran.slice(before).filter(a => a[2] === 'clean' && a.length > 3)).toEqual([])
+    // The only button is the requests'; the band has none for the disk.
+    expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['Requests'])
     await ui.unmount()
   }
+
+  // Nothing of the band's line for it says to clean when none of it can be cleared now.
+  w.signal = signal(30, true, { amount: 0, live_mb: 3072 })
+  await $.command.run(TYPED('status'))
+  const none = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await none.find({ type: 'Text', text: /skein asks this box/ }))?.text.trim()).toBe(
+    'skein asks this box to free disk, but none of it can be cleared now · /skein clean lists it',
+  )
+  await none.unmount()
 })
 
 // What would make it fail: askLine leaving out `live_mb` (the first line reads as today's), or
@@ -323,12 +332,12 @@ const LIVE_CASES: Array<[string, Record<string, unknown>, string]> = [
   ],
 ]
 
+// The band says the ask in a few dim words (SKEIN-1460); `/skein status` and `/skein clean` say all of it.
 for (const [when, over, line] of LIVE_CASES) {
-  test(`the band says what skein asks when ${when}`, async ($, on) => {
+  test(`/skein status says what skein asks when ${when}`, async ($, on) => {
     await started(on, world({ signal: signal(30, true, over) }), $)
-    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect((await ui.find({ type: 'Text', text: /skein asks this box/ }))?.text.trim()).toBe(line)
-    await ui.unmount()
+    const disk = ((await $.command.run(TYPED('status'))).text ?? '').split('\n')[1] ?? ''
+    expect(disk.slice(disk.indexOf('skein asks'))).toBe(line)
   })
 }
 
@@ -353,6 +362,8 @@ test('a signal file skein stopped writing asks nothing, and the vitals line says
 
 test('the pane offers Clean on what can go now, greys what cannot, and keeps the shared cache apart', async ($, on) => {
   await started(on, world({ signal: signal(30, true) }), $)
+  // The list is drawn in `/skein clean`'s view only (SKEIN-1460).
+  await $.command.run(TYPED('clean'))
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -388,6 +399,7 @@ test('Clean runs skein-mcp clean on that item alone and shows what it said', asy
     removal: { result: { removed: ['/home/agent/.cache/pip'], freed_bytes: 3.2 * G, failed: [] }, said },
   })
   await started(on, w, $)
+  await $.command.run(TYPED('clean'))
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -943,9 +955,9 @@ test('busy: a line for each running job and each lane at work, while it runs', a
 
 // What would make it fail: what waits on the person drawn above the vitals, not in amber, or not
 // worded as what to do; a toast missing for one of them, raised again on the next look, or not
-// raised for one that comes later. Watched: with `raiseToasts` toasting whatever it toasted
-// before, the second look raised all three again and this failed; with the update line left out
-// of `asked`, the rows failed.
+// raised for one that comes later; or the disk ask, which is the agent's, among them. Watched: with
+// `raiseToasts` toasting whatever it toasted before, the second look raised both again and this
+// failed; with the update line left out of `asked`, the rows failed.
 test('waiting on you: amber lines under the vitals, each worded as the action, and one toast per new thing', async ($, on) => {
   const updates = [{ component: 'agent-cli', have: 'claude@2.1.300', new: 'claude@2.1.316', applies: 'restart', restart_requested: false }]
   const w = world({
@@ -960,29 +972,29 @@ test('waiting on you: amber lines under the vitals, each worded as the action, a
     const lines = await bandLines(ui)
     expect(lines).toEqual([
       'skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂  ·  $31 today · $515 7d',
-      '⚑ skein asks this box to free 1.2G of disk: it is over its own allowance.',
       '⚑ Waiting for your answer: “Keep the old table?”',
       '⚑ A restart gives this box claude@2.1.316. Ask the agent to restart when idle, or skein does once the box is idle.',
+      'skein asks this box to free 1.2G · the agent clears it · /skein clean to do it yourself',
     ])
-    for (const text of [/skein asks/, /Waiting for your answer/, /A restart gives/]) {
+    for (const text of [/Waiting for your answer/, /A restart gives/]) {
       expect((await ui.find({ type: 'Text', text }))?.props.color).toBe('warning')
     }
-    // "Free disk" still opens the pane, as it did; the band has no key that cleans.
-    expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['Free disk', 'Read'])
+    expect((await ui.find({ type: 'Text', text: /skein asks/ }))?.props.dimColor).toBe(true)
+    // The band has no key that cleans, and none for the disk.
+    expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['Read'])
     await ui.unmount()
   }
   expect(w.toasts).toEqual([
-    'skein asks this box to free 1.2G of disk: it is over its own allowance.',
     'Waiting for your answer: “Keep the old table?”',
     'A restart gives this box claude@2.1.316. Ask the agent to restart when idle, or skein does once the box is idle.',
   ])
 
   // The next look raises nothing again; a new question raises one toast, for it alone.
   await clock.advance(60_000)
-  expect(w.toasts.length).toBe(3)
+  expect(w.toasts.length).toBe(2)
   w.questions = [...(w.questions ?? []), question('q2', '2026-10-30T11:00:00Z', 'Merge now?')]
   await clock.advance(60_000)
-  expect(w.toasts.slice(3)).toEqual(['Waiting for your answer: “Merge now?”'])
+  expect(w.toasts.slice(2)).toEqual(['Waiting for your answer: “Merge now?”'])
 
   // A restart the box already asked for waits on nobody.
   w.signal = signal(30, true, {}, { ...vitals(0.15), updates: [{ ...updates[0], restart_requested: true }] })
@@ -990,6 +1002,43 @@ test('waiting on you: amber lines under the vitals, each worded as the action, a
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 120 } })
   expect(await ui.find({ type: 'Text', text: /A restart gives/ })).toBe(undefined)
   await ui.unmount()
+})
+
+// What would make it fail: the disk ask counted again among what waits on the person, so a new ask
+// toasts and opens the pane (SKEIN-1460); or a request for more allowance, which the person does
+// answer, not counted, or read as a package request. Watched: with the disk ask put back first in
+// `waitingThings`, the toasts and the opens failed; with `readRequests` reading the `disk` queue as
+// `package`, the toast said "A package request waits for an answer: " and this failed.
+test("a disk ask is the agent's: no toast, no pane opened; a request for more allowance waits on the person", async ($, on) => {
+  const w = world({ signal: signal(30, false, {}, vitals(0.15)) })
+  const clock = await started(on, w, $)
+  // The first look opens the pane, as it does for every session; the person then closes it.
+  expect(w.opened).toEqual(['skein'])
+
+  w.signal = signal(30, true, {}, vitals(0.15), NOW + 60_000)
+  await clock.advance(60_000)
+  expect(w.toasts).toEqual([])
+  expect(w.opened).toEqual(['skein'])
+  const quiet = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // The ask was read: its dim line is there, and nothing of it is amber.
+  expect(await quiet.find({ type: 'Text', text: /the agent clears it/ })).not.toBe(undefined)
+  expect((await quiet.findAll({ type: 'Text' })).filter(t => t.props.color === 'warning')).toEqual([])
+  await quiet.unmount()
+
+  w.questions = [{ queue: 'disk', id: 'd-1', asked: '2026-10-30T11:30:00Z', size: '20g', why: 'the release build needs room', state: 'waiting' }]
+  w.signal = signal(30, true, {}, vitals(0.15), NOW + 120_000)
+  await clock.advance(60_000)
+  expect(w.toasts).toEqual(['A disk request waits for an answer: 20g (the release build needs room)'])
+  expect(w.opened).toEqual(['skein', 'skein'])
+  const asked = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const line = await asked.find({ type: 'Text', text: /request is waiting/ })
+  expect(line?.text.trim()).toBe('1 request is waiting for an answer.')
+  expect(line?.props.color).toBe('warning')
+  expect((await asked.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['Requests'])
+  await asked.unmount()
+  expect((await $.command.run(TYPED('requests'))).text).toBe(
+    ['this box asked for:', '  write acme/site: granted', '  disk 20g (the release build needs room): waiting'].join('\n'),
+  )
 })
 
 // What would make it fail: a note for the agent read as something asked of the person, the way
@@ -1107,16 +1156,28 @@ test('a narrow band cuts details, never wraps: bars first, then the week, then t
 })
 
 // What would make it fail: a band taller than its rows, so the engine scrolls it and the thing that
-// waits on the person may be out of view. Watched: with the row count not compared to `maxRows`, the
-// band drew three rows into two and this failed.
+// waits on the person may be out of view; or the disk ask, the agent's, taking the one line from the
+// vitals. Watched: with the row count not compared to `maxRows`, the band drew three rows into two
+// and this failed; with the disk ask put back first in `asked`, the first line was the ask's.
 test('where the band has too few rows, it is one line: what waits on the person first', async ($, on) => {
   const w = world({ signal: signal(30, true, {}, vitals(0.15)), mail: '2' })
   await started(on, w, $)
+  // The disk ask and the mail are the agent's: the line is the vitals', with what is left out counted.
+  const asked = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 2 } })
+  const only = await asked.findAll({ type: 'Text' })
+  expect(only.map(t => t.text)).toEqual(['skein  disk ▮▮▮▯▯▯▯▯▯▯ 2.7/10G  mem ▮▯▯▯▯ 1.1/14G  cpu ▂ · 2 more'])
+  expect(only[0]?.props.dimColor).toBe(true)
+  await asked.unmount()
+
+  // A question does wait on the person, and takes the line.
+  w.questions = [question('q1', '2026-10-30T08:00:00Z', 'Keep the old table?')]
+  await $.command.run(TYPED('status'))
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, maxRows: 2 } })
   expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('').trimEnd()).toBe(
-    '⚑ skein asks this box to free 1.2G of disk: it is over its own allowance. · 2 more',
+    '⚑ Waiting for your answer: “Keep the old table?” · 3 more',
   )
   await ui.unmount()
+  w.questions = []
 
   w.signal = signal(30, false, {}, vitals(0.15))
   w.mail = '0'
