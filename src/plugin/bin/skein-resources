@@ -9,6 +9,10 @@
 #   pre-tool-use    PreToolUse on Bash|Task|Agent: hold exactly one call per crossing this session
 #                   has not been shown, with that ask's words. Every later call runs.
 #   prompt          UserPromptSubmit: each standing ask's reminder, as context.
+#
+# A note (the file's `notes`, SKEIN-1455) is told to the agent once per crossing in a session, at
+# SessionStart or at the next prompt, whichever comes first, and is never held for. It is the
+# agent's to act on, so nothing that draws for the person reads it.
 #   monitor         The `resources` monitor: one line when a band changes, either way.
 #
 # Disk is said at most once an hour (owner, SKEIN-1335). A box a little over its share is over it
@@ -73,6 +77,20 @@ def asks(s):
         a
         for a in s.get("asks") or []
         if isinstance(a, dict) and a.get("kind") in KINDS and a.get("crossing_id")
+    ]
+
+
+def notes(s):
+    """Notes skein has for the agent with words to say, each with its crossing id."""
+    if not s:
+        return []
+    return [
+        n
+        for n in s.get("notes") or []
+        if isinstance(n, dict)
+        and n.get("crossing_id")
+        and isinstance(n.get("text"), str)
+        and n["text"]
     ]
 
 
@@ -160,13 +178,17 @@ def context(event, lines):
 
 def session_start():
     path = shown_file(hook_input().get("session_id", ""))
-    told = [a for a in asks(signals()) if a.get("start")]
+    s = signals()
+    told = [a for a in asks(s) if a.get("start")]
+    seen = shown(path) if path else set()
+    fresh = [n for n in notes(s) if n["crossing_id"] not in seen]
+    ids = [a["crossing_id"] for a in told] + [n["crossing_id"] for n in fresh]
     # Shown here counts as shown (owner, SKEIN-1055): a session is not held for an ask it was
     # just told about. Only what was actually printed is recorded.
-    if told and record(path, [a["crossing_id"] for a in told]):
+    if ids and record(path, ids):
         if any(a["kind"] == "disk" for a in told):
             disk_record(path, dict(disk_said(path), warned=time.time()))
-        context("SessionStart", [a["start"] for a in told])
+        context("SessionStart", [a["start"] for a in told] + [n["text"] for n in fresh])
 
 
 def pre_tool_use():
@@ -205,7 +227,8 @@ def prompt():
     now = time.time()
     said = disk_said(path) if path else {}
     lines = []
-    for a in asks(signals()):
+    s = signals()
+    for a in asks(s):
         if not a.get("remind"):
             continue
         if a["kind"] == "disk":
@@ -216,6 +239,12 @@ def prompt():
             if not disk_record(path, dict(said, warned=now)):
                 continue
         lines.append(a["remind"])
+    # Each note once per crossing, and only once it is recorded: a note that could not be recorded
+    # would be said on every prompt.
+    seen = shown(path) if path else set()
+    fresh = [n for n in notes(s) if n["crossing_id"] not in seen]
+    if fresh and record(path, [n["crossing_id"] for n in fresh]):
+        lines.extend(n["text"] for n in fresh)
     context("UserPromptSubmit", lines)
 
 

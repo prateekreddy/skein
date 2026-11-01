@@ -67,6 +67,16 @@ pub const PIDS_OF_MAX_PCT: u64 = 75;
 /// against: a hold for a rounding error teaches an agent the hold is noise.
 pub const DISK_HOLD_OVER_PCT: u64 = 10;
 
+/// How full of its own allowance, as a percentage, a box's disk is before its agent is told what it
+/// can remove (SKEIN-1455). Below its allowance nothing is asked of a box, so until this an agent
+/// heard nothing until it was over: one box sat at 96% of its share with 7.0G of old build output
+/// it could have removed, and its owner found that in a screenshot.
+///
+/// 85 because it is the fleet's own line, `DISK_FULL_PCT` in `src/health/disk.rs`, for the same
+/// reason: clearing takes the agent a minute, and running out costs a build that fails half-way.
+/// On a 10G share it leaves 1.5G, about one more build's output, before the box is over.
+pub const DISK_NEAR_PCT: u64 = 85;
+
 /// The kinds an ask can be. **There is no `cpu`**, and the plugin's hook holds only for these.
 pub const ASK_KINDS: [&str; 3] = ["disk", "memory", "pids"];
 
@@ -252,6 +262,29 @@ pub struct Signals {
     /// when the box has no ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_ask: Option<DiskAskView>,
+    /// What skein tells this box's agent and asks nothing for (SKEIN-1455). Apart from `asks` so
+    /// that nothing which reads `asks` for the person, in the band, the pane or a toast, ever
+    /// shows one: a note is the agent's to act on. The plugin's hooks say each once per crossing,
+    /// and never hold a command for one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
+}
+
+/// One note for the box's agent. A band like an [`Ask`]: a crossing mints its `crossing_id`, and
+/// while the band holds the id and `since` carry over and only the figures move.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    /// `disk-near`: the box holds at least [`DISK_NEAR_PCT`] of its allowance.
+    pub kind: String,
+    /// RFC3339, when this crossing began.
+    pub since: String,
+    /// New at each crossing, the same while the band holds. The plugin says one note per id.
+    pub crossing_id: String,
+    /// What the agent is told. Empty while a disk ask stands, which says the same and more: the
+    /// band is kept, so a box that clears back under its allowance is not told again until it
+    /// has dropped under the line and crossed it once more.
+    #[serde(default)]
+    pub text: String,
 }
 
 /// A box's disk ask as its signal file says it. A contract like [`CleanList`]: fields are only
@@ -693,6 +726,20 @@ fn removable_now(clean: Option<&CleanList>) -> Vec<CleanItem> {
         .unwrap_or_default()
 }
 
+/// Whether the box holds at least [`DISK_NEAR_PCT`] of its own allowance, with what it holds and
+/// the allowance. Over the allowance counts too, so the band does not end while the box is over.
+fn near_band(r: &Reading) -> Band<(u64, u64)> {
+    match (r.disk_mb, r.disk_limit_mb) {
+        (Some(mb), Some(limit))
+            if limit > 0 && mb.saturating_mul(100) >= limit.saturating_mul(DISK_NEAR_PCT) =>
+        {
+            Band::Asked((mb, limit))
+        }
+        (None, Some(_)) => Band::Unknown,
+        _ => Band::NotAsked,
+    }
+}
+
 /// Memory: hot on this reading and the one before it, and near its line.
 fn memory_band(
     cg: Option<&Cgroup>,
@@ -797,6 +844,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
         updates: Vec::new(),
         clean: r.clean.clone(),
         disk_ask: None,
+        notes: Vec::new(),
     };
 
     let prev_ask = |kind: &str| prev.and_then(|p| p.asks.iter().find(|a| a.kind == kind));
@@ -834,6 +882,37 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
             out.cleared
                 .insert("disk".into(), words::DISK_CLEARED.to_string());
         }
+    }
+    // Near its own allowance (SKEIN-1455): told to the agent, never asked of the person. Silent
+    // while a disk ask stands, which names the same items and the tool; the band is kept, so a box
+    // that clears back under is not told again for the same crossing.
+    let prev_note = prev.and_then(|p| p.notes.iter().find(|n| n.kind == "disk-near"));
+    match near_band(r) {
+        Band::Asked((holds, limit)) => {
+            let text = match out.asks.iter().any(|a| a.kind == "disk") {
+                true => String::new(),
+                false => {
+                    let mut removable = removable_now(r.clean.as_ref());
+                    removable.sort_by_key(|i| std::cmp::Reverse(i.bytes));
+                    words::near_limit(holds, limit, &removable, room(r.clean.as_ref()))
+                }
+            };
+            let (since, crossing_id) = match prev_note {
+                Some(n) => (n.since.clone(), n.crossing_id.clone()),
+                None => (
+                    out.at.clone(),
+                    format!("disk-near-{}", r.at.timestamp_millis()),
+                ),
+            };
+            out.notes.push(Note {
+                kind: "disk-near".into(),
+                since,
+                crossing_id,
+                text,
+            });
+        }
+        Band::Unknown => out.notes.extend(prev_note.cloned()),
+        Band::NotAsked => {}
     }
     match memory_band(cg, throttled_per_min, prev_rate) {
         Band::Asked((rate, anon, high)) => out
@@ -1004,6 +1083,39 @@ mod words {
     /// The sentence every disk ask's hold, start and entering line carries (SKEIN-1356).
     pub(super) const CLEAN: &str =
         "`skein_clean` lists the caches and build output this box can remove, and removes them.";
+
+    /// The note for a box at [`DISK_NEAR_PCT`] of its allowance and not over it (SKEIN-1455):
+    /// what it holds, how much of that can go now, and [`clean_hint`]'s items and call. With
+    /// nothing on skein's list to remove, it says so; unlisted, it names the tool.
+    pub(super) fn near_limit(
+        holds: u64,
+        limit: u64,
+        removable: &[CleanItem],
+        room: Option<Room>,
+    ) -> String {
+        let standing = format!(
+            "skein: this box holds {} of its {} share of the fleet's disk",
+            gib_up(holds),
+            gib(limit)
+        );
+        let bytes: u64 = removable.iter().map(|i| i.bytes).sum();
+        match room {
+            None => format!("{standing}; clear what it does not need before it goes over. {CLEAN}"),
+            Some(r) if removable.is_empty() => match r.live {
+                0 => format!("{standing}, and nothing skein lists can be removed now. {WHERE}"),
+                live => format!(
+                    "{standing}, and nothing skein lists can be removed now ({} of it is in a \
+                     build running now). {WHERE}",
+                    gib_up(live)
+                ),
+            },
+            Some(_) => format!(
+                "{standing}; {} of it can be removed now, before it goes over. {}",
+                gib_up(bytes.div_ceil(MIB)),
+                clean_hint(removable)
+            ),
+        }
+    }
 
     /// The disk ask's words for asking `asked` MiB, with `room` what skein's list says the box
     /// can do about it now (SKEIN-1391). With no build running, the owner's approved words with
@@ -2193,6 +2305,14 @@ mod tests {
             words::DISK_CLEARED.to_string(),
             words::MEMORY_CLEARED.to_string(),
             words::pids_cleared(1),
+        ]);
+        let target = [item("web-main/tree/target", "build output", 5120)];
+        let room = |clear, live| Some(Room { clear, live });
+        texts.extend([
+            words::near_limit(8806, 10240, &target, room(5120, 0)),
+            words::near_limit(8806, 10240, &[], room(0, 0)),
+            words::near_limit(8806, 10240, &[], room(0, 3072)),
+            words::near_limit(8806, 10240, &[], None),
         ]);
         for t in &texts {
             let lower = t.to_lowercase();
@@ -3864,5 +3984,227 @@ mod tests {
             "the unpriced turn is priced at nothing: {alpha:?}"
         );
         assert_eq!(alpha.today.input, 1500, "its tokens are still counted");
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // Near its own allowance: a note for the agent, never an ask (SKEIN-1455)
+    // --------------------------------------------------------------------------------------------
+
+    /// A box with a 10G allowance holding `pct` percent of it, the fleet under its line, and
+    /// `items` on skein's list.
+    fn near(minute: i64, pct: u64, items: Option<Vec<CleanItem>>) -> Reading {
+        Reading {
+            disk_mb: Some(10240 * pct / 100),
+            disk_limit_mb: Some(10240),
+            clean: items.map(listing),
+            ..reading(minute, Some(calm()))
+        }
+    }
+
+    /// The near note's words, when the file has one with words to say.
+    fn near_said(s: &Signals) -> Option<&str> {
+        s.notes
+            .iter()
+            .find(|n| n.kind == "disk-near" && !n.text.is_empty())
+            .map(|n| n.text.as_str())
+    }
+
+    /// A list given out of order: a scratchpad, a small cache, a build running now, and the
+    /// biggest build output last.
+    fn near_items() -> Vec<CleanItem> {
+        vec![
+            item(
+                "~/.cache/skein/claude/claude-1000/-p/old",
+                "scratchpad",
+                9216,
+            ),
+            item("~/.cache/pip", "download cache", 700),
+            CleanItem {
+                live: true,
+                ..item("web-main/.worktrees/lane/target", "build output", 6144)
+            },
+            item("~/.cache/ms-playwright", "download cache", 1536),
+            item("web-main/tree/target", "build output", 5120),
+        ]
+    }
+
+    /// **At 86% of its allowance, under the fleet's line, the agent is told what it can remove
+    /// now, biggest first, and nothing is asked of the box.**
+    ///
+    /// What would make it fail: [`DISK_NEAR_PCT`] set to 100 (no note at 86%); the sort in `next`
+    /// dropped (the list's own order names `~/.cache/pip` first); `removable_now` letting a live
+    /// build through (the running lane's 6.0G is named); the note pushed into `asks` (the person
+    /// would be asked).
+    #[test]
+    fn a_box_past_the_near_line_is_told_what_it_can_remove_biggest_first() {
+        let s = next(None, &near(0, 86, Some(near_items())));
+        assert!(
+            s.asks.is_empty(),
+            "a box under its allowance was asked: {:?}",
+            s.asks
+        );
+        assert_eq!(
+            near_said(&s),
+            Some(
+                "skein: this box holds 8.6G of its 10.0G share of the fleet's disk; 7.2G of it \
+                 can be removed now, before it goes over. `skein_clean` lists the caches and \
+                 build output this box can remove, and removes them. The biggest are \
+                 web-main/tree/target (5.0G), ~/.cache/ms-playwright (1.5G) and ~/.cache/pip \
+                 (0.7G); to remove them now, call `skein_clean` with \
+                 {\"paths\":[\"/fleet/web-main/tree/target\",\
+                 \"/fleet/web-main/home/.cache/ms-playwright\",\
+                 \"/fleet/web-main/home/.cache/pip\"]}."
+            ),
+            "{:?}",
+            s.notes
+        );
+        let text = near_said(&s).unwrap();
+        assert!(
+            !text.contains(".worktrees/lane"),
+            "a build running now was offered for removal: {text}"
+        );
+        assert!(
+            !text.contains("scratchpad") && !text.contains("-p/old"),
+            "{text}"
+        );
+    }
+
+    /// **At 84% there is no note**, and at 85% exactly there is one: the line is "at least".
+    ///
+    /// What would make it fail: [`DISK_NEAR_PCT`] set to 80 (84% is told), or the comparison
+    /// made strict and the constant moved to 84.
+    #[test]
+    fn a_box_under_the_near_line_is_told_nothing() {
+        let s = next(None, &near(0, 84, Some(near_items())));
+        assert!(s.notes.is_empty(), "84% was told: {:?}", s.notes);
+        assert!(s.asks.is_empty());
+        assert!(near_said(&next(None, &near(0, 85, Some(near_items())))).is_some());
+    }
+
+    /// **Over its allowance, the existing allowance ask stands and there is no second note**; the
+    /// note's band is kept silent under it, so coming back under the allowance is not a new
+    /// crossing.
+    ///
+    /// What would make it fail: the note's words written while a disk ask stands (two notices
+    /// for one problem); `near_band` ending at the allowance (the note is dropped while over, and
+    /// coming back under mints a new id, which the hook says again).
+    #[test]
+    fn a_box_over_its_allowance_gets_the_ask_and_not_a_second_note() {
+        let files = run(&[
+            near(0, 86, Some(near_items())),
+            near(1, 112, Some(near_items())),
+            near(2, 90, Some(near_items())),
+        ]);
+        let over = &files[1];
+        assert_eq!(
+            over.asks
+                .iter()
+                .map(|a| format!("{}/{}", a.kind, a.why))
+                .collect::<Vec<_>>(),
+            vec!["disk/allowance"]
+        );
+        assert!(
+            disk_ask(over).hold.contains(words::CLEAN),
+            "the allowance ask no longer names skein_clean: {:?}",
+            disk_ask(over)
+        );
+        assert_eq!(
+            near_said(over),
+            None,
+            "a note beside the ask: {:?}",
+            over.notes
+        );
+        assert_eq!(
+            files[2].notes[0].crossing_id, files[0].notes[0].crossing_id,
+            "coming back under the allowance was a new crossing"
+        );
+        assert!(near_said(&files[2]).is_some());
+    }
+
+    /// **With nothing it can remove, the note says so plainly**, and names what is in a running
+    /// build.
+    ///
+    /// What would make it fail: `near_limit` taking the listing branch for an empty list (it
+    /// would say "0.0G of it can be removed" and name `skein_clean` with nothing).
+    #[test]
+    fn a_box_near_its_line_with_nothing_to_remove_is_told_so() {
+        let bare = next(None, &near(0, 90, Some(vec![])));
+        assert_eq!(
+            near_said(&bare),
+            Some(
+                "skein: this box holds 9.0G of its 10.0G share of the fleet's disk, and nothing \
+                 skein lists can be removed now. `skein_resources` shows where this box stands."
+            )
+        );
+        let live = next(
+            None,
+            &near(
+                0,
+                90,
+                Some(vec![CleanItem {
+                    live: true,
+                    ..item("web-main/tree/target", "build output", 3072)
+                }]),
+            ),
+        );
+        assert_eq!(
+            near_said(&live),
+            Some(
+                "skein: this box holds 9.0G of its 10.0G share of the fleet's disk, and nothing \
+                 skein lists can be removed now (3.0G of it is in a build running now). \
+                 `skein_resources` shows where this box stands."
+            )
+        );
+    }
+
+    /// **The shipped hook says the note once per crossing, beside the prompt, and holds
+    /// nothing**; again only after the box drops under the line and crosses it once more.
+    ///
+    /// What would make it fail: the prompt hook not recording the note's id (said on every
+    /// prompt); recording before printing, or never printing (nothing said); the pre-tool-use hook
+    /// reading notes (the call is held); `next` minting a new id on every tick (said again at 90%).
+    #[test]
+    fn the_near_note_is_said_once_per_crossing_and_never_held() {
+        let h = hooked();
+        let write = |min: i64, pct: u64| {
+            write_box(
+                &h.state,
+                &Reading {
+                    at: Utc::now() + chrono::Duration::seconds(min),
+                    ..near(0, pct, Some(near_items()))
+                },
+            )
+            .unwrap()
+        };
+        let first = write(0, 86);
+        let text = near_said(&first).unwrap().to_string();
+        assert_eq!(h.tool("s1"), None, "a note held a command");
+        assert_eq!(h.context("prompt", "s1"), Some(text.clone()));
+        assert_eq!(h.context("prompt", "s1"), None, "said on a second prompt");
+        let moved = write(1, 90);
+        assert_eq!(
+            h.context("prompt", "s1"),
+            None,
+            "said again in the same crossing"
+        );
+        // A new session is told at its start, with the figures as they are now, and not again at
+        // its first prompt.
+        assert_eq!(
+            h.context("session-start", "s2").as_deref(),
+            near_said(&moved)
+        );
+        assert_eq!(h.context("prompt", "s2"), None);
+
+        // Under the line, then over it again: a new crossing, said once more.
+        let under = write(2, 70);
+        assert!(under.notes.is_empty());
+        assert_eq!(h.context("prompt", "s1"), None);
+        let again = write(3, 88);
+        assert_ne!(again.notes[0].crossing_id, first.notes[0].crossing_id);
+        assert!(
+            h.context("prompt", "s1").is_some(),
+            "a new crossing was not said"
+        );
+        assert_eq!(h.context("prompt", "s1"), None);
     }
 }

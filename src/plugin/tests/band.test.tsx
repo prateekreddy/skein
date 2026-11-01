@@ -992,6 +992,39 @@ test('waiting on you: amber lines under the vitals, each worded as the action, a
   await ui.unmount()
 })
 
+// What would make it fail: a note for the agent read as something asked of the person, the way
+// the disk ask is: `readResources` taking its ask from `notes` as well as `asks`, or listing a
+// note's kind among what skein asks, would draw an amber line, a "Free disk" button, a toast, and
+// "skein asks about disk-near" in the pane (SKEIN-1455).
+test('a note for the agent is not drawn for the person: no amber line, no button, no toast', async ($, on) => {
+  const NOTE = "skein: this box holds 8.6G of its 10.0G share of the fleet's disk; 5.0G of it can be removed now, before it goes over."
+  const notes = [{ kind: 'disk-near', since: stamp(NOW - 30_000), crossing_id: 'disk-near-1', text: NOTE }]
+  const near = { ...vitals(0.15), disk: { mb: 8806, limit_mb: 10240, fleet: 'under', fleet_over_by_mb: 0 }, notes }
+  const w = world({ signal: signal(30, false, {}, near), usage: usage(60, 31.2, 515.4) })
+  const clock = await started(on, w, $)
+  await clock.advance(60_000)
+
+  for (const surface of SURFACES) {
+    const band = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 120 } })
+    const lines = await bandLines(band)
+    expect(lines.length).toBe(1)
+    expect(lines.filter(l => l.startsWith('⚑'))).toEqual([])
+    expect((await band.findAll({ type: 'Text' })).filter(t => t.props.color === 'warning')).toEqual([])
+    expect(await band.find({ type: 'Button' })).toBe(undefined)
+    await band.unmount()
+
+    const pane = await $.ui.mount({ ...PANE, surface })
+    expect((await pane.findAll({ type: 'Text' })).filter(t => t.props.color === 'warning')).toEqual([])
+    expect(await pane.find({ type: 'Text', text: /nothing asked/ })).not.toBe(undefined)
+    expect(await pane.find({ type: 'Text', text: /removed now, before it goes over/ })).toBe(undefined)
+    await pane.unmount()
+  }
+  const status = (await $.command.run(TYPED('status'))).text ?? ''
+  expect(status).not.toContain('⚑')
+  expect(status).not.toContain('before it goes over')
+  expect(w.toasts).toEqual([])
+})
+
 // ------------------------------------------------------------------------------------------------
 // Each figure only while its signal is fresh
 // ------------------------------------------------------------------------------------------------
