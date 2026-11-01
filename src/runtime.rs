@@ -710,6 +710,38 @@ mod tests {
         );
     }
 
+    /// **The shipped guide tells a box's agent to run heavy work through `skein-job` and to ask
+    /// the owner with `skein_ask_person`** (SKEIN-1458). Until it did, no box used either: the
+    /// question tool is deferred, so an agent saw only its name, and nothing named the wrapper.
+    /// Read from the `memory: |` block of the shipped copy, the text `hooks/guide.ts` puts in the
+    /// prompt, so a mention elsewhere in the spec does not count.
+    ///
+    /// What would make it fail: the "Heavy work" or "Asking the owner" section deleted from
+    /// `src/kit/spec.yaml`, or either name reworded out of it. Watched: with both sections
+    /// deleted it failed on `skein-job run --`, and with "Asking the owner" alone deleted on
+    /// `skein_ask_person`; restored from a scratchpad copy each time, md5 checked.
+    #[test]
+    fn the_shipped_guide_names_skein_job_and_skein_ask_person() {
+        let spec = PLUGIN_FILES
+            .iter()
+            .find(|(r, _)| *r == "guide/kit-spec.yaml")
+            .map(|(_, b)| *b)
+            .expect("the plugin ships no guide/kit-spec.yaml");
+        let guide: String = spec
+            .lines()
+            .skip_while(|l| *l != "memory: |")
+            .skip(1)
+            .take_while(|l| l.trim().is_empty() || l.starts_with("  "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for name in ["skein-job run --", "skein_ask_person"] {
+            assert!(
+                guide.contains(name),
+                "the box guide does not name `{name}`, so no agent learns of it"
+            );
+        }
+    }
+
     /// **The hooks module a box loads is the whole of it** (SKEIN-1359): `hooks/hooks.json` names
     /// a module the build ships, every file under `src/plugin/hooks/` ships with the bytes it has
     /// on disk, and every file a shipped module imports for its values ships too. A box gets only

@@ -82,6 +82,25 @@ memory: |
   shared download cache is on a line of its own: it is not counted against this box, and it can be
   removed only while no other box of this repo is running. Config and logins are never on the list.
 
+  ## Heavy work
+
+  Run builds, test suites, CI-like runs and browser runs as `skein-job run -- <cmd>`. It waits
+  until the fleet grants it cores, so boxes do not starve each other, then runs the command in this
+  box and exits with its status. `--cores N` asks for N; with none, skein picks from that command's
+  past runs. A `skein-job` inside another's command runs at once, without waiting. It ends with one
+  line on stderr of what the job used, such as `asked 4 cores, used 1.3 avg (peak 3.8), 1.4 GB
+  peak, 6m12s`. In Claude Code the person sees the wait, and its place in the queue, in the spinner.
+  A job the owner stops from the cockpit says so and exits 137: do not just run it again.
+
+  ## Asking the owner
+
+  When you are blocked on a decision only the owner can make, ask with the `skein_ask_person` tool,
+  giving `options` when the choices are clear. It may be listed by name only: load it through tool
+  search first. The owner sees it in the cockpit; at most 5 may wait, each at most 2 KB. The answer
+  comes later as mail in your inbox, delivered at a turn boundary: `question <id>, "<answer>"`, or
+  `question <id> was dismissed without an answer`. `skein_requests` shows it too. Do not ask what
+  you can decide yourself.
+
   ## Git authentication in this box
 
   Before retrying a failed fetch, push, or PR, inspect the configured path:
