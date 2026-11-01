@@ -469,6 +469,72 @@ test('the pane opens as the session starts and for a new thing waiting, never ag
   expect(b.opened).toEqual(['skein', 'skein'])
 })
 
+// What would make it fail: the disk ask drawn as the person's again (SKEIN-1460): counted in the
+// header, in an amber WAITING ON YOU panel, with the disk list pulled into the panels, the
+// processes row amber for the disk alone, or the pane opened for it; or `/skein clean`'s view
+// losing the list or the ask's words. Watched: with the disk ask put back in `waitingThings`, the
+// header said `1 waiting on you`, the panel was drawn and the pane opened, and this failed; with
+// `isAsked && cleanList` put back, the list's heading was drawn in the panels and this failed; with
+// the processes row's tone back to amber for any ask, its colour failed.
+test("a disk ask is the agent's: one dim line in BOX, no count, no waiting panel, no list, no open", async ($, on) => {
+  const b = box()
+  const clock = engine(on, b)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(b.opened).toEqual(['skein'])
+  b.panes.delete('skein')
+
+  b.ask = true
+  await minute(clock, b)
+  expect(b.opened).toEqual(['skein'])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...DOCKED, surface })
+    expect(await lines(ui)).toEqual([
+      'SKEIN · web-main · ok',
+      '╭ BOX ─────────────────────────────────────────╮',
+      '│ disk ▮▮▮▯▯▯▯▯▯▯  2.7 / 10 G   27%            │',
+      '│ mem  ▮▯▯▯▯▯▯▯▯▯  1.1 / 14 G    8%            │',
+      '│ cpu  ▄▄  0.4 cores · 2m                      │',
+      '│ processes 50 / 8192 · skein asks about disk  │',
+      '│ skein asks this box to free 1.2G · the agent │',
+      '│ clears it · /skein clean to do it yourself   │',
+      '╰──────────────────────────────────────────────╯',
+    ])
+    expect((await ui.find({ type: 'Text', text: /^ok$/ }))?.props.color).toBe('success')
+    expect((await ui.findAll({ type: 'Text' })).filter(t => t.props.color === 'warning')).toEqual([])
+    expect((await ui.find({ type: 'Text', text: /skein asks about disk/ }))?.props.dimColor).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /the agent/ }))?.props.dimColor).toBe(true)
+    await ui.unmount()
+  }
+
+  // `/skein clean` is the person's override: its view has the list and the ask in full, as before.
+  await $.command.run({ command: 'skein', args: 'clean', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  const clean = await $.ui.mount({ ...DOCKED, surface: 'terminal' })
+  const drawn = await lines(clean)
+  expect(drawn.slice(0, 4)).toEqual([
+    'SKEIN · web-main · ok',
+    'disk · what this box can remove',
+    'This box holds 2.7G of its 10.0G allowance. 0M can be removed now.',
+    'skein asks this box to free 1.2G of disk: it is over its own allowance.',
+  ])
+  expect((await clean.find({ type: 'Text', text: /of disk: it is over/ }))?.props.color).toBe('warning')
+  await clean.press({ key: 'pane:back' })
+  await clean.unmount()
+
+  // A question still waits on the person: counted, in the amber panel, and the pane opens for it.
+  b.panes.delete('skein')
+  b.questions = [question('q1', 'Keep the old table?')]
+  await minute(clock, b)
+  expect(b.opened).toEqual(['skein', 'skein', 'skein'])
+  const asked = await $.ui.mount({ ...DOCKED, surface: 'terminal' })
+  expect((await lines(asked)).filter(l => /waiting on you|WAITING ON YOU|⚑/.test(l))).toEqual([
+    'SKEIN · web-main · 1 waiting on you',
+    '╭ WAITING ON YOU ─────────────────────────── 1 ╮',
+    '│ ⚑ Answer in the cockpit: “Keep the old       │',
+  ])
+  await asked.unmount()
+})
+
 // What would make it fail: a pane that opened unasked on a narrow terminal and waits undrawn, with
 // nothing anywhere saying so. Watched: with the band's line for it removed, nothing said where the
 // pane went and this failed.

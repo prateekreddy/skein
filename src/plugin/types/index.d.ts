@@ -138,7 +138,7 @@ export type SkeinSharedCache = {
 
 /** One of this box's requests or questions, with its answer's state, as `skein-mcp requests` reads it. */
 export type SkeinRequestRow = {
-  queue: 'package' | 'write' | 'question'
+  queue: 'package' | 'write' | 'question' | 'disk'
   id: string
   asked: string
   /** `waiting` until the owner's inbox answers it. */
