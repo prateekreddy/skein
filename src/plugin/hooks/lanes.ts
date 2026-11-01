@@ -1,7 +1,8 @@
 // What skein knows of a subagent that works as a lane (SKEIN-1361, SKEIN-1374): the lanes skein
 // made, as `skein-mcp lane list` reports them, and, for a worktree made by hand, git's own worktree
 // records; `/proc/locks` and `/proc/<pid>/{cwd,fd}`; and the text of the subagent's own tool calls. Nothing here reaches the network or runs a process; the
-// panel runs `skein-mcp` and hands its output to `lanesListed`.
+// panel runs `skein-mcp` and hands its output to `lanesListed`, and runs git for `hasLanded`'s one
+// question, whether a branch's tip is in master's history.
 //
 // The agents panel (`agents-panel.tsx`) calls these; each takes the few `$.fs` calls it needs as
 // a `Files`, so a test hands it a made-up box.
@@ -92,6 +93,57 @@ export async function commonGitDir(fs: Files, cwd: string): Promise<string | nul
     () => dotGit,
     () => null,
   )
+}
+
+/**
+ * A ref's commit, from its own file under the git directory or from `packed-refs`; null when git
+ * has no such ref, or holds its refs in a form this does not read.
+ */
+export async function refAt(fs: Files, gitDir: string, ref: string): Promise<string | null> {
+  const loose = (await fs.read(`${gitDir}/${ref}`).catch(() => '')).trim()
+  if (/^[0-9a-f]{40,64}$/.test(loose)) return loose
+  const packed = await fs.read(`${gitDir}/packed-refs`).catch(() => '')
+  for (const line of packed.split('\n')) {
+    const [sha, name] = line.trim().split(' ')
+    if (name === ref && sha !== undefined && /^[0-9a-f]{40,64}$/.test(sha)) return sha
+  }
+
+  return null
+}
+
+/** The branches a lane's work lands on, in the order they are looked for. */
+export const LANDING_REFS = ['refs/heads/master', 'refs/heads/main', 'refs/remotes/origin/master', 'refs/remotes/origin/main'] as const
+
+/**
+ * Whether a lane's work has landed: its worktree is gone, and its branch with it or its tip is
+ * already on master (or main, or the origin's).
+ *
+ * A coordinator merges a lane, then removes its worktree and deletes its branch, so a worktree
+ * still there has not landed, and one removed while its branch holds commits master lacks was set
+ * aside rather than merged. A branch deleted outright reads as landed: git's own `branch -d`
+ * refuses an unmerged one. A detached worktree, or refs git keeps in a reftable, give no branch to
+ * read, so those never read as landed. Whether one commit is in another's history is git's to
+ * say, so that one question goes to `isAncestor`, and only once the worktree is gone and its
+ * branch is not.
+ */
+export async function hasLanded(
+  fs: Files,
+  gitDir: string,
+  worktree: string,
+  branch: string | null,
+  isAncestor: (tip: string, onto: string) => Promise<boolean>,
+): Promise<boolean> {
+  if ((await fs.realPath(worktree)) !== null) return false
+  if (branch === null) return false
+  if ((await fs.list(`${gitDir}/reftable`).catch(() => null)) !== null) return false
+  const tip = await refAt(fs, gitDir, `refs/heads/${branch}`)
+  if (tip === null) return true
+  for (const ref of LANDING_REFS) {
+    const onto = await refAt(fs, gitDir, ref)
+    if (onto !== null && (onto === tip || (await isAncestor(tip, onto)))) return true
+  }
+
+  return false
 }
 
 /**

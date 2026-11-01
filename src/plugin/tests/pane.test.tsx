@@ -12,6 +12,7 @@ import type { On } from 'claude-code'
 const NOW = Date.parse('2026-10-30T12:00:00Z')
 const STATE = '/fleet-root-example/.skein/state/web-main'
 const LANES = '/lanes-example'
+const REPO = '/repo-example'
 const SURFACES = ['terminal', 'desktop'] as const
 const G = 1024 * 1024 * 1024
 const MIN = 60_000
@@ -32,6 +33,12 @@ type Box = {
   placed: boolean
   opened: string[]
   panes: Map<string, boolean>
+  /**
+   * The repository the session runs in, at REPO, for whether a lane's work landed: the worktrees
+   * still on disk, its refs by name, and the `tip>onto` pairs git says are in one history. Null
+   * for a session outside one.
+   */
+  git: { trees: Set<string>; refs: Map<string, string>; onMaster: Set<string>; asked: string[] } | null
 }
 
 function box(over: Partial<Box> = {}): Box {
@@ -47,6 +54,7 @@ function box(over: Partial<Box> = {}): Box {
     placed: true,
     opened: [],
     panes: new Map(),
+    git: null,
     ...over,
   }
 }
@@ -112,10 +120,26 @@ function engine(on: On, b: Box) {
       const window = (cost: number) => ({ cost, input: 1, output: 2, cache_read: 3, cache_write: 4 })
       return { value: JSON.stringify({ at: stamp(b.now - 60_000), today: window(31.34), week: window(515.4), unpriced: true }) }
     }
+    const ref = b.git !== null && e.path.startsWith(`${REPO}/.git/refs/`) ? b.git.refs.get(e.path.slice(`${REPO}/.git/`.length)) : undefined
+    if (ref !== undefined) return { value: `${ref}\n` }
     throw new Error(`no such file: ${e.path}`)
+  })
+  // The repository's git directory is a folder of its own; nothing else is listed.
+  on('fs.list', (_, e) => {
+    if (b.git !== null && e.path === `${REPO}/.git`) return { value: [] }
+    throw new Error(`no such folder: ${e.path}`)
+  })
+  on('fs.stat', (_, e) => {
+    if (b.git?.trees.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false, realPath: e.path } }
+    throw new Error(`ENOENT: ${e.path}`)
   })
   on('process.run', (_, e) => {
     const argv = [...e.argv]
+    if (argv[0] === 'git' && argv[2] === 'merge-base' && b.git !== null) {
+      const pair = `${argv[4]}>${argv[5]}`
+      b.git.asked.push(pair)
+      return out('', b.git.onMaster.has(pair) ? 0 : 1)
+    }
     if (argv[1]?.endsWith('/probe/mailbox.sh')) return out(`${b.mail}\n`)
     if (argv[2] === 'requests') return out(JSON.stringify({ result: { box: 'web-main', requests: b.questions }, said: '' }))
     if (argv[2] === 'lane' && argv[3] === 'list') {
@@ -148,6 +172,49 @@ async function spawn($: Engine, id: string, prompt: string) {
     background: true,
     fork: false,
   })
+}
+
+/**
+ * A repository with three lanes skein made, each with its subagent: gone's and kept's done, busy's
+ * still at work, a minute on. A test then merges what it merges, removing worktrees, branches and
+ * skein's lane records, so the board knows those lanes only by the session's subagents.
+ * `onMaster` are the `tip>onto` pairs git says are in one history from the start.
+ */
+async function mergedBox($: Engine, on: On, onMaster: string[] = []): Promise<{ b: Box; clock: { advance: (ms: number) => Promise<void> } }> {
+  const trees = new Set([`${LANES}/gone`, `${LANES}/kept`, `${LANES}/busy`])
+  const refs = new Map([
+    ['refs/heads/master', 'a'.repeat(40)],
+    ['refs/heads/lane/gone', 'b'.repeat(40)],
+    ['refs/heads/lane/kept', 'c'.repeat(40)],
+    ['refs/heads/lane/busy', 'd'.repeat(40)],
+  ])
+  const b = box({
+    lanes: [
+      { name: 'gone', item: 'SKEIN-1' },
+      { name: 'kept', item: 'SKEIN-2' },
+      { name: 'busy', item: 'SKEIN-3' },
+    ],
+    git: { trees, refs, onMaster: new Set(onMaster), asked: [] },
+  })
+  const clock = engine(on, b)
+  await $.session.start({ cwd: REPO, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  for (const name of ['gone', 'kept', 'busy']) await spawn($, name, `Your worktree is ${LANES}/${name}, on its branch.`)
+  for (const name of ['gone', 'kept']) {
+    await $.turn.complete({ turnId: 't', agentId: `agent-${name}`, reason: 'answer', answer: 'done', durationMs: 1, isAborted: false })
+  }
+  await minute(clock, b)
+
+  return { b, clock }
+}
+
+/** The lanes panel's lines of the docked pane. */
+async function lanesDrawn($: Engine): Promise<string[]> {
+  const ui = await $.ui.mount({ ...DOCKED, surface: 'terminal' })
+  const drawn = (await lines(ui)).filter(l => /^(lanes · |. \d: |    )/.test(l))
+  await ui.unmount()
+
+  return drawn
 }
 
 const question = (id: string, text: string) => ({ queue: 'question', id, asked: '2026-10-30T11:00:00Z', question: text, options: [], state: 'waiting' })
@@ -259,10 +326,11 @@ test('docked at 48 columns: every panel in order, from the box as skein and the 
       '│   table?”                                    │',
       '╰──────────────────────────────────────────────╯',
       'lanes · 3 · 2 at work               1-3 open one',
-      '✓ 1: inbox  SKEIN-1375 ━━━━━━━━ agent done',
-      '◐ 2: ledger SKEIN-1404 ━━━━━━── heavy work',
-      '◌ 3: spend  SKEIN-1410 ━━━━━━── #2 in the queue',
+      '✓ 1: inbox  SKEIN-1375 ━━━━━━── agent done',
+      '◐ 2: ledger SKEIN-1404 ━━━━━─── heavy work',
+      '◌ 3: spend  SKEIN-1410 ━━━━━─── #2 in the queue',
       '    made › at work › heavy work › agent done',
+      '    › merged',
       'queue · yours: 1 running, 1 waiting',
       'fleet ▣▣▣▣□□□□ 4/8 cores · 3 running',
       '● cargo test · lane ledger · 2 cores',
@@ -325,7 +393,7 @@ test('a lane opened by its number: its item, where it stands, its agent and job,
       HEAD,
       '◐ ledger · SKEIN-1404 · lane/ledger',
       '  SKEIN-1404, not claimed yet',
-      '  ━━━━━━━━━━━━──── heavy work',
+      '  ━━━━━━━━━━────── heavy work',
       '  agent    running · Opus 5.5 · 5m · ≈$0.00',
       '  job      cargo test --test ledger',
       '  worktree /lanes-example/ledger',
@@ -430,3 +498,76 @@ const BAND = {
   requestId: 'above-prompt',
   props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 9 }, view: {} },
 } as const
+
+// What would make it fail: the board taking a subagent's answer as the lane's last word (the
+// owner's 2026-11-01 look: four merged lanes drawn `agent done` for hours), a lane whose worktree
+// is still there drawn as merged, a running lane looked at at all, or a merged lane kept for ever.
+// Watched, each against this test: with `stageOf`'s merged line taken out, gone stayed
+// `✓ agent done`; with `hasLanded`'s worktree check taken out, kept, merged with its worktree not
+// yet removed, read merged too; with the running checks taken out of `refreshLanded` and
+// `stageOf`, busy read merged while at work; with `laneRuns`'s hour taken out, gone was still on
+// the board an hour on.
+test('a lane whose work landed is drawn merged, then leaves the board an hour on; the others stay as they were', async ($, on) => {
+  // kept is merged too, but its worktree is not removed yet: the coordinator is not done with it.
+  const { b, clock } = await mergedBox($, on, [`${'c'.repeat(40)}>${'a'.repeat(40)}`])
+  const git = b.git
+  if (git === null) throw new Error('the box has a repository')
+  expect(await lanesDrawn($)).toEqual([
+    'lanes · 3 · 1 at work               1-3 open one',
+    '✓ 1: gone SKEIN-1    ━━━━━━── agent done',
+    '✓ 2: kept SKEIN-2    ━━━━━━── agent done',
+    '● 3: busy SKEIN-3    ━━━───── at work',
+    '    made › at work › heavy work › agent done',
+    '    › merged',
+  ])
+
+  // gone is merged: its worktree removed, its branch deleted, its record with them. busy's
+  // worktree and branch go too, but its subagent still runs, so nothing of it is looked at.
+  for (const name of ['gone', 'busy']) {
+    git.trees.delete(`${LANES}/${name}`)
+    git.refs.delete(`refs/heads/lane/${name}`)
+  }
+  b.lanes = []
+  await minute(clock, b)
+  await minute(clock, b)
+  expect(await lanesDrawn($)).toEqual([
+    'lanes · 3 · 1 at work               1-3 open one',
+    '◆ 1: gone SKEIN-1    ━━━━━━━━ merged',
+    '✓ 2: kept SKEIN-2    ━━━━━━── agent done',
+    '● 3: busy SKEIN-3    ━━━───── at work',
+    '    made › at work › heavy work › agent done',
+    '    › merged',
+  ])
+
+  for (let i = 0; i < 60; i++) await minute(clock, b)
+  expect(await lanesDrawn($)).toEqual([
+    'lanes · 2 · 1 at work               1-2 open one',
+    '✓ 1: kept SKEIN-2    ━━━━━━── agent done',
+    '● 2: busy SKEIN-3    ━━━───── at work',
+    '    made › at work › heavy work › agent done',
+    '    › merged',
+  ])
+})
+
+// What would make it fail: a worktree removed with its branch kept read as merged whatever the
+// branch holds, or git asked again each minute about the same two commits. Watched: with
+// `hasLanded`'s ancestry check made to answer yes, kept read merged; with the `ancestry` cache
+// taken out, git was asked about kept's pair again at every look and the count failed.
+test('a lane whose worktree went but whose branch stayed is merged only once its tip is on master, asked of git once', async ($, on) => {
+  const { b, clock } = await mergedBox($, on)
+  const git = b.git
+  if (git === null) throw new Error('the box has a repository')
+  // Both worktrees removed, both branches kept; only gone's tip is on master.
+  git.trees.delete(`${LANES}/gone`)
+  git.trees.delete(`${LANES}/kept`)
+  git.onMaster.add(`${'b'.repeat(40)}>${'a'.repeat(40)}`)
+  b.lanes = []
+  for (let i = 0; i < 3; i++) await minute(clock, b)
+
+  expect((await lanesDrawn($)).slice(1, 3)).toEqual([
+    '◆ 1: gone SKEIN-1    ━━━━━━━━ merged',
+    '✓ 2: kept SKEIN-2    ━━━━━━── agent done',
+  ])
+  // Each pair once, however many looks: gone's settled at the first, kept's answer kept.
+  expect(git.asked.sort()).toEqual([`${'b'.repeat(40)}>${'a'.repeat(40)}`, `${'c'.repeat(40)}>${'a'.repeat(40)}`])
+})

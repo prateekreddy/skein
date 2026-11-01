@@ -28,7 +28,7 @@ import type {
 } from 'claude-code'
 
 import type { SkeinAgentLane, SkeinAgentRun, SkeinAgentsPanel, SkeinAgentStatus } from '../types'
-import { claimedItem, commonGitDir, heavyLock, lanesListed, lockOf, ordinal, queueOf, waitingJobs, withHandMade, worktreeIn, worktrees } from './lanes'
+import { claimedItem, commonGitDir, hasLanded, heavyLock, lanesListed, lockOf, ordinal, queueOf, waitingJobs, withHandMade, worktreeIn, worktrees } from './lanes'
 import type { Files, Lane } from './lanes'
 import { costOf } from './prices'
 
@@ -48,6 +48,10 @@ const MAX_RUNS = 200
 // How often the heavy lock is looked at while a lane runs: `/proc/locks`, and the open files and
 // folder of each process at a lock.
 const LOCK_EVERY_MS = 5000
+// How often an ended lane is looked at for whether its work landed (SKEIN-1456), and how long a
+// landed lane stays on the skein pane's board, as merged, before it leaves it.
+const LANDED_EVERY_MS = 60_000
+const MERGED_SHOWN_MS = 60 * 60_000
 
 // The repository's git directory, found once when the session starts, and the lanes, read again as
 // each subagent starts: those skein made, from `skein-mcp lane list`, the one reader of their
@@ -55,6 +59,9 @@ const LOCK_EVERY_MS = 5000
 // a reload finds them again.
 let gitDir: string | null = null
 let known: Lane[] = []
+// git's answers to whether one commit is in another's history, by the two commits: a sha's history
+// never changes, so each pair is asked once.
+const ancestry = new Map<string, boolean>()
 
 // `register.tsx` hooks the events every feature may watch, once, and calls these in its order:
 // `onStart` as the session starts, and for each subagent `onSpawn`, `onStep`, `onTurnComplete` and
@@ -78,6 +85,7 @@ export async function onStart($: EngineInterface, e: SessionStartInput): Promise
     })()
   })
   $.clock.every(LOCK_EVERY_MS, () => void refreshLock($))
+  $.clock.every(LANDED_EVERY_MS, () => void refreshLanded($))
 }
 
 /** A subagent started: its row, its lane if it has one, and the panel opened unless shut. */
@@ -186,9 +194,11 @@ export async function lanesWorking($: EngineInterface): Promise<SkeinAgentRun[]>
 }
 
 /** Every subagent of the session that worked in a lane, running or ended, for the skein pane's
- * lanes board (SKEIN-1440). */
+ * lanes board (SKEIN-1440): but for one whose work landed over an hour ago (SKEIN-1456). */
 export async function laneRuns($: EngineInterface): Promise<SkeinAgentRun[]> {
-  return (await read($, agents)).filter(a => a.lane !== null)
+  const [list, at] = await Promise.all([read($, agents), $.clock.now()])
+
+  return list.filter(a => a.lane !== null && !(typeof a.lane.landedAt === 'number' && at - a.lane.landedAt >= MERGED_SHOWN_MS))
 }
 
 export function register(on: On): void {
@@ -388,6 +398,48 @@ async function refreshLock($: EngineInterface): Promise<void> {
   if (!changed) return
 
   await update($, agents, all => all.map(a => (a.lane === null ? a : { ...a, lane: placed(a.lane, a.status === 'running') })))
+}
+
+/**
+ * Each ended lane whose work has landed since the last look, marked with the time it was seen
+ * landed. A running lane is not looked at, and a lane seen landed once is not looked at again.
+ */
+async function refreshLanded($: EngineInterface): Promise<void> {
+  const repo = gitDir
+  if (repo === null) return
+  const list = await read($, agents)
+  const ended = list.filter(a => a.status !== 'running' && a.lane !== null && typeof a.lane.landedAt !== 'number')
+  if (ended.length === 0) return
+
+  const isAncestor = async (tip: string, onto: string): Promise<boolean> => {
+    const key = `${tip}>${onto}`
+    const known = ancestry.get(key)
+    if (known !== undefined) return known
+    try {
+      const ran = await $.process.run(['git', `--git-dir=${repo}`, 'merge-base', '--is-ancestor', tip, onto], { timeoutMs: 10000 })
+      // 0 yes, 1 no; anything else is git failing to say, asked again at the next look.
+      if (ran.exitCode === 0 || ran.exitCode === 1) ancestry.set(key, ran.exitCode === 0)
+      return ran.exitCode === 0
+    } catch {
+      return false
+    }
+  }
+  const landed = new Set<string>()
+  for (const tree of new Set(ended.map(a => `${a.lane?.worktree}\n${a.lane?.branch ?? ''}`))) {
+    const [worktree = '', branch = ''] = tree.split('\n')
+    if (await hasLanded(files($), repo, worktree, branch === '' ? null : branch, isAncestor)) landed.add(tree)
+  }
+  if (landed.size === 0) return
+
+  const at = await $.clock.now()
+  // Read again as it is written: a lane that started running meanwhile is left as it is.
+  await update($, agents, all =>
+    all.map(a =>
+      a.lane !== null && a.status !== 'running' && typeof a.lane.landedAt !== 'number' && landed.has(`${a.lane.worktree}\n${a.lane.branch ?? ''}`)
+        ? { ...a, lane: { ...a.lane, landedAt: at } }
+        : a,
+    ),
+  )
 }
 
 function laneLines(lane: SkeinAgentLane): string[] {
