@@ -554,6 +554,9 @@ fn a_box_with_no_drop_box_says_its_job_is_not_queued_and_why() {
     );
 }
 
+/// One way to take something away from the wrapper's environment.
+type Edit<'a> = Box<dyn FnOnce(&mut Command) + 'a>;
+
 /// **Each other way the queue is skipped says its own reason**: no `SKEIN_BOX`, no fleet at
 /// `SKEIN_FLEET_ROOT`, and no `SKEIN_STATE` to read skein's answer from. The last of these used to
 /// file the job and wait 30 s for a view it could not find; the bound here is 10 s.
@@ -572,7 +575,7 @@ fn each_way_a_job_skips_the_queue_says_its_own_reason() {
     );
     let nowhere = fleet.dir.path().join("no-fleet-here");
     let home = fleet.dir.path().join("home");
-    let cases: [(&str, Box<dyn FnOnce(&mut Command)>); 3] = [
+    let cases: [(&str, Edit); 3] = [
         (
             "SKEIN_BOX is not set, so skein cannot tell which box this is",
             Box::new(|c| {
