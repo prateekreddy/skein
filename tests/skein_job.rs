@@ -460,7 +460,7 @@ fn a_job_skein_never_answered_is_still_told_its_cores() {
     );
     assert!(
         err.lines()
-            .any(|l| l.starts_with("skein-job: asked 3 cores, used ") && !l.contains("GB")),
+            .any(|l| l.starts_with("skein-job: used ") && !l.contains("GB")),
         "a run skein never measured did not end with the wrapper's own count:\n{err}"
     );
     assert_eq!(
@@ -493,6 +493,164 @@ fn a_job_skein_never_answered_is_still_told_its_cores() {
         ],
         "{err}"
     );
+}
+
+// ─────────── a job the queue never saw says so (SKEIN-1459) ───────────
+
+/// What the wrapper says before a job it runs without the fleet's queue.
+const UNQUEUED: &str = "skein-job: not waiting for a fleet slot: ";
+
+/// `echo ran` under the wrapper, with `edit` applied to its command first; what it printed.
+fn ran_with(fleet: &Fleet, edit: impl FnOnce(&mut Command)) -> (String, String) {
+    let mut c = fleet.wrapper();
+    edit(&mut c);
+    let child = c
+        .args(["run", "--cores", "3", "--", "echo", "ran"])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    // Well inside the 30 s a filed job waits for an answer, so a run that filed one fails here.
+    finish_within(child, Duration::from_secs(10)).unwrap()
+}
+
+/// **A box with no job drop-box says, before its job runs, that the job is not waiting for a fleet
+/// slot, why, and what fixes it; and its last line does not say what it asked for.** That box is
+/// one started before the queue shipped: the launcher makes the drop-box when a box starts.
+///
+/// What would make it fail: the line not said (the sabotage that was run: the `say` of the reason
+/// taken out, and no line starts `not waiting for a fleet slot`), said after the command ran, or the
+/// last line still reading `asked 3 cores` (the sabotage that was run: `asked` set to the cores
+/// the tools were told again, as before SKEIN-1459).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_box_with_no_drop_box_says_its_job_is_not_queued_and_why() {
+    let fleet = Fleet::new(
+        "skein-job-no-drop",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    fs::remove_dir(fleet.places.requests.join("web-main")).unwrap();
+    let (out, err) = ran_with(&fleet, |_| {});
+    assert_eq!(out.trim(), "ran", "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    let said = lines
+        .iter()
+        .position(|l| {
+            *l == format!(
+                "{UNQUEUED}this box has no job drop-box, because it started before skein's job \
+                 queue; restarting the box fixes that"
+            )
+        })
+        .unwrap_or_else(|| panic!("it did not say why the job was not queued:\n{err}"));
+    let last = lines
+        .iter()
+        .position(|l| l.starts_with("skein-job: used ") && l.ends_with('s'))
+        .unwrap_or_else(|| panic!("no last line of what it used:\n{err}"));
+    assert!(said < last, "the reason came after the run:\n{err}");
+    assert!(
+        !err.contains("asked"),
+        "a job nothing was asked of says it asked:\n{err}"
+    );
+}
+
+/// **Each other way the queue is skipped says its own reason**: no `SKEIN_BOX`, no fleet at
+/// `SKEIN_FLEET_ROOT`, and no `SKEIN_STATE` to read skein's answer from. The last of these used to
+/// file the job and wait 30 s for a view it could not find; the bound here is 10 s.
+///
+/// What would make it fail: the reasons worded alike, or one of the three checks gone (the
+/// sabotage that was run: the `SKEIN_STATE` check taken out, and that run files its job and is
+/// killed at 10 s waiting for an answer it cannot read).
+#[cfg(target_os = "linux")]
+#[test]
+fn each_way_a_job_skips_the_queue_says_its_own_reason() {
+    let fleet = Fleet::new(
+        "skein-job-skips",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    let nowhere = fleet.dir.path().join("no-fleet-here");
+    let cases: [(&str, Box<dyn FnOnce(&mut Command)>); 3] = [
+        (
+            "SKEIN_BOX is not set, so skein cannot tell which box this is",
+            Box::new(|c| {
+                c.env_remove("SKEIN_BOX");
+            }),
+        ),
+        (
+            &format!("there is no skein fleet at {}", nowhere.display()),
+            Box::new(|c| {
+                c.env("SKEIN_FLEET_ROOT", &nowhere);
+            }),
+        ),
+        (
+            "SKEIN_STATE is not set, so skein's answer could not be read",
+            Box::new(|c| {
+                c.env_remove("SKEIN_STATE");
+            }),
+        ),
+    ];
+    for (why, edit) in cases {
+        let (out, err) = ran_with(&fleet, edit);
+        assert_eq!(out.trim(), "ran", "{err}");
+        assert!(
+            err.lines().any(|l| l == format!("{UNQUEUED}{why}")),
+            "not {why:?}:\n{err}"
+        );
+        assert_eq!(err.matches(UNQUEUED).count(), 1, "not one reason:\n{err}");
+    }
+    let filed = fs::read_dir(fleet.places.requests.join("web-main"))
+        .unwrap()
+        .count();
+    assert_eq!(filed, 0, "a job that skipped the queue filed in it");
+}
+
+/// **A job the queue granted says nothing of skipping it**, and still ends saying what it asked.
+///
+/// What would make it fail: the line said whatever the drop-box (the sabotage that was run: the
+/// `say` made unconditional, and the granted run says `not waiting for a fleet slot: None`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_queued_job_does_not_say_it_skipped_the_queue() {
+    let fleet = Fleet::new(
+        "skein-job-queued",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    let (out, err) = ran_with(&fleet, |_| {});
+    assert_eq!(out.trim(), "ran", "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("skein-job: asked 3 cores, used ")),
+        "the job was not granted, so this proves nothing about a queued one:\n{err}"
+    );
+    assert!(!err.contains(UNQUEUED), "{err}");
+}
+
+/// **A nested call stays silent, even in a box with no drop-box.** It runs on its parent's cores
+/// by design (SYNAP-517), so it skipped no queue and has nothing to explain: the outer call
+/// already said it if there was anything to say.
+///
+/// What would make it fail: the drop-box check made before the nested call's early `exec` (the
+/// sabotage that was run: the `drop_box()` call and its `say` moved above it, and the nested call
+/// says `not waiting for a fleet slot`).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_nested_call_says_nothing_about_the_queue() {
+    let fleet = Fleet::new(
+        "skein-job-nested-quiet",
+        "web-main",
+        PathBuf::from("/nonexistent-cgroup-root"),
+        4,
+    );
+    fs::remove_dir(fleet.places.requests.join("web-main")).unwrap();
+    let (out, err) = ran_with(&fleet, |c| {
+        c.env("SKEIN_JOB_ID", "j-outer");
+    });
+    assert_eq!(out.trim(), "ran", "{err}");
+    assert_eq!(err, "", "a nested call said something");
 }
 
 /// **A job ends with one line saying what it asked for and what it used, as skein measured it
