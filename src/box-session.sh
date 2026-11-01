@@ -2186,6 +2186,26 @@ printf "SKEIN_LIMITS %s\n" "$limits_state"
 [ -s "$claude_at/.credentials.json" ] && unset ANTHROPIC_API_KEY
 [ -n "$codex_at" ] && [ -s "$codex_at/auth.json" ] && unset OPENAI_API_KEY
 
+# --- Every box's drop-boxes, the workshop box's too (SKEIN-1463) -------------------------------
+#
+# A box files what it asks for into `<fleet root>/.skein/<queue>/requests/<box>/`: a package, a
+# write, a question for its owner, a job slot. The directory is made HERE, at fleet scope and before
+# `exec bwrap`, for every box. It used to be made inside the cover below, which the workshop box
+# skips, so the workshop box never had one: its `skein-job` always ran unqueued, and its questions
+# and requests had nowhere to land.
+#
+# Only the making is for every box. The workshop box needs nothing more, because it sees the fleet
+# root as the sandbox does, read-write, and none of the binds it does get is under `requests/`.
+# A covered box sees `.skein` read-only, so the cover below binds each of these back read-write,
+# and that bind, the half that decides who a request is from, is the cover's and unchanged.
+drop_boxes=()
+for asking in substrate gitgate asks jobs; do
+  drop="${SKEIN_FLEET_ROOT:-/boxes}/.skein/$asking/requests/$box"
+  mkdir -p "$drop" 2>/dev/null || true
+  [ -d "$drop" ] && drop_boxes+=("$drop")
+done
+unset asking drop
+
 # --- One box cannot see another's files ----------------------------------------------------------
 #
 # Measured on this fleet, from inside a box, before any of this existed:
@@ -2321,10 +2341,11 @@ SKEIN_ANCESTOR_MOUNTS
   # running for weeks: neither request directory existed, because the only thing that creates them
   # is the half that cannot write.
   #
-  # So the *directories* are bound read-write and nothing else is. They are created HERE, before
-  # `exec bwrap`, because this runs outside the namespace where `.skein` is still writable — and
-  # because bwrap needs a source that exists. Applied after the `--ro-bind` above, since bwrap takes
-  # its arguments in order and the later, narrower mount is the one that wins.
+  # So the *directories* are bound read-write and nothing else is. They are created before this
+  # block, by the drop-box loop above it, because that runs outside the namespace where `.skein` is
+  # still writable — and because bwrap needs a source that exists. Applied after the `--ro-bind`
+  # above, since bwrap takes its arguments in order and the later, narrower mount is the one that
+  # wins.
   #
   # **`requests/<box>/`, not `requests/`, and the difference is who a request is from.** Unmasking
   # the queue as one shared directory is the second of the three steps architecture §8.4 puts in
@@ -2347,12 +2368,10 @@ SKEIN_ANCESTOR_MOUNTS
   # What a box gains is exactly the ability to ask, which is what the cockpit's approval panels were
   # built for. It gains no ability to answer: the grants, the decisions and the package manifest all
   # live elsewhere under `.skein` and stay read-only.
-  for asking in substrate gitgate asks jobs; do
-    drop="$fleet_root_dir/.skein/$asking/requests/$box"
-    mkdir -p "$drop" 2>/dev/null || true
-    [ -d "$drop" ] && binds+=(--bind "$drop" "$drop")
+  for drop in "${drop_boxes[@]}"; do
+    binds+=(--bind "$drop" "$drop")
   done
-  unset asking drop
+  unset drop
 
   binds+=(--bind "$root" "$root")
   # The state parent is a separate mount (the host's `~/.skein/boxes`), so it needs its own cover.
@@ -2451,6 +2470,7 @@ SKEIN_MOUNTS
   fi
   unset fleet_root_dir state_parent fleet_mount owned skip
 fi
+unset drop_boxes
 # Which store is this box's, recorded where every script skein ships into the box looks first
 # (`skein_box_store` in box-self.sh, SKEIN-1174): the checkout's git directory, beside the kit's
 # own markers there. Every one of them used to work it out from `.claude/skein` instead, and a repo

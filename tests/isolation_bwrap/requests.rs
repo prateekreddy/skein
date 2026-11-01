@@ -366,7 +366,10 @@ fn a_box_cannot_write_another_boxs_job_request() {
     let said = String::from_utf8_lossy(
         &fleet.in_box(
             Born::Covered,
-            r#"for who in web-main other-main; do
+            // `SKEIN_JOB_ID` unset: under a `skein-job` of the suite's own, the wrapper inherits
+            // it and runs straight away as a nested call, filing nothing.
+            r#"unset SKEIN_JOB_ID
+for who in web-main other-main; do
   printf '%s: ' "$who"
   SKEIN_BOX="$who" SKEIN_STATE="$3" SKEIN_JOB_LOCK="$4" SKEIN_JOB_UNANSWERED_SECONDS=1 \
     python3 "$2" run --class test -- echo "ran as $who" 2>&1
@@ -418,4 +421,108 @@ done"#,
         said.contains("ran as web-main") && said.contains("ran as other-main"),
         "{said}"
     );
+}
+
+/// **The workshop box gets its drop-boxes too, and can file into them** (SKEIN-1463).
+///
+/// The launcher used to make `requests/<box>/` inside the cover, which the workshop box skips, so
+/// the workshop box had no drop-box under any queue: its `skein-job` always ran unqueued, and its
+/// questions and requests had nowhere to land. This takes the fixture's drop-boxes for `web-main`
+/// away, asserts they are gone, starts the workshop box through the launcher's lifted block, and,
+/// from inside the namespace, writes a file into each and runs the shipped `skein-job`, then reads
+/// what landed back from outside.
+///
+/// What it proves: the launcher makes the four drop-boxes for a privileged box, and with the
+/// privileged box's mounts as that block builds them each is writable from inside. What it does not:
+/// the binds the launcher adds after the block (the depot, the toolchain and the browsers, each
+/// read-only and none under `requests/`), and the real sandbox's own mounts under the fleet root.
+///
+/// **What would make it fail**: the drop-box loop's `mkdir` made for covered boxes only, as before
+/// (the sabotage that was run: `[ "${SKEIN_BOX_PRIVILEGED-}" = "1" ] ||` before it, and no drop-box
+/// is made, so the probe reports `missing` for each).
+#[test]
+fn the_workshop_box_gets_its_drop_boxes_and_can_file_into_them() {
+    if !bwrap_works() {
+        return skip(
+            "bwrap cannot create \
+             a user namespace here, so the workshop box's drop-boxes were NOT exercised",
+        );
+    }
+    let fleet = Fleet::make("workshop-drops");
+    let queues = ["substrate", "gitgate", "asks", "jobs"];
+    let drop = |queue: &str| {
+        fleet
+            .fleet_root
+            .join(format!(".skein/{queue}/requests/web-main"))
+    };
+    // An absence that was never a presence proves nothing, and the fixture makes these.
+    for queue in queues {
+        fs::remove_dir_all(drop(queue)).unwrap();
+        assert!(
+            !drop(queue).exists(),
+            "{queue}: the fixture's drop-box is still there"
+        );
+    }
+
+    let wrapper = fleet.fleet_root.join(".skein/plugin/bin/skein-job");
+    fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+    fs::write(&wrapper, include_str!("../../src/plugin/bin/skein-job")).unwrap();
+    let lock = fleet.dir.path().join("heavy.lock");
+    let mut args = vec![
+        wrapper.to_string_lossy().into_owned(),
+        fleet
+            .state_parent
+            .join("web-main")
+            .to_string_lossy()
+            .into_owned(),
+        lock.to_string_lossy().into_owned(),
+    ];
+    args.extend(
+        queues
+            .iter()
+            .map(|q| drop(q).to_string_lossy().into_owned()),
+    );
+    let said = String::from_utf8_lossy(&fleet.in_box(
+        Born::Workshop,
+        // `SKEIN_JOB_ID` unset for the reason the job-queue test above gives.
+        r#"unset SKEIN_JOB_ID
+wrapper="$1"; state="$2"; lock="$3"; shift 3
+for d in "$@"; do
+  if [ ! -d "$d" ]; then echo "missing $d"; continue; fi
+  if echo '{}' > "$d/from-the-box.json" 2>/dev/null; then echo "filed $d"; else echo "refused $d"; fi
+done
+SKEIN_BOX=web-main SKEIN_STATE="$state" SKEIN_JOB_LOCK="$lock" SKEIN_JOB_UNANSWERED_SECONDS=1 \
+  python3 "$wrapper" run --class test -- echo ran 2>&1"#,
+        &args,
+    ))
+    .to_string();
+
+    for queue in queues {
+        assert!(
+            said.lines()
+                .any(|l| l == format!("filed {}", drop(queue).display())),
+            "the workshop box could not file into its {queue} drop-box:\n{said}"
+        );
+        assert!(
+            drop(queue).join("from-the-box.json").is_file(),
+            "the workshop box's {queue} request did not land:\n{said}"
+        );
+    }
+    // The job: filed in its own drop-box, not run unqueued for want of one.
+    assert!(
+        !said.contains("no job drop-box"),
+        "the workshop box's job ran unqueued for want of a drop-box:\n{said}"
+    );
+    let jobs: Vec<String> = fs::read_dir(drop("jobs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("j-"))
+        .collect();
+    assert_eq!(
+        jobs.len(),
+        1,
+        "the workshop box's job was not filed:\n{said}"
+    );
+    assert!(said.lines().any(|l| l == "ran"), "{said}");
 }
