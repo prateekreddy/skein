@@ -353,6 +353,8 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     ("hooks/keeper.ts", include_str!("plugin/hooks/keeper.ts")),
     ("hooks/guide.ts", include_str!("plugin/hooks/guide.ts")),
     ("hooks/tracker.ts", include_str!("plugin/hooks/tracker.ts")),
+    // An idle agent woken with the owner's answer to its question (SKEIN-1467).
+    ("hooks/wake.ts", include_str!("plugin/hooks/wake.ts")),
     // skein's tool results and a waiting `skein-job` drawn for the person (SKEIN-1440).
     (
         "hooks/tool-results.tsx",
