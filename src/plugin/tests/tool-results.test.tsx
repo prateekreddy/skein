@@ -586,14 +586,15 @@ async function drawRow($: Engine, c: Call) {
 const READ = { tool: 'Read', input: { file_path: '/workspace/web/README.md' }, output: { type: 'text' } }
 const JOB_INPUT = { command: 'skein-job run --cores 4 -- cargo test --lib' }
 
-// What would make it fail: the group left folded, so the person sees only the count line; a
-// group's MCP calls matched by a name other than the tool_use block's own; or every group
-// unfolded, so a run of reads draws each file. Watched: with the ToolGroup hook passing `e` on
-// unchanged, the first case was handed `isExpanded: false` and this failed.
+// What would make it fail: a group of skein's own calls left folded, so the person sees only the
+// count line; a group's MCP calls matched by a name other than the tool_use block's own; or a group
+// that mixes skein's calls with other tools, or holds a skein-job shell command, unfolded, which
+// opens every call in it (the owner's 2026-11-02 complaint about clutter).
 const GROUPS: Array<[string, Call[], boolean]> = [
-  ['a skein tool among reads', [{ ...READ, tool_use_id: 'a1' }, { tool_use_id: 'a2', tool: name('resources'), input: {} }], true],
+  ['a skein tool among reads', [{ ...READ, tool_use_id: 'a1' }, { tool_use_id: 'a2', tool: name('resources'), input: {} }], false],
+  ['two skein tools alone', [{ tool_use_id: 'a3', tool: name('resources'), input: {} }, { tool_use_id: 'a4', tool: name('top'), input: {} }], true],
   ["the mod's own clean", [{ tool_use_id: 'b1', tool: 'mcp__skein__clean', input: {} }], true],
-  ['a waiting skein-job run', [{ tool_use_id: 'c1', tool: 'Bash', input: JOB_INPUT }], true],
+  ['a waiting skein-job run', [{ tool_use_id: 'c1', tool: 'Bash', input: JOB_INPUT }], false],
   ['only reads and a plain shell command', [{ ...READ, tool_use_id: 'd1' }, { tool_use_id: 'd2', tool: 'Bash', input: { command: 'ls' } }], false],
   ["a skein tool this file does not draw", [{ tool_use_id: 'e1', tool: name('lane'), input: {} }], false],
   ["another server's tool of the same name", [{ tool_use_id: 'f1', tool: 'mcp__other__skein_resources', input: {} }], false],
@@ -616,7 +617,7 @@ for (const [what, calls, isUnfolded] of GROUPS) {
 test('a row of a group unfolded here draws skein’s lines in place of the JSON', async ($, on) => {
   const handed = engine(on)
   const call = { tool_use_id: 'u1', tool: name('resources'), input: {}, output: F.mcp(F.RESOURCES) }
-  await drawGroup($, [READ, call], false)
+  await drawGroup($, [call], false)
   expect(await drawRow($, call)).toEqual([
     'engine',
     '  ⎿  as of 17:49 UTC',
@@ -631,12 +632,6 @@ test('a row of a group unfolded here draws skein’s lines in place of the JSON'
   const row = handed.at(-1) as Record<string, unknown>
   expect(row.output).toBe(undefined)
   expect(row.tool).toBe(name('resources'))
-
-  // A skein-job's row keeps the engine's own output and says what the job used under it.
-  const job = { tool_use_id: 'u2', tool: 'Bash', input: JOB_INPUT, output: F.JOB_BASH_OUTPUT }
-  await drawGroup($, [job], false, 'grp2')
-  expect(await drawRow($, job)).toEqual(['engine', '✓ 3 m 12 s · used 3.4 of 4 cores · peak 2.1 GB'])
-  expect((handed.at(-1) as Record<string, unknown>).output).toEqual(F.JOB_BASH_OUTPUT)
 })
 
 // What would make it fail: the calls this file unfolded remembered for good, so ctrl+o's view of

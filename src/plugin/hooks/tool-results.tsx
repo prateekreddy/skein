@@ -161,11 +161,16 @@ async function answerLines($: Engine, tool: string, output: unknown, columns: nu
 }
 
 export function register(on: On): void {
-  // A group holding one of skein's calls is unfolded, so the person sees its result; every other
-  // group is left as the engine draws it.
+  // A group made only of skein's own tool calls is unfolded, so the person sees their results; every
+  // other group is left folded as the engine draws it. Unfolding opens the whole group, so a group
+  // that mixes skein's calls with other tools, or a `skein-job` shell command, stays folded: the
+  // owner found every group opened by one skein call too much clutter (2026-11-02). ctrl+o still
+  // opens any group, and skein's results are drawn readably there too.
   on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
-    const ids = e.props.calls.filter(c => isDrawnCall(c.tool, c.input)).flatMap(c => (c.tool_use_id === undefined ? [] : [c.tool_use_id]))
-    if (ids.length === 0) return next(e)
+    const calls = e.props.calls
+    const isOnlySkein = calls.length > 0 && calls.every(c => skeinTool(c.tool) !== null && isDrawnCall(c.tool, c.input))
+    const ids = isOnlySkein ? calls.flatMap(c => (c.tool_use_id === undefined ? [] : [c.tool_use_id])) : []
+    if (ids.length === 0 || ids.length !== calls.length) return next(e)
     if (e.props.isExpanded) {
       markUnfolded(e.surface, ids, false)
 
