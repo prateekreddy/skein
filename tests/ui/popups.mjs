@@ -49,6 +49,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const BOX = "popups-box";
 // See the note in smoke.mjs: written by the fixture rather than read back after startup.
@@ -77,10 +78,9 @@ function makeFixture() {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, "#!/usr/bin/env bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
-  fs.chmodSync(sbx, 0o755);
+  writeExecutable(sbx, "#!/usr/bin/env bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
   // A `gh` with no login, so this machine's own cannot answer for a token.
-  fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  writeExecutable(path.join(bin, "gh"), "#!/bin/sh\nexit 1\n");
   return { root, home, bin, sbx };
 }
 

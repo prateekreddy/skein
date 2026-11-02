@@ -40,6 +40,7 @@ import { erring, finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 
 // Ten, because that is `REV_ASKED_PARALLEL` — the width one pressed stack read opens, and the row of
@@ -105,19 +106,17 @@ async function makeFixture() {
   const github = await queueGitHub(prs);
 
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
-  fs.chmodSync(sbx, 0o755);
+  writeExecutable(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
 
   // **A model that takes its time**, which is the only reason any of this is measurable. An instant
   // reading is never in flight, so a suite about what the page holds WHILE reading would have
   // nothing to hold and would pass with the bug in place.
   const claude = path.join(bin, "claude");
-  fs.writeFileSync(claude, `#!/bin/sh
+  writeExecutable(claude, `#!/bin/sh
 sleep ${READ_SECONDS}
 printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\n'
 exit 0
 `);
-  fs.chmodSync(claude, 0o755);
   return { root, bin, home, github, sbx, claude };
 }
 

@@ -27,6 +27,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { erring, ledger } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const API_TOKEN = "t".repeat(64);
 // The one token the private host lets in, and the token `acme/first` already has stored.
@@ -75,7 +76,7 @@ function makeFixture() {
   // names, closed so that a machine where somebody ran `gh auth login` cannot answer for the page.
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  writeExecutable(path.join(bin, "gh"), "#!/bin/sh\nexit 1\n");
   return { root, home, fleet, bare, bin };
 }
 

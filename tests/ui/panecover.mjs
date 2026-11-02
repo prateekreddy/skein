@@ -52,6 +52,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 // The box whose launch fails, and the box whose launch stays up. Two names, so the two panes are two
 // sessions in the page's own `sessions` map and can be probed one after the other.
@@ -82,8 +83,7 @@ function makeFixture() {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, "#!/usr/bin/env bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
-  fs.chmodSync(sbx, 0o755);
+  writeExecutable(sbx, "#!/usr/bin/env bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
   return { root, home, bin, sbx };
 }
 

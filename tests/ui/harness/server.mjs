@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serverBinary } from "../lift.mjs";
 import { fixtureScopes, quiesceOnExit } from "./leaks.mjs";
+import { writeExecutable } from "./executable.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -160,10 +161,13 @@ function fixtureHome(base) {
     `# ${FIXTURE_HOME_SENTINEL}: written by tests/ui/harness/server.mjs, and seeded into every box\n`,
   );
   // The agent CLI a box this server launches runs: a stand-in, on every machine (SKEIN-1312).
+  // Replaced by rename, never written over: this runs on every `startServer`, and a suite that
+  // starts several on one fixture rewrites a file an earlier server's processes may be running,
+  // which is `ETXTBSY` (SKEIN-1465, `executable.mjs`).
   const bin = path.join(home, ".local", "bin");
   fs.mkdirSync(bin, { recursive: true });
   for (const executable of BOX_AGENT_EXECUTABLES) {
-    fs.writeFileSync(path.join(bin, executable), fixtureBoxAgent(executable), { mode: 0o755 });
+    writeExecutable(path.join(bin, executable), fixtureBoxAgent(executable));
   }
   return home;
 }
@@ -217,7 +221,7 @@ export const FIXTURE_AGENT_STUB = "agent-stub-from-a-ui-fixture";
 /** Write [`FIXTURE_AGENT_STUB`] into the fixture and return its path. */
 function fixtureAgentStub(base) {
   const stub = path.join(base, FIXTURE_AGENT_STUB);
-  fs.writeFileSync(
+  writeExecutable(
     stub,
     "#!/bin/sh\n# Written by tests/ui/harness/server.mjs: the agent CLI a suite's server is handed\n" +
       "# when the suite names none. It runs nothing and says so.\n" +
@@ -226,7 +230,6 @@ function fixtureAgentStub(base) {
       // stub the server reached, rather than nothing at all.
       'echo "$*" >> "$0.asked"\n' +
       "exit 1\n",
-    { mode: 0o755 },
   );
   return stub;
 }

@@ -19,6 +19,7 @@ import { erring, finding, ledger, seeing, settler } from "../harness/browser.mjs
 import { stub } from "../harness/github.mjs";
 import { startServer } from "../harness/server.mjs";
 import { fileURLToPath } from "node:url";
+import { writeExecutable } from "../harness/executable.mjs";
 
 // ---------- refuse to run as anything but `review.mjs` ----------
 /** **A part is not a suite, and run as one it can only fail and then never end.**
@@ -371,8 +372,7 @@ async function makeFixture() {
   // sbx stand-in: an empty fleet is fine — review does not depend on any box being alive, which is
   // itself part of what this file proves.
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
-  fs.chmodSync(sbx, 0o755);
+  writeExecutable(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
 
   // A `claude` that answers all THREE prompts skein sends, told apart the way the prompts differ:
   // the merged one (the reading whose review the session POSTS to GitHub itself) is the only one
@@ -381,7 +381,7 @@ async function makeFixture() {
   // arriving. It used to key on the literal `REVIEW:`, which was in the merged prompt's answer
   // format until the review stopped coming back to skein at all.
   const claude = path.join(bin, "claude");
-  fs.writeFileSync(claude, `#!/bin/sh
+  writeExecutable(claude, `#!/bin/sh
 # **The prompt arrives on STDIN** (SKEIN-684), and nothing on argv is it. It used to be the last
 # argument — never the fourth, since a reading is a conversation (SKEIN-393) and the command line
 # carries --session-id/--resume between the model and the prompt — and then skein stopped putting
@@ -431,7 +431,6 @@ case "$p" in
 esac
 exit 0
 `);
-  fs.chmodSync(claude, 0o755);
   return { root, bin, home, github, sbx, claude };
 }
 
