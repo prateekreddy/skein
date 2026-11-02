@@ -714,10 +714,10 @@ export function askLine(ask: SkeinDiskAsk): string {
         : "the fleet's disk is over its line"
 
   if (ask.amount_mb <= 0) {
-    const live = ask.live_mb > 0 ? ` (${humanMb(ask.live_mb)} in a build running now)` : ''
+    const live = ask.live_mb > 0 ? ` (${humanMb(ask.live_mb)} in use now)` : ''
     return `skein asks this box to free disk, but none of it can be cleared now: ${why}${live}.`
   }
-  const live = ask.live_mb > 0 ? ` (${humanMb(ask.live_mb)} more in a build running now)` : ''
+  const live = ask.live_mb > 0 ? ` (${humanMb(ask.live_mb)} more in use now)` : ''
 
   return `skein asks this box to free ${humanMb(ask.amount_mb)} of disk: ${why}${live}.`
 }

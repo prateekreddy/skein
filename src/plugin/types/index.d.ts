@@ -196,8 +196,8 @@ export type SkeinBand = {
   disk: {
     mb: number | null
     limit_mb: number | null
-    /** skein's disk ask of this box, when it stands: what it can clear now, and what is in a
-     * build running now, which no ask counts (SKEIN-1391). */
+    /** skein's disk ask of this box, when it stands: what it can clear now, and what is in use
+     * now, which no ask counts (SKEIN-1391). */
     ask: SkeinDiskAsk | null
   } | null
   /** skein's disk list; null before skein has listed it. */
