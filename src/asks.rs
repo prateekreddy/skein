@@ -41,8 +41,8 @@ pub struct Ask {
     /// The box's own words. Rendered escaped, as plain text.
     #[serde(default)]
     pub question: String,
-    /// The answers the box offers, each a button whose label is escaped. Empty means the owner
-    /// types a one-line reply.
+    /// The answers the box offers, each a button whose label is escaped. Offered or not, the owner
+    /// may type a one-line reply instead (SKEIN-1466).
     #[serde(default)]
     pub options: Vec<String>,
     #[serde(default)]
@@ -242,8 +242,9 @@ fn decision(box_name: &str, id: &str) -> Option<Ask> {
 ///
 /// `rendered` rather than an id, for `gitgate::decide`'s reason: the file is the box's and can
 /// change between the render and the press. The box, the id and the offered labels come from what
-/// the page drew. An answer to a question that offered options must be one of them; one that
-/// offered none is a typed line.
+/// the page drew. An answer is one of the offered labels or a line the owner typed, whether or not
+/// the question offered any: the options are the box's suggestions, and the owner's own words are
+/// always an answer (SKEIN-1466).
 ///
 /// The record is written first and the inbox line second, so a lost line leaves the box reading
 /// its question as waiting — the direction that is not a lie.
@@ -259,9 +260,6 @@ pub fn answer(rendered: &Ask, reply: &Reply) -> Result<Ask, String> {
             }
             if label.len() > MAX_BYTES {
                 return Err(format!("an answer is at most {MAX_BYTES} bytes"));
-            }
-            if !rendered.options.is_empty() && !rendered.options.iter().any(|o| o == label) {
-                return Err("that answer is not one the question offered".into());
             }
             Some(label.to_string())
         }
@@ -392,7 +390,7 @@ mod tests {
     /// dismissal is an answer too.**
     ///
     /// What would make it fail: `answer` not calling `send_question_answer`, or with another body;
-    /// a second answer allowed; a label the question did not offer accepted.
+    /// a second answer allowed.
     #[test]
     fn an_answer_reaches_the_box_once_in_the_approved_words() {
         let _g = crate::testutil::env_lock();
@@ -402,7 +400,6 @@ mod tests {
         std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
 
         let a = ask("web-main", "q-7f3a0000", "2026-09-24T10:00:00Z");
-        assert!(answer(&a, &Reply::Answer("Something else".into())).is_err());
         answer(&a, &Reply::Answer("Keep it".into())).expect("answered");
         assert!(answer(&a, &Reply::Dismiss).is_err(), "answered twice");
 
@@ -427,5 +424,52 @@ mod tests {
                 "question q-81c20000 was dismissed without an answer"
             ]
         );
+    }
+
+    /// **The owner's own words answer a question that offered options**, and an answer is still
+    /// one line of at most [`MAX_BYTES`] (SKEIN-1466).
+    ///
+    /// What would make it fail: `answer` refusing a label the question did not offer again, which
+    /// it did until SKEIN-1466; or the one-line, empty or [`MAX_BYTES`] checks dropped, so that a
+    /// refused reply below is recorded and the second answer is refused as already given.
+    #[test]
+    fn the_owners_own_words_answer_a_question_that_offered_options() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", &home);
+        std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
+
+        let a = ask("web-main", "q-5e110000", "2026-09-24T10:00:00Z");
+        for refused in [
+            String::new(),
+            "   ".into(),
+            "Keep it\nfor now".into(),
+            "Keep it\rfor now".into(),
+            "x".repeat(MAX_BYTES + 1),
+        ] {
+            assert!(
+                answer(&a, &Reply::Answer(refused.clone())).is_err(),
+                "an answer of {} bytes, {:?}…, was taken",
+                refused.len(),
+                refused.chars().take(12).collect::<String>()
+            );
+        }
+        let done = answer(&a, &Reply::Answer("  Archive it instead ".into())).expect("answered");
+        assert_eq!(
+            (done.state.as_str(), done.answer.as_str()),
+            ("answered", "Archive it instead")
+        );
+
+        let bodies: Vec<String> = std::fs::read_dir(home.join("boxes/web-main/inbox"))
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                let m: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(e.path()).unwrap()).unwrap();
+                m["body"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(bodies, ["question q-5e110000, \"Archive it instead\""]);
     }
 }

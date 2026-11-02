@@ -98,8 +98,8 @@ memory: |
   giving `options` when the choices are clear. It may be listed by name only: load it through tool
   search first. The owner sees it in the cockpit; at most 5 may wait, each at most 2 KB. The answer
   comes later as mail in your inbox, delivered at a turn boundary: `question <id>, "<answer>"`, or
-  `question <id> was dismissed without an answer`. `skein_requests` shows it too. Do not ask what
-  you can decide yourself.
+  `question <id> was dismissed without an answer`. The answer may be one of your options or the
+  owner's own words. `skein_requests` shows it too. Do not ask what you can decide yourself.
 
   ## Git authentication in this box
 
