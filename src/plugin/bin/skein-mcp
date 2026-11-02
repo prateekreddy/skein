@@ -1821,7 +1821,7 @@ TOOLS = [
         "name": "skein_ask_person",
         "description": "Ask the fleet's owner a question, at most 2 KB, optionally with the answers "
         "to choose from. They see it in the cockpit as your own words; the answer arrives in your "
-        "inbox. At most 5 may wait at once.",
+        "inbox, and is one of your options or the owner's own words. At most 5 may wait at once.",
         "inputSchema": {
             "type": "object",
             "properties": {

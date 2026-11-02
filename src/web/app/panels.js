@@ -695,9 +695,12 @@ function askqCard(a) {
     askqShown.set(key, { box: a.box || "", question: a.question || "", options });
     // The buttons carry the option's INDEX, never its text: a label is the box's words, and the
     // only place they go is inside the escaped button face.
-    row = (options.length
-      ? options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})"${busy}>${esc(o)}</button>`).join("")
-      : `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}"${busy} /><button class="kbtn primary" onclick="answerAskq(${k}, -1)"${busy}>Send answer</button>`)
+    // The typed line is always there, options or not: the options are the box's suggestions, and
+    // the owner's own words are always an answer (SKEIN-1466).
+    const offered = options.map((o, i) => `<button class="kbtn primary aq-opt" onclick="answerAskq(${k}, ${i})"${busy}>${esc(o)}</button>`).join("");
+    const hint = options.length ? ` placeholder="or answer in your own words"` : "";
+    row = (offered ? offered + `</div><div class="sq-row">` : "")
+      + `<input type="text" class="aq-reply" id="aq-reply-${esc(key)}" data-key="${esc(key)}"${hint}${busy} /><button class="kbtn primary" onclick="answerAskq(${k}, -1)"${busy}>Send answer</button>`
       + `<button class="kbtn ghost" onclick="dismissAskq(${k})"${busy}>Dismiss</button>` + sendingNote("askq", key);
   } else if (a.state === "answered") {
     row = `<span class="sq-meta">answered: "${esc(a.answer || "")}" · ${esc(localStamp(a.decided, true))}</span>`;
@@ -712,16 +715,51 @@ function askqCard(a) {
     </div>`;
 }
 
+// How long an answered or dismissed question stays in the panel, from when it was decided: 2 days.
+// The owner's number (SKEIN-1466): what was decided is kept in view long enough to look back at
+// what you told a box, and then it is clutter. Only the panel forgets it — the record on disk stays,
+// and the box keeps its answer in its inbox.
+const ASKQ_DECIDED_SHOWN_MS = 2 * 24 * 60 * 60 * 1000;
+// Whether this viewer last left the answered questions open. A convenience, so a storage that throws
+// or is empty reads as closed.
+const ASKQ_DECIDED_OPEN_KEY = "skein.askq.decided-open";
+function askqDecidedOpen() { try { return localStorage.getItem(ASKQ_DECIDED_OPEN_KEY) === "1"; } catch { return false; } }
+
+// Waiting questions first, oldest at the bottom as before; then answered and dismissed ones from
+// the last ASKQ_DECIDED_SHOWN_MS, newest first, under one row that is closed until opened.
+function askqListHtml(asks, now) {
+  const waiting = asks.filter(a => a.state === "waiting").reverse();
+  const decided = asks.filter(a => a.state !== "waiting")
+    .map(a => ({ a, at: Date.parse(a.decided || "") }))
+    // A decision with no readable time is kept: it cannot be shown to be old.
+    .filter(d => !(now - d.at > ASKQ_DECIDED_SHOWN_MS))
+    .sort((x, y) => (y.at || 0) - (x.at || 0))
+    .map(d => d.a);
+  if (!waiting.length && !decided.length) return "";
+  let html = waiting.length ? waiting.map(askqCard).join("") : `<div class="note">no questions waiting</div>`;
+  if (decided.length) {
+    html += `<details class="aq-done"${askqDecidedOpen() ? " open" : ""}><summary>Answered · ${decided.length}</summary>`
+      + decided.map(askqCard).join("") + `</details>`;
+  }
+  return html;
+}
+
 function loadAskq() {
   const list = document.getElementById("askq-list");
   return fetch("/api/fleet/asks").then(r => r.json()).then(asks => {
-    if (!asks.length) {
+    const html = askqListHtml(asks, Date.now());
+    if (!html) {
       list.innerHTML = `<div class="note">no questions — a box asks with the <code>skein_ask_person</code> tool</div>`;
       return;
     }
-    redrawKeeping(list, asks.slice().reverse().map(askqCard).join(""));
+    redrawKeeping(list, html);
   }).catch(() => { list.innerHTML = `<div class="note">could not load questions</div>`; });
 }
+// `toggle` does not bubble, so it is caught on the way down.
+document.getElementById("askq-list").addEventListener("toggle", e => {
+  if (!e.target.matches?.("details.aq-done")) return;
+  try { localStorage.setItem(ASKQ_DECIDED_OPEN_KEY, e.target.open ? "1" : "0"); } catch { /* a convenience */ }
+}, true);
 
 function sendAskq(key, body) {
   const shown = askqShown.get(key);
@@ -737,7 +775,7 @@ function sendAskq(key, body) {
     .finally(() => markSending("askq", key, false));
 }
 
-// `i` is the offered answer's index, or -1 for the typed line of a question that offered none.
+// `i` is the offered answer's index, or -1 for the typed line, which every waiting question has.
 function answerAskq(key, i) {
   const shown = askqShown.get(key);
   if (!shown) { toast("that question is no longer on screen — reopen the panel"); return; }

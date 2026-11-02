@@ -1159,6 +1159,8 @@
   /* a box's question: its own words, as plain text, wrapped where it wraps */
   .aq-body { font-size:12px; color:var(--text); white-space:pre-wrap; word-break:break-word; margin-top:6px; }
   .aq-reply { flex:1; min-width:10em; }
+  .aq-done { margin-top:6px; }
+  .aq-done > summary { cursor:pointer; font-size:12px; color:var(--dim); padding:6px 2px; }
   /* the decision inbox: every question waiting on the person, above the board (SKEIN-1375) */
   #decisions { margin:6px 10px 10px; display:flex; flex-direction:column; gap:6px; }
   #decisions[hidden] { display:none; }

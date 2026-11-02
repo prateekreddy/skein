@@ -928,6 +928,17 @@ await check("a typed answer survives a refresh of Questions, which still shows a
   await page.keyboard.type("!");
   if ((await reply.inputValue()) !== "port 8080!") throw new Error(`typing after the refresh gave ${JSON.stringify(await reply.inputValue())}`);
 });
+// Fails if `askqCard` draws no reply field for a question that offered options (SKEIN-1466), or
+// if that field is drawn without an id, so `redrawKeeping` cannot carry its value across.
+await check("a typed answer to a question that offered options survives a refresh too", async () => {
+  const other = page.locator(`[id="aq-reply-${BOX}/q-2"]`);
+  await other.fill("neither, ask me tomorrow");
+  await page.evaluate(() => pollAskq());
+  await page.waitForTimeout(300);
+  const got = await other.inputValue();
+  if (got !== "neither, ask me tomorrow") throw new Error(`field ${JSON.stringify(got)}`);
+  await page.locator(`[id="${replyId}"]`).focus();
+});
 // Fails if the keydown listener on the list is removed: Enter sends nothing.
 await check("Enter in a question's answer field sends the answer", async () => {
   answers.length = 0;

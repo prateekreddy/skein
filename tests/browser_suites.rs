@@ -145,7 +145,9 @@ const BROWSER_SUITES: [&str; 22] = [
     // token (SKEIN-1231).
     "addtoken",
     // A box's question in the questions panel: its text and its offered answers shown as plain
-    // text, and each answer, typed line and dismissal reaching the box's inbox (SKEIN-1061).
+    // text, and each answer, typed line and dismissal reaching the box's inbox (SKEIN-1061); a
+    // typed line on a question that offered options too, and answered ones under a closed row
+    // until two days have passed (SKEIN-1466).
     "asks",
     "connections",
     // A box's ask for a bigger disk allowance, approved on its card in the Decisions strip: the
