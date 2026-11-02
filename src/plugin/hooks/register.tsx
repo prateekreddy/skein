@@ -46,6 +46,7 @@ import { register as skeinPane } from './pane'
 import { onStart as toastsStart, onToolCall as toastsToolCall, onTurnComplete as toastsTurnComplete } from './toasts'
 import { register as toolResults } from './tool-results'
 import { register as tracker, onStart as trackerStart, onTurnComplete as trackerTurnComplete } from './tracker'
+import { onStart as wakeStart, onTurnComplete as wakeTurnComplete, onTurnStart as wakeTurnStart } from './wake'
 
 export const register: Register = on => {
   identity(on)
@@ -67,6 +68,7 @@ export const register: Register = on => {
     await quietly(keeperStart($, e))
     await quietly(trackerStart($, e))
     await quietly(toastsStart($, e))
+    await quietly(wakeStart($, e))
 
     return started
   })
@@ -88,6 +90,7 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     await quietly(attentionTurnStart($, e))
+    await quietly(wakeTurnStart($, e))
 
     return next(e)
   })
@@ -99,6 +102,7 @@ export const register: Register = on => {
     await quietly(guideTurnComplete($, e))
     await quietly(trackerTurnComplete($, e))
     await quietly(toastsTurnComplete($, e))
+    await quietly(wakeTurnComplete($, e))
 
     return next(e)
   })
