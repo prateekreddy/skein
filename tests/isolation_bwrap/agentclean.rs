@@ -57,7 +57,7 @@ fn clean_in_box_with(
         server = q(server),
         shell = skein::util::sh_quote(shell),
     );
-    let mut child = Command::new("bash")
+    let mut child = box_runner("bash")
         .arg("-c")
         .arg(&runner)
         .stdin(Stdio::piped())

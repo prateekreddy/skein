@@ -366,10 +366,10 @@ fn a_box_cannot_write_another_boxs_job_request() {
     let said = String::from_utf8_lossy(
         &fleet.in_box(
             Born::Covered,
-            // `SKEIN_JOB_ID` unset: under a `skein-job` of the suite's own, the wrapper inherits
-            // it and runs straight away as a nested call, filing nothing.
-            r#"unset SKEIN_JOB_ID
-for who in web-main other-main; do
+            // No `$SKEIN_JOB_ID` arrives here from a `skein-job` of the suite's own, which would
+            // make the wrapper run straight away as a nested call, filing nothing: `box_runner`
+            // clears it with the rest of the outer box's `SKEIN_*`.
+            r#"for who in web-main other-main; do
   printf '%s: ' "$who"
   SKEIN_BOX="$who" SKEIN_STATE="$3" SKEIN_JOB_LOCK="$4" SKEIN_JOB_UNANSWERED_SECONDS=1 \
     python3 "$2" run --class test -- echo "ran as $who" 2>&1
@@ -484,9 +484,8 @@ fn the_workshop_box_gets_its_drop_boxes_and_can_file_into_them() {
     );
     let said = String::from_utf8_lossy(&fleet.in_box(
         Born::Workshop,
-        // `SKEIN_JOB_ID` unset for the reason the job-queue test above gives.
-        r#"unset SKEIN_JOB_ID
-wrapper="$1"; state="$2"; lock="$3"; shift 3
+        // No `$SKEIN_JOB_ID` reaches the wrapper, for the reason the job-queue test above gives.
+        r#"wrapper="$1"; state="$2"; lock="$3"; shift 3
 for d in "$@"; do
   if [ ! -d "$d" ]; then echo "missing $d"; continue; fi
   if echo '{}' > "$d/from-the-box.json" 2>/dev/null; then echo "filed $d"; else echo "refused $d"; fi

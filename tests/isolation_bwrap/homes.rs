@@ -172,7 +172,7 @@ impl Homes {
             block = rewrite(home_binds_block()),
             probe = skein::util::sh_quote(probe),
         );
-        let out = Command::new("bash")
+        let out = box_runner("bash")
             .arg("-c")
             .arg(&runner)
             .output()

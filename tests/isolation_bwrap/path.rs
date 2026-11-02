@@ -485,7 +485,7 @@ impl Started {
         // It costs little in practice: `box-session.sh` itself exits 3 when tmux is missing, so a
         // machine that cannot run this cannot run a box either.
         let probe = format!("{}\nprintf %s \"$tmux_bin\"\n", launcher_path_statements());
-        let out = Command::new("bash").arg("-c").arg(&probe).output().unwrap();
+        let out = box_runner("bash").arg("-c").arg(&probe).output().unwrap();
         let tmux_bin = String::from_utf8_lossy(&out.stdout).trim().to_string();
         assert!(
             !tmux_bin.is_empty(),
@@ -589,7 +589,7 @@ impl Started {
             pane = skein::util::sh_quote(&pane),
             block = block,
         );
-        let out = Command::new("bash")
+        let out = box_runner("bash")
             .arg("-c")
             .arg(&runner)
             .output()
@@ -854,7 +854,7 @@ fn a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path() {
     // `/bin/bash` absolutely, because the PATH below names a directory that does not exist — a
     // `bash` looked up on it is not found and the test fails on the spawn rather than on what it
     // is about. Proved by writing it the other way first.
-    let out = Command::new("/bin/bash")
+    let out = box_runner("/bin/bash")
         .arg("-c")
         .arg(&probe)
         .env("HOME", &home)

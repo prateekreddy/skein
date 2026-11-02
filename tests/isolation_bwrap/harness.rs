@@ -3,6 +3,34 @@
 
 use super::*;
 
+/// A `Command` for a runner that starts a box — one that runs bwrap, or the launcher's own lines —
+/// carrying none of the `SKEIN_*` variables of the box this suite happens to run in.
+///
+/// Every runner here passes its environment through, and a skein box exports a dozen `SKEIN_*`
+/// variables of its own (`env | grep ^SKEIN_` in one). Each of them is a value the launcher reads,
+/// so a runner that inherits them tests the launcher with the outer box's answer standing in for
+/// the fixture's: `$SKEIN_REPO_TOOLS` reached `a_link_where_the_area_should_be_is_refused`
+/// (SKEIN-1464), `$SKEIN_JOB_ID` from a `skein-job run` reached the job-queue probe (SKEIN-1463),
+/// `$SKEIN_BOX_PEERS` reaches the peer test's "host that never sets it". Cleared here as a class,
+/// once, rather than one name at a time as each is found.
+///
+/// **Kept**, because they are the test's own and never the box's: `$SKEIN_TEST`, the marker cargo
+/// sets; `$SKEIN_HOME` and `$SKEIN_FLEET_ROOT`, which cargo forces empty and a test pins with
+/// `common::env_pins`; and `$SKEIN_TESTS_*`, the suite's own switches. A variable a runner means
+/// to set it sets in its script or with `.env` after this, and both win over the clearing.
+pub(super) fn box_runner(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        let Some(n) = name.to_str() else { continue };
+        let the_tests_own = matches!(n, "SKEIN_TEST" | "SKEIN_HOME" | "SKEIN_FLEET_ROOT")
+            || n.starts_with("SKEIN_TESTS_");
+        if n.starts_with("SKEIN_") && !the_tests_own {
+            cmd.env_remove(&name);
+        }
+    }
+    cmd
+}
+
 /// The launcher's isolation block, lifted out of the script it lives in.
 ///
 /// Read from `box-session.sh` rather than copied, so a change to the launcher is a change to what
@@ -498,7 +526,7 @@ impl Fleet {
             probe = skein::util::sh_quote(probe),
             args = quoted.join(" "),
         );
-        let out = Command::new("bash")
+        let out = box_runner("bash")
             .arg("-c")
             .arg(&runner)
             .output()
@@ -618,7 +646,7 @@ done
             paths = quoted.join(" "),
         );
 
-        let out = Command::new("bash")
+        let out = box_runner("bash")
             .arg("-c")
             .arg(&runner)
             .output()
@@ -680,7 +708,7 @@ done
             unsets = unsets_between_blocks(),
             announce = announcement_block(),
         );
-        let out = Command::new("bash")
+        let out = box_runner("bash")
             .arg("-c")
             .arg(&runner)
             .output()
