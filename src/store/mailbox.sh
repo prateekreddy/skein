@@ -15,7 +15,9 @@
 # stop with exit 2 + stderr if mail arrived mid-turn, so it can't be missed just because nobody asked).
 # Both mark seenBy the instant they deliver, so the same message never blocks twice. This is the fix
 # for the one *silent* failure mode skein cannot tolerate: a message that sits unread because nothing
-# ever re-checked after SessionStart.
+# ever re-checked after SessionStart. A Claude session that is idle has no turn boundary to wait
+# for, so skein's plugin also takes this box's shared mail with `wake` while it is idle and starts a
+# turn with it (SKEIN-1468); all three mark through the same `take_shared`.
 #
 # Installed twice: into <store>/skein/bin, where an agent runs it by hand, and into skein's
 # read-only plugin (`probe/`), which is the copy the hooks run (SKEIN-1144). Both find the store,
@@ -29,6 +31,8 @@
 #   mailbox.sh stop-check   # same delivery, but for the Stop hook: silent exit 0 if nothing unread,
 #                           # else prints to stderr and exit 2 (blocks the stop so it can't be missed)
 #   mailbox.sh unread       # how many `inbox` would deliver now, as one number; marks nothing
+#   mailbox.sh wake         # this box's unread SHARED mail, marked seen, one JSON line each: what
+#                           # skein's plugin wakes an idle session with (owner's inbox not read)
 #   mailbox.sh list         # all messages (read-only, no seen mutation)
 #   mailbox.sh prune [days] # delete fully-seen messages older than N days (default 14)
 set -uo pipefail
@@ -188,6 +192,21 @@ prune_seen() { # $1 = age in days, $2 = noisy (0/1)
   fi
 }
 
+# Takes one shared message for this box: under the mailbox lock, checks it is this box's unread
+# mail, marks `seenBy`, and only then prints it through the jq filter `$2`. Fails, printing nothing,
+# when it is not this box's unread mail or the mark could not be made: showing an unmarked message
+# would make it repeat for ever and could trap Stop in a continuation loop. The one way `inbox`,
+# `stop-check` and `wake` take mail, so whichever of them runs first delivers it and the others
+# find it seen.
+take_shared() ( # $1 = message file, $2 = jq filter rendering it
+  flock -w 5 8 || exit 1
+  jq -e --arg v "$vmid" "$for_me_unseen" "$1" >/dev/null 2>&1 || exit 1
+  tmp="$(mktemp "$box/.mail-seen.XXXXXX" 2>/dev/null)" || exit 1
+  jq --arg v "$vmid" '.seenBy = ((.seenBy // []) + [$v] | unique)' "$1" >"$tmp" 2>/dev/null \
+    && mv "$tmp" "$1" || { rm -f "$tmp"; exit 1; }
+  jq -r "$2" "$1" 2>/dev/null
+) 8<"$lock"
+
 case "$cmd" in
   send)
     to="broadcast"; kind="note"; body=""; body_file=""; branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
@@ -233,18 +252,9 @@ case "$cmd" in
     lock_ready || shared=0
     for f in "$box"/*.json; do
       [ "$shared" = 1 ] && [ -e "$f" ] || break
-      # Lock/read/mark/rename before surfacing. If marking fails, emit nothing: showing an unmarked
-      # message would make it repeat forever and could trap Stop in a continuation loop.
-      line="$({
-        flock -w 5 8 || exit 1
-        jq -e --arg v "$vmid" "$for_me_unseen" "$f" >/dev/null 2>&1 || exit 1
-        tmp="$(mktemp "$box/.mail-seen.XXXXXX" 2>/dev/null)" || exit 1
-        jq --arg v "$vmid" '.seenBy = ((.seenBy // []) + [$v] | unique)' "$f" >"$tmp" 2>/dev/null \
-          && mv "$tmp" "$f" || { rm -f "$tmp"; exit 1; }
-        # **The name is shown with the fact that nobody checked it.** A name rendered as a name is
-        # how one box speaks as another — or as you.
-        jq -r '"  • [\(.kind // "note")] from \(.from // "?") (a box; this name is not checked) on \(.branch // "?"): \(.body // "")"' "$f" 2>/dev/null
-      } 8<"$lock")" || continue
+      # **The name is shown with the fact that nobody checked it.** A name rendered as a name is
+      # how one box speaks as another — or as you.
+      line="$(take_shared "$f" '"  • [\(.kind // "note")] from \(.from // "?") (a box; this name is not checked) on \(.branch // "?"): \(.body // "")"')" || continue
       if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
         echo "[mailbox] unread hand-off for $vmid:"
       fi
@@ -291,6 +301,24 @@ case "$cmd" in
     [ "$found" -eq 0 ] && exit 0
     ;;
 
+  wake)
+    # The shared mail an idle session is woken with (the plugin's wake.ts, SKEIN-1468): taken
+    # exactly as `inbox` takes it, through `take_shared`, so each message is delivered once by
+    # whichever of the three runs first. One JSON object a line, `{from, body, cut}`, the sender's
+    # claimed name cut to 64 characters and the body to 2048, `cut` saying whether the body was. At
+    # most 10 messages a run, so the output stays well inside what the caller reads: the rest wait
+    # for the next run or the turn-boundary hooks. The owner's inbox is not read here; wake.ts reads
+    # it itself, because only the owner's answers to questions wake a session.
+    lock_ready || exit 0
+    n=0
+    for f in "$box"/*.json; do
+      [ "$n" -lt 10 ] && [ -e "$f" ] || break
+      take_shared "$f" '(.body // "" | tostring) as $b
+        | {from: ((.from // "?") | tostring | .[0:64]), body: $b[0:2048], cut: (($b | length) > 2048)}
+        | tojson' && n=$((n+1))
+    done
+    ;;
+
   unread)
     # Read-only, so it takes no lock: a message marked while this counts is off by one until the
     # next count, and nothing is marked or pruned here. Read by skein's band above the prompt
@@ -325,6 +353,6 @@ case "$cmd" in
     prune_seen "$days" 1
     ;;
 
-  *) echo "usage: mailbox.sh {send|inbox|stop-check|unread|list|prune}" >&2; exit 2;;
+  *) echo "usage: mailbox.sh {send|inbox|stop-check|wake|unread|list|prune}" >&2; exit 2;;
 esac
 exit 0

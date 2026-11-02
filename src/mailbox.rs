@@ -828,6 +828,95 @@ mod tests {
         assert_eq!(run("boxB", &["unread"]), "0");
     }
 
+    /// **`mailbox.sh wake` takes this box's unread shared mail exactly as `inbox` does, and nothing
+    /// of the owner's** (SKEIN-1468). skein's plugin runs it while the session is idle and starts a
+    /// turn with what it prints, so it and the turn-boundary hooks must deliver each message once
+    /// between them, and the owner's lines must stay where only the owner's answers wake a session.
+    ///
+    /// What would make it fail, each watched: `wake` not marking `seenBy` (the second `wake` and the
+    /// following `inbox` deliver "to B" again); `wake` ignoring `seenBy` (it delivers "read
+    /// already"); its `to` test made always true (it delivers "to C, not B"); the `[0:2048]` cut
+    /// removed (the long body comes back 3000 long); `wake` reading the owner's inbox (it records
+    /// the owner's id, and `inbox` no longer shows the owner's answer).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mailbox_wake_takes_shared_mail_once_with_the_turn_boundary_hooks_and_none_of_the_owners() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> String {
+            let out = box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let send = |from: &str, to: &str, body: &str| {
+            run(
+                from,
+                &["send", "--to", to, "--kind", "note", "--body", body],
+            );
+        };
+        // Read at a turn boundary first, so `wake` must find it seen.
+        send("boxA", "boxB", "read already");
+        assert!(run("boxB", &["inbox"]).contains("read already"));
+        send("boxA", "boxB", "to B");
+        send("boxA", "boxC", "to C, not B");
+        send("boxB", "broadcast", "B's own");
+        send("boxA", "boxB", &"x".repeat(3000));
+        let inbox = home.join(".box-script").join("state").join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::write(
+            inbox.join("1-skein.json"),
+            r#"{"from":"skein","to":"boxB","kind":"answer","body":"question q-1, \"yes\"","ts":"2026-11-02T10:00:00Z"}"#,
+        )
+        .unwrap();
+        let seen_file = home.join(".box-script").join("home").join(".skein-mail-seen");
+        let seen_before = fs::read_to_string(&seen_file).unwrap_or_default();
+
+        let woke = run("boxB", &["wake"]);
+        let taken: Vec<serde_json::Value> = woke
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("one JSON object a line"))
+            .collect();
+        assert_eq!(taken.len(), 2, "took: {woke}");
+        assert_eq!(taken[0]["from"], "boxA");
+        assert_eq!(taken[0]["body"], "to B");
+        assert_eq!(taken[0]["cut"], false);
+        assert_eq!(taken[1]["body"].as_str().map(str::len), Some(2048));
+        assert_eq!(taken[1]["cut"], true);
+        assert_eq!(
+            fs::read_to_string(&seen_file).unwrap_or_default(),
+            seen_before,
+            "wake recorded an owner message as delivered"
+        );
+
+        assert_eq!(run("boxB", &["wake"]), "", "a second wake delivered again");
+        let then = run("boxB", &["inbox"]);
+        assert!(!then.contains("to B"), "inbox delivered what wake took: {then}");
+        assert!(
+            then.contains("from you: question q-1"),
+            "the owner's message was not left to the turn-boundary hooks: {then}"
+        );
+        // The record the comparison above read is the one `inbox` writes, or it compared nothing.
+        assert!(fs::read_to_string(&seen_file)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l == "1-skein.json"));
+    }
+
     #[test]
     fn relay_cross_project_mail_delivers_across_stores() {
         let _g = env_lock();
