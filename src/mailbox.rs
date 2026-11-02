@@ -883,7 +883,10 @@ mod tests {
             r#"{"from":"skein","to":"boxB","kind":"answer","body":"question q-1, \"yes\"","ts":"2026-11-02T10:00:00Z"}"#,
         )
         .unwrap();
-        let seen_file = home.join(".box-script").join("home").join(".skein-mail-seen");
+        let seen_file = home
+            .join(".box-script")
+            .join("home")
+            .join(".skein-mail-seen");
         let seen_before = fs::read_to_string(&seen_file).unwrap_or_default();
 
         let woke = run("boxB", &["wake"]);
@@ -905,7 +908,10 @@ mod tests {
 
         assert_eq!(run("boxB", &["wake"]), "", "a second wake delivered again");
         let then = run("boxB", &["inbox"]);
-        assert!(!then.contains("to B"), "inbox delivered what wake took: {then}");
+        assert!(
+            !then.contains("to B"),
+            "inbox delivered what wake took: {then}"
+        );
         assert!(
             then.contains("from you: question q-1"),
             "the owner's message was not left to the turn-boundary hooks: {then}"
