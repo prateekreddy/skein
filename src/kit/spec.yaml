@@ -86,11 +86,22 @@ memory: |
 
   Run builds, test suites, CI-like runs and browser runs as `skein-job run -- <cmd>`. It waits
   until the fleet grants it cores, so boxes do not starve each other, then runs the command in this
-  box and exits with its status. `--cores N` asks for N; with none, skein picks from that command's
-  past runs. A `skein-job` inside another's command runs at once, without waiting. It ends with one
-  line on stderr of what the job used, such as `asked 4 cores, used 1.3 avg (peak 3.8), 1.4 GB
-  peak, 6m12s`. In Claude Code the person sees the wait, and its place in the queue, in the spinner.
-  A job the owner stops from the cockpit says so and exits 137: do not just run it again.
+  box and exits with its status.
+
+  - **Wrap the work, once.** Wrap the outermost command that builds or tests, not each step inside
+    it: a `skein-job` inside another's command runs at once, without waiting. Do not wrap what
+    mostly waits, such as a dev server, a watcher, a `sleep` loop or a download.
+  - **Let skein size it.** With no `--cores`, skein picks from what that command used before; pass
+    `--cores N` only when you know better. The command is told its grant (`CARGO_BUILD_JOBS`,
+    `MAKEFLAGS=-jN`, `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`), so do not hard-code `-j`. Give a
+    whole CI run `--class ci`, training `--class train` and a WebKit build `--class webkit`: until
+    a command has a run behind it, skein reserves memory by its class.
+  - **The wait is part of the run.** It counts against your command's timeout, so give a long job a
+    timeout that covers the queue too, or run it in the background. In Claude Code the person sees
+    the wait, and its place in the queue, in the spinner.
+  - **Read its last line.** It ends with one line on stderr of what the job used, such as `asked 4
+    cores, used 1.3 avg (peak 3.8), 1.4 GB peak, 6m12s`. A job the owner stops from the cockpit
+    says so and exits 137: do not just run it again.
 
   ## Asking the owner
 
