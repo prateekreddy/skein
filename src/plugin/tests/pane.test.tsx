@@ -573,7 +573,9 @@ const BAND = {
 // yet removed, read merged too; with the running checks taken out of `refreshLanded` and
 // `stageOf`, busy read merged while at work; with `laneRuns`'s hour taken out, gone was still on
 // the board an hour on.
-// Sixty one-minute ticks take about 4 s on a quiet box and passed 5 s on CI, so this one gets 30.
+// Sixty one-minute ticks run every timer of the session sixty times over, so this is the suite's
+// longest test; it passed the kit's 5 s on CI before the agents panel's clock stopped ticking
+// undrawn (SKEIN-1457), and keeps a 30 s ceiling because the box's load sets its time.
 test('a lane whose work landed is drawn merged, then leaves the board an hour on; the others stay as they were', { timeoutMs: 30_000 }, async ($, on) => {
   // kept is merged too, but its worktree is not removed yet: the coordinator is not done with it.
   const { b, clock } = await mergedBox($, on, [`${'c'.repeat(40)}>${'a'.repeat(40)}`])
