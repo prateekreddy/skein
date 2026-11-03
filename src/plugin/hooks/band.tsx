@@ -702,9 +702,9 @@ export function waitingThings(found: SkeinBand): Waiting[] {
   return out
 }
 
-// What skein asks, and, when a build is running, how much of the box is in it: skein asks only for
-// what can be cleared now, so a box whose space is all in a running build is asked for none of it
-// (SKEIN-1391).
+// What skein asks, and how much of the box is in use now: skein asks only for what can be cleared
+// now, so a box whose space is all in use, by a build or any other process in it, is asked for none
+// of it (SKEIN-1391, SKEIN-1462).
 export function askLine(ask: SkeinDiskAsk): string {
   const why =
     ask.why === 'allowance'
