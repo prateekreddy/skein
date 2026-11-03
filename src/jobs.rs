@@ -257,6 +257,14 @@ impl Usage {
 /// tokens or values another box has no business reading. Of each word only what follows its last
 /// `/` is kept, an argument with an `=` is never taken (`KEY=value`, `--flag=value`), and each is
 /// cut to 40 characters.
+///
+/// It is also what a command's runs are kept under in the history, so leading launchers are skipped
+/// first, with their own flags and arguments: `env`, `bash`/`sh`/`zsh`/`dash`, `timeout`, `nice`,
+/// `nohup`, `stdbuf`, `time` and `ionice`, stacked in any order. `env A=1 timeout 200 bash x.sh
+/// foo` is `x.sh foo`; kept whole it was `env timeout`, one record for every command run that way,
+/// without the word that tells them apart. A shell given `-c` or `-s` has no script to name, so it
+/// is `bash -c` (or `-s`). A command that is nothing but launchers, such as `timeout 200`, is named
+/// as before.
 pub fn short_command(argv: &[String]) -> String {
     let word = |w: &str| -> String {
         w.rsplit('/')
@@ -265,6 +273,92 @@ pub fn short_command(argv: &[String]) -> String {
             .chars()
             .take(40)
             .collect()
+    };
+    // The flags of each launcher that take the next word as their value. A flag given its value
+    // after an `=`, or joined to it (`-n5`, `-oL`), is one word and needs no entry.
+    let takes_value = |launcher: &str, flag: &str| -> bool {
+        let flags: &[&str] = match launcher {
+            "env" => &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+            "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+            "nice" => &["-n", "--adjustment"],
+            "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
+            "time" => &["-f", "--format", "-o", "--output"],
+            "ionice" => &[
+                "-c",
+                "--class",
+                "-n",
+                "--classdata",
+                "-p",
+                "--pid",
+                "-P",
+                "--pgid",
+                "-u",
+                "--uid",
+            ],
+            _ => &[],
+        };
+        flags.contains(&flag)
+    };
+    let mut i = 0;
+    while let Some(launcher) = argv.get(i).map(|p| word(p)) {
+        let mut j = i + 1;
+        match launcher.as_str() {
+            "env" | "timeout" | "nice" | "stdbuf" | "time" | "ionice" | "nohup" => {
+                while let Some(a) = argv.get(j) {
+                    if a == "--" {
+                        j += 1;
+                        break;
+                    }
+                    let is_flag = a.starts_with('-') && a.len() > 1;
+                    if !(is_flag || (launcher == "env" && a.contains('='))) {
+                        break;
+                    }
+                    j += if is_flag && takes_value(&launcher, a) {
+                        2
+                    } else {
+                        1
+                    };
+                }
+                // `timeout`'s own first plain word is its duration, not the command.
+                if launcher == "timeout" {
+                    j += 1;
+                }
+            }
+            "bash" | "sh" | "zsh" | "dash" => {
+                while let Some(a) = argv.get(j) {
+                    if a == "--" {
+                        j += 1;
+                        break;
+                    }
+                    if !(a.starts_with('-') || a.starts_with('+')) || a.len() < 2 {
+                        break;
+                    }
+                    // A cluster of short options, such as `-ec`: `-c` means the next word is
+                    // shell code and `-s` means the script is read from stdin, so there is no
+                    // script to name, and the code is not a name either (it may hold anything, and
+                    // is never the same twice). The shell and that flag are the most there is.
+                    let cluster = !a.starts_with("--");
+                    if cluster {
+                        if let Some(mode) = a[1..].chars().find(|&c| c == 'c' || c == 's') {
+                            return format!("{launcher} -{mode}");
+                        }
+                    }
+                    // `-o pipefail`, `+O extglob`, `--rcfile <file>`: the option is the next word.
+                    let value_next = match cluster {
+                        true => a.ends_with('o') || a.ends_with('O'),
+                        false => a == "--rcfile" || a == "--init-file",
+                    };
+                    j += if value_next { 2 } else { 1 };
+                }
+            }
+            _ => break,
+        }
+        i = j;
+    }
+    // Nothing but launchers: named as before, from the first word.
+    let argv = match i < argv.len() {
+        true => &argv[i..],
+        false => argv,
     };
     let Some(program) = argv.first().map(|p| word(p)).filter(|p| !p.is_empty()) else {
         return String::new();
@@ -2391,10 +2485,9 @@ mod tests {
                 "env",
                 "TOKEN=abc",
                 "/srv/scripts/run.sh",
-                "--key",
-                "k"
+                "--quiet"
             ])),
-            "env run.sh"
+            "run.sh"
         );
         assert_eq!(short_command(&argv(&["make", "-j8"])), "make");
         assert_eq!(short_command(&argv(&[])), "");
@@ -2412,6 +2505,59 @@ mod tests {
         let v = view_for(&q, "api-main", Pool::default(), at(0));
         assert_eq!(v.ahead.len(), 1, "{v:#?}");
         assert_eq!(v.ahead[0].command, "cargo build");
+    }
+
+    /// **A command run through a launcher is named by what it launches** (SKEIN-1470): the
+    /// history is keyed by this name, and `env corepack` or `bash ci-run.sh` put unrelated
+    /// commands in one record and lost the word that tells them apart.
+    ///
+    /// What would make it fail: the launcher loop removed (every case below names its launcher,
+    /// such as `env corepack`), one launcher missing from it (that case names the launcher), a
+    /// launcher's flag value or `timeout`'s duration taken as the command (`5 …`, `L …`), a
+    /// `bash -c` string taken as a name, or a command of nothing but launchers naming nothing.
+    #[test]
+    fn a_short_command_skips_the_launchers_in_front_of_it() {
+        let short =
+            |a: &[&str]| short_command(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            short(&["env", "-u", "HOME", "A=1", "corepack", "pnpm"]),
+            "corepack pnpm"
+        );
+        assert_eq!(
+            short(&["/bin/bash", "-e", "ci-run.sh", "s685"]),
+            "ci-run.sh s685"
+        );
+        assert_eq!(short(&["sh", "-o", "pipefail", "x.sh"]), "x.sh");
+        assert_eq!(short(&["zsh", "--", "z.sh", "a"]), "z.sh a");
+        assert_eq!(short(&["dash", "d.sh"]), "d.sh");
+        assert_eq!(short(&["bash", "-ec", "cargo test && rm x"]), "bash -c");
+        assert_eq!(short(&["sh", "-s", "arg"]), "sh -s");
+        assert_eq!(
+            short(&["timeout", "-k", "5", "--signal=INT", "200", "cargo", "test"]),
+            "cargo test"
+        );
+        assert_eq!(short(&["nice", "-n", "19", "make", "all"]), "make all");
+        assert_eq!(short(&["nohup", "gentle", "run"]), "gentle run");
+        assert_eq!(
+            short(&["stdbuf", "-o", "L", "-eL", "tail", "log"]),
+            "tail log"
+        );
+        assert_eq!(
+            short(&["/usr/bin/time", "-f", "%e", "cargo", "build"]),
+            "cargo build"
+        );
+        assert_eq!(short(&["ionice", "-c", "3", "rsync", "src"]), "rsync src");
+        assert_eq!(
+            short(&["env", "A=1", "timeout", "200", "bash", "x.sh", "foo"]),
+            "x.sh foo"
+        );
+        assert_eq!(
+            short(&["nohup", "nice", "-n5", "env", "bash", "-c", "secret"]),
+            "bash -c"
+        );
+        // Nothing but launchers: the old rule, from the first word.
+        assert_eq!(short(&["timeout", "200"]), "timeout 200");
+        assert_eq!(short(&["env", "A=1"]), "env");
     }
 
     /// **A job with `--min` starts smaller when that is what fits, and never below its min.** Four
