@@ -486,14 +486,60 @@ export function endLine(ended: NonNullable<ReturnType<typeof jobEnded>>, command
 }
 
 /** A command in two words, as skein names a job to another box (`short_command` in
- * `src/jobs.rs`): its program and its first argument that is not a flag or a `KEY=value`. */
+ * `src/jobs.rs`, which this follows rule for rule): leading launchers skipped with their own
+ * flags (`env`, `bash`/`sh`/`zsh`/`dash`, `timeout`, `nice`, `nohup`, `stdbuf`, `time`, `ionice`),
+ * then the program and its first argument that is not a flag or a `KEY=value`. A shell given `-c`
+ * or `-s` is `bash -c`; a command of launchers alone is named from its first word. */
 export function shortCommand(command: string): string {
-  const words = command.split(/\s+/).filter(w => w !== '')
+  const all = command.split(/\s+/).filter(w => w !== '')
   const word = (w: string) => (w.split('/').pop() ?? '').slice(0, 40)
+  let i = 0
+  for (;;) {
+    const at = all[i]
+    if (at === undefined) break
+    const launcher = word(at)
+    let j = i + 1
+    if (LAUNCHERS.has(launcher)) {
+      for (let a = all[j]; a !== undefined; a = all[j]) {
+        if (a === '--') { j += 1; break }
+        const isFlag = a.startsWith('-') && a.length > 1
+        if (!(isFlag || (launcher === 'env' && a.includes('=')))) break
+        j += isFlag && (LAUNCHER_VALUE_FLAGS[launcher] ?? []).includes(a) ? 2 : 1
+      }
+      // `timeout`'s own first plain word is its duration, not the command.
+      if (launcher === 'timeout') j += 1
+    } else if (SHELLS.has(launcher)) {
+      for (let a = all[j]; a !== undefined; a = all[j]) {
+        if (a === '--') { j += 1; break }
+        if (!(a.startsWith('-') || a.startsWith('+')) || a.length < 2) break
+        const cluster = !a.startsWith('--')
+        // `-c` is shell code and `-s` a script on stdin: nothing to name, and the code is no name.
+        const mode = cluster ? [...a.slice(1)].find(c => c === 'c' || c === 's') : undefined
+        if (mode !== undefined) return `${launcher} -${mode}`
+        const valueNext = cluster ? a.endsWith('o') || a.endsWith('O') : a === '--rcfile' || a === '--init-file'
+        j += valueNext ? 2 : 1
+      }
+    } else break
+    i = j
+  }
+  const words = i < all.length ? all.slice(i) : all
   const program = words[0] === undefined ? '' : word(words[0])
   const first = words.slice(1).find(w => !w.startsWith('-') && !w.includes('='))
 
-  return first === undefined ? program : `${program} ${word(first)}`
+  return first === undefined || word(first) === '' ? program : `${program} ${word(first)}`
+}
+
+const LAUNCHERS = new Set(['env', 'timeout', 'nice', 'stdbuf', 'time', 'ionice', 'nohup'])
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash'])
+/** Each launcher's flags that take the next word as their value (`takes_value` in
+ * `short_command`). */
+const LAUNCHER_VALUE_FLAGS: Record<string, readonly string[]> = {
+  env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'],
+  nice: ['-n', '--adjustment'],
+  stdbuf: ['-i', '-o', '-e', '--input', '--output', '--error'],
+  time: ['-f', '--format', '-o', '--output'],
+  ionice: ['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'],
 }
 
 // ------------------------------------------------------------------------------------------------

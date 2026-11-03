@@ -707,3 +707,23 @@ test('unfolding a group leaves what the model read as the tool gave it', async (
   expect(ran.result).toEqual(answer)
   expect(job.result).toEqual(F.JOB_BASH_OUTPUT)
 })
+
+// What would make it fail: `shortCommand` naming a job by its launcher, as skein did before
+// SKEIN-1470, so this box's spinner said `env timeout` where every other box reads `ci-run.sh
+// s685`. Watched: with the launcher loop in `shortCommand` cut, the message read `env timeout`.
+test('the spinner names a job launched through env, timeout and bash by what they launch, as skein does', async ($, on) => {
+  const handed = engine(on)
+  mock.clock(on, { now: NOW })
+  const command = 'env A=1 timeout 200 bash ci-run.sh s685'
+  on('fs.read', () => ({ value: JSON.stringify({ ...F.JOBS_VIEW, jobs: [{ ...F.JOBS_VIEW.jobs[0], command }] }) }))
+  const bash = slowBash(on)
+
+  const call = $.tool.call({ tool: 'Bash', command: `skein-job run -- ${command}`, tool_use_id: 'b3' } as never)
+  await bash.isReached
+  const ui = await $.ui.mount(SPINNER('main'))
+  await ui.drawn()
+  expect(handed.at(-1)).toMatchObject({ message: 'Waiting for a fleet slot · #2 · ci-run.sh s685 · 1 ahead: api-main cargo build' })
+  await ui.unmount()
+  bash.release()
+  await call
+})
