@@ -158,7 +158,7 @@ impl Peers {
             probe = skein::util::sh_quote(probe),
             args = quoted.join(" "),
         );
-        let out = Command::new("bash")
+        let out = box_runner("bash")
             .arg("-c")
             .arg(&runner)
             .output()

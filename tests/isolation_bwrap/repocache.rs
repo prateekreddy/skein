@@ -176,7 +176,7 @@ fn in_repo_box_with(
         inside = skein::util::sh_quote(&inside),
         arg = q(arg),
     );
-    let out = Command::new("bash")
+    let out = box_runner("bash")
         .arg("-c")
         .arg(&runner)
         .output()
