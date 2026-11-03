@@ -37,6 +37,14 @@
 //! counts. A repo alone may use every core; when another repo has a job waiting, that job takes
 //! the next freed cores first. Nothing running is ever stopped by the queue.
 //!
+//! **An idle job lends its cores** (SKEIN-1469). A granted job measured using under
+//! [`IDLE_BELOW`] of a core for [`IDLE_AFTER`] is idle, and [`schedule`] counts its cores as free
+//! while it stays so: two CI runs were measured holding two cores each for six minutes at 0.01,
+//! waiting on their own script's lock. It is never stopped and its grant is never taken back; the
+//! moment it is read busy again it holds its cores again, and the pool may be over-granted until
+//! enough jobs end. Nothing is capped (a job's cgroup has a weight and no `cpu.max`), so the kernel
+//! shares the cores by weight meanwhile, and nothing new is granted until the busy jobs fit.
+//!
 //! **A grant is freed by the kernel's word, not the box's.** A granted job holds its cores while
 //! the wrapper's pid is in the box's `cgroup.procs`; a wrapper killed with `-9` writes no done
 //! file, and gives them back on the next tick anyway. Every duration is measured on the host's
@@ -70,6 +78,19 @@ pub const DEFAULT_MAX_CORES_PER_JOB: u32 = 4;
 /// How far the cores granted may run past the machine's unless the config says otherwise: jobs
 /// rarely use every core they ask for, and admission also counts what they are measured to use.
 pub const DEFAULT_OVERSUBSCRIBE: f64 = 1.5;
+
+/// The most cores a granted job may be read using and still count as idle: what a process blocked
+/// on a lock, a socket or a sleep uses, and well under what a compiler or a test thread uses while
+/// it works. The jobs measured idle on 2026-11-02 read 0.00 to 0.01.
+pub const IDLE_BELOW: f64 = 0.1;
+
+/// How long a granted job must stay under [`IDLE_BELOW`], on every reading, before its cores are
+/// lent (SKEIN-1469). A chosen figure, not a measured one: long enough that the pauses inside busy
+/// work (a link waiting on its last crate, a fetch of dependencies, a test waiting on a server it
+/// started) are not taken for idleness, since lending across a pause starts a job beside one that
+/// is about to need its cores back; short enough to lend most of the shortest idle spell measured,
+/// six minutes on its own script's lock, where the longest was 58 minutes.
+pub const IDLE_AFTER: Duration = Duration::from_secs(180);
 
 /// The kinds of heavy work a job may say it is. Anything else is read as `build`.
 pub const CLASSES: [&str; 5] = ["build", "test", "ci", "webkit", "train"];
@@ -211,6 +232,11 @@ pub struct Job {
     /// running once its wrapper had gone ([`cgroup::stop_leftovers`]).
     #[serde(default)]
     pub leftovers: u32,
+    /// When it was first read using under [`IDLE_BELOW`], with every reading since under it too;
+    /// empty while it is read busy and once it is not running. A tick with no reading of it leaves
+    /// this as it was. It is idle once this is [`IDLE_AFTER`] ago ([`Job::idle_secs`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub idle_since: String,
 }
 
 /// What a finished job used, from its own cgroup.
@@ -283,6 +309,16 @@ pub fn short_command(argv: &[String]) -> String {
 impl Job {
     fn is_active(&self) -> bool {
         self.state == "waiting" || self.state == "granted"
+    }
+
+    /// The seconds a granted job has been idle at `now`, once it counts as idle: read under
+    /// [`IDLE_BELOW`] on every reading for at least [`IDLE_AFTER`]. `None` for any other job.
+    pub fn idle_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        if self.state != "granted" || self.idle_since.is_empty() {
+            return None;
+        }
+        let secs = secs_between(&self.idle_since, now);
+        (secs >= IDLE_AFTER.as_secs() as i64).then_some(secs)
     }
 
     /// The cores a granted job holds. One granted by a skein from before cores holds the default
@@ -397,10 +433,12 @@ pub fn limits() -> Limits {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Pool {
     pub cores: u32,
-    /// Granted to running jobs, fleet-wide.
+    /// Granted to running jobs, fleet-wide, idle ones too.
     pub granted: u32,
     /// What a waiting job could start with now.
     pub free: u32,
+    /// Of `granted`, the cores of idle jobs, which `free` counts as free (SKEIN-1469).
+    pub lent: u32,
 }
 
 /// One box's view of its jobs: what the wrapper waits on and the agents panel shows.
@@ -420,6 +458,9 @@ pub struct View {
     /// Cores a waiting job could start with now.
     #[serde(default)]
     pub free: u32,
+    /// Of `granted`, the cores of idle jobs, lent to waiting ones ([`Pool::lent`]).
+    #[serde(default)]
+    pub lent: u32,
     #[serde(default)]
     pub running: usize,
     #[serde(default)]
@@ -473,6 +514,10 @@ pub struct ViewJob {
     /// What it used, once it has ended and was measured; `reason` then says it in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Usage>,
+    /// Seconds it has been idle, while it runs idle and its cores are lent ([`Job::idle_secs`]);
+    /// `reason` then says it in words, such as `idle 6m, its cores lent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_secs: Option<i64>,
 }
 
 // ───────────────────────────── one tick ─────────────────────────────
@@ -722,6 +767,21 @@ fn cores_word(n: u32) -> String {
     }
 }
 
+/// Seconds as a short span, as the cockpit's `jobSpan` says it: `40s`, `6m`, `2h 5m`.
+fn span(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s % 3600 < 60 => format!("{}h", s / 3600),
+        s => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// `idle 6m, its cores lent`: what an idle job's row says.
+fn idle_said(secs: i64) -> String {
+    format!("idle {}, its cores lent", span(secs))
+}
+
 /// `stopped 2 leftover processes`.
 fn leftovers_said(n: u32) -> String {
     match n {
@@ -758,6 +818,11 @@ fn gb(mib: u64) -> String {
 /// A job with a `min` starts with fewer than it asked, never fewer than `min`, when that is what
 /// fits.
 ///
+/// **An idle job's cores are lent.** A running job `idle` names ([`Job::idle_secs`], which the
+/// tick passes) does not count against the ceiling, so its cores may be granted to a waiting job.
+/// Its grant stands, and the moment it is not idle it counts again: the cores held may then be
+/// past the ceiling, and nothing is granted until they are back within it.
+///
 /// **What waits behind what.** A job that does not fit for cores holds the cores it waits for:
 /// every job after it waits too, so a big ask is not passed for ever by small ones, and another
 /// repo's job really does get the next freed cores. A job held by memory, or whose box is asked
@@ -768,6 +833,7 @@ pub fn schedule(
     limits: Limits,
     memory_asked: &dyn Fn(&str) -> bool,
     in_use: &dyn Fn(&Job) -> Option<f64>,
+    idle: &dyn Fn(&Job) -> bool,
     machine_busy: Option<f64>,
 ) -> Pool {
     let ask_cap = limits.max_cores_per_job.min(limits.cores).max(1);
@@ -782,11 +848,16 @@ pub fn schedule(
         };
     }
     let ceiling = limits.grant_ceiling();
+    // The cores held against the ceiling: every running job's but an idle one's, which are lent.
     let mut granted: u32 = 0;
+    let mut lent: u32 = 0;
     let mut used: f64 = 0.0;
     for j in queue.jobs.iter().filter(|j| j.state == "granted") {
         let holds = j.holds();
-        granted += holds;
+        match idle(j) {
+            true => lent += holds,
+            false => granted += holds,
+        }
         used += in_use(j)
             .filter(|u| u.is_finite() && *u >= 0.0)
             .unwrap_or(holds as f64);
@@ -798,7 +869,7 @@ pub fn schedule(
     let machine_busy = machine_busy.filter(|b| b.is_finite() && *b >= 0.0);
     // What the machine has idle once this pass's grants are added to the reading; all of it when
     // there is no reading.
-    let idle = |given: u32| -> u32 {
+    let idle_now = |given: u32| -> u32 {
         match machine_busy {
             Some(busy) => (limits.cores as f64 - busy - given as f64).floor().max(0.0) as u32,
             None => u32::MAX,
@@ -844,7 +915,7 @@ pub fn schedule(
             held_for = Some(job.repo.clone());
             continue;
         }
-        if idle(given) < job.min {
+        if idle_now(given) < job.min {
             let busy = machine_busy.unwrap_or(0.0) + given as f64;
             job.reason = format!(
                 "machine busy: {} of {} cores in use",
@@ -854,7 +925,7 @@ pub fn schedule(
             held_for = Some(job.repo.clone());
             continue;
         }
-        let give = job.cores.min(fits).min(idle(given));
+        let give = job.cores.min(fits).min(idle_now(given));
         job.state = "granted".into();
         job.granted_cores = give;
         job.reason.clear();
@@ -866,8 +937,9 @@ pub fn schedule(
     }
     Pool {
         cores: limits.cores,
-        granted,
-        free: free(granted, used).min(idle(given)),
+        granted: granted + lent,
+        free: free(granted, used).min(idle_now(given)),
+        lent,
     }
 }
 
@@ -934,6 +1006,7 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
             "" => parse_stamp(&job.ended).unwrap_or(now),
             g => parse_stamp(g).unwrap_or(now),
         };
+        let idle_secs = job.idle_secs(now);
         jobs.push(ViewJob {
             id: job.id.clone(),
             class: job.class.clone(),
@@ -945,7 +1018,11 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
             granted_cores: job.granted_cores,
             position: (job.state == "waiting").then(|| place(i)).flatten(),
             reason: match (job.used, job.leftovers) {
-                _ if job.is_active() => job.reason.clone(),
+                _ if job.is_active() => match (idle_secs, job.reason.as_str()) {
+                    (Some(secs), "") => idle_said(secs),
+                    (Some(secs), why) => format!("{why}; {}", idle_said(secs)),
+                    (None, why) => why.to_string(),
+                },
                 (Some(u), 0) => u.said(),
                 (Some(u), n) => format!("{}; {}", u.said(), leftovers_said(n)),
                 (None, 0) => job.reason.clone(),
@@ -956,6 +1033,7 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
                 .then(|| parse_stamp(&job.ended).map(|e| secs_between(&job.granted, e)))
                 .flatten(),
             used: job.used,
+            idle_secs,
         });
     }
     View {
@@ -964,6 +1042,7 @@ pub fn view_for(queue: &Queue, name: &str, pool: Pool, now: DateTime<Utc>) -> Vi
         cores: pool.cores,
         granted: pool.granted,
         free: pool.free,
+        lent: pool.lent,
         running: queue.jobs.iter().filter(|j| j.state == "granted").count(),
         jobs,
         ahead,
@@ -1116,25 +1195,40 @@ pub fn tick(
             live.insert((b.clone(), id.clone()), rate);
         }
     }
+    // Whether each running job is idle, from the rate just read and no second measurement
+    // (SKEIN-1469): a reading under IDLE_BELOW starts its idle spell or carries it on, any other
+    // reading ends it, and a job with no reading this tick keeps the spell it had.
+    for job in queue.jobs.iter_mut().filter(|j| j.state == "granted") {
+        match live.get(&(job.box_name.clone(), job.id.clone())) {
+            Some(&rate) if rate < IDLE_BELOW => {
+                if job.idle_since.is_empty() {
+                    job.idle_since = stamp(now);
+                }
+            }
+            Some(_) => job.idle_since.clear(),
+            None => {}
+        }
+    }
     let states = places.states.clone();
     let pool = schedule(
         &mut queue,
         limits,
         &|name| memory_asked(&states, name),
         &|job| live.get(&(job.box_name.clone(), job.id.clone())).copied(),
+        &|job| job.idle_secs(now).is_some(),
         machine_busy,
     );
     granted_now(&mut queue, &before, now);
-    // A job granted now moves into a cgroup of its own, capped and weighted for the cores it was
-    // granted, before its view says `granted`, which is what the wrapper waits for before it
-    // starts the command (SKEIN-1419).
+    // A job granted now moves into a cgroup of its own, weighted for the cores it was granted and
+    // never capped at them (SKEIN-1469), before its view says `granted`, which is what the wrapper
+    // waits for before it starts the command (SKEIN-1419).
     for job in queue.jobs.iter_mut().filter(|j| j.state == "granted") {
         if before.contains(&(job.box_name.clone(), job.id.clone())) {
             continue;
         }
         let cores = Some(job.holds() as f64);
         if let Err(why) = cgroup::place(&places.cgroups, &job.box_name, &job.id, job.pid, cores) {
-            job.reason = format!("runs in its box's cgroup, uncapped and unmeasured: {why}");
+            job.reason = format!("runs in its box's cgroup, unweighted and unmeasured: {why}");
         }
     }
     let boxes_with_jobs: BTreeSet<&String> = queue.jobs.iter().map(|j| &j.box_name).collect();
@@ -1157,6 +1251,9 @@ pub fn tick(
         let key = (job.box_name.clone(), job.id.clone());
         let running = job.state == "granted";
         job.using = live.get(&key).copied().filter(|_| running);
+        if !running {
+            job.idle_since.clear();
+        }
         job.mem_mib = running
             .then(|| {
                 cgroup::memory_now(&cgroup::job_cgroup(&places.cgroups, &job.box_name, &job.id))
@@ -1546,6 +1643,9 @@ pub struct FleetView {
     pub granted: u32,
     #[serde(default)]
     pub free: u32,
+    /// Of `granted`, the cores of idle jobs, lent to waiting ones ([`Pool::lent`]).
+    #[serde(default)]
+    pub lent: u32,
     /// Running jobs first, in the order skein saw them, then waiting ones in the order they go.
     #[serde(default)]
     pub jobs: Vec<FleetJob>,
@@ -1581,10 +1681,13 @@ pub struct FleetJob {
     /// Its place among the waiting, from 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<usize>,
-    /// Why a waiting job has not started; why a running one is uncapped, when it is.
+    /// Why a waiting job has not started; why a running one is unmeasured, when it is.
     pub reason: String,
     /// Seconds it has waited, while it waits, or run, while it runs, at `at`.
     pub secs: i64,
+    /// Seconds it has been idle, while it runs idle and its cores are lent ([`Job::idle_secs`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_secs: Option<i64>,
 }
 
 /// The cockpit's jobs list, from the queue and the pool as one tick left them.
@@ -1622,6 +1725,7 @@ pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
                 },
                 now,
             ),
+            idle_secs: job.idle_secs(now),
         }
     };
     let mut jobs: Vec<FleetJob> = queue
@@ -1641,6 +1745,7 @@ pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
         cores: pool.cores,
         granted: pool.granted,
         free: pool.free,
+        lent: pool.lent,
         jobs,
     }
 }
@@ -2067,6 +2172,10 @@ mod tests {
         None
     }
 
+    fn none_idle(_: &Job) -> bool {
+        false
+    }
+
     /// **A repo alone fills the whole machine.** Five two-core jobs of one repo on an eight-core
     /// machine with nothing measured: four start, eight cores granted, and the fifth waits for two
     /// cores with none free. The box's view says the same in cores.
@@ -2202,7 +2311,14 @@ mod tests {
                 job("w1", "doc", 1, "waiting"),
             ],
         };
-        let pool = schedule(&mut q, limits, &no_box_asked, &|_| Some(0.0), None);
+        let pool = schedule(
+            &mut q,
+            limits,
+            &no_box_asked,
+            &|_| Some(0.0),
+            &none_idle,
+            None,
+        );
         assert_eq!(state_of(&q, "w1"), "waiting", "{q:#?}");
         assert_eq!(find(&q, "w1").reason, "waiting for 1 core (0 free)");
         assert_eq!(
@@ -2210,7 +2326,8 @@ mod tests {
             Pool {
                 cores: 4,
                 granted: 6,
-                free: 0
+                free: 0,
+                lent: 0
             }
         );
     }
@@ -2233,7 +2350,14 @@ mod tests {
             ],
         };
         let mut unread = queue.clone();
-        schedule(&mut unread, machine(4), &no_box_asked, &unmeasured, None);
+        schedule(
+            &mut unread,
+            machine(4),
+            &no_box_asked,
+            &unmeasured,
+            &none_idle,
+            None,
+        );
         assert_eq!(
             state_of(&unread, "w1"),
             "waiting",
@@ -2241,7 +2365,14 @@ mod tests {
         );
 
         let mut q = queue;
-        let pool = schedule(&mut q, machine(4), &no_box_asked, &|_| Some(0.5), None);
+        let pool = schedule(
+            &mut q,
+            machine(4),
+            &no_box_asked,
+            &|_| Some(0.5),
+            &none_idle,
+            None,
+        );
         assert_eq!(state_of(&q, "w1"), "granted", "{q:#?}");
         assert_eq!(find(&q, "w1").granted_cores, 2);
         assert_eq!(pool.granted, 6);
@@ -2273,6 +2404,7 @@ mod tests {
             machine(11),
             &no_box_asked,
             &|_| Some(1.0),
+            &none_idle,
             None,
         );
         assert_eq!(
@@ -2287,6 +2419,7 @@ mod tests {
             machine(11),
             &no_box_asked,
             &|_| Some(1.0),
+            &none_idle,
             Some(9.5),
         );
         assert_eq!(state_of(&q, "w1"), "waiting", "{q:#?}");
@@ -2305,6 +2438,7 @@ mod tests {
             machine(11),
             &no_box_asked,
             &|_| Some(1.0),
+            &none_idle,
             Some(6.0),
         );
         assert_eq!(find(&q, "w1").granted_cores, 4, "{q:#?}");
@@ -2357,7 +2491,7 @@ mod tests {
             mem_free_mib: Some(3584),
             ..machine(16)
         };
-        schedule(&mut q, limits, &no_box_asked, &unmeasured, None);
+        schedule(&mut q, limits, &no_box_asked, &unmeasured, &none_idle, None);
         assert_eq!(state_of(&q, "w-ci"), "waiting", "{q:#?}");
         assert_eq!(find(&q, "w-ci").reason, "memory: needs ~4 GB, 3.5 GB free");
         assert_eq!(state_of(&q, "w-b1"), "granted", "{q:#?}");
@@ -2431,7 +2565,14 @@ mod tests {
             schema: 1,
             jobs: vec![job("r1", "web", 3, "granted"), flexible, firm],
         };
-        schedule(&mut q, machine(4), &no_box_asked, &unmeasured, None);
+        schedule(
+            &mut q,
+            machine(4),
+            &no_box_asked,
+            &unmeasured,
+            &none_idle,
+            None,
+        );
         assert_eq!(state_of(&q, "w1"), "granted", "{q:#?}");
         assert_eq!(find(&q, "w1").granted_cores, 1, "{q:#?}");
         assert_eq!(state_of(&q, "w2"), "waiting", "{q:#?}");

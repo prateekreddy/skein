@@ -1,5 +1,5 @@
-//! A granted job's own cgroup, under its box's (SKEIN-1419), so skein can cap and measure that one
-//! job.
+//! A granted job's own cgroup, under its box's (SKEIN-1419), so skein can weigh and measure that
+//! one job.
 //!
 //! **The shape.** A box's cgroup is `<cgroups>/<box>` (`fleet::box_cgroup`), and it carries the
 //! box's memory ceiling and floor. cgroup v2 lets a cgroup hand a controller to its children only
@@ -22,8 +22,14 @@
 //! **Either a whole job cgroup or none.** [`place`] refuses before it makes anything when the box
 //! has no leaf (a box with no cgroup delegation, or one started before this) or when its cgroup does
 //! not hand on the `cpu` controller, and the job then runs in the box's own cgroup, as every job did
-//! before, with the reason in its view. The limits are written before the pid is moved, so a job
-//! never runs for a moment in a cgroup of its own with no limit on it.
+//! before, with the reason in its view. The weight and the memory floor are written before the pid
+//! is moved, so a job never runs for a moment in a cgroup of its own without them.
+//!
+//! **A weight, never a cap** (SKEIN-1469). A job's cgroup gets no `cpu.max`: a two-core job capped
+//! at two cores peaked at 2.1 with the fleet idle, which is cores left unused while work waited on
+//! them. Its weight shares the CPU out when jobs contend for it, and costs nothing when they do
+//! not, so a job may use every free core. The cores it was granted still reach its tools as
+//! `CARGO_BUILD_JOBS` and the rest, as a request for that much parallelism.
 //!
 //! **Measured at the end, then removed.** [`finish`] reads `cpu.stat`'s `usage_usec` and
 //! `memory.peak` from the job's cgroup and removes it. A job whose wrapper is gone, killed with `-9`
@@ -60,8 +66,9 @@ pub const BOX_LEAF: &str = "box";
 /// 100, the box's own processes get four fifths of the box's CPU whenever both want it, which is
 /// more than an idle agent and its shells ever use, so they stay responsive. A job's weight is
 /// capped below the leaf's, so no single job, however many cores it was granted, outweighs the
-/// person; 300 still lets a three-core job take three times a one-core job's share beside it. The
-/// cap on a job's speed is `cpu.max`, not this: a weight costs nothing while the machine is quiet.
+/// person; 300 still lets a three-core job take three times a one-core job's share beside it.
+/// Nothing caps a job's speed (SKEIN-1469): a weight decides only while the CPU is contended and
+/// costs nothing while the machine is quiet, so a job may use every core nobody else wants.
 pub const BOX_LEAF_WEIGHT: u32 = 400;
 
 /// A job's `cpu.weight` for each core it was granted. See [`BOX_LEAF_WEIGHT`].
@@ -81,9 +88,6 @@ pub const BOX_WEIGHT_PER_CORE: u32 = 100;
 /// The largest `cpu.weight` the kernel takes.
 pub const CPU_WEIGHT_MAX: u32 = 10_000;
 
-/// The `cpu.max` period, in microseconds: the kernel's default.
-const PERIOD_USEC: u64 = 100_000;
-
 /// Where box `box_name`'s job `id` has its cgroup.
 pub fn job_cgroup(cgroups: &Path, box_name: &str, id: &str) -> PathBuf {
     cgroups.join(box_name).join(format!("job-{id}"))
@@ -93,13 +97,6 @@ pub fn job_cgroup(cgroups: &Path, box_name: &str, id: &str) -> PathBuf {
 pub fn weight_for(cores: Option<f64>) -> u32 {
     let want = (cores.unwrap_or(1.0).max(0.0) * WEIGHT_PER_CORE).round() as u32;
     want.clamp(1, JOB_WEIGHT_MAX)
-}
-
-/// `cpu.max` for `cores`: that many periods' worth of CPU in each period.
-pub fn cpu_max_for(cores: f64) -> String {
-    // The kernel refuses a quota under 1 ms.
-    let quota = ((cores.max(0.0) * PERIOD_USEC as f64).round() as u64).max(1_000);
-    format!("{quota} {PERIOD_USEC}")
 }
 
 /// What a job's cgroup counted.
@@ -260,8 +257,8 @@ impl Cgroupfs for Kernel {
 
 // ───────────────────────────── a job's cgroup ─────────────────────────────
 
-/// Move box `box_name`'s wrapper `pid`, for job `id`, into a cgroup of the job's own, with
-/// `cpu.max` for `cores` when cores are given and a `cpu.weight` for them either way. Returns the
+/// Move box `box_name`'s wrapper `pid`, for job `id`, into a cgroup of the job's own, with a
+/// `cpu.weight` for `cores` (one core's when none are given) and never a `cpu.max`. Returns the
 /// job's cgroup, or why the job runs in its box's cgroup instead, in words for the job's view.
 pub fn place(
     cgroups: &Path,
@@ -304,9 +301,6 @@ pub(crate) fn place_with(
     let made = |e: io::Error| format!("could not make its cgroup: {e}");
     fs.mkdir(&dir).map_err(made)?;
     let mut writes = vec![("cpu.weight", weight_for(cores).to_string())];
-    if let Some(c) = cores {
-        writes.push(("cpu.max", cpu_max_for(c)));
-    }
     // The box's memory floor reaches its children only through theirs: with the controller handed
     // on, a child's `memory.min` of 0 is protected by none of its parent's (unless cgroupfs is mounted
     // with recursive memory protection). `max` takes all of the parent's, shared out by usage when
@@ -583,20 +577,30 @@ mod tests {
             .to_string()
     }
 
-    /// **A granted job gets its own cgroup, its limits are set before its pid is moved, and the cap
-    /// is the cores it was granted.**
+    /// **A granted job gets its own cgroup, weighted for the cores it was granted and never capped
+    /// at them, with its weight and floor set before its pid is moved** (SKEIN-1469).
     ///
-    /// What would make it fail: `cpu.max` not written when cores are given, or written as anything
-    /// but cores × the period; the pid written into the box's cgroup or leaf instead of the job's;
-    /// the pid moved before the limits (the order is asserted, because a job moved first runs
-    /// uncapped until the cap lands); the box's floor not reaching the job (`memory.min`).
+    /// What would make it fail: any `cpu.max` written for the job (the sabotage that was run: the
+    /// `cpu.max` write put back into `place_with`, and the list of writes then names it); the
+    /// weight not following the cores; the pid written into the box's cgroup or leaf instead of the
+    /// job's; the pid moved before the weight (the order is asserted, because a job moved first
+    /// runs unweighted until the weight lands); the box's floor not reaching the job
+    /// (`memory.min`).
     #[test]
-    fn a_placed_job_is_capped_at_its_cores_before_it_is_moved() {
+    fn a_placed_job_is_weighted_for_its_cores_and_never_capped() {
         let (_d, cgroups) = tree("cpu memory", true);
         let fs = Fake::default();
         let dir = place_with(&fs, &cgroups, "web-main", "j-1", 4242, Some(1.5)).unwrap();
         assert_eq!(dir, cgroups.join("web-main/job-j-1"));
-        assert_eq!(read(&dir.join("cpu.max")), "150000 100000");
+        let capped: Vec<String> = fs
+            .wrote
+            .borrow()
+            .iter()
+            .filter(|(p, _)| p.ends_with("cpu.max"))
+            .map(|(p, v)| format!("{} = {v}", p.display()))
+            .collect();
+        assert!(capped.is_empty(), "a job was capped: {capped:?}");
+        assert!(!dir.join("cpu.max").exists(), "a job was capped");
         assert_eq!(read(&dir.join("cpu.weight")), "150");
         assert_eq!(read(&dir.join("memory.min")), "max");
         assert_eq!(read(&dir.join("cgroup.procs")), "4242");
@@ -606,21 +610,20 @@ mod tests {
             .iter()
             .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        // The FIRST move, not the last: a pid moved early and again at the end still ran uncapped
-        // in between.
+        // The FIRST move, not the last: a pid moved early and again at the end still ran
+        // unweighted in between.
         assert_eq!(
             order.iter().position(|f| f == "cgroup.procs"),
             Some(order.len() - 1),
-            "the pid was moved before its limits were set: {order:?}"
+            "the pid was moved before its weight was set: {order:?}"
         );
     }
 
-    /// With no cores given, no cap, and one core's weight.
+    /// With no cores given, one core's weight.
     #[test]
-    fn a_job_with_no_cores_given_is_weighted_as_one_core_and_not_capped() {
+    fn a_job_with_no_cores_given_is_weighted_as_one_core() {
         let (_d, cgroups) = tree("cpu", true);
         let dir = place_with(&Fake::default(), &cgroups, "web-main", "j-2", 7, None).unwrap();
-        assert!(!dir.join("cpu.max").exists(), "a cap was invented");
         assert_eq!(read(&dir.join("cpu.weight")), "100");
         assert!(
             !dir.join("memory.min").exists(),
@@ -632,7 +635,7 @@ mod tests {
     ///
     /// What would make it fail: placing a job in a box with no leaf (its processes are in the box's
     /// own cgroup, and cgroup v2 refuses a child controller there), or with no `cpu` handed on (a
-    /// `cpu.max` that cannot be written), or leaving a half-made cgroup behind a refused write.
+    /// `cpu.weight` that cannot be written), or leaving a half-made cgroup behind a refused write.
     #[test]
     fn a_box_that_cannot_have_job_cgroups_says_why_and_makes_none() {
         let (_d, cgroups) = tree("cpu memory", false);
@@ -727,14 +730,12 @@ mod tests {
     }
 
     #[test]
-    fn weights_stay_below_the_box_and_caps_follow_the_cores() {
+    fn weights_follow_the_cores_and_stay_below_the_box() {
         assert_eq!(weight_for(None), 100);
         assert_eq!(weight_for(Some(0.5)), 50);
         assert_eq!(weight_for(Some(2.0)), 200);
         assert_eq!(weight_for(Some(16.0)), JOB_WEIGHT_MAX);
         assert_eq!(weight_for(Some(0.0)), 1);
-        assert_eq!(cpu_max_for(4.0), "400000 100000");
-        assert_eq!(cpu_max_for(0.0), "1000 100000");
     }
 
     /// **The live rate is the cores used between two readings**, and the first reading has none.
@@ -814,16 +815,16 @@ mod tests {
         q.jobs.iter().find(|j| j.id == id).expect("no such job")
     }
 
-    /// **The tick that grants a job moves its wrapper into the job's own cgroup, capped and weighted
-    /// for the cores it was granted, and the job holds them from there.**
+    /// **The tick that grants a job moves its wrapper into the job's own cgroup, weighted for the
+    /// cores it was granted, and the job holds them from there.**
     ///
     /// The wrapper's pid starts in the box's leaf, as a process the box's shell started does. After
     /// the granting tick it is in `job-<id>/cgroup.procs`, and the fixture then takes it out of the
     /// leaf as the kernel's move would: the next tick must still find it in the box.
     ///
     /// What would make it fail: no `place` in the tick's grant path (no job cgroup is made); the
-    /// grant's cores not passed to it (the sabotage that was run: `None` in their place, and no
-    /// `cpu.max` is written and the weight is one core's 100); or `pid_in_box` reading only the
+    /// grant's cores not passed to it (the sabotage that was run: `None` in their place, and the
+    /// weight is one core's 100); or `pid_in_box` reading only the
     /// box's own `cgroup.procs` (the job reads `gone` on the second tick, because its pid is only in
     /// the job's cgroup).
     #[test]
@@ -838,7 +839,6 @@ mod tests {
         let cg = job_cgroup(&places.cgroups, "web-main", "j-a");
         assert_eq!(read(&cg.join("cgroup.procs")), "31337");
         assert_eq!(job(&q, "j-a").granted_cores, 2, "{q:#?}");
-        assert_eq!(read(&cg.join("cpu.max")), "200000 100000");
         assert_eq!(read(&cg.join("cpu.weight")), "200");
 
         std::fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
@@ -1353,12 +1353,12 @@ mod tests {
         assert_eq!(read(&boxcg.join("cpu.weight")), "100");
     }
 
-    /// **A box with no cgroup delegation still runs its jobs, uncapped as before, and says so.**
+    /// **A box with no cgroup delegation still runs its jobs, unweighted as before, and says so.**
     ///
     /// What would make it fail: a refused placement holding the grant back (the job waits for
     /// ever on a box that can never have a job cgroup), or the refusal kept out of the view.
     #[test]
-    fn a_box_without_delegation_still_runs_its_jobs_and_says_they_are_uncapped() {
+    fn a_box_without_delegation_still_runs_its_jobs_and_says_they_are_unmeasured() {
         let (_d, places) = fleet(false);
         std::fs::write(places.cgroups.join("web-main/cgroup.procs"), "31337\n").unwrap();
         submit(&places, "j-c", 31337, "waiting");
@@ -1366,7 +1366,8 @@ mod tests {
         let view = crate::jobs::read_view(&places.states.join("web-main")).expect("no view");
         assert_eq!(view.jobs[0].state, "granted", "{view:#?}");
         assert!(
-            view.jobs[0].reason.contains("uncapped") && view.jobs[0].reason.contains("restarting"),
+            view.jobs[0].reason.contains("unmeasured")
+                && view.jobs[0].reason.contains("restarting"),
             "{view:#?}"
         );
         assert!(!job_cgroup(&places.cgroups, "web-main", "j-c").exists());
@@ -1380,6 +1381,122 @@ mod tests {
         assert!(
             job(&q, "j-d").reason.contains("does not delegate"),
             "{q:#?}"
+        );
+    }
+
+    /// **An idle job's cores go to a waiting job, and once it is busy again it holds them, and
+    /// nothing more is granted until the busy jobs fit** (SKEIN-1469). Four cores, a ceiling of
+    /// six. `j-idle` is granted four and is read using nothing; `j-wait`, asking four, waits with
+    /// two free by the ceiling. Before [`crate::jobs::IDLE_AFTER`] it still waits; after it, the
+    /// idle job's cores are lent and `j-wait` starts with four, eight granted in all, and both
+    /// views say the idle job's cores are lent. Then `j-idle` uses half a core: it is not idle,
+    /// still granted its four, the pool is eight held against a ceiling of six, and a one-core job
+    /// that fits by use waits with nothing free.
+    ///
+    /// What would make it fail: idleness never counted (the sabotage that was run: `idle_secs`
+    /// returning `None` always, and `j-wait` waits at 184 s, three minutes after the reading at
+    /// 4 s); `IDLE_AFTER` not waited for (it starts at 100 s); a busy reading not ending the spell
+    /// (the sabotage that was run: the `Some(_)` arm left empty, and the job still reads idle once
+    /// busy; were that not asserted, it stays lent and `j-one` gets the two the ceiling has left);
+    /// an idle job's grant taken back; the views saying nothing of it.
+    #[test]
+    fn an_idle_jobs_cores_are_lent_until_it_is_busy_again() {
+        let (_d, places) = fleet(true);
+        let leaf = places.cgroups.join("web-main").join(BOX_LEAF);
+        std::fs::write(leaf.join("cgroup.procs"), "41001\n41002\n41003\n").unwrap();
+        let ask = |id: &str, pid: u32, cores: u32| {
+            let body = serde_json::json!({"id": id, "class": "test", "argv": ["cargo", "test"],
+                                          "cwd": "/w", "pid": pid, "state": "waiting",
+                                          "cores": cores});
+            std::fs::write(
+                places.requests.join("web-main").join(format!("{id}.json")),
+                body.to_string(),
+            )
+            .unwrap();
+        };
+        let stat = |id: &str, usec: u64| {
+            std::fs::write(
+                job_cgroup(&places.cgroups, "web-main", id).join("cpu.stat"),
+                format!("usage_usec {usec}\n"),
+            )
+            .unwrap();
+        };
+        let mut rates = Rates::default();
+        ask("j-idle", 41001, 4);
+        let q = tick_with(&places, 0, &mut rates);
+        assert_eq!(job(&q, "j-idle").granted_cores, 4, "{q:#?}");
+        stat("j-idle", 5_000);
+        ask("j-wait", 41002, 4);
+        // Its first reading, at 2 s, has no rate; the second, at 4 s, reads it idle.
+        tick_with(&places, 2, &mut rates);
+        let q = tick_with(&places, 4, &mut rates);
+        assert_eq!(
+            job(&q, "j-idle").idle_since,
+            "2026-10-31T12:00:04Z",
+            "{q:#?}"
+        );
+        let q = tick_with(&places, 100, &mut rates);
+        assert_eq!(job(&q, "j-wait").state, "waiting", "lent too soon: {q:#?}");
+        assert_eq!(job(&q, "j-wait").reason, "waiting for 4 cores (2 free)");
+
+        let q = tick_with(&places, 184, &mut rates);
+        assert_eq!(
+            job(&q, "j-wait").state,
+            "granted",
+            "the idle job's cores were not lent: {q:#?}"
+        );
+        assert_eq!(job(&q, "j-wait").granted_cores, 4, "{q:#?}");
+        assert_eq!(job(&q, "j-idle").state, "granted", "{q:#?}");
+        assert_eq!(job(&q, "j-idle").granted_cores, 4, "{q:#?}");
+        let view = crate::jobs::read_view(&places.states.join("web-main")).expect("no view");
+        assert_eq!((view.granted, view.lent), (8, 4), "{view:#?}");
+        let idle = view.jobs.iter().find(|j| j.id == "j-idle").unwrap();
+        assert_eq!(idle.reason, "idle 3m, its cores lent", "{view:#?}");
+        assert_eq!(idle.idle_secs, Some(180), "{view:#?}");
+        let fleet: crate::jobs::FleetView = serde_json::from_str(
+            &std::fs::read_to_string(crate::jobs::fleet_view_path(&places)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fleet.lent, 4, "{fleet:#?}");
+        let rows: Vec<(&str, Option<i64>)> = fleet
+            .jobs
+            .iter()
+            .map(|j| (j.id.as_str(), j.idle_secs))
+            .collect();
+        assert_eq!(rows, [("j-idle", Some(180)), ("j-wait", None)]);
+
+        // `j-wait` read once at nothing, then both jobs at half a core: busy, and the pool is
+        // held past its ceiling.
+        stat("j-wait", 0);
+        tick_with(&places, 186, &mut rates);
+        stat("j-idle", 1_005_000);
+        stat("j-wait", 1_000_000);
+        ask("j-one", 41003, 1);
+        let q = tick_with(&places, 188, &mut rates);
+        assert_eq!(job(&q, "j-idle").state, "granted", "{q:#?}");
+        assert_eq!(
+            job(&q, "j-idle").granted_cores,
+            4,
+            "its grant was taken back: {q:#?}"
+        );
+        assert_eq!(
+            job(&q, "j-idle").idle_since,
+            "",
+            "still idle when busy: {q:#?}"
+        );
+        assert_eq!(
+            job(&q, "j-one").state,
+            "waiting",
+            "granted past the ceiling while the busy jobs do not fit: {q:#?}"
+        );
+        assert_eq!(job(&q, "j-one").reason, "waiting for 1 core (0 free)");
+        let view = crate::jobs::read_view(&places.states.join("web-main")).expect("no view");
+        assert_eq!((view.granted, view.lent, view.free), (8, 0, 0), "{view:#?}");
+        let busy = view.jobs.iter().find(|j| j.id == "j-idle").unwrap();
+        assert_eq!(
+            (busy.reason.as_str(), busy.idle_secs),
+            ("", None),
+            "{view:#?}"
         );
     }
 }

@@ -729,6 +729,9 @@ function heldNote(field, held) {
 // the row's hover beside its two-word form: the owner chose named over counted (2026-10-31). The
 // command, the folder and the box's class are the box's own words, so every one is escaped.
 //
+// **An idle job's cores are lent** (SKEIN-1469): a running row with `idle_secs` says so in its
+// figures, and the pool says how many of the granted cores are lent, as the queue counted them.
+//
 // **A link can open it**: `/#jobs` for the whole fleet, `/#jobs-<box>` for one box's jobs, so a
 // box's terminal pane can link to its own.
 
@@ -768,6 +771,7 @@ function jobFigures(j) {
     parts.push(j.granted_cores && j.granted_cores !== j.cores
       ? `asked ${cores(j.cores)}, granted ${j.granted_cores}` : `${cores(j.granted_cores || j.cores)}`);
     if (typeof j.using === "number") parts.push(`using ${j.using.toFixed(1)}`);
+    if (typeof j.idle_secs === "number") parts.push(`idle ${jobSpan(j.idle_secs)}, its cores lent`);
     parts.push(j.mem_measured ? `${gb(j.mem_mib)} GB` : `~${gb(j.mem_mib)} GB`);
     parts.push(`running ${jobSpan(j.secs)}`);
   } else {
@@ -783,7 +787,8 @@ function jobsHtml(view, box = "") {
   const v = view && typeof view === "object" ? view : {};
   const all = Array.isArray(v.jobs) ? v.jobs : [];
   const jobs = box ? all.filter(j => j.box === box) : all;
-  const pool = `<div class="jb-pool"><b>${v.cores | 0}</b> cores · <b>${v.granted | 0}</b> granted · <b>${v.free | 0}</b> free</div>`;
+  const lent = v.lent | 0 ? ` · <b>${v.lent | 0}</b> lent` : "";
+  const pool = `<div class="jb-pool"><b>${v.cores | 0}</b> cores · <b>${v.granted | 0}</b> granted${lent} · <b>${v.free | 0}</b> free</div>`;
   const stale = v.running === false
     ? `<div class="note jb-stale">The queue is not running: skein has not looked at it for a while, so this may be out of date.</div>` : "";
   const scope = box
