@@ -846,21 +846,21 @@ fn eventually<T>(bound: Duration, what: &str, mut ok: impl FnMut() -> Option<T>)
     }
 }
 
-/// **A granted job runs in a cgroup of its own under its box's, capped at the cores it is given; a
-/// kill of the box's cgroup still ends it; and once it has ended, what it used is read back and its
+/// **A granted job runs in a cgroup of its own under its box's, weighted and never capped; a kill
+/// of the box's cgroup still ends it; and once it has ended, what it used is read back and its
 /// cgroup removed** (SKEIN-1419). On real cgroups, through the real scheduler and the shipped
 /// wrapper.
 ///
 /// The wrapper starts in the box's leaf, as one a box's shell started does. The job's command
 /// reports its own `/proc/self/cgroup` before it does anything else, so where it says it is is
-/// where the tick put the wrapper **before** the wrapper read `granted`. The cap the tick set for
-/// the cores it granted is read back from the kernel. The box's cgroup is killed as `fleet::box_cgroup_kill` kills it, at the box's
+/// where the tick put the wrapper **before** the wrapper read `granted`. The kernel's own `cpu.max`
+/// for the job's cgroup is read back, and must be the uncapped `max` it makes every cgroup with
+/// (SKEIN-1469). The box's cgroup is killed as `fleet::box_cgroup_kill` kills it, at the box's
 /// level and not the job's, and the job's processes must be gone. The scheduler then sees the
 /// wrapper gone, reads what the job used, and removes its cgroup.
 ///
 /// What would make it fail: no placement in the tick's grant path, or one after the view says
-/// `granted` (the command reports the leaf: `/…/demo/box`); `cpu.max` not written for the granted
-/// cores;
+/// `granted` (the command reports the leaf: `/…/demo/box`); any `cpu.max` written for the job;
 /// a job cgroup made outside the box's (the kill misses it and `sleep` survives); the end path not
 /// reading the job's cgroup or not removing it. **Not run inside a box**, which has no cgroup it
 /// can write: there it skips and says so, and CI's runner, which has `sudo`, is where it runs.
@@ -934,10 +934,14 @@ fn a_granted_job_has_its_own_cgroup_is_killed_with_its_box_and_is_measured_at_th
         .and_then(|p| p.parse().ok())
         .expect("the job said no pid");
 
-    // (a) the cap, for the one core the one-core machine granted, as the granting tick set it.
+    // (a) no cap, though the one-core machine granted one core: the kernel's own `max`.
     assert_eq!(
-        fs::read_to_string(job_cg.join("cpu.max")).unwrap().trim(),
-        "100000 100000"
+        fs::read_to_string(job_cg.join("cpu.max"))
+            .unwrap()
+            .split_whitespace()
+            .next(),
+        Some("max"),
+        "the job's cgroup was capped"
     );
     let procs = fs::read_to_string(job_cg.join("cgroup.procs")).unwrap();
     assert!(procs.lines().any(|l| l == job_pid.to_string()), "{procs}");

@@ -40,6 +40,15 @@ test("a row says what it asked for, what it has and uses, its memory, and how lo
   assert.equal(jobFigures(waiting({ min: 1, cores: 4 })), "asks 1–4 cores · needs ~2 GB · waiting 40s");
 });
 
+// What would make it fail: an idle running row (`idle_secs` set) not saying so, a busy one saying
+// it, or the pool leaving out the cores lent, or naming lent cores when none are.
+test("an idle job says its cores are lent, and the pool counts them", () => {
+  assert.equal(jobFigures(running({ using: 0.01, idle_secs: 372 })), "4 cores · using 0.0 · idle 6m, its cores lent · 1.5 GB · running 2m");
+  assert.doesNotMatch(jobFigures(running()), /idle|lent/);
+  assert.match(jobsHtml(view([running({ idle_secs: 372 })], { lent: 4 })), /<b>4<\/b> granted · <b>4<\/b> lent · <b>1<\/b> free/);
+  assert.doesNotMatch(jobsHtml(view([running()])), /lent/);
+});
+
 // What would make it fail: a row with no Stop, a Stop that does not name its job, the pool not
 // drawn, or a box's words drawn as markup.
 test("every row has a Stop naming its job, the pool is shown, and a box's words are text", () => {
