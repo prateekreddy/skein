@@ -20,6 +20,7 @@ import type {
   EngineInterface,
   On,
   SessionStartInput,
+  Timer,
   ToolCallInput,
   ToolCallResult,
   TurnCompleteInput,
@@ -53,6 +54,12 @@ const LOCK_EVERY_MS = 5000
 const LANDED_EVERY_MS = 60_000
 const MERGED_SHOWN_MS = 60 * 60_000
 
+// The once-a-second clock that moves the running agents' times on (SKEIN-1457). Only the panel
+// draws `now`, so it runs only while the panel is open with a subagent running: a drawing of the
+// panel starts it, and its first tick after the panel closes or the last subagent ends stops it.
+// Running it all session cost a dispatch a second, the most of any timer here, for nothing drawn.
+let ticker: Timer | null = null
+
 // The repository's git directory, found once when the session starts, and the lanes, read again as
 // each subagent starts: those skein made, from `skein-mcp lane list`, the one reader of their
 // records, and any other worktree git records, made by hand. Not drawn from, so not in `$.state`:
@@ -75,15 +82,9 @@ export async function onStart($: EngineInterface, e: SessionStartInput): Promise
   })
   gitDir = await commonGitDir(files($), e.cwd)
 
-  // Ticks the running agents' clocks; quiet when nothing runs.
-  $.clock.every(1000, () => {
-    void (async () => {
-      const list = await read($, agents)
-      if (!list.some(a => a.status === 'running')) return
-      const at = await $.clock.now()
-      await update($, now, () => at)
-    })()
-  })
+  // A resumed session starts again: the clock the last start left waits for the next drawing.
+  ticker?.cancel()
+  ticker = null
   $.clock.every(LOCK_EVERY_MS, () => void refreshLock($))
   $.clock.every(LANDED_EVERY_MS, () => void refreshLanded($))
 }
@@ -230,7 +231,10 @@ export function register(on: On): void {
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, agents)
     const p: SkeinAgentsPanel = await read($, panel)
-    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+    // `now` subscribes the drawing to the clock's ticks; the clock itself is read too, so a
+    // drawing made while the clock was stopped is as current as one the clock ticked for.
+    const at = Math.max(await read($, now), await $.clock.now(), ...list.map(a => a.startedAt), 0)
+    if (list.some(a => a.status === 'running')) tick($)
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
@@ -320,6 +324,23 @@ export function register(on: On): void {
         )}
       </Box>
     )
+  })
+}
+
+/** The clock of the running agents' times, started where it is not running. */
+function tick($: EngineInterface): void {
+  if (ticker !== null) return
+  ticker = $.clock.every(1000, () => {
+    void (async () => {
+      const [list, panes] = await Promise.all([read($, agents), $.ui.panes().catch(() => [])])
+      if (!list.some(a => a.status === 'running') || !panes.some(p => p.id === PANE)) {
+        ticker?.cancel()
+        ticker = null
+        return
+      }
+      const at = await $.clock.now()
+      await update($, now, () => at)
+    })()
   })
 }
 
