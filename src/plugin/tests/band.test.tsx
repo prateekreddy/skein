@@ -316,14 +316,14 @@ test('the band says the disk ask in one dim line with nothing to press, and coun
 // the first expectation failed.
 const LIVE_CASES: Array<[string, Record<string, unknown>, string]> = [
   [
-    'part of the box is in a running build',
+    'part of the box is in use',
     { amount: 1228, live_mb: 3072 },
-    'skein asks this box to free 1.2G of disk: it is over its own allowance (3.0G more in a build running now).',
+    'skein asks this box to free 1.2G of disk: it is over its own allowance (3.0G more in use now).',
   ],
   [
-    'all it could clear is in a running build',
+    'all it could clear is in use',
     { amount: 0, live_mb: 3072 },
-    'skein asks this box to free disk, but none of it can be cleared now: it is over its own allowance (3.0G in a build running now).',
+    'skein asks this box to free disk, but none of it can be cleared now: it is over its own allowance (3.0G in use now).',
   ],
   [
     'nothing skein lists can be cleared',

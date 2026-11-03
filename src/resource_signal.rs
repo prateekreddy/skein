@@ -553,8 +553,8 @@ pub struct Ask {
     /// listed items can free now (SKEIN-1391). memory: throttles a minute, rounded. pids:
     /// processes running.
     pub amount: u64,
-    /// disk: MiB of what the box holds that is in a build running now, which no ask counts as
-    /// clearable (SKEIN-1391). Zero, and absent from the file, when none is.
+    /// disk: MiB of what the box holds that is in use now (`CleanItem::live`), which no ask counts
+    /// as clearable (SKEIN-1391). Zero, and absent from the file, when none is.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub live_mb: u64,
     /// RFC3339, when this crossing began.
@@ -1106,8 +1106,8 @@ mod words {
             Some(r) if removable.is_empty() => match r.live {
                 0 => format!("{standing}, and nothing skein lists can be removed now. {WHERE}"),
                 live => format!(
-                    "{standing}, and nothing skein lists can be removed now ({} of it is in a \
-                     build running now). {WHERE}",
+                    "{standing}, and nothing skein lists can be removed now ({} of it is in use \
+                     now). {WHERE}",
                     gib_up(live)
                 ),
             },
@@ -1120,9 +1120,9 @@ mod words {
     }
 
     /// The disk ask's words for asking `asked` MiB, with `room` what skein's list says the box
-    /// can do about it now (SKEIN-1391). With no build running, the owner's approved words with
-    /// the shrunk figure; with one, the words that say how much of the box is in it; with nothing
-    /// to clear, a line that is told and never held.
+    /// can do about it now (SKEIN-1391). With nothing in use, the owner's approved words with the
+    /// shrunk figure; with some, the words that say how much of the box is in use; with nothing to
+    /// clear, a line that is told and never held.
     pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem], asked: u64, room: Option<Room>) -> Ask {
         let live = room.map_or(0, |r| r.live);
         if room.is_some() && asked == 0 {
@@ -1167,7 +1167,7 @@ mod words {
 
     /// "This box holds 10.5G against its 10.0G share of the fleet's disk", or for the fleet's
     /// asks "The fleet's disk is 4.1G over what it can spare and this box holds 9.4G of it", with
-    /// `live` MiB of it in a build running now when that is not zero.
+    /// `live` MiB of it in use now (`CleanItem::live`) when that is not zero.
     fn standing(d: &DiskAsk, live: u64) -> String {
         match d {
             DiskAsk::Allowance { holds, limit, .. } => match live {
@@ -1177,7 +1177,7 @@ mod words {
                     gib(*limit)
                 ),
                 _ => format!(
-                    "this box holds {} against its {} share ({} in a build running now)",
+                    "this box holds {} against its {} share ({} in use now)",
                     gib_up(*holds),
                     gib(*limit),
                     gib_up(live)
@@ -1191,7 +1191,7 @@ mod words {
                 ),
                 _ => format!(
                     "the fleet's disk is {} over what it can spare and this box holds {} of it ({} \
-                     in a build running now)",
+                     in use now)",
                     gib_up(s.over_by),
                     gib(s.holds),
                     gib_up(live)
@@ -1205,7 +1205,10 @@ mod words {
     fn nothing_to_clear(d: &DiskAsk, live: u64) -> Ask {
         let end = match live {
             0 => "nothing skein lists can be cleared now.",
-            _ => "nothing can be cleared until it ends.",
+            _ => {
+                "nothing skein lists can be cleared now; what is in use can be cleared once \
+                 nothing has it open."
+            }
         };
         let line = format!("skein: {}; {end}", standing(d, live));
         Ask {
@@ -1221,8 +1224,8 @@ mod words {
         }
     }
 
-    /// Some of the box is in a build running now and `asked` MiB can be cleared (SKEIN-1391): the
-    /// approved shape of each ask, saying how much is in the build and that only `asked` can go.
+    /// Some of the box is in use now and `asked` MiB can be cleared (SKEIN-1391): the approved
+    /// shape of each ask, saying how much is in use and that only `asked` can go.
     fn live_words(d: &DiskAsk, asked: u64, live: u64) -> Ask {
         let z = gib_up(asked);
         let y = gib_up(live);
@@ -1231,26 +1234,26 @@ mod words {
                 "allowance",
                 format!(
                     "skein: clear {z} of storage you are not using before you continue. This box \
-                     holds {} against its {} share of the fleet's disk ({y} of it in a build \
-                     running now); {z} can be cleared now. {HELD}",
+                     holds {} against its {} share of the fleet's disk ({y} of it in use \
+                     now); {z} can be cleared now. {HELD}",
                     gib_up(*holds),
                     gib(*limit),
                 ),
                 format!(
                     "skein: before you start, this box is asked to clear {z} of storage it is not \
-                     using. It holds {} against its {} share of the fleet's disk ({y} of it in a \
-                     build running now); {z} can be cleared now. {WHERE}",
+                     using. It holds {} against its {} share of the fleet's disk ({y} of it in use \
+                     now); {z} can be cleared now. {WHERE}",
                     gib_up(*holds),
                     gib(*limit),
                 ),
                 format!(
                     "skein: still asked of this box: clear {z} of storage (it holds {}, {y} of it \
-                     in a build running now).",
+                     in use now).",
                     gib_up(*holds),
                 ),
                 format!(
                     "skein: this box holds {} against its {} share of the fleet's disk ({y} of it \
-                     in a build running now); clear the {z} that can be cleared now.",
+                     in use now); clear the {z} that can be cleared now.",
                     gib_up(*holds),
                     gib(*limit),
                 ),
@@ -1264,8 +1267,8 @@ mod words {
                 format!(
                     "skein: clear {z} of storage you are not using before you continue — build \
                      outputs, caches, and any containers or volumes you started. The fleet's disk \
-                     is {} over what it can spare, and this box holds {} of it ({y} in a build \
-                     running now){}; {z} can be cleared now. {HELD}",
+                     is {} over what it can spare, and this box holds {} of it ({y} in use \
+                     now){}; {z} can be cleared now. {HELD}",
                     gib_up(s.over_by),
                     gib(s.holds),
                     match s.every_box {
@@ -1276,18 +1279,18 @@ mod words {
                 format!(
                     "skein: before you start, this box is asked to clear {z} of storage it is not \
                      using. The fleet's disk is {} over what it can spare and this box holds {} \
-                     ({y} of it in a build running now); {z} can be cleared now. {WHERE}",
+                     ({y} of it in use now); {z} can be cleared now. {WHERE}",
                     gib_up(s.over_by),
                     gib(s.holds),
                 ),
                 format!(
                     "skein: still asked of this box: clear {z} of storage (it holds {}, {y} of it \
-                     in a build running now).",
+                     in use now).",
                     gib(s.holds),
                 ),
                 format!(
                     "skein: the fleet's disk is over its line; this box is asked to clear the {z} \
-                     it can clear now ({y} of it is in a build running now)."
+                     it can clear now ({y} of it is in use now)."
                 ),
             ),
         };
@@ -2747,11 +2750,11 @@ mod tests {
     }
 
     /// **A build running now is not asked for: the ask shrinks to what can be cleared, and its
-    /// words say how much is in the build** (SKEIN-1391).
+    /// words say how much is in use** (SKEIN-1391).
     ///
     /// 2G over a 10G share, with a 3G target a build is running in and a 1.5G pip cache: the box
-    /// is asked for 1.5G, held for it (more than a tenth of its share), and told that 3.0G is in a
-    /// build running now. 0.5G over with a 0.2G pip cache: asked for 0.2G and told so, not held.
+    /// is asked for 1.5G, held for it (more than a tenth of its share), and told that 3.0G is in use
+    /// now. 0.5G over with a 0.2G pip cache: asked for 0.2G and told so, not held.
     ///
     /// What would make it fail: `removable_now` counting a live build as clearable (the 2G case is
     /// asked for 2.0G and the hint names the target). Watched: with `.filter(|i| !i.live)`
@@ -2775,8 +2778,8 @@ mod tests {
             ask.hold,
             format!(
                 "skein: clear 1.5G of storage you are not using before you continue. This box \
-                 holds 12.0G against its 10.0G share of the fleet's disk (3.0G of it in a build \
-                 running now); 1.5G can be cleared now. {PIP_HINT} This one command was held so \
+                 holds 12.0G against its 10.0G share of the fleet's disk (3.0G of it in use \
+                 now); 1.5G can be cleared now. {PIP_HINT} This one command was held so \
                  you would see this; the next will run."
             )
         );
@@ -2786,7 +2789,7 @@ mod tests {
                 format!(
                     "skein: before you start, this box is asked to clear 1.5G of storage it is \
                      not using. It holds 12.0G against its 10.0G share of the fleet's disk (3.0G \
-                     of it in a build running now); 1.5G can be cleared now. {PIP_HINT} \
+                     of it in use now); 1.5G can be cleared now. {PIP_HINT} \
                      `skein_resources` shows where this box stands."
                 )
                 .as_str()
@@ -2796,7 +2799,7 @@ mod tests {
             ask.remind.as_deref(),
             Some(
                 "skein: still asked of this box: clear 1.5G of storage (it holds 12.0G, 3.0G of \
-                 it in a build running now)."
+                 it in use now)."
             )
         );
         assert_eq!(
@@ -2804,7 +2807,7 @@ mod tests {
             Some(
                 format!(
                     "skein: this box holds 12.0G against its 10.0G share of the fleet's disk \
-                     (3.0G of it in a build running now); clear the 1.5G that can be cleared now. \
+                     (3.0G of it in use now); clear the 1.5G that can be cleared now. \
                      {PIP_HINT}"
                 )
                 .as_str()
@@ -2854,8 +2857,9 @@ mod tests {
         let only_live = disk_ask(&next(None, &over_with(0, 2048, vec![running_target(3072)])));
         assert!(only_live.hold.is_empty(), "held: {}", only_live.hold);
         assert_eq!((only_live.amount, only_live.live_mb), (0, 3072));
-        let line = "skein: this box holds 12.0G against its 10.0G share (3.0G in a build running \
-                    now); nothing can be cleared until it ends.";
+        let line = "skein: this box holds 12.0G against its 10.0G share (3.0G in use now); \
+                    nothing skein lists can be cleared now; what is in use can be cleared once \
+                    nothing has it open.";
         assert_eq!(only_live.enter.as_deref(), Some(line));
         assert_eq!(only_live.remind.as_deref(), Some(line));
         assert_eq!(only_live.start, Some(format!("{line} {}", words::WHERE)));
@@ -2902,7 +2906,7 @@ mod tests {
     }
 
     /// **A box skein has not listed yet is asked as it always was**, and a listed box with no
-    /// build running gets the owner's approved words with the shrunk figure (SKEIN-1391).
+    /// nothing in use gets the owner's approved words with the shrunk figure (SKEIN-1391).
     ///
     /// `clean: None` means skein does not know what can be cleared, not that nothing can: the ask
     /// is its full size, and holds.
@@ -3018,8 +3022,8 @@ mod tests {
             format!(
                 "skein: clear 1.5G of storage you are not using before you continue — build \
                  outputs, caches, and any containers or volumes you started. The fleet's disk is \
-                 4.1G over what it can spare, and this box holds 9.4G of it (3.0G in a build \
-                 running now); 2 other boxes have been asked for the rest; 1.5G can be cleared \
+                 4.1G over what it can spare, and this box holds 9.4G of it (3.0G in use \
+                 now); 2 other boxes have been asked for the rest; 1.5G can be cleared \
                  now. {PIP_HINT} This one command was held so you would see this; the next will \
                  run."
             )
@@ -3029,7 +3033,7 @@ mod tests {
             Some(
                 format!(
                     "skein: the fleet's disk is over its line; this box is asked to clear the \
-                     1.5G it can clear now (3.0G of it is in a build running now). {PIP_HINT}"
+                     1.5G it can clear now (3.0G of it is in use now). {PIP_HINT}"
                 )
                 .as_str()
             )
@@ -3060,7 +3064,8 @@ mod tests {
             nothing.enter.as_deref(),
             Some(
                 "skein: the fleet's disk is 4.1G over what it can spare and this box holds 9.4G \
-                 of it (3.0G in a build running now); nothing can be cleared until it ends."
+                 of it (3.0G in use now); nothing skein lists can be cleared now; what is in \
+                 use can be cleared once nothing has it open."
             )
         );
     }
@@ -4253,7 +4258,7 @@ mod tests {
             near_said(&live),
             Some(
                 "skein: this box holds 9.0G of its 10.0G share of the fleet's disk, and nothing \
-                 skein lists can be removed now (3.0G of it is in a build running now). \
+                 skein lists can be removed now (3.0G of it is in use now). \
                  `skein_resources` shows where this box stands."
             )
         );
