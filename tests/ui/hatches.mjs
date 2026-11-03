@@ -32,10 +32,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fixtureRoot, freshFixture, harness, openDoor } from "./lift.mjs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { FIXTURE_AGENT_STUB, FIXTURE_GH_TOKEN, FIXTURE_HOME_SENTINEL, LIVE_COCKPIT_PORT, startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
 import { stub } from "./harness/github.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const API_TOKEN = "h".repeat(64);
 
@@ -104,8 +105,7 @@ function fixture() {
     sync_connection: "",
   }]));
   const gh = path.join(bin, "gh");
-  fs.writeFileSync(gh, "#!/bin/sh\nexit 1\n");
-  fs.chmodSync(gh, 0o755);
+  writeExecutable(gh, "#!/bin/sh\nexit 1\n");
   return { root, home, bin };
 }
 
@@ -435,6 +435,60 @@ try {
       { aDoorwayStarted: true, itsPortIsTheOnePinned: true, itsPortIsTheLiveOne: false,
         whenTheSuiteAsksForTheLiveOne: "refused" },
     );
+  }
+
+  // 8. **A fixture executable is replaced, never written over, while a process runs it**
+  //    (SKEIN-1465). CI run 41318757630 failed "the harness suite could run at all" with `ETXTBSY`
+  //    on `server-home/.local/bin/claude`: `startServer` rewrote the stand-in in place each time
+  //    this suite started a server, and something an earlier server started was running it.
+  //    `harness/executable.mjs` now writes every fixture executable beside its target and renames
+  //    it over the target.
+  //
+  //    A copy of `sleep` is run, then rewritten through the helper. **What makes this fail**: the
+  //    helper writing in place. That throws `ETXTBSY`, and the path stays the inode the process is
+  //    running. The inode arm is there for a kernel that stops refusing the write, so the check does
+  //    not depend on the refusal. Before the rewrite, it first checks that the process really is
+  //    running that file: otherwise there is nothing to be busy, and the check could not fail.
+  //    (Measured: a copy of a multi-call `sleep` under another name exits at once, and an in-place
+  //    write over it then succeeds. That is the reason for the name below.)
+  {
+    const dir = path.join(fx.root, "running-executable");
+    fs.mkdirSync(dir, { recursive: true });
+    // Named `sleep`, so a multi-call coreutils that dispatches on argv[0] still runs as sleep.
+    const file = path.join(dir, "sleep");
+    writeExecutable(file, fs.readFileSync("/bin/sleep"));
+    const running = spawn(file, ["60"], { stdio: "ignore" });
+    try {
+      await new Promise((resolve, reject) => { running.once("spawn", resolve); running.once("error", reject); });
+      const exe = `/proc/${running.pid}/exe`;
+      const itWasRunningIt = fs.readlinkSync(exe) === file;
+      let rewritten = "rewritten";
+      try {
+        writeExecutable(file, "#!/bin/sh\necho replaced\n");
+      } catch (e) {
+        rewritten = (e && e.code) || String(e);
+      }
+      const now = fs.statSync(file);
+      t.check(
+        "a fixture executable a process is running is replaced by rename, never written over",
+        { theProcessWasRunningTheFile: itWasRunningIt,
+          theRewrite: rewritten,
+          thePathIsANewFile: now.ino !== fs.statSync(exe).ino,
+          theProcessIsStillRunning: running.exitCode === null && running.signalCode === null,
+          thePathHoldsTheNewContentExecutable:
+            fs.readFileSync(file, "utf8") === "#!/bin/sh\necho replaced\n" && (now.mode & 0o777) === 0o755,
+          nothingElseWasLeftInTheDirectory: fs.readdirSync(dir) },
+        { theProcessWasRunningTheFile: true,
+          theRewrite: "rewritten",
+          thePathIsANewFile: true,
+          theProcessIsStillRunning: true,
+          thePathHoldsTheNewContentExecutable: true,
+          nothingElseWasLeftInTheDirectory: ["sleep"] },
+      );
+    } finally {
+      running.kill("SIGKILL");
+      if (running.exitCode === null && running.signalCode === null) await new Promise(r => running.once("exit", r));
+    }
   }
 
   // Two further checks were here, and they are gone rather than retargeted. They asserted a

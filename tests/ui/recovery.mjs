@@ -52,6 +52,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, settler } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 // The sandbox every placement in this fixture names, and the one the config declares. They have to
 // be the same string or `place::placed_boxes` filters the record out and the box never reaches the
@@ -118,8 +119,7 @@ function makeFixture(root) {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, "#!/bin/bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
-  fs.chmodSync(sbx, 0o755);
+  writeExecutable(sbx, "#!/bin/bash\ncase \"$1\" in\n  ls) echo '[]'; exit 0 ;;\nesac\nexit 0\n");
   return { root, home, bin, sbx };
 }
 

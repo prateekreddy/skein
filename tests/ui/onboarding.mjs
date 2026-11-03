@@ -29,6 +29,7 @@ import { fixtureRoot, freshFixture, openDoor } from "./lift.mjs";
 import { ledger, seeing, settler } from "./harness/browser.mjs";
 import { FIXTURE_BOX_AGENT, FIXTURE_HOME_SENTINEL, startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const API_TOKEN = "t".repeat(64);
 const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
@@ -120,7 +121,7 @@ function makeFixture() {
   const state = path.join(root, "sbx-state");
   fs.mkdirSync(state);
   fs.writeFileSync(path.join(state, "fleet"), "");
-  fs.writeFileSync(sbx, `#!/bin/bash
+  writeExecutable(sbx, `#!/bin/bash
 printf '%s\\n' "$*" >> ${path.join(root, "sbx.log")}
 case "$1" in
   ls)
@@ -145,7 +146,6 @@ case "$1" in
 esac
 exit 0
 `);
-  fs.chmodSync(sbx, 0o755);
   // The home a script sent through `sbx exec` would see. In-fleet nothing takes that route — a box
   // is a namespace skein enters directly, so this stays empty and the provisioning check reads
   // `<fleet root>/<box>/home` instead. It is kept as the containment it always was: if anything

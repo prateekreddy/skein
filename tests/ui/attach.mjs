@@ -31,6 +31,7 @@ import { boxlikeNamespace, fixtureRoot, freshFixture, grab, harness, openDoor } 
 import { processes, sighting } from "./harness/leaks.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const BOX = "attach-box";
 const t = harness();
@@ -100,13 +101,12 @@ async function fixture() {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, `#!/usr/bin/env bash
+  writeExecutable(sbx, `#!/usr/bin/env bash
 case "$1" in
   ls) echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
 esac
 exit 0
 `);
-  fs.chmodSync(sbx, 0o755);
 
   // **The one case the box has to fake, and it is faked INSIDE the box.**
   //
@@ -160,13 +160,12 @@ exit 0
   //
   // `export` and not an interpolation: the path is then in the environment `exec` keeps, rather
   // than in an argument list it replaces (SKEIN-861).
-  fs.writeFileSync(stub, `#!/bin/sh
+  writeExecutable(stub, `#!/bin/sh
 export SKEIN_TEST_FIXTURE='${root}'
 printf '%s\n' "$*" >> ${stalls}
 case "$*" in *skein-stall*) exec sleep 60 ;; esac
 exec /usr/bin/bash "$@"
 `);
-  fs.chmodSync(stub, 0o755);
 
   const box = await boxlikeNamespace(root, { from: boxbin, to: stallDir });
 

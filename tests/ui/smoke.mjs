@@ -18,6 +18,7 @@ import { boxlikeNamespace, fixtureRoot, freshFixture, openDoor } from "./lift.mj
 import { erring, ledger, seeing, settler, texter } from "./harness/browser.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const BOX = "smoke-box";
 
@@ -102,14 +103,13 @@ async function makeFixture() {
   // `sbx exec <sandbox> nsenter … -- bash -lc <script>` and there is no namespace here to enter.
   // The script already carries its own `cd <tree>` and `export HOME=<home>` from `Place::wrap`, and
   // the placement record above points both at this fixture, so it lands in the right place by itself.
-  fs.writeFileSync(sbx, `#!/usr/bin/env bash
+  writeExecutable(sbx, `#!/usr/bin/env bash
 case "$1" in
   ls)   echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
   exec) exec bash -c "\${@: -1}" ;;
 esac
 exit 0
 `);
-  fs.chmodSync(sbx, 0o755);
   // the box's own conversation record — what the Transcript tab reads instead of the screen
   // Under the box's host state dir, because that is where a placed box's record lives: box-session.sh
   // binds `~/.claude/projects` in from the host, so skein reads it there rather than shelling into the
@@ -179,7 +179,7 @@ exit 0
   for (const [v, days] of [["1.80.0", 41], ["1.92.0", 1]]) {
     const rustc = path.join(tc, `${v}-x86_64-unknown-linux-gnu`, "bin", "rustc");
     fs.mkdirSync(path.dirname(rustc), { recursive: true });
-    fs.writeFileSync(rustc, Buffer.alloc(256 * 1024, 7), { mode: 0o755 });
+    writeExecutable(rustc, Buffer.alloc(256 * 1024, 7));
     const then = new Date(Date.now() - days * 86400 * 1000);
     fs.utimesSync(rustc, then, then);
   }

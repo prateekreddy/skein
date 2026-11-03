@@ -51,6 +51,7 @@ import { erring, finding, ledger } from "./harness/browser.mjs";
 import { queueGitHub } from "./harness/github.mjs";
 import { startServer } from "./harness/server.mjs";
 import { stopThenRemove } from "./harness/teardown.mjs";
+import { writeExecutable } from "./harness/executable.mjs";
 
 const API_TOKEN = "d".repeat(64);
 
@@ -125,15 +126,13 @@ async function makeFixture() {
   const github = await queueGitHub(prs);
 
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
-  fs.chmodSync(sbx, 0o755);
+  writeExecutable(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
 
   const claude = path.join(bin, "claude");
-  fs.writeFileSync(claude, `#!/bin/sh
+  writeExecutable(claude, `#!/bin/sh
 printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\n'
 exit 0
 `);
-  fs.chmodSync(claude, 0o755);
   return { root, bin, home, github, sbx, claude };
 }
 
