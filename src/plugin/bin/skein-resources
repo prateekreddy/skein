@@ -12,7 +12,10 @@
 #
 # A note (the file's `notes`, SKEIN-1455) is told to the agent once per crossing in a session, at
 # SessionStart or at the next prompt, whichever comes first, and is never held for. It is the
-# agent's to act on, so nothing that draws for the person reads it.
+# agent's to act on, so nothing that draws for the person reads it. A note with no words is one
+# skein keeps silent while a disk ask says the same; any hook that sees it records its crossing as
+# told, so it is not said the moment the ask clears, with figures from a list up to five minutes
+# old (SKEIN-1475).
 #   monitor         The `resources` monitor: one line when a band changes, either way.
 #
 # Disk is said at most once an hour (owner, SKEIN-1335). A box a little over its share is over it
@@ -91,6 +94,21 @@ def notes(s):
         and n.get("crossing_id")
         and isinstance(n.get("text"), str)
         and n["text"]
+    ]
+
+
+def silent(s, seen):
+    """Crossing ids of the notes skein keeps silent (no words, while a disk ask stands) that this
+    session has not recorded: told already, by the ask."""
+    if not s:
+        return []
+    return [
+        n["crossing_id"]
+        for n in s.get("notes") or []
+        if isinstance(n, dict)
+        and n.get("crossing_id")
+        and not n.get("text")
+        and n["crossing_id"] not in seen
     ]
 
 
@@ -182,7 +200,7 @@ def session_start():
     told = [a for a in asks(s) if a.get("start")]
     seen = shown(path) if path else set()
     fresh = [n for n in notes(s) if n["crossing_id"] not in seen]
-    ids = [a["crossing_id"] for a in told] + [n["crossing_id"] for n in fresh]
+    ids = [a["crossing_id"] for a in told] + [n["crossing_id"] for n in fresh] + silent(s, seen)
     # Shown here counts as shown (owner, SKEIN-1055): a session is not held for an ask it was
     # just told about. Only what was actually printed is recorded.
     if ids and record(path, ids):
@@ -196,7 +214,11 @@ def pre_tool_use():
     if not path:
         return
     seen = shown(path)
-    unshown = [a for a in asks(signals()) if a["crossing_id"] not in seen and a.get("hold")]
+    s = signals()
+    quiet = silent(s, seen)
+    if quiet:
+        record(path, quiet)
+    unshown = [a for a in asks(s) if a["crossing_id"] not in seen and a.get("hold")]
     now, said = time.time(), disk_said(path)
     # A disk hold within the hour: this crossing waits, unrecorded, and holds a call once the hour
     # is up if it still stands.
@@ -243,7 +265,8 @@ def prompt():
     # would be said on every prompt.
     seen = shown(path) if path else set()
     fresh = [n for n in notes(s) if n["crossing_id"] not in seen]
-    if fresh and record(path, [n["crossing_id"] for n in fresh]):
+    ids = [n["crossing_id"] for n in fresh] + silent(s, seen)
+    if ids and record(path, ids):
         lines.extend(n["text"] for n in fresh)
     context("UserPromptSubmit", lines)
 

@@ -5,8 +5,9 @@
 //   toast, since a collapsed band shows nothing;
 // * the disk skein asks the box to free, dim: clearing it is the agent's, and `/skein clean` is the
 //   person's override (SKEIN-1460), so it is not counted as waiting, toasted, or a reason to open
-//   the pane. A request for more allowance, `skein_request_disk`, is the person's to answer, and
-//   waits with the other requests;
+//   the pane. A box more than a tenth over its share, one skein holds a command for, waits on the
+//   person too, amber with Free disk (SKEIN-1475). A request for more allowance,
+//   `skein_request_disk`, is the person's to answer, and waits with the other requests;
 // * one dim line of vitals, always: disk, memory and CPU against the box's limits, and its spend,
 //   each part drawn only while its signal is fresh (`vitals.ts`);
 // * one line for each thing running now: each of the box's granted or waiting heavy jobs, and each
@@ -265,18 +266,19 @@ export function register(on: On): void {
     const work = workLines(await read($, bandJobs), lanesAtWorkNamed(await lanesWorking($)), columns)
 
     const { Box, Button, Text } = $.ui.resolve(e)
-    // Read and Requests open the pane on what waits.
-    const open = () => void openSkein($, 'board')
+    // Free disk opens the pane on the disk list; Read and Requests on what waits.
+    const open = (ask: Ask) => () => void openSkein($, ask.key === 'disk' ? 'clean' : 'board')
     const askRow = (ask: Ask, text = ask.text) => (
       <Box>
         <Text color="warning">{LOUD}</Text>
         <Text color="warning" wrap="truncate-end">
           {text}{' '}
         </Text>
-        {ask.button !== undefined && <Button key={`band:${ask.key}`} label={ask.button} onPress={open} />}
+        {ask.button !== undefined && <Button key={`band:${ask.key}`} label={ask.button} onPress={open(ask)} />}
       </Box>
     )
-    const disk = found.disk?.ask ? quietAskLine(found.disk.ask) : null
+    // A held ask waits on the person, amber, in `asks`; one the agent is only told is dim.
+    const disk = found.disk?.ask && !found.disk.ask.held ? quietAskLine(found.disk.ask) : null
     const mail = mailNote(found.mail ?? 0)
     // The pane opened by itself but this terminal could not place it: the band says where it is.
     const unplaced = (await paneWaitsUnplaced($)) ? UNPLACED : null
@@ -614,15 +616,17 @@ export async function cleanFromPane($: Engine, paths: string[]): Promise<void> {
 // Words
 // ------------------------------------------------------------------------------------------------
 
-// A line with no `button` has nothing for the person to press. Mail and the disk ask are not
-// among these: they are the agent's, so each is a dim line of its own, not amber and never toasted
-// (`mailNote`, `quietAskLine`).
+// A line with no `button` has nothing for the person to press. Mail and a disk ask skein does not
+// hold for are not among these: they are the agent's, so each is a dim line of its own, not amber
+// and never toasted (`mailNote`, `quietAskLine`). A held disk ask is (SKEIN-1475).
 type Ask = { key: string; text: string; button?: string }
 
 /** What the band says, loudest first, in `columns` cells; empty when there is nothing to say. */
 function asked(found: SkeinBand | null, columns: number): Ask[] {
   if (found === null) return []
   const out: Ask[] = []
+  const ask = found.disk?.ask
+  if (ask?.held) out.push({ key: 'disk', text: askLine(ask), button: 'Free disk' })
   // The oldest waiting question in its own words, since it has waited longest for the person; the
   // rest are counted. The pane has every question whole.
   const questions = (found.requests ?? [])
@@ -671,10 +675,20 @@ export function updateLine(pending: readonly SkeinUpdate[]): string {
  * toast's words, a few words for a short line, and the pane's line, worded as what to do. */
 export type Waiting = { key: string; toast: string; short: string; action: string }
 
-/** Each thing that waits on the person, loudest first. The disk skein asks the box to free is not
- * one: the agent clears it (`quietAskLine`). A request for more allowance is, as a request. */
+/** Each thing that waits on the person, loudest first. The disk skein asks the box to free is one
+ * only when skein holds a command for it, more than a tenth over (SKEIN-1475); otherwise the agent
+ * clears it (`quietAskLine`). A request for more allowance is, as a request. */
 export function waitingThings(found: SkeinBand): Waiting[] {
   const out: Waiting[] = []
+  const ask = found.disk?.ask
+  if (ask?.held) {
+    out.push({
+      key: `disk:${ask.id}`,
+      toast: askLine(ask),
+      short: ask.amount_mb > 0 ? `free ${humanMb(ask.amount_mb)}` : 'free disk',
+      action: askLine(ask),
+    })
+  }
   for (const r of found.requests ?? []) {
     if (r.state !== 'waiting') continue
     out.push(

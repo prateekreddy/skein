@@ -307,8 +307,19 @@ impl BoxProcesses {
     /// (mount namespace, ancestor) once. An item that is itself a mount point at another name in
     /// the box would be missed; the launcher makes none.
     pub fn in_use(&self, name: &str, items: &[&str]) -> std::collections::BTreeSet<String> {
+        self.holders(name, items).into_keys().collect()
+    }
+
+    /// [`Self::in_use`], with what holds each item: the first of the box's processes found using
+    /// it, as `cargo (pid 1234)` from its `comm`, or `a process (pid 1234)` when that cannot be
+    /// read or is not plain characters (SKEIN-1475). The words `skein-mcp`'s `holders()` gives inside the box.
+    pub fn holders(
+        &self,
+        name: &str,
+        items: &[&str],
+    ) -> std::collections::BTreeMap<String, String> {
         use std::os::unix::fs::MetadataExt;
-        let mut out = std::collections::BTreeSet::new();
+        let mut out = std::collections::BTreeMap::new();
         let Some(pids) = self.by_box.get(name) else {
             return out;
         };
@@ -358,7 +369,18 @@ impl BoxProcesses {
                         }
                     };
                     if let Some((_, item)) = candidates.iter().find(|(k, _)| *k == id) {
-                        out.insert(item.to_string());
+                        out.entry(item.to_string()).or_insert_with(|| {
+                            let comm = std::fs::read_to_string(at.join("comm")).unwrap_or_default();
+                            // A box names its own processes: only plain characters are said.
+                            let c = comm.trim_end_matches('\n');
+                            let plain = c
+                                .chars()
+                                .all(|ch| ch.is_ascii_alphanumeric() || "._+-".contains(ch));
+                            match c {
+                                c if !c.is_empty() && plain => format!("{c} (pid {pid})"),
+                                _ => format!("a process (pid {pid})"),
+                            }
+                        });
                         break;
                     }
                 }

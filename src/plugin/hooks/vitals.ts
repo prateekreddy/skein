@@ -96,6 +96,7 @@ export async function readResources($: Engine): Promise<(SkeinResources & { at: 
             amount_mb: numberOr(ask.amount, 0) ?? 0,
             live_mb: numberOr(ask.live_mb, 0) ?? 0,
             why: typeof ask.why === 'string' ? ask.why : '',
+            held: typeof ask.hold === 'string' && ask.hold !== '',
           }
         : null,
     },
