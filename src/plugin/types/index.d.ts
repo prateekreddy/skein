@@ -149,7 +149,9 @@ export type SkeinRequestRow = {
 
 /** skein's disk ask, as the band reads it from the signal file. `id` is the ask's crossing, new at
  * each one, which the band raises one toast for. */
-export type SkeinDiskAsk = { id: string; amount_mb: number; live_mb: number; why: string }
+/** skein's disk ask of this box. `held`: it has words to hold a command with, which skein writes
+ * only when the box's whole excess is more than a tenth of its share (`disk_holds`, SKEIN-1475). */
+export type SkeinDiskAsk = { id: string; amount_mb: number; live_mb: number; why: string; held: boolean }
 
 /** A version rolled out since the box started that a restart would give it (`Update` in
  * `src/resource_signal.rs`). `restartRequested`: the box has already asked for the restart. */

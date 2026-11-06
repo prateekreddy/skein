@@ -1041,6 +1041,48 @@ test("a disk ask is the agent's: no toast, no pane opened; a request for more al
   )
 })
 
+// What would make it fail: a disk ask skein holds a command for (more than a tenth over its share,
+// SKEIN-1475) drawn dim like one it only tells; or one it only tells drawn amber. Watched: with
+// `held` read as false in `readResources`, the held ask was the dim line with no button and this
+// failed; with the `ask?.held` guard dropped from `asked`, the told ask was amber and this failed.
+test('a held disk ask is amber with Free disk and waits on the person; a told one stays dim', async ($, on) => {
+  const w = world({ signal: signal(30, false, {}, vitals(0.15)) })
+  const clock = await started(on, w, $)
+  expect(w.opened).toEqual(['skein'])
+
+  // Told, not held: one dim line, nothing to press, no toast, no pane.
+  w.signal = signal(30, true, {}, vitals(0.15), NOW + 60_000)
+  await clock.advance(60_000)
+  const told = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const dim = await told.find({ type: 'Text', text: /skein asks this box/ })
+  expect(dim?.text.trim()).toBe('skein asks this box to free 1.2G · the agent clears it · /skein clean to do it yourself')
+  expect(dim?.props.dimColor).toBe(true)
+  expect(await told.findAll({ type: 'Button' })).toEqual([])
+  await told.unmount()
+  expect(w.toasts).toEqual([])
+  expect(w.opened).toEqual(['skein'])
+
+  // Held, under a new crossing: amber, Free disk, one toast, and the pane opens.
+  const line = 'skein asks this box to free disk, but none of it can be cleared now: it is over its own allowance (8.0G in use now).'
+  w.signal = signal(30, true, { crossing_id: 'c-2', amount: 0, live_mb: 8192, hold: 'skein: held' }, vitals(0.15), NOW + 120_000)
+  await clock.advance(60_000)
+  expect(w.toasts).toEqual([line])
+  expect(w.opened).toEqual(['skein', 'skein'])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, bodyColumns: 160 } })
+    const loud = await ui.find({ type: 'Text', text: /skein asks this box/ })
+    expect(loud?.text.trim()).toBe(line)
+    expect(loud?.props.color).toBe('warning')
+    expect(await ui.find({ type: 'Text', text: /the agent clears it/ })).toBe(undefined)
+    expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['Free disk'])
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: { ...BAND.props, bodyColumns: 160 } })
+  await ui.press({ key: 'band:disk' })
+  await ui.unmount()
+  expect(w.opened).toEqual(['skein', 'skein', 'skein'])
+})
+
 // What would make it fail: a note for the agent read as something asked of the person, the way
 // the disk ask is: `readResources` taking its ask from `notes` as well as `asks`, or listing a
 // note's kind among what skein asks, would draw an amber line, a "Free disk" button, a toast, and

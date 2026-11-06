@@ -24,6 +24,8 @@ type Box = {
   now: number
   cores: number
   ask: boolean
+  /** Whether skein holds a command for the ask: its `hold` has words. */
+  held: boolean
   questions: Record<string, unknown>[]
   lanes: { name: string; item: string }[]
   jobs: Record<string, unknown>[]
@@ -46,6 +48,7 @@ function box(over: Partial<Box> = {}): Box {
     now: NOW,
     cores: 0.4,
     ask: false,
+    held: false,
     questions: [],
     lanes: [],
     jobs: [],
@@ -98,7 +101,7 @@ function engine(on: On, b: Box) {
           memory: { anon: 1.1 * G, high: 14 * G, max: 16 * G, read_at: stamp(b.now - 10_000) },
           cpu: { cores: b.cores, usage_usec: 1 },
           pids: { current: 50, max: 8192 },
-          asks: b.ask ? [{ kind: 'disk', why: 'allowance', amount: 1228, since: stamp(NOW), crossing_id: 'c-1', hold: '' }] : [],
+          asks: b.ask ? [{ kind: 'disk', why: 'allowance', amount: 1228, since: stamp(NOW), crossing_id: 'c-1', hold: b.held ? 'skein: held' : '' }] : [],
         }),
       }
     }
@@ -533,6 +536,35 @@ test("a disk ask is the agent's: one dim line in BOX, no count, no waiting panel
     '│ ⚑ Answer in the cockpit: “Keep the old       │',
   ])
   await asked.unmount()
+})
+
+// What would make it fail: a disk ask skein holds a command for (SKEIN-1475) drawn as the agent's
+// alone: not counted, no WAITING ON YOU, the processes row dim, the pane not opened. Watched: with
+// the `ask?.held` push dropped from `waitingThings`, the header said `ok` and this failed; with
+// `|| ask?.held` dropped from the processes row's tone, its colour failed.
+test('a held disk ask waits on the person: counted, amber, in WAITING ON YOU, and the pane opens', async ($, on) => {
+  const b = box()
+  const clock = engine(on, b)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(b.opened).toEqual(['skein'])
+  b.panes.delete('skein')
+
+  b.ask = true
+  b.held = true
+  await minute(clock, b)
+  expect(b.opened).toEqual(['skein', 'skein'])
+  const ui = await $.ui.mount({ ...DOCKED, surface: 'terminal' })
+  const drawn = await lines(ui)
+  expect(drawn[0]).toBe('SKEIN · web-main · 1 waiting on you')
+  expect(drawn).toContain('│ processes 50 / 8192 · skein asks about disk  │')
+  expect(drawn.filter(l => /the agent/.test(l))).toEqual([])
+  expect(drawn.filter(l => /WAITING ON YOU|⚑/.test(l))).toEqual([
+    '╭ WAITING ON YOU ─────────────────────────── 1 ╮',
+    '│ ⚑ skein asks this box to free 1.2G of disk:  │',
+  ])
+  expect((await ui.find({ type: 'Text', text: /skein asks about disk/ }))?.props.color).toBe('warning')
+  await ui.unmount()
 })
 
 // What would make it fail: a pane that opened unasked on a narrow terminal and waits undrawn, with

@@ -226,15 +226,17 @@ function boxPanel(f: Facts, width: number): Line[] {
   const ask = found.disk?.ask ?? null
   const kinds = [...(ask ? ['disk'] : []), ...found.asked].map(k => (k === 'pids' ? 'processes' : k))
   const asked = kinds.length === 0 ? 'nothing asked' : `skein asks about ${kinds.join(', ')}`
-  // Amber only for what the agent cannot clear by itself; the disk alone is dim.
-  const askTone: Tone | undefined = found.asked.length > 0 ? 'warning' : kinds.length > 0 ? 'dim' : undefined
+  // Amber for what the agent cannot clear by itself, and for a disk ask skein holds for; a disk ask
+  // it does not hold for, alone, is dim (SKEIN-1475).
+  const askTone: Tone | undefined = found.asked.length > 0 || ask?.held ? 'warning' : kinds.length > 0 ? 'dim' : undefined
   const pids = found.pids
   if (pids !== null && pids.current !== null) {
     rows.push([{ text: `processes ${pids.current}${pids.max === null ? '' : ` / ${pids.max}`} · ` }, { text: asked, tone: askTone }])
   } else if (rows.length > 0) {
     rows.push([{ text: asked, tone: askTone }])
   }
-  if (ask) for (const part of wrap(quietAskLine(ask), inner)) rows.push([{ text: part, tone: 'dim' }])
+  // A held ask is in WAITING ON YOU instead.
+  if (ask && !ask.held) for (const part of wrap(quietAskLine(ask), inner)) rows.push([{ text: part, tone: 'dim' }])
   const mail = found.mail ?? 0
   // Mail is the agent's to read: a dim line, never amber.
   if (mail > 0) rows.push([{ text: `✉ ${mail} unread, for the agent's next turn`, tone: 'dim' }])
