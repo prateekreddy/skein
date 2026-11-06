@@ -79,6 +79,15 @@ pub const DISK_HOLD_OVER_PCT: u64 = 10;
 /// On a 10G share it leaves 1.5G, about one more build's output, before the box is over.
 pub const DISK_NEAR_PCT: u64 = 85;
 
+/// The least the dead items an agent may remove must come to before a box under its share is told
+/// about them (SKEIN-1477). Under it, a tidy box costs no tokens.
+pub const TIDY_MIN_BYTES: u64 = 500 * 1024 * 1024;
+
+/// How often, at most, a box is told about its dead items: once a day (owner, 2026-11-06: "once in
+/// a while (too often wastes tokens)"). The plugin says each crossing once per box, not per
+/// session, so this is per box.
+pub const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// The kinds an ask can be. **There is no `cpu`**, and the plugin's hook holds only for these.
 pub const ASK_KINDS: [&str; 3] = ["disk", "memory", "pids"];
 
@@ -469,6 +478,22 @@ pub struct CleanItem {
     /// Added beside `live` rather than in it: `live` is read as a bool by `skein-mcp`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub held_by: String,
+    /// `dead`, it belongs to finished work, or `warm`, it speeds up the next run
+    /// (`fleet::tidy::classify`, SKEIN-1477). Empty in a file written before it existed, which
+    /// reads as warm.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub class: String,
+    /// Why a dead item is dead, in words for the agent: `lane/x is merged`. Empty when warm.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dead_because: String,
+    /// The worktree a dead item is in, as the box spells it, when that worktree can go too with
+    /// `git worktree remove`: nothing in it is uncommitted or unpushed. Never removed by skein.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub worktree: String,
+    /// RFC3339, when it was last used as far as a sample of its newest modification times shows
+    /// (`fleet::tidy::last_used`). Empty when that could not be read.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub used_at: String,
 }
 
 impl From<crate::fleet::Cleanable> for CleanItem {
@@ -480,6 +505,7 @@ impl From<crate::fleet::Cleanable> for CleanItem {
             bytes: c.bytes,
             live: false,
             held_by: String::new(),
+            ..Default::default()
         }
     }
 }
@@ -746,7 +772,7 @@ fn disk_holds(d: &DiskAsk, limit: Option<u64>) -> bool {
 /// scratchpads, which may belong to a session still running in the box, and not a build that is
 /// running now (SKEIN-1391).
 fn removable_now(clean: Option<&CleanList>) -> Vec<CleanItem> {
-    clean
+    let mut out: Vec<CleanItem> = clean
         .map(|c| {
             c.items
                 .iter()
@@ -755,7 +781,119 @@ fn removable_now(clean: Option<&CleanList>) -> Vec<CleanItem> {
                 .cloned()
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    by_tidiness(&mut out);
+    out
+}
+
+/// Dead items first, then warm ones, least recently used first (owner, 2026-11-06, SKEIN-1477),
+/// and a warm item whose last use is not known after those whose is. Stable: items alike keep the
+/// list's own order, biggest first.
+fn by_tidiness(items: &mut [CleanItem]) {
+    items.sort_by(|a, b| {
+        let key = |i: &CleanItem| {
+            let dead = i.class == crate::fleet::tidy::DEAD;
+            let used = if dead { "" } else { i.used_at.as_str() };
+            (!dead, used.is_empty() && !dead, used.to_string())
+        };
+        key(a).cmp(&key(b))
+    });
+}
+
+/// The dead items the agent may remove now, as [`removable_now`] has them.
+fn dead_now(clean: Option<&CleanList>) -> Vec<CleanItem> {
+    removable_now(clean)
+        .into_iter()
+        .filter(|i| i.class == crate::fleet::tidy::DEAD)
+        .collect()
+}
+
+/// The housekeeping note (SKEIN-1477): a box under its share whose dead items come to at least
+/// [`TIDY_MIN_BYTES`] is told them, at most once every [`TIDY_EVERY`]. A crossing is minted only
+/// with words to say, and is carried for the whole period whatever happens, so nothing can mint a
+/// second one inside it; while a disk ask or the near note stands, or once too little is dead, its
+/// words are empty, and the plugin says nothing for it. Unlisted, it is carried as it was.
+fn tidy_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note> {
+    let before = prev.and_then(|p| p.notes.iter().find(|n| n.kind == "disk-tidy"));
+    let Some(clean) = r.clean.as_ref() else {
+        return before.cloned();
+    };
+    let dead = dead_now(Some(clean));
+    let bytes: u64 = dead.iter().map(|i| i.bytes).sum();
+    // Under the share only: a disk ask or the near note already names what can go, dead first.
+    let quiet = out.asks.iter().any(|a| a.kind == "disk")
+        || out.notes.iter().any(|n| n.kind == "disk-near");
+    let text = match bytes >= TIDY_MIN_BYTES && !quiet {
+        true => words::tidy(&dead),
+        false => String::new(),
+    };
+    let within = before.filter(|n| {
+        DateTime::parse_from_rfc3339(&n.since).is_ok_and(|since| {
+            (r.at - since.with_timezone(&Utc)).num_seconds() < TIDY_EVERY.as_secs() as i64
+        })
+    });
+    match within {
+        Some(n) => Some(Note { text, ..n.clone() }),
+        None if !text.is_empty() => Some(Note {
+            kind: "disk-tidy".into(),
+            since: out.at.clone(),
+            crossing_id: format!("disk-tidy-{}", r.at.timestamp_millis()),
+            text,
+        }),
+        None => None,
+    }
+}
+
+/// Box `name`'s freshly listed items, each with its class (`fleet::tidy::classify`) and when it
+/// was last used (SKEIN-1477). The box is asked about its worktrees only while it is running, and
+/// `gh`'s answers are kept across ticks in `fleet::tidy::gh_cache`.
+fn classified(
+    name: &str,
+    items: Vec<crate::fleet::Cleanable>,
+    liveness: &std::collections::HashMap<String, bool>,
+    at: DateTime<Utc>,
+) -> Vec<CleanItem> {
+    use crate::fleet::tidy;
+    let box_dir = PathBuf::from(crate::fleet::box_root(name));
+    let moved = crate::repos::repo_for_box(name)
+        .is_some_and(|repo| crate::fleet::repo_tools_dir(&repo.id).is_dir());
+    let runner = tidy::in_box_runner(name);
+    let inbox = tidy::InBox {
+        run: &runner,
+        home: "\"$HOME\"".into(),
+        vartmp: "/var/tmp".into(),
+    };
+    let running = liveness.get(name) == Some(&true);
+    let pairs: Vec<(&str, &str)> = items.iter().map(|c| (c.path.as_str(), c.kind)).collect();
+    let classes = {
+        let mut gh = tidy::gh_cache().lock().unwrap_or_else(|e| e.into_inner());
+        tidy::classify(
+            &box_dir,
+            &pairs,
+            moved,
+            running.then_some(&inbox),
+            &mut gh,
+            at.timestamp(),
+        )
+    };
+    items
+        .into_iter()
+        .map(|c| {
+            let used = tidy::last_used(Path::new(&c.path));
+            let class = classes.get(&c.path).cloned();
+            let mut item = CleanItem::from(c);
+            if let Some(k) = class {
+                item.class = k.class.to_string();
+                item.dead_because = k.because;
+                item.worktree = k.worktree;
+            }
+            item.used_at = used
+                .and_then(|s| DateTime::from_timestamp(s, 0))
+                .map(stamp)
+                .unwrap_or_default();
+            item
+        })
+        .collect()
 }
 
 /// Whether the box holds at least [`DISK_NEAR_PCT`] of its own allowance, with what it holds and
@@ -945,6 +1083,9 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
         }
         Band::Unknown => out.notes.extend(prev_note.cloned()),
         Band::NotAsked => {}
+    }
+    if let Some(note) = tidy_note(prev, r, &out) {
+        out.notes.push(note);
     }
     match memory_band(cg, throttled_per_min, prev_rate) {
         Band::Asked((rate, anon, high)) => out
@@ -1160,6 +1301,73 @@ mod words {
                 clean_hint(removable)
             ),
         }
+    }
+
+    /// How many dead items the housekeeping note names; the rest are left to `skein_clean`'s list.
+    const TIDY_NAMED: usize = 6;
+
+    /// The housekeeping note (SKEIN-1477): the dead items the agent may remove now, each with its
+    /// size and why, the exact `skein_clean` call that removes them, and the worktrees that can go
+    /// too, which `skein_clean` never removes. Empty when none of them can be named.
+    pub(super) fn tidy(dead: &[CleanItem]) -> String {
+        let nameable_items: Vec<&CleanItem> = dead
+            .iter()
+            .filter(|i| nameable(&i.shown) && nameable(&i.path))
+            .collect();
+        let named: Vec<&CleanItem> = nameable_items.iter().copied().take(TIDY_NAMED).collect();
+        if named.is_empty() {
+            return String::new();
+        }
+        let listed: Vec<String> = named
+            .iter()
+            .map(|i| {
+                format!(
+                    "{} ({}, {})",
+                    i.shown,
+                    gib_up(i.bytes.div_ceil(MIB)),
+                    i.dead_because
+                )
+            })
+            .collect();
+        let paths: Vec<&str> = named.iter().map(|i| i.path.as_str()).collect();
+        let mut text = format!(
+            "skein: housekeeping. These are left from finished work and can go: {}. To remove \
+             {}, call `skein_clean` with {}.",
+            listed.join("; "),
+            if named.len() == 1 { "it" } else { "them" },
+            serde_json::json!({ "paths": paths }),
+        );
+        let rest = nameable_items.len() - named.len();
+        if rest > 0 {
+            text.push_str(&format!(
+                " `skein_clean` with no paths lists {rest} more like {}.",
+                if rest == 1 { "it" } else { "them" }
+            ));
+        }
+        let mut worktrees: Vec<&str> = Vec::new();
+        for i in &named {
+            if nameable(&i.worktree) && !worktrees.contains(&i.worktree.as_str()) {
+                worktrees.push(&i.worktree);
+            }
+        }
+        let commands: Vec<String> = worktrees
+            .iter()
+            .map(|w| format!("`git worktree remove {w}`"))
+            .collect();
+        match commands.as_slice() {
+            [] => {}
+            [one] => text.push_str(&format!(
+                " The worktree can go too, with {one}; git refuses while anything in it is \
+                 uncommitted."
+            )),
+            many => text.push_str(&format!(
+                " The worktrees can go too, with {}; git refuses while anything in one is \
+                 uncommitted.",
+                many.join(", ")
+            )),
+        }
+        text.push_str(" Nothing else needs doing.");
+        text
     }
 
     /// The disk ask's words for asking `asked` MiB, with `room` what skein's list says the box
@@ -1607,13 +1815,14 @@ pub(crate) fn clean_list(
         Some(p) => p.clone(),
         None => {
             let items = crate::fleet::box_cleanables(name).ok()?;
+            let items = classified(name, items, liveness, at);
             let cache = crate::fleet::repo_cache_for_box(name, liveness, repo_caches)
                 .ok()
                 .flatten();
             CleanList {
                 at: stamp(at),
                 box_root: crate::fleet::box_root(name),
-                items: items.into_iter().map(CleanItem::from).collect(),
+                items,
                 repo_cache: cache.map(|rc| RepoCacheList {
                     path: rc.path,
                     bytes: rc.items.iter().map(|i| i.bytes).sum(),
@@ -2763,6 +2972,7 @@ mod tests {
             bytes: mib * MIB,
             live: false,
             held_by: String::new(),
+            ..Default::default()
         };
         let mut list = CleanList {
             at: stamp(at(0)),
@@ -3843,6 +4053,7 @@ mod tests {
             bytes: mib * 1024 * 1024,
             live: false,
             held_by: String::new(),
+            ..Default::default()
         }
     }
 
@@ -4646,5 +4857,190 @@ mod tests {
             "the note was said straight after the ask that covered it cleared"
         );
         assert_eq!(h.context("session-start", "s2").as_deref(), Some(text));
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // Under the share: a daily housekeeping note naming dead items only (SKEIN-1477)
+    // --------------------------------------------------------------------------------------------
+
+    /// `item`, classed dead because of `why`.
+    fn dead(shown: &str, kind: &str, mib: u64, why: &str) -> CleanItem {
+        CleanItem {
+            class: crate::fleet::tidy::DEAD.into(),
+            dead_because: why.into(),
+            ..item(shown, kind, mib)
+        }
+    }
+
+    /// `item`, classed warm and last used at `used`.
+    fn warm(shown: &str, kind: &str, mib: u64, used: &str) -> CleanItem {
+        CleanItem {
+            class: crate::fleet::tidy::WARM.into(),
+            used_at: used.into(),
+            ..item(shown, kind, mib)
+        }
+    }
+
+    /// A box at 50% of its 10G allowance, the fleet under its line, with `items` listed.
+    fn under_share(minute: i64, items: Vec<CleanItem>) -> Reading {
+        Reading {
+            disk_mb: Some(5120),
+            disk_limit_mb: Some(10240),
+            clean: Some(listing(items)),
+            ..reading(minute, Some(calm()))
+        }
+    }
+
+    fn tidy_of(s: &Signals) -> Option<&Note> {
+        s.notes.iter().find(|n| n.kind == "disk-tidy")
+    }
+
+    /// A merged lane's target, `mib` big, and a warm cache bigger than it.
+    fn tidy_items(mib: u64) -> Vec<CleanItem> {
+        vec![
+            warm(
+                "~/.cache/ms-playwright",
+                "download cache",
+                4096,
+                "2026-09-24T09:00:00Z",
+            ),
+            CleanItem {
+                worktree: "/fleet/web-main/tree/.worktrees/a".into(),
+                ..dead(
+                    "web-main/tree/.worktrees/a/target",
+                    "build output",
+                    mib,
+                    "lane/a is merged",
+                )
+            },
+            dead(
+                "~/.cache/skein/claude/claude-1000/-p/old",
+                "scratchpad",
+                9216,
+                "its session has ended",
+            ),
+        ]
+    }
+
+    /// **Under the share, a box whose dead items come to 500 MB or more is told them once, with
+    /// the exact `skein_clean` call; not under 500 MB; and not again for 24 hours**, however the
+    /// figure moves, after which a new crossing is minted.
+    ///
+    /// What would make it fail: [`TIDY_MIN_BYTES`] at 0 (a note at 400 MB); [`TIDY_EVERY`] shorter
+    /// than an hour (a new crossing id an hour later); minting whenever no note stands (the dip
+    /// under 500 MB drops the note and the rise mints a second one inside the day); a warm item or
+    /// the scratchpad, which `skein_clean` refuses in the box, named in the note; the note pushed
+    /// into `asks`. Watched: with `TIDY_MIN_BYTES` set to 0 this failed at 400 MB, and with
+    /// `TIDY_EVERY` set to 60 s it failed at the hour.
+    #[test]
+    fn the_tidy_note_is_daily_and_only_over_500mb_of_dead_items() {
+        let small = next(None, &under_share(0, tidy_items(400)));
+        assert_eq!(tidy_of(&small), None, "told about 400 MB");
+
+        let first = next(Some(&small), &under_share(1, tidy_items(600)));
+        let note = tidy_of(&first).expect("not told about 600 MB").clone();
+        assert!(first.asks.is_empty(), "{:?}", first.asks);
+        assert_eq!(
+            note.text,
+            "skein: housekeeping. These are left from finished work and can go: \
+             web-main/tree/.worktrees/a/target (0.6G, lane/a is merged). To remove it, call \
+             `skein_clean` with {\"paths\":[\"/fleet/web-main/tree/.worktrees/a/target\"]}. The \
+             worktree can go too, with `git worktree remove /fleet/web-main/tree/.worktrees/a`; \
+             git refuses while anything in it is uncommitted. Nothing else needs doing."
+        );
+
+        let hour = next(Some(&first), &under_share(61, tidy_items(700)));
+        assert_eq!(
+            tidy_of(&hour).map(|n| n.crossing_id.as_str()),
+            Some(note.crossing_id.as_str()),
+            "a second crossing inside the day"
+        );
+        let dip = next(Some(&hour), &under_share(120, tidy_items(100)));
+        assert_eq!(
+            tidy_of(&dip).map(|n| (n.crossing_id.as_str(), n.text.as_str())),
+            Some((note.crossing_id.as_str(), "")),
+            "the day's crossing was not kept, silent, under 500 MB"
+        );
+        let rise = next(Some(&dip), &under_share(180, tidy_items(900)));
+        assert_eq!(
+            tidy_of(&rise).map(|n| n.crossing_id.as_str()),
+            Some(note.crossing_id.as_str()),
+            "a rise inside the day minted a second crossing"
+        );
+
+        let day = next(Some(&rise), &under_share(1 + 24 * 60, tidy_items(900)));
+        let again = tidy_of(&day).expect("not told again after a day");
+        assert_ne!(again.crossing_id, note.crossing_id);
+        assert!(!again.text.is_empty());
+    }
+
+    /// **Over the share, the disk ask names dead items first, then warm ones least recently used
+    /// first**, whatever their size (owner, 2026-11-06).
+    ///
+    /// What would make it fail: `removable_now` not sorting (the list's own order, biggest first,
+    /// names the 4.0G playwright cache first); warm items sorted newest first. Watched: with the
+    /// `by_tidiness` call dropped from `removable_now`, this failed naming
+    /// ~/.cache/ms-playwright first.
+    #[test]
+    fn over_the_share_dead_items_are_named_first_then_the_least_recently_used() {
+        let items = vec![
+            warm(
+                "~/.cache/ms-playwright",
+                "download cache",
+                4096,
+                "2026-09-24T09:00:00Z",
+            ),
+            warm(
+                "web-main/tree/target",
+                "build output",
+                3072,
+                "2026-09-20T09:00:00Z",
+            ),
+            dead(
+                "web-main/tree/.worktrees/a/target",
+                "build output",
+                1024,
+                "lane/a is merged",
+            ),
+        ];
+        let s = next(None, &over_with(0, 2048, items));
+        let ask = s
+            .asks
+            .iter()
+            .find(|a| a.kind == "disk")
+            .expect("no disk ask");
+        assert!(
+            ask.hold.contains(
+                "The biggest are web-main/tree/.worktrees/a/target (1.0G), web-main/tree/target \
+                 (3.0G) and ~/.cache/ms-playwright (4.0G)"
+            ),
+            "{}",
+            ask.hold
+        );
+    }
+
+    /// **The shipped hook says a tidy note once in the whole box, not once per session**, and
+    /// holds nothing for it.
+    ///
+    /// What would make it fail: `disk-tidy` missing from the hook's `BOX_ONCE` (a second session
+    /// is told the same note); the box's record not written (likewise). Watched: with `BOX_ONCE`
+    /// emptied, session s2 was told the note again and this failed.
+    #[test]
+    fn the_tidy_note_is_said_once_per_box() {
+        let h = hooked();
+        let s = write_box(
+            &h.state,
+            &Reading {
+                at: Utc::now(),
+                ..under_share(0, tidy_items(600))
+            },
+        )
+        .unwrap();
+        let text = tidy_of(&s).unwrap().text.clone();
+        assert_eq!(h.tool("s1"), None, "a note held a command");
+        assert_eq!(h.context("session-start", "s1"), Some(text));
+        assert_eq!(h.context("prompt", "s1"), None);
+        assert_eq!(h.context("session-start", "s2"), None, "told again in s2");
+        assert_eq!(h.context("prompt", "s3"), None, "told again in s3");
     }
 }
