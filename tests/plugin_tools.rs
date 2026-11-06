@@ -1412,6 +1412,74 @@ fn what_skein_marks_in_use_is_refused_with_no_lock_held() {
     }
 }
 
+/// **A refusal names the process that holds the item**: "cargo (pid 1234) in this box is using it
+/// now", in the listing and in the sentence the agent reads when it asks to remove it anyway. The
+/// holder is the box's own process whose working directory, program or open file is inside the
+/// item. A path above an item holds nothing: the shell works in `$HOME`, above the cache, and
+/// node in the checkout, above its target.
+///
+/// What would make it fail: `holders` finding nothing (the generic words stay), or matching the
+/// other way round, a process whose path is above the item. Watched: with `holders` returning
+/// `{}`, the first assertion failed on the generic words; with the match made `under(p, name)`,
+/// it failed naming `node (pid 4321)` for the target.
+#[test]
+fn a_refusal_names_the_process_that_holds_the_item() {
+    let b = Box_::new("skein-tools-it-clean-holder");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    let mut file: Value =
+        serde_json::from_str(&fs::read_to_string(b.at("state/signals/resources.json")).unwrap())
+            .unwrap();
+    for it in file["clean"]["items"].as_array_mut().unwrap() {
+        it["live"] = json!(true);
+    }
+    b.put("state/signals/resources.json", &file.to_string());
+    b.put("root/proc/locks", "");
+    b.in_cgroup("/skein/web-main/box");
+    b.put(
+        "root/sys/fs/cgroup/skein/web-main/cgroup.procs",
+        "1000\n1234\n4321\n",
+    );
+    let home = c.root.join("home");
+    let target = c.root.join("tree/target");
+    let pip = home.join(".cache/pip");
+    let proc_ = |pid: u32, comm: &str, cwd: &std::path::Path, fd: Option<std::path::PathBuf>| {
+        b.put(&format!("root/proc/{pid}/comm"), &format!("{comm}\n"));
+        let at = b.at(&format!("root/proc/{pid}"));
+        fs::create_dir_all(at.join("fd")).unwrap();
+        std::os::unix::fs::symlink(cwd, at.join("cwd")).unwrap();
+        std::os::unix::fs::symlink(format!("/usr/bin/{comm}"), at.join("exe")).unwrap();
+        if let Some(fd) = fd {
+            std::os::unix::fs::symlink(fd, at.join("fd/3")).unwrap();
+        }
+    };
+    proc_(1000, "bash", &home, None);
+    proc_(1234, "cargo", &target.join("debug"), None);
+    proc_(
+        4321,
+        "node",
+        &c.root.join("tree"),
+        Some(pip.join("wheels/x.whl")),
+    );
+
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let why = |path: &std::path::Path| {
+        listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["path"] == path.display().to_string())
+            .unwrap_or_else(|| panic!("{path:?} not listed: {listing}"))["why_not"]
+            .clone()
+    };
+    assert_eq!(why(&target), "cargo (pid 1234) in this box is using it now");
+    assert_eq!(why(&pip), "node (pid 4321) in this box is using it now");
+    let (got, said) = clean_said(&b, &[target.display().to_string()]);
+    assert_eq!(got["error"], "not-safe-now", "{got}");
+    assert!(said.contains("cargo (pid 1234)"), "{said}");
+    assert!(target.exists(), "the target was removed while in use");
+}
+
 /// **A lock on another filesystem's file with the target's inode number is not a build in it**
 /// (SKEIN-1391): skein-mcp's recheck at the call matches `/proc/locks` by device and inode
 /// together, so the target is removed.
