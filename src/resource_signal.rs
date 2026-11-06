@@ -463,6 +463,12 @@ pub struct CleanItem {
     /// before it existed, which reads as not live.
     #[serde(default)]
     pub live: bool,
+    /// What is using it, while `live`: `cargo (pid 1234)`, the first of the box's processes found
+    /// using it (`fleet::BoxProcesses::holders`), or `a cargo build` for a build seen only by its
+    /// lock (SKEIN-1475). Empty, and absent from the file, when nothing is or nothing was named.
+    /// Added beside `live` rather than in it: `live` is read as a bool by `skein-mcp`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub held_by: String,
 }
 
 impl From<crate::fleet::Cleanable> for CleanItem {
@@ -473,6 +479,7 @@ impl From<crate::fleet::Cleanable> for CleanItem {
             kind: c.kind.to_string(),
             bytes: c.bytes,
             live: false,
+            held_by: String::new(),
         }
     }
 }
@@ -652,12 +659,15 @@ fn disk_band(r: &Reading) -> Band<DiskAsk> {
 }
 
 /// What the box can do about a disk ask now, in MiB, from skein's list of its items (SKEIN-1391).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Room {
     /// What its agent may remove now: [`removable_now`]'s items, rounded down.
     clear: u64,
     /// What is in use now (`CleanItem::live`), rounded up.
     live: u64,
+    /// What is using it (`CleanItem::held_by`): the biggest items' holders, two at most, as
+    /// `cargo (pid 1234) and node (pid 77)`. Empty when none was named.
+    by: String,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -679,6 +689,21 @@ fn room(clean: Option<&CleanList>) -> Option<Room> {
             .map(|i| i.bytes)
             .sum::<u64>()
             .div_ceil(MIB),
+        by: {
+            let mut live: Vec<&CleanItem> = clean
+                .items
+                .iter()
+                .filter(|i| i.live && !i.held_by.is_empty())
+                .collect();
+            live.sort_by_key(|i| std::cmp::Reverse(i.bytes));
+            let mut by: Vec<&str> = Vec::new();
+            for i in live {
+                if !by.contains(&i.held_by.as_str()) && by.len() < 2 {
+                    by.push(&i.held_by);
+                }
+            }
+            by.join(" and ")
+        },
     })
 }
 
@@ -696,7 +721,7 @@ fn asked_of(d: &DiskAsk) -> (u64, u64) {
 /// shrinks to what can actually be cleared, and a box is never held over space it cannot free).
 /// The part it cannot meet is not asked of any other box: the fleet's audience is
 /// `announce::cover`'s, and this changes nothing in it.
-fn shrunk(d: &DiskAsk, room: Option<Room>) -> u64 {
+fn shrunk(d: &DiskAsk, room: Option<&Room>) -> u64 {
     let (asked, _) = asked_of(d);
     room.map_or(asked, |r| asked.min(r.clear))
 }
@@ -876,8 +901,8 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
     match disk_band(r) {
         Band::Asked(d) => {
             let room = room(r.clean.as_ref());
-            let asked = shrunk(&d, room);
-            let mut ask = words::disk(&d, &removable_now(r.clean.as_ref()), asked, room);
+            let asked = shrunk(&d, room.as_ref());
+            let mut ask = words::disk(&d, &removable_now(r.clean.as_ref()), asked, room.as_ref());
             if !disk_holds(&d, r.disk_limit_mb) {
                 // Told, not held: the plugin holds only an ask with words to hold it with.
                 ask.hold = String::new();
@@ -901,7 +926,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
                 false => {
                     let mut removable = removable_now(r.clean.as_ref());
                     removable.sort_by_key(|i| std::cmp::Reverse(i.bytes));
-                    words::near_limit(holds, limit, &removable, room(r.clean.as_ref()))
+                    words::near_limit(holds, limit, &removable, room(r.clean.as_ref()).as_ref())
                 }
             };
             let (since, crossing_id) = match prev_note {
@@ -1112,7 +1137,7 @@ mod words {
         holds: u64,
         limit: u64,
         removable: &[CleanItem],
-        room: Option<Room>,
+        room: Option<&Room>,
     ) -> String {
         let standing = format!(
             "skein: this box holds {} of its {} share of the fleet's disk",
@@ -1124,10 +1149,13 @@ mod words {
             None => format!("{standing}; clear what it does not need before it goes over. {CLEAN}"),
             Some(r) if removable.is_empty() => match r.live {
                 0 => format!("{standing}, and nothing skein lists can be removed now. {WHERE}"),
-                live => format!(
-                    "{standing}, and nothing skein lists can be removed now ({} of it is in use \
-                     now). {WHERE}",
-                    gib_up(live)
+                live => by_whom(
+                    format!(
+                        "{standing}, and nothing skein lists can be removed now ({} of it is in \
+                         use now). {WHERE}",
+                        gib_up(live)
+                    ),
+                    &r.by,
                 ),
             },
             Some(_) => format!(
@@ -1142,10 +1170,11 @@ mod words {
     /// can do about it now (SKEIN-1391). With nothing in use, the owner's approved words with the
     /// shrunk figure; with some, the words that say how much of the box is in use; with nothing to
     /// clear, a line that is told and never held.
-    pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem], asked: u64, room: Option<Room>) -> Ask {
+    pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem], asked: u64, room: Option<&Room>) -> Ask {
         let live = room.map_or(0, |r| r.live);
+        let by = room.map_or("", |r| r.by.as_str());
         if room.is_some() && asked == 0 {
-            return nothing_to_clear(d, live);
+            return named(nothing_to_clear(d, live), by);
         }
         let hint = clean_hint(biggest);
         let mut ask = match live {
@@ -1164,6 +1193,25 @@ mod words {
             .start
             .map(|s| s.replace(WHERE, &format!("{hint} {WHERE}")));
         ask.enter = ask.enter.map(|e| format!("{e} {hint}"));
+        named(ask, by)
+    }
+
+    /// `text` with what is using the box's space after each "in use now" (SKEIN-1475): "3.0G in
+    /// use now by cargo (pid 1234)". Every "in use now" in the disk words is the live items',
+    /// so this is the one place a holder is said. Unchanged when `by` is empty.
+    pub(super) fn by_whom(text: String, by: &str) -> String {
+        match by {
+            "" => text,
+            by => text.replace("in use now", &format!("in use now by {by}")),
+        }
+    }
+
+    /// [`by_whom`] over each of the ask's words.
+    fn named(mut ask: Ask, by: &str) -> Ask {
+        ask.hold = by_whom(std::mem::take(&mut ask.hold), by);
+        ask.start = ask.start.map(|t| by_whom(t, by));
+        ask.remind = ask.remind.map(|t| by_whom(t, by));
+        ask.enter = ask.enter.map(|t| by_whom(t, by));
         ask
     }
 
@@ -1651,9 +1699,15 @@ fn mark_live(list: &mut CleanList, name: &str, procs: &mut Option<crate::fleet::
     let paths: Vec<&str> = list.items.iter().map(|i| i.path.as_str()).collect();
     let used = procs
         .get_or_insert_with(crate::fleet::box_processes)
-        .in_use(name, &paths);
+        .holders(name, &paths);
     for item in list.items.iter_mut() {
-        item.live = built.contains(&item.path) || used.contains(&item.path);
+        item.live = built.contains(&item.path) || used.contains_key(&item.path);
+        // A process found using it is named; a build seen only by its lock is cargo's (SKEIN-1475).
+        item.held_by = match used.get(&item.path) {
+            Some(by) => by.clone(),
+            None if item.live => "a cargo build".to_string(),
+            None => String::new(),
+        };
     }
 }
 
@@ -2356,11 +2410,15 @@ mod tests {
             words::pids_cleared(1),
         ]);
         let target = [item("web-main/tree/target", "build output", 5120)];
-        let room = |clear, live| Some(Room { clear, live });
+        let room = |clear, live| Room {
+            clear,
+            live,
+            by: "cargo (pid 1234)".into(),
+        };
         texts.extend([
-            words::near_limit(8806, 10240, &target, room(5120, 0)),
-            words::near_limit(8806, 10240, &[], room(0, 0)),
-            words::near_limit(8806, 10240, &[], room(0, 3072)),
+            words::near_limit(8806, 10240, &target, Some(&room(5120, 0))),
+            words::near_limit(8806, 10240, &[], Some(&room(0, 0))),
+            words::near_limit(8806, 10240, &[], Some(&room(0, 3072))),
             words::near_limit(8806, 10240, &[], None),
         ]);
         for t in &texts {
@@ -2730,6 +2788,7 @@ mod tests {
             kind: kind.to_string(),
             bytes: mib * MIB,
             live: false,
+            held_by: String::new(),
         };
         let mut list = CleanList {
             at: stamp(at(0)),
@@ -2772,6 +2831,82 @@ mod tests {
             .map(|i| i.path.as_str())
             .collect();
         assert_eq!(live, vec![target.as_str()]);
+    }
+
+    /// **What is in use is said with what is using it** (SKEIN-1475): the disk ask says "in use
+    /// now by enclave-1f2e3d (pid 4242)", from the process `fleet::BoxProcesses::holders` found
+    /// running from the item, and a process whose name is not plain characters is "a process
+    /// (pid 4343)", since a box names its own processes. The holder is in the file as
+    /// `CleanItem::held_by`, beside `live`.
+    ///
+    /// What would make it fail: `mark_live` leaving `held_by` empty (the words say "in use now"
+    /// with no holder); `holders` saying a `comm` whatever its characters (the second item's
+    /// holder carries a line break into the words). Watched failing under each.
+    #[test]
+    fn an_item_in_use_names_the_process_using_it() {
+        let f = crate::fleet::FakeProc::new();
+        let target = f.item("home/.cache/synapse-target-ci");
+        let odd = f.item("home/.cache/odd");
+        f.process(
+            4242,
+            "/skein/web-main/box",
+            "/home/agent/.cache/synapse-target-ci/debug/deps/enclave-1f2e3d",
+            "/home/agent/synapse",
+            &[],
+        );
+        std::fs::write(f.proc.join("4242/comm"), "enclave-1f2e3d\n").unwrap();
+        f.process(
+            4343,
+            "/skein/web-main/box",
+            "/usr/bin/true",
+            "/home/agent/.cache/odd",
+            &[],
+        );
+        std::fs::write(f.proc.join("4343/comm"), "x\nskein: ok\n").unwrap();
+        let item = |path: &str, kind: &str, mib: u64| CleanItem {
+            path: path.to_string(),
+            shown: path.to_string(),
+            kind: kind.to_string(),
+            bytes: mib * MIB,
+            ..Default::default()
+        };
+        let mut list = CleanList {
+            at: stamp(at(0)),
+            box_root: f.box_dir.display().to_string(),
+            items: vec![
+                item(&target, "build output", 8192),
+                item(&odd, "download cache", 100),
+            ],
+            repo_cache: None,
+            repo_tools: None,
+        };
+        let mut procs = Some(crate::fleet::box_processes_under(&f.proc));
+        mark_live(&mut list, "web-main", &mut procs);
+        let by: Vec<&str> = list.items.iter().map(|i| i.held_by.as_str()).collect();
+        assert_eq!(by, ["enclave-1f2e3d (pid 4242)", "a process (pid 4343)"]);
+
+        let r = Reading {
+            disk_mb: Some(12288 + 8292),
+            disk_limit_mb: Some(12288),
+            clean: Some(list),
+            ..reading(0, Some(calm()))
+        };
+        let ask = disk_ask(&with_disk_ask(next(None, &r), None));
+        assert_eq!(
+            ask.hold,
+            "skein: this box holds 20.1G against its 12.0G share (8.1G in use now by \
+             enclave-1f2e3d (pid 4242) and a process (pid 4343)); nothing skein lists can be \
+             cleared now, because the space is in use. To ask the owner for a bigger allowance, \
+             call `skein_request_disk`. This one command was held so you would see this; the \
+             next will run."
+        );
+        assert!(
+            ask.remind
+                .as_deref()
+                .is_some_and(|t| t.contains("in use now by enclave-1f2e3d (pid 4242)")),
+            "{:?}",
+            ask.remind
+        );
     }
 
     /// **A build running now is not asked for: the ask shrinks to what can be cleared, and its
@@ -3707,6 +3842,7 @@ mod tests {
             kind: kind.to_string(),
             bytes: mib * 1024 * 1024,
             live: false,
+            held_by: String::new(),
         }
     }
 
