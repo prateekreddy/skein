@@ -776,7 +776,7 @@ inherited_env=(
   # the ones a box has no use for as it reads them.
   SKEIN_FLEET_LIMITS SKEIN_FLEET_GUARANTEES SKEIN_GIT_SCOPE SKEIN_BOX_REPO SKEIN_BOX_PRIVILEGED
   SKEIN_MODEL_SCRATCH SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE SKEIN_BOX_PEERS SKEIN_FLEET_NAME
-  SKEIN_BOX_TELEMETRY SKEIN_BOX_VERSIONS
+  SKEIN_BOX_TELEMETRY SKEIN_BOX_VERSIONS SKEIN_BOX_KINDS
   # Where the agent CLIs' npm prefix is, for the fleet tests, which cannot write the real one.
   # Unset in production, where it is /usr/local/share/npm-global (SKEIN-1372).
   SKEIN_NPM_PREFIX
@@ -2647,6 +2647,22 @@ if [ -n "$repo_tools_id" ] &&
 fi
 unset repo_tools_id repo_tools_at repo_tools_dir repo_tools_fd
 
+# --- Which of the repo's caches this box is pointed at: the repo's kinds (SKEIN-1373) ------------
+#
+# The owner's decision of 2026-11-06: one shared compiler cache per repo, and a repo's kinds say
+# which caches it gets, because a node repo has no use for the Rust cache and a rust repo none for
+# npm's. skein reads them off the box's checkout, or takes the owner's choice for the repo, and
+# hands them over in `SKEIN_BOX_KINDS` (`fleet::box_kinds`), words from rust, node, python and go.
+# Unset, from a skein that could not tell, is every kind, which is what a box had before kinds. Only
+# known words are kept; the session block below matches them as whole words.
+repo_kinds="" kinds_in=()
+read -r -a kinds_in <<<"${SKEIN_BOX_KINDS-rust node python go}"
+for kind in ${kinds_in[@]+"${kinds_in[@]}"}; do
+  case "$kind" in rust | node | python | go) repo_kinds="$repo_kinds $kind" ;; esac
+done
+repo_kinds="${repo_kinds# }"
+unset kind kinds_in SKEIN_BOX_KINDS
+
 # --- skein's own commands, for every agent in the box (SKEIN-1436) --------------------------------
 #
 # `skein-lock`, the repo's install lock above, is a command an agent runs by name. Claude Code puts
@@ -3966,8 +3982,8 @@ exec bwrap \
   -- \
   bash -lc '
     tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; repo_tools="$7"
-    rustup_home="$8"
-    shift 8
+    rustup_home="$8"; repo_kinds="$9"
+    shift 9
     # The box own PATH, decided at the top of this file and handed across as a positional.
     #
     # HERE and not before the exec, and not with bwrap --setenv, for the two reasons written up
@@ -4021,7 +4037,8 @@ exec bwrap \
     # still off: the shim installs a missing toolchain itself, under the repo lock, and rustup
     # installing one on its own would take no lock. What gets past the shim (the fleet toolchain
     # proxies at their own path, which the box can see) then hears the toolchain is not installed,
-    # and does not install it unlocked. CARGO_HOME and CARGO_INSTALL_ROOT are set with the area below.
+    # and does not install it unlocked. CARGO_INSTALL_ROOT is set with the area below, and CARGO_HOME
+    # too in a rust repo; a repo of other kinds leaves cargo its default, the box own ~/.cargo.
     if [ -n "$rustup_home" ] && [ "$rustup_home" = "$repo_tools/rustup" ]; then
       export RUSTUP_HOME="$rustup_home" RUSTUP_AUTO_INSTALL=0
     elif [ -n "$rustup_home" ]; then
@@ -4055,20 +4072,46 @@ exec bwrap \
     #
     # npm global prefix moves too, and the agent CLIs stay where they are: they are found on
     # box_path in the fleet prefix, which nothing here changes.
+    #
+    # The caches follow the repo kinds, each kind in an if of its own (SKEIN-1373, the owner on
+    # 2026-11-06: no point giving a node repo the Rust cache, or a rust repo npm). Where the tool
+    # managers install does not: cargo install, npm i -g, uv tool, pipx and go install put their
+    # commands in the area for every repo, so a cargo tool an agent of a node repo installs is still
+    # on its PATH after a restart. A kind the repo lacks has its cache names not exported at all,
+    # rather than exported and left unmade: unexported, a tool that runs anyway uses the box own
+    # default (~/.cargo, ~/.npm, ~/.cache/pip, ~/go), which works and is counted against that box,
+    # where an export would quietly grow the shared cache for a kind the owner said the repo is not.
+    has_kind() { case " $repo_kinds " in *" $1 "*) return 0 ;; esac; return 1; }
     if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]; then
       mkdir -p "$repo_tools/tools/bin" "$repo_tools/cache" 2>/dev/null
-      export SKEIN_REPO_TOOLS="$repo_tools" CARGO_HOME="$repo_tools/cache/cargo" \
-        CARGO_INSTALL_ROOT="$repo_tools/tools" npm_config_cache="$repo_tools/cache/npm" \
-        PIP_CACHE_DIR="$repo_tools/cache/pip" UV_CACHE_DIR="$repo_tools/cache/uv" UV_LINK_MODE=copy \
-        npm_config_store_dir="${tree%/*}/pnpm-store" pnpm_config_store_dir="${tree%/*}/pnpm-store" \
+      export SKEIN_REPO_TOOLS="$repo_tools" CARGO_INSTALL_ROOT="$repo_tools/tools" \
         NPM_CONFIG_PREFIX="$repo_tools/tools" PNPM_HOME="$repo_tools/pnpm" \
         pnpm_config_global_bin_dir="$repo_tools/tools/bin" NVM_DIR="$repo_tools/nvm" \
         FNM_DIR="$repo_tools/fnm" VOLTA_HOME="$repo_tools/volta" \
         UV_PYTHON_INSTALL_DIR="$repo_tools/uv/python" UV_TOOL_DIR="$repo_tools/uv/tools" \
         UV_TOOL_BIN_DIR="$repo_tools/tools/bin" PIPX_HOME="$repo_tools/pipx" \
-        PIPX_BIN_DIR="$repo_tools/tools/bin" PYENV_ROOT="$repo_tools/pyenv" GOPATH="$repo_tools/go" \
+        PIPX_BIN_DIR="$repo_tools/tools/bin" PYENV_ROOT="$repo_tools/pyenv" \
         GOBIN="$repo_tools/tools/bin" MISE_DATA_DIR="$repo_tools/mise"
     fi
+    if [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind rust; then
+      export CARGO_HOME="$repo_tools/cache/cargo"
+    fi
+    if [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind node; then
+      export npm_config_cache="$repo_tools/cache/npm" \
+        npm_config_store_dir="${tree%/*}/pnpm-store" pnpm_config_store_dir="${tree%/*}/pnpm-store"
+    fi
+    if [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind python; then
+      export PIP_CACHE_DIR="$repo_tools/cache/pip" UV_CACHE_DIR="$repo_tools/cache/uv" UV_LINK_MODE=copy
+    fi
+    if [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind go; then
+      export GOPATH="$repo_tools/go"
+    fi
+    # No compiler cache yet, and no RUSTC_WRAPPER for any box (SKEIN-1373). Two things come first.
+    # SKEIN-1479: sccache compiles in its own server, which outlives the job that started it, keeps
+    # that job cgroup from being removed, and charges every later compile there, outside the queue.
+    # SKEIN-1481: sccache 0.13 keys each entry by the target directory path, so a lane or box got 0
+    # hits of 101 from another (measured 2026-11-06), and 101 of 101 only at one path.
+    unset -f has_kind
     # The browsers directory of this box alone, where the kit links the fleet browsers (SKEIN-1341).
     # GC off, or Playwright removes the links to browsers the projects here do not use (measured).
     export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" PLAYWRIGHT_SKIP_BROWSER_GC=1
@@ -4101,4 +4144,4 @@ exec bwrap \
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"
   ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$box_path" "${repo_tools-}" \
-    "${rustup_home-}" "${pane_cmd[@]}"
+    "${rustup_home-}" "${repo_kinds-}" "${pane_cmd[@]}"

@@ -235,8 +235,10 @@ fn parse_session_decides(script: &str, inherited: &[String]) -> Vec<String> {
 }
 
 /// **The names the session points at the repo's download cache** — every `NAME=` the launcher's
-/// session block exports inside its `if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]` (SKEIN-1350,
-/// SKEIN-1431), read out of the launcher's text (SKEIN-1354).
+/// session block exports inside its `if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]` and inside each
+/// per-kind `if` that opens the same way (SKEIN-1350, SKEIN-1431, SKEIN-1373), read out of the
+/// launcher's text (SKEIN-1354). A box gets a kind's names only when its repo is that kind, and a
+/// crossing then has them exactly when the session does.
 ///
 /// A crossing carries these as part of [`session_exports`], which reads every export in the
 /// block; this list is the part of it that names the cache, for what is said about the cache. A
@@ -267,22 +269,32 @@ pub fn session_cache_names() -> &'static [String] {
 /// The line that opens the session block's repo-cache exports, as `src/box-session.sh` spells it.
 const CACHE_EXPORTS_OPEN: &str = r#"if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]; then"#;
 
+/// How every `if` that exports into the repo's area opens: the first, for every repo, and one per
+/// kind of repo after it (`if [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind rust; then`,
+/// SKEIN-1373). Each runs to its own `fi`.
+const CACHE_EXPORTS_GUARD: &str = r#"if [ -n "$repo_tools" ] && [ -d "$repo_tools" ]"#;
+
 fn parse_session_cache_names(script: &str) -> Vec<String> {
-    let mut lines = script
-        .lines()
-        .skip_while(|l| l.trim() != CACHE_EXPORTS_OPEN);
     assert!(
-        lines.next().is_some(),
+        script.lines().any(|l| l.trim() == CACHE_EXPORTS_OPEN),
         "src/box-session.sh has no `{CACHE_EXPORTS_OPEN}` line, so a crossing cannot tell which \
          names point a box at its repo's download cache"
     );
     let mut names: Vec<String> = Vec::new();
-    let mut closed = false;
-    for line in lines {
+    let mut open = false;
+    let mut blocks = 0;
+    for line in script.lines() {
         let code = line.trim();
+        if !open {
+            if code.starts_with(CACHE_EXPORTS_GUARD) && code.ends_with("then") {
+                open = true;
+                blocks += 1;
+            }
+            continue;
+        }
         if code == "fi" {
-            closed = true;
-            break;
+            open = false;
+            continue;
         }
         if code.starts_with('#') {
             continue;
@@ -297,7 +309,7 @@ fn parse_session_cache_names(script: &str) -> Vec<String> {
         }
     }
     assert!(
-        closed && !names.is_empty(),
+        !open && blocks > 0 && !names.is_empty(),
         "the launcher's repo-cache exports have no `fi`, or export nothing"
     );
     for name in &names {
@@ -754,6 +766,8 @@ mod tests {
                 "ANTHROPIC_API_KEY",
                 "GH_TOKEN",
                 "OPENAI_API_KEY",
+                // SKEIN-1373: the repo's kinds, consumed by the launcher and held by no box.
+                "SKEIN_BOX_KINDS",
                 "SKEIN_BOX_STORE",
                 // SKEIN-1225: the telemetry switch, consumed by the launcher and held by no box.
                 "SKEIN_BOX_TELEMETRY",

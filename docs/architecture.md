@@ -974,7 +974,7 @@ path in it (`src/box-session.sh:2446`) and binds back only the one store this bo
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
   — module notes and a repo pull. Neither exists: the module notes, the diff and CODEOWNERS read the
   mirror through `repos::Tree` (`src/repos/mirror.rs:316`), and `pull_repo` fetches the mirror and does
-  nothing else (`src/repos/add.rs:258`). What has not changed is that skein still runs git **on the
+  nothing else (`src/repos/add.rs:260`). What has not changed is that skein still runs git **on the
   host** against a tree inside `~/.skein/repos` — the mirror, via `fetch_mirror` — so a box that
   could write that mirror's `config` would still get execution as the host user at the next fetch.
   The cover above is what stops it, which means the cover is load-bearing for more than file
@@ -1437,7 +1437,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    repo adopted in place; there is no `work` field on `Repo` and no adopted repo to have one (§6),
    and the argument survives its loss intact, because one arbitrary path is enough to defeat a rule
    written over a root. **Built**: the launcher is *given* the mount set rather than learning it, as
-   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet/start.rs:168`), and each box gets back only its
+   `SKEIN_FLEET_MOUNTS` from `mount_manifest` (`src/fleet/start.rs:169`), and each box gets back only its
    own repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what the launcher's `--tmpfs "$fleet_root_dir"`
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that
