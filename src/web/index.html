@@ -11619,7 +11619,7 @@ const repoCacheSeen = new Map();   // repo id -> the last answer, so a re-render
 const repoKindsSeen = new Map();   // repo id -> the last answer, so a re-render need not ask again
 function repoKindsRow(r) {
   return `<div class="set-field" data-repokinds="${esc(r.id)}"><span class="set-title">Kinds<span class="rsaved" data-saved="${esc(r.id)}-kinds">saved</span></span>`
-    + `<span class="desc">which shared caches this repo's boxes get: cargo's and the compiler cache for rust, npm's for node, pip's and uv's for python, go's modules for go. A kind it is not gets none, so nothing is set up or counted for it. Unchosen, each box reads them off its own checkout as it starts: Cargo.toml, package.json, pyproject.toml or requirements.txt, go.mod. A change reaches a box at its next start</span>`
+    + `<span class="desc">which shared caches this repo's boxes get: cargo's for rust, npm's for node, pip's and uv's for python, go's modules for go. A kind it is not gets none, so nothing is set up or counted for it. Unchosen, each box reads them off its own checkout as it starts: Cargo.toml, package.json, pyproject.toml or requirements.txt, go.mod. A change reaches a box at its next start</span>`
     + `<div class="path-row" data-kindpicks><span class="desc">reading…</span></div></div>`;
 }
 function showRepoKinds(id, k) {

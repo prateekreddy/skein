@@ -15,7 +15,7 @@
 
 **Decided by.** The project owner, on SKEIN-1350. Amended by the owner on 2026-10-31 (SKEIN-1426):
 each repo's caches move to its tools area on the fleet's disk. Amended again on 2026-11-06
-(SKEIN-1373): one shared compiler cache per repo, and a repo's kinds decide which caches it gets.
+(SKEIN-1373): a repo's kinds decide which caches it gets; its shared compiler cache waits.
 
 **Why.** The launcher bound the sandbox's `~/.cargo`, `~/.rustup` and `~/.npm` read-write into
 every box, whatever repo it belonged to. They were kept on the grounds that nothing on a box's
@@ -75,13 +75,12 @@ puts it.
   repo's files. A kind the repo is not has its cache names left unexported, so a tool run anyway
   uses the box's own default and counts against that box; where the tool managers install is
   pointed into the area for every repo, so a cargo tool installed in a node repo still runs.
-- A rust repo's boxes share one compiler cache, sccache's, at `cache/sccache` in the area, capped
-  at 2G, and only when sccache runs in the box, since cargo runs its wrapper for every crate. Each
-  box's sccache server listens on a socket in the box's own `/tmp`: the default is a TCP port on
-  the loopback every box shares, where the first box's server would compile for every box of
-  every repo, in its own namespace and into its own repo's cache. A hit needs the same absolute
-  paths, the target directory's included, so with sccache 0.13 two worktrees share nothing
-  (measured: 0 hits of 101 between two, 101 of 101 at one path).
+- No compiler cache yet: no box gets `RUSTC_WRAPPER`. The owner asked for one shared sccache per
+  rust repo, and two things are settled first. sccache compiles in its own server, which outlives
+  the heavy job that started it, keeps that job's cgroup from being removed and charges every later
+  compile there, outside the queue (SKEIN-1479). And sccache 0.13 keys each entry by the target
+  directory's path, so two worktrees share nothing (SKEIN-1481; measured 2026-11-06: 0 hits of
+  101 between two, 101 of 101 at one path).
 - Build output stays per box: `target/`, `node_modules`, and the read-only fleet toolchain at
   `~/.cargo/bin`.
 - The repo's cache counts toward the repo, not toward any box's disk allowance. The old one is
@@ -116,8 +115,8 @@ puts it.
   `the_caches_are_on_the_trees_file_system_and_pnpm_hard_links_into_a_worktree` and
   `a_link_where_the_area_should_be_is_refused` (`tests/isolation_bwrap/repocache.rs`); its bind is
   `src/box-session.sh:2641` and the tools are pointed at it at `src/box-session.sh:4087`. Which
-  caches follow which kind, and sccache only where it runs: bwrap test
-  `a_repos_kinds_decide_its_caches_and_sccache_only_where_it_runs`; the kinds a box is handed:
+  caches follow which kind, and no box gets a compiler wrapper: bwrap test
+  `a_repos_kinds_decide_its_caches_and_no_box_gets_a_compiler_wrapper`; the kinds a box is handed:
   tests `a_checkouts_kinds_are_read_off_its_files` (`src/repos/kinds.rs`) and
   `a_box_start_carries_its_kinds_and_the_owners_choice_replaces_detection` (`src/fleet/start.rs`). The install
   lock: fleet test `two_concurrent_auto_installs_are_serialised_by_the_shim`

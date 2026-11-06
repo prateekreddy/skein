@@ -7,8 +7,8 @@
 //! are read off the checkout. The owner can choose them instead, on the repo's card, and the choice
 //! is kept in skein's own record of the repo ([`Repo::kinds`]), never in the repo's files.
 //!
-//! **What a kind decides is caches, not tools.** The launcher points a kind's download and
-//! compiler caches into the repo's tools area only when the repo has that kind
+//! **What a kind decides is caches, not tools.** The launcher points a kind's download caches into
+//! the repo's tools area only when the repo has that kind
 //! (`src/box-session.sh`, the session block). Where a tool manager installs (`cargo install`,
 //! `npm i -g`, `uv tool`, `go install`) is pointed into the area for every repo, so an agent of a
 //! node repo that installs a cargo tool anyway still has it, on its PATH, after a restart.

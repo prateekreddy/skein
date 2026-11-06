@@ -60,7 +60,7 @@ fn repo_kinds_block() -> String {
 }
 
 /// The session block's exports into the area, lifted: from the `has_kind` helper through the
-/// area's `if`, one `if` per kind and the compiler cache's, to the helper's `unset`. Run inside the
+/// area's `if` and one `if` per kind, to the helper's `unset`. Run inside the
 /// box, as production runs them, with `$repo_tools`, `$repo_kinds` and `$tree` set as the launcher
 /// hands them across.
 fn repo_tools_exports() -> String {
@@ -73,7 +73,7 @@ fn repo_tools_exports() -> String {
         .to_string();
     let block = lift(
         &from,
-        "unset sccache_dir",
+        "unset -f has_kind",
         "session block's repo-tools exports",
     );
     for name in [
@@ -85,8 +85,6 @@ fn repo_tools_exports() -> String {
         "UV_CACHE_DIR",
         "npm_config_store_dir",
         "NPM_CONFIG_PREFIX",
-        "RUSTC_WRAPPER",
-        "SCCACHE_DIR",
     ] {
         assert!(
             block.contains(&format!("{name}=")),
@@ -629,23 +627,6 @@ done
 printf 'tool %s\n' "$(skein-test-tool 2>/dev/null || echo none)"
 "#;
 
-/// The bwrap arguments that leave no `sccache` on a box's PATH: an empty file over each one the
-/// fleet has, in every directory `box_path` can name outside the box's own home.
-fn without_sccache() -> String {
-    let path = std::env::var("PATH").unwrap_or_default();
-    let mut hide = String::new();
-    for dir in path
-        .split(':')
-        .chain(["/usr/local/share/npm-global/bin", "/usr/bin", "/bin"])
-    {
-        let at = Path::new(dir).join("sccache");
-        if at.exists() && !hide.contains(&format!(" {} ", at.display())) {
-            hide.push_str(&format!(" --ro-bind /dev/null {} ", at.display()));
-        }
-    }
-    hide
-}
-
 /// One executable file at `path`, saying `said`.
 fn stub(path: &Path, said: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -654,51 +635,46 @@ fn stub(path: &Path, said: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// **A repo's kinds decide which of its caches its boxes are pointed at, and the compiler cache
-/// only when sccache is there to run** (SKEIN-1373, the owner's decision of 2026-11-06). Real
-/// bwrap, the launcher's own fleet-scope reading of `SKEIN_BOX_KINDS` and its own session exports,
-/// in production's order, for four boxes:
+/// **A repo's kinds decide which of its caches its boxes are pointed at, and no box gets a
+/// compiler wrapper** (SKEIN-1373, the owner's decision of 2026-11-06). Real bwrap, the launcher's
+/// own fleet-scope reading of `SKEIN_BOX_KINDS` and its own session exports, in production's order,
+/// for three boxes:
 ///
-///   * a rust repo whose area has `sccache` in its `bin`: cargo's whole home in the area, sccache as
-///     cargo's wrapper with its cache beside it, its server on a socket in the box's own `/tmp`, and
-///     no npm, pip or go cache;
-///   * a node repo: npm's cache in the area and no `CARGO_HOME` or `RUSTC_WRAPPER`, while
-///     `cargo install` still lands in the area and a cargo tool installed there still runs;
-///   * a rust repo with no `sccache` anywhere on the box's PATH: `CARGO_HOME`, and no
-///     `RUSTC_WRAPPER`, which would fail every cargo command;
+///   * a rust repo whose area has a runnable `sccache` in its `bin`: cargo's whole home in the
+///     area, no npm, pip or go cache, and no `RUSTC_WRAPPER` or `SCCACHE_*`. sccache waits on
+///     SKEIN-1479 (its server compiles outside the job that asked, in a cgroup that then cannot be
+///     removed) and SKEIN-1481 (no hits across worktrees or boxes with sccache 0.13);
+///   * a node repo: npm's cache in the area and no `CARGO_HOME`, while `cargo install` still lands
+///     in the area and a cargo tool installed there still runs;
 ///   * a box whose kinds skein could not tell: every kind's cache, as before kinds.
 ///
 /// # What would make this fail
 ///
 ///   * The kind ifs dropped, every cache exported for every repo: the node box has `CARGO_HOME`.
-///   * The fleet-scope reading dropping `$SKEIN_BOX_KINDS`, which is every kind: the node box gets
-///     cargo's, and the rust box npm's.
-///   * The `sccache --version` guard dropped, or made `command -v`, which names the hidden,
-///     unrunnable `sccache` anyway: the bare rust box has `RUSTC_WRAPPER`.
-///   * `SCCACHE_SERVER_UDS` dropped, which puts every box's server on one TCP port: the socket
-///     line is `none`.
+///   * The fleet-scope reading dropping `$SKEIN_BOX_KINDS`, which is every kind: the rust box gets
+///     npm's.
+///   * A `RUSTC_WRAPPER=sccache` export put back, guarded on sccache running or not: the rust box
+///     has it.
 ///   * `CARGO_INSTALL_ROOT` moved into the rust if: the node box's `cargo install` root is `none`.
 ///   * The unset default not every kind: the untold box loses a cache.
 #[test]
-fn a_repos_kinds_decide_its_caches_and_sccache_only_where_it_runs() {
+fn a_repos_kinds_decide_its_caches_and_no_box_gets_a_compiler_wrapper() {
     if !bwrap_works() {
         skip("bwrap cannot make a user namespace here, so which caches a box gets is unchecked");
         return;
     }
     let f = Fleet::make("repokinds1373");
     let area = |repo: &str| f.fleet_root.join(".repo-tools").join(repo);
-    for repo in ["rs", "js", "bare", "old"] {
+    for repo in ["rs", "js", "old"] {
         fs::create_dir_all(area(repo).join("tools/bin")).unwrap();
     }
     stub(&area("rs").join("tools/bin/sccache"), "stub-sccache");
     stub(&area("js").join("tools/bin/skein-test-tool"), "tool-ran");
-    let hide = without_sccache();
     let run = |name: &str, repo: &str, kinds: Option<&str>| {
-        in_repo_box_of_kinds(&f, name, repo, CACHE_ENV, &area(repo), &hide, kinds)
+        in_repo_box_of_kinds(&f, name, repo, CACHE_ENV, &area(repo), "", kinds)
     };
     let rs = run("rs-main", "rs", Some("rust"));
     let js = run("js-main", "js", Some("node"));
-    let bare = run("bare-main", "bare", Some("rust"));
     let old = run("old-main", "old", None);
     let seen = |repo: &str, rel: &str| {
         // The box sees its area at `~/.repo-tools`, its own home's.
@@ -710,18 +686,6 @@ fn a_repos_kinds_decide_its_caches_and_sccache_only_where_it_runs() {
     };
 
     assert_eq!(answer(&rs, "CARGO_HOME"), seen("rs", "cache/cargo"), "{rs}");
-    assert_eq!(answer(&rs, "RUSTC_WRAPPER"), "sccache", "{rs}");
-    assert_eq!(
-        answer(&rs, "SCCACHE_DIR"),
-        seen("rs", "cache/sccache"),
-        "{rs}"
-    );
-    assert_eq!(
-        answer(&rs, "SCCACHE_SERVER_UDS"),
-        "/tmp/sccache.sock",
-        "{rs}"
-    );
-    assert_eq!(answer(&rs, "SCCACHE_CACHE_SIZE"), "2G", "{rs}");
     for name in [
         "npm_config_cache",
         "npm_config_store_dir",
@@ -735,14 +699,23 @@ fn a_repos_kinds_decide_its_caches_and_sccache_only_where_it_runs() {
             "a rust repo's box got {name}:\n{rs}"
         );
     }
+    for (label, report) in [("rust", &rs), ("node", &js), ("untold", &old)] {
+        for name in [
+            "RUSTC_WRAPPER",
+            "SCCACHE_DIR",
+            "SCCACHE_SERVER_UDS",
+            "SCCACHE_CACHE_SIZE",
+        ] {
+            assert_eq!(
+                answer(report, name),
+                "none",
+                "the {label} repo's box got {name}, a compiler cache that waits on SKEIN-1479 and \
+                 SKEIN-1481:\n{report}"
+            );
+        }
+    }
 
-    for name in [
-        "CARGO_HOME",
-        "RUSTC_WRAPPER",
-        "SCCACHE_DIR",
-        "PIP_CACHE_DIR",
-        "GOPATH",
-    ] {
+    for name in ["CARGO_HOME", "PIP_CACHE_DIR", "GOPATH"] {
         assert_eq!(
             answer(&js, name),
             "none",
@@ -764,20 +737,6 @@ fn a_repos_kinds_decide_its_caches_and_sccache_only_where_it_runs() {
         "tool-ran",
         "a tool installed in a node repo's area is not on its box's PATH:\n{js}"
     );
-
-    assert_eq!(
-        answer(&bare, "CARGO_HOME"),
-        seen("bare", "cache/cargo"),
-        "{bare}"
-    );
-    for name in ["RUSTC_WRAPPER", "SCCACHE_DIR", "SCCACHE_SERVER_UDS"] {
-        assert_eq!(
-            answer(&bare, name),
-            "none",
-            "a rust repo's box with no sccache on its PATH got {name}, and every cargo command \
-             there would fail:\n{bare}"
-        );
-    }
 
     for (name, rel) in [
         ("CARGO_HOME", "cache/cargo"),

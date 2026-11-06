@@ -4106,37 +4106,12 @@ exec bwrap \
     if [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind go; then
       export GOPATH="$repo_tools/go"
     fi
-    # One compiler cache for the repo rust builds, sccache, in the area beside cargo downloads
-    # (SKEIN-1373), so it counts toward the repo and toward no box. Only when sccache on the box PATH
-    # runs: cargo runs RUSTC_WRAPPER for every crate, so a wrapper that is not there fails every
-    # build. Asked by running it, because command -v names a file on PATH that is not executable
-    # when there is no other, and cargo cannot run that one either.
-    #
-    # Each box talks to a sccache server of its own, on a socket in its own /tmp. The default is TCP
-    # port 4226 on 127.0.0.1, and every box shares the fleet network namespace, so the first box to
-    # start a server would serve every other box, of every repo: their compiles run in its mount
-    # namespace, against its files, into its repo cache. The servers share the cache directory, which
-    # sccache writes by temp file and rename, so two boxes never see half an entry; each server
-    # indexes the directory when it first uses it, so it hits what another box wrote before then,
-    # and not after. Measured on 2026-11-06 with sccache 0.13 in two bwrap namespaces at once, each
-    # with its own /tmp and socket: three rounds, every build finished, no cache read or write
-    # error, and the second and third rounds hit every cacheable crate.
-    #
-    # A hit needs the same absolute paths, the target directory included: the same crates built in
-    # two worktrees of this repo hit 0 of 101, and in one target path 101 of 101. So it pays for a
-    # rebuild at a path built before, not yet for a new lane. 2G is its cap: every dependency of a
-    # cargo test --lib of this repo is 72 MiB in it, so about ten worktrees in three profiles each
-    # fit, and the fleet disk had 8 GB free when it was measured. The cap is per server, counted
-    # from what it indexed, and the next server to start holds the whole directory to it.
-    sccache_dir="$repo_tools/cache/sccache"
-    [ -n "$repo_tools" ] && [ -d "$repo_tools" ] && has_kind rust && sccache --version >/dev/null 2>&1 ||
-      sccache_dir=""
-    if [ -n "$sccache_dir" ]; then
-      export RUSTC_WRAPPER=sccache SCCACHE_DIR="$sccache_dir" SCCACHE_CACHE_SIZE=2G \
-        SCCACHE_SERVER_UDS=/tmp/sccache.sock
-    fi
+    # No compiler cache yet, and no RUSTC_WRAPPER for any box (SKEIN-1373). Two things come first.
+    # SKEIN-1479: sccache compiles in its own server, which outlives the job that started it, keeps
+    # that job cgroup from being removed, and charges every later compile there, outside the queue.
+    # SKEIN-1481: sccache 0.13 keys each entry by the target directory path, so a lane or box got 0
+    # hits of 101 from another (measured 2026-11-06), and 101 of 101 only at one path.
     unset -f has_kind
-    unset sccache_dir
     # The browsers directory of this box alone, where the kit links the fleet browsers (SKEIN-1341).
     # GC off, or Playwright removes the links to browsers the projects here do not use (measured).
     export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" PLAYWRIGHT_SKIP_BROWSER_GC=1
