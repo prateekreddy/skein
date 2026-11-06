@@ -169,9 +169,9 @@ pub(super) fn tree_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
 /// worktree's `node_modules` is pnpm's store, hard linked (the store is the box's own, beside its
 /// checkout, so that it can link): `tree_bytes` reads 0.85 GB there, and removing it frees almost
 /// none of that, since every block is still held by the store's link. So a file counts only when
-/// all of its `st_nlink` links are inside `path`. A box's charged total is still [`tree_bytes`]
-/// over the whole box directory, which holds the store too and so counts each file once: right as
-/// it is.
+/// all of its links, as many as its `nlink` says, are inside `path`. A box's charged total is
+/// still [`tree_bytes`] over the whole box directory, which holds the store too and so counts each
+/// file once: right as it is.
 pub(super) fn freed_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
     use std::os::unix::fs::MetadataExt;
     let mut bytes: u64 = 0;
