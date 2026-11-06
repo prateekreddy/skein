@@ -1643,6 +1643,18 @@ mod cockpit_routes {
         // (path, method, why it has no `fetch` in the pages)
         let declared: &[(&str, &str, &str)] = &[
             (
+                "/api/repos/:id/ci-builds",
+                "GET",
+                "a repo's declared CI build output and its cap (SKEIN-1476), set by the owner \
+                 through the API until the repo card has its control, SKEIN-1478",
+            ),
+            (
+                "/api/repos/:id/ci-builds",
+                "POST",
+                "a repo's declared CI build output and its cap (SKEIN-1476), set by the owner \
+                 through the API until the repo card has its control, SKEIN-1478",
+            ),
+            (
                 "/api/repos/:id/review/:number/triggers",
                 "POST",
                 "§10's per-pull-request trigger override, deliberately with no page caller yet. \
