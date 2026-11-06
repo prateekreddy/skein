@@ -1642,6 +1642,103 @@ fn top_by_disk_shows_the_box_and_the_shared_cache_apart() {
     );
 }
 
+/// **The repo's CI build output is listed as the repo's, on its own line in `skein_top`, and is
+/// never safe to remove while a skein-job runs or waits in the box** (SKEIN-1476). skein lists it
+/// under `repo CI output`; the box's charged kinds leave it out. Three ways a job is seen: skein's
+/// view says one is `granted` (running) or `waiting` (queued), or the box's job lock is in
+/// `/proc/locks` with no view at all. With none of them it is safe like any build output.
+///
+/// What would make it fail: the listing treating the kind as build output (it is then safe while
+/// a job runs), reading only the lock or only the view (the case the other source covers comes back
+/// safe), or `skein_top` folding it into the box's kinds. Watched, in `bin/skein-mcp`: with the
+/// listing's busy-job branch removed, the granted case read safe_now true; with the job check's
+/// loop over the view skipped, so did the granted case (the lock was free); with its lock check
+/// answering no, the lock case did; with the box's own rows keeping the CI rows, `bytes_by_kind`
+/// carried `repo CI output`.
+#[test]
+fn ci_output_is_the_repos_and_never_safe_while_a_job_runs() {
+    let b = Box_::new("skein-tools-it-clean-ci");
+    let c = Cleanable::plant(&b);
+    c.listed(&b, &c.root, (0, 0), Some(stamp_ago(10)));
+    b.put(
+        "fleet/web-main/home/.cache/synapse-target-ci/debug/deps/enclave",
+        "data",
+    );
+    let ci = c.root.join("home/.cache/synapse-target-ci");
+    let mut file: Value =
+        serde_json::from_str(&fs::read_to_string(b.at("state/signals/resources.json")).unwrap())
+            .unwrap();
+    file["clean"]["items"].as_array_mut().unwrap().push(json!({
+        "path": ci.display().to_string(), "shown": "~/.cache/synapse-target-ci",
+        "kind": "repo CI output", "bytes": 4096,
+    }));
+    b.put("state/signals/resources.json", &file.to_string());
+    b.put("root/proc/locks", "");
+    let row = |listing: &Value| {
+        listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "repo CI output")
+            .cloned()
+            .unwrap_or_else(|| panic!("no CI output listed: {listing}"))
+    };
+    let jobs = |state: &str| {
+        b.put(
+            "state/signals/jobs.json",
+            &json!({"at": stamp_ago(1), "jobs": [{"id": "j-1", "state": state}]}).to_string(),
+        )
+    };
+
+    for (state, words) in [("granted", "running"), ("waiting", "queued")] {
+        jobs(state);
+        let r = row(&b.call("web-main", "skein_clean", json!({})));
+        assert_eq!(r["safe_now"], false, "{state}: {r}");
+        assert!(
+            r["why_not"].as_str().unwrap().contains(words),
+            "{state}: {r}"
+        );
+        let (got, _) = clean_said(&b, &[ci.display().to_string()]);
+        assert_eq!(got["error"], "not-safe-now", "{state}: {got}");
+        assert!(
+            ci.exists(),
+            "the CI output was removed while a job was {words}"
+        );
+    }
+
+    // No view at all, and the job lock held: skein-job running on the box's lock alone.
+    fs::remove_file(b.at("state/signals/jobs.json")).unwrap();
+    b.put("root/var/tmp/skein-lanes-heavy.lock", "");
+    let lock = b.at("root/var/tmp/skein-lanes-heavy.lock");
+    b.put(
+        "root/proc/locks",
+        &format!(
+            "1: FLOCK  ADVISORY  WRITE 4242 {} 0 EOF\n",
+            proc_locks_name(&lock)
+        ),
+    );
+    let r = row(&b.call("web-main", "skein_clean", json!({})));
+    assert_eq!(r["safe_now"], false, "lock held: {r}");
+
+    // skein_top: its own line, out of the box's charged kinds.
+    let top = b.call("web-main", "skein_top", json!({"by": "disk"}));
+    assert!(
+        top["cleanable"]["bytes_by_kind"]
+            .get("repo CI output")
+            .is_none(),
+        "{top}"
+    );
+    let line = &top["repo_ci_output"];
+    assert_eq!(line["counted_against_this_box"], false, "{top}");
+    assert_eq!(line["bytes"], 4096, "{top}");
+
+    // Every job done, and the lock free: safe like any build output.
+    jobs("done");
+    b.put("root/proc/locks", "");
+    let r = row(&b.call("web-main", "skein_clean", json!({})));
+    assert_eq!(r["safe_now"], true, "no job: {r}");
+}
+
 /// The repo's tools area under the fixture's fleet root, with four tool versions in it, and
 /// skein's list of them as unused in the signal file: Rust, a Go toolchain whose directories are
 /// read-only as go's module cache makes them, Node, and Python, which skein saw a box of the repo

@@ -443,6 +443,10 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
             "/api/repos/:id/cache",
             get(api_repo_cache).post(api_repo_cache_clean),
         )
+        .route(
+            "/api/repos/:id/ci-builds",
+            get(api_repo_ci_builds).post(api_set_repo_ci_builds),
+        )
         .route("/api/review", get(api_review_merged))
         .route("/api/review/counts", get(api_review_counts))
         .route("/api/review/reading", get(api_review_reading))
