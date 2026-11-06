@@ -358,6 +358,9 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     tokio::spawn(skein::resource_signal::watch_box_resources());
     // Each running box's tools prune their own caches once a day: pnpm's store, uv's (SKEIN-1432).
     tokio::spawn(skein::fleet::watch_tool_caches());
+    // Which of each box's clean items belong to finished work, asked of the box's own git and gh
+    // off the resource tick (SKEIN-1477).
+    tokio::spawn(skein::fleet::tidy::watch_classes());
     // The fleet's heavy-work queue (SKEIN-1388): every 2 s, apart from the minute above.
     tokio::spawn(skein::jobs::watch_jobs());
     // The fleet's usage once an hour, and each box's own spend from it (SKEIN-1384).

@@ -16,6 +16,10 @@
 # skein keeps silent while a disk ask says the same; any hook that sees it records its crossing as
 # told, so it is not said the moment the ask clears, with figures from a list up to five minutes
 # old (SKEIN-1475).
+# A `disk-tidy` note (SKEIN-1477) is said once per crossing in the whole box, not per session:
+# skein mints one at most daily, and a box that starts ten sessions a day is told once. The box's
+# record is `~/.local/state/skein/told-box`, and a note whose crossing cannot be recorded there is
+# not said.
 #   monitor         The `resources` monitor: one line when a band changes, either way.
 #
 # Disk is said at most once an hour (owner, SKEIN-1335). A box a little over its share is over it
@@ -54,6 +58,9 @@ EVERY = 30
 
 # The least time between two things said to one session about disk.
 DISK_EVERY = 3600
+
+# The note kinds said once per crossing in the whole box rather than in each session.
+BOX_ONCE = ("disk-tidy",)
 
 
 def signals():
@@ -131,6 +138,29 @@ def shown_file(session):
     return os.path.join(base, "skein", "shown", safe)
 
 
+def box_file():
+    """Where the box records the crossings of `BOX_ONCE` notes it has told any session."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(base, "skein", "told-box")
+
+
+def fresh_notes(s, seen):
+    """The notes this session has not been told, less the box-once notes the box has been told,
+    and less those it cannot record for the box: one said and not recorded would be said again."""
+    told = shown(box_file())
+    fresh = [
+        n for n in notes(s)
+        if n["crossing_id"] not in seen
+        and not (n.get("kind") in BOX_ONCE and n["crossing_id"] in told)
+    ]
+    once = [n["crossing_id"] for n in fresh if n.get("kind") in BOX_ONCE]
+    if once and not record(box_file(), once):
+        fresh = [n for n in fresh if n.get("kind") not in BOX_ONCE]
+    return fresh
+
+
 def shown(path):
     try:
         with open(path, encoding="utf-8") as f:
@@ -199,7 +229,7 @@ def session_start():
     s = signals()
     told = [a for a in asks(s) if a.get("start")]
     seen = shown(path) if path else set()
-    fresh = [n for n in notes(s) if n["crossing_id"] not in seen]
+    fresh = fresh_notes(s, seen) if path else []
     ids = [a["crossing_id"] for a in told] + [n["crossing_id"] for n in fresh] + silent(s, seen)
     # Shown here counts as shown (owner, SKEIN-1055): a session is not held for an ask it was
     # just told about. Only what was actually printed is recorded.
@@ -264,7 +294,7 @@ def prompt():
     # Each note once per crossing, and only once it is recorded: a note that could not be recorded
     # would be said on every prompt.
     seen = shown(path) if path else set()
-    fresh = [n for n in notes(s) if n["crossing_id"] not in seen]
+    fresh = fresh_notes(s, seen) if path else []
     ids = [n["crossing_id"] for n in fresh] + silent(s, seen)
     if ids and record(path, ids):
         lines.extend(n["text"] for n in fresh)

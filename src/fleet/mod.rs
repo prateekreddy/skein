@@ -88,6 +88,7 @@ mod stop;
 mod substrate;
 #[cfg(test)]
 mod testkit;
+pub mod tidy;
 mod transcript;
 mod unowned;
 pub mod versions;
