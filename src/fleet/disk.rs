@@ -162,7 +162,62 @@ pub(super) fn tree_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
     bytes
 }
 
-// ──────────── the substrate: what skein installs beside the boxes, and what nobody claims ────────
+/// What removing the directory `path` would free, in bytes: [`tree_bytes`]' walk, except that a
+/// file with more links than the walk finds inside `path` counts nothing.
+///
+/// Its own figure because the two questions differ once a file is linked from outside the item. A
+/// worktree's `node_modules` is pnpm's store, hard linked (the store is the box's own, beside its
+/// checkout, so that it can link): `tree_bytes` reads 0.85 GB there, and removing it frees almost
+/// none of that, since every block is still held by the store's link. So a file counts only when
+/// all of its links, as many as its `nlink` says, are inside `path`. A box's charged total is
+/// still [`tree_bytes`] over the whole box directory, which holds the store too and so counts each
+/// file once: right as it is.
+pub(super) fn freed_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut bytes: u64 = 0;
+    // Each file with more than one link, by (device, inode): its blocks, its link count, and how
+    // many of its links the walk has met.
+    let mut shared: std::collections::HashMap<(u64, u64), (u64, u64, u64)> = Default::default();
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        bytes += meta.blocks() * 512;
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(kids) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for kid in kids.flatten() {
+            let Ok(meta) = kid.metadata() else {
+                continue;
+            };
+            if on_disk.is_some_and(|dev| meta.dev() != dev) {
+                continue;
+            }
+            if meta.is_dir() {
+                // A directory's link count is its subdirectories', not other names for it.
+                bytes += meta.blocks() * 512;
+                stack.push(kid.path());
+            } else if meta.nlink() <= 1 {
+                bytes += meta.blocks() * 512;
+            } else {
+                let at = shared.entry((meta.dev(), meta.ino())).or_insert((
+                    meta.blocks() * 512,
+                    meta.nlink(),
+                    0,
+                ));
+                at.2 += 1;
+            }
+        }
+    }
+    bytes
+        + shared
+            .values()
+            .filter(|(_, links, met)| met >= links)
+            .map(|(b, _, _)| b)
+            .sum::<u64>()
+}
+
+// ──────────── the substrate:what skein installs beside the boxes, and what nobody claims ────────
 //
 // `<fleet root>/.skein` is the one entry in the fleet root that is not a box, and on 2026-09-05 it
 // held **19.2 GB of build directories nothing in skein had made and nothing in skein would remove**

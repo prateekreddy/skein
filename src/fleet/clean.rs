@@ -33,7 +33,8 @@ pub struct Cleanable {
     pub shown: String,
     /// `build output`, `download cache` or `scratchpad`.
     pub kind: &'static str,
-    /// Allocated bytes, by the walk every other disk figure in skein comes from.
+    /// What removing it frees: allocated bytes, by the walk every other disk figure in skein comes
+    /// from, less every file that is also linked from outside it (`freed_bytes`).
     pub bytes: u64,
 }
 
@@ -53,6 +54,11 @@ const DOWNLOAD_CACHES: &[&str] = &[
 /// How deep the build-output walk goes below each of a box's top directories. A checkout's
 /// `target` is two levels down (`tree/target`), a worktree's under the box's `/var/tmp` three.
 const BUILD_DEPTH: usize = 5;
+
+/// Where a box installs a tool for itself (the box guide: "for example in `~/opt/node-22.11.0`").
+/// Nothing under it is offered: a hand-installed Node's `lib/node_modules` is the tool, not a
+/// build's output, and removing it broke the box's local CI with exit 127.
+const INSTALLED_TOOLS: &str = "opt";
 
 /// Everything in box `name` that [`clean_box`] would remove, biggest first.
 ///
@@ -76,7 +82,7 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
 
     for rel in DOWNLOAD_CACHES {
         let path = home.join(rel);
-        if real_all_the_way(&box_dir, &path, dev) {
+        if real_all_the_way(&box_dir, &path, dev) && !holds_skeins_links(&path) {
             found.push((path, "download cache"));
         }
     }
@@ -85,7 +91,8 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
             .into_iter()
             .map(|p| (p, "scratchpad")),
     );
-    let skip: Vec<std::path::PathBuf> = found.iter().map(|(p, _)| p.clone()).collect();
+    let mut skip: Vec<std::path::PathBuf> = found.iter().map(|(p, _)| p.clone()).collect();
+    skip.push(home.join(INSTALLED_TOOLS));
     let mut builds = Vec::new();
     for top in ["home", "tree", "vartmp"] {
         build_dirs(&box_dir.join(top), dev, BUILD_DEPTH, &skip, &mut builds);
@@ -100,7 +107,7 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
         .into_iter()
         .map(|(path, kind)| Cleanable {
             shown: shown(&box_dir, &path),
-            bytes: tree_bytes(&path, Some(dev)),
+            bytes: freed_bytes(&path, Some(dev)),
             path: path.display().to_string(),
             kind,
         })
@@ -529,7 +536,7 @@ fn repo_cache_given(
                 if !real_all_the_way(&dir, &path, dev) {
                     continue;
                 }
-                let bytes = tree_bytes(&path, Some(dev));
+                let bytes = freed_bytes(&path, Some(dev));
                 if bytes > 0 {
                     items.push(Cleanable {
                         path: path.display().to_string(),
@@ -926,6 +933,9 @@ fn ended_scratchpads(box_dir: &Path, home: &Path, dev: u64) -> Vec<std::path::Pa
     }
     for uid_dir in real_subdirs(&scratch, dev) {
         for project in real_subdirs(&uid_dir, dev) {
+            if !is_project_slug(&project) {
+                continue;
+            }
             let sessions = real_subdirs(&project, dev);
             let slug = project
                 .file_name()
@@ -951,6 +961,36 @@ fn ended_scratchpads(box_dir: &Path, home: &Path, dev: u64) -> Vec<std::path::Pa
         }
     }
     out
+}
+
+/// Whether `dir`, under `claude-<uid>/`, is a project's scratchpads: Claude names that directory
+/// for the session's working directory, an absolute path with each `/` made `-`, so the name
+/// starts with `-`. The CLI keeps other things beside them — `bash-edit-diff`, holding ninety-odd
+/// small directories of its own, and `bundled-skills` — which are not a project, and whose
+/// subdirectories are not sessions. Listing them buried the real items.
+fn is_project_slug(dir: &Path) -> bool {
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.len() > 1 && n.starts_with('-'))
+}
+
+/// Whether the download cache `dir` holds a link into skein's own directory (`<fleet root>/.skein`):
+/// it is then skein's, not the box's. `~/.cache/ms-playwright` is that, when the kit links the
+/// fleet's shared browsers into it at box start (`skein-link-browsers.sh`, a link per browser into
+/// `<fleet root>/.skein/browsers`). Removing it took every browser away from the box until it
+/// started again, and broke its e2e run; there is nothing in it to download again. Read from the
+/// links themselves (the kit binds `.skein` at its own path, so the box's link names the fleet's
+/// path), and so a cache holding only the box's own downloads stays on the list.
+fn holds_skeins_links(dir: &Path) -> bool {
+    let ours = std::path::PathBuf::from(skein_dir());
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_type().is_ok_and(|t| t.is_symlink())
+                && std::fs::read_link(e.path()).is_ok_and(|to| to.starts_with(&ours))
+        })
 }
 
 fn real_subdirs(dir: &std::path::Path, dev: u64) -> Vec<std::path::PathBuf> {
@@ -1387,6 +1427,139 @@ mod tests {
         ] {
             assert!(kept.exists(), "the clean removed {}", kept.display());
         }
+    }
+
+    /// **A tool the box installed and skein's browser links are never offered**, though one is
+    /// a `node_modules` and the other a download cache's name. Reported from synapse boxes: a
+    /// hand-installed Node's `~/opt/node-*/lib/node_modules` was listed as build output, and
+    /// removing it broke local CI with exit 127; `~/.cache/ms-playwright`, which the kit fills
+    /// with links into `<fleet root>/.skein/browsers`, was listed as a download cache, and
+    /// removing it broke e2e. A `node_modules` elsewhere is still offered, so the walk ran.
+    ///
+    /// What would make it fail: dropping the `~/opt` skip (`~/opt/node-22.11.0/lib/node_modules`
+    /// is offered), or dropping `holds_skeins_links` (`~/.cache/ms-playwright` is offered).
+    /// Watched: with each of the two removed in turn, this failed with that path in the list.
+    #[test]
+    fn an_installed_tool_and_skeins_browser_links_are_never_offered() {
+        let _lock = env_lock();
+        let dir = tempdir();
+        let base: &Path = dir.as_ref();
+        let root = base.join("fleet");
+        let mut pins = env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &root);
+        pins.set("SKEIN_HOME", base.join("skein"));
+        let home = root.join("web-main/home");
+        put(&home.join("opt/node-22.11.0/lib/node_modules/npm/index.js"));
+        put(&home.join("opt/node-22.11.0/bin/node"));
+        let store = root.join(".skein/browsers/chromium-1140");
+        put(&store.join("chrome-linux/chrome"));
+        let pw = home.join(".cache/ms-playwright");
+        std::fs::create_dir_all(&pw).unwrap();
+        std::os::unix::fs::symlink(&store, pw.join("chromium-1140")).unwrap();
+        put(&pw.join(".links/marker"));
+        put(&root.join("web-main/vartmp/lane/node_modules/left-pad/index.js"));
+
+        let offered: Vec<String> = box_cleanables("web-main")
+            .expect("a box with a directory is answerable")
+            .into_iter()
+            .map(|c| c.shown)
+            .collect();
+        assert_eq!(
+            offered,
+            vec!["web-main/vartmp/lane/node_modules".to_string()],
+            "an installed tool or skein's browser links were offered"
+        );
+    }
+
+    /// **The CLI's own directories beside the projects are not scratchpads.** `claude-<uid>/`
+    /// holds each project's scratchpads under a directory named for its working directory, which
+    /// starts with `-`, and beside them `bash-edit-diff`, with ninety-odd small directories that
+    /// were each listed as a scratchpad and buried the real items, and `bundled-skills`.
+    ///
+    /// What would make it fail: `ended_scratchpads` taking every directory under `claude-<uid>/`
+    /// as a project (the `is_project_slug` check dropped). Watched: with that check removed, this
+    /// failed with `bash-edit-diff/one` and `bash-edit-diff/three` listed (`two`, the newest, was
+    /// kept as if it were the live session).
+    #[test]
+    fn the_clis_own_directories_are_not_scratchpads() {
+        let _lock = env_lock();
+        let dir = tempdir();
+        let (_root, b, _pins) = planted(&dir);
+        let cli = b.join("home/.cache/skein/claude/claude-1000");
+        for rel in [
+            "bash-edit-diff/one/a.diff",
+            "bash-edit-diff/two/a.diff",
+            "bash-edit-diff/three/a.diff",
+            "bundled-skills/review/SKILL.md",
+        ] {
+            put(&cli.join(rel));
+        }
+        let scratch: Vec<String> = box_cleanables("web-main")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.kind == "scratchpad")
+            .map(|c| c.shown)
+            .collect();
+        assert_eq!(
+            scratch,
+            vec!["~/.cache/skein/claude/claude-1000/-proj/old-session".to_string()],
+            "only the real project's ended session is a scratchpad"
+        );
+    }
+
+    /// **The size offered is what removing it frees**: a file hard linked from pnpm's store
+    /// outside the item counts nothing, and one whose every link is inside the item counts once.
+    /// A worktree's `node_modules`, all links into `<box>/pnpm-store`, read 0.85 GB on a box and
+    /// removing it freed little.
+    ///
+    /// What would make it fail: sizing items with `tree_bytes` (the store's file counts, the first
+    /// assertion), or counting a linked file never (the second). Watched: with `box_cleanables`
+    /// back on `tree_bytes`, the first failed; with the `met >= links` filter made `false`, the
+    /// second failed.
+    #[test]
+    fn a_file_linked_from_outside_an_item_is_not_counted_as_freed() {
+        let _lock = env_lock();
+        let dir = tempdir();
+        let base: &Path = dir.as_ref();
+        let root = base.join("fleet");
+        let mut pins = env_pins();
+        pins.set("SKEIN_FLEET_ROOT", &root);
+        pins.set("SKEIN_HOME", base.join("skein"));
+        let b = root.join("web-main");
+        let store = b.join("pnpm-store/v10/files/00");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("big"), vec![7u8; 64 * 1024]).unwrap();
+        let shared = b.join("vartmp/wt/node_modules/big-pkg");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::hard_link(store.join("big"), shared.join("index.js")).unwrap();
+        put(&b.join("vartmp/wt/node_modules/own-pkg/index.js"));
+        let inside = b.join("vartmp/both/node_modules/pkg");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::write(inside.join("a.js"), vec![7u8; 64 * 1024]).unwrap();
+        std::fs::hard_link(inside.join("a.js"), inside.join("b.js")).unwrap();
+
+        let offered = box_cleanables("web-main").unwrap();
+        let size = |shown: &str| {
+            offered
+                .iter()
+                .find(|c| c.shown == shown)
+                .unwrap_or_else(|| panic!("{shown} not offered: {offered:?}"))
+                .bytes
+        };
+        let wt = size("web-main/vartmp/wt/node_modules");
+        assert!(
+            tree_bytes(&b.join("vartmp/wt/node_modules"), None) >= 80 * 1024,
+            "the fixture's link is not inside the item"
+        );
+        assert!(
+            (16 * 1024..64 * 1024).contains(&wt),
+            "the store's file was counted as freed: {wt}"
+        );
+        let both = size("web-main/vartmp/both/node_modules");
+        assert!(
+            both >= 64 * 1024,
+            "a file whose every link is in the item was not counted: {both}"
+        );
     }
 
     /// **Nothing reached through a link anywhere in its path is offered or removed.**
