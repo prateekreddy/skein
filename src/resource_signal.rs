@@ -844,38 +844,34 @@ fn tidy_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note>
     }
 }
 
-/// Box `name`'s freshly listed items, each with its class (`fleet::tidy::classify`) and when it
-/// was last used (SKEIN-1477). The box is asked about its worktrees only while it is running, and
-/// `gh`'s answers are kept across ticks in `fleet::tidy::gh_cache`.
+/// Box `name`'s freshly listed items, each with its class and when it was last used
+/// (SKEIN-1477). Only what plain files tell is worked out here; what the box's own git and `gh`
+/// say comes from the last answers `fleet::tidy::watch_classes` got on its own timer, so this tick
+/// never waits on a box. What was listed is recorded for that timer's next look.
 fn classified(
     name: &str,
     items: Vec<crate::fleet::Cleanable>,
-    liveness: &std::collections::HashMap<String, bool>,
     at: DateTime<Utc>,
 ) -> Vec<CleanItem> {
     use crate::fleet::tidy;
     let box_dir = PathBuf::from(crate::fleet::box_root(name));
     let moved = crate::repos::repo_for_box(name)
         .is_some_and(|repo| crate::fleet::repo_tools_dir(&repo.id).is_dir());
-    let runner = tidy::in_box_runner(name);
-    let inbox = tidy::InBox {
-        run: &runner,
-        home: "\"$HOME\"".into(),
-        vartmp: "/var/tmp".into(),
-    };
-    let running = liveness.get(name) == Some(&true);
     let pairs: Vec<(&str, &str)> = items.iter().map(|c| (c.path.as_str(), c.kind)).collect();
-    let classes = {
-        let mut gh = tidy::gh_cache().lock().unwrap_or_else(|e| e.into_inner());
-        tidy::classify(
-            &box_dir,
-            &pairs,
-            moved,
-            running.then_some(&inbox),
-            &mut gh,
-            at.timestamp(),
-        )
-    };
+    let mut classes = tidy::classify(
+        &box_dir,
+        &pairs,
+        moved,
+        None,
+        &mut tidy::GhCache::default(),
+        at.timestamp(),
+    );
+    for (path, k) in tidy::found(name) {
+        if k.class == tidy::DEAD && classes.contains_key(&path) {
+            classes.insert(path, k);
+        }
+    }
+    tidy::want(name, &box_dir, &pairs, moved);
     items
         .into_iter()
         .map(|c| {
@@ -1260,7 +1256,7 @@ mod words {
         };
         let paths: Vec<&str> = named.iter().map(|i| i.path.as_str()).collect();
         format!(
-            "{CLEAN} The biggest {} {list}; to remove {} now, call `skein_clean` with {}.",
+            "{CLEAN} The first to go {} {list}; to remove {} now, call `skein_clean` with {}.",
             if named.len() == 1 { "is" } else { "are" },
             if named.len() == 1 { "it" } else { "them" },
             serde_json::json!({ "paths": paths }),
@@ -1815,7 +1811,7 @@ pub(crate) fn clean_list(
         Some(p) => p.clone(),
         None => {
             let items = crate::fleet::box_cleanables(name).ok()?;
-            let items = classified(name, items, liveness, at);
+            let items = classified(name, items, at);
             let cache = crate::fleet::repo_cache_for_box(name, liveness, repo_caches)
                 .ok()
                 .flatten();
@@ -2858,7 +2854,7 @@ mod tests {
     }
 
     const PIP_HINT: &str = "`skein_clean` lists the caches and build output this box can remove, \
-                            and removes them. The biggest is ~/.cache/pip (1.5G); to remove it \
+                            and removes them. The first to go is ~/.cache/pip (1.5G); to remove it \
                             now, call `skein_clean` with \
                             {\"paths\":[\"/fleet/web-main/home/.cache/pip\"]}.";
 
@@ -4110,7 +4106,7 @@ mod tests {
             .find(|a| a.kind == "disk")
             .expect("a disk ask");
         let hint = "`skein_clean` lists the caches and build output this box can remove, and \
-                    removes them. The biggest are ~/.cache/ms-playwright (3.2G), \
+                    removes them. The first to go are ~/.cache/ms-playwright (3.2G), \
                     web-main/tree/target (2.1G) and ~/.cache/pip (0.7G); to remove them now, call \
                     `skein_clean` with {\"paths\":[\"/fleet/web-main/home/.cache/ms-playwright\",\
                     \"/fleet/web-main/tree/target\",\"/fleet/web-main/home/.cache/pip\"]}.";
@@ -4151,7 +4147,7 @@ mod tests {
         );
         let hold = &bare.asks.iter().find(|a| a.kind == "disk").unwrap().hold;
         assert!(
-            hold.contains(words::CLEAN) && !hold.contains("The biggest"),
+            hold.contains(words::CLEAN) && !hold.contains("The first to go"),
             "{hold}"
         );
     }
@@ -4613,7 +4609,7 @@ mod tests {
             Some(
                 "skein: this box holds 8.6G of its 10.0G share of the fleet's disk; 7.2G of it \
                  can be removed now, before it goes over. `skein_clean` lists the caches and \
-                 build output this box can remove, and removes them. The biggest are \
+                 build output this box can remove, and removes them. The first to go are \
                  web-main/tree/target (5.0G), ~/.cache/ms-playwright (1.5G) and ~/.cache/pip \
                  (0.7G); to remove them now, call `skein_clean` with \
                  {\"paths\":[\"/fleet/web-main/tree/target\",\
@@ -5011,8 +5007,8 @@ mod tests {
             .expect("no disk ask");
         assert!(
             ask.hold.contains(
-                "The biggest are web-main/tree/.worktrees/a/target (1.0G), web-main/tree/target \
-                 (3.0G) and ~/.cache/ms-playwright (4.0G)"
+                "The first to go are web-main/tree/.worktrees/a/target (1.0G), \
+                 web-main/tree/target (3.0G) and ~/.cache/ms-playwright (4.0G)"
             ),
             "{}",
             ask.hold

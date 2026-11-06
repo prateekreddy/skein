@@ -16,9 +16,10 @@
 //! moment ago from the remote head is its ancestor too, so ancestry counts only for a branch whose
 //! reflog shows a commit made on it.
 //!
-//! **Source is never dead.** A worktree's own files are not on the list and never will be. The
-//! worktree is named for `git worktree remove` only when its branch is finished and nothing in it
-//! is uncommitted or unpushed; its regenerable output may be dead either way, once the branch is.
+//! **Source is never dead.** A worktree's own files are not on the list and never will be. Its
+//! regenerable output is dead only when its branch is finished and nothing in it is uncommitted or
+//! unpushed, since work that is not committed and pushed is not finished; the worktree is then
+//! named for `git worktree remove`, which git refuses while anything in it is uncommitted.
 //!
 //! **git runs inside the box.** The checkout and its `.git` are the box's to write, and git run on
 //! them from outside runs the box's config with skein's reach: a `filter.<x>.clean` on anything
@@ -28,6 +29,11 @@
 //! The cost is bounded: one `git for-each-ref` per repository, `git status` only for a worktree
 //! whose branch is already finished or about to be asked about, at most [`GH_PER_LIST`] `gh` calls
 //! a listing, and no fetch.
+//!
+//! **Off the resource tick.** A box's answers can take tens of seconds, and the tick that writes
+//! every box's signal file must not wait on them, or a disk ask waits too. So the tick classifies
+//! only what plain files tell it, and records what it listed ([`want`]); [`watch_classes`] asks the
+//! running boxes on its own timer, and the tick reads the last answers ([`found`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -43,8 +49,8 @@ pub struct Classed {
     pub class: &'static str,
     /// `lane/x is merged`, `its worktree is gone`. Empty for a warm item.
     pub because: String,
-    /// The worktree the item is in, as the box spells it, when the worktree itself can go:
-    /// its branch is finished and nothing in it is uncommitted or unpushed. Empty otherwise.
+    /// The linked worktree a dead item is in, as the box spells it: it can go too, with
+    /// `git worktree remove`. Empty for anything else.
     pub worktree: String,
 }
 
@@ -564,11 +570,14 @@ pub fn classify(
             (false, track) => track.contains("ahead"),
             (true, _) => !b.by_prs && !b.base.is_empty() && b.r.ahead.is_none_or(|a| a > 0),
         };
+        // Uncommitted or unpushed work means the work is not finished, whatever the branch says,
+        // and the agent may be following it up there: its output stays warm (coordinator,
+        // 2026-11-06). A worktree whose state could not be read is not known to be finished.
         let clean = dirty.get(&b.w.display().to_string()) == Some(&false);
-        let worktree = match clean && !unpushed {
-            true => box_spelling(box_dir, b.w),
-            false => String::new(),
-        };
+        if !clean || unpushed {
+            continue;
+        }
+        let worktree = box_spelling(box_dir, b.w);
         for path in linked.get(b.w).into_iter().flatten() {
             out.insert(
                 path.clone(),
@@ -587,6 +596,109 @@ fn pr_words(branch: &str, merged: bool) -> String {
     match merged {
         true => format!("{}'s pull request is merged", said(branch)),
         false => format!("{}'s pull request is closed", said(branch)),
+    }
+}
+
+/// How often [`watch_classes`] asks the running boxes about their worktrees: the clean list's own
+/// period, `resource_signal::CLEAN_LIST_EVERY`.
+pub const CLASSIFY_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What the tick last listed in one box, for [`classify_wanted`] to ask the box about.
+#[derive(Debug, Clone)]
+struct Wanted {
+    box_dir: PathBuf,
+    items: Vec<(String, String)>,
+    moved: bool,
+}
+
+fn wanted() -> &'static std::sync::Mutex<BTreeMap<String, Wanted>> {
+    static WANTED: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, Wanted>>> =
+        std::sync::OnceLock::new();
+    WANTED.get_or_init(Default::default)
+}
+
+fn answers() -> &'static std::sync::Mutex<BTreeMap<String, BTreeMap<String, Classed>>> {
+    static FOUND: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<String, BTreeMap<String, Classed>>>,
+    > = std::sync::OnceLock::new();
+    FOUND.get_or_init(Default::default)
+}
+
+/// Record what the tick listed in box `name`, (path, kind), for the next [`classify_wanted`].
+pub fn want(name: &str, box_dir: &Path, items: &[(&str, &str)], moved: bool) {
+    let entry = Wanted {
+        box_dir: box_dir.to_path_buf(),
+        items: items
+            .iter()
+            .map(|(p, k)| (p.to_string(), k.to_string()))
+            .collect(),
+        moved,
+    };
+    wanted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(name.to_string(), entry);
+}
+
+/// The classes [`classify_wanted`] last found for box `name`, by path. Empty when it has not
+/// asked, or the box was not running when it last looked.
+pub fn found(name: &str) -> BTreeMap<String, Classed> {
+    answers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Ask every running box the tick has listed about its worktrees, and keep the answers for
+/// [`found`]. A box that is not running has its answers dropped: nothing it says can be fresh.
+pub fn classify_wanted(liveness: &HashMap<String, bool>) {
+    let boxes = wanted().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let now = chrono::Utc::now().timestamp();
+    for (name, w) in boxes {
+        if liveness.get(&name) != Some(&true) {
+            answers()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&name);
+            continue;
+        }
+        let runner = in_box_runner(&name);
+        let inbox = InBox {
+            run: &runner,
+            home: "\"$HOME\"".into(),
+            vartmp: "/var/tmp".into(),
+        };
+        let pairs: Vec<(&str, &str)> = w
+            .items
+            .iter()
+            .map(|(p, k)| (p.as_str(), k.as_str()))
+            .collect();
+        let classes = {
+            let mut gh = gh_cache().lock().unwrap_or_else(|e| e.into_inner());
+            classify(&w.box_dir, &pairs, w.moved, Some(&inbox), &mut gh, now)
+        };
+        answers()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.clone(), classes);
+    }
+}
+
+/// The loop skein-server runs: [`classify_wanted`] every [`CLASSIFY_EVERY`], off the resource
+/// tick. Never returns.
+pub async fn watch_classes() {
+    let mut tick = tokio::time::interval(CLASSIFY_EVERY);
+    loop {
+        tick.tick().await;
+        let ran = tokio::task::spawn_blocking(|| {
+            classify_wanted(&crate::fleet::fleet_liveness());
+        })
+        .await;
+        if let Err(e) = ran {
+            eprintln!("skein: classifying the boxes' clean items did not run: {e}");
+        }
     }
 }
 
@@ -901,15 +1013,15 @@ mod tests {
         assert_eq!(got[&failing].class, WARM, "a failing gh was guessed at");
     }
 
-    /// **A worktree with uncommitted changes is never dead**: its branch is merged, so its
-    /// regenerable output may go, but the worktree itself is not offered for removal, while a
-    /// clean one beside it is.
+    /// **A worktree with uncommitted changes is never dead**: its branch is merged, and its output
+    /// stays warm and the worktree is not offered for removal, while a clean one beside it is
+    /// dead and offered (coordinator, 2026-11-06: uncommitted work is unfinished work).
     ///
-    /// What would make it fail: `git status` not asked, or its answer not read (the dirty
-    /// worktree offered for `git worktree remove`). Watched: with `let clean = … == Some(&false)`
-    /// made `let clean = true`, `.worktrees/d` was offered and this failed.
+    /// What would make it fail: `git status` not asked, or its answer not read, or a dirty
+    /// worktree's output still classed dead. Watched: with `if !clean || unpushed` made
+    /// `if unpushed`, `.worktrees/d/target` came back dead and this failed.
     #[test]
-    fn a_worktree_with_uncommitted_changes_is_never_offered() {
+    fn a_worktree_with_uncommitted_changes_is_never_dead() {
         let b = Box_::new();
         let clean = b.lane("a", true);
         let dirty = b.lane("d", true);
@@ -922,10 +1034,11 @@ mod tests {
         ];
         let got = b.classify(&items, false, &mut GhCache::default(), 0);
         assert_eq!(got[&clean].worktree, b.worktree("a").display().to_string());
-        assert_eq!(got[&dirty].class, DEAD, "{:?}", got[&dirty]);
+        assert_eq!(got[&clean].class, DEAD, "{:?}", got[&clean]);
         assert_eq!(
-            got[&dirty].worktree, "",
-            "a worktree with uncommitted work was offered for removal"
+            got[&dirty],
+            Classed::warm(),
+            "a worktree with uncommitted work was classed dead"
         );
     }
 
