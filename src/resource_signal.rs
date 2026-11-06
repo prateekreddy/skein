@@ -1149,13 +1149,9 @@ mod words {
             None => format!("{standing}; clear what it does not need before it goes over. {CLEAN}"),
             Some(r) if removable.is_empty() => match r.live {
                 0 => format!("{standing}, and nothing skein lists can be removed now. {WHERE}"),
-                live => by_whom(
-                    format!(
-                        "{standing}, and nothing skein lists can be removed now ({} of it is in \
-                         use now). {WHERE}",
-                        gib_up(live)
-                    ),
-                    &r.by,
+                live => format!(
+                    "{standing}; {}, so nothing skein lists can be removed now. {WHERE}",
+                    in_use(live, &r.by)
                 ),
             },
             Some(_) => format!(
@@ -1168,13 +1164,13 @@ mod words {
 
     /// The disk ask's words for asking `asked` MiB, with `room` what skein's list says the box
     /// can do about it now (SKEIN-1391). With nothing in use, the owner's approved words with the
-    /// shrunk figure; with some, the words that say how much of the box is in use; with nothing to
-    /// clear, a line that is told and never held.
+    /// shrunk figure; with some, the words that say how much of the box is in use and by what;
+    /// with nothing to clear, [`nothing_to_clear`]'s.
     pub(super) fn disk(d: &DiskAsk, biggest: &[CleanItem], asked: u64, room: Option<&Room>) -> Ask {
         let live = room.map_or(0, |r| r.live);
         let by = room.map_or("", |r| r.by.as_str());
         if room.is_some() && asked == 0 {
-            return named(nothing_to_clear(d, live), by);
+            return nothing_to_clear(d, live, by);
         }
         let hint = clean_hint(biggest);
         let mut ask = match live {
@@ -1183,7 +1179,7 @@ mod words {
                 ask.amount = asked;
                 ask
             }
-            _ => live_words(d, asked, live),
+            _ => live_words(d, asked, live, by),
         };
         ask.live_mb = live;
         // Before the closing sentence of the hold and the start line, which the owner fixed
@@ -1193,26 +1189,17 @@ mod words {
             .start
             .map(|s| s.replace(WHERE, &format!("{hint} {WHERE}")));
         ask.enter = ask.enter.map(|e| format!("{e} {hint}"));
-        named(ask, by)
-    }
-
-    /// `text` with what is using the box's space after each "in use now" (SKEIN-1475): "3.0G in
-    /// use now by cargo (pid 1234)". Every "in use now" in the disk words is the live items',
-    /// so this is the one place a holder is said. Unchanged when `by` is empty.
-    pub(super) fn by_whom(text: String, by: &str) -> String {
-        match by {
-            "" => text,
-            by => text.replace("in use now", &format!("in use now by {by}")),
-        }
-    }
-
-    /// [`by_whom`] over each of the ask's words.
-    fn named(mut ask: Ask, by: &str) -> Ask {
-        ask.hold = by_whom(std::mem::take(&mut ask.hold), by);
-        ask.start = ask.start.map(|t| by_whom(t, by));
-        ask.remind = ask.remind.map(|t| by_whom(t, by));
-        ask.enter = ask.enter.map(|t| by_whom(t, by));
         ask
+    }
+
+    /// "3.0G of it is in use now", and when skein knows what is using it, ", by cargo (pid
+    /// 1234)" after it (SKEIN-1475). A clause of its own, never inside parentheses: the holder
+    /// carries its own.
+    pub(super) fn in_use(live: u64, by: &str) -> String {
+        match by {
+            "" => format!("{} of it is in use now", gib_up(live)),
+            by => format!("{} of it is in use now, by {by}", gib_up(live)),
+        }
     }
 
     /// `d` asking `asked` MiB: the fleet's share or the excess replaced. An every-box ask's words
@@ -1232,101 +1219,89 @@ mod words {
         }
     }
 
-    /// "This box holds 10.5G against its 10.0G share of the fleet's disk", or for the fleet's
-    /// asks "The fleet's disk is 4.1G over what it can spare and this box holds 9.4G of it", with
-    /// `live` MiB of it in use now (`CleanItem::live`) when that is not zero.
-    fn standing(d: &DiskAsk, live: u64) -> String {
-        match d {
-            DiskAsk::Allowance { holds, limit, .. } => match live {
-                0 => format!(
-                    "this box holds {} against its {} share of the fleet's disk",
-                    gib_up(*holds),
-                    gib(*limit)
-                ),
-                _ => format!(
-                    "this box holds {} against its {} share ({} in use now)",
-                    gib_up(*holds),
-                    gib(*limit),
-                    gib_up(live)
-                ),
-            },
-            DiskAsk::Share(s) | DiskAsk::EveryBox(s) => match live {
-                0 => format!(
-                    "the fleet's disk is {} over what it can spare and this box holds {} of it",
-                    gib_up(s.over_by),
-                    gib(s.holds)
-                ),
-                _ => format!(
-                    "the fleet's disk is {} over what it can spare and this box holds {} of it ({} \
-                     in use now)",
-                    gib_up(s.over_by),
-                    gib(s.holds),
-                    gib_up(live)
-                ),
-            },
-        }
-    }
-
-    /// Nothing on skein's list can be cleared now (SKEIN-1391): the box is told where it stands.
-    /// It is held when far enough over ([`disk_holds`], SKEIN-1475), and the hold says the space
-    /// is in use; [`with_disk_ask`] adds what it can do then. `amount` is zero, so nothing reads it
-    /// as a figure to clear.
-    fn nothing_to_clear(d: &DiskAsk, live: u64) -> Ask {
-        let end = match live {
-            0 => "nothing skein lists can be cleared now.",
+    /// Nothing on skein's list can be cleared now (SKEIN-1391): the box is told where it stands,
+    /// with `live` MiB in use now by `by`.
+    ///
+    /// Over its own allowance it is held when far enough over ([`disk_holds`], SKEIN-1475), and
+    /// [`with_disk_ask`] adds what it can do: ask for a bigger allowance. Under the fleet's ask it
+    /// is never held (owner, 2026-11-06): a bigger allowance frees nothing on the fleet's disk and
+    /// nothing can be cleared, so a hold would be noise. `amount` is zero, so nothing reads it as
+    /// a figure to clear.
+    fn nothing_to_clear(d: &DiskAsk, live: u64, by: &str) -> Ask {
+        let stands = match d {
+            DiskAsk::Allowance { holds, limit, .. } => format!(
+                "this box holds {} against its {} share",
+                gib_up(*holds),
+                gib(*limit)
+            ),
+            DiskAsk::Share(s) | DiskAsk::EveryBox(s) => format!(
+                "the fleet's disk is {} over what it can spare and this box holds {} of it",
+                gib_up(s.over_by),
+                gib(s.holds)
+            ),
+        };
+        let (said, told) = match live {
+            0 => {
+                let said = format!("skein: {stands}, and nothing skein lists can be cleared now.");
+                (said.clone(), said)
+            }
             _ => {
-                "nothing skein lists can be cleared now; what is in use can be cleared once \
-                 nothing has it open."
+                let said = format!(
+                    "skein: {stands}; {}, so nothing skein lists can be cleared.",
+                    in_use(live, by)
+                );
+                let told =
+                    format!("{said} What is in use can be cleared once nothing has it open.");
+                (said, told)
             }
         };
-        let line = format!("skein: {}; {end}", standing(d, live));
+        let hold = match d {
+            DiskAsk::Allowance { .. } => format!("{said} {HELD}"),
+            DiskAsk::Share(_) | DiskAsk::EveryBox(_) => String::new(),
+        };
         Ask {
             kind: "disk".into(),
             why: disk_words(d).why,
             amount: 0,
             live_mb: live,
-            hold: format!(
-                "skein: {}; nothing skein lists can be cleared now, because the space is in use. \
-                 {HELD}",
-                standing(d, live)
-            ),
-            start: Some(format!("{line} {WHERE}")),
-            remind: Some(line.clone()),
-            enter: Some(line),
+            hold,
+            start: Some(format!("{told} {WHERE}")),
+            remind: Some(told.clone()),
+            enter: Some(told),
             ..Default::default()
         }
     }
 
     /// Some of the box is in use now and `asked` MiB can be cleared (SKEIN-1391): the approved
-    /// shape of each ask, saying how much is in use and that only `asked` can go.
-    fn live_words(d: &DiskAsk, asked: u64, live: u64) -> Ask {
+    /// shape of each ask, saying how much is in use, by what when skein knows (SKEIN-1475), and
+    /// that only `asked` can go.
+    fn live_words(d: &DiskAsk, asked: u64, live: u64, by: &str) -> Ask {
         let z = gib_up(asked);
-        let y = gib_up(live);
+        let used = in_use(live, by);
         let (why, hold, start, remind, enter) = match d {
             DiskAsk::Allowance { holds, limit, .. } => (
                 "allowance",
                 format!(
                     "skein: clear {z} of storage you are not using before you continue. This box \
-                     holds {} against its {} share of the fleet's disk ({y} of it in use \
-                     now); {z} can be cleared now. {HELD}",
+                     holds {} against its {} share of the fleet's disk; {used}, and {z} can be \
+                     cleared now. {HELD}",
                     gib_up(*holds),
                     gib(*limit),
                 ),
                 format!(
                     "skein: before you start, this box is asked to clear {z} of storage it is not \
-                     using. It holds {} against its {} share of the fleet's disk ({y} of it in use \
-                     now); {z} can be cleared now. {WHERE}",
+                     using. It holds {} against its {} share of the fleet's disk; {used}, and {z} \
+                     can be cleared now. {WHERE}",
                     gib_up(*holds),
                     gib(*limit),
                 ),
                 format!(
-                    "skein: still asked of this box: clear {z} of storage (it holds {}, {y} of it \
-                     in use now).",
+                    "skein: still asked of this box: clear {z} of storage. It holds {}; {used}.",
                     gib_up(*holds),
                 ),
                 format!(
-                    "skein: this box holds {} against its {} share of the fleet's disk ({y} of it \
-                     in use now); clear the {z} that can be cleared now.",
+                    "skein: this box holds {} against its {} share of the fleet's disk; {used}. \
+                     Clear the {z} that can be cleared now.",
                     gib_up(*holds),
                     gib(*limit),
                 ),
@@ -1340,8 +1315,8 @@ mod words {
                 format!(
                     "skein: clear {z} of storage you are not using before you continue — build \
                      outputs, caches, and any containers or volumes you started. The fleet's disk \
-                     is {} over what it can spare, and this box holds {} of it ({y} in use \
-                     now){}; {z} can be cleared now. {HELD}",
+                     is {} over what it can spare, and this box holds {} of it; {used}, and {z} \
+                     can be cleared now{}. {HELD}",
                     gib_up(s.over_by),
                     gib(s.holds),
                     match s.every_box {
@@ -1351,19 +1326,18 @@ mod words {
                 ),
                 format!(
                     "skein: before you start, this box is asked to clear {z} of storage it is not \
-                     using. The fleet's disk is {} over what it can spare and this box holds {} \
-                     ({y} of it in use now); {z} can be cleared now. {WHERE}",
+                     using. The fleet's disk is {} over what it can spare and this box holds {}; \
+                     {used}, and {z} can be cleared now. {WHERE}",
                     gib_up(s.over_by),
                     gib(s.holds),
                 ),
                 format!(
-                    "skein: still asked of this box: clear {z} of storage (it holds {}, {y} of it \
-                     in use now).",
+                    "skein: still asked of this box: clear {z} of storage. It holds {}; {used}.",
                     gib(s.holds),
                 ),
                 format!(
                     "skein: the fleet's disk is over its line; this box is asked to clear the {z} \
-                     it can clear now ({y} of it is in use now)."
+                     it can clear now, and {used}."
                 ),
             ),
         };
@@ -2894,16 +2868,15 @@ mod tests {
         let ask = disk_ask(&with_disk_ask(next(None, &r), None));
         assert_eq!(
             ask.hold,
-            "skein: this box holds 20.1G against its 12.0G share (8.1G in use now by \
-             enclave-1f2e3d (pid 4242) and a process (pid 4343)); nothing skein lists can be \
-             cleared now, because the space is in use. To ask the owner for a bigger allowance, \
-             call `skein_request_disk`. This one command was held so you would see this; the \
-             next will run."
+            "skein: this box holds 20.1G against its 12.0G share; 8.1G of it is in use now, by \
+             enclave-1f2e3d (pid 4242) and a process (pid 4343), so nothing skein lists can be \
+             cleared. To ask the owner for a bigger allowance, call `skein_request_disk`. This \
+             one command was held so you would see this; the next will run."
         );
         assert!(
             ask.remind
                 .as_deref()
-                .is_some_and(|t| t.contains("in use now by enclave-1f2e3d (pid 4242)")),
+                .is_some_and(|t| t.contains("in use now, by enclave-1f2e3d (pid 4242)")),
             "{:?}",
             ask.remind
         );
@@ -2938,8 +2911,8 @@ mod tests {
             ask.hold,
             format!(
                 "skein: clear 1.5G of storage you are not using before you continue. This box \
-                 holds 12.0G against its 10.0G share of the fleet's disk (3.0G of it in use \
-                 now); 1.5G can be cleared now. {PIP_HINT} This one command was held so \
+                 holds 12.0G against its 10.0G share of the fleet's disk; 3.0G of it is in use \
+                 now, and 1.5G can be cleared now. {PIP_HINT} This one command was held so \
                  you would see this; the next will run."
             )
         );
@@ -2948,8 +2921,8 @@ mod tests {
             Some(
                 format!(
                     "skein: before you start, this box is asked to clear 1.5G of storage it is \
-                     not using. It holds 12.0G against its 10.0G share of the fleet's disk (3.0G \
-                     of it in use now); 1.5G can be cleared now. {PIP_HINT} \
+                     not using. It holds 12.0G against its 10.0G share of the fleet's disk; 3.0G \
+                     of it is in use now, and 1.5G can be cleared now. {PIP_HINT} \
                      `skein_resources` shows where this box stands."
                 )
                 .as_str()
@@ -2958,16 +2931,16 @@ mod tests {
         assert_eq!(
             ask.remind.as_deref(),
             Some(
-                "skein: still asked of this box: clear 1.5G of storage (it holds 12.0G, 3.0G of \
-                 it in use now)."
+                "skein: still asked of this box: clear 1.5G of storage. It holds 12.0G; 3.0G of \
+                 it is in use now."
             )
         );
         assert_eq!(
             ask.enter.as_deref(),
             Some(
                 format!(
-                    "skein: this box holds 12.0G against its 10.0G share of the fleet's disk \
-                     (3.0G of it in use now); clear the 1.5G that can be cleared now. \
+                    "skein: this box holds 12.0G against its 10.0G share of the fleet's disk; \
+                     3.0G of it is in use now. Clear the 1.5G that can be cleared now. \
                      {PIP_HINT}"
                 )
                 .as_str()
@@ -3005,7 +2978,7 @@ mod tests {
     ///
     /// synapse-master: 8G over a 12G share, all of it in a CI build in use. Since SKEIN-1391 the
     /// hold was measured on what could be cleared, 0, so it was only ever told. Now its whole
-    /// excess is measured: it is held, the hold says the space is in use, and it names
+    /// excess is measured: it is held, the hold says how much is in use and by what, and it names
     /// `skein_request_disk`. With a list that has nothing its agent may remove and nothing in use,
     /// the same. 0.5G over a 12G share with the same build is told and never held.
     ///
@@ -3027,23 +3000,35 @@ mod tests {
             };
             disk_ask(&with_disk_ask(next(None, &r), None))
         };
+        let ci = CleanItem {
+            held_by: "enclave-1f2e3d (pid 4242)".into(),
+            ..running_target(8192)
+        };
+        let named = over(8192, vec![ci]);
+        assert_eq!(
+            named.hold,
+            "skein: this box holds 20.0G against its 12.0G share; 8.0G of it is in use now, by \
+             enclave-1f2e3d (pid 4242), so nothing skein lists can be cleared. To ask the owner \
+             for a bigger allowance, call `skein_request_disk`. This one command was held so you \
+             would see this; the next will run."
+        );
         let held = over(8192, vec![running_target(8192)]);
         assert_eq!((held.amount, held.live_mb), (0, 8192), "{held:?}");
         assert_eq!(
             held.hold,
-            "skein: this box holds 20.0G against its 12.0G share (8.0G in use now); nothing skein \
-             lists can be cleared now, because the space is in use. To ask the owner for a bigger \
-             allowance, call `skein_request_disk`. This one command was held so you would see \
-             this; the next will run."
+            "skein: this box holds 20.0G against its 12.0G share; 8.0G of it is in use now, so \
+             nothing skein lists can be cleared. To ask the owner for a bigger allowance, call \
+             `skein_request_disk`. This one command was held so you would see this; the next \
+             will run."
         );
         let request = "To ask the owner for a bigger allowance, call `skein_request_disk`.";
         assert_eq!(
             held.enter.as_deref(),
             Some(
                 format!(
-                    "skein: this box holds 20.0G against its 12.0G share (8.0G in use now); \
-                     nothing skein lists can be cleared now; what is in use can be cleared once \
-                     nothing has it open. {request}"
+                    "skein: this box holds 20.0G against its 12.0G share; 8.0G of it is in use \
+                     now, so nothing skein lists can be cleared. What is in use can be cleared \
+                     once nothing has it open. {request}"
                 )
                 .as_str()
             )
@@ -3062,10 +3047,9 @@ mod tests {
         );
         assert_eq!(
             bare.hold,
-            "skein: this box holds 20.0G against its 12.0G share of the fleet's disk; nothing \
-             skein lists can be cleared now, because the space is in use. To ask the owner for a \
-             bigger allowance, call `skein_request_disk`. This one command was held so you would \
-             see this; the next will run."
+            "skein: this box holds 20.0G against its 12.0G share, and nothing skein lists can be \
+             cleared now. To ask the owner for a bigger allowance, call `skein_request_disk`. \
+             This one command was held so you would see this; the next will run."
         );
 
         let small = over(512, vec![running_target(3072)]);
@@ -3092,8 +3076,8 @@ mod tests {
         let waiting = disk_ask(&with_disk_ask(next(None, &r), Some(view)));
         assert!(
             waiting.hold.contains(
-                "because the space is in use. Its ask for 24.0G is with the owner. This one \
-                 command was held"
+                "so nothing skein lists can be cleared. Its ask for 24.0G is with the owner. This \
+                 one command was held"
             ),
             "{}",
             waiting.hold
@@ -3238,9 +3222,14 @@ mod tests {
     /// **The fleet's asks shrink the same way** (SKEIN-1391), and the part the box cannot meet is
     /// not moved onto any other box: the share stays what `announce::cover` chose.
     ///
+    /// With nothing it can clear, a fleet's ask is told and never held, however far over
+    /// (owner, 2026-11-06, SKEIN-1475): a bigger allowance frees nothing on the fleet's disk.
+    ///
     /// What would make it fail: `shrunk` applied to the allowance alone, the fleet's share and
     /// every-box ask keeping their full size (2.3G and 9.4G). Watched: with `shrunk` returning
-    /// `asked` for both fleet kinds, the amounts read 2355 and 9626 and this failed.
+    /// `asked` for both fleet kinds, the amounts read 2355 and 9626 and this failed. And
+    /// `nothing_to_clear` writing a hold for the fleet's asks too. Watched: with its fleet arm
+    /// made `format!("{said} {HELD}")`, the `nothing` case held and this failed.
     #[test]
     fn the_fleets_asks_shrink_to_what_can_be_cleared_too() {
         let items = vec![
@@ -3262,9 +3251,9 @@ mod tests {
             format!(
                 "skein: clear 1.5G of storage you are not using before you continue — build \
                  outputs, caches, and any containers or volumes you started. The fleet's disk is \
-                 4.1G over what it can spare, and this box holds 9.4G of it (3.0G in use \
-                 now); 2 other boxes have been asked for the rest; 1.5G can be cleared \
-                 now. {PIP_HINT} This one command was held so you would see this; the next will \
+                 4.1G over what it can spare, and this box holds 9.4G of it; 3.0G of it is in \
+                 use now, and 1.5G can be cleared now; 2 other boxes have been asked for the \
+                 rest. {PIP_HINT} This one command was held so you would see this; the next will \
                  run."
             )
         );
@@ -3273,7 +3262,7 @@ mod tests {
             Some(
                 format!(
                     "skein: the fleet's disk is over its line; this box is asked to clear the \
-                     1.5G it can clear now (3.0G of it is in use now). {PIP_HINT}"
+                     1.5G it can clear now, and 3.0G of it is in use now. {PIP_HINT}"
                 )
                 .as_str()
             )
@@ -3284,7 +3273,7 @@ mod tests {
         assert!(
             every
                 .hold
-                .contains("; every box has been asked; 1.5G can be cleared now."),
+                .contains("; 3.0G of it is in use now, and 1.5G can be cleared now; every box has been asked."),
             "{}",
             every.hold
         );
@@ -3299,19 +3288,30 @@ mod tests {
                 ..fleet(false)
             },
         ));
-        // 2.3G of a 10G share is held on its whole size, nothing to clear or not (SKEIN-1475).
-        assert_eq!(
-            nothing.hold,
-            "skein: the fleet's disk is 4.1G over what it can spare and this box holds 9.4G of it \
-             (3.0G in use now); nothing skein lists can be cleared now, because the space is in \
-             use. This one command was held so you would see this; the next will run."
-        );
+        // 2.3G of a 10G share, far enough over to hold, but nothing it can clear and no allowance
+        // that would free the fleet's disk: told, never held (owner, 2026-11-06, SKEIN-1475).
+        assert!(nothing.hold.is_empty(), "held: {}", nothing.hold);
         assert_eq!(
             nothing.enter.as_deref(),
             Some(
                 "skein: the fleet's disk is 4.1G over what it can spare and this box holds 9.4G \
-                 of it (3.0G in use now); nothing skein lists can be cleared now; what is in \
-                 use can be cleared once nothing has it open."
+                 of it; 3.0G of it is in use now, so nothing skein lists can be cleared. What is \
+                 in use can be cleared once nothing has it open."
+            )
+        );
+        let none = disk_ask(&next(
+            None,
+            &Reading {
+                clean: Some(listing(vec![])),
+                ..fleet(true)
+            },
+        ));
+        assert!(none.hold.is_empty(), "held: {}", none.hold);
+        assert_eq!(
+            none.enter.as_deref(),
+            Some(
+                "skein: the fleet's disk is 4.1G over what it can spare and this box holds 9.4G \
+                 of it, and nothing skein lists can be cleared now."
             )
         );
     }
@@ -4504,9 +4504,9 @@ mod tests {
         assert_eq!(
             near_said(&live),
             Some(
-                "skein: this box holds 9.0G of its 10.0G share of the fleet's disk, and nothing \
-                 skein lists can be removed now (3.0G of it is in use now). \
-                 `skein_resources` shows where this box stands."
+                "skein: this box holds 9.0G of its 10.0G share of the fleet's disk; 3.0G of it \
+                 is in use now, so nothing skein lists can be removed now. `skein_resources` \
+                 shows where this box stands."
             )
         );
     }
