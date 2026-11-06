@@ -106,7 +106,10 @@ try {
   check("the running row says its cores and how long it has run",
     /^\d+ cores? · .*running \d+[smh]$/.test((await runRow.locator(".jb-fig").textContent()).trim()), true);
   check("the pool is shown, with the running job's one core granted",
-    /^\d+ cores · 1 granted · \d+ free$/.test((await panel.locator(".jb-pool").textContent()).trim()), true);
+    /^\d+ cores · 1 granted · \d+ free( · machine busy \d+\.\d( \([^)]*\))?)?$/.test((await panel.locator(".jb-pool").textContent()).trim()), true);
+  // The figures are averaged over the span the owner picks, and the pick starts on now (SKEIN-1473).
+  check("the average-over pick is on the page and starts on now",
+    await page.locator("#jobs-over select").inputValue().catch(() => ""), "now");
 
   // **What would make this fail:** the press not reaching the stop route, the queue not reading
   // the owner's stop, or the wrapper not reading `stopped` in its view.
