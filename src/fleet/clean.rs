@@ -31,7 +31,8 @@ pub struct Cleanable {
     pub path: String,
     /// The same path for a person: `~/…` under the box's home, `<box>/…` elsewhere in it.
     pub shown: String,
-    /// `build output`, `download cache` or `scratchpad`.
+    /// `build output`, `download cache`, `scratchpad`, or [`CI_OUTPUT_KIND`] for the repo's CI
+    /// build output, which counts against no box.
     pub kind: &'static str,
     /// What removing it frees: allocated bytes, by the walk every other disk figure in skein comes
     /// from, less every file that is also linked from outside it (`freed_bytes`).
@@ -84,6 +85,15 @@ pub fn box_cleanables(name: &str) -> Result<Vec<Cleanable>, String> {
         let path = home.join(rel);
         if real_all_the_way(&box_dir, &path, dev) && !holds_skeins_links(&path) {
             found.push((path, "download cache"));
+        }
+    }
+    // The repo's CI build output, while its cap covers it (SKEIN-1476): listed so the agent sees
+    // it, under its own kind, and kept out of the build walk below so it is not listed twice. Over
+    // the cap it is not here, and the walk finds it as the box's build output, as before.
+    for d in exempt_ci_dirs(name) {
+        let path = std::path::PathBuf::from(&d.path);
+        if !inside_a_checkout_and_kept(&box_dir, &path) {
+            found.push((path, CI_OUTPUT_KIND));
         }
     }
     found.extend(
@@ -589,7 +599,7 @@ fn repo_cache_given(
 
 /// Every box directory in the fleet that belongs to repo `id`, by the rule the board uses
 /// (`repos::repo_for_box`: the longest registered id the name starts with).
-fn boxes_of_repo(id: &str) -> Vec<String> {
+pub(super) fn boxes_of_repo(id: &str) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(fleet_root()) else {
         return Vec::new();
     };
@@ -912,7 +922,7 @@ fn entries(dir: &std::os::fd::OwnedFd) -> std::io::Result<Vec<std::ffi::CString>
 /// link. Checking only the last component is not enough: `symlink_metadata` follows every
 /// component before the last, so a box that made its own `~/.cache` a link to another box's home
 /// or into the store would have had that directory offered, and removed, as its own.
-fn real_all_the_way(box_dir: &Path, path: &Path, dev: u64) -> bool {
+pub(super) fn real_all_the_way(box_dir: &Path, path: &Path, dev: u64) -> bool {
     let Ok(rel) = path.strip_prefix(box_dir) else {
         return false;
     };
@@ -935,7 +945,7 @@ fn real_all_the_way(box_dir: &Path, path: &Path, dev: u64) -> bool {
 /// A directory, not a link to one, on the box directory's own device. About the last component
 /// only: callers either walk down from the box directory one component at a time, or use
 /// [`real_all_the_way`].
-fn is_real_dir(path: &std::path::Path, dev: u64) -> bool {
+pub(super) fn is_real_dir(path: &std::path::Path, dev: u64) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && m.dev() == dev)
 }

@@ -304,6 +304,53 @@ pub(super) async fn api_repo_cache_clean(
     }
 }
 
+/// A repo's CI build output (SKEIN-1476): what the owner declared, the cap in force, and what is
+/// in each box now. Walks the declared directories, so it is asked for when the repo's settings
+/// open and never on the board's tick.
+pub(super) async fn api_repo_ci_builds(Path(id): Path<String>) -> Response {
+    let r = tokio::task::spawn_blocking(move || {
+        if !skein::repos::load_repos().iter().any(|r| r.id == id) {
+            return Err(format!("{id} is not a registered repo"));
+        }
+        Ok(serde_json::json!({
+            "default_cap_mib": skein::fleet::default_cap_mib(),
+            "output": skein::fleet::repo_ci_output(&id),
+        }))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct RepoCiBuildsReq {
+    #[serde(default)]
+    dirs: Vec<String>,
+    /// A size, as `8g`; absent or empty takes the fleet's default box allowance.
+    #[serde(default)]
+    cap: Option<String>,
+}
+
+/// Set a repo's CI build directories and cap. The cockpit's API is the owner's, so this is the
+/// owner's call; a box has no route to it, and asks for more disk with `skein_request_disk`.
+pub(super) async fn api_set_repo_ci_builds(
+    Path(id): Path<String>,
+    Json(r): Json<RepoCiBuildsReq>,
+) -> Response {
+    let done = tokio::task::spawn_blocking(move || {
+        skein::fleet::set_ci_builds(&id, &r.dirs, r.cap.as_deref())
+    })
+    .await;
+    match done {
+        Ok(Ok(set)) => Json(set).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

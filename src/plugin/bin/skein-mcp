@@ -12,8 +12,8 @@
 #                     package drop-box.
 #   skein_top         this box's largest processes by memory or CPU, or by disk what the box is
 #                     charged for: skein's list of its caches, build output and scratchpads, its
-#                     checkout's largest directories, and the repo's shared cache on a line of its
-#                     own. It never offers to stop anything: the kernel's limits are the ceiling,
+#                     checkout's largest directories, and the repo's shared cache and its CI build
+#                     output on lines of their own. It never offers to stop anything: the kernel's limits are the ceiling,
 #                     and this is only how the agent sees what it is holding.
 #   skein_requests    the box's own package, git-write and disk requests and questions, and the
 #                     owner's answers. `skein-mcp requests` answers the same on the command line, which is
@@ -349,7 +349,8 @@ def top_disk_all(n):
     if "error" in listing:
         out["cleanable"] = {"error": listing["error"]}
         return out
-    own = [r for r in listing["items"] if r["where"] == "box"]
+    own = [r for r in listing["items"] if r["where"] == "box" and r["kind"] != CI_OUTPUT]
+    ci = [r for r in listing["items"] if r["where"] == "box" and r["kind"] == CI_OUTPUT]
     by_kind = {}
     for r in own:
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + r["bytes"]
@@ -364,6 +365,15 @@ def top_disk_all(n):
     shared = listing.get("shared_repo_cache")
     if shared is not None:
         out["shared_repo_cache"] = shared
+    if ci:
+        # On a line of its own, like the shared cache: it is in this box, and charged to the repo.
+        out["repo_ci_output"] = {
+            "bytes": sum(r["bytes"] for r in ci),
+            "what": "the repo's CI build output, which the owner declared: it counts toward the "
+            "repo, not toward this box's disk",
+            "counted_against_this_box": False,
+            "items": [{k: r[k] for k in ("path", "in_box", "bytes", "safe_now", "why_not")} for r in ci],
+        }
     tools = listing.get("repo_tools")
     if tools is not None:
         out["repo_tools"] = tools
@@ -418,6 +428,16 @@ LIST_STALE_SECONDS = 900
 # What this box's agent may remove at any time, because it knows what it is running (owner,
 # 2026-10-30). A scratchpad is listed and not removed here: it may be another session's.
 ANY_TIME = ("download cache", "build output")
+
+# The repo's CI build output (`CI_OUTPUT_KIND` in `src/fleet/cibuild.rs`, SKEIN-1476): in this box,
+# counted against no box while the repo's cap covers it. Listed, and never safe to remove while a
+# skein-job runs or waits in this box: a CI run builds there, and clearing it costs the next run a
+# cold build.
+CI_OUTPUT = "repo CI output"
+
+# skein-job's own lock (`LOCK` in `bin/skein-job`), held or waited on by every job in this box,
+# queued or not.
+HEAVY_LOCK = os.environ.get("SKEIN_JOB_LOCK") or real("/var/tmp/skein-lanes-heavy.lock")
 
 
 def signal_file():
@@ -586,6 +606,41 @@ def holders(paths):
     return out
 
 
+def jobs_busy(locks):
+    """Why a skein-job in this box keeps the repo's CI output from being removed now, or None.
+
+    Two sources, and either is enough: skein's view of the box's jobs (`signals/jobs.json`, which
+    only skein writes), where a job `waiting` is queued and one `granted` is running; and the
+    box's job lock in `/proc/locks`, which a job holds or waits on whether or not the fleet queue
+    is answering. A `/proc/locks` that cannot be read cannot say no job is running, so it refuses.
+    """
+    state = os.environ.get("SKEIN_STATE", "")
+    view = None
+    if state:
+        try:
+            with open(os.path.join(state, "signals", "jobs.json"), encoding="utf-8") as f:
+                view = json.load(f)
+        except (OSError, ValueError):
+            view = None
+    if isinstance(view, dict):
+        for job in view.get("jobs") or []:
+            if not isinstance(job, dict):
+                continue
+            if job.get("state") == "granted":
+                return "a skein-job is running in this box, and the repo's CI builds here"
+            if job.get("state") == "waiting":
+                return "a skein-job is queued in this box, and the repo's CI builds here"
+    if locks is None:
+        return "this box cannot read /proc/locks to tell whether a skein-job is running"
+    try:
+        st = os.lstat(HEAVY_LOCK)
+    except OSError:
+        return None
+    if (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino) in locks:
+        return "a skein-job is running or waiting in this box, and the repo's CI builds here"
+    return None
+
+
 def clean_rows(sig):
     """Every item on skein's list for this box that is still there, with where the box sees it and
     whether it may be removed now, and why not when it may not."""
@@ -614,9 +669,11 @@ def clean_rows(sig):
             why = "skein listed a directory that is not this box's, so nothing on the list is removed"
         elif stale:
             why = "skein has not listed this box's disk lately; try again in a few minutes"
-        elif kind not in ANY_TIME:
+        elif kind == CI_OUTPUT and jobs_busy(locks) is not None:
+            why = jobs_busy(locks)
+        elif kind not in ANY_TIME and kind != CI_OUTPUT:
             why = "a scratchpad may belong to a session still running in this box"
-        elif kind == "build output" and locks is not None and build_running(path, locks):
+        elif kind in ("build output", CI_OUTPUT) and locks is not None and build_running(path, locks):
             why = "a build is running in it now"
             held.append(len(rows))
         elif it.get("live") is True:

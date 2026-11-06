@@ -3,7 +3,8 @@
 
 use super::*;
 
-/// How much disk each box is using, in MiB — every box at once, in one round trip.
+/// How much disk each box is charged for, in MiB — every box at once, in one round trip: what is
+/// under its directory, less the CI build output its repo's cap covers (`cibuild.rs`).
 ///
 /// Measured rather than enforced, and that distinction is the honest part of this: the fleet's disk
 /// is a single filesystem shared by every box, so nothing in the kernel stops one from filling it.
@@ -48,7 +49,12 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
             // took the branch fallback to twelve forks a tick (SKEIN-49).
             // The walk, in this process. The `sbx exec du` beside it was the host's way of
             // reaching the same tree, and it is what made this signal cost a fork (SKEIN-576).
-            Some(local_disk_usage(&fleet_root()))
+            //
+            // Then each repo's declared CI build output comes off its box (SKEIN-1476), here, so
+            // every reader of this map is told the one charged figure.
+            let mut usage = local_disk_usage(&fleet_root());
+            charge_ci_builds(&mut usage);
+            Some(usage)
         })
         .unwrap_or_default()
 }

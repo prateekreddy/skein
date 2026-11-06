@@ -59,6 +59,7 @@ use std::time::Duration;
 
 pub mod browsers;
 mod checkout;
+mod cibuild;
 mod clean;
 mod containers;
 mod create;
@@ -92,6 +93,7 @@ mod unowned;
 pub mod versions;
 
 pub use checkout::*;
+pub use cibuild::*;
 pub use clean::*;
 pub use containers::*;
 pub use create::*;
